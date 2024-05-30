@@ -1,0 +1,8 @@
+[package]
+name = "xlsynth"
+version = "0.0.1"
+edition = "2018"
+
+[dependencies]
+libloading = "0.7"
+libc = "0.2.155"
