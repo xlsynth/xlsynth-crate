@@ -3,7 +3,7 @@ use std::process::Command;
 
 fn main() {
     // URL of the DSO release on GitHub
-    let dso_url = "https://github.com/xlsynth/xlsynth/releases/download/v0.0.4/libxls.dylib";
+    let dso_url = "https://github.com/xlsynth/xlsynth/releases/download/v0.0.10/libxls.dylib";
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let dso_path = PathBuf::from(&out_dir).join("libxls.dylib");
 
