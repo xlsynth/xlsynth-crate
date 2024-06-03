@@ -337,6 +337,62 @@ pub(crate) fn xls_package_get_function(
     }
 }
 
+/// Bindings for the C API function:
+/// ```c
+/// bool xls_interpret_function(
+///     struct xls_function* function, size_t argc,
+///     const struct xls_value** args, char** error_out,
+///     struct xls_value** result_out);
+/// ```
+pub(crate) fn xls_interpret_function(
+    function: *const CIrFunction,
+    args: &[IrValue],
+) -> Result<IrValue, XlsynthError> {
+    type XlsInterpretFunction = unsafe extern "C" fn(
+        function: *const CIrFunction,
+        argc: libc::size_t,
+        args: *const *const CIrValue,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CIrValue,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsInterpretFunction> = match lib.get(b"xls_interpret_function") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_interpret_function`: {}",
+                    e
+                )))
+            }
+        };
+
+        let args_ptrs: Vec<*const CIrValue> =
+            args.iter().map(|v| -> *const CIrValue { v.ptr }).collect();
+        let argc = args_ptrs.len();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut result_out: *mut CIrValue = std::ptr::null_mut();
+        let success = dlsym(
+            function,
+            argc,
+            args_ptrs.as_ptr(),
+            &mut error_out,
+            &mut result_out,
+        );
+        if success {
+            let result = IrValue { ptr: result_out };
+            return Ok(result);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
