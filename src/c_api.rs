@@ -179,6 +179,26 @@ pub(crate) fn xls_value_to_string(p: *mut CIrValue) -> Result<String, XlsynthErr
     }
 }
 
+pub(crate) fn xls_value_eq(
+    lhs: *const CIrValue,
+    rhs: *const CIrValue,
+) -> Result<bool, XlsynthError> {
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<unsafe extern "C" fn(*const CIrValue, *const CIrValue) -> bool> =
+            match lib.get(b"xls_value_eq") {
+                Ok(f) => f,
+                Err(e) => {
+                    return Err(XlsynthError(format!(
+                        "Failed to load symbol `xls_value_eq`: {}",
+                        e
+                    )))
+                }
+            };
+        return Ok(dlsym(lhs, rhs));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
