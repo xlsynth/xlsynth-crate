@@ -1,4 +1,4 @@
-use crate::c_api::{xls_value_free, xls_value_to_string, xls_parse_typed_value, CIrValue};
+use crate::c_api::{xls_parse_typed_value, xls_value_free, xls_value_to_string, CIrValue};
 use crate::xlsynth_error::XlsynthError;
 
 pub struct IrValue {

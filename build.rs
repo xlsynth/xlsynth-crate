@@ -5,7 +5,10 @@ const VERSION_TAG: &str = "v0.0.10";
 
 fn main() {
     // URL of the DSO release on GitHub
-    let dso_url = format!("https://github.com/xlsynth/xlsynth/releases/download/{}/libxls.dylib", VERSION_TAG);
+    let dso_url = format!(
+        "https://github.com/xlsynth/xlsynth/releases/download/{}/libxls.dylib",
+        VERSION_TAG
+    );
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let dso_path = PathBuf::from(&out_dir).join(format!("libxls-{}.dylib", VERSION_TAG));
 

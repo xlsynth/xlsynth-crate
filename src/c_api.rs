@@ -17,8 +17,10 @@ static LIBRARY: OnceCell<Mutex<Library>> = OnceCell::new();
 
 fn get_library() -> &'static Mutex<Library> {
     LIBRARY.get_or_init(|| {
-        let library =
-            unsafe { Library::new(format!("libxls-{}.dylib", VERSION_TAG)).expect("dynamic library should be present") };
+        let library = unsafe {
+            Library::new(format!("libxls-{}.dylib", VERSION_TAG))
+                .expect("dynamic library should be present")
+        };
         Mutex::new(library)
     })
 }
@@ -183,8 +185,8 @@ mod tests {
 
     #[test]
     fn test_convert_dslx_to_ir() {
-        let ir =
-            xls_convert_dslx_to_ir("fn f(x: u32) -> u32 { x }").expect("ir conversion should succeed");
+        let ir = xls_convert_dslx_to_ir("fn f(x: u32) -> u32 { x }")
+            .expect("ir conversion should succeed");
         assert_eq!(
             ir,
             "package test_mod
