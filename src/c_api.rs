@@ -30,27 +30,31 @@ pub(crate) struct CIrValue {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
-type XlsConvertDslxToIr = unsafe extern "C" fn(
-    dslx: *const std::os::raw::c_char,
-    path: *const std::os::raw::c_char,
-    module_name: *const std::os::raw::c_char,
-    dslx_stdlib_path: *const std::os::raw::c_char,
-    additional_search_paths: *const *const std::os::raw::c_char,
-    additional_search_paths_count: libc::size_t,
-    error_out: *mut *mut std::os::raw::c_char,
-    ir_out: *mut *mut std::os::raw::c_char,
-) -> bool;
+#[repr(C)]
+pub(crate) struct CIrPackage {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
 
-type XlsParseTypedValue = unsafe extern "C" fn(
-    text: *const std::os::raw::c_char,
-    error_out: *mut *mut std::os::raw::c_char,
-    value_out: *mut *mut CIrValue,
-) -> bool;
+#[repr(C)]
+pub(crate) struct CIrFunction {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
 
 type XlsValueToString =
     unsafe extern "C" fn(value: *const CIrValue, str_out: *mut *mut std::os::raw::c_char) -> bool;
 
 pub fn xls_convert_dslx_to_ir(dslx: &str) -> Result<String, XlsynthError> {
+    type XlsConvertDslxToIr = unsafe extern "C" fn(
+        dslx: *const std::os::raw::c_char,
+        path: *const std::os::raw::c_char,
+        module_name: *const std::os::raw::c_char,
+        dslx_stdlib_path: *const std::os::raw::c_char,
+        additional_search_paths: *const *const std::os::raw::c_char,
+        additional_search_paths_count: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        ir_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
     unsafe {
         let lib = get_library().lock().unwrap();
         let dlsym_convert_dslx_to_ir: Symbol<XlsConvertDslxToIr> =
@@ -104,6 +108,11 @@ pub fn xls_convert_dslx_to_ir(dslx: &str) -> Result<String, XlsynthError> {
 }
 
 pub fn xls_parse_typed_value(s: &str) -> Result<IrValue, XlsynthError> {
+    type XlsParseTypedValue = unsafe extern "C" fn(
+        text: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        value_out: *mut *mut CIrValue,
+    ) -> bool;
     unsafe {
         let lib = get_library().lock().unwrap();
         let dlsym: Symbol<XlsParseTypedValue> = match lib.get(b"xls_parse_typed_value") {
@@ -145,6 +154,24 @@ pub(crate) fn xls_value_free(p: *mut CIrValue) -> Result<(), XlsynthError> {
                 )))
             }
         };
+        dlsym(p);
+        return Ok(());
+    }
+}
+
+pub(crate) fn xls_package_free(p: *mut CIrPackage) -> Result<(), XlsynthError> {
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<unsafe extern "C" fn(*mut CIrPackage)> =
+            match lib.get(b"xls_package_free") {
+                Ok(f) => f,
+                Err(e) => {
+                    return Err(XlsynthError(format!(
+                        "Failed to load symbol `xls_package_free`: {}",
+                        e
+                    )))
+                }
+            };
         dlsym(p);
         return Ok(());
     }
@@ -196,6 +223,117 @@ pub(crate) fn xls_value_eq(
                 }
             };
         return Ok(dlsym(lhs, rhs));
+    }
+}
+
+/// Bindings for the C API function:
+/// ```c
+/// bool xls_parse_ir_package(
+///     const char* ir, const char* filename,
+///     char** error_out,
+///     struct xls_package** xls_package_out);
+/// ```
+pub(crate) fn xls_parse_ir_package(
+    ir: &str,
+    filename: Option<&str>,
+) -> Result<crate::ir_package::IrPackage, XlsynthError> {
+    type XlsParseIrPackage = unsafe extern "C" fn(
+        ir: *const std::os::raw::c_char,
+        filename: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        xls_package_out: *mut *mut CIrPackage,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsParseIrPackage> = match lib.get(b"xls_parse_ir_package") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_parse_ir_package`: {}",
+                    e
+                )))
+            }
+        };
+
+        let ir = CString::new(ir).unwrap();
+        // The filename is allowed to be a null pointer if there is no filename.
+        let filename_ptr = filename
+            .map(|s| CString::new(s).unwrap())
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null());
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut xls_package_out: *mut CIrPackage = std::ptr::null_mut();
+        let success = dlsym(
+            ir.as_ptr(),
+            filename_ptr,
+            &mut error_out,
+            &mut xls_package_out,
+        );
+        if success {
+            let package = crate::ir_package::IrPackage {
+                ptr: xls_package_out,
+            };
+            return Ok(package);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+/// Bindings for the C API function:
+/// ```c
+/// bool xls_package_get_function(s
+///    struct xls_package* package,
+///    const char* function_name, char** error_out,
+///    struct xls_function** result_out);
+/// ```
+pub(crate) fn xls_package_get_function(
+    package: *const CIrPackage,
+    function_name: &str,
+) -> Result<crate::ir_package::IrFunction, XlsynthError> {
+    type XlsPackageGetFunction = unsafe extern "C" fn(
+        package: *const CIrPackage,
+        function_name: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CIrFunction,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsPackageGetFunction> = match lib.get(b"xls_package_get_function") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_package_get_function`: {}",
+                    e
+                )))
+            }
+        };
+
+        let function_name = CString::new(function_name).unwrap();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut result_out: *mut CIrFunction = std::ptr::null_mut();
+        let success = dlsym(
+            package,
+            function_name.as_ptr(),
+            &mut error_out,
+            &mut result_out,
+        );
+        if success {
+            let function = crate::ir_package::IrFunction { ptr: result_out };
+            return Ok(function);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
     }
 }
 

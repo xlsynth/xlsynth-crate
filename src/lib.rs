@@ -1,4 +1,5 @@
 pub mod c_api;
+pub mod ir_package;
 pub mod ir_value;
 pub mod xlsynth_error;
 
