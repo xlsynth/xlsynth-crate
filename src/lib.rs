@@ -6,12 +6,14 @@ use once_cell::sync::OnceCell;
 use std::ffi::CString;
 use std::sync::Mutex;
 
+const VERSION_TAG: &str = "v0.0.10";
+
 static LIBRARY: OnceCell<Mutex<Library>> = OnceCell::new();
 
 fn get_library() -> &'static Mutex<Library> {
     LIBRARY.get_or_init(|| {
         let library =
-            unsafe { Library::new("libxls.dylib").expect("dynamic library should be present") };
+            unsafe { Library::new(format!("libxls-{}.dylib", VERSION_TAG)).expect("dynamic library should be present") };
         Mutex::new(library)
     })
 }
