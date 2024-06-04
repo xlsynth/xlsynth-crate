@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2018"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
@@ -8,6 +8,9 @@ license = "Apache-2.0"
 repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
+exclude = [
+    ".github",
+]
 
 [dependencies]
 libloading = "0.7"
