@@ -5,8 +5,8 @@ pub mod ir_package;
 pub mod ir_value;
 pub mod xlsynth_error;
 
-pub use ir_package::IrPackage;
 pub use ir_package::IrFunction;
+pub use ir_package::IrPackage;
 pub use ir_value::IrValue;
 pub use xlsynth_error::XlsynthError;
 
