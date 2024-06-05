@@ -1,6 +1,5 @@
-use crate::c_api::{
-    xls_parse_typed_value, xls_value_eq, xls_value_free, xls_value_to_string, CIrValue,
-};
+use crate::c_api;
+use crate::c_api::CIrValue;
 use crate::xlsynth_error::XlsynthError;
 
 pub struct IrValue {
@@ -9,13 +8,13 @@ pub struct IrValue {
 
 impl IrValue {
     pub fn parse_typed(s: &str) -> Result<Self, XlsynthError> {
-        xls_parse_typed_value(s)
+        c_api::xls_parse_typed_value(s)
     }
 }
 
 impl std::cmp::PartialEq for IrValue {
     fn eq(&self, other: &Self) -> bool {
-        xls_value_eq(self.ptr, other.ptr).expect("eq success")
+        c_api::xls_value_eq(self.ptr, other.ptr).expect("eq success")
     }
 }
 
@@ -24,7 +23,7 @@ impl std::fmt::Display for IrValue {
         write!(
             f,
             "{}",
-            xls_value_to_string(self.ptr).expect("stringify success")
+            c_api::xls_value_to_string(self.ptr).expect("stringify success")
         )
     }
 }
@@ -34,14 +33,14 @@ impl std::fmt::Debug for IrValue {
         write!(
             f,
             "{}",
-            xls_value_to_string(self.ptr).expect("stringify success")
+            c_api::xls_value_to_string(self.ptr).expect("stringify success")
         )
     }
 }
 
 impl Drop for IrValue {
     fn drop(&mut self) {
-        xls_value_free(self.ptr).expect("dealloc success");
+        c_api::xls_value_free(self.ptr).expect("dealloc success");
     }
 }
 

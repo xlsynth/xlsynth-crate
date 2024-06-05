@@ -11,7 +11,7 @@ use crate::xlsynth_error::XlsynthError;
 extern crate libc;
 extern crate libloading;
 
-const VERSION_TAG: &str = "v0.0.10";
+const VERSION_TAG: &str = "v0.0.14";
 
 static LIBRARY: OnceCell<Mutex<Library>> = OnceCell::new();
 
@@ -390,6 +390,146 @@ pub(crate) fn xls_interpret_function(
             String::new()
         };
         return Err(XlsynthError(error_out_str));
+    }
+}
+
+/// Binding for the C API function:
+/// ```c
+/// bool xls_optimize_ir(const char* ir, const char* top, char** error_out,
+/// char** ir_out);
+/// ```
+pub(crate) fn xls_optimize_ir(ir: &str, top: &str) -> Result<String, XlsynthError> {
+    type XlsOptimizeIr = unsafe extern "C" fn(
+        ir: *const std::os::raw::c_char,
+        top: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        ir_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsOptimizeIr> = match lib.get(b"xls_optimize_ir") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_optimize_ir`: {}",
+                    e
+                )))
+            }
+        };
+
+        let ir = CString::new(ir).unwrap();
+        let top = CString::new(top).unwrap();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = dlsym(ir.as_ptr(), top.as_ptr(), &mut error_out, &mut ir_out);
+        if success {
+            let ir_out_str = if !ir_out.is_null() {
+                CString::from_raw(ir_out).into_string().unwrap()
+            } else {
+                String::new()
+            };
+            return Ok(ir_out_str);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+/// Binding for the C API function:
+/// ```c
+/// bool xls_mangle_dslx_name(const char* module_name, const char* function_name,
+/// char** error_out, char** mangled_out);
+/// ```
+pub(crate) fn xls_mangle_dslx_name(
+    module_name: &str,
+    function_name: &str,
+) -> Result<String, XlsynthError> {
+    type XlsMangleDslxName = unsafe extern "C" fn(
+        module_name: *const std::os::raw::c_char,
+        function_name: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        mangled_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsMangleDslxName> = match lib.get(b"xls_mangle_dslx_name") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_mangle_dslx_name`: {}",
+                    e
+                )))
+            }
+        };
+
+        let module_name = CString::new(module_name).unwrap();
+        let function_name = CString::new(function_name).unwrap();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut mangled_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = dlsym(
+            module_name.as_ptr(),
+            function_name.as_ptr(),
+            &mut error_out,
+            &mut mangled_out,
+        );
+        if success {
+            let mangled_out_str = if !mangled_out.is_null() {
+                CString::from_raw(mangled_out).into_string().unwrap()
+            } else {
+                String::new()
+            };
+            return Ok(mangled_out_str);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+/// Binding for the C API function:
+/// ```c
+/// bool xls_package_to_string(const struct xls_package* p, char** string_out) {
+/// ```
+pub(crate) fn xls_package_to_string(p: *const CIrPackage) -> Result<String, XlsynthError> {
+    type XlsPackageToString = unsafe extern "C" fn(
+        p: *const CIrPackage,
+        string_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsPackageToString> = match lib.get(b"xls_package_to_string") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_package_to_string`: {}",
+                    e
+                )))
+            }
+        };
+
+        let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = dlsym(p, &mut c_str_out);
+        if success {
+            let s: String = if !c_str_out.is_null() {
+                CString::from_raw(c_str_out).into_string().unwrap()
+            } else {
+                String::new()
+            };
+            return Ok(s);
+        }
+        return Err(XlsynthError(
+            "Failed to convert XLS package to string via C API".to_string(),
+        ));
     }
 }
 

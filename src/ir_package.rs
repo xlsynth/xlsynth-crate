@@ -1,7 +1,5 @@
-use crate::c_api::{
-    xls_interpret_function, xls_package_free, xls_package_get_function, xls_parse_ir_package,
-    CIrFunction, CIrPackage,
-};
+use crate::c_api;
+use crate::c_api::{CIrFunction, CIrPackage};
 use crate::xlsynth_error::XlsynthError;
 use crate::IrValue;
 
@@ -12,17 +10,21 @@ pub struct IrPackage {
 impl IrPackage {
     #[allow(dead_code)]
     pub fn parse_ir(ir: &str, filename: Option<&str>) -> Result<Self, XlsynthError> {
-        xls_parse_ir_package(ir, filename)
+        c_api::xls_parse_ir_package(ir, filename)
     }
 
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
-        xls_package_get_function(self.ptr, name)
+        c_api::xls_package_get_function(self.ptr, name)
+    }
+
+    pub fn to_string(&self) -> String {
+        c_api::xls_package_to_string(self.ptr).unwrap()
     }
 }
 
 impl Drop for IrPackage {
     fn drop(&mut self) {
-        xls_package_free(self.ptr).expect("dealloc success");
+        c_api::xls_package_free(self.ptr).expect("dealloc success");
     }
 }
 
@@ -33,7 +35,7 @@ pub struct IrFunction {
 
 impl IrFunction {
     pub fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
-        xls_interpret_function(self.ptr, args)
+        c_api::xls_interpret_function(self.ptr, args)
     }
 }
 

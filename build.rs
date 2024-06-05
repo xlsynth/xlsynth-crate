@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const VERSION_TAG: &str = "v0.0.10";
+const VERSION_TAG: &str = "v0.0.14";
 
 fn main() {
     // URL of the DSO release on GitHub
@@ -13,7 +13,18 @@ fn main() {
     let dso_path = PathBuf::from(&out_dir).join(format!("libxls-{}.dylib", VERSION_TAG));
 
     // Check if the DSO has already been downloaded
-    if !dso_path.exists() {
+    if dso_path.exists() {
+        println!(
+            "cargo:info=DSO already downloaded to: {}",
+            dso_path.display()
+        );
+    } else {
+        println!(
+            "cargo:info=Downloading DSO from: {} to {}",
+            dso_url,
+            dso_path.display()
+        );
+
         // Download the DSO
         let status = Command::new("curl")
             .arg("-L")
@@ -24,6 +35,8 @@ fn main() {
             .expect("Failed to download DSO");
 
         if !status.success() {
+            // Remove the output file path.
+            std::fs::remove_file(&dso_path).expect("Failed to remove file");
             panic!("Download failed with status: {:?}", status);
         }
     }

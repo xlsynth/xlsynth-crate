@@ -8,14 +8,13 @@ fn validate_mol() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("reading DSLX program from: {:?}", filename);
     // Read the DSLX code from sample.x in this same directory.
     let dslx = std::fs::read_to_string(filename)?;
-    let ir = xlsynth::convert_dslx_to_ir(&dslx)?;
-    let package = xlsynth::ir_package::IrPackage::parse_ir(&ir, Some(&file))?;
-    let mangled = xlsynth::mangle_dslx("test_mod", "mol")?;
+    let package = xlsynth::convert_dslx_to_ir(&dslx)?;
+    let mangled = xlsynth::mangle_dslx_name("test_mod", "mol")?;
     let f = package.get_function(&mangled)?;
     let result = f.interpret(&[])?;
     let want = xlsynth::IrValue::parse_typed("bits[32]:42")?;
     assert_eq!(result, want);
-    Ok(())   
+    Ok(())
 }
 
 fn main() {
