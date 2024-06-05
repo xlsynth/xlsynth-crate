@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use xlsynth;
 
 /// Validates the "meaning of life" value that comes from the `mol` function in `sample.x`.

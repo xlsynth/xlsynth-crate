@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::c_api;
 use crate::c_api::{CIrFunction, CIrPackage};
 use crate::xlsynth_error::XlsynthError;

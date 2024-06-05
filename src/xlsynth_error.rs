@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[derive(Debug)]
 pub struct XlsynthError(pub String);
 

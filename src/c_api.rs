@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Wrappers around the C API for the XLS dynamic shared object.
 
 use libloading::{Library, Symbol};
