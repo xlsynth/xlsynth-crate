@@ -2,7 +2,7 @@
 
 Rust bindings to the functionality in the "Accelerated Hardware Synthesis" library.
 
-```
+```rust
 extern crate xlsynth;
 
 use xlsynth::{IrValue, IrPackage, IrFunction, XlsynthError};
