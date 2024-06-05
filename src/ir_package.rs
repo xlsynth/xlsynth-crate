@@ -5,7 +5,7 @@ use crate::c_api::{
 use crate::xlsynth_error::XlsynthError;
 use crate::IrValue;
 
-pub(crate) struct IrPackage {
+pub struct IrPackage {
     pub(crate) ptr: *mut CIrPackage,
 }
 
@@ -15,8 +15,7 @@ impl IrPackage {
         xls_parse_ir_package(ir, filename)
     }
 
-    #[allow(dead_code)]
-    fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
+    pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
         xls_package_get_function(self.ptr, name)
     }
 }
@@ -27,14 +26,13 @@ impl Drop for IrPackage {
     }
 }
 
-pub(crate) struct IrFunction {
+pub struct IrFunction {
     #[allow(dead_code)]
     pub(crate) ptr: *mut CIrFunction,
 }
 
 impl IrFunction {
-    #[allow(dead_code)]
-    fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
+    pub fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
         xls_interpret_function(self.ptr, args)
     }
 }

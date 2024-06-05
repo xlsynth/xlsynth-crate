@@ -19,3 +19,9 @@ once_cell = "1.19"
 
 [build-dependencies]
 curl = "0.4"
+
+[workspace]
+members = [
+    ".",
+    "sample_usage",
+]
