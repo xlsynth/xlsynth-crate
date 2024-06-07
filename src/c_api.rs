@@ -13,7 +13,7 @@ use crate::xlsynth_error::XlsynthError;
 extern crate libc;
 extern crate libloading;
 
-const VERSION_TAG: &str = "v0.0.14";
+const VERSION_TAG: &str = "v0.0.36";
 
 static LIBRARY: OnceCell<Mutex<Library>> = OnceCell::new();
 
@@ -72,7 +72,8 @@ pub fn xls_convert_dslx_to_ir(dslx: &str) -> Result<String, XlsynthError> {
         let dslx = CString::new(dslx).unwrap();
         let path = CString::new("test_mod.x").unwrap();
         let module_name = CString::new("test_mod").unwrap();
-        let dslx_stdlib_path = CString::new("/does/not/exist/").unwrap();
+        let stdlib_path = env!("DSLX_STDLIB_PATH");
+        let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
 
         let additional_search_paths_ptrs: Vec<*const std::os::raw::c_char> = vec![];
 

@@ -29,7 +29,10 @@ fn check_all_rust_files_for_spdx() {
             let path = entry.path();
 
             if path.is_dir() {
-                dir_worklist.push(path.clone());
+                // We exclude the DSLX stdlib from needing SPDX.
+                if path == Path::new("stdlib") {
+                    dir_worklist.push(path.clone());
+                }
                 continue;
             }
 
