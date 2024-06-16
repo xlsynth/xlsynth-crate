@@ -3,16 +3,31 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const VERSION_TAG: &str = "v0.0.14";
+const VERSION_TAG: &str = "v0.0.41";
 
 fn main() {
     // URL of the DSO release on GitHub
+    #[allow(unused_assignments)]
+    let mut dso_extension: Option<&'static str> = None;
+
+    #[cfg(target_os = "macos")]
+    {
+        dso_extension = Some("dylib");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        dso_extension = Some("so");
+    }
+
     let dso_url = format!(
-        "https://github.com/xlsynth/xlsynth/releases/download/{}/libxls.dylib",
-        VERSION_TAG
+        "https://github.com/xlsynth/xlsynth/releases/download/{}/libxls.{}",
+        VERSION_TAG,
+        dso_extension.unwrap()
     );
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    let dso_path = PathBuf::from(&out_dir).join(format!("libxls-{}.dylib", VERSION_TAG));
+    let dso_path =
+        PathBuf::from(&out_dir).join(format!("libxls-{}.{}", VERSION_TAG, dso_extension.unwrap()));
 
     // Check if the DSO has already been downloaded
     if dso_path.exists() {
