@@ -26,8 +26,5 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Build
-        run: cargo build --verbose --workspace
-
       - name: Run tests
         run: cargo test --verbose --workspace
