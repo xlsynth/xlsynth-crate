@@ -1,36 +1,47 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
 use crate::c_api;
 use crate::c_api::{CIrFunction, CIrPackage};
 use crate::xlsynth_error::XlsynthError;
 use crate::IrValue;
 
 pub struct IrPackage {
-    pub(crate) ptr: *mut CIrPackage,
+    pub(crate) ptr: Arc<RwLock<*mut CIrPackage>>,
 }
 
+unsafe impl Send for IrPackage {}
+unsafe impl Sync for IrPackage {}
+
 impl IrPackage {
-    #[allow(dead_code)]
     pub fn parse_ir(ir: &str, filename: Option<&str>) -> Result<Self, XlsynthError> {
         c_api::xls_parse_ir_package(ir, filename)
     }
 
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
-        c_api::xls_package_get_function(self.ptr, name)
+        let read_guard = self.ptr.read().unwrap();
+        c_api::xls_package_get_function(&self.ptr, read_guard, name)
     }
 
     pub fn to_string(&self) -> String {
-        c_api::xls_package_to_string(self.ptr).unwrap()
+        let read_guard = self.ptr.read().unwrap();
+        c_api::xls_package_to_string(*read_guard).unwrap()
     }
 
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
-        c_api::xls_package_get_type_for_value(self.ptr, value.ptr)
+        let write_guard = self.ptr.write().unwrap();
+        c_api::xls_package_get_type_for_value(*write_guard, value.ptr)
     }
 }
 
 impl Drop for IrPackage {
     fn drop(&mut self) {
-        c_api::xls_package_free(self.ptr).expect("dealloc success");
+        let mut write_guard = self.ptr.write().unwrap();
+        if !write_guard.is_null() {
+            c_api::xls_package_free(*write_guard).expect("dealloc success");
+            *write_guard = std::ptr::null_mut();
+        }
     }
 }
 
@@ -59,12 +70,17 @@ impl std::fmt::Display for IrFunctionType {
 }
 
 pub struct IrFunction {
+    pub(crate) parent: Arc<RwLock<*mut CIrPackage>>,
     pub(crate) ptr: *mut CIrFunction,
 }
 
+unsafe impl Send for IrFunction {}
+unsafe impl Sync for IrFunction {}
+
 impl IrFunction {
     pub fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
-        c_api::xls_interpret_function(self.ptr, args)
+        let package_read_guard: RwLockReadGuard<*mut CIrPackage> = self.parent.read().unwrap();
+        c_api::xls_interpret_function(&package_read_guard, self.ptr, args)
     }
 
     pub fn get_name(&self) -> String {
@@ -72,7 +88,8 @@ impl IrFunction {
     }
 
     pub fn get_type(&self) -> Result<IrFunctionType, XlsynthError> {
-        c_api::xls_function_get_type(self.ptr)
+        let package_write_guard: RwLockWriteGuard<*mut CIrPackage> = self.parent.write().unwrap();
+        c_api::xls_function_get_type(&package_write_guard, self.ptr)
     }
 }
 

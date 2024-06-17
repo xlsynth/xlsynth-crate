@@ -44,6 +44,9 @@ impl IrValue {
     }
 }
 
+unsafe impl Send for IrValue {}
+unsafe impl Sync for IrValue {}
+
 impl std::cmp::PartialEq for IrValue {
     fn eq(&self, other: &Self) -> bool {
         c_api::xls_value_eq(self.ptr, other.ptr).expect("eq success")

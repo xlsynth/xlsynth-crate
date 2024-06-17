@@ -5,7 +5,7 @@
 use libloading::{Library, Symbol};
 use once_cell::sync::OnceCell;
 use std::ffi::CString;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::ir_package::{IrFunctionType, IrType};
 use crate::ir_value::IrValue;
@@ -381,7 +381,7 @@ pub(crate) fn xls_parse_ir_package(
         );
         if success {
             let package = crate::ir_package::IrPackage {
-                ptr: xls_package_out,
+                ptr: Arc::new(RwLock::new(xls_package_out)),
             };
             return Ok(package);
         }
@@ -492,7 +492,8 @@ pub(crate) fn xls_package_get_type_for_value(
 ///    struct xls_function** result_out);
 /// ```
 pub(crate) fn xls_package_get_function(
-    package: *const CIrPackage,
+    package: &Arc<RwLock<*mut CIrPackage>>,
+    guard: RwLockReadGuard<*mut CIrPackage>,
     function_name: &str,
 ) -> Result<crate::ir_package::IrFunction, XlsynthError> {
     type XlsPackageGetFunction = unsafe extern "C" fn(
@@ -518,13 +519,16 @@ pub(crate) fn xls_package_get_function(
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut result_out: *mut CIrFunction = std::ptr::null_mut();
         let success = dlsym(
-            package,
+            *guard,
             function_name.as_ptr(),
             &mut error_out,
             &mut result_out,
         );
         if success {
-            let function = crate::ir_package::IrFunction { ptr: result_out };
+            let function = crate::ir_package::IrFunction {
+                parent: package.clone(),
+                ptr: result_out,
+            };
             return Ok(function);
         }
         let error_out_str: String = if !error_out.is_null() {
@@ -542,6 +546,7 @@ pub(crate) fn xls_package_get_function(
 /// struct xls_function_type** xls_fn_type_out);
 /// ```
 pub(crate) fn xls_function_get_type(
+    package_write_guard: &RwLockWriteGuard<*mut CIrPackage>,
     function: *const CIrFunction,
 ) -> Result<IrFunctionType, XlsynthError> {
     type XlsFunctionGetType = unsafe extern "C" fn(
@@ -673,6 +678,7 @@ pub(crate) fn xls_function_get_name(function: *const CIrFunction) -> Result<Stri
 ///     struct xls_value** result_out);
 /// ```
 pub(crate) fn xls_interpret_function(
+    _package_guard: &RwLockReadGuard<*mut CIrPackage>,
     function: *const CIrFunction,
     args: &[IrValue],
 ) -> Result<IrValue, XlsynthError> {
