@@ -13,7 +13,7 @@ use crate::xlsynth_error::XlsynthError;
 extern crate libc;
 extern crate libloading;
 
-const VERSION_TAG: &str = "v0.0.41";
+const DSO_VERSION_TAG: &str = env!("XLS_DSO_VERSION_TAG");
 
 static LIBRARY: OnceCell<Mutex<Library>> = OnceCell::new();
 
@@ -27,7 +27,7 @@ fn get_library() -> &'static Mutex<Library> {
             panic!("Running on an unknown OS");
         };
         let library = unsafe {
-            Library::new(format!("libxls-{}.{}", VERSION_TAG, dso_extension))
+            Library::new(format!("libxls-{}.{}", DSO_VERSION_TAG, dso_extension))
                 .expect("dynamic library should be present")
         };
         Mutex::new(library)
