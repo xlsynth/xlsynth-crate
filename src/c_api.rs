@@ -7,7 +7,7 @@ use once_cell::sync::OnceCell;
 use std::ffi::CString;
 use std::sync::Mutex;
 
-use crate::ir_package::{IrType, IrFunctionType};
+use crate::ir_package::{IrFunctionType, IrType};
 use crate::ir_value::IrValue;
 use crate::xlsynth_error::XlsynthError;
 
@@ -541,7 +541,9 @@ pub(crate) fn xls_package_get_function(
 /// bool xls_function_get_type(struct xls_function* function, char** error_out,
 /// struct xls_function_type** xls_fn_type_out);
 /// ```
-pub(crate) fn xls_function_get_type(function: *const CIrFunction) -> Result<IrFunctionType, XlsynthError> {
+pub(crate) fn xls_function_get_type(
+    function: *const CIrFunction,
+) -> Result<IrFunctionType, XlsynthError> {
     type XlsFunctionGetType = unsafe extern "C" fn(
         function: *const CIrFunction,
         error_out: *mut *mut std::os::raw::c_char,
@@ -564,7 +566,9 @@ pub(crate) fn xls_function_get_type(function: *const CIrFunction) -> Result<IrFu
         let mut xls_fn_type_out: *mut CIrFunctionType = std::ptr::null_mut();
         let success = dlsym(function, &mut error_out, &mut xls_fn_type_out);
         if success {
-            let ir_type = IrFunctionType { ptr: xls_fn_type_out };
+            let ir_type = IrFunctionType {
+                ptr: xls_fn_type_out,
+            };
             return Ok(ir_type);
         }
         let error_out_str: String = if !error_out.is_null() {
@@ -581,7 +585,9 @@ pub(crate) fn xls_function_get_type(function: *const CIrFunction) -> Result<IrFu
 /// bool xls_function_type_to_string(struct xls_function_type* xls_function_type,
 /// char** error_out, char** string_out);
 /// ```
-pub(crate) fn xls_function_type_to_string(t: *const CIrFunctionType) -> Result<String, XlsynthError> {
+pub(crate) fn xls_function_type_to_string(
+    t: *const CIrFunctionType,
+) -> Result<String, XlsynthError> {
     type XlsFunctionTypeToString = unsafe extern "C" fn(
         t: *const CIrFunctionType,
         error_out: *mut *mut std::os::raw::c_char,

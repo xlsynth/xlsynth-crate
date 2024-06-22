@@ -50,7 +50,11 @@ pub struct IrFunctionType {
 
 impl std::fmt::Display for IrFunctionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", c_api::xls_function_type_to_string(self.ptr).unwrap())
+        write!(
+            f,
+            "{}",
+            c_api::xls_function_type_to_string(self.ptr).unwrap()
+        )
     }
 }
 
@@ -101,10 +105,7 @@ mod tests {
 
         // Inspect the function type.
         let f_type = f.get_type().expect("get type success");
-        assert_eq!(
-            f_type.to_string(),
-            "(bits[32]) -> bits[32]".to_string()
-        );
+        assert_eq!(f_type.to_string(), "(bits[32]) -> bits[32]".to_string());
 
         let ft = IrValue::parse_typed("bits[32]:42").unwrap();
         let result = f.interpret(&[ft]).expect("interpret success");
