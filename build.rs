@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const DSO_VERSION_TAG: &str = "v0.0.45";
+const DSO_VERSION_TAG: &str = "v0.0.46";
 
 fn main() {
     // URL of the DSO release on GitHub
