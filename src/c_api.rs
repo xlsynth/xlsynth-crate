@@ -29,10 +29,12 @@ fn get_library() -> &'static Mutex<Library> {
         };
         let so_filename = format!("libxls-{}.{}", DSO_VERSION_TAG, dso_extension);
         let library = unsafe {
-            Library::new(so_filename.clone())
-                .expect("dynamic library should be present")
+            Library::new(so_filename.clone()).expect("dynamic library should be present")
         };
-        log::info!("Successfully loaded XLS shared object from filename: {}", so_filename);
+        log::info!(
+            "Successfully loaded XLS shared object from filename: {}",
+            so_filename
+        );
         Mutex::new(library)
     })
 }
@@ -712,10 +714,11 @@ fn __test_mod__f(x: bits[32]) -> bits[32] {
             .expect("should convert to format preference");
         assert_eq!(fmt, 0);
 
-        let fmt: XlsFormatPreference = xls_format_preference_from_string("hex")
-            .expect("should convert to format preference");
+        let fmt: XlsFormatPreference =
+            xls_format_preference_from_string("hex").expect("should convert to format preference");
         assert_eq!(fmt, 4);
 
-        xls_format_preference_from_string("blah").expect_err("should not convert to format preference");
+        xls_format_preference_from_string("blah")
+            .expect_err("should not convert to format preference");
     }
 }
