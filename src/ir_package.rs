@@ -22,6 +22,10 @@ impl IrPackage {
     pub fn to_string(&self) -> String {
         c_api::xls_package_to_string(self.ptr).unwrap()
     }
+
+    pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
+        c_api::xls_package_get_type_for_value(self.ptr, value.ptr)
+    }
 }
 
 impl Drop for IrPackage {
@@ -30,8 +34,17 @@ impl Drop for IrPackage {
     }
 }
 
+pub struct IrType {
+    pub(crate) ptr: *mut c_api::CIrType,
+}
+
+impl std::fmt::Display for IrType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", c_api::xls_type_to_string(self.ptr).unwrap())
+    }
+}
+
 pub struct IrFunction {
-    #[allow(dead_code)]
     pub(crate) ptr: *mut CIrFunction,
 }
 
@@ -75,5 +88,10 @@ mod tests {
         let result = f.interpret(&[ft]).expect("interpret success");
         let want = IrValue::parse_typed("bits[32]:43").unwrap();
         assert_eq!(result, want);
+
+        assert_eq!(
+            package.get_type_for_value(&want).unwrap().to_string(),
+            "bits[32]".to_string()
+        );
     }
 }
