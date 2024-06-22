@@ -39,6 +39,10 @@ impl IrFunction {
     pub fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
         c_api::xls_interpret_function(self.ptr, args)
     }
+
+    pub fn get_name(&self) -> String {
+        c_api::xls_function_get_name(self.ptr).unwrap()
+    }
 }
 
 #[cfg(test)]
@@ -51,18 +55,22 @@ mod tests {
             "package test\nfn f() -> bits[32] { ret literal.1: bits[32] = literal(value=42) }\n";
         let package = IrPackage::parse_ir(ir, None).expect("parse success");
         let f = package.get_function("f").expect("should find function");
+        assert_eq!(f.get_name(), "f");
         let result = f.interpret(&[]).expect("interpret success");
         assert_eq!(result, IrValue::parse_typed("bits[32]:42").unwrap());
     }
 
     #[test]
     fn test_plus_one_fn_interp() {
-        let ir = "package test\nfn f(x: bits[32]) -> bits[32] {
+        let ir = "package test\nfn plus_one(x: bits[32]) -> bits[32] {
     literal.2: bits[32] = literal(value=1)
     ret add.1: bits[32] = add(x, literal.2)
 }";
         let package = IrPackage::parse_ir(ir, None).expect("parse success");
-        let f = package.get_function("f").expect("should find function");
+        let f = package
+            .get_function("plus_one")
+            .expect("should find function");
+        assert_eq!(f.get_name(), "plus_one");
         let ft = IrValue::parse_typed("bits[32]:42").unwrap();
         let result = f.interpret(&[ft]).expect("interpret success");
         let want = IrValue::parse_typed("bits[32]:43").unwrap();
