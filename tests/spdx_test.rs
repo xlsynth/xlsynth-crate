@@ -8,7 +8,13 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
     let file = fs::File::open(file_path).unwrap();
     let reader = io::BufReader::new(file);
     if let Some(Ok(first_line)) = reader.lines().next() {
-        return first_line.starts_with("// SPDX-License-Identifier: Apache-2.0");
+        let ok = first_line.starts_with("// SPDX-License-Identifier: Apache-2.0");
+        if ok {
+            println!("Found SPDX identifier in file: {:?}", file_path);
+        } else {
+            eprintln!("Missing SPDX identifier in file: {:?}", file_path);
+        }
+        return ok;
     }
     false
 }
@@ -30,7 +36,8 @@ fn check_all_rust_files_for_spdx() {
 
             if path.is_dir() {
                 // We exclude the DSLX stdlib from needing SPDX.
-                if path == Path::new("stdlib") {
+                if entry.file_name() != "target" && entry.file_name() != ".git" {
+                    println!("Adding to directory worklist: {:?}", path);
                     dir_worklist.push(path.clone());
                 }
                 continue;

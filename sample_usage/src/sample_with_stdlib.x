@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import std;
 
 fn use_popcount() -> u32 {
