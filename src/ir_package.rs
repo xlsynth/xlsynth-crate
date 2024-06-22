@@ -44,6 +44,16 @@ impl std::fmt::Display for IrType {
     }
 }
 
+pub struct IrFunctionType {
+    pub(crate) ptr: *mut c_api::CIrFunctionType,
+}
+
+impl std::fmt::Display for IrFunctionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", c_api::xls_function_type_to_string(self.ptr).unwrap())
+    }
+}
+
 pub struct IrFunction {
     pub(crate) ptr: *mut CIrFunction,
 }
@@ -55,6 +65,10 @@ impl IrFunction {
 
     pub fn get_name(&self) -> String {
         c_api::xls_function_get_name(self.ptr).unwrap()
+    }
+
+    pub fn get_type(&self) -> Result<IrFunctionType, XlsynthError> {
+        c_api::xls_function_get_type(self.ptr)
     }
 }
 
@@ -84,6 +98,14 @@ mod tests {
             .get_function("plus_one")
             .expect("should find function");
         assert_eq!(f.get_name(), "plus_one");
+
+        // Inspect the function type.
+        let f_type = f.get_type().expect("get type success");
+        assert_eq!(
+            f_type.to_string(),
+            "(bits[32]) -> bits[32]".to_string()
+        );
+
         let ft = IrValue::parse_typed("bits[32]:42").unwrap();
         let result = f.interpret(&[ft]).expect("interpret success");
         let want = IrValue::parse_typed("bits[32]:43").unwrap();

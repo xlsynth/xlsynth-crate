@@ -7,7 +7,7 @@ use once_cell::sync::OnceCell;
 use std::ffi::CString;
 use std::sync::Mutex;
 
-use crate::ir_package::IrType;
+use crate::ir_package::{IrType, IrFunctionType};
 use crate::ir_value::IrValue;
 use crate::xlsynth_error::XlsynthError;
 
@@ -52,6 +52,11 @@ pub(crate) struct CIrFunction {
 
 #[repr(C)]
 pub(crate) struct CIrType {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub(crate) struct CIrFunctionType {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
@@ -521,6 +526,90 @@ pub(crate) fn xls_package_get_function(
         if success {
             let function = crate::ir_package::IrFunction { ptr: result_out };
             return Ok(function);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+/// Bindings for the C API function:
+/// ```c
+/// bool xls_function_get_type(struct xls_function* function, char** error_out,
+/// struct xls_function_type** xls_fn_type_out);
+/// ```
+pub(crate) fn xls_function_get_type(function: *const CIrFunction) -> Result<IrFunctionType, XlsynthError> {
+    type XlsFunctionGetType = unsafe extern "C" fn(
+        function: *const CIrFunction,
+        error_out: *mut *mut std::os::raw::c_char,
+        xls_fn_type_out: *mut *mut CIrFunctionType,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsFunctionGetType> = match lib.get(b"xls_function_get_type") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_function_get_type`: {}",
+                    e
+                )))
+            }
+        };
+
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut xls_fn_type_out: *mut CIrFunctionType = std::ptr::null_mut();
+        let success = dlsym(function, &mut error_out, &mut xls_fn_type_out);
+        if success {
+            let ir_type = IrFunctionType { ptr: xls_fn_type_out };
+            return Ok(ir_type);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+/// Bindings for the C API function:
+/// ```c
+/// bool xls_function_type_to_string(struct xls_function_type* xls_function_type,
+/// char** error_out, char** string_out);
+/// ```
+pub(crate) fn xls_function_type_to_string(t: *const CIrFunctionType) -> Result<String, XlsynthError> {
+    type XlsFunctionTypeToString = unsafe extern "C" fn(
+        t: *const CIrFunctionType,
+        error_out: *mut *mut std::os::raw::c_char,
+        string_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsFunctionTypeToString> = match lib.get(b"xls_function_type_to_string") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_function_type_to_string`: {}",
+                    e
+                )))
+            }
+        };
+
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = dlsym(t, &mut error_out, &mut c_str_out);
+        if success {
+            let out_str = if !c_str_out.is_null() {
+                CString::from_raw(c_str_out).into_string().unwrap()
+            } else {
+                String::new()
+            };
+            return Ok(out_str);
         }
         let error_out_str: String = if !error_out.is_null() {
             CString::from_raw(error_out).into_string().unwrap()
