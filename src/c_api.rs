@@ -19,7 +19,6 @@ static LIBRARY: OnceCell<Mutex<Library>> = OnceCell::new();
 
 fn get_library() -> &'static Mutex<Library> {
     LIBRARY.get_or_init(|| {
-        let _ = env_logger::try_init();
         let dso_extension = if cfg!(target_os = "macos") {
             "dylib"
         } else if cfg!(target_os = "linux") {
@@ -31,10 +30,6 @@ fn get_library() -> &'static Mutex<Library> {
         let library = unsafe {
             Library::new(so_filename.clone()).expect("dynamic library should be present")
         };
-        log::info!(
-            "Successfully loaded XLS shared object from filename: {}",
-            so_filename
-        );
         Mutex::new(library)
     })
 }

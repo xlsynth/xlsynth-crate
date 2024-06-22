@@ -574,11 +574,9 @@ version = "0.0.12"
 dependencies = [
  "curl",
  "docmatic",
- "env_logger",
  "flate2",
  "libc",
  "libloading",
- "log",
  "once_cell",
  "tar",
 ]
