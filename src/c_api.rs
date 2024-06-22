@@ -19,6 +19,7 @@ static LIBRARY: OnceCell<Mutex<Library>> = OnceCell::new();
 
 fn get_library() -> &'static Mutex<Library> {
     LIBRARY.get_or_init(|| {
+        let _ = env_logger::try_init();
         let dso_extension = if cfg!(target_os = "macos") {
             "dylib"
         } else if cfg!(target_os = "linux") {
@@ -26,10 +27,12 @@ fn get_library() -> &'static Mutex<Library> {
         } else {
             panic!("Running on an unknown OS");
         };
+        let so_filename = format!("libxls-{}.{}", DSO_VERSION_TAG, dso_extension);
         let library = unsafe {
-            Library::new(format!("libxls-{}.{}", DSO_VERSION_TAG, dso_extension))
+            Library::new(so_filename.clone())
                 .expect("dynamic library should be present")
         };
+        log::info!("Successfully loaded XLS shared object from filename: {}", so_filename);
         Mutex::new(library)
     })
 }
@@ -48,6 +51,8 @@ pub(crate) struct CIrPackage {
 pub(crate) struct CIrFunction {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
+
+pub(crate) type XlsFormatPreference = i32;
 
 type XlsValueToString =
     unsafe extern "C" fn(value: *const CIrValue, str_out: *mut *mut std::os::raw::c_char) -> bool;
@@ -202,6 +207,92 @@ pub(crate) fn xls_value_to_string(p: *mut CIrValue) -> Result<String, XlsynthErr
 
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = dlsym(p, &mut c_str_out);
+        if success {
+            let s: String = if !c_str_out.is_null() {
+                CString::from_raw(c_str_out).into_string().unwrap()
+            } else {
+                String::new()
+            };
+            return Ok(s);
+        }
+        return Err(XlsynthError(
+            "Failed to convert XLS value to string via C API".to_string(),
+        ));
+    }
+}
+
+pub(crate) fn xls_format_preference_from_string(
+    s: &str,
+) -> Result<XlsFormatPreference, XlsynthError> {
+    // Invokes the function with signature:
+    // ```c
+    // bool xls_format_preference_from_string(const char* s, char** error_out,
+    //   xls_format_preference* result_out);
+    // ```
+    //
+    // Note that the format preference enum is `int32_t``.
+    type XlsFormatPreferenceFromString = unsafe extern "C" fn(
+        s: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut XlsFormatPreference,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsFormatPreferenceFromString> =
+            match lib.get(b"xls_format_preference_from_string") {
+                Ok(f) => f,
+                Err(e) => {
+                    return Err(XlsynthError(format!(
+                        "Failed to load symbol `xls_format_preference_from_string`: {}",
+                        e
+                    )))
+                }
+            };
+
+        let c_str = CString::new(s).unwrap();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut result_out: XlsFormatPreference = -1;
+        let success = dlsym(c_str.as_ptr(), &mut error_out, &mut result_out);
+        if success {
+            return Ok(result_out);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+pub(crate) fn xls_value_to_string_format_preference(
+    p: *mut CIrValue,
+    fmt: XlsFormatPreference,
+) -> Result<String, XlsynthError> {
+    type XlsValueToStringFormatPreference = unsafe extern "C" fn(
+        value: *const CIrValue,
+        fmt: XlsFormatPreference,
+        error_out: *mut *mut std::os::raw::c_char,
+        str_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsValueToStringFormatPreference> =
+            match lib.get(b"xls_value_to_string_format_preference") {
+                Ok(f) => f,
+                Err(e) => {
+                    return Err(XlsynthError(format!(
+                        "Failed to load symbol `xls_value_to_string_format_preference`: {}",
+                        e
+                    )))
+                }
+            };
+
+        let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = dlsym(p, fmt, &mut error_out, &mut c_str_out);
         if success {
             let s: String = if !c_str_out.is_null() {
                 CString::from_raw(c_str_out).into_string().unwrap()
@@ -613,5 +704,18 @@ fn __test_mod__f(x: bits[32]) -> bits[32] {
     fn test_parse_typed_value_bits32_42() {
         let v: IrValue = xls_parse_typed_value("bits[32]:42").expect("should parse ok");
         assert_eq!(v.to_string(), "bits[32]:42");
+    }
+
+    #[test]
+    fn test_xls_format_preference_from_string() {
+        let fmt: XlsFormatPreference = xls_format_preference_from_string("default")
+            .expect("should convert to format preference");
+        assert_eq!(fmt, 0);
+
+        let fmt: XlsFormatPreference = xls_format_preference_from_string("hex")
+            .expect("should convert to format preference");
+        assert_eq!(fmt, 4);
+
+        xls_format_preference_from_string("blah").expect_err("should not convert to format preference");
     }
 }
