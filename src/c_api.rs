@@ -347,6 +347,45 @@ pub(crate) fn xls_package_get_function(
     }
 }
 
+pub(crate) fn xls_function_get_name(function: *const CIrFunction) -> Result<String, XlsynthError> {
+    type XlsFunctionGetName = unsafe extern "C" fn(
+        function: *const CIrFunction,
+        error_out: *mut *mut std::os::raw::c_char,
+        name_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    unsafe {
+        let lib = get_library().lock().unwrap();
+        let dlsym: Symbol<XlsFunctionGetName> = match lib.get(b"xls_function_get_name") {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(XlsynthError(format!(
+                    "Failed to load symbol `xls_function_get_name`: {}",
+                    e
+                )))
+            }
+        };
+
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = dlsym(function, &mut error_out, &mut c_str_out);
+        if success {
+            let out_str = if !c_str_out.is_null() {
+                CString::from_raw(c_str_out).into_string().unwrap()
+            } else {
+                String::new()
+            };
+            return Ok(out_str);
+        }
+        let error_out_str: String = if !error_out.is_null() {
+            CString::from_raw(error_out).into_string().unwrap()
+        } else {
+            String::new()
+        };
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
 /// Bindings for the C API function:
 /// ```c
 /// bool xls_interpret_function(
