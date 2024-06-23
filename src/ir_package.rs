@@ -9,6 +9,10 @@ use crate::IrValue;
 
 pub struct IrPackage {
     pub(crate) ptr: Arc<RwLock<*mut CIrPackage>>,
+    // TODO(cdleary): 2024-06-23 This is the filename that is passed to the "parse package IR"
+    // C API functionality. We should be able to remove this field and recover the value
+    // from the built package if we had the appropriate C API.
+    pub(crate) filename: Option<String>,
 }
 
 unsafe impl Send for IrPackage {}
@@ -32,6 +36,13 @@ impl IrPackage {
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
         let write_guard = self.ptr.write().unwrap();
         c_api::xls_package_get_type_for_value(*write_guard, value.ptr)
+    }
+
+    pub fn filename(&self) -> Option<&str> {
+        match self.filename {
+            Some(ref s) => Some(s),
+            None => None,
+        }
     }
 }
 
