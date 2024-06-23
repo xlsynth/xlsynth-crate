@@ -546,7 +546,7 @@ pub(crate) fn xls_package_get_function(
 /// struct xls_function_type** xls_fn_type_out);
 /// ```
 pub(crate) fn xls_function_get_type(
-    package_write_guard: &RwLockWriteGuard<*mut CIrPackage>,
+    _package_write_guard: &RwLockWriteGuard<*mut CIrPackage>,
     function: *const CIrFunction,
 ) -> Result<IrFunctionType, XlsynthError> {
     type XlsFunctionGetType = unsafe extern "C" fn(
