@@ -8,7 +8,8 @@ use xlsynth::IrPackage;
 fn load_package(cargo_relpath: &str) -> IrPackage {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(cargo_relpath);
     let dslx = std::fs::read_to_string(&path).expect("read_to_string failed");
-    let package = xlsynth::convert_dslx_to_ir(&dslx, path.as_path()).expect("convert_dslx_to_ir failed");
+    let package =
+        xlsynth::convert_dslx_to_ir(&dslx, path.as_path()).expect("convert_dslx_to_ir failed");
     package
 }
 

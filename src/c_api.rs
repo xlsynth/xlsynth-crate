@@ -78,11 +78,7 @@ pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<Stri
     ) -> bool;
 
     // Extract the module name from the path; e.g. "foo/bar/baz.x" -> "baz"
-    let module_name = path
-        .file_stem()
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let module_name = path.file_stem().unwrap().to_str().unwrap();
     let path_str = path.to_str().unwrap();
 
     unsafe {
@@ -882,8 +878,11 @@ mod tests {
 
     #[test]
     fn test_convert_dslx_to_ir() {
-        let ir = xls_convert_dslx_to_ir("fn f(x: u32) -> u32 { x }", std::path::Path::new("/memfile/test_mod.x"))
-            .expect("ir conversion should succeed");
+        let ir = xls_convert_dslx_to_ir(
+            "fn f(x: u32) -> u32 { x }",
+            std::path::Path::new("/memfile/test_mod.x"),
+        )
+        .expect("ir conversion should succeed");
         assert_eq!(
             ir,
             "package test_mod
