@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use multithread::validate_all_threads_compute_add1;
 use xlsynth;
+
+mod multithread;
 
 fn load_and_invoke(file: &str, func: &str) -> Result<xlsynth::IrValue, Box<dyn std::error::Error>> {
     let filename = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
@@ -38,16 +41,24 @@ fn main() {
         "meaning-of-life validation result: {:?} {:?}",
         mol_result, popcount_result
     );
+
+    validate_all_threads_compute_add1();
+    println!("multi-threaded validation complete");
 }
 
-#[test]
-fn test_validate_mol() {
-    let _ = env_logger::try_init();
-    validate_mol().expect("validation should succeed");
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn test_validate_use_popcount() {
-    let _ = env_logger::try_init();
-    validate_use_popcount().expect("validation should succeed");
+    #[test]
+    fn test_validate_mol() {
+        let _ = env_logger::try_init();
+        validate_mol().expect("validation should succeed");
+    }
+
+    #[test]
+    fn test_validate_use_popcount() {
+        let _ = env_logger::try_init();
+        validate_use_popcount().expect("validation should succeed");
+    }
 }
