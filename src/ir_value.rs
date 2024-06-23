@@ -208,8 +208,10 @@ mod tests {
 
         let f = IrValue::parse_typed("bits[1]:0").expect("parse success");
         assert_eq!(f.to_bool().unwrap(), false);
+        assert_eq!(f.bit_count(), 1);
 
         let t = IrValue::parse_typed("bits[1]:1").expect("parse success");
         assert_eq!(t.to_bool().unwrap(), true);
+        assert_eq!(t.bit_count(), 1);
     }
 }
