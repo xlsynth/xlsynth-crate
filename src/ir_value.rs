@@ -37,10 +37,50 @@ impl IrValue {
         c_api::xls_parse_typed_value(s)
     }
 
+    pub fn u64(value: u64) -> Result<Self, XlsynthError> {
+        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
+        Self::parse_typed(std::format!("bits[64]:{}", value).as_str())
+    }
+
+    pub fn bit_count(&self) -> usize {
+        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
+        let s = self
+            .to_string_fmt(IrFormatPreference::Default)
+            .expect("fmt success");
+        // Look at the decimal value in the formatted result; e.g. `bits[7]:42` => `7`
+        let parts: Vec<&str> = s
+            .split(':')
+            .nth(0)
+            .expect("split success")
+            .split('[')
+            .nth(1)
+            .expect("split success")
+            .split(']')
+            .collect();
+        return parts[0].parse::<usize>().expect("parse success");
+    }
+
     pub fn to_string_fmt(&self, format: IrFormatPreference) -> Result<String, XlsynthError> {
         let fmt_pref: c_api::XlsFormatPreference =
             c_api::xls_format_preference_from_string(format.to_string())?;
         c_api::xls_value_to_string_format_preference(self.ptr, fmt_pref)
+    }
+
+    pub fn to_bool(&self) -> Result<bool, XlsynthError> {
+        if self.bit_count() != 1 {
+            return Err(XlsynthError(format!(
+                "IrValue {} is not single-bit; must be bits[1] to convert to bool",
+                self.to_string()
+            )));
+        }
+        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
+        let s = self.to_string_fmt(IrFormatPreference::PlainBinary)?;
+        let v = s.split(':').nth(1).expect("split success");
+        match v {
+            "0" => return Ok(false),
+            "1" => return Ok(true),
+            _ => panic!("Unexpected stringified value for single-bit IrValue: {}", s),
+        }
     }
 }
 
@@ -153,5 +193,25 @@ mod tests {
                 .expect("fmt success"),
             "bits[32]:2a"
         );
+    }
+
+    #[test]
+    fn test_ir_value_from_rust() {
+        let v = IrValue::u64(42).expect("u64 success");
+        assert_eq!(
+            v.to_string_fmt(IrFormatPreference::Default)
+                .expect("fmt success"),
+            "bits[64]:42"
+        );
+        assert_eq!(v.bit_count(), 64);
+        v.to_bool().expect_err("bool conversion fail for u64");
+
+        let f = IrValue::parse_typed("bits[1]:0").expect("parse success");
+        assert_eq!(f.to_bool().unwrap(), false);
+        assert_eq!(f.bit_count(), 1);
+
+        let t = IrValue::parse_typed("bits[1]:1").expect("parse success");
+        assert_eq!(t.to_bool().unwrap(), true);
+        assert_eq!(t.bit_count(), 1);
     }
 }

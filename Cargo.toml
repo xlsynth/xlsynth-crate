@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth"
-version = "0.0.12"
+version = "0.0.13"
 edition = "2018"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
@@ -30,3 +30,9 @@ members = [
 
 [dev-dependencies]
 docmatic = "0.1.2"
+curl = "0.4"
+toml = "0.5"
+serde_json = "1.0"
+semver = "1.0"
+log = "0.4"
+env_logger = "0.11"
