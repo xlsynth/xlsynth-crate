@@ -6,9 +6,9 @@ use rayon::prelude::*;
 use xlsynth::IrPackage;
 
 fn load_package(cargo_relpath: &str) -> IrPackage {
-    let filename = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(cargo_relpath);
-    let dslx = std::fs::read_to_string(filename).expect("read_to_string failed");
-    let package = xlsynth::convert_dslx_to_ir(&dslx).expect("convert_dslx_to_ir failed");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(cargo_relpath);
+    let dslx = std::fs::read_to_string(&path).expect("read_to_string failed");
+    let package = xlsynth::convert_dslx_to_ir(&dslx, path.as_path()).expect("convert_dslx_to_ir failed");
     package
 }
 
@@ -21,7 +21,7 @@ lazy_static! {
     // Load sample.x and expose the "add1" function so that threads can invoke it via the XLS
     // interpreter.
     static ref ADD1_FUNCTION: xlsynth::IrFunction = {
-        let mangled = xlsynth::mangle_dslx_name("test_mod", "add1").expect("mangle_dslx_name failed");
+        let mangled = xlsynth::mangle_dslx_name("sample", "add1").expect("mangle_dslx_name failed");
         let function = SAMPLE_PACKAGE.get_function(&mangled).expect("get_function failed");
         assert_eq!(function.get_name(), mangled);
         function

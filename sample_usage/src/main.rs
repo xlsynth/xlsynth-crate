@@ -6,11 +6,12 @@ use xlsynth;
 mod multithread;
 
 fn load_and_invoke(file: &str, func: &str) -> Result<xlsynth::IrValue, Box<dyn std::error::Error>> {
-    let filename = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
-    log::info!("reading DSLX program from: {:?}", filename);
-    let dslx = std::fs::read_to_string(filename)?;
-    let package = xlsynth::convert_dslx_to_ir(&dslx)?;
-    let mangled = xlsynth::mangle_dslx_name("test_mod", func)?;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+    log::info!("reading DSLX program from: {:?}", path);
+    let dslx = std::fs::read_to_string(&path)?;
+    let package = xlsynth::convert_dslx_to_ir(&dslx, path.as_path())?;
+    let dslx_module_name = path.file_stem().unwrap().to_str().unwrap();
+    let mangled = xlsynth::mangle_dslx_name(dslx_module_name, func)?;
     let f = package.get_function(&mangled)?;
     let result = f.interpret(&[])?;
     Ok(result)

@@ -65,7 +65,7 @@ pub(crate) type XlsFormatPreference = i32;
 type XlsValueToString =
     unsafe extern "C" fn(value: *const CIrValue, str_out: *mut *mut std::os::raw::c_char) -> bool;
 
-pub fn xls_convert_dslx_to_ir(dslx: &str) -> Result<String, XlsynthError> {
+pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<String, XlsynthError> {
     type XlsConvertDslxToIr = unsafe extern "C" fn(
         dslx: *const std::os::raw::c_char,
         path: *const std::os::raw::c_char,
@@ -76,6 +76,14 @@ pub fn xls_convert_dslx_to_ir(dslx: &str) -> Result<String, XlsynthError> {
         error_out: *mut *mut std::os::raw::c_char,
         ir_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+
+    // Extract the module name from the path; e.g. "foo/bar/baz.x" -> "baz"
+    let module_name = path
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let path_str = path.to_str().unwrap();
 
     unsafe {
         let lib = get_library().lock().unwrap();
@@ -90,8 +98,8 @@ pub fn xls_convert_dslx_to_ir(dslx: &str) -> Result<String, XlsynthError> {
                 }
             };
         let dslx = CString::new(dslx).unwrap();
-        let path = CString::new("test_mod.x").unwrap();
-        let module_name = CString::new("test_mod").unwrap();
+        let c_path = CString::new(path_str).unwrap();
+        let c_module_name = CString::new(module_name).unwrap();
         let stdlib_path = env!("DSLX_STDLIB_PATH");
         let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
 
@@ -103,8 +111,8 @@ pub fn xls_convert_dslx_to_ir(dslx: &str) -> Result<String, XlsynthError> {
         // Call the function
         let success = dlsym_convert_dslx_to_ir(
             dslx.as_ptr(),
-            path.as_ptr(),
-            module_name.as_ptr(),
+            c_path.as_ptr(),
+            c_module_name.as_ptr(),
             dslx_stdlib_path.as_ptr(),
             additional_search_paths_ptrs.as_ptr(),
             additional_search_paths_ptrs.len(),
@@ -382,6 +390,7 @@ pub(crate) fn xls_parse_ir_package(
         if success {
             let package = crate::ir_package::IrPackage {
                 ptr: Arc::new(RwLock::new(xls_package_out)),
+                filename: filename.map(|s| s.to_string()),
             };
             return Ok(package);
         }
@@ -873,13 +882,13 @@ mod tests {
 
     #[test]
     fn test_convert_dslx_to_ir() {
-        let ir = xls_convert_dslx_to_ir("fn f(x: u32) -> u32 { x }")
+        let ir = xls_convert_dslx_to_ir("fn f(x: u32) -> u32 { x }", std::path::Path::new("/memfile/test_mod.x"))
             .expect("ir conversion should succeed");
         assert_eq!(
             ir,
             "package test_mod
 
-file_number 0 \"test_mod.x\"
+file_number 0 \"/memfile/test_mod.x\"
 
 fn __test_mod__f(x: bits[32]) -> bits[32] {
   ret x: bits[32] = param(name=x)
