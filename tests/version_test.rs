@@ -27,7 +27,10 @@ fn fetch_latest_version(crate_name: &str) -> Result<String, Box<dyn std::error::
     log::info!("Response: {:?}", response);
     let newest_version = response["crate"]["newest_version"].as_str();
     let latest_version = newest_version
-        .ok_or(format!("Failed to parse latest version: {:?}", newest_version))?
+        .ok_or(format!(
+            "Failed to parse latest version: {:?}",
+            newest_version
+        ))?
         .to_string();
     Ok(latest_version)
 }
@@ -37,7 +40,10 @@ fn fetch_local_version() -> Result<String, Box<dyn std::error::Error>> {
     let cargo_toml: toml::Value = toml::from_str(&cargo_toml)?;
     let version = cargo_toml["package"]["version"]
         .as_str()
-        .ok_or(format!("Failed to parse local version: {}", cargo_toml["package"]["version"]))?
+        .ok_or(format!(
+            "Failed to parse local version: {}",
+            cargo_toml["package"]["version"]
+        ))?
         .to_string();
     Ok(version)
 }
