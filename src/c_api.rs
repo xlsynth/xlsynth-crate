@@ -7,7 +7,7 @@ use once_cell::sync::OnceCell;
 use std::ffi::CString;
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::ir_package::{IrFunctionType, IrType};
+use crate::ir_package::{IrFunctionType, IrPackagePtr, IrType};
 use crate::ir_value::IrValue;
 use crate::xlsynth_error::XlsynthError;
 
@@ -385,7 +385,7 @@ pub(crate) fn xls_parse_ir_package(
         );
         if success {
             let package = crate::ir_package::IrPackage {
-                ptr: Arc::new(RwLock::new(xls_package_out)),
+                ptr: Arc::new(RwLock::new(IrPackagePtr(xls_package_out))),
                 filename: filename.map(|s| s.to_string()),
             };
             return Ok(package);
@@ -497,8 +497,8 @@ pub(crate) fn xls_package_get_type_for_value(
 ///    struct xls_function** result_out);
 /// ```
 pub(crate) fn xls_package_get_function(
-    package: &Arc<RwLock<*mut CIrPackage>>,
-    guard: RwLockReadGuard<*mut CIrPackage>,
+    package: &Arc<RwLock<IrPackagePtr>>,
+    guard: RwLockReadGuard<IrPackagePtr>,
     function_name: &str,
 ) -> Result<crate::ir_package::IrFunction, XlsynthError> {
     type XlsPackageGetFunction = unsafe extern "C" fn(
@@ -524,7 +524,7 @@ pub(crate) fn xls_package_get_function(
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut result_out: *mut CIrFunction = std::ptr::null_mut();
         let success = dlsym(
-            *guard,
+            guard.const_c_ptr(),
             function_name.as_ptr(),
             &mut error_out,
             &mut result_out,
@@ -551,7 +551,7 @@ pub(crate) fn xls_package_get_function(
 /// struct xls_function_type** xls_fn_type_out);
 /// ```
 pub(crate) fn xls_function_get_type(
-    _package_write_guard: &RwLockWriteGuard<*mut CIrPackage>,
+    _package_write_guard: &RwLockWriteGuard<IrPackagePtr>,
     function: *const CIrFunction,
 ) -> Result<IrFunctionType, XlsynthError> {
     type XlsFunctionGetType = unsafe extern "C" fn(
@@ -683,7 +683,7 @@ pub(crate) fn xls_function_get_name(function: *const CIrFunction) -> Result<Stri
 ///     struct xls_value** result_out);
 /// ```
 pub(crate) fn xls_interpret_function(
-    _package_guard: &RwLockReadGuard<*mut CIrPackage>,
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
     function: *const CIrFunction,
     args: &[IrValue],
 ) -> Result<IrValue, XlsynthError> {

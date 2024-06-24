@@ -7,8 +7,31 @@ use crate::c_api::{CIrFunction, CIrPackage};
 use crate::xlsynth_error::XlsynthError;
 use crate::IrValue;
 
+/// We wrap up the raw C pointer in this type that implements `Drop` trait -- this allows us to
+/// wrap it up in an Arc so that types with derived lifetimes (e.g. C function pointers) can grab
+/// a hold of the Arc to prevent deallocation of its backing type.
+pub(crate) struct IrPackagePtr(pub *mut CIrPackage);
+
+impl IrPackagePtr {
+    pub fn mut_c_ptr(&self) -> *mut CIrPackage {
+        self.0
+    }
+    pub fn const_c_ptr(&self) -> *const CIrPackage {
+        self.0
+    }
+}
+
+impl Drop for IrPackagePtr {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            c_api::xls_package_free(self.0).expect("dealloc success");
+            self.0 = std::ptr::null_mut();
+        }
+    }
+}
+
 pub struct IrPackage {
-    pub(crate) ptr: Arc<RwLock<*mut CIrPackage>>,
+    pub(crate) ptr: Arc<RwLock<IrPackagePtr>>,
     // TODO(cdleary): 2024-06-23 This is the filename that is passed to the "parse package IR"
     // C API functionality. We should be able to remove this field and recover the value
     // from the built package if we had the appropriate C API.
@@ -30,28 +53,18 @@ impl IrPackage {
 
     pub fn to_string(&self) -> String {
         let read_guard = self.ptr.read().unwrap();
-        c_api::xls_package_to_string(*read_guard).unwrap()
+        c_api::xls_package_to_string(read_guard.const_c_ptr()).unwrap()
     }
 
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
         let write_guard = self.ptr.write().unwrap();
-        c_api::xls_package_get_type_for_value(*write_guard, value.ptr)
+        c_api::xls_package_get_type_for_value(write_guard.mut_c_ptr(), value.ptr)
     }
 
     pub fn filename(&self) -> Option<&str> {
         match self.filename {
             Some(ref s) => Some(s),
             None => None,
-        }
-    }
-}
-
-impl Drop for IrPackage {
-    fn drop(&mut self) {
-        let mut write_guard = self.ptr.write().unwrap();
-        if !write_guard.is_null() {
-            c_api::xls_package_free(*write_guard).expect("dealloc success");
-            *write_guard = std::ptr::null_mut();
         }
     }
 }
@@ -81,7 +94,7 @@ impl std::fmt::Display for IrFunctionType {
 }
 
 pub struct IrFunction {
-    pub(crate) parent: Arc<RwLock<*mut CIrPackage>>,
+    pub(crate) parent: Arc<RwLock<IrPackagePtr>>,
     pub(crate) ptr: *mut CIrFunction,
 }
 
@@ -90,7 +103,7 @@ unsafe impl Sync for IrFunction {}
 
 impl IrFunction {
     pub fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
-        let package_read_guard: RwLockReadGuard<*mut CIrPackage> = self.parent.read().unwrap();
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
         c_api::xls_interpret_function(&package_read_guard, self.ptr, args)
     }
 
@@ -99,7 +112,7 @@ impl IrFunction {
     }
 
     pub fn get_type(&self) -> Result<IrFunctionType, XlsynthError> {
-        let package_write_guard: RwLockWriteGuard<*mut CIrPackage> = self.parent.write().unwrap();
+        let package_write_guard: RwLockWriteGuard<IrPackagePtr> = self.parent.write().unwrap();
         c_api::xls_function_get_type(&package_write_guard, self.ptr)
     }
 }
