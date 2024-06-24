@@ -13,17 +13,14 @@ fn load_package(cargo_relpath: &str) -> IrPackage {
     package
 }
 
-lazy_static! {
-    static ref SAMPLE_PACKAGE: xlsynth::IrPackage = load_package("src/sample.x");
-}
-
 // Do a lazy_static initialization of the function.
 lazy_static! {
     // Load sample.x and expose the "add1" function so that threads can invoke it via the XLS
     // interpreter.
     static ref ADD1_FUNCTION: xlsynth::IrFunction = {
+        let package = load_package("src/sample.x");
         let mangled = xlsynth::mangle_dslx_name("sample", "add1").expect("mangle_dslx_name failed");
-        let function = SAMPLE_PACKAGE.get_function(&mangled).expect("get_function failed");
+        let function = package.get_function(&mangled).expect("get_function failed");
         assert_eq!(function.get_name(), mangled);
         function
     };
