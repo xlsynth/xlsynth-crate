@@ -13,6 +13,11 @@ fn load_and_invoke(file: &str, func: &str) -> Result<xlsynth::IrValue, Box<dyn s
     let dslx_module_name = path.file_stem().unwrap().to_str().unwrap();
     let mangled = xlsynth::mangle_dslx_name(dslx_module_name, func)?;
     let f = package.get_function(&mangled)?;
+    log::info!(
+        "function {} type: {}",
+        f.get_name(),
+        f.get_type()?.to_string()
+    );
     let result = f.interpret(&[])?;
     Ok(result)
 }
@@ -34,6 +39,28 @@ fn validate_use_popcount() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn validate_fail() -> Result<(), Box<dyn std::error::Error>> {
+    let file = "src/sample_with_fail.x";
+    let result = load_and_invoke(file, "always_fail");
+    match result {
+        Ok(_) => Err(Box::new(xlsynth::XlsynthError(
+            "expected function to fail".to_string(),
+        ))),
+        Err(e) => {
+            if e.to_string()
+                .contains("ABORTED: Assertion failure via fail!")
+            {
+                Ok(())
+            } else {
+                Err(Box::new(xlsynth::XlsynthError(format!(
+                    "got unexpected error: {}",
+                    e.to_string()
+                ))))
+            }
+        }
+    }
+}
+
 fn main() {
     let _ = env_logger::try_init();
     let mol_result = validate_mol();
@@ -42,6 +69,9 @@ fn main() {
         "meaning-of-life validation result: {:?} {:?}",
         mol_result, popcount_result
     );
+
+    validate_fail().expect("failing function invocation should work as expected");
+    println!("fail-function validation complete");
 
     validate_all_threads_compute_add1();
     println!("multi-threaded validation complete");
@@ -61,5 +91,11 @@ mod tests {
     fn test_validate_use_popcount() {
         let _ = env_logger::try_init();
         validate_use_popcount().expect("validation should succeed");
+    }
+
+    #[test]
+    fn test_validate_fail() {
+        let _ = env_logger::try_init();
+        validate_fail().expect("validation should succeed");
     }
 }
