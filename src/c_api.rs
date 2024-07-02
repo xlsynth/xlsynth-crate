@@ -5,6 +5,7 @@
 use libloading::{Library, Symbol};
 use once_cell::sync::OnceCell;
 use std::ffi::CString;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::ir_package::{IrFunctionType, IrPackagePtr, IrType};
@@ -14,6 +15,7 @@ use crate::xlsynth_error::XlsynthError;
 extern crate libc;
 extern crate libloading;
 
+const DSO_PATH: &str = env!("XLS_DSO_PATH");
 const DSO_VERSION_TAG: &str = env!("XLS_DSO_VERSION_TAG");
 
 static LIBRARY: OnceCell<Mutex<Library>> = OnceCell::new();
@@ -27,9 +29,13 @@ fn get_library() -> &'static Mutex<Library> {
         } else {
             panic!("Running on an unknown OS");
         };
-        let so_filename = format!("libxls-{}.{}", DSO_VERSION_TAG, dso_extension);
+        let so_path = PathBuf::from(DSO_PATH).join(format!(
+            "libxls-{}.{}",
+            DSO_VERSION_TAG,
+            dso_extension
+        ));
         let library = unsafe {
-            Library::new(so_filename.clone()).expect("dynamic library should be present")
+            Library::new(so_path.clone()).expect("dynamic library should be present")
         };
         Mutex::new(library)
     })
