@@ -92,7 +92,9 @@ fn main() {
     // Ensure the DSO is copied to the correct location
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-lib={}-{}", "xls", DSO_VERSION_TAG);
     println!("cargo:rustc-env=XLS_DSO_VERSION_TAG={}", DSO_VERSION_TAG);
+    println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);    
     println!(
         "cargo:rustc-env=DSLX_STDLIB_PATH={}/xls/dslx/stdlib/",
         stdlib_path.display()
