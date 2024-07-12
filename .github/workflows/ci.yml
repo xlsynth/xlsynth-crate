@@ -31,4 +31,6 @@ jobs:
         run: cargo build -vv --workspace
 
       - name: Test crate
-        run: cargo test -vv --workspace
+        run: |
+          cargo clean
+          cargo test -vv --workspace
