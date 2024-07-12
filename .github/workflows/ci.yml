@@ -26,5 +26,14 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Run tests
+      - name: Build crate
+        run: cargo build -vv --lib
+
+      - name: Test crate
+        run: cargo test -vv --lib
+
+      - name: Build workspace
+        run: cargo build -vv --worksapce
+
+      - name: Test workspace
         run: cargo test -vv --workspace
