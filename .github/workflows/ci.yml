@@ -28,13 +28,7 @@ jobs:
           override: true
 
       - name: Build crate
-        run: cargo build -vv --lib
-
-      - name: Test crate
-        run: cargo test -vv --lib
-
-      - name: Build workspace
         run: cargo build -vv --workspace
 
-      - name: Test workspace
+      - name: Test crate
         run: cargo test -vv --workspace
