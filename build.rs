@@ -27,12 +27,11 @@ fn main() {
     let dso_url = format!("{}libxls.{}", url_base, dso_extension.unwrap());
     let tarball_url = format!("{}/dslx_stdlib.tar.gz", url_base);
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    let dso_name = format!(
+    let dso_path = PathBuf::from(&out_dir).join(format!(
         "libxls-{}.{}",
         DSO_VERSION_TAG,
         dso_extension.unwrap()
-    );
-    let dso_path = PathBuf::from(&out_dir).join(&dso_name);
+    ));
 
     // Check if the DSO has already been downloaded
     if dso_path.exists() {
@@ -92,8 +91,8 @@ fn main() {
 
     // Ensure the DSO is copied to the correct location
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rustc-link-search={}", out_dir);
-    println!("cargo:rustc-link-lib=dylib:+verbatim={}", dso_name);
+    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-lib=dylib=xls-{}", DSO_VERSION_TAG);
     println!("cargo:rustc-env=XLS_DSO_VERSION_TAG={}", DSO_VERSION_TAG);
     println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);
     println!(
