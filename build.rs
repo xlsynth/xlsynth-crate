@@ -3,12 +3,13 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const DSO_VERSION_TAG: &str = "v0.0.51";
+const DSO_VERSION_TAG: &str = "v0.0.58";
 
 fn main() {
     // URL of the DSO release on GitHub
     #[allow(unused_assignments)]
     let mut dso_extension: Option<&'static str> = None;
+    let mut dso_download_suffix = "";
 
     #[cfg(target_os = "macos")]
     {
@@ -18,18 +19,18 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         dso_extension = Some("so");
+        dso_download_suffix = "-ubuntu20.04";
     }
 
     let url_base = format!(
         "https://github.com/xlsynth/xlsynth/releases/download/{}/",
         DSO_VERSION_TAG
     );
-    let dso_url = format!("{}libxls.{}", url_base, dso_extension.unwrap());
-    let tarball_url = format!("{}/dslx_stdlib.tar.gz", url_base);
+    let dso_url = format!("{url_base}libxls{dso_download_suffix}.{}", dso_extension.unwrap());
+    let tarball_url = format!("{url_base}/dslx_stdlib.tar.gz");
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let dso_name = format!(
-        "libxls-{}.{}",
-        DSO_VERSION_TAG,
+        "libxls-{DSO_VERSION_TAG}.{}",
         dso_extension.unwrap()
     );
     let dso_path = PathBuf::from(&out_dir).join(&dso_name);
