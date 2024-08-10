@@ -14,6 +14,7 @@ jobs:
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest]
+      fail-fast: false
 
     steps:
       - name: Check out code
@@ -26,5 +27,10 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Run tests
-        run: cargo test --verbose --workspace
+      - name: Build crate
+        run: cargo build -vv --workspace
+
+      - name: Test crate
+        run: |
+          cargo clean
+          cargo test -vv --workspace

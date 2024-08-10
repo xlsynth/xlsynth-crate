@@ -27,11 +27,12 @@ fn main() {
     let dso_url = format!("{}libxls.{}", url_base, dso_extension.unwrap());
     let tarball_url = format!("{}/dslx_stdlib.tar.gz", url_base);
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    let dso_path = PathBuf::from(&out_dir).join(format!(
+    let dso_name = format!(
         "libxls-{}.{}",
         DSO_VERSION_TAG,
         dso_extension.unwrap()
-    ));
+    );
+    let dso_path = PathBuf::from(&out_dir).join(&dso_name);
 
     // Check if the DSO has already been downloaded
     if dso_path.exists() {
@@ -60,6 +61,22 @@ fn main() {
             std::fs::remove_file(&dso_path).expect("Failed to remove file");
             panic!("Download failed with status: {:?}", status);
         }
+
+	#[cfg(target_os = "macos")]
+	{
+	    println!("cargo:info=Fixing DSO id: to {}", dso_name);
+            // Download the DSO id
+            let status = Command::new("install_name_tool")
+		.arg("-id")
+		.arg(format!("@rpath/{}", &dso_name))
+		.arg(&dso_path)
+		.status()
+		.expect("Failed to fix DSO id");
+	    
+            if !status.success() {
+		panic!("Fixing DSO id failed with status: {:?}", status);
+            }
+	}
     }
 
     let stdlib_path = PathBuf::from(&out_dir).join(format!("dslx_stdlib_{}", DSO_VERSION_TAG));
@@ -92,7 +109,9 @@ fn main() {
     // Ensure the DSO is copied to the correct location
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-lib=dylib=xls-{}", DSO_VERSION_TAG);
     println!("cargo:rustc-env=XLS_DSO_VERSION_TAG={}", DSO_VERSION_TAG);
+    println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);
     println!(
         "cargo:rustc-env=DSLX_STDLIB_PATH={}/xls/dslx/stdlib/",
         stdlib_path.display()
