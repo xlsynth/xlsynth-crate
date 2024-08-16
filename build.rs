@@ -9,6 +9,7 @@ fn main() {
     // URL of the DSO release on GitHub
     #[allow(unused_assignments)]
     let mut dso_extension: Option<&'static str> = None;
+    #[allow(unused_assignments)]
     let mut dso_download_suffix = "";
 
     #[cfg(target_os = "macos")]
