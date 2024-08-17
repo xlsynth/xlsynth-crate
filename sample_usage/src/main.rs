@@ -3,6 +3,11 @@
 use multithread::validate_all_threads_compute_add1;
 use xlsynth;
 
+// Show that the API works even if the Rust (caller) program is using an alternative allocator.
+extern crate mimalloc;
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod multithread;
 
 fn load_and_invoke(file: &str, func: &str) -> Result<xlsynth::IrValue, Box<dyn std::error::Error>> {

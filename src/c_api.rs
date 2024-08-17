@@ -2,6 +2,7 @@
 
 //! Wrappers around the C API for the XLS dynamic shared object.
 
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -57,6 +58,7 @@ mod ffi {
         ) -> bool;
         pub fn xls_value_free(value: *mut CIrValue);
         pub fn xls_package_free(package: *mut CIrPackage);
+        pub fn xls_c_str_free(c_str: *mut std::os::raw::c_char);
         pub fn xls_value_to_string(
             value: *const CIrValue,
             str_out: *mut *mut std::os::raw::c_char,
@@ -144,6 +146,19 @@ pub(crate) type CIrFunctionType = ffi::CIrFunctionType;
 pub(crate) type CIrType = ffi::CIrType;
 pub(crate) type XlsFormatPreference = ffi::XlsFormatPreference;
 
+/// Converts a C string that was given from the XLS library into a Rust string and deallocates
+/// the original C string.
+unsafe fn c_str_to_rust(xls_c_str: *mut std::os::raw::c_char) -> String {
+    if xls_c_str.is_null() {
+        return String::new();
+    }
+
+    let c_str: &CStr = CStr::from_ptr(xls_c_str);
+    let result: String = String::from_utf8_lossy(c_str.to_bytes()).to_string();
+    ffi::xls_c_str_free(xls_c_str);
+    result
+}
+
 pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<String, XlsynthError> {
     // Extract the module name from the path; e.g. "foo/bar/baz.x" -> "baz"
     let module_name = path.file_stem().unwrap().to_str().unwrap();
@@ -174,18 +189,9 @@ pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<Stri
         );
 
         if success {
-            let ir_out_str = if !ir_out.is_null() {
-                CString::from_raw(ir_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(ir_out_str);
+            return Ok(c_str_to_rust(ir_out));
         } else {
-            let error_out_str = if !error_out.is_null() {
-                CString::from_raw(error_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
+            let error_out_str = c_str_to_rust(error_out);
             return Err(XlsynthError(error_out_str));
         }
     }
@@ -200,11 +206,7 @@ pub fn xls_parse_typed_value(s: &str) -> Result<IrValue, XlsynthError> {
         if success {
             return Ok(IrValue { ptr: ir_value_out });
         } else {
-            let error_out_str: String = if !error_out.is_null() {
-                CString::from_raw(error_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
+            let error_out_str: String = c_str_to_rust(error_out);
             return Err(XlsynthError(error_out_str));
         }
     }
@@ -229,14 +231,11 @@ pub(crate) fn xls_value_to_string(p: *mut CIrValue) -> Result<String, XlsynthErr
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = ffi::xls_value_to_string(p, &mut c_str_out);
         if success {
-            let s: String = if !c_str_out.is_null() {
-                CString::from_raw(c_str_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(s);
+            return Ok(c_str_to_rust(c_str_out));
         }
-        return Err(XlsynthError("Failed to convert XLS value to string via C API".to_string()));
+        return Err(XlsynthError(
+            "Failed to convert XLS value to string via C API".to_string(),
+        ));
     }
 }
 
@@ -252,11 +251,7 @@ pub(crate) fn xls_format_preference_from_string(
         if success {
             return Ok(result_out);
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -271,14 +266,11 @@ pub(crate) fn xls_value_to_string_format_preference(
         let success =
             ffi::xls_value_to_string_format_preference(p, fmt, &mut error_out, &mut c_str_out);
         if success {
-            let s: String = if !c_str_out.is_null() {
-                CString::from_raw(c_str_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(s);
+            return Ok(c_str_to_rust(c_str_out));
         }
-        return Err(XlsynthError("Failed to convert XLS value to string via C API".to_string()));
+        return Err(XlsynthError(
+            "Failed to convert XLS value to string via C API".to_string(),
+        ));
     }
 }
 
@@ -324,11 +316,7 @@ pub(crate) fn xls_parse_ir_package(
             };
             return Ok(package);
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -344,18 +332,9 @@ pub(crate) fn xls_type_to_string(t: *const CIrType) -> Result<String, XlsynthErr
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = ffi::xls_type_to_string(t, &mut error_out, &mut c_str_out);
         if success {
-            let out_str = if !c_str_out.is_null() {
-                CString::from_raw(c_str_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(out_str);
+            return Ok(c_str_to_rust(c_str_out));
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -379,11 +358,7 @@ pub(crate) fn xls_package_get_type_for_value(
             let ir_type = IrType { ptr: result_out };
             return Ok(ir_type);
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -410,15 +385,13 @@ pub(crate) fn xls_package_get_function(
             &mut result_out,
         );
         if success {
-            let function =
-                crate::ir_package::IrFunction { parent: package.clone(), ptr: result_out };
+            let function = crate::ir_package::IrFunction {
+                parent: package.clone(),
+                ptr: result_out,
+            };
             return Ok(function);
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -437,14 +410,12 @@ pub(crate) fn xls_function_get_type(
         let mut xls_fn_type_out: *mut CIrFunctionType = std::ptr::null_mut();
         let success = ffi::xls_function_get_type(function, &mut error_out, &mut xls_fn_type_out);
         if success {
-            let ir_type = IrFunctionType { ptr: xls_fn_type_out };
+            let ir_type = IrFunctionType {
+                ptr: xls_fn_type_out,
+            };
             return Ok(ir_type);
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -462,18 +433,9 @@ pub(crate) fn xls_function_type_to_string(
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = ffi::xls_function_type_to_string(t, &mut error_out, &mut c_str_out);
         if success {
-            let out_str = if !c_str_out.is_null() {
-                CString::from_raw(c_str_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(out_str);
+            return Ok(c_str_to_rust(c_str_out));
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -484,18 +446,9 @@ pub(crate) fn xls_function_get_name(function: *const CIrFunction) -> Result<Stri
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = ffi::xls_function_get_name(function, &mut error_out, &mut c_str_out);
         if success {
-            let out_str = if !c_str_out.is_null() {
-                CString::from_raw(c_str_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(out_str);
+            return Ok(c_str_to_rust(c_str_out));
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -529,11 +482,7 @@ pub(crate) fn xls_interpret_function(
             let result = IrValue { ptr: result_out };
             return Ok(result);
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -551,18 +500,9 @@ pub(crate) fn xls_optimize_ir(ir: &str, top: &str) -> Result<String, XlsynthErro
         let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = ffi::xls_optimize_ir(ir.as_ptr(), top.as_ptr(), &mut error_out, &mut ir_out);
         if success {
-            let ir_out_str = if !ir_out.is_null() {
-                CString::from_raw(ir_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(ir_out_str);
+            return Ok(c_str_to_rust(ir_out));
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -588,18 +528,9 @@ pub(crate) fn xls_mangle_dslx_name(
             &mut mangled_out,
         );
         if success {
-            let mangled_out_str = if !mangled_out.is_null() {
-                CString::from_raw(mangled_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(mangled_out_str);
+            return Ok(c_str_to_rust(mangled_out));
         }
-        let error_out_str: String = if !error_out.is_null() {
-            CString::from_raw(error_out).into_string().unwrap()
-        } else {
-            String::new()
-        };
+        let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
 }
@@ -613,14 +544,11 @@ pub(crate) fn xls_package_to_string(p: *const CIrPackage) -> Result<String, Xlsy
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = ffi::xls_package_to_string(p, &mut c_str_out);
         if success {
-            let s: String = if !c_str_out.is_null() {
-                CString::from_raw(c_str_out).into_string().unwrap()
-            } else {
-                String::new()
-            };
-            return Ok(s);
+            return Ok(c_str_to_rust(c_str_out));
         }
-        return Err(XlsynthError("Failed to convert XLS package to string via C API".to_string()));
+        return Err(XlsynthError(
+            "Failed to convert XLS package to string via C API".to_string(),
+        ));
     }
 }
 
