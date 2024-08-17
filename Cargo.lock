@@ -306,6 +306,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97b3888a4aecf77e811145cadf6eef5901f4782c53886191b2f693f24761847c"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.39"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23aa6811d3bd4deb8a84dde645f943476d13b248d818edcf8ce0b2f37f036b44"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -334,6 +344,15 @@ name = "memchr"
 version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
+
+[[package]]
+name = "mimalloc"
+version = "0.1.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68914350ae34959d83f732418d51e2427a794055d0b9529f48259ac07af65633"
+dependencies = [
+ "libmimalloc-sys",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -495,6 +514,7 @@ dependencies = [
  "env_logger",
  "lazy_static",
  "log",
+ "mimalloc",
  "num_cpus",
  "rayon",
  "xlsynth",

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.58";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.60";
 
 /// Downloads the dynamic shared object for XLS from the release page if it does not already exist.
 fn download_dso_if_dne(url_base: &str, out_dir: &str) {
@@ -24,7 +24,10 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) {
         dso_download_suffix = "-ubuntu20.04";
     }
 
-    let dso_url = format!("{url_base}libxls{dso_download_suffix}.{}", dso_extension.unwrap());
+    let dso_url = format!(
+        "{url_base}libxls{dso_download_suffix}.{}",
+        dso_extension.unwrap()
+    );
     let dso_name = format!(
         "libxls-{RELEASE_LIB_VERSION_TAG}.{}",
         dso_extension.unwrap()
@@ -71,7 +74,7 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) {
             .arg(&dso_path)
             .status()
             .expect("Failed to fix DSO id");
-        
+
         if !status.success() {
             panic!("Fixing DSO id failed with status: {:?}", status);
         }
@@ -79,7 +82,8 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) {
 }
 
 fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
-    let stdlib_path = PathBuf::from(&out_dir).join(format!("dslx_stdlib_{}", RELEASE_LIB_VERSION_TAG));
+    let stdlib_path =
+        PathBuf::from(&out_dir).join(format!("dslx_stdlib_{}", RELEASE_LIB_VERSION_TAG));
     if stdlib_path.exists() {
         println!(
             "cargo:info=DSLX stdlib path already downloaded to: {}",
@@ -122,7 +126,10 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-link-search=native={}", out_dir);
     println!("cargo:rustc-link-lib=dylib=xls-{}", RELEASE_LIB_VERSION_TAG);
-    println!("cargo:rustc-env=XLS_DSO_VERSION_TAG={}", RELEASE_LIB_VERSION_TAG);
+    println!(
+        "cargo:rustc-env=XLS_DSO_VERSION_TAG={}",
+        RELEASE_LIB_VERSION_TAG
+    );
     println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);
     println!(
         "cargo:rustc-env=DSLX_STDLIB_PATH={}/xls/dslx/stdlib/",
