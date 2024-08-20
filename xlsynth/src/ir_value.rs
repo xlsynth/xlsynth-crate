@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::c_api;
-use crate::c_api::CIrValue;
-use crate::xlsynth_error::XlsynthError;
+use xlsynth_sys::CIrValue;
+
+use crate::{xls_format_preference_from_string, xls_parse_typed_value, xls_value_eq, xls_value_free, xls_value_to_string, xls_value_to_string_format_preference, xlsynth_error::XlsynthError};
 
 pub struct IrValue {
     pub(crate) ptr: *mut CIrValue,
@@ -34,7 +34,7 @@ impl IrFormatPreference {
 
 impl IrValue {
     pub fn parse_typed(s: &str) -> Result<Self, XlsynthError> {
-        c_api::xls_parse_typed_value(s)
+        xls_parse_typed_value(s)
     }
 
     pub fn u64(value: u64) -> Result<Self, XlsynthError> {
@@ -61,9 +61,9 @@ impl IrValue {
     }
 
     pub fn to_string_fmt(&self, format: IrFormatPreference) -> Result<String, XlsynthError> {
-        let fmt_pref: c_api::XlsFormatPreference =
-            c_api::xls_format_preference_from_string(format.to_string())?;
-        c_api::xls_value_to_string_format_preference(self.ptr, fmt_pref)
+        let fmt_pref: xlsynth_sys::XlsFormatPreference =
+            xls_format_preference_from_string(format.to_string())?;
+        xls_value_to_string_format_preference(self.ptr, fmt_pref)
     }
 
     pub fn to_bool(&self) -> Result<bool, XlsynthError> {
@@ -89,7 +89,7 @@ unsafe impl Sync for IrValue {}
 
 impl std::cmp::PartialEq for IrValue {
     fn eq(&self, other: &Self) -> bool {
-        c_api::xls_value_eq(self.ptr, other.ptr).expect("eq success")
+        xls_value_eq(self.ptr, other.ptr).expect("eq success")
     }
 }
 
@@ -98,7 +98,7 @@ impl std::fmt::Display for IrValue {
         write!(
             f,
             "{}",
-            c_api::xls_value_to_string(self.ptr).expect("stringify success")
+            xls_value_to_string(self.ptr).expect("stringify success")
         )
     }
 }
@@ -108,14 +108,14 @@ impl std::fmt::Debug for IrValue {
         write!(
             f,
             "{}",
-            c_api::xls_value_to_string(self.ptr).expect("stringify success")
+            xls_value_to_string(self.ptr).expect("stringify success")
         )
     }
 }
 
 impl Drop for IrValue {
     fn drop(&mut self) {
-        c_api::xls_value_free(self.ptr).expect("dealloc success");
+        xls_value_free(self.ptr).expect("dealloc success");
     }
 }
 

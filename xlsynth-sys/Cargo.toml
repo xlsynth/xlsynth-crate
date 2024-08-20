@@ -1,0 +1,19 @@
+[package]
+name = "xlsynth-sys"
+version = "0.0.20"
+edition = "2018"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust (Native Library)"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth"
+homepage = "https://github.com/xlsynth/xlsynth-crate"
+links = "xlsynth"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+curl = "0.4"
+flate2 = "1.0"
+tar = "0.4"

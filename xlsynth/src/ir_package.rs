@@ -2,10 +2,9 @@
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::c_api;
-use crate::c_api::{CIrFunction, CIrPackage};
+use xlsynth_sys::{CIrPackage, CIrFunction};
 use crate::xlsynth_error::XlsynthError;
-use crate::IrValue;
+use crate::{xls_function_get_name, xls_function_get_type, xls_function_type_to_string, xls_interpret_function, xls_package_free, xls_package_get_function, xls_package_get_type_for_value, xls_package_to_string, xls_parse_ir_package, xls_type_to_string, IrValue};
 
 /// We wrap up the raw C pointer in this type that implements `Drop` trait -- this allows us to
 /// wrap it up in an Arc so that types with derived lifetimes (e.g. C function pointers) can grab
@@ -24,7 +23,7 @@ impl IrPackagePtr {
 impl Drop for IrPackagePtr {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            c_api::xls_package_free(self.0).expect("dealloc success");
+            xls_package_free(self.0).expect("dealloc success");
             self.0 = std::ptr::null_mut();
         }
     }
@@ -43,22 +42,22 @@ unsafe impl Sync for IrPackage {}
 
 impl IrPackage {
     pub fn parse_ir(ir: &str, filename: Option<&str>) -> Result<Self, XlsynthError> {
-        c_api::xls_parse_ir_package(ir, filename)
+        xls_parse_ir_package(ir, filename)
     }
 
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
         let read_guard = self.ptr.read().unwrap();
-        c_api::xls_package_get_function(&self.ptr, read_guard, name)
+        xls_package_get_function(&self.ptr, read_guard, name)
     }
 
     pub fn to_string(&self) -> String {
         let read_guard = self.ptr.read().unwrap();
-        c_api::xls_package_to_string(read_guard.const_c_ptr()).unwrap()
+        xls_package_to_string(read_guard.const_c_ptr()).unwrap()
     }
 
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
         let write_guard = self.ptr.write().unwrap();
-        c_api::xls_package_get_type_for_value(write_guard.mut_c_ptr(), value.ptr)
+        xls_package_get_type_for_value(write_guard.mut_c_ptr(), value.ptr)
     }
 
     pub fn filename(&self) -> Option<&str> {
@@ -70,17 +69,17 @@ impl IrPackage {
 }
 
 pub struct IrType {
-    pub(crate) ptr: *mut c_api::CIrType,
+    pub(crate) ptr: *mut xlsynth_sys::CIrType,
 }
 
 impl std::fmt::Display for IrType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", c_api::xls_type_to_string(self.ptr).unwrap())
+        write!(f, "{}", xls_type_to_string(self.ptr).unwrap())
     }
 }
 
 pub struct IrFunctionType {
-    pub(crate) ptr: *mut c_api::CIrFunctionType,
+    pub(crate) ptr: *mut xlsynth_sys::CIrFunctionType,
 }
 
 impl std::fmt::Display for IrFunctionType {
@@ -88,7 +87,7 @@ impl std::fmt::Display for IrFunctionType {
         write!(
             f,
             "{}",
-            c_api::xls_function_type_to_string(self.ptr).unwrap()
+            xls_function_type_to_string(self.ptr).unwrap()
         )
     }
 }
@@ -104,16 +103,16 @@ unsafe impl Sync for IrFunction {}
 impl IrFunction {
     pub fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
         let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
-        c_api::xls_interpret_function(&package_read_guard, self.ptr, args)
+        xls_interpret_function(&package_read_guard, self.ptr, args)
     }
 
     pub fn get_name(&self) -> String {
-        c_api::xls_function_get_name(self.ptr).unwrap()
+        xls_function_get_name(self.ptr).unwrap()
     }
 
     pub fn get_type(&self) -> Result<IrFunctionType, XlsynthError> {
         let package_write_guard: RwLockWriteGuard<IrPackagePtr> = self.parent.write().unwrap();
-        c_api::xls_function_get_type(&package_write_guard, self.ptr)
+        xls_function_get_type(&package_write_guard, self.ptr)
     }
 }
 
