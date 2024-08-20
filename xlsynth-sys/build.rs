@@ -155,8 +155,6 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out_dir);
     println!("cargo:rustc-link-lib=dylib={}", dso_info.get_dso_name());
     println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);
-    println!(
-        "cargo:rustc-env=DSLX_STDLIB_PATH={}/xls/dslx/stdlib/",
-        stdlib_path.display()
-    );
+    let stdlib_path_full = format!("{}/xls/dslx/stdlib/", stdlib_path.display());
+    println!("cargo:rustc-env=DSLX_STDLIB_PATH={stdlib_path_full}");
 }

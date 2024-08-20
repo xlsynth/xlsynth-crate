@@ -721,16 +721,24 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "curl",
  "docmatic",
  "env_logger",
- "flate2",
- "libc",
  "log",
  "semver",
  "serde_json",
- "tar",
  "toml",
+ "xlsynth-sys",
+]
+
+[[package]]
+name = "xlsynth-sys"
+version = "0.0.20"
+dependencies = [
+ "curl",
+ "flate2",
+ "libc",
+ "tar",
 ]
