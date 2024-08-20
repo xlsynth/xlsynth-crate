@@ -12,7 +12,10 @@ struct DsoInfo {
 
 impl DsoInfo {
     fn get_dso_filename(&self) -> String {
-        format!("libxls-{RELEASE_LIB_VERSION_TAG}-{}.{}", self.lib_suffix, self.extension)
+        format!(
+            "libxls-{RELEASE_LIB_VERSION_TAG}-{}.{}",
+            self.lib_suffix, self.extension
+        )
     }
 
     fn get_dso_name(&self) -> String {
@@ -37,10 +40,16 @@ fn get_dso_info() -> DsoInfo {
         ("macos", "x86_64") => "x64",
         ("macos", "arm64") => "arm64",
         ("linux", "x86_64") => "ubuntu20.04",
-        _ => panic!("Unhandled combination; target_os: {} target_arch: {}", target_os, target_arch)
+        _ => panic!(
+            "Unhandled combination; target_os: {} target_arch: {}",
+            target_os, target_arch
+        ),
     };
 
-    DsoInfo{extension, lib_suffix}
+    DsoInfo {
+        extension,
+        lib_suffix,
+    }
 }
 
 /// Downloads the dynamic shared object for XLS from the release page if it does not already exist.
