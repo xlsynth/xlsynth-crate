@@ -2,7 +2,10 @@
 
 use xlsynth_sys::CIrValue;
 
-use crate::{xls_format_preference_from_string, xls_parse_typed_value, xls_value_eq, xls_value_free, xls_value_to_string, xls_value_to_string_format_preference, xlsynth_error::XlsynthError};
+use crate::{
+    xls_format_preference_from_string, xls_parse_typed_value, xls_value_eq, xls_value_free,
+    xls_value_to_string, xls_value_to_string_format_preference, xlsynth_error::XlsynthError,
+};
 
 pub struct IrValue {
     pub(crate) ptr: *mut CIrValue,

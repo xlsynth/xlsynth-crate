@@ -2,9 +2,14 @@
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use xlsynth_sys::{CIrPackage, CIrFunction};
 use crate::xlsynth_error::XlsynthError;
-use crate::{xls_function_get_name, xls_function_get_type, xls_function_type_to_string, xls_interpret_function, xls_package_free, xls_package_get_function, xls_package_get_type_for_value, xls_package_to_string, xls_parse_ir_package, xls_type_to_string, IrValue};
+use crate::{
+    xls_function_get_name, xls_function_get_type, xls_function_type_to_string,
+    xls_interpret_function, xls_package_free, xls_package_get_function,
+    xls_package_get_type_for_value, xls_package_to_string, xls_parse_ir_package,
+    xls_type_to_string, IrValue,
+};
+use xlsynth_sys::{CIrFunction, CIrPackage};
 
 /// We wrap up the raw C pointer in this type that implements `Drop` trait -- this allows us to
 /// wrap it up in an Arc so that types with derived lifetimes (e.g. C function pointers) can grab
@@ -84,11 +89,7 @@ pub struct IrFunctionType {
 
 impl std::fmt::Display for IrFunctionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            xls_function_type_to_string(self.ptr).unwrap()
-        )
+        write!(f, "{}", xls_function_type_to_string(self.ptr).unwrap())
     }
 }
 

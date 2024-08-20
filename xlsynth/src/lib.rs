@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use ir_package::{IrFunctionType, IrPackagePtr, IrType};
 use xlsynth_sys::{CIrFunction, CIrFunctionType, CIrType, XlsFormatPreference};
-use xlsynth_sys::{CIrValue, CIrPackage};
+use xlsynth_sys::{CIrPackage, CIrValue};
 
 pub use ir_package::IrFunction;
 pub use ir_package::IrPackage;
@@ -76,7 +76,8 @@ pub fn xls_parse_typed_value(s: &str) -> Result<IrValue, XlsynthError> {
         let c_str = CString::new(s).unwrap();
         let mut ir_value_out: *mut CIrValue = std::ptr::null_mut();
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let success = xlsynth_sys::xls_parse_typed_value(c_str.as_ptr(), &mut error_out, &mut ir_value_out);
+        let success =
+            xlsynth_sys::xls_parse_typed_value(c_str.as_ptr(), &mut error_out, &mut ir_value_out);
         if success {
             return Ok(IrValue { ptr: ir_value_out });
         } else {
@@ -120,8 +121,11 @@ pub(crate) fn xls_format_preference_from_string(
         let c_str = CString::new(s).unwrap();
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut result_out: XlsFormatPreference = -1;
-        let success =
-            xlsynth_sys::xls_format_preference_from_string(c_str.as_ptr(), &mut error_out, &mut result_out);
+        let success = xlsynth_sys::xls_format_preference_from_string(
+            c_str.as_ptr(),
+            &mut error_out,
+            &mut result_out,
+        );
         if success {
             return Ok(result_out);
         }
@@ -137,8 +141,12 @@ pub(crate) fn xls_value_to_string_format_preference(
     unsafe {
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let success =
-            xlsynth_sys::xls_value_to_string_format_preference(p, fmt, &mut error_out, &mut c_str_out);
+        let success = xlsynth_sys::xls_value_to_string_format_preference(
+            p,
+            fmt,
+            &mut error_out,
+            &mut c_str_out,
+        );
         if success {
             return Ok(c_str_to_rust(c_str_out));
         }
@@ -226,8 +234,12 @@ pub(crate) fn xls_package_get_type_for_value(
     unsafe {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut result_out: *mut CIrType = std::ptr::null_mut();
-        let success =
-            xlsynth_sys::xls_package_get_type_for_value(package, value, &mut error_out, &mut result_out);
+        let success = xlsynth_sys::xls_package_get_type_for_value(
+            package,
+            value,
+            &mut error_out,
+            &mut result_out,
+        );
         if success {
             let ir_type = IrType { ptr: result_out };
             return Ok(ir_type);
@@ -282,7 +294,8 @@ pub(crate) fn xls_function_get_type(
     unsafe {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut xls_fn_type_out: *mut CIrFunctionType = std::ptr::null_mut();
-        let success = xlsynth_sys::xls_function_get_type(function, &mut error_out, &mut xls_fn_type_out);
+        let success =
+            xlsynth_sys::xls_function_get_type(function, &mut error_out, &mut xls_fn_type_out);
         if success {
             let ir_type = IrFunctionType {
                 ptr: xls_fn_type_out,
@@ -372,7 +385,8 @@ pub(crate) fn xls_optimize_ir(ir: &str, top: &str) -> Result<String, XlsynthErro
         let top = CString::new(top).unwrap();
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let success = xlsynth_sys::xls_optimize_ir(ir.as_ptr(), top.as_ptr(), &mut error_out, &mut ir_out);
+        let success =
+            xlsynth_sys::xls_optimize_ir(ir.as_ptr(), top.as_ptr(), &mut error_out, &mut ir_out);
         if success {
             return Ok(c_str_to_rust(ir_out));
         }
