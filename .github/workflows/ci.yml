@@ -28,9 +28,9 @@ jobs:
           override: true
 
       - name: Build crate
-        run: cargo build -vv --workspace
+        run: cargo build --workspace
 
       - name: Test crate
         run: |
           cargo clean
-          cargo test -vv --workspace
+          cargo test --workspace
