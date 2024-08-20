@@ -10,7 +10,7 @@ documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
-xlsynth-sys = {path = "../xlsynth-sys"}
+xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.20"}
 
 [dev-dependencies]
 docmatic = "0.1.2"
