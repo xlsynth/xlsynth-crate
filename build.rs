@@ -38,7 +38,7 @@ fn get_dso_info() -> DsoInfo {
 
     let lib_suffix = match (target_os.as_str(), target_arch.as_str()) {
         ("macos", "x86_64") => "x64",
-        ("macos", "arm64") => "arm64",
+        ("macos", "aarch64") => "arm64",
         ("linux", "x86_64") => "ubuntu20.04",
         _ => panic!(
             "Unhandled combination; target_os: {} target_arch: {}",
