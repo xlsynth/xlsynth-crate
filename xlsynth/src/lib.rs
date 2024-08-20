@@ -38,10 +38,6 @@ pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<Stri
         let dslx = CString::new(dslx).unwrap();
         let c_path = CString::new(path_str).unwrap();
         let c_module_name = CString::new(module_name).unwrap();
-        //let stdlib_path = env!("DEP_XLSYNTH_SYS_DSLX_STDLIB_PATH");
-        for (key, value) in std::env::vars() {
-            println!("{}: {}", key, value);
-        }
         let stdlib_path = xlsynth_sys::DSLX_STDLIB_PATH;
         let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
 
