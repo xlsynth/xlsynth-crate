@@ -54,7 +54,10 @@ fn test_version_is_greater_than_latest_released() {
     let local_version = fetch_local_version(".").unwrap();
 
     let local_sys_version = fetch_local_version("../xlsynth-sys").unwrap();
-    assert_eq!(local_version, local_sys_version, "xlsynth version: {local_version} xlsynth-sys version: {local_sys_version}");
+    assert_eq!(
+        local_version, local_sys_version,
+        "xlsynth version: {local_version} xlsynth-sys version: {local_sys_version}"
+    );
 
     let latest_semver = semver::Version::parse(&latest_version).expect("Invalid latest version");
     let local_semver = semver::Version::parse(&local_version).expect("Invalid local version");
