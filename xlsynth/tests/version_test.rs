@@ -35,8 +35,8 @@ fn fetch_latest_version(crate_name: &str) -> Result<String, Box<dyn std::error::
     Ok(latest_version)
 }
 
-fn fetch_local_version() -> Result<String, Box<dyn std::error::Error>> {
-    let cargo_toml = std::fs::read_to_string("Cargo.toml")?;
+fn fetch_local_version(relpath: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let cargo_toml = std::fs::read_to_string(format!("{relpath}/Cargo.toml"))?;
     let cargo_toml: toml::Value = toml::from_str(&cargo_toml)?;
     let version = cargo_toml["package"]["version"]
         .as_str()
@@ -51,7 +51,13 @@ fn fetch_local_version() -> Result<String, Box<dyn std::error::Error>> {
 #[test]
 fn test_version_is_greater_than_latest_released() {
     let latest_version = fetch_latest_version(CRATE_NAME).expect("Failed to fetch latest version");
-    let local_version = fetch_local_version().expect("Failed to fetch local version");
+    let local_version = fetch_local_version(".").unwrap();
+
+    let local_sys_version = fetch_local_version("../xlsynth-sys").unwrap();
+    assert_eq!(
+        local_version, local_sys_version,
+        "xlsynth version: {local_version} xlsynth-sys version: {local_sys_version}"
+    );
 
     let latest_semver = semver::Version::parse(&latest_version).expect("Invalid latest version");
     let local_semver = semver::Version::parse(&local_version).expect("Invalid local version");

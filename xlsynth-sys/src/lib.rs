@@ -130,3 +130,4 @@ extern "C" {
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
+pub const XLS_DSO_PATH: &str = env!("XLS_DSO_PATH");
