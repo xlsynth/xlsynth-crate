@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use multithread::validate_all_threads_compute_add1;
-use xlsynth;
 
 // Show that the API works even if the Rust (caller) program is using an alternative allocator.
 extern crate mimalloc;

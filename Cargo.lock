@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "curl",
  "docmatic",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "curl",
  "flate2",
