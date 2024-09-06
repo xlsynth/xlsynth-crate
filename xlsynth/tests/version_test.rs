@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Test that the current package version reflected in Cargo.toml is more than the released
-//! version -- this help make sure we bump the version appropriately after a release is performed.
+//! Test that the current package version reflected in Cargo.toml is more than
+//! the released version -- this help make sure we bump the version
+//! appropriately after a release is performed.
 
 use curl::easy::Easy;
 

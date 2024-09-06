@@ -17,8 +17,8 @@ pub use ir_package::IrPackage;
 pub use ir_value::IrValue;
 pub use xlsynth_error::XlsynthError;
 
-/// Converts a C string that was given from the XLS library into a Rust string and deallocates
-/// the original C string.
+/// Converts a C string that was given from the XLS library into a Rust string
+/// and deallocates the original C string.
 unsafe fn c_str_to_rust(xls_c_str: *mut std::os::raw::c_char) -> String {
     if xls_c_str.is_null() {
         return String::new();
@@ -27,7 +27,10 @@ unsafe fn c_str_to_rust(xls_c_str: *mut std::os::raw::c_char) -> String {
     let c_str: &CStr = CStr::from_ptr(xls_c_str);
     let result: String = String::from_utf8_lossy(c_str.to_bytes()).to_string();
 
-    // We release the C string via a call to the XLS library so that it can use the same allocator it used to allocate the string for deallocation and we don't need to assume the Rust code and dynmic library are using the same underlying allocator.
+    // We release the C string via a call to the XLS library so that it can use the
+    // same allocator it used to allocate the string for deallocation and we don't
+    // need to assume the Rust code and dynmic library are using the same underlying
+    // allocator.
     xlsynth_sys::xls_c_str_free(xls_c_str);
     result
 }

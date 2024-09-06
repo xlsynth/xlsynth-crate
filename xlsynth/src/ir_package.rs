@@ -11,9 +11,10 @@ use crate::{
 };
 use xlsynth_sys::{CIrFunction, CIrPackage};
 
-/// We wrap up the raw C pointer in this type that implements `Drop` trait -- this allows us to
-/// wrap it up in an Arc so that types with derived lifetimes (e.g. C function pointers) can grab
-/// a hold of the Arc to prevent deallocation of its backing type.
+/// We wrap up the raw C pointer in this type that implements `Drop` trait --
+/// this allows us to wrap it up in an Arc so that types with derived lifetimes
+/// (e.g. C function pointers) can grab a hold of the Arc to prevent
+/// deallocation of its backing type.
 pub(crate) struct IrPackagePtr(pub *mut CIrPackage);
 
 impl IrPackagePtr {
