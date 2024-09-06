@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.77";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.79";
 
 struct DsoInfo {
     extension: &'static str,
@@ -52,7 +52,8 @@ fn get_dso_info() -> DsoInfo {
     }
 }
 
-/// Downloads the dynamic shared object for XLS from the release page if it does not already exist.
+/// Downloads the dynamic shared object for XLS from the release page if it does
+/// not already exist.
 fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
     let dso_info: DsoInfo = get_dso_info();
     let dso_url = dso_info.get_dso_url(url_base);

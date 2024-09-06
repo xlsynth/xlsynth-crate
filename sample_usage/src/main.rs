@@ -2,7 +2,8 @@
 
 use multithread::validate_all_threads_compute_add1;
 
-// Show that the API works even if the Rust (caller) program is using an alternative allocator.
+// Show that the API works even if the Rust (caller) program is using an
+// alternative allocator.
 extern crate mimalloc;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -26,7 +27,8 @@ fn load_and_invoke(file: &str, func: &str) -> Result<xlsynth::IrValue, Box<dyn s
     Ok(result)
 }
 
-/// Validates the "meaning of life" value that comes from the `mol` function in `sample.x`.
+/// Validates the "meaning of life" value that comes from the `mol` function in
+/// `sample.x`.
 fn validate_mol() -> Result<(), Box<dyn std::error::Error>> {
     let file = "src/sample.x";
     let result = load_and_invoke(file, "mol")?;
