@@ -29,7 +29,30 @@ pub struct CIrFunctionType {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+// "VAST" is the "Verilog AST" API which
+#[repr(C)]
+pub struct CVastFile {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastModule {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastDataType {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastLogicRef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 pub type XlsFormatPreference = i32;
+
+pub type VastFileType = i32;
 
 extern "C" {
     pub fn xls_convert_dslx_to_ir(
@@ -127,6 +150,38 @@ extern "C" {
         p: *const CIrPackage,
         string_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+
+    // -- VAST APIs
+
+    pub fn xls_vast_make_verilog_file(file_type: VastFileType) -> *mut CVastFile;
+    pub fn xls_vast_verilog_file_free(f: *mut CVastFile);
+    pub fn xls_vast_verilog_file_add_module(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CVastModule;
+    pub fn xls_vast_verilog_file_make_scalar_type(f: *mut CVastFile) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_bit_vector_type(
+        f: *mut CVastFile,
+        bit_count: i64,
+        is_signed: bool,
+    ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_module_add_input(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_output(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_wire(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_file_add_include(f: *mut CVastFile, path: *const std::os::raw::c_char);
+    pub fn xls_vast_verilog_file_emit(f: *const CVastFile) -> *mut std::os::raw::c_char;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
