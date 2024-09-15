@@ -459,8 +459,8 @@ mod tests {
 
 file_number 0 \"/memfile/test_mod.x\"
 
-fn __test_mod__f(x: bits[32]) -> bits[32] {
-  ret x: bits[32] = param(name=x)
+fn __test_mod__f(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
 }
 "
         );

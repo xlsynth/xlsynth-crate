@@ -46,7 +46,37 @@ pub struct CVastDataType {
 }
 
 #[repr(C)]
+pub struct CVastExpression {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastLiteral {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CVastLogicRef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastInstantiation {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastContinuousAssignment {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastSlice {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastIndexableExpression {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
@@ -159,12 +189,38 @@ extern "C" {
         f: *mut CVastFile,
         name: *const std::os::raw::c_char,
     ) -> *mut CVastModule;
+
+    // - Node creation
     pub fn xls_vast_verilog_file_make_scalar_type(f: *mut CVastFile) -> *mut CVastDataType;
     pub fn xls_vast_verilog_file_make_bit_vector_type(
         f: *mut CVastFile,
         bit_count: i64,
         is_signed: bool,
     ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_continuous_assignment(
+        f: *mut CVastFile,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastContinuousAssignment;
+    pub fn xls_vast_verilog_file_make_slice_i64(
+        f: *mut CVastFile,
+        subject: *mut CVastIndexableExpression,
+        hi: i64,
+        lo: i64,
+    ) -> *mut CVastSlice;
+    pub fn xls_vast_verilog_file_make_instantiation(
+        f: *mut CVastFile,
+        module_name: *const std::os::raw::c_char,
+        instance_name: *const std::os::raw::c_char,
+        parameter_port_names: *const *const std::os::raw::c_char,
+        parameter_expressions: *const *const CVastExpression,
+        parameter_count: libc::size_t,
+        connection_port_names: *const *const std::os::raw::c_char,
+        connection_expressions: *const *const CVastExpression,
+        connection_count: libc::size_t,
+    ) -> *mut CVastInstantiation;
+
+    // - Module additions
     pub fn xls_vast_verilog_module_add_input(
         m: *mut CVastModule,
         name: *const std::os::raw::c_char,
@@ -180,6 +236,23 @@ extern "C" {
         name: *const std::os::raw::c_char,
         type_: *mut CVastDataType,
     ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_member_instantiation(
+        m: *mut CVastModule,
+        inst: *mut CVastInstantiation,
+    );
+    pub fn xls_vast_verilog_module_add_member_continuous_assignment(
+        m: *mut CVastModule,
+        ca: *mut CVastContinuousAssignment,
+    );
+
+    // - Expression conversions
+    pub fn xls_vast_logic_ref_as_indexable_expression(
+        v: *mut CVastLogicRef,
+    ) -> *mut CVastIndexableExpression;
+    pub fn xls_vast_literal_as_expression(v: *mut CVastLiteral) -> *mut CVastExpression;
+    pub fn xls_vast_logic_ref_as_expression(v: *mut CVastLogicRef) -> *mut CVastExpression;
+    pub fn xls_vast_slice_as_expression(v: *mut CVastSlice) -> *mut CVastExpression;
+
     pub fn xls_vast_verilog_file_add_include(f: *mut CVastFile, path: *const std::os::raw::c_char);
     pub fn xls_vast_verilog_file_emit(f: *const CVastFile) -> *mut std::os::raw::c_char;
 }
