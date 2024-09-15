@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.86";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.87";
 
 struct DsoInfo {
     extension: &'static str,

@@ -10,6 +10,11 @@ pub struct CIrValue {
 }
 
 #[repr(C)]
+pub struct CIrBits {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CIrPackage {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -95,12 +100,21 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         ir_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+
     pub fn xls_parse_typed_value(
         text: *const std::os::raw::c_char,
         error_out: *mut *mut std::os::raw::c_char,
         value_out: *mut *mut CIrValue,
     ) -> bool;
     pub fn xls_value_free(value: *mut CIrValue);
+
+    pub fn xls_value_get_bits(
+        value: *const CIrValue,
+        error_out: *mut *mut std::os::raw::c_char,
+        bits_out: *mut *mut CIrBits,
+    ) -> bool;
+    pub fn xls_bits_free(bits: *mut CIrBits);
+
     pub fn xls_package_free(package: *mut CIrPackage);
     pub fn xls_c_str_free(c_str: *mut std::os::raw::c_char);
     pub fn xls_value_to_string(
@@ -219,6 +233,14 @@ extern "C" {
         connection_expressions: *const *const CVastExpression,
         connection_count: libc::size_t,
     ) -> *mut CVastInstantiation;
+    pub fn xls_vast_verilog_file_make_literal(
+        f: *mut CVastFile,
+        bits: *const CIrBits,
+        format_preference: XlsFormatPreference,
+        emit_bit_count: bool,
+        error_out: *mut *mut std::os::raw::c_char,
+        literal_out: *mut *mut CVastLiteral,
+    ) -> bool;
 
     // - Module additions
     pub fn xls_vast_verilog_module_add_input(
