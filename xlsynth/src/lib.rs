@@ -9,8 +9,9 @@ use std::ffi::{CStr, CString};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use ir_package::{IrFunctionType, IrPackagePtr, IrType};
+use ir_value::IrBits;
+use xlsynth_sys::{CIrBits, CIrPackage, CIrValue};
 use xlsynth_sys::{CIrFunction, CIrFunctionType, CIrType, XlsFormatPreference};
-use xlsynth_sys::{CIrPackage, CIrValue};
 
 pub use ir_package::IrFunction;
 pub use ir_package::IrPackage;
@@ -113,6 +114,19 @@ pub(crate) fn xls_value_to_string(p: *mut CIrValue) -> Result<String, XlsynthErr
         return Err(XlsynthError(
             "Failed to convert XLS value to string via C API".to_string(),
         ));
+    }
+}
+
+pub(crate) fn xls_value_get_bits(p: *const CIrValue) -> Result<IrBits, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut bits_out: *mut CIrBits = std::ptr::null_mut();
+        let success = xlsynth_sys::xls_value_get_bits(p, &mut error_out, &mut bits_out);
+        if success {
+            return Ok(IrBits { ptr: bits_out });
+        }
+        let error_out_str: String = c_str_to_rust(error_out);
+        return Err(XlsynthError(error_out_str));
     }
 }
 
@@ -459,8 +473,8 @@ mod tests {
 
 file_number 0 \"/memfile/test_mod.x\"
 
-fn __test_mod__f(x: bits[32]) -> bits[32] {
-  ret x: bits[32] = param(name=x)
+fn __test_mod__f(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
 }
 "
         );
