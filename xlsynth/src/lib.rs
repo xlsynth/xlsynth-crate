@@ -10,8 +10,8 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use ir_package::{IrFunctionType, IrPackagePtr, IrType};
 use ir_value::IrBits;
+use xlsynth_sys::{CIrBits, CIrPackage, CIrValue};
 use xlsynth_sys::{CIrFunction, CIrFunctionType, CIrType, XlsFormatPreference};
-use xlsynth_sys::{CIrPackage, CIrValue, CIrBits};
 
 pub use ir_package::IrFunction;
 pub use ir_package::IrPackage;

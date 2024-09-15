@@ -4,7 +4,7 @@ use xlsynth_sys::{CIrBits, CIrValue};
 
 use crate::{
     xls_format_preference_from_string, xls_parse_typed_value, xls_value_eq, xls_value_free,
-    xls_value_to_string, xls_value_to_string_format_preference, xls_value_get_bits,
+    xls_value_get_bits, xls_value_to_string, xls_value_to_string_format_preference,
     xlsynth_error::XlsynthError,
 };
 
@@ -93,7 +93,7 @@ impl IrValue {
     }
 
     /// Attempts to extract the bits contents underlying this value.
-    /// 
+    ///
     /// If this value is not a bits type, an error is returned.
     pub fn to_bits(&self) -> Result<IrBits, XlsynthError> {
         xls_value_get_bits(self.ptr)
@@ -233,6 +233,7 @@ mod tests {
     fn test_ir_value_get_bits() {
         let v = IrValue::parse_typed("bits[32]:42").expect("parse success");
         let _bits = v.to_bits().expect("to_bits success");
-        // TODO(cdleary): 2024-09-15 No APIs exposed to do anything directly with bits yet.
+        // TODO(cdleary): 2024-09-15 No APIs exposed to do anything directly
+        // with bits yet.
     }
 }
