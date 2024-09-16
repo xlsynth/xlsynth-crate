@@ -8,6 +8,7 @@ use xlsynth_sys as sys;
 
 use std::{
     ffi::CString,
+    os::raw::c_char,
     sync::{Arc, Mutex},
 };
 
@@ -21,12 +22,12 @@ impl Drop for VastFilePtr {
     }
 }
 
-struct VastDataType {
+pub struct VastDataType {
     pub(crate) inner: *mut sys::CVastDataType,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
 
-struct LogicRef {
+pub struct LogicRef {
     pub(crate) inner: *mut sys::CVastLogicRef,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
@@ -50,22 +51,22 @@ impl LogicRef {
     }
 }
 
-struct Expr {
+pub struct Expr {
     pub(crate) inner: *mut sys::CVastExpression,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
 
-struct IndexableExpr {
+pub struct IndexableExpr {
     pub(crate) inner: *mut sys::CVastIndexableExpression,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
 
-struct VastModule {
+pub struct VastModule {
     pub(crate) inner: *mut sys::CVastModule,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
 
-struct Slice {
+pub struct Slice {
     pub(crate) inner: *mut sys::CVastSlice,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
@@ -81,12 +82,12 @@ impl Slice {
     }
 }
 
-struct Instantiation {
+pub struct Instantiation {
     pub(crate) inner: *mut sys::CVastInstantiation,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
 
-struct ContinuousAssignment {
+pub struct ContinuousAssignment {
     pub(crate) inner: *mut sys::CVastContinuousAssignment,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
@@ -146,12 +147,12 @@ impl VastModule {
     }
 }
 
-enum VastFileType {
+pub enum VastFileType {
     Verilog,
     SystemVerilog,
 }
 
-struct VastFile {
+pub struct VastFile {
     pub(crate) ptr: Arc<Mutex<VastFilePtr>>,
 }
 
@@ -182,6 +183,63 @@ impl VastFile {
         let module = unsafe { sys::xls_vast_verilog_file_add_module(locked.0, c_name.as_ptr()) };
         VastModule {
             inner: module,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_instantiation(
+        &mut self,
+        module_name: &str,
+        instance_name: &str,
+        parameter_port_names: &[&str],
+        parameter_expressions: &[&Expr],
+        connection_port_names: &[&str],
+        connection_expressions: &[&Expr],
+    ) -> Instantiation {
+        let c_module_name = CString::new(module_name).unwrap();
+        let c_instance_name = CString::new(instance_name).unwrap();
+
+        // Even though we only need char pointers to call the C++ API, we need to return
+        // a Vec of CStrings in addition to the char pointers, to prevent the strings
+        // from being dropped before the pointers are used.
+        fn to_cstrings_and_ptrs(strings: &[&str]) -> (Vec<CString>, Vec<*const c_char>) {
+            let cstrings: Vec<CString> =
+                strings.iter().map(|&s| CString::new(s).unwrap()).collect();
+            let ptrs = cstrings.iter().map(|s| s.as_ptr()).collect();
+            (cstrings, ptrs)
+        }
+
+        let (c_param_names, c_param_name_ptrs) = to_cstrings_and_ptrs(parameter_port_names);
+        let (c_conn_names, c_conn_name_ptrs) = to_cstrings_and_ptrs(connection_port_names);
+
+        fn to_expr_ptrs(exprs: &[&Expr]) -> Vec<*const sys::CVastExpression> {
+            exprs
+                .iter()
+                .map(|expr| expr.inner as *const sys::CVastExpression)
+                .collect()
+        }
+
+        let c_param_expr_ptrs = to_expr_ptrs(parameter_expressions);
+        let c_conn_expr_ptrs = to_expr_ptrs(connection_expressions);
+
+        let locked = self.ptr.lock().unwrap();
+
+        let instantiation = unsafe {
+            sys::xls_vast_verilog_file_make_instantiation(
+                locked.0,
+                c_module_name.as_ptr(),
+                c_instance_name.as_ptr(),
+                c_param_name_ptrs.as_ptr(),
+                c_param_expr_ptrs.as_ptr(),
+                c_param_expr_ptrs.len(),
+                c_conn_name_ptrs.as_ptr(),
+                c_conn_expr_ptrs.as_ptr(),
+                c_conn_expr_ptrs.len(),
+            )
+        };
+
+        Instantiation {
+            inner: instantiation,
             parent: self.ptr.clone(),
         }
     }
@@ -268,6 +326,45 @@ mod tests {
   output wire [3:0] my_output
 );
   assign my_output = my_input[3:0];
+endmodule
+";
+        assert_eq!(verilog, want);
+    }
+
+    #[test]
+    fn test_instantiation() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+
+        let data_type = file.make_bit_vector_type(8, false);
+
+        let mut a_module = file.add_module("A");
+        a_module.add_output("bus", &data_type);
+
+        let mut b_module = file.add_module("B");
+        let bus = b_module.add_wire("bus", &data_type);
+
+        // TODO(sherbst) 2024-09-16: Test parameters.
+
+        b_module.add_member_instantiation(file.make_instantiation(
+            "A",
+            "a_i",
+            &[],
+            &[],
+            &["bus"],
+            &[&bus.to_expr()],
+        ));
+
+        let verilog = file.emit();
+        let want = "module A(
+  output wire [7:0] bus
+);
+
+endmodule
+module B;
+  wire [7:0] bus;
+  A a_i (
+    .bus(bus)
+  );
 endmodule
 ";
         assert_eq!(verilog, want);
