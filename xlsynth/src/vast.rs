@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::c_str_to_rust;
+use crate::{c_str_to_rust, ir_value::IrFormatPreference, XlsynthError};
 
 pub(crate) struct VastFilePtr(pub *mut sys::CVastFile);
 
@@ -244,6 +244,44 @@ impl VastFile {
         }
     }
 
+    /// Makes a literal expression from a string, `s`, using the given format,
+    /// `fmt`. `s` must be in the form `bits[N]:value`, where `N` is the bit
+    /// width and `value` is the value of the literal, expressed in decimal,
+    /// hex, or binary. For example, `s` might be "bits[16]:42" or
+    /// "bits[39]:0xABCD". `fmt` indicates how the literal should be formatted
+    /// in the output Verilog.
+    pub fn make_literal(
+        &mut self,
+        s: &str,
+        fmt: &IrFormatPreference,
+    ) -> Result<Expr, XlsynthError> {
+        let v = crate::xls_parse_typed_value(s).unwrap();
+        let mut fmt = crate::xls_format_preference_from_string(fmt.to_string()).unwrap();
+
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut literal_out: *mut sys::CVastLiteral = std::ptr::null_mut();
+
+        unsafe {
+            let success = sys::xls_vast_verilog_file_make_literal(
+                self.ptr.lock().unwrap().0,
+                v.to_bits().unwrap().ptr,
+                fmt,
+                true,
+                &mut error_out,
+                &mut literal_out,
+            );
+
+            if success {
+                Ok(Expr {
+                    inner: sys::xls_vast_literal_as_expression(literal_out),
+                    parent: self.ptr.clone(),
+                })
+            } else {
+                Err(XlsynthError(c_str_to_rust(error_out)))
+            }
+        }
+    }
+
     pub fn make_scalar_type(&mut self) -> VastDataType {
         let locked = self.ptr.lock().unwrap();
         let data_type = unsafe { sys::xls_vast_verilog_file_make_scalar_type(locked.0) };
@@ -343,13 +381,15 @@ endmodule
         let mut b_module = file.add_module("B");
         let bus = b_module.add_wire("bus", &data_type);
 
-        // TODO(sherbst) 2024-09-16: Test parameters.
+        let param_value = file
+            .make_literal("bits[32]:42", &IrFormatPreference::UnsignedDecimal)
+            .unwrap();
 
         b_module.add_member_instantiation(file.make_instantiation(
             "A",
             "a_i",
-            &[],
-            &[],
+            &["a_param"],
+            &[&param_value],
             &["bus"],
             &[&bus.to_expr()],
         ));
@@ -362,9 +402,33 @@ endmodule
 endmodule
 module B;
   wire [7:0] bus;
-  A a_i (
+  A #(
+    .a_param(32'd42)
+  ) a_i (
     .bus(bus)
   );
+endmodule
+";
+        assert_eq!(verilog, want);
+    }
+
+    #[test]
+    fn test_literal() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let wire = module.add_wire("bus", &file.make_bit_vector_type(128, false));
+        let literal = file
+            .make_literal(
+                "bits[128]:0xFFEEDDCCBBAA99887766554433221100",
+                &IrFormatPreference::Hex,
+            )
+            .unwrap();
+        let assignment = file.make_continuous_assignment(&wire.to_expr(), &literal);
+        module.add_member_continuous_assignment(assignment);
+        let verilog = file.emit();
+        let want = "module my_module;
+  wire [127:0] bus;
+  assign bus = 128'hffee_ddcc_bbaa_9988_7766_5544_3322_1100;
 endmodule
 ";
         assert_eq!(verilog, want);
