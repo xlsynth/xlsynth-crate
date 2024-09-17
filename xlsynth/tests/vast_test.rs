@@ -51,13 +51,15 @@ endmodule
         let mut b_module = file.add_module("B");
         let bus = b_module.add_wire("bus", &data_type);
 
-        // TODO(sherbst) 2024-09-16: Test parameters.
+        let param_value = file
+            .make_literal("bits[32]:42", "unsigned_decimal")
+            .unwrap();
 
         b_module.add_member_instantiation(file.make_instantiation(
             "A",
             "a_i",
-            &[],
-            &[],
+            &["a_param"],
+            &[&param_value],
             &["bus"],
             &[&bus.to_expr()],
         ));
@@ -70,9 +72,30 @@ endmodule
 endmodule
 module B;
   wire [7:0] bus;
-  A a_i (
+  A #(
+    .a_param(32'd42)
+  ) a_i (
     .bus(bus)
   );
+endmodule
+";
+        assert_eq!(verilog, want);
+    }
+
+    #[test]
+    fn test_literal() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let wire = module.add_wire("bus", &file.make_bit_vector_type(128, false));
+        let literal = file
+            .make_literal("bits[128]:0xFFEEDDCCBBAA99887766554433221100", "hex")
+            .unwrap();
+        let assignment = file.make_continuous_assignment(&wire.to_expr(), &literal);
+        module.add_member_continuous_assignment(assignment);
+        let verilog = file.emit();
+        let want = "module my_module;
+  wire [127:0] bus;
+  assign bus = 128'hffee_ddcc_bbaa_9988_7766_5544_3322_1100;
 endmodule
 ";
         assert_eq!(verilog, want);
