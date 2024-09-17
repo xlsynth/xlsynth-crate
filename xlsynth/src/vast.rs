@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{c_str_to_rust, XlsynthError};
+use crate::{c_str_to_rust, ir_value::IrFormatPreference, XlsynthError};
 
 pub(crate) struct VastFilePtr(pub *mut sys::CVastFile);
 
@@ -249,12 +249,14 @@ impl VastFile {
     /// width and `value` is the value of the literal, expressed in decimal,
     /// hex, or binary. For example, `s` might be "bits[16]:42" or
     /// "bits[39]:0xABCD". `fmt` indicates how the literal should be formatted
-    /// in the output Verilog. Options include `default`, `binary`,
-    /// `signed_decimal`, `unsigned_decimal`, `hex`, `plain_binary`, and
-    /// `plain_hex`.
-    pub fn make_literal(&mut self, s: &str, fmt: &str) -> Result<Expr, XlsynthError> {
+    /// in the output Verilog.
+    pub fn make_literal(
+        &mut self,
+        s: &str,
+        fmt: &IrFormatPreference,
+    ) -> Result<Expr, XlsynthError> {
         let v = crate::xls_parse_typed_value(s).unwrap();
-        let mut fmt = crate::xls_format_preference_from_string(fmt).unwrap();
+        let mut fmt = crate::xls_format_preference_from_string(fmt.to_string()).unwrap();
 
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut literal_out: *mut sys::CVastLiteral = std::ptr::null_mut();
@@ -380,7 +382,7 @@ endmodule
         let bus = b_module.add_wire("bus", &data_type);
 
         let param_value = file
-            .make_literal("bits[32]:42", "unsigned_decimal")
+            .make_literal("bits[32]:42", &IrFormatPreference::UnsignedDecimal)
             .unwrap();
 
         b_module.add_member_instantiation(file.make_instantiation(
@@ -416,7 +418,10 @@ endmodule
         let mut module = file.add_module("my_module");
         let wire = module.add_wire("bus", &file.make_bit_vector_type(128, false));
         let literal = file
-            .make_literal("bits[128]:0xFFEEDDCCBBAA99887766554433221100", "hex")
+            .make_literal(
+                "bits[128]:0xFFEEDDCCBBAA99887766554433221100",
+                &IrFormatPreference::Hex,
+            )
             .unwrap();
         let assignment = file.make_continuous_assignment(&wire.to_expr(), &literal);
         module.add_member_continuous_assignment(assignment);

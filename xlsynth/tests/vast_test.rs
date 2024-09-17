@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use xlsynth::vast::*;
+    use xlsynth::{ir_value::*, vast::*};
 
     #[test]
     fn test_vast() {
@@ -52,7 +52,7 @@ endmodule
         let bus = b_module.add_wire("bus", &data_type);
 
         let param_value = file
-            .make_literal("bits[32]:42", "unsigned_decimal")
+            .make_literal("bits[32]:42", &IrFormatPreference::UnsignedDecimal)
             .unwrap();
 
         b_module.add_member_instantiation(file.make_instantiation(
@@ -88,7 +88,10 @@ endmodule
         let mut module = file.add_module("my_module");
         let wire = module.add_wire("bus", &file.make_bit_vector_type(128, false));
         let literal = file
-            .make_literal("bits[128]:0xFFEEDDCCBBAA99887766554433221100", "hex")
+            .make_literal(
+                "bits[128]:0xFFEEDDCCBBAA99887766554433221100",
+                &IrFormatPreference::Hex,
+            )
             .unwrap();
         let assignment = file.make_continuous_assignment(&wire.to_expr(), &literal);
         module.add_member_continuous_assignment(assignment);

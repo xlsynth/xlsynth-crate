@@ -28,7 +28,7 @@ pub enum IrFormatPreference {
 }
 
 impl IrFormatPreference {
-    fn to_string(&self) -> &'static str {
+    pub fn to_string(&self) -> &'static str {
         match self {
             IrFormatPreference::Default => "default",
             IrFormatPreference::Binary => "binary",
