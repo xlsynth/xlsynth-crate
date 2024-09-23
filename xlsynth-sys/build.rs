@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::BufRead;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -27,6 +29,34 @@ impl DsoInfo {
     }
 }
 
+fn is_rocky() -> bool {
+    // Define the path to /etc/os-release
+    let os_release_path = Path::new("/etc/os-release");
+
+    // Check if the file exists
+    if !os_release_path.exists() {
+        return false;
+    }
+
+    // Open the file
+    let file = std::fs::File::open(os_release_path);
+    if let Ok(file) = file {
+        // Read through the lines in the file
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                // Check if the line contains `ID="rocky"`
+                if line.contains("ID=\"rocky\"") {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Return false if `ID="rocky"` is not found
+    false
+}
+
 fn get_dso_info() -> DsoInfo {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
@@ -39,6 +69,7 @@ fn get_dso_info() -> DsoInfo {
     let lib_suffix = match (target_os.as_str(), target_arch.as_str()) {
         ("macos", "x86_64") => "x64",
         ("macos", "aarch64") => "arm64",
+        ("linux", "x86_64") if is_rocky() => "rocky8",
         ("linux", "x86_64") => "ubuntu2004",
         _ => panic!(
             "Unhandled combination; target_os: {} target_arch: {}",
