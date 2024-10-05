@@ -174,6 +174,14 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
 }
 
 fn main() {
+    // Detect if building on docs.rs
+    if std::env::var("DOCS_RS").is_ok() {
+        println!("cargo:warning=Skipping dynamic library download on docs.rs");
+        println!("cargo:rustc-env=XLS_DSO_PATH=/does/not/exist/libxls.so");
+        println!("cargo:rustc-env=DSLX_STDLIB_PATH=/does/not/exist/stdlib/");
+        return;
+    }
+
     let url_base = format!(
         "https://github.com/xlsynth/xlsynth/releases/download/{}/",
         RELEASE_LIB_VERSION_TAG
