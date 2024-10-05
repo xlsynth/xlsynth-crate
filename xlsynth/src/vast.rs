@@ -247,8 +247,8 @@ impl VastFile {
     /// Makes a literal expression from a string, `s`, using the given format,
     /// `fmt`. `s` must be in the form `bits[N]:value`, where `N` is the bit
     /// width and `value` is the value of the literal, expressed in decimal,
-    /// hex, or binary. For example, `s` might be "bits[16]:42" or
-    /// "bits[39]:0xABCD". `fmt` indicates how the literal should be formatted
+    /// hex, or binary. For example, `s` might be `bits[16]:42` or
+    /// `bits[39]:0xABCD`. `fmt` indicates how the literal should be formatted
     /// in the output Verilog.
     pub fn make_literal(
         &mut self,
