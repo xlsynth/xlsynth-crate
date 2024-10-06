@@ -398,16 +398,17 @@ extern "C" {
     pub fn xls_dslx_type_info_get_type_struct_def(
         type_info: *mut CDslxTypeInfo,
         enum_def: *mut CDslxStructDef,
-    ) -> *const CDslxType;
+    ) -> *mut CDslxType;
     pub fn xls_dslx_type_info_get_type_enum_def(
         type_info: *mut CDslxTypeInfo,
         enum_def: *mut CDslxEnumDef,
-    ) -> *const CDslxType;
+    ) -> *mut CDslxType;
     pub fn xls_dslx_type_info_get_type_type_alias(
         type_info: *mut CDslxTypeInfo,
         enum_def: *mut CDslxTypeAlias,
-    ) -> *const CDslxType;
+    ) -> *mut CDslxType;
 
+    /// Gets the concrete type for a TypeAnnotation AST node.
     pub fn xls_dslx_type_info_get_type_type_annotation(
         type_info: *mut CDslxTypeInfo,
         type_annotation: *mut CDslxTypeAnnotation,
@@ -476,6 +477,12 @@ extern "C" {
         type_: *const CDslxType,
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut i64,
+    ) -> bool;
+
+    pub fn xls_dslx_type_is_signed_bits(
+        type_: *const CDslxType,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut bool,
     ) -> bool;
 }
 

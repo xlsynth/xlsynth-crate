@@ -5,7 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.93";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.95";
 
 struct DsoInfo {
     extension: &'static str,
@@ -187,14 +187,36 @@ fn main() {
         RELEASE_LIB_VERSION_TAG
     );
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    let dso_info = download_dso_if_dne(&url_base, &out_dir);
     let stdlib_path: PathBuf = download_stdlib_if_dne(&url_base, &out_dir);
+    let stdlib_path_full = format!("{}/xls/dslx/stdlib/", stdlib_path.display());
+    println!("cargo:rustc-env=DSLX_STDLIB_PATH={stdlib_path_full}");
+
+    if std::env::var("DEV_XLS_DSO_WORKSPACE").is_ok() {
+        // This points at a XLS workspace root.
+        // Grab the DSO from the build artifacts.
+        let workspace = std::env::var("DEV_XLS_DSO_WORKSPACE").unwrap();
+        // The DSO is in the workspace subdir bazel-bin/xls/public/libxls.so
+        let dso_path = PathBuf::from(workspace).join("bazel-bin/xls/public/libxls.so");
+        let dso_info = DsoInfo {
+            extension: "so",
+            lib_suffix: "ubuntu2004",
+        };
+        let dso_filename = dso_info.get_dso_filename();
+        let dso_dest = PathBuf::from(&out_dir).join(&dso_filename);
+        std::fs::copy(&dso_path, &dso_dest).unwrap();
+        println!("cargo:info=Using DSO from workspace: {}", dso_dest.display());
+        println!("cargo:rerun-if-changed=build.rs");
+        println!("cargo:rustc-link-search=native={}", out_dir);
+        println!("cargo:rustc-link-lib=dylib={}", dso_info.get_dso_name());
+        println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);
+        return;
+    }
+
+    let dso_info = download_dso_if_dne(&url_base, &out_dir);
 
     // Ensure the DSO is copied to the correct location
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-link-search=native={}", out_dir);
     println!("cargo:rustc-link-lib=dylib={}", dso_info.get_dso_name());
     println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);
-    let stdlib_path_full = format!("{}/xls/dslx/stdlib/", stdlib_path.display());
-    println!("cargo:rustc-env=DSLX_STDLIB_PATH={stdlib_path_full}");
 }
