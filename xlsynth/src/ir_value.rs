@@ -51,6 +51,11 @@ impl IrValue {
         Self::parse_typed(std::format!("bits[64]:{}", value).as_str())
     }
 
+    pub fn make_bits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
+        // TODO(cdleary): 2024-10-06 Expose a more efficient API for this.
+        Self::parse_typed(std::format!("bits[{}]:{}", bit_count, value).as_str())
+    }
+
     pub fn bit_count(&self) -> usize {
         // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
         let s = self
@@ -261,5 +266,22 @@ mod tests {
         let _bits = v.to_bits().expect("to_bits success");
         // TODO(cdleary): 2024-09-15 No APIs exposed to do anything directly
         // with bits yet.
+    }
+
+    #[test]
+    fn test_ir_value_make_bits() {
+        let zero_u2 = IrValue::make_bits(2, 0).expect("make_bits success");
+        assert_eq!(
+            zero_u2.to_string_fmt(IrFormatPreference::Default)
+                .expect("fmt success"),
+            "bits[2]:0"
+        );
+
+        let three_u2 = IrValue::make_bits(2, 3).expect("make_bits success");
+        assert_eq!(
+            three_u2.to_string_fmt(IrFormatPreference::Default)
+                .expect("fmt success"),
+            "bits[2]:3"
+        );
     }
 }
