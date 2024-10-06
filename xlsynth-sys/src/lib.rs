@@ -142,6 +142,16 @@ pub struct CDslxEnumMember {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+#[repr(C)]
+pub struct CDslxStructMember {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxTypeAnnotation {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 pub type XlsFormatPreference = i32;
 
 pub type VastFileType = i32;
@@ -398,6 +408,36 @@ extern "C" {
         enum_def: *mut CDslxTypeAlias,
     ) -> *const CDslxType;
 
+    pub fn xls_dslx_type_info_get_type_type_annotation(
+        type_info: *mut CDslxTypeInfo,
+        type_annotation: *mut CDslxTypeAnnotation,
+    ) -> *mut CDslxType;
+
+    // -- StructDef
+
+    pub fn xls_dslx_struct_def_get_identifier(
+        struct_def: *const CDslxStructDef,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_struct_def_is_parametric(struct_def: *const CDslxStructDef) -> bool;
+
+    pub fn xls_dslx_struct_def_get_member_count(struct_def: *const CDslxStructDef) -> i64;
+
+    pub fn xls_dslx_struct_def_get_member(
+        struct_def: *const CDslxStructDef,
+        i: i64,
+    ) -> *mut CDslxStructMember;
+
+    pub fn xls_dslx_struct_member_get_name(
+        member: *const CDslxStructMember,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_struct_member_get_type(
+        member: *const CDslxStructMember,
+    ) -> *mut CDslxTypeAnnotation;
+
+    // -- EnumDef
+
     pub fn xls_dslx_enum_def_get_identifier(
         enum_def: *const CDslxEnumDef,
     ) -> *mut std::os::raw::c_char;
@@ -414,6 +454,8 @@ extern "C" {
     ) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_enum_member_get_value(member: *const CDslxEnumMember) -> *mut CDslxExpr;
+
+    // --
 
     pub fn xls_dslx_interp_value_free(value: *mut CDslxInterpValue);
 

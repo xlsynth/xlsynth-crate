@@ -129,6 +129,18 @@ impl Module {
             ptr,
         })
     }
+
+    pub fn get_type_definition_as_struct_def(&self, idx: usize) -> Result<StructDef, XlsynthError> {
+        let ptr =
+            unsafe { sys::xls_dslx_module_get_type_definition_as_struct_def(self.ptr, idx as i64) };
+        if ptr.is_null() {
+            return Err(XlsynthError("Failed to get struct def".to_string()));
+        }
+        Ok(StructDef {
+            parent: self.parent.clone(),
+            ptr,
+        })
+    }
 }
 
 pub struct EnumMember {
@@ -157,6 +169,8 @@ pub struct Expr {
     pub(crate) ptr: *mut sys::CDslxExpr,
 }
 
+// -- EnumDef
+
 pub struct EnumDef {
     parent: Rc<TypecheckedModulePtr>,
     pub(crate) ptr: *mut sys::CDslxEnumDef,
@@ -178,6 +192,68 @@ impl EnumDef {
         EnumMember {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_enum_def_get_member(self.ptr, idx as i64) },
+        }
+    }
+}
+
+// -- TypeAnnotation
+
+pub struct TypeAnnotation {
+    parent: Rc<TypecheckedModulePtr>,
+    pub(crate) ptr: *mut sys::CDslxTypeAnnotation,
+}
+
+// -- StructDef
+
+pub struct StructMember {
+    parent: Rc<TypecheckedModulePtr>,
+    pub(crate) ptr: *mut sys::CDslxStructMember,
+}
+
+impl StructMember {
+    pub fn get_name(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_struct_member_get_name(self.ptr);
+            c_str_to_rust(c_str)
+        }
+    }
+
+    pub fn get_type(&self) -> TypeAnnotation {
+        TypeAnnotation {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_struct_member_get_type(self.ptr) },
+        }
+    }
+}
+
+pub struct StructDef {
+    parent: Rc<TypecheckedModulePtr>,
+    pub(crate) ptr: *mut sys::CDslxStructDef,
+}
+
+impl StructDef {
+    pub fn get_identifier(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_struct_def_get_identifier(self.ptr);
+            c_str_to_rust(c_str)
+        }
+    }
+
+    pub fn is_parametric(&self) -> bool {
+        unsafe { sys::xls_dslx_struct_def_is_parametric(self.ptr) }
+    }
+
+    // TODO(cdleary): 2024-10-06 This implementation is missing from the library.
+    /*
+    pub fn get_member_count(&self) -> usize {
+        unsafe { sys::xls_dslx_struct_def_get_member_count(self.ptr) as usize }
+    }
+    */
+
+    pub fn get_member(&self, idx: usize) -> StructMember {
+        StructMember {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_struct_def_get_member(self.ptr, idx as i64) },
         }
     }
 }
@@ -239,6 +315,37 @@ impl TypeInfo {
             Ok(InterpValue {
                 ptr: Rc::new(InterpValuePtr { ptr: result_out }),
             })
+        } else {
+            let error_out_str: String = unsafe { c_str_to_rust(error_out) };
+            Err(XlsynthError(error_out_str))
+        }
+    }
+
+    pub fn get_type_for_type_annotation(&self, type_annotation: TypeAnnotation) -> Type {
+        Type {
+            parent: self.parent.clone(),
+            ptr: unsafe {
+                sys::xls_dslx_type_info_get_type_type_annotation(self.ptr, type_annotation.ptr)
+            },
+        }
+    }
+}
+
+pub struct Type {
+    parent: Rc<TypecheckedModulePtr>,
+    pub(crate) ptr: *mut sys::CDslxType,
+}
+
+impl Type {
+    pub fn get_total_bit_count(&self) -> Result<usize, XlsynthError> {
+        let mut error_out = std::ptr::null_mut();
+        let mut result_out = 0;
+        let success = unsafe {
+            sys::xls_dslx_type_get_total_bit_count(self.ptr, &mut error_out, &mut result_out)
+        };
+        if success {
+            assert!(error_out.is_null());
+            Ok(result_out as usize)
         } else {
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
@@ -317,5 +424,41 @@ mod tests {
             ir_value.to_string_fmt(IrFormatPreference::Hex).unwrap(),
             "bits[32]:0xcafe_f00d"
         )
+    }
+
+    #[test]
+    fn test_one_struct_def() {
+        let dslx = "struct MyStruct { a: u32, b: u16 }";
+        let mut import_data = ImportData::default();
+        let typechecked_module =
+            parse_and_typecheck(dslx, "/fake/path.x", "my_struct_mod", &mut import_data)
+                .expect("parse-and-typecheck success");
+        let module = typechecked_module.get_module();
+        let type_info = typechecked_module.get_type_info();
+        assert_eq!(module.get_type_definition_count(), 1);
+        assert_eq!(
+            module.get_type_definition_kind(0),
+            TypeDefinitionKind::StructDef
+        );
+
+        let struct_def = module
+            .get_type_definition_as_struct_def(0)
+            .expect("struct definition");
+        assert_eq!(struct_def.get_identifier(), "MyStruct");
+
+        // TODO(cdleary): 2024-10-06 This implementation is missing from the library.
+        // assert_eq!(struct_def.get_member_count(), 2);
+
+        let member_a = struct_def.get_member(0);
+        assert_eq!(member_a.get_name(), "a");
+        let type_a = member_a.get_type();
+        let concrete_type_a = type_info.get_type_for_type_annotation(type_a);
+        assert_eq!(concrete_type_a.get_total_bit_count().unwrap(), 32);
+
+        let member_b = struct_def.get_member(1);
+        assert_eq!(member_b.get_name(), "b");
+        let type_b = member_b.get_type();
+        let concrete_type_b = type_info.get_type_for_type_annotation(type_b);
+        assert_eq!(concrete_type_b.get_total_bit_count().unwrap(), 16);
     }
 }
