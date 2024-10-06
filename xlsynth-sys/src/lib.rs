@@ -85,9 +85,78 @@ pub struct CVastIndexableExpression {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+// -- DSLX
+
+#[repr(C)]
+pub struct CDslxImportData {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxTypecheckedModule {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxModule {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxTypeInfo {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxStructDef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxEnumDef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxTypeAlias {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxType {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxExpr {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxInterpValue {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxEnumMember {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxStructMember {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxTypeAnnotation {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 pub type XlsFormatPreference = i32;
 
 pub type VastFileType = i32;
+
+pub type DslxTypeDefinitionKind = i32;
 
 extern "C" {
     pub fn xls_convert_dslx_to_ir(
@@ -277,6 +346,137 @@ extern "C" {
 
     pub fn xls_vast_verilog_file_add_include(f: *mut CVastFile, path: *const std::os::raw::c_char);
     pub fn xls_vast_verilog_file_emit(f: *const CVastFile) -> *mut std::os::raw::c_char;
+
+    // -- DSLX
+
+    pub fn xls_dslx_import_data_create(
+        dslx_stdlib_path: *const std::os::raw::c_char,
+        additional_search_paths: *const *const std::os::raw::c_char,
+        additional_search_paths_count: libc::size_t,
+    ) -> *mut CDslxImportData;
+    pub fn xls_dslx_import_data_free(data: *mut CDslxImportData);
+
+    pub fn xls_dslx_parse_and_typecheck(
+        text: *const std::os::raw::c_char,
+        path: *const std::os::raw::c_char,
+        module_name: *const std::os::raw::c_char,
+        import_data: *const CDslxImportData,
+        error_out: *mut *mut std::os::raw::c_char,
+        typechecked_module_out: *mut *mut CDslxTypecheckedModule,
+    ) -> bool;
+
+    pub fn xls_dslx_typechecked_module_free(module: *mut CDslxTypecheckedModule);
+
+    pub fn xls_dslx_typechecked_module_get_module(
+        module: *mut CDslxTypecheckedModule,
+    ) -> *mut CDslxModule;
+
+    pub fn xls_dslx_typechecked_module_get_type_info(
+        module: *mut CDslxTypecheckedModule,
+    ) -> *mut CDslxTypeInfo;
+
+    pub fn xls_dslx_module_get_type_definition_count(module: *const CDslxModule) -> i64;
+
+    pub fn xls_dslx_module_get_type_definition_kind(
+        module: *const CDslxModule,
+        i: i64,
+    ) -> DslxTypeDefinitionKind;
+
+    pub fn xls_dslx_module_get_type_definition_as_struct_def(
+        module: *const CDslxModule,
+        i: i64,
+    ) -> *mut CDslxStructDef;
+    pub fn xls_dslx_module_get_type_definition_as_enum_def(
+        module: *const CDslxModule,
+        i: i64,
+    ) -> *mut CDslxEnumDef;
+    pub fn xls_dslx_module_get_type_definition_as_type_alias(
+        module: *const CDslxModule,
+        i: i64,
+    ) -> *mut CDslxTypeAlias;
+
+    pub fn xls_dslx_type_info_get_type_struct_def(
+        type_info: *mut CDslxTypeInfo,
+        enum_def: *mut CDslxStructDef,
+    ) -> *const CDslxType;
+    pub fn xls_dslx_type_info_get_type_enum_def(
+        type_info: *mut CDslxTypeInfo,
+        enum_def: *mut CDslxEnumDef,
+    ) -> *const CDslxType;
+    pub fn xls_dslx_type_info_get_type_type_alias(
+        type_info: *mut CDslxTypeInfo,
+        enum_def: *mut CDslxTypeAlias,
+    ) -> *const CDslxType;
+
+    pub fn xls_dslx_type_info_get_type_type_annotation(
+        type_info: *mut CDslxTypeInfo,
+        type_annotation: *mut CDslxTypeAnnotation,
+    ) -> *mut CDslxType;
+
+    // -- StructDef
+
+    pub fn xls_dslx_struct_def_get_identifier(
+        struct_def: *const CDslxStructDef,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_struct_def_is_parametric(struct_def: *const CDslxStructDef) -> bool;
+
+    pub fn xls_dslx_struct_def_get_member_count(struct_def: *const CDslxStructDef) -> i64;
+
+    pub fn xls_dslx_struct_def_get_member(
+        struct_def: *const CDslxStructDef,
+        i: i64,
+    ) -> *mut CDslxStructMember;
+
+    pub fn xls_dslx_struct_member_get_name(
+        member: *const CDslxStructMember,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_struct_member_get_type(
+        member: *const CDslxStructMember,
+    ) -> *mut CDslxTypeAnnotation;
+
+    // -- EnumDef
+
+    pub fn xls_dslx_enum_def_get_identifier(
+        enum_def: *const CDslxEnumDef,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_enum_def_get_member_count(enum_def: *const CDslxEnumDef) -> i64;
+
+    pub fn xls_dslx_enum_def_get_member(
+        enum_def: *const CDslxEnumDef,
+        i: i64,
+    ) -> *mut CDslxEnumMember;
+
+    pub fn xls_dslx_enum_member_get_name(
+        member: *const CDslxEnumMember,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_enum_member_get_value(member: *const CDslxEnumMember) -> *mut CDslxExpr;
+
+    // --
+
+    pub fn xls_dslx_interp_value_free(value: *mut CDslxInterpValue);
+
+    pub fn xls_dslx_interp_value_convert_to_ir(
+        value: *mut CDslxInterpValue,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CIrValue,
+    ) -> bool;
+
+    pub fn xls_dslx_type_info_get_const_expr(
+        type_info: *mut CDslxTypeInfo,
+        expr: *mut CDslxExpr,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxInterpValue,
+    ) -> bool;
+
+    pub fn xls_dslx_type_get_total_bit_count(
+        type_: *const CDslxType,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut i64,
+    ) -> bool;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");

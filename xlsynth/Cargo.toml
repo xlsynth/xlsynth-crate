@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth"
-version = "0.0.28"
+version = "0.0.29"
 edition = "2018"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
@@ -9,8 +9,11 @@ repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
+# Specify the path to the top-level README.md
+readme = "../README.md"
+
 [dependencies]
-xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.28"}
+xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.29"}
 
 [dev-dependencies]
 docmatic = "0.1.2"
