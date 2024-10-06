@@ -5,6 +5,7 @@ pub mod ir_package;
 pub mod ir_value;
 pub mod vast;
 pub mod xlsynth_error;
+pub mod dslx_bridge;
 
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
