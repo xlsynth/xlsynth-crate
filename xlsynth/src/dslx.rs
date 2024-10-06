@@ -56,13 +56,15 @@ impl ImportData {
         }
 
         ImportData {
-            ptr: Rc::new(ImportDataPtr{ptr: unsafe {
-                sys::xls_dslx_import_data_create(
-                    dslx_stdlib_path_c_ptr,
-                    additional_search_paths_ptr.as_ptr(),
-                    additional_search_paths_ptr.len(),
-                )
-            }}),
+            ptr: Rc::new(ImportDataPtr {
+                ptr: unsafe {
+                    sys::xls_dslx_import_data_create(
+                        dslx_stdlib_path_c_ptr,
+                        additional_search_paths_ptr.as_ptr(),
+                        additional_search_paths_ptr.len(),
+                    )
+                },
+            }),
         }
     }
 }
@@ -367,9 +369,8 @@ impl Type {
     pub fn is_signed_bits(&self) -> Result<bool, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = false;
-        let success = unsafe {
-            sys::xls_dslx_type_is_signed_bits(self.ptr, &mut error_out, &mut result_out)
-        };
+        let success =
+            unsafe { sys::xls_dslx_type_is_signed_bits(self.ptr, &mut error_out, &mut result_out) };
         if success {
             assert!(error_out.is_null());
             Ok(result_out)
@@ -406,7 +407,7 @@ pub fn parse_and_typecheck(
             return Ok(TypecheckedModule {
                 ptr: Rc::new(TypecheckedModulePtr {
                     parent: import_data.ptr.clone(),
-                    ptr: result_out
+                    ptr: result_out,
                 }),
             });
         }

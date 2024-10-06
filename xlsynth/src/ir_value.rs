@@ -102,7 +102,10 @@ impl IrValue {
         let number = string.split(':').nth(1).expect("split success");
         match number.parse::<i64>() {
             Ok(i) => Ok(i),
-            Err(e) => Err(XlsynthError(format!("IrValue::to_i64() failed to parse i64 from string: {}", e))),
+            Err(e) => Err(XlsynthError(format!(
+                "IrValue::to_i64() failed to parse i64 from string: {}",
+                e
+            ))),
         }
     }
 
@@ -111,7 +114,10 @@ impl IrValue {
         let number = string.split(':').nth(1).expect("split success");
         match number.parse::<u64>() {
             Ok(i) => Ok(i),
-            Err(e) => Err(XlsynthError(format!("IrValue::to_u64() failed to parse u64 from string: {}", e))),
+            Err(e) => Err(XlsynthError(format!(
+                "IrValue::to_u64() failed to parse u64 from string: {}",
+                e
+            ))),
         }
     }
 
@@ -272,14 +278,16 @@ mod tests {
     fn test_ir_value_make_bits() {
         let zero_u2 = IrValue::make_bits(2, 0).expect("make_bits success");
         assert_eq!(
-            zero_u2.to_string_fmt(IrFormatPreference::Default)
+            zero_u2
+                .to_string_fmt(IrFormatPreference::Default)
                 .expect("fmt success"),
             "bits[2]:0"
         );
 
         let three_u2 = IrValue::make_bits(2, 3).expect("make_bits success");
         assert_eq!(
-            three_u2.to_string_fmt(IrFormatPreference::Default)
+            three_u2
+                .to_string_fmt(IrFormatPreference::Default)
                 .expect("fmt success"),
             "bits[2]:3"
         );

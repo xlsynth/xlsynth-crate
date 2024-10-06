@@ -204,7 +204,10 @@ fn main() {
         let dso_filename = dso_info.get_dso_filename();
         let dso_dest = PathBuf::from(&out_dir).join(&dso_filename);
         std::fs::copy(&dso_path, &dso_dest).unwrap();
-        println!("cargo:info=Using DSO from workspace: {}", dso_dest.display());
+        println!(
+            "cargo:info=Using DSO from workspace: {}",
+            dso_dest.display()
+        );
         println!("cargo:rerun-if-changed=build.rs");
         println!("cargo:rustc-link-search=native={}", out_dir);
         println!("cargo:rustc-link-lib=dylib={}", dso_info.get_dso_name());
