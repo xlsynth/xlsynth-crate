@@ -13,10 +13,6 @@ pub struct IrBits {
     pub(crate) ptr: *mut CIrBits,
 }
 
-pub struct IrValue {
-    pub(crate) ptr: *mut CIrValue,
-}
-
 pub enum IrFormatPreference {
     Default,
     Binary,
@@ -41,6 +37,10 @@ impl IrFormatPreference {
     }
 }
 
+pub struct IrValue {
+    pub(crate) ptr: *mut CIrValue,
+}
+
 impl IrValue {
     pub fn parse_typed(s: &str) -> Result<Self, XlsynthError> {
         xls_parse_typed_value(s)
@@ -49,6 +49,11 @@ impl IrValue {
     pub fn u64(value: u64) -> Result<Self, XlsynthError> {
         // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
         Self::parse_typed(std::format!("bits[64]:{}", value).as_str())
+    }
+
+    pub fn make_bits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
+        // TODO(cdleary): 2024-10-06 Expose a more efficient API for this.
+        Self::parse_typed(std::format!("bits[{}]:{}", bit_count, value).as_str())
     }
 
     pub fn bit_count(&self) -> usize {
@@ -89,6 +94,30 @@ impl IrValue {
             "0" => return Ok(false),
             "1" => return Ok(true),
             _ => panic!("Unexpected stringified value for single-bit IrValue: {}", s),
+        }
+    }
+
+    pub fn to_i64(&self) -> Result<i64, XlsynthError> {
+        let string = self.to_string_fmt(IrFormatPreference::SignedDecimal)?;
+        let number = string.split(':').nth(1).expect("split success");
+        match number.parse::<i64>() {
+            Ok(i) => Ok(i),
+            Err(e) => Err(XlsynthError(format!(
+                "IrValue::to_i64() failed to parse i64 from string: {}",
+                e
+            ))),
+        }
+    }
+
+    pub fn to_u64(&self) -> Result<u64, XlsynthError> {
+        let string = self.to_string_fmt(IrFormatPreference::UnsignedDecimal)?;
+        let number = string.split(':').nth(1).expect("split success");
+        match number.parse::<u64>() {
+            Ok(i) => Ok(i),
+            Err(e) => Err(XlsynthError(format!(
+                "IrValue::to_u64() failed to parse u64 from string: {}",
+                e
+            ))),
         }
     }
 
@@ -214,13 +243,21 @@ mod tests {
     #[test]
     fn test_ir_value_from_rust() {
         let v = IrValue::u64(42).expect("u64 success");
+
+        // Check formatting for default stringification.
         assert_eq!(
             v.to_string_fmt(IrFormatPreference::Default)
                 .expect("fmt success"),
             "bits[64]:42"
         );
+        // Check the bit count is as we specified.
         assert_eq!(v.bit_count(), 64);
+
+        // Check we can't convert a 64-bit value to a bool.
         v.to_bool().expect_err("bool conversion fail for u64");
+
+        let v_i64 = v.to_i64().expect("i64 conversion success");
+        assert_eq!(v_i64, 42);
 
         let f = IrValue::parse_typed("bits[1]:0").expect("parse success");
         assert_eq!(f.to_bool().unwrap(), false);
@@ -235,5 +272,24 @@ mod tests {
         let _bits = v.to_bits().expect("to_bits success");
         // TODO(cdleary): 2024-09-15 No APIs exposed to do anything directly
         // with bits yet.
+    }
+
+    #[test]
+    fn test_ir_value_make_bits() {
+        let zero_u2 = IrValue::make_bits(2, 0).expect("make_bits success");
+        assert_eq!(
+            zero_u2
+                .to_string_fmt(IrFormatPreference::Default)
+                .expect("fmt success"),
+            "bits[2]:0"
+        );
+
+        let three_u2 = IrValue::make_bits(2, 3).expect("make_bits success");
+        assert_eq!(
+            three_u2
+                .to_string_fmt(IrFormatPreference::Default)
+                .expect("fmt success"),
+            "bits[2]:3"
+        );
     }
 }

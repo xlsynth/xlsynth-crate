@@ -18,16 +18,20 @@ pub enum TypeDefinitionKind {
     ColonRef = 3,
 }
 
-struct ImportData {
-    pub(crate) ptr: *mut CDslxImportData,
+struct ImportDataPtr {
+    ptr: *mut CDslxImportData,
 }
 
-impl Drop for ImportData {
+impl Drop for ImportDataPtr {
     fn drop(&mut self) {
         unsafe {
             sys::xls_dslx_import_data_free(self.ptr);
         }
     }
+}
+
+pub struct ImportData {
+    ptr: Rc<ImportDataPtr>,
 }
 
 impl ImportData {
@@ -52,13 +56,15 @@ impl ImportData {
         }
 
         ImportData {
-            ptr: unsafe {
-                sys::xls_dslx_import_data_create(
-                    dslx_stdlib_path_c_ptr,
-                    additional_search_paths_ptr.as_ptr(),
-                    additional_search_paths_ptr.len(),
-                )
-            },
+            ptr: Rc::new(ImportDataPtr {
+                ptr: unsafe {
+                    sys::xls_dslx_import_data_create(
+                        dslx_stdlib_path_c_ptr,
+                        additional_search_paths_ptr.as_ptr(),
+                        additional_search_paths_ptr.len(),
+                    )
+                },
+            }),
         }
     }
 }
@@ -66,6 +72,7 @@ impl ImportData {
 /// Simple wrapper around the typechecked module entity that has a `Drop`
 /// implementation
 struct TypecheckedModulePtr {
+    parent: Rc<ImportDataPtr>,
     pub(crate) ptr: *mut sys::CDslxTypecheckedModule,
 }
 
@@ -77,8 +84,8 @@ impl Drop for TypecheckedModulePtr {
     }
 }
 
-struct TypecheckedModule {
-    pub(crate) ptr: Rc<TypecheckedModulePtr>,
+pub struct TypecheckedModule {
+    ptr: Rc<TypecheckedModulePtr>,
 }
 
 impl TypecheckedModule {
@@ -329,6 +336,13 @@ impl TypeInfo {
             },
         }
     }
+
+    pub fn get_type_for_enum_def(&self, enum_def: &EnumDef) -> Type {
+        Type {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_type_info_get_type_enum_def(self.ptr, enum_def.ptr) },
+        }
+    }
 }
 
 pub struct Type {
@@ -351,9 +365,23 @@ impl Type {
             Err(XlsynthError(error_out_str))
         }
     }
+
+    pub fn is_signed_bits(&self) -> Result<bool, XlsynthError> {
+        let mut error_out = std::ptr::null_mut();
+        let mut result_out = false;
+        let success =
+            unsafe { sys::xls_dslx_type_is_signed_bits(self.ptr, &mut error_out, &mut result_out) };
+        if success {
+            assert!(error_out.is_null());
+            Ok(result_out)
+        } else {
+            let error_out_str: String = unsafe { c_str_to_rust(error_out) };
+            Err(XlsynthError(error_out_str))
+        }
+    }
 }
 
-fn parse_and_typecheck(
+pub fn parse_and_typecheck(
     dslx: &str,
     path: &str,
     module_name: &str,
@@ -369,7 +397,7 @@ fn parse_and_typecheck(
             program_c_str.as_ptr(),
             path_c_str.as_ptr(),
             module_name_c_str.as_ptr(),
-            import_data.ptr,
+            import_data.ptr.ptr,
             &mut error_out,
             &mut result_out,
         );
@@ -377,7 +405,10 @@ fn parse_and_typecheck(
             assert!(error_out.is_null());
             assert!(!result_out.is_null());
             return Ok(TypecheckedModule {
-                ptr: Rc::new(TypecheckedModulePtr { ptr: result_out }),
+                ptr: Rc::new(TypecheckedModulePtr {
+                    parent: import_data.ptr.clone(),
+                    ptr: result_out,
+                }),
             });
         }
 
