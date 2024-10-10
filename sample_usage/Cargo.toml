@@ -13,3 +13,6 @@ num_cpus = "1.0"
 rayon = "1.10"
 lazy_static = "1.4"
 mimalloc = "0.1.43"
+
+[build-dependencies]
+xlsynth = { path = "../xlsynth" }

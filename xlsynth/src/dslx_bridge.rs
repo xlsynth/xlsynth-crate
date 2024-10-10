@@ -78,13 +78,19 @@ pub fn convert_leaf_module(
         dslx::parse_and_typecheck(dslx_program, path_str, module_name, import_data)?;
     let module = typechecked_module.get_module();
     let type_info = typechecked_module.get_type_info();
-    let mut defs: Vec<String> = vec![];
+
+    let mut chunks: Vec<String> = vec![
+        format!("mod {module_name} {{"),
+        // We allow e.g. enum variants to be unused in consumer code.
+        "#![allow(dead_code)]".to_string(),
+        "use xlsynth::IrValue;\n".to_string(),
+    ];
     for i in 0..module.get_type_definition_count() {
         let type_def_kind = module.get_type_definition_kind(i);
         match type_def_kind {
             dslx::TypeDefinitionKind::EnumDef => {
                 let enum_def = module.get_type_definition_as_enum_def(i).unwrap();
-                defs.push(convert_enum_to_rust(&enum_def, &type_info)?)
+                chunks.push(convert_enum_to_rust(&enum_def, &type_info)?)
             }
             dslx::TypeDefinitionKind::StructDef => {
                 todo!("convert struct definition from DSLX to Rust")
@@ -93,7 +99,8 @@ pub fn convert_leaf_module(
             dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),
         }
     }
-    Ok(defs.join("\n\n"))
+    chunks.push(format!("}} // mod {module_name}"));
+    Ok(chunks.join("\n"))
 }
 
 #[cfg(test)]
@@ -112,7 +119,11 @@ mod tests {
         let rust = convert_leaf_module(&mut import_data, dslx, &path).unwrap();
         assert_eq!(
             rust,
-            r#"pub enum MyEnum {
+            r#"mod my_module {
+#![allow(dead_code)]
+use xlsynth::IrValue;
+
+pub enum MyEnum {
     A = 0,
     B = 3,
 }
@@ -124,7 +135,8 @@ impl Into<IrValue> for MyEnum {
             MyEnum::B => IrValue::make_bits(2, 3).unwrap(),
         }
     }
-}"#
+}
+} // mod my_module"#
         );
     }
 }
