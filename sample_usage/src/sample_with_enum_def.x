@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 pub enum MyEnum : u8 {
     A = u8:2,
     B = u8:42,
