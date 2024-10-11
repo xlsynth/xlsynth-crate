@@ -13,3 +13,4 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 [dependencies]
 xlsynth = { path = "../xlsynth", version = "0.0.30" }
 clap = "2.33"
+tempfile = "3.13"

@@ -38,9 +38,23 @@ unsafe fn c_str_to_rust(xls_c_str: *mut std::os::raw::c_char) -> String {
     result
 }
 
+pub fn dslx_path_to_module_name(path: &std::path::Path) -> Result<&str, XlsynthError> {
+    let stem = path.file_stem();
+    match stem {
+        None => {
+            return Err(XlsynthError(
+                "Failed to extract module name from path".to_string(),
+            ));
+        }
+        Some(stem) => {
+            return Ok(stem.to_str().unwrap());
+        }
+    }
+}
+
 pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<String, XlsynthError> {
     // Extract the module name from the path; e.g. "foo/bar/baz.x" -> "baz"
-    let module_name = path.file_stem().unwrap().to_str().unwrap();
+    let module_name = dslx_path_to_module_name(path)?;
     let path_str = path.to_str().unwrap();
 
     unsafe {
