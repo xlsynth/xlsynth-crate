@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-driver"
-version = "0.0.1"
+version = "0.0.30"
 edition = "2021"
 
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
@@ -11,5 +11,5 @@ documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.0.29" }
+xlsynth = { path = "../xlsynth", version = "0.0.30" }
 clap = "2.33"
