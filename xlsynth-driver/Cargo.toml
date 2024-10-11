@@ -1,0 +1,11 @@
+[package]
+name = "xlsynth-driver"
+version = "0.0.30"
+edition = "2021"
+
+description = "Binary that integrates XLS capabilities into a driver program"
+license = "Apache-2.0"
+
+[dependencies]
+xlsynth = { path = "../xlsynth" }
+clap = "2.33"
