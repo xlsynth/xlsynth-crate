@@ -49,11 +49,17 @@ impl ImportData {
             std::ffi::CString::new(dslx_stdlib_path.to_str().unwrap()).unwrap();
         let dslx_stdlib_path_c_ptr = dslx_stdlib_path_c_str.as_ptr();
 
-        let mut additional_search_paths_ptr: Vec<*const std::os::raw::c_char> = vec![];
-        for path in additional_search_paths {
-            let path_c_str = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
-            additional_search_paths_ptr.push(path_c_str.as_ptr());
-        }
+        // Note: we make sure we collect up the CString values so their lifetime
+        // envelopes the import_data_create call.
+        let additional_search_paths_cstring: Vec<std::ffi::CString> = additional_search_paths
+            .iter()
+            .map(|p| std::ffi::CString::new(p.to_str().unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        let additional_search_paths_ptr: Vec<*const std::os::raw::c_char> =
+            additional_search_paths_cstring
+                .iter()
+                .map(|s| s.as_ptr())
+                .collect::<Vec<_>>();
 
         ImportData {
             ptr: Rc::new(ImportDataPtr {
