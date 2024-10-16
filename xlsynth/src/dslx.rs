@@ -51,12 +51,12 @@ impl ImportData {
 
         // Note: we make sure we collect up the CString values so their lifetime
         // envelopes the import_data_create call.
-        let additional_search_paths_cstring: Vec<std::ffi::CString> = additional_search_paths
+        let additional_search_paths_c_strs: Vec<std::ffi::CString> = additional_search_paths
             .iter()
             .map(|p| std::ffi::CString::new(p.to_str().unwrap()).unwrap())
             .collect::<Vec<_>>();
-        let additional_search_paths_ptr: Vec<*const std::os::raw::c_char> =
-            additional_search_paths_cstring
+        let additional_search_paths_c_ptrs: Vec<*const std::os::raw::c_char> =
+            additional_search_paths_c_strs
                 .iter()
                 .map(|s| s.as_ptr())
                 .collect::<Vec<_>>();
@@ -66,8 +66,8 @@ impl ImportData {
                 ptr: unsafe {
                     sys::xls_dslx_import_data_create(
                         dslx_stdlib_path_c_ptr,
-                        additional_search_paths_ptr.as_ptr(),
-                        additional_search_paths_ptr.len(),
+                        additional_search_paths_c_ptrs.as_ptr(),
+                        additional_search_paths_c_ptrs.len(),
                     )
                 },
             }),
