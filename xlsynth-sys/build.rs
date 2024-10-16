@@ -35,6 +35,7 @@ fn is_rocky() -> bool {
 
     // Check if the file exists
     if !os_release_path.exists() {
+        println!("cargo:info=OS release path does not exist");
         return false;
     }
 
@@ -51,6 +52,9 @@ fn is_rocky() -> bool {
                 }
             }
         }
+        println!("cargo:info=Did not find rocky ID line in OS release data");
+    } else {
+        println!("cargo:info=Could not open OS release data file");
     }
 
     // Return false if `ID="rocky"` is not found
@@ -69,8 +73,7 @@ fn get_dso_info() -> DsoInfo {
     let lib_suffix = match (target_os.as_str(), target_arch.as_str()) {
         ("macos", "x86_64") => "x64",
         ("macos", "aarch64") => "arm64",
-        ("linux", "x86_64") if is_rocky() => "rocky8",
-        ("linux", "x86_64") => "ubuntu2004",
+        ("linux", "x86_64") => if is_rocky() { "rocky8" } else { "ubuntu2004" },
         _ => panic!(
             "Unhandled combination; target_os: {} target_arch: {}",
             target_os, target_arch
