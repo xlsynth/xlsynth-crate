@@ -13,29 +13,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-24.04, ubuntu-22.04, ubuntu-20.04, rocky8]
+        os: [macos-latest, ubuntu-24.04, ubuntu-22.04, ubuntu-20.04]
       fail-fast: false
 
     steps:
-      - name: Set up runner for Rocky Linux 8
-        if: matrix.os == 'rocky8'
-        uses: addnab/docker-run-action@v3
-        with:
-          image: rockylinux:8
-          options: --workdir="/github/workspace"
-          run: |
-            yum install -y gcc openssl-devel libffi-devel make curl
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            source $HOME/.cargo/env
-            cargo build --workspace
-            cargo test --workspace
-
       - name: Check out code
-        if: matrix.os != 'rocky8'
         uses: actions/checkout@v2
 
       - name: Set up Rust
-        if: matrix.os != 'rocky8'
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
@@ -43,11 +28,31 @@ jobs:
           override: true
 
       - name: Build crate
-        if: matrix.os != 'rocky8'
         run: cargo build --workspace
 
       - name: Test crate
-        if: matrix.os != 'rocky8'
+        run: |
+          cargo clean
+          cargo test --workspace
+
+  build-and-test-rocky8:
+    runs-on: ubuntu-latest
+    container: rockylinux:8
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up dependencies
+        run: |
+          yum install -y gcc openssl-devel libffi-devel make curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+
+      - name: Build crate
+        run: cargo build --workspace
+
+      - name: Test crate
         run: |
           cargo clean
           cargo test --workspace
