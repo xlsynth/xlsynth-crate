@@ -35,7 +35,7 @@ jobs:
           cargo clean
           cargo test --workspace
 
-  build-and-test-rocky8:
+  build-rocky8:
     runs-on: ubuntu-latest
     container: rockylinux:8
 
@@ -47,12 +47,16 @@ jobs:
         run: |
           yum install -y gcc openssl-devel libffi-devel make curl
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env
 
       - name: Build crate
-        run: cargo build --workspace
+        run: |
+          source $HOME/.cargo/env
+          cargo build --workspace
 
       - name: Test crate
         run: |
+          source $HOME/.cargo/env
           cargo clean
           cargo test --workspace
