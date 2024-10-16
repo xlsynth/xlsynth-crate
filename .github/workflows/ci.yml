@@ -28,7 +28,7 @@ jobs:
           override: true
 
       - name: Build crate
-        run: cargo build --workspace
+        run: cargo build --workspace -vv
 
       - name: Test crate
         run: |
@@ -53,7 +53,7 @@ jobs:
       - name: Build crate
         run: |
           source $HOME/.cargo/env
-          cargo build --workspace
+          cargo build --workspace -vv
 
       - name: Test crate
         run: |
