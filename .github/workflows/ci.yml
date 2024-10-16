@@ -28,9 +28,35 @@ jobs:
           override: true
 
       - name: Build crate
-        run: cargo build --workspace
+        run: cargo build --workspace -vv
 
       - name: Test crate
         run: |
+          cargo clean
+          cargo test --workspace
+
+  build-rocky8:
+    runs-on: ubuntu-latest
+    container: rockylinux:8
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up dependencies
+        run: |
+          yum install -y gcc openssl-devel libffi-devel make curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "source $HOME/.cargo/env" >> $HOME/.bashrc
+          source $HOME/.cargo/env
+
+      - name: Build crate
+        run: |
+          source $HOME/.cargo/env
+          cargo build --workspace -vv
+
+      - name: Test crate
+        run: |
+          source $HOME/.cargo/env
           cargo clean
           cargo test --workspace
