@@ -79,7 +79,7 @@ impl ImportData {
 /// implementation
 struct TypecheckedModulePtr {
     parent: Rc<ImportDataPtr>,
-    pub(crate) ptr: *mut sys::CDslxTypecheckedModule,
+    ptr: *mut sys::CDslxTypecheckedModule,
 }
 
 impl Drop for TypecheckedModulePtr {
@@ -112,7 +112,7 @@ impl TypecheckedModule {
 
 pub struct Module {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxModule,
+    ptr: *mut sys::CDslxModule,
 }
 
 impl Module {
@@ -158,7 +158,7 @@ impl Module {
 
 pub struct EnumMember {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxEnumMember,
+    ptr: *mut sys::CDslxEnumMember,
 }
 
 impl EnumMember {
@@ -179,14 +179,14 @@ impl EnumMember {
 
 pub struct Expr {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxExpr,
+    ptr: *mut sys::CDslxExpr,
 }
 
 // -- EnumDef
 
 pub struct EnumDef {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxEnumDef,
+    ptr: *mut sys::CDslxEnumDef,
 }
 
 impl EnumDef {
@@ -213,14 +213,14 @@ impl EnumDef {
 
 pub struct TypeAnnotation {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxTypeAnnotation,
+    ptr: *mut sys::CDslxTypeAnnotation,
 }
 
 // -- StructDef
 
 pub struct StructMember {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxStructMember,
+    ptr: *mut sys::CDslxStructMember,
 }
 
 impl StructMember {
@@ -241,7 +241,7 @@ impl StructMember {
 
 pub struct StructDef {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxStructDef,
+    ptr: *mut sys::CDslxStructDef,
 }
 
 impl StructDef {
@@ -272,7 +272,7 @@ impl StructDef {
 }
 
 struct InterpValuePtr {
-    pub(crate) ptr: *mut sys::CDslxInterpValue,
+    ptr: *mut sys::CDslxInterpValue,
 }
 
 impl Drop for InterpValuePtr {
@@ -307,7 +307,7 @@ impl InterpValue {
 
 pub struct TypeInfo {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxTypeInfo,
+    ptr: *mut sys::CDslxTypeInfo,
 }
 
 impl TypeInfo {
@@ -353,7 +353,7 @@ impl TypeInfo {
 
 pub struct Type {
     parent: Rc<TypecheckedModulePtr>,
-    pub(crate) ptr: *mut sys::CDslxType,
+    ptr: *mut sys::CDslxType,
 }
 
 impl Type {
