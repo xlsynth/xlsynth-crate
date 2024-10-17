@@ -299,6 +299,7 @@ impl InterpValue {
             assert!(!result_out.is_null());
             Ok(IrValue { ptr: result_out })
         } else {
+            assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
@@ -329,6 +330,7 @@ impl TypeInfo {
                 ptr: Rc::new(InterpValuePtr { ptr: result_out }),
             })
         } else {
+            assert!(!error_out.is_null());            
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
@@ -367,6 +369,7 @@ impl Type {
             assert!(error_out.is_null());
             Ok(result_out as usize)
         } else {
+            assert!(!error_out.is_null());            
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
@@ -381,6 +384,7 @@ impl Type {
             assert!(error_out.is_null());
             Ok(result_out)
         } else {
+            assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
@@ -418,6 +422,7 @@ pub fn parse_and_typecheck(
             });
         }
 
+        assert!(!error_out.is_null());
         let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
     }
