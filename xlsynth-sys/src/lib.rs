@@ -128,6 +128,11 @@ pub struct CDslxType {
 }
 
 #[repr(C)]
+pub struct CDslxTypeDim {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CDslxExpr {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -183,6 +188,7 @@ extern "C" {
         bits_out: *mut *mut CIrBits,
     ) -> bool;
     pub fn xls_bits_free(bits: *mut CIrBits);
+    pub fn xls_bits_get_bit_count(bits: *const CIrBits) -> i64;
 
     pub fn xls_package_free(package: *mut CIrPackage);
     pub fn xls_c_str_free(c_str: *mut std::os::raw::c_char);
@@ -470,6 +476,12 @@ extern "C" {
         result_out: *mut *mut CIrValue,
     ) -> bool;
 
+    pub fn xls_dslx_type_to_string(
+        type_: *const CDslxType,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;    
+
     pub fn xls_dslx_type_info_get_const_expr(
         type_info: *mut CDslxTypeInfo,
         expr: *mut CDslxExpr,
@@ -488,6 +500,27 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut bool,
     ) -> bool;
+
+    pub fn xls_dslx_type_is_bits_like(
+        type_: *const CDslxType,
+        is_signed: *mut *mut CDslxTypeDim,
+        size: *mut *mut CDslxTypeDim,
+    ) -> bool;
+
+    pub fn xls_dslx_type_dim_is_parametric(
+        dim: *const CDslxTypeDim,
+    ) -> bool;
+    pub fn xls_dslx_type_dim_get_as_bool(
+        dim: *const CDslxTypeDim,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut bool,
+    ) -> bool;
+    pub fn xls_dslx_type_dim_get_as_int64(
+        dim: *const CDslxTypeDim,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut i64,
+    ) -> bool;
+    pub fn xls_dslx_type_dim_free(dim: *mut CDslxTypeDim);
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
