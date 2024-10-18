@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_sys::{CIrBits, CIrValue, xls_bits_get_bit_count};
+use xlsynth_sys::{xls_bits_get_bit_count, CIrBits, CIrValue};
 
 use crate::{
     xls_format_preference_from_string, xls_parse_typed_value, xls_value_eq, xls_value_free,
@@ -172,7 +172,8 @@ impl Drop for IrValue {
     }
 }
 
-/// Typed wrapper around an `IrBits` value that has a particular compile-time-known bit width and whose type notes the value
+/// Typed wrapper around an `IrBits` value that has a particular
+/// compile-time-known bit width and whose type notes the value
 /// should be treated as unsigned.
 pub struct IrUBits<const BIT_COUNT: usize> {
     wrapped: IrBits,
@@ -193,7 +194,8 @@ impl<const BIT_COUNT: usize> IrUBits<BIT_COUNT> {
     }
 }
 
-/// Typed wrapper around an `IrBits` value that has a particular compile-time-known bit width and whose type notes the value
+/// Typed wrapper around an `IrBits` value that has a particular
+/// compile-time-known bit width and whose type notes the value
 /// should be treated as signed.
 pub struct IrSBits<const BIT_COUNT: usize> {
     wrapped: IrBits,

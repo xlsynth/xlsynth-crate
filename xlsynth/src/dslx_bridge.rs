@@ -78,8 +78,12 @@ fn convert_struct_to_rust(
         let member_name = member.get_name();
         let member_type = type_info.get_type_for_struct_member(&member);
         if let Some((is_signed, bit_count)) = member_type.is_bits_like() {
-            lines.push(format!("    pub {}: Ir{}Bits<{}>,",
-                member_name, if is_signed { "S" } else { "U" }, bit_count));
+            lines.push(format!(
+                "    pub {}: Ir{}Bits<{}>,",
+                member_name,
+                if is_signed { "S" } else { "U" },
+                bit_count
+            ));
         } else {
             todo!("convert struct member type to Rust type: {}", member_type);
         }

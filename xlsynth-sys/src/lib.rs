@@ -480,7 +480,7 @@ extern "C" {
         type_: *const CDslxType,
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut std::os::raw::c_char,
-    ) -> bool;    
+    ) -> bool;
 
     pub fn xls_dslx_type_info_get_const_expr(
         type_info: *mut CDslxTypeInfo,
@@ -507,9 +507,7 @@ extern "C" {
         size: *mut *mut CDslxTypeDim,
     ) -> bool;
 
-    pub fn xls_dslx_type_dim_is_parametric(
-        dim: *const CDslxTypeDim,
-    ) -> bool;
+    pub fn xls_dslx_type_dim_is_parametric(dim: *const CDslxTypeDim) -> bool;
     pub fn xls_dslx_type_dim_get_as_bool(
         dim: *const CDslxTypeDim,
         error_out: *mut *mut std::os::raw::c_char,

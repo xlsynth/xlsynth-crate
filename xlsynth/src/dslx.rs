@@ -330,7 +330,7 @@ impl TypeInfo {
                 ptr: Rc::new(InterpValuePtr { ptr: result_out }),
             })
         } else {
-            assert!(!error_out.is_null());            
+            assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
@@ -366,7 +366,8 @@ impl TypeInfo {
     }
 }
 
-/// RAII-style wrapper around a `CDslxTypeDim` pointer that calls `free` on drop.
+/// RAII-style wrapper around a `CDslxTypeDim` pointer that calls `free` on
+/// drop.
 struct TypeDimWrapper {
     wrapped: *mut sys::CDslxTypeDim,
 }
@@ -434,9 +435,8 @@ impl Type {
     pub fn to_string(&self) -> Result<String, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();
-        let success = unsafe {
-            sys::xls_dslx_type_to_string(self.ptr, &mut error_out, &mut result_out)
-        };
+        let success =
+            unsafe { sys::xls_dslx_type_to_string(self.ptr, &mut error_out, &mut result_out) };
         if success {
             assert!(error_out.is_null());
             assert!(!result_out.is_null());
@@ -459,7 +459,7 @@ impl Type {
             assert!(error_out.is_null());
             Ok(result_out as usize)
         } else {
-            assert!(!error_out.is_null());            
+            assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
@@ -480,19 +480,21 @@ impl Type {
         }
     }
 
-    /// Returns `Some((is_signed, bit_count))` if the type is bits-like, otherwise returns `None`.
+    /// Returns `Some((is_signed, bit_count))` if the type is bits-like,
+    /// otherwise returns `None`.
     pub fn is_bits_like(&self) -> Option<(bool, usize)> {
         let mut is_signed = std::ptr::null_mut();
         let mut size = std::ptr::null_mut();
-        let success = unsafe {
-            sys::xls_dslx_type_is_bits_like(self.ptr, &mut is_signed, &mut size)
-        };
+        let success =
+            unsafe { sys::xls_dslx_type_is_bits_like(self.ptr, &mut is_signed, &mut size) };
 
         let is_signed_wrapper = TypeDimWrapper { wrapped: is_signed };
         let size_wrapper = TypeDimWrapper { wrapped: size };
 
         if success {
-            let is_signed = is_signed_wrapper.get_as_bool().expect("get_as_bool success");
+            let is_signed = is_signed_wrapper
+                .get_as_bool()
+                .expect("get_as_bool success");
             let size = size_wrapper.get_as_i64().expect("get_as_i64 success");
             Some((is_signed, size as usize))
         } else {
@@ -609,7 +611,9 @@ mod tests {
             assert_eq!(concrete_type_a.to_string().unwrap(), "uN[32]");
             assert_eq!(concrete_type_a.get_total_bit_count().unwrap(), 32);
 
-            let bits_like = concrete_type_a.is_bits_like().expect("u32 should be bits-like");
+            let bits_like = concrete_type_a
+                .is_bits_like()
+                .expect("u32 should be bits-like");
             assert_eq!(bits_like, (false, 32));
         }
 
@@ -622,7 +626,9 @@ mod tests {
             assert_eq!(concrete_type_b.to_string().unwrap(), "uN[16]");
             assert_eq!(concrete_type_b.get_total_bit_count().unwrap(), 16);
 
-            let bits_like = concrete_type_b.is_bits_like().expect("u16 should be bits-like");
+            let bits_like = concrete_type_b
+                .is_bits_like()
+                .expect("u16 should be bits-like");
             assert_eq!(bits_like, (false, 16));
         }
     }
