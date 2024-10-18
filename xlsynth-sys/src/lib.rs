@@ -403,6 +403,10 @@ extern "C" {
         type_info: *mut CDslxTypeInfo,
         enum_def: *mut CDslxEnumDef,
     ) -> *mut CDslxType;
+    pub fn xls_dslx_type_info_get_type_struct_member(
+        type_info: *mut CDslxTypeInfo,
+        member: *mut CDslxStructMember,
+    ) -> *mut CDslxType;
     pub fn xls_dslx_type_info_get_type_type_alias(
         type_info: *mut CDslxTypeInfo,
         enum_def: *mut CDslxTypeAlias,

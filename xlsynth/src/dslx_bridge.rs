@@ -66,6 +66,23 @@ fn convert_enum_to_rust(
     Ok(lines.join("\n"))
 }
 
+fn convert_struct_to_rust(
+    struct_def: &dslx::StructDef,
+    type_info: &dslx::TypeInfo,
+) -> Result<String, XlsynthError> {
+    let mut lines: Vec<String> = vec![];
+    let struct_name = struct_def.get_identifier();
+    lines.push(format!("pub struct {} {{", struct_name));
+    for i in 0..struct_def.get_member_count() {
+        let member = struct_def.get_member(i);
+        let member_name = member.get_name();
+        let member_type = type_info.get_type_for_struct_member(&member);
+        todo!("convert struct member type to Rust type");
+    }
+    lines.push("}\n".to_string());
+    Ok(lines.join("\n"))
+}
+
 pub fn convert_leaf_module(
     import_data: &mut dslx::ImportData,
     dslx_program: &str,
@@ -93,7 +110,8 @@ pub fn convert_leaf_module(
                 chunks.push(convert_enum_to_rust(&enum_def, &type_info)?)
             }
             dslx::TypeDefinitionKind::StructDef => {
-                todo!("convert struct definition from DSLX to Rust")
+                let struct_def = module.get_type_definition_as_struct_def(i).unwrap();
+                chunks.push(convert_struct_to_rust(&struct_def, &type_info)?)
             }
             dslx::TypeDefinitionKind::TypeAlias => todo!("convert type alias from DSLX to Rust"),
             dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),

@@ -256,12 +256,9 @@ impl StructDef {
         unsafe { sys::xls_dslx_struct_def_is_parametric(self.ptr) }
     }
 
-    // TODO(cdleary): 2024-10-06 This implementation is missing from the library.
-    /*
     pub fn get_member_count(&self) -> usize {
         unsafe { sys::xls_dslx_struct_def_get_member_count(self.ptr) as usize }
     }
-    */
 
     pub fn get_member(&self, idx: usize) -> StructMember {
         StructMember {
@@ -349,6 +346,15 @@ impl TypeInfo {
         Type {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_type_info_get_type_enum_def(self.ptr, enum_def.ptr) },
+        }
+    }
+
+    pub fn get_type_for_struct_member(&self, struct_member: &StructMember) -> Type {
+        Type {
+            parent: self.parent.clone(),
+            ptr: unsafe {
+                sys::xls_dslx_type_info_get_type_struct_member(self.ptr, struct_member.ptr)
+            },
         }
     }
 }
@@ -488,8 +494,7 @@ mod tests {
             .expect("struct definition");
         assert_eq!(struct_def.get_identifier(), "MyStruct");
 
-        // TODO(cdleary): 2024-10-06 This implementation is missing from the library.
-        // assert_eq!(struct_def.get_member_count(), 2);
+        assert_eq!(struct_def.get_member_count(), 2);
 
         let member_a = struct_def.get_member(0);
         assert_eq!(member_a.get_name(), "a");
