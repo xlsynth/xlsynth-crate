@@ -43,10 +43,13 @@ impl RustBridgeBuilder {
         self.lines.join("\n")
     }
 
-    fn convert_type(&self, ty: &dslx::Type) -> Result<String, XlsynthError> {
+    fn convert_type(ty: &dslx::Type) -> Result<String, XlsynthError> {
         if let Some((is_signed, bit_count)) = ty.is_bits_like() {
             let signed_str = if is_signed { "S" } else { "U" };
             Ok(format!("Ir{}Bits<{}>", signed_str, bit_count))
+        } else if ty.is_enum() {
+            let enum_def = ty.get_enum_def().unwrap();
+            Ok(enum_def.get_identifier().to_string())
         } else {
             Err(XlsynthError(format!(
                 "Unsupported type for conversion from DSLX to Rust: {:?}",
@@ -112,7 +115,7 @@ impl BridgeBuilder for RustBridgeBuilder {
         }
         self.lines.push("        }".to_string());
         self.lines.push("    }".to_string());
-        self.lines.push("}".to_string());
+        self.lines.push("}\n".to_string());
         Ok(())
     }
 
@@ -123,7 +126,7 @@ impl BridgeBuilder for RustBridgeBuilder {
     ) -> Result<(), XlsynthError> {
         self.lines.push(format!("pub struct {} {{", dslx_name));
         for (name, ty) in members.iter() {
-            let rust_ty = self.convert_type(ty)?;
+            let rust_ty = Self::convert_type(ty)?;
             self.lines.push(format!("    pub {}: {},", name, rust_ty));
         }
         self.lines.push("}\n".to_string());
@@ -271,5 +274,46 @@ pub struct MyStruct {
 
 } // mod my_module"#
         );
+    }
+
+    #[test]
+    fn test_convert_leaf_module_struct_with_enum_field() {
+        let dslx = r#"
+        enum MyEnum : u2 { A = 0, B = 3 }
+        struct MyStruct {
+            a: MyEnum,
+            b: s16,
+        }
+        "#;
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = RustBridgeBuilder::new();
+        let rust = convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            r#"mod my_module {
+#![allow(dead_code)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+pub enum MyEnum {
+    A = 0,
+    B = 3,
+}
+
+impl Into<IrValue> for MyEnum {
+    fn into(self) -> IrValue {
+        match self {
+            MyEnum::A => IrValue::make_bits(2, 0).unwrap(),
+            MyEnum::B => IrValue::make_bits(2, 3).unwrap(),
+        }
+    }
+}
+
+pub struct MyStruct {
+    pub a: MyEnum,
+    pub b: IrSBits<16>,
+}
+
+} // mod my_module"#);
     }
 }

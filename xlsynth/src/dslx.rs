@@ -501,6 +501,22 @@ impl Type {
             None
         }
     }
+
+    pub fn is_enum(&self) -> bool {
+        unsafe { sys::xls_dslx_type_is_enum(self.ptr) }
+    }
+
+    pub fn get_enum_def(&self) -> Result<EnumDef, XlsynthError> {
+        if !self.is_enum() {
+            return Err(XlsynthError("Type is not an enum".to_string()));
+        }
+        let ptr = unsafe { sys::xls_dslx_type_get_enum_def(self.ptr) };
+        // Wrap up the pointer as an EnumDef structure.
+        Ok(EnumDef {
+            parent: self.parent.clone(),
+            ptr,
+        })
+    }
 }
 
 pub fn parse_and_typecheck(
