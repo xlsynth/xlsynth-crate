@@ -5,7 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.99";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.98";
 
 struct DsoInfo {
     extension: &'static str,
@@ -166,14 +166,17 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
         .arg("--fail")
         .arg("-o")
         .arg(&tarball_path)
-        .arg(tarball_url)
+        .arg(&tarball_url)
         .status()
         .expect("Failed to download DSO");
 
     if !status.success() {
-        // Remove the output file path.
-        std::fs::remove_file(&tarball_path).expect("Failed to remove file");
-        panic!("Download failed with status: {:?}", status);
+        // Remove the output file path if it got created -- if not it's ok.
+        let _ = std::fs::remove_file(&tarball_path);
+        panic!(
+            "Download of {tarball_url:?} failed with status: {:?}",
+            status
+        );
     }
     let tar_gz = std::fs::File::open(tarball_path).unwrap();
     let tar = flate2::read::GzDecoder::new(tar_gz);

@@ -4,6 +4,7 @@ pub mod dslx;
 pub mod dslx_bridge;
 pub mod ir_package;
 pub mod ir_value;
+pub mod rust_bridge_builder;
 pub mod vast;
 pub mod xlsynth_error;
 

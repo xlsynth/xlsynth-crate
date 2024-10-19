@@ -2,6 +2,7 @@
 
 use xlsynth::dslx;
 use xlsynth::dslx_bridge;
+use xlsynth::rust_bridge_builder;
 
 fn x_path_to_rs_filename(path: &std::path::Path) -> String {
     let mut out = path.file_stem().unwrap().to_str().unwrap().to_string();
@@ -16,7 +17,7 @@ fn x_path_to_bridge(relpath: &str) -> std::path::PathBuf {
         std::fs::read_to_string(&path).expect(&format!("DSLX file should be readable: {path:?}"));
 
     // Generate the bridge code.
-    let mut builder = dslx_bridge::RustBridgeBuilder::new();
+    let mut builder = rust_bridge_builder::RustBridgeBuilder::new();
     dslx_bridge::convert_leaf_module(&mut import_data, &dslx, &path, &mut builder)
         .expect("expect bridge building success");
     let sample_with_enum_def_rs = builder.build();
