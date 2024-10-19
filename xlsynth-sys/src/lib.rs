@@ -507,9 +507,7 @@ extern "C" {
         size: *mut *mut CDslxTypeDim,
     ) -> bool;
 
-    pub fn xls_dslx_type_is_enum(
-        type_: *const CDslxType
-    ) -> bool;
+    pub fn xls_dslx_type_is_enum(type_: *const CDslxType) -> bool;
 
     pub fn xls_dslx_type_dim_is_parametric(dim: *const CDslxTypeDim) -> bool;
     pub fn xls_dslx_type_dim_get_as_bool(

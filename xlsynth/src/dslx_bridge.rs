@@ -314,6 +314,7 @@ pub struct MyStruct {
     pub b: IrSBits<16>,
 }
 
-} // mod my_module"#);
+} // mod my_module"#
+        );
     }
 }
