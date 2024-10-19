@@ -169,7 +169,8 @@ mod tests {
             r#"typedef enum logic [1:0] {
     READ = 2'd0,
     WRITE = 2'd1
-} op_type_e;"#
+} op_type_e;
+"#
         );
     }
 
@@ -188,9 +189,10 @@ mod tests {
         assert_eq!(
             builder.build(),
             r#"typedef struct packed {
-    logic [7:0] byte_data,
-    logic [15:0] word_data
-} my_struct_t;"#
+    logic [7:0] byte_data;
+    logic [15:0] word_data;
+} my_struct_t;
+"#
         );
     }
 }

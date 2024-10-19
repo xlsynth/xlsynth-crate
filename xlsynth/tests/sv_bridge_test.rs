@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use pretty_assertions::assert_eq;
 use xlsynth::{dslx, dslx_bridge::convert_leaf_module, sv_bridge_builder::SvBridgeBuilder};
 

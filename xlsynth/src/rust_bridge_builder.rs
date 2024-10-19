@@ -50,6 +50,7 @@ impl BridgeBuilder for RustBridgeBuilder {
             format!("mod {module_name} {{"),
             // We allow e.g. enum variants to be unused in consumer code.
             "#![allow(dead_code)]".to_string(),
+            "#![allow(unused_imports)]".to_string(),
             "use xlsynth::{IrValue, IrUBits, IrSBits};\n".to_string(),
         ];
         Ok(())
@@ -141,6 +142,7 @@ mod tests {
             builder.build(),
             r#"mod my_module {
 #![allow(dead_code)]
+#![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
 
 pub enum MyEnum {
@@ -177,6 +179,7 @@ impl Into<IrValue> for MyEnum {
             builder.build(),
             r#"mod my_module {
 #![allow(dead_code)]
+#![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
 
 pub struct MyStruct {
@@ -205,6 +208,7 @@ pub struct MyStruct {
             builder.build(),
             r#"mod my_module {
 #![allow(dead_code)]
+#![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
 
 pub enum MyEnum {
@@ -251,6 +255,7 @@ pub struct MyStruct {
             builder.build(),
             r#"mod my_module {
 #![allow(dead_code)]
+#![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
 
 pub struct MyInnerStruct {
@@ -285,6 +290,7 @@ pub struct MyStruct {
             builder.build(),
             r#"mod my_module {
 #![allow(dead_code)]
+#![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
 
 pub struct MyStruct {
