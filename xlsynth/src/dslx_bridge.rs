@@ -14,10 +14,20 @@ pub trait BridgeBuilder {
 
     fn end_module(&mut self, module_name: &str) -> Result<(), XlsynthError>;
 
-    /// `is_signed` indicates whether the bits type underlying the enum is signed. 
-    fn add_enum_def(&mut self, dslx_name: &str, is_signed: bool, members: &[(String, IrValue)]) -> Result<(), XlsynthError>;
+    /// `is_signed` indicates whether the bits type underlying the enum is
+    /// signed.
+    fn add_enum_def(
+        &mut self,
+        dslx_name: &str,
+        is_signed: bool,
+        members: &[(String, IrValue)],
+    ) -> Result<(), XlsynthError>;
 
-    fn add_struct_def(&mut self, dslx_name: &str, members: &[(String, dslx::Type)]) -> Result<(), XlsynthError>;
+    fn add_struct_def(
+        &mut self,
+        dslx_name: &str,
+        members: &[(String, dslx::Type)],
+    ) -> Result<(), XlsynthError>;
 }
 
 pub struct RustBridgeBuilder {
@@ -38,7 +48,10 @@ impl RustBridgeBuilder {
             let signed_str = if is_signed { "S" } else { "U" };
             Ok(format!("Ir{}Bits<{}>", signed_str, bit_count))
         } else {
-            Err(XlsynthError(format!("Unsupported type for conversion from DSLX to Rust: {:?}", ty.to_string()?)))
+            Err(XlsynthError(format!(
+                "Unsupported type for conversion from DSLX to Rust: {:?}",
+                ty.to_string()?
+            )))
         }
     }
 }
@@ -59,7 +72,12 @@ impl BridgeBuilder for RustBridgeBuilder {
         Ok(())
     }
 
-    fn add_enum_def(&mut self, dslx_name: &str, is_signed: bool, members: &[(String, IrValue)]) -> Result<(), XlsynthError> {
+    fn add_enum_def(
+        &mut self,
+        dslx_name: &str,
+        is_signed: bool,
+        members: &[(String, IrValue)],
+    ) -> Result<(), XlsynthError> {
         let value_to_string = |value: &IrValue| -> Result<String, XlsynthError> {
             if is_signed {
                 value.to_i64().map(|v| v.to_string())
@@ -70,13 +88,17 @@ impl BridgeBuilder for RustBridgeBuilder {
 
         self.lines.push(format!("pub enum {} {{", dslx_name));
         for (name, value) in members.iter() {
-            self.lines.push(format!("    {} = {},", name, value_to_string(value)?));
+            self.lines
+                .push(format!("    {} = {},", name, value_to_string(value)?));
         }
         self.lines.push("}\n".to_string());
 
-        // Now we emit the converter so we can easily pass our generated Rust enum to IR interpreter functions.
-        self.lines.push(format!("impl Into<IrValue> for {} {{", dslx_name));
-        self.lines.push("    fn into(self) -> IrValue {".to_string());
+        // Now we emit the converter so we can easily pass our generated Rust enum to IR
+        // interpreter functions.
+        self.lines
+            .push(format!("impl Into<IrValue> for {} {{", dslx_name));
+        self.lines
+            .push("    fn into(self) -> IrValue {".to_string());
         self.lines.push("        match self {".to_string());
         for (member_name, value) in members.iter() {
             let value_str = value_to_string(value)?;
@@ -94,7 +116,11 @@ impl BridgeBuilder for RustBridgeBuilder {
         Ok(())
     }
 
-    fn add_struct_def(&mut self, dslx_name: &str, members: &[(String, dslx::Type)]) -> Result<(), XlsynthError> {
+    fn add_struct_def(
+        &mut self,
+        dslx_name: &str,
+        members: &[(String, dslx::Type)],
+    ) -> Result<(), XlsynthError> {
         self.lines.push(format!("pub struct {} {{", dslx_name));
         for (name, ty) in members.iter() {
             let rust_ty = self.convert_type(ty)?;
@@ -152,7 +178,7 @@ pub fn convert_leaf_module(
     import_data: &mut dslx::ImportData,
     dslx_program: &str,
     path: &std::path::Path,
-    builder: &mut dyn BridgeBuilder
+    builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
     // If the path is `path/to/foo.x` then the module name is `foo`.
     let module_name = path.file_stem().unwrap().to_str().unwrap();
