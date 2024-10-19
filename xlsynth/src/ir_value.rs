@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_sys::{CIrBits, CIrValue};
+use xlsynth_sys::{xls_bits_get_bit_count, CIrBits, CIrValue};
 
 use crate::{
     xls_format_preference_from_string, xls_parse_typed_value, xls_value_eq, xls_value_free,
@@ -11,6 +11,14 @@ use crate::{
 pub struct IrBits {
     #[allow(dead_code)]
     pub(crate) ptr: *mut CIrBits,
+}
+
+impl IrBits {
+    pub fn get_bit_count(&self) -> usize {
+        let bit_count = unsafe { xls_bits_get_bit_count(self.ptr) };
+        assert!(bit_count >= 0);
+        bit_count as usize
+    }
 }
 
 pub enum IrFormatPreference {
@@ -161,6 +169,50 @@ impl std::fmt::Debug for IrValue {
 impl Drop for IrValue {
     fn drop(&mut self) {
         xls_value_free(self.ptr).expect("dealloc success");
+    }
+}
+
+/// Typed wrapper around an `IrBits` value that has a particular
+/// compile-time-known bit width and whose type notes the value
+/// should be treated as unsigned.
+pub struct IrUBits<const BIT_COUNT: usize> {
+    wrapped: IrBits,
+}
+
+impl<const BIT_COUNT: usize> IrUBits<BIT_COUNT> {
+    const SIGNEDNESS: bool = false;
+
+    pub fn new(wrapped: IrBits) -> Result<Self, XlsynthError> {
+        if wrapped.get_bit_count() != BIT_COUNT {
+            return Err(XlsynthError(format!(
+                "Expected {} bits, got {}",
+                BIT_COUNT,
+                wrapped.get_bit_count()
+            )));
+        }
+        Ok(Self { wrapped })
+    }
+}
+
+/// Typed wrapper around an `IrBits` value that has a particular
+/// compile-time-known bit width and whose type notes the value
+/// should be treated as signed.
+pub struct IrSBits<const BIT_COUNT: usize> {
+    wrapped: IrBits,
+}
+
+impl<const BIT_COUNT: usize> IrSBits<BIT_COUNT> {
+    const SIGNEDNESS: bool = true;
+
+    pub fn new(wrapped: IrBits) -> Result<Self, XlsynthError> {
+        if wrapped.get_bit_count() != BIT_COUNT {
+            return Err(XlsynthError(format!(
+                "Expected {} bits, got {}",
+                BIT_COUNT,
+                wrapped.get_bit_count()
+            )));
+        }
+        Ok(Self { wrapped })
     }
 }
 

@@ -256,18 +256,18 @@ impl StructDef {
         unsafe { sys::xls_dslx_struct_def_is_parametric(self.ptr) }
     }
 
-    // TODO(cdleary): 2024-10-06 This implementation is missing from the library.
-    /*
     pub fn get_member_count(&self) -> usize {
         unsafe { sys::xls_dslx_struct_def_get_member_count(self.ptr) as usize }
     }
-    */
 
     pub fn get_member(&self, idx: usize) -> StructMember {
-        StructMember {
+        assert!(idx < self.get_member_count(), "member index out of bounds");
+        let result = StructMember {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_struct_def_get_member(self.ptr, idx as i64) },
-        }
+        };
+        assert!(!result.ptr.is_null());
+        result
     }
 }
 
@@ -330,7 +330,7 @@ impl TypeInfo {
                 ptr: Rc::new(InterpValuePtr { ptr: result_out }),
             })
         } else {
-            assert!(!error_out.is_null());            
+            assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
@@ -351,6 +351,73 @@ impl TypeInfo {
             ptr: unsafe { sys::xls_dslx_type_info_get_type_enum_def(self.ptr, enum_def.ptr) },
         }
     }
+
+    pub fn get_type_for_struct_member(&self, struct_member: &StructMember) -> Type {
+        assert!(!self.ptr.is_null());
+        assert!(!struct_member.ptr.is_null());
+        let result = Type {
+            parent: self.parent.clone(),
+            ptr: unsafe {
+                sys::xls_dslx_type_info_get_type_struct_member(self.ptr, struct_member.ptr)
+            },
+        };
+        assert!(!result.ptr.is_null());
+        result
+    }
+}
+
+/// RAII-style wrapper around a `CDslxTypeDim` pointer that calls `free` on
+/// drop.
+struct TypeDimWrapper {
+    wrapped: *mut sys::CDslxTypeDim,
+}
+
+impl Drop for TypeDimWrapper {
+    fn drop(&mut self) {
+        unsafe {
+            sys::xls_dslx_type_dim_free(self.wrapped);
+        }
+    }
+}
+
+impl TypeDimWrapper {
+    fn is_parametric(&self) -> bool {
+        unsafe { sys::xls_dslx_type_dim_is_parametric(self.wrapped) }
+    }
+
+    fn get_as_bool(&self) -> Result<bool, XlsynthError> {
+        assert!(!self.wrapped.is_null());
+        let mut error_out = std::ptr::null_mut();
+        let mut result_out = false;
+        let success = unsafe {
+            sys::xls_dslx_type_dim_get_as_bool(self.wrapped, &mut error_out, &mut result_out)
+        };
+        if success {
+            assert!(error_out.is_null());
+            Ok(result_out)
+        } else {
+            assert!(!error_out.is_null());
+            let error_out_str: String = unsafe { c_str_to_rust(error_out) };
+            Err(XlsynthError(error_out_str))
+        }
+    }
+
+    fn get_as_i64(&self) -> Result<i64, XlsynthError> {
+        assert!(!self.wrapped.is_null());
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut result_out: i64 = 0;
+        let success = unsafe {
+            sys::xls_dslx_type_dim_get_as_int64(self.wrapped, &mut error_out, &mut result_out)
+        };
+        if success {
+            assert!(error_out.is_null());
+            Ok(result_out)
+        } else {
+            assert!(!error_out.is_null());
+            let error_out_str: String = unsafe { c_str_to_rust(error_out) };
+            Err(XlsynthError(error_out_str))
+        }
+    }
 }
 
 pub struct Type {
@@ -358,7 +425,30 @@ pub struct Type {
     ptr: *mut sys::CDslxType,
 }
 
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_string().unwrap())
+    }
+}
+
 impl Type {
+    pub fn to_string(&self) -> Result<String, XlsynthError> {
+        let mut error_out = std::ptr::null_mut();
+        let mut result_out = std::ptr::null_mut();
+        let success =
+            unsafe { sys::xls_dslx_type_to_string(self.ptr, &mut error_out, &mut result_out) };
+        if success {
+            assert!(error_out.is_null());
+            assert!(!result_out.is_null());
+            let result_out_str: String = unsafe { c_str_to_rust(result_out) };
+            Ok(result_out_str)
+        } else {
+            assert!(!error_out.is_null());
+            let error_out_str: String = unsafe { c_str_to_rust(error_out) };
+            Err(XlsynthError(error_out_str))
+        }
+    }
+
     pub fn get_total_bit_count(&self) -> Result<usize, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = 0;
@@ -369,7 +459,7 @@ impl Type {
             assert!(error_out.is_null());
             Ok(result_out as usize)
         } else {
-            assert!(!error_out.is_null());            
+            assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
@@ -387,6 +477,28 @@ impl Type {
             assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
+        }
+    }
+
+    /// Returns `Some((is_signed, bit_count))` if the type is bits-like,
+    /// otherwise returns `None`.
+    pub fn is_bits_like(&self) -> Option<(bool, usize)> {
+        let mut is_signed = std::ptr::null_mut();
+        let mut size = std::ptr::null_mut();
+        let success =
+            unsafe { sys::xls_dslx_type_is_bits_like(self.ptr, &mut is_signed, &mut size) };
+
+        let is_signed_wrapper = TypeDimWrapper { wrapped: is_signed };
+        let size_wrapper = TypeDimWrapper { wrapped: size };
+
+        if success {
+            let is_signed = is_signed_wrapper
+                .get_as_bool()
+                .expect("get_as_bool success");
+            let size = size_wrapper.get_as_i64().expect("get_as_i64 success");
+            Some((is_signed, size as usize))
+        } else {
+            None
         }
     }
 }
@@ -488,19 +600,36 @@ mod tests {
             .expect("struct definition");
         assert_eq!(struct_def.get_identifier(), "MyStruct");
 
-        // TODO(cdleary): 2024-10-06 This implementation is missing from the library.
-        // assert_eq!(struct_def.get_member_count(), 2);
+        assert_eq!(struct_def.get_member_count(), 2);
 
         let member_a = struct_def.get_member(0);
         assert_eq!(member_a.get_name(), "a");
         let type_a = member_a.get_type();
-        let concrete_type_a = type_info.get_type_for_type_annotation(type_a);
-        assert_eq!(concrete_type_a.get_total_bit_count().unwrap(), 32);
+        // Inspect the inferred type information for the type AST node.
+        {
+            let concrete_type_a = type_info.get_type_for_type_annotation(type_a);
+            assert_eq!(concrete_type_a.to_string().unwrap(), "uN[32]");
+            assert_eq!(concrete_type_a.get_total_bit_count().unwrap(), 32);
+
+            let bits_like = concrete_type_a
+                .is_bits_like()
+                .expect("u32 should be bits-like");
+            assert_eq!(bits_like, (false, 32));
+        }
 
         let member_b = struct_def.get_member(1);
         assert_eq!(member_b.get_name(), "b");
         let type_b = member_b.get_type();
-        let concrete_type_b = type_info.get_type_for_type_annotation(type_b);
-        assert_eq!(concrete_type_b.get_total_bit_count().unwrap(), 16);
+        // Inspect the inferred type information for the type AST node.
+        {
+            let concrete_type_b = type_info.get_type_for_type_annotation(type_b);
+            assert_eq!(concrete_type_b.to_string().unwrap(), "uN[16]");
+            assert_eq!(concrete_type_b.get_total_bit_count().unwrap(), 16);
+
+            let bits_like = concrete_type_b
+                .is_bits_like()
+                .expect("u16 should be bits-like");
+            assert_eq!(bits_like, (false, 16));
+        }
     }
 }

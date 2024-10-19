@@ -66,6 +66,32 @@ fn convert_enum_to_rust(
     Ok(lines.join("\n"))
 }
 
+fn convert_struct_to_rust(
+    struct_def: &dslx::StructDef,
+    type_info: &dslx::TypeInfo,
+) -> Result<String, XlsynthError> {
+    let mut lines: Vec<String> = vec![];
+    let struct_name = struct_def.get_identifier();
+    lines.push(format!("pub struct {} {{", struct_name));
+    for i in 0..struct_def.get_member_count() {
+        let member = struct_def.get_member(i);
+        let member_name = member.get_name();
+        let member_type = type_info.get_type_for_struct_member(&member);
+        if let Some((is_signed, bit_count)) = member_type.is_bits_like() {
+            lines.push(format!(
+                "    pub {}: Ir{}Bits<{}>,",
+                member_name,
+                if is_signed { "S" } else { "U" },
+                bit_count
+            ));
+        } else {
+            todo!("convert struct member type to Rust type: {}", member_type);
+        }
+    }
+    lines.push("}\n".to_string());
+    Ok(lines.join("\n"))
+}
+
 pub fn convert_leaf_module(
     import_data: &mut dslx::ImportData,
     dslx_program: &str,
@@ -83,7 +109,7 @@ pub fn convert_leaf_module(
         format!("mod {module_name} {{"),
         // We allow e.g. enum variants to be unused in consumer code.
         "#![allow(dead_code)]".to_string(),
-        "use xlsynth::IrValue;\n".to_string(),
+        "use xlsynth::{IrValue, IrUBits, IrSBits};\n".to_string(),
     ];
     for i in 0..module.get_type_definition_count() {
         let type_def_kind = module.get_type_definition_kind(i);
@@ -93,7 +119,8 @@ pub fn convert_leaf_module(
                 chunks.push(convert_enum_to_rust(&enum_def, &type_info)?)
             }
             dslx::TypeDefinitionKind::StructDef => {
-                todo!("convert struct definition from DSLX to Rust")
+                let struct_def = module.get_type_definition_as_struct_def(i).unwrap();
+                chunks.push(convert_struct_to_rust(&struct_def, &type_info)?)
             }
             dslx::TypeDefinitionKind::TypeAlias => todo!("convert type alias from DSLX to Rust"),
             dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),
@@ -121,7 +148,7 @@ mod tests {
             rust,
             r#"mod my_module {
 #![allow(dead_code)]
-use xlsynth::IrValue;
+use xlsynth::{IrValue, IrUBits, IrSBits};
 
 pub enum MyEnum {
     A = 0,
@@ -136,6 +163,32 @@ impl Into<IrValue> for MyEnum {
         }
     }
 }
+} // mod my_module"#
+        );
+    }
+
+    #[test]
+    fn test_convert_leaf_module_struct_def_only() {
+        let dslx = r#"
+        struct MyStruct {
+            a: u32,
+            b: s16,
+        }
+        "#;
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let rust = convert_leaf_module(&mut import_data, dslx, &path).unwrap();
+        assert_eq!(
+            rust,
+            r#"mod my_module {
+#![allow(dead_code)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+pub struct MyStruct {
+    pub a: IrUBits<32>,
+    pub b: IrSBits<16>,
+}
+
 } // mod my_module"#
         );
     }
