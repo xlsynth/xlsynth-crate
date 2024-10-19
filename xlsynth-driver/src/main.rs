@@ -14,9 +14,11 @@
 //!
 //! Commands are:
 //!
-//! - dslx2sv: Converts a DSLX file to SystemVerilog.
+//! - dslx2pipeline: Converts a DSLX entry point to a SystemVerilog pipeline.
 //! - dslx2ir: Converts a DSLX file to the XLS IR.
 //! - ir2opt: Converts an XLS IR file to an optimized XLS IR file.
+//! - dslx2sv-types: Convert type definitions in a DSLX file to SystemVerilog
+//!   types.
 //!
 //! Sample usage:
 //!
@@ -26,6 +28,8 @@
 //! $ cargo run -- --tool_path=/home/cdleary/opt/xlsynth/latest/ \
 //!     dslx2pipeline ../sample-usage/src/sample.x add1 \
 //!     --delay_model=asap7 --pipeline_stages=2
+//! $ cargo run -- \
+//!     dslx2sv-types ../tests/structure_zoo.x
 //! ```
 
 use clap::{App, Arg, ArgMatches, SubCommand};
@@ -148,6 +152,17 @@ fn main() {
                         .takes_value(true),
                 ),
         )
+        // dslx2sv-types converts all the definitions in the .x file to SV types
+        .subcommand(
+            SubCommand::with_name("dslx2sv-types")
+                .about("Converts DSLX type definitions to SystemVerilog")
+                .arg(
+                    Arg::with_name("INPUT_FILE")
+                        .help("The input DSLX file")
+                        .required(true)
+                        .index(1),
+                ),
+        )
         // ir2opt subcommand requires a top symbol
         .subcommand(
             SubCommand::with_name("ir2opt")
@@ -195,6 +210,8 @@ fn main() {
         handle_ir2opt(matches, tool_path);
     } else if let Some(matches) = matches.subcommand_matches("ir2pipeline") {
         handle_ir2pipeline(matches, tool_path);
+    } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
+        handle_dslx2sv_types(matches, tool_path);
     } else {
         eprintln!("No valid subcommand provided.");
         process::exit(1);
@@ -268,6 +285,14 @@ fn handle_ir2opt(matches: &ArgMatches, tool_path: Option<&str>) {
     let input_path = std::path::Path::new(input_file);
 
     ir2opt(input_path, top, tool_path);
+}
+
+fn handle_dslx2sv_types(matches: &ArgMatches, _tool_path: Option<&str>) {
+    let input_file = matches.value_of("INPUT_FILE").unwrap();
+    let input_path = std::path::Path::new(input_file);
+
+    // Stub function for DSLX to SV type conversion
+    dslx2sv_types(input_path);
 }
 
 fn run_codegen_pipeline(
@@ -355,6 +380,16 @@ fn ir2opt(input_file: &std::path::Path, top: &str, tool_path: Option<&str>) {
     } else {
         todo!("ir2opt subcommand using runtime APIs")
     }
+}
+
+fn dslx2sv_types(input_file: &std::path::Path) {
+    let dslx = std::fs::read_to_string(input_file).unwrap();
+    let mut import_data = xlsynth::dslx::ImportData::default();
+    let mut builder = xlsynth::sv_bridge_builder::SvBridgeBuilder::new();
+    xlsynth::dslx_bridge::convert_leaf_module(&mut import_data, &dslx, input_file, &mut builder)
+        .unwrap();
+    let sv = builder.build();
+    println!("{}", sv);
 }
 
 fn dslx2pipeline(
