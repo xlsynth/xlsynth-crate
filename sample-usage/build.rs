@@ -36,7 +36,7 @@ fn main() {
         sample_with_enum_def_rs_path.display()
     );
 
-    let sample_with_enum_def_rs_path = x_path_to_bridge("src/structure_zoo.x");
+    let sample_with_enum_def_rs_path = x_path_to_bridge("../xlsynth/tests/structure_zoo.x");
     println!(
         "cargo:rustc-env=DSLX_STRUCTURE_ZOO={}",
         sample_with_enum_def_rs_path.display()

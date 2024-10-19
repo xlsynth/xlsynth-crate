@@ -22,6 +22,7 @@ pub trait BridgeBuilder {
         &mut self,
         dslx_name: &str,
         is_signed: bool,
+        underlying_bit_count: usize,
         members: &[(String, IrValue)],
     ) -> Result<(), XlsynthError>;
 
@@ -53,10 +54,12 @@ fn convert_enum(
     builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
     let tups = enum_as_tups(enum_def, type_info);
-    let enum_underlying = type_info.get_type_for_enum_def(enum_def);
-    let is_signed = enum_underlying.is_signed_bits()?;
+    let enum_underlying = type_info.get_type_for_type_annotation(enum_def.get_underlying());
+    let (is_signed, underlying_bit_count) = enum_underlying
+        .is_bits_like()
+        .expect(&format!("enum underlying type should be bits-like; got: {enum_underlying}"));
     let enum_name = enum_def.get_identifier();
-    builder.add_enum_def(&enum_name, is_signed, &tups)
+    builder.add_enum_def(&enum_name, is_signed, underlying_bit_count, &tups)
 }
 
 fn convert_struct(

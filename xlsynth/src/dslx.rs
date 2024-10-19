@@ -207,6 +207,13 @@ impl EnumDef {
             ptr: unsafe { sys::xls_dslx_enum_def_get_member(self.ptr, idx as i64) },
         }
     }
+
+    pub fn get_underlying(&self) -> TypeAnnotation {
+        TypeAnnotation {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_enum_def_get_underlying(self.ptr) },
+        }
+    }
 }
 
 // -- TypeAnnotation

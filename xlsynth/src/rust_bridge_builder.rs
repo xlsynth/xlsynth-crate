@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Builder that creates Rust type definitions from DSLX type definitions.
+//! 
+//! This helps us e.g. call DSLX functions from Rust code, i.e. it enables Rust->DSLX FFI interop.
+
 use crate::{dslx, dslx_bridge::BridgeBuilder, IrValue, XlsynthError};
 
 pub struct RustBridgeBuilder {
@@ -57,6 +63,7 @@ impl BridgeBuilder for RustBridgeBuilder {
         &mut self,
         dslx_name: &str,
         is_signed: bool,
+        _underlying_bit_count: usize,
         members: &[(String, IrValue)],
     ) -> Result<(), XlsynthError> {
         let value_to_string = |value: &IrValue| -> Result<String, XlsynthError> {
