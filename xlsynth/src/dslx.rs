@@ -517,6 +517,22 @@ impl Type {
             ptr,
         })
     }
+
+    pub fn is_struct(&self) -> bool {
+        unsafe { sys::xls_dslx_type_is_struct(self.ptr) }
+    }
+
+    pub fn get_struct_def(&self) -> Result<StructDef, XlsynthError> {
+        if !self.is_struct() {
+            return Err(XlsynthError("Type is not a struct".to_string()));
+        }
+        let ptr = unsafe { sys::xls_dslx_type_get_struct_def(self.ptr) };
+        // Wrap up the pointer as a StructDef structure.
+        Ok(StructDef {
+            parent: self.parent.clone(),
+            ptr,
+        })
+    }
 }
 
 pub fn parse_and_typecheck(

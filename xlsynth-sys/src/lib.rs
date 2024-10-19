@@ -508,6 +508,7 @@ extern "C" {
     ) -> bool;
 
     pub fn xls_dslx_type_is_enum(type_: *const CDslxType) -> bool;
+    pub fn xls_dslx_type_is_struct(type_: *const CDslxType) -> bool;
 
     pub fn xls_dslx_type_dim_is_parametric(dim: *const CDslxTypeDim) -> bool;
     pub fn xls_dslx_type_dim_get_as_bool(
@@ -523,6 +524,8 @@ extern "C" {
     pub fn xls_dslx_type_dim_free(dim: *mut CDslxTypeDim);
 
     pub fn xls_dslx_type_get_enum_def(ty: *const CDslxType) -> *mut CDslxEnumDef;
+
+    pub fn xls_dslx_type_get_struct_def(ty: *const CDslxType) -> *mut CDslxStructDef;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");

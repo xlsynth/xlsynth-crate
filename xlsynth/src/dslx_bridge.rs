@@ -50,6 +50,9 @@ impl RustBridgeBuilder {
         } else if ty.is_enum() {
             let enum_def = ty.get_enum_def().unwrap();
             Ok(enum_def.get_identifier().to_string())
+        } else if ty.is_struct() {
+            let struct_def = ty.get_struct_def().unwrap();
+            Ok(struct_def.get_identifier().to_string())
         } else {
             Err(XlsynthError(format!(
                 "Unsupported type for conversion from DSLX to Rust: {:?}",
@@ -225,7 +228,7 @@ mod tests {
         let mut import_data = dslx::ImportData::default();
         let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
         let mut builder = RustBridgeBuilder::new();
-        let rust = convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
             r#"mod my_module {
@@ -260,7 +263,7 @@ impl Into<IrValue> for MyEnum {
         let mut import_data = dslx::ImportData::default();
         let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
         let mut builder = RustBridgeBuilder::new();
-        let rust = convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
             r#"mod my_module {
@@ -288,7 +291,7 @@ pub struct MyStruct {
         let mut import_data = dslx::ImportData::default();
         let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
         let mut builder = RustBridgeBuilder::new();
-        let rust = convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
             r#"mod my_module {
@@ -312,6 +315,44 @@ impl Into<IrValue> for MyEnum {
 pub struct MyStruct {
     pub a: MyEnum,
     pub b: IrSBits<16>,
+}
+
+} // mod my_module"#
+        );
+    }
+
+    #[test]
+    fn test_convert_leaf_module_nested_struct() {
+        let dslx = r#"
+        struct MyInnerStruct {
+            x: u8,
+            y: u8,
+        }
+        struct MyStruct {
+            a: u32,
+            b: s16,
+            c: MyInnerStruct,
+        }
+        "#;
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = RustBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            r#"mod my_module {
+#![allow(dead_code)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+pub struct MyInnerStruct {
+    pub x: IrUBits<8>,
+    pub y: IrUBits<8>,
+}
+
+pub struct MyStruct {
+    pub a: IrUBits<32>,
+    pub b: IrSBits<16>,
+    pub c: MyInnerStruct,
 }
 
 } // mod my_module"#
