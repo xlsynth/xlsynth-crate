@@ -9,8 +9,9 @@ fn main() {
     let sample_with_enum_def = std::fs::read_to_string(&path).unwrap();
 
     // Generate the bridge code.
-    let sample_with_enum_def_rs =
-        dslx_bridge::convert_leaf_module(&mut import_data, &sample_with_enum_def, &path).unwrap();
+    let mut builder = dslx_bridge::RustBridgeBuilder::new();
+        dslx_bridge::convert_leaf_module(&mut import_data, &sample_with_enum_def, &path, &mut builder).expect("expect bridge building success");
+        let sample_with_enum_def_rs = builder.build();
 
     // Write this out to sample_with_enum_def.rs in the OUT_DIR.
     let out_dir = std::env::var("OUT_DIR").unwrap();
