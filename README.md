@@ -24,9 +24,19 @@ fn main() {
 
 ### Development Notes
 
-To link against a local version of the public API, instead of a released version,
-supply the `DEV_XLS_DSO_WORKSPACE` environment variable pointing at the workspace
-root where the built shared library resides; e.g.
+The `xlsynth` Rust crate leverages a dynamic library with XLS' core functionality (i.e. `libxls.so`
+/ `libxls.dylib`).
+
+The DSO is built and released for multiple platforms via GitHub actions at
+[xlsynth/xlsynth/releases](https://github.com/xlsynth/xlsynth/releases/).
+
+The version that this crate expects is described in `xlsynth-sys/build.rs` as
+`RELEASE_LIB_VERSION_TAG`. By default, this crate pulls the dynamic library from the targeted
+release.
+
+To link against a local version of the public API, instead of a released version, supply the
+`DEV_XLS_DSO_WORKSPACE` environment variable pointing at the workspace root where the built shared
+library resides; e.g.
 
 ```shell
 $ export DEV_XLS_DSO_WORKSPACE=$HOME/proj/xlsynth/
