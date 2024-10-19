@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! "Structure Zoo" i.e. a collection of structures with various shapes and forms and properties put together in one place.
+//!
 //! Note: the structs in here are nonsense, just for testing.
 
 enum TransactionType : u1 {
