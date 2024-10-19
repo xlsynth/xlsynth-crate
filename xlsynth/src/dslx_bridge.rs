@@ -9,6 +9,128 @@
 
 use crate::{dslx, IrValue, XlsynthError};
 
+pub trait BridgeBuilder {
+    fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError>;
+
+    fn end_module(&mut self, module_name: &str) -> Result<(), XlsynthError>;
+
+    /// `is_signed` indicates whether the bits type underlying the enum is
+    /// signed.
+    fn add_enum_def(
+        &mut self,
+        dslx_name: &str,
+        is_signed: bool,
+        members: &[(String, IrValue)],
+    ) -> Result<(), XlsynthError>;
+
+    fn add_struct_def(
+        &mut self,
+        dslx_name: &str,
+        members: &[(String, dslx::Type)],
+    ) -> Result<(), XlsynthError>;
+}
+
+pub struct RustBridgeBuilder {
+    lines: Vec<String>,
+}
+
+impl RustBridgeBuilder {
+    pub fn new() -> Self {
+        Self { lines: vec![] }
+    }
+
+    pub fn build(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    fn convert_type(&self, ty: &dslx::Type) -> Result<String, XlsynthError> {
+        if let Some((is_signed, bit_count)) = ty.is_bits_like() {
+            let signed_str = if is_signed { "S" } else { "U" };
+            Ok(format!("Ir{}Bits<{}>", signed_str, bit_count))
+        } else {
+            Err(XlsynthError(format!(
+                "Unsupported type for conversion from DSLX to Rust: {:?}",
+                ty.to_string()?
+            )))
+        }
+    }
+}
+
+impl BridgeBuilder for RustBridgeBuilder {
+    fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError> {
+        self.lines = vec![
+            format!("mod {module_name} {{"),
+            // We allow e.g. enum variants to be unused in consumer code.
+            "#![allow(dead_code)]".to_string(),
+            "use xlsynth::{IrValue, IrUBits, IrSBits};\n".to_string(),
+        ];
+        Ok(())
+    }
+
+    fn end_module(&mut self, module_name: &str) -> Result<(), XlsynthError> {
+        self.lines.push(format!("}} // mod {module_name}"));
+        Ok(())
+    }
+
+    fn add_enum_def(
+        &mut self,
+        dslx_name: &str,
+        is_signed: bool,
+        members: &[(String, IrValue)],
+    ) -> Result<(), XlsynthError> {
+        let value_to_string = |value: &IrValue| -> Result<String, XlsynthError> {
+            if is_signed {
+                value.to_i64().map(|v| v.to_string())
+            } else {
+                value.to_u64().map(|v| v.to_string())
+            }
+        };
+
+        self.lines.push(format!("pub enum {} {{", dslx_name));
+        for (name, value) in members.iter() {
+            self.lines
+                .push(format!("    {} = {},", name, value_to_string(value)?));
+        }
+        self.lines.push("}\n".to_string());
+
+        // Now we emit the converter so we can easily pass our generated Rust enum to IR
+        // interpreter functions.
+        self.lines
+            .push(format!("impl Into<IrValue> for {} {{", dslx_name));
+        self.lines
+            .push("    fn into(self) -> IrValue {".to_string());
+        self.lines.push("        match self {".to_string());
+        for (member_name, value) in members.iter() {
+            let value_str = value_to_string(value)?;
+            self.lines.push(format!(
+                "            {}::{} => IrValue::make_bits({}, {}).unwrap(),",
+                dslx_name,
+                member_name,
+                value.bit_count(),
+                value_str
+            ));
+        }
+        self.lines.push("        }".to_string());
+        self.lines.push("    }".to_string());
+        self.lines.push("}".to_string());
+        Ok(())
+    }
+
+    fn add_struct_def(
+        &mut self,
+        dslx_name: &str,
+        members: &[(String, dslx::Type)],
+    ) -> Result<(), XlsynthError> {
+        self.lines.push(format!("pub struct {} {{", dslx_name));
+        for (name, ty) in members.iter() {
+            let rust_ty = self.convert_type(ty)?;
+            self.lines.push(format!("    pub {}: {},", name, rust_ty));
+        }
+        self.lines.push("}\n".to_string());
+        Ok(())
+    }
+}
+
 fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, IrValue)> {
     let mut tups = vec![];
     for i in 0..enum_def.get_member_count() {
@@ -24,79 +146,40 @@ fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(St
     tups
 }
 
-fn convert_enum_to_rust(
+fn convert_enum(
     enum_def: &dslx::EnumDef,
     type_info: &dslx::TypeInfo,
-) -> Result<String, XlsynthError> {
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
     let tups = enum_as_tups(enum_def, type_info);
     let enum_underlying = type_info.get_type_for_enum_def(enum_def);
     let is_signed = enum_underlying.is_signed_bits()?;
-
-    let value_to_string = |value: &IrValue| -> Result<String, XlsynthError> {
-        if is_signed {
-            value.to_i64().map(|v| v.to_string())
-        } else {
-            value.to_u64().map(|v| v.to_string())
-        }
-    };
-
-    let mut lines: Vec<String> = vec![];
     let enum_name = enum_def.get_identifier();
-    lines.push(format!("pub enum {} {{", enum_name));
-    for (name, value) in tups.iter() {
-        lines.push(format!("    {} = {},", name, value_to_string(value)?));
-    }
-    lines.push("}\n".to_string());
-    lines.push(format!("impl Into<IrValue> for {} {{", enum_name));
-    lines.push("    fn into(self) -> IrValue {".to_string());
-    lines.push("        match self {".to_string());
-    for (member_name, value) in tups.iter() {
-        let value_str = value_to_string(value)?;
-        lines.push(format!(
-            "            {}::{} => IrValue::make_bits({}, {}).unwrap(),",
-            enum_name,
-            member_name,
-            value.bit_count(),
-            value_str
-        ));
-    }
-    lines.push("        }".to_string());
-    lines.push("    }".to_string());
-    lines.push("}".to_string());
-    Ok(lines.join("\n"))
+    builder.add_enum_def(&enum_name, is_signed, &tups)
 }
 
-fn convert_struct_to_rust(
+fn convert_struct(
     struct_def: &dslx::StructDef,
     type_info: &dslx::TypeInfo,
-) -> Result<String, XlsynthError> {
-    let mut lines: Vec<String> = vec![];
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
     let struct_name = struct_def.get_identifier();
-    lines.push(format!("pub struct {} {{", struct_name));
+    let mut members = vec![];
     for i in 0..struct_def.get_member_count() {
         let member = struct_def.get_member(i);
         let member_name = member.get_name();
         let member_type = type_info.get_type_for_struct_member(&member);
-        if let Some((is_signed, bit_count)) = member_type.is_bits_like() {
-            lines.push(format!(
-                "    pub {}: Ir{}Bits<{}>,",
-                member_name,
-                if is_signed { "S" } else { "U" },
-                bit_count
-            ));
-        } else {
-            todo!("convert struct member type to Rust type: {}", member_type);
-        }
+        members.push((member_name, member_type));
     }
-    lines.push("}\n".to_string());
-    Ok(lines.join("\n"))
+    builder.add_struct_def(&struct_name, &members)
 }
 
 pub fn convert_leaf_module(
     import_data: &mut dslx::ImportData,
     dslx_program: &str,
     path: &std::path::Path,
-) -> Result<String, XlsynthError> {
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
     // If the path is `path/to/foo.x` then the module name is `foo`.
     let module_name = path.file_stem().unwrap().to_str().unwrap();
     let path_str = path.to_str().unwrap();
@@ -105,29 +188,24 @@ pub fn convert_leaf_module(
     let module = typechecked_module.get_module();
     let type_info = typechecked_module.get_type_info();
 
-    let mut chunks: Vec<String> = vec![
-        format!("mod {module_name} {{"),
-        // We allow e.g. enum variants to be unused in consumer code.
-        "#![allow(dead_code)]".to_string(),
-        "use xlsynth::{IrValue, IrUBits, IrSBits};\n".to_string(),
-    ];
+    builder.start_module(module_name)?;
     for i in 0..module.get_type_definition_count() {
         let type_def_kind = module.get_type_definition_kind(i);
         match type_def_kind {
             dslx::TypeDefinitionKind::EnumDef => {
                 let enum_def = module.get_type_definition_as_enum_def(i).unwrap();
-                chunks.push(convert_enum_to_rust(&enum_def, &type_info)?)
+                convert_enum(&enum_def, &type_info, builder)?
             }
             dslx::TypeDefinitionKind::StructDef => {
                 let struct_def = module.get_type_definition_as_struct_def(i).unwrap();
-                chunks.push(convert_struct_to_rust(&struct_def, &type_info)?)
+                convert_struct(&struct_def, &type_info, builder)?
             }
             dslx::TypeDefinitionKind::TypeAlias => todo!("convert type alias from DSLX to Rust"),
             dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),
         }
     }
-    chunks.push(format!("}} // mod {module_name}"));
-    Ok(chunks.join("\n"))
+    builder.end_module(module_name)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -143,9 +221,10 @@ mod tests {
         "#;
         let mut import_data = dslx::ImportData::default();
         let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
-        let rust = convert_leaf_module(&mut import_data, dslx, &path).unwrap();
+        let mut builder = RustBridgeBuilder::new();
+        let rust = convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
-            rust,
+            builder.build(),
             r#"mod my_module {
 #![allow(dead_code)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
@@ -177,9 +256,10 @@ impl Into<IrValue> for MyEnum {
         "#;
         let mut import_data = dslx::ImportData::default();
         let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
-        let rust = convert_leaf_module(&mut import_data, dslx, &path).unwrap();
+        let mut builder = RustBridgeBuilder::new();
+        let rust = convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
-            rust,
+            builder.build(),
             r#"mod my_module {
 #![allow(dead_code)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
