@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Builder that creates SystemVerilog type definitions from DSLX type definitions.
+//! Builder that creates SystemVerilog type definitions from DSLX type
+//! definitions.
 
-use crate::{dslx, dslx_bridge::BridgeBuilder, ir_value::IrFormatPreference, IrValue, XlsynthError};
+use crate::{
+    dslx, dslx_bridge::BridgeBuilder, ir_value::IrFormatPreference, IrValue, XlsynthError,
+};
 
 pub struct SvBridgeBuilder {
     lines: Vec<String>,
@@ -61,13 +64,14 @@ impl SvBridgeBuilder {
         }
     }
 
-    /// Converts a DSLX enum name in CamelCase to a SystemVerilog enum name in snake_case with an _e suffix
-    /// i.e. `MyEnum` -> `my_enum_e`
+    /// Converts a DSLX enum name in CamelCase to a SystemVerilog enum name in
+    /// snake_case with an _e suffix i.e. `MyEnum` -> `my_enum_e`
     fn enum_name_to_sv(dslx_name: &str) -> String {
         format!("{}_e", camel_to_snake(dslx_name))
     }
 
-    /// Converts a DSLX struct name in CamelCase to a SystemVerilog struct name in snake_case with a _t suffix
+    /// Converts a DSLX struct name in CamelCase to a SystemVerilog struct name
+    /// in snake_case with a _t suffix
     fn struct_name_to_sv(dslx_name: &str) -> String {
         format!("{}_t", camel_to_snake(dslx_name))
     }
@@ -91,7 +95,10 @@ impl BridgeBuilder for SvBridgeBuilder {
     ) -> Result<(), XlsynthError> {
         let mut lines = vec![];
         let sv_name = Self::enum_name_to_sv(dslx_name);
-        lines.push(format!("typedef enum logic{} {{", make_bit_span_suffix(underlying_bit_count)));
+        lines.push(format!(
+            "typedef enum logic{} {{",
+            make_bit_span_suffix(underlying_bit_count)
+        ));
         for (i, (member_name, member_value)) in members.iter().enumerate() {
             let format = if is_signed {
                 IrFormatPreference::SignedDecimal
@@ -101,7 +108,10 @@ impl BridgeBuilder for SvBridgeBuilder {
             let member_value_str = member_value.to_string_fmt(format)?;
             let digits = member_value_str.split(':').nth(1).expect("split success");
             let maybe_comma = if i < members.len() - 1 { "," } else { "" };
-            lines.push(format!("    {} = {}'d{}{}", member_name, underlying_bit_count, digits, maybe_comma));
+            lines.push(format!(
+                "    {} = {}'d{}{}",
+                member_name, underlying_bit_count, digits, maybe_comma
+            ));
         }
         lines.push(format!("}} {};\n", sv_name));
         self.lines.push(lines.join("\n"));
@@ -117,11 +127,15 @@ impl BridgeBuilder for SvBridgeBuilder {
         lines.push(format!("typedef struct packed {{"));
         for (i, (member_name, member_ty)) in members.iter().enumerate() {
             if member_ty.is_array() {
-                // Arrays are displayed differently from other members, the size is after the name, separated from the element type.
+                // Arrays are displayed differently from other members, the size is after the
+                // name, separated from the element type.
                 let element_ty = member_ty.get_array_element_type();
                 let element_sv_ty = Self::convert_type(&element_ty)?;
                 let array_size = member_ty.get_array_size();
-                lines.push(format!("    {} {}[{}];", element_sv_ty, member_name, array_size));
+                lines.push(format!(
+                    "    {} {}[{}];",
+                    element_sv_ty, member_name, array_size
+                ));
             } else {
                 let member_sv_ty = Self::convert_type(member_ty)?;
                 lines.push(format!("    {} {};", member_sv_ty, member_name));

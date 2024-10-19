@@ -460,7 +460,9 @@ extern "C" {
         i: i64,
     ) -> *mut CDslxEnumMember;
 
-    pub fn xls_dslx_enum_def_get_underlying(enum_def: *const CDslxEnumDef) -> *mut CDslxTypeAnnotation;
+    pub fn xls_dslx_enum_def_get_underlying(
+        enum_def: *const CDslxEnumDef,
+    ) -> *mut CDslxTypeAnnotation;
 
     pub fn xls_dslx_enum_member_get_name(
         member: *const CDslxEnumMember,

@@ -55,9 +55,9 @@ fn convert_enum(
 ) -> Result<(), XlsynthError> {
     let tups = enum_as_tups(enum_def, type_info);
     let enum_underlying = type_info.get_type_for_type_annotation(enum_def.get_underlying());
-    let (is_signed, underlying_bit_count) = enum_underlying
-        .is_bits_like()
-        .expect(&format!("enum underlying type should be bits-like; got: {enum_underlying}"));
+    let (is_signed, underlying_bit_count) = enum_underlying.is_bits_like().expect(&format!(
+        "enum underlying type should be bits-like; got: {enum_underlying}"
+    ));
     let enum_name = enum_def.get_identifier();
     builder.add_enum_def(&enum_name, is_signed, underlying_bit_count, &tups)
 }
