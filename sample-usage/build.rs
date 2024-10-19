@@ -12,16 +12,17 @@ fn x_path_to_rs_filename(path: &std::path::Path) -> String {
 fn x_path_to_bridge(relpath: &str) -> std::path::PathBuf {
     let mut import_data = dslx::ImportData::default();
     let path = std::path::PathBuf::from(relpath);
-    let sample_with_enum_def = std::fs::read_to_string(&path).unwrap();
+    let dslx =
+        std::fs::read_to_string(&path).expect(&format!("DSLX file should be readable: {path:?}"));
 
     // Generate the bridge code.
     let mut builder = dslx_bridge::RustBridgeBuilder::new();
-    dslx_bridge::convert_leaf_module(&mut import_data, &sample_with_enum_def, &path, &mut builder)
+    dslx_bridge::convert_leaf_module(&mut import_data, &dslx, &path, &mut builder)
         .expect("expect bridge building success");
     let sample_with_enum_def_rs = builder.build();
 
     // Write this out to sample_with_enum_def.rs in the OUT_DIR.
-    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR should be set");
     let out_path = std::path::PathBuf::from(out_dir).join(x_path_to_rs_filename(&path));
     std::fs::write(&out_path, sample_with_enum_def_rs).unwrap();
     out_path

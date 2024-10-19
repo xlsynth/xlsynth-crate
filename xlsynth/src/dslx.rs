@@ -533,6 +533,29 @@ impl Type {
             ptr,
         })
     }
+
+    pub fn is_array(&self) -> bool {
+        unsafe { sys::xls_dslx_type_is_array(self.ptr) }
+    }
+
+    pub fn get_array_element_type(&self) -> Type {
+        assert!(self.is_array());
+        Type {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_type_array_get_element_type(self.ptr) },
+        }
+    }
+
+    pub fn get_array_size(&self) -> usize {
+        assert!(self.is_array());
+        let type_dim = TypeDimWrapper {
+            wrapped: unsafe { sys::xls_dslx_type_array_get_size(self.ptr) },
+        };
+        assert!(!type_dim.wrapped.is_null());
+        let size = type_dim.get_as_i64().expect("get_as_i64 success");
+        assert!(size >= 0);
+        size as usize
+    }
 }
 
 pub fn parse_and_typecheck(

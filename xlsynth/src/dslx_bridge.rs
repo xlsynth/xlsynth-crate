@@ -9,6 +9,8 @@
 
 use crate::{dslx, IrValue, XlsynthError};
 
+/// Abstract interface for building bridge code; i.e. interop to or from DSLX
+/// with another language like Rust or SystemVerilog.
 pub trait BridgeBuilder {
     fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError>;
 
@@ -53,6 +55,11 @@ impl RustBridgeBuilder {
         } else if ty.is_struct() {
             let struct_def = ty.get_struct_def().unwrap();
             Ok(struct_def.get_identifier().to_string())
+        } else if ty.is_array() {
+            let array_ty = ty.get_array_element_type();
+            let array_size = ty.get_array_size();
+            let rust_ty = Self::convert_type(&array_ty)?;
+            Ok(format!("[{}; {}]", rust_ty, array_size))
         } else {
             Err(XlsynthError(format!(
                 "Unsupported type for conversion from DSLX to Rust: {:?}",
@@ -248,6 +255,7 @@ impl Into<IrValue> for MyEnum {
         }
     }
 }
+
 } // mod my_module"#
         );
     }
@@ -353,6 +361,35 @@ pub struct MyStruct {
     pub a: IrUBits<32>,
     pub b: IrSBits<16>,
     pub c: MyInnerStruct,
+}
+
+} // mod my_module"#
+        );
+    }
+
+    #[test]
+    fn test_convert_leaf_module_struct_with_array() {
+        let dslx = r#"
+        struct MyStruct {
+            a: u32,
+            b: s16,
+            c: u8[4],
+        }
+        "#;
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = RustBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            r#"mod my_module {
+#![allow(dead_code)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+pub struct MyStruct {
+    pub a: IrUBits<32>,
+    pub b: IrSBits<16>,
+    pub c: [IrUBits<8>; 4],
 }
 
 } // mod my_module"#
