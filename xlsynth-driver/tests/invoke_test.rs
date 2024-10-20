@@ -15,10 +15,18 @@ fn test_dslx2sv_types_subcommand() {
         .output()
         .expect("Failed to run xlsynth-driver");
 
-    assert!(output.status.success(), "stdout: {}\nstderr: {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout.trim(), r"typedef enum logic [1:0] {
+    assert_eq!(
+        stdout.trim(),
+        r"typedef enum logic [1:0] {
     READ = 2'd0,
     WRITE = 2'd1
-} op_type_e;");
+} op_type_e;"
+    );
 }
