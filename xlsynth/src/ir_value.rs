@@ -180,7 +180,7 @@ pub struct IrUBits<const BIT_COUNT: usize> {
 }
 
 impl<const BIT_COUNT: usize> IrUBits<BIT_COUNT> {
-    const SIGNEDNESS: bool = false;
+    pub const SIGNEDNESS: bool = false;
 
     pub fn new(wrapped: IrBits) -> Result<Self, XlsynthError> {
         if wrapped.get_bit_count() != BIT_COUNT {
@@ -202,7 +202,7 @@ pub struct IrSBits<const BIT_COUNT: usize> {
 }
 
 impl<const BIT_COUNT: usize> IrSBits<BIT_COUNT> {
-    const SIGNEDNESS: bool = true;
+    pub const SIGNEDNESS: bool = true;
 
     pub fn new(wrapped: IrBits) -> Result<Self, XlsynthError> {
         if wrapped.get_bit_count() != BIT_COUNT {

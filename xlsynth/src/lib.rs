@@ -7,6 +7,9 @@ pub mod ir_value;
 pub mod vast;
 pub mod xlsynth_error;
 
+pub mod rust_bridge_builder;
+pub mod sv_bridge_builder;
+
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.98";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.101";
 
 struct DsoInfo {
     extension: &'static str,
@@ -166,14 +166,17 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
         .arg("--fail")
         .arg("-o")
         .arg(&tarball_path)
-        .arg(tarball_url)
+        .arg(&tarball_url)
         .status()
         .expect("Failed to download DSO");
 
     if !status.success() {
-        // Remove the output file path.
-        std::fs::remove_file(&tarball_path).expect("Failed to remove file");
-        panic!("Download failed with status: {:?}", status);
+        // Remove the output file path if it got created -- if not it's ok.
+        let _ = std::fs::remove_file(&tarball_path);
+        panic!(
+            "Download of {tarball_url:?} failed with status: {:?}",
+            status
+        );
     }
     let tar_gz = std::fs::File::open(tarball_path).unwrap();
     let tar = flate2::read::GzDecoder::new(tar_gz);
@@ -212,7 +215,16 @@ fn main() {
         };
         let dso_filename = dso_info.get_dso_filename();
         let dso_dest = PathBuf::from(&out_dir).join(&dso_filename);
-        std::fs::copy(&dso_path, &dso_dest).unwrap();
+
+        // Symlink to the artifact in the workspace.
+        assert!(
+            cfg!(unix),
+            "DEV_XLS_DSO_WORKSPACE env var only supported in UNIX-like environments"
+        );
+        std::fs::remove_file(&dso_dest).ok();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dso_path, &dso_dest).unwrap();
+
         println!(
             "cargo:info=Using DSO from workspace: {}",
             dso_dest.display()

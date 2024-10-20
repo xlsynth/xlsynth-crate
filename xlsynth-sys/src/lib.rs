@@ -460,6 +460,10 @@ extern "C" {
         i: i64,
     ) -> *mut CDslxEnumMember;
 
+    pub fn xls_dslx_enum_def_get_underlying(
+        enum_def: *const CDslxEnumDef,
+    ) -> *mut CDslxTypeAnnotation;
+
     pub fn xls_dslx_enum_member_get_name(
         member: *const CDslxEnumMember,
     ) -> *mut std::os::raw::c_char;
@@ -507,6 +511,10 @@ extern "C" {
         size: *mut *mut CDslxTypeDim,
     ) -> bool;
 
+    pub fn xls_dslx_type_is_enum(type_: *const CDslxType) -> bool;
+    pub fn xls_dslx_type_is_struct(type_: *const CDslxType) -> bool;
+    pub fn xls_dslx_type_is_array(type_: *const CDslxType) -> bool;
+
     pub fn xls_dslx_type_dim_is_parametric(dim: *const CDslxTypeDim) -> bool;
     pub fn xls_dslx_type_dim_get_as_bool(
         dim: *const CDslxTypeDim,
@@ -519,6 +527,13 @@ extern "C" {
         result_out: *mut i64,
     ) -> bool;
     pub fn xls_dslx_type_dim_free(dim: *mut CDslxTypeDim);
+
+    pub fn xls_dslx_type_get_enum_def(ty: *const CDslxType) -> *mut CDslxEnumDef;
+
+    pub fn xls_dslx_type_get_struct_def(ty: *const CDslxType) -> *mut CDslxStructDef;
+
+    pub fn xls_dslx_type_array_get_element_type(ty: *const CDslxType) -> *mut CDslxType;
+    pub fn xls_dslx_type_array_get_size(ty: *const CDslxType) -> *mut CDslxTypeDim;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");

@@ -207,6 +207,13 @@ impl EnumDef {
             ptr: unsafe { sys::xls_dslx_enum_def_get_member(self.ptr, idx as i64) },
         }
     }
+
+    pub fn get_underlying(&self) -> TypeAnnotation {
+        TypeAnnotation {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_enum_def_get_underlying(self.ptr) },
+        }
+    }
 }
 
 // -- TypeAnnotation
@@ -500,6 +507,61 @@ impl Type {
         } else {
             None
         }
+    }
+
+    pub fn is_enum(&self) -> bool {
+        unsafe { sys::xls_dslx_type_is_enum(self.ptr) }
+    }
+
+    pub fn get_enum_def(&self) -> Result<EnumDef, XlsynthError> {
+        if !self.is_enum() {
+            return Err(XlsynthError("Type is not an enum".to_string()));
+        }
+        let ptr = unsafe { sys::xls_dslx_type_get_enum_def(self.ptr) };
+        // Wrap up the pointer as an EnumDef structure.
+        Ok(EnumDef {
+            parent: self.parent.clone(),
+            ptr,
+        })
+    }
+
+    pub fn is_struct(&self) -> bool {
+        unsafe { sys::xls_dslx_type_is_struct(self.ptr) }
+    }
+
+    pub fn get_struct_def(&self) -> Result<StructDef, XlsynthError> {
+        if !self.is_struct() {
+            return Err(XlsynthError("Type is not a struct".to_string()));
+        }
+        let ptr = unsafe { sys::xls_dslx_type_get_struct_def(self.ptr) };
+        // Wrap up the pointer as a StructDef structure.
+        Ok(StructDef {
+            parent: self.parent.clone(),
+            ptr,
+        })
+    }
+
+    pub fn is_array(&self) -> bool {
+        unsafe { sys::xls_dslx_type_is_array(self.ptr) }
+    }
+
+    pub fn get_array_element_type(&self) -> Type {
+        assert!(self.is_array());
+        Type {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_type_array_get_element_type(self.ptr) },
+        }
+    }
+
+    pub fn get_array_size(&self) -> usize {
+        assert!(self.is_array());
+        let type_dim = TypeDimWrapper {
+            wrapped: unsafe { sys::xls_dslx_type_array_get_size(self.ptr) },
+        };
+        assert!(!type_dim.wrapped.is_null());
+        let size = type_dim.get_as_i64().expect("get_as_i64 success");
+        assert!(size >= 0);
+        size as usize
     }
 }
 
