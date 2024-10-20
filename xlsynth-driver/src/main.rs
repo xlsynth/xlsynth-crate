@@ -39,6 +39,8 @@ use std::process::Command;
 trait AppExt {
     fn add_delay_model_arg(self) -> Self;
     fn add_pipeline_args(self) -> Self;
+    fn add_dslx_path_arg(self) -> Self;
+    fn add_dslx_stdlib_path_arg(self) -> Self;
 }
 
 impl AppExt for App<'_, '_> {
@@ -70,6 +72,26 @@ impl AppExt for App<'_, '_> {
                     .takes_value(true),
             )
     }
+
+    fn add_dslx_path_arg(self) -> Self {
+        (self as App).arg(
+            Arg::with_name("dslx_path")
+                .long("dslx_path")
+                .value_name("DSLX_PATH_SEMI_SEPARATED")
+                .help("Semi-separated paths for DSLX")
+                .takes_value(true),
+        )
+    }
+
+    fn add_dslx_stdlib_path_arg(self) -> Self {
+        (self as App).arg(
+            Arg::with_name("dslx_stdlib_path")
+                .long("dslx_stdlib_path")
+                .value_name("DSLX_STDLIB_PATH")
+                .help("Path to the DSLX standard library")
+                .takes_value(true),
+        )
+    }
 }
 
 fn main() {
@@ -100,6 +122,8 @@ fn main() {
                 )
                 .add_delay_model_arg()
                 .add_pipeline_args()
+                .add_dslx_stdlib_path_arg()
+                .add_dslx_path_arg()
                 // --keep_temps flag to keep temporary files
                 .arg(
                     Arg::with_name("keep_temps")
@@ -107,20 +131,6 @@ fn main() {
                         .help("Keep temporary files")
                         .takes_value(false),
                 )
-                .arg(
-                    Arg::with_name("dslx_stdlib_path")
-                        .long("dslx_stdlib_path")
-                        .value_name("DSLX_STDLIB_PATH")
-                        .help("Path to the DSLX standard library")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("dslx_path")
-                        .long("dslx_path")
-                        .value_name("DSLX_PATH_SEMI_SEPARATED")
-                        .help("Semi-separated paths for DSLX")
-                        .takes_value(true),
-                ),
         )
         .subcommand(
             SubCommand::with_name("dslx2ir")
@@ -137,20 +147,8 @@ fn main() {
                         .required(false)
                         .index(2),
                 )
-                .arg(
-                    Arg::with_name("dslx_stdlib_path")
-                        .long("dslx_stdlib_path")
-                        .value_name("DSLX_STDLIB_PATH")
-                        .help("Path to the DSLX standard library")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("dslx_path")
-                        .long("dslx_path")
-                        .value_name("DSLX_PATH_SEMI_SEPARATED")
-                        .help("Semi-separated paths for DSLX")
-                        .takes_value(true),
-                ),
+                .add_dslx_stdlib_path_arg()
+                .add_dslx_path_arg()
         )
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
@@ -161,7 +159,9 @@ fn main() {
                         .help("The input DSLX file")
                         .required(true)
                         .index(1),
-                ),
+                )
+                .add_dslx_stdlib_path_arg()
+                .add_dslx_path_arg()
         )
         // ir2opt subcommand requires a top symbol
         .subcommand(
@@ -290,9 +290,11 @@ fn handle_ir2opt(matches: &ArgMatches, tool_path: Option<&str>) {
 fn handle_dslx2sv_types(matches: &ArgMatches, _tool_path: Option<&str>) {
     let input_file = matches.value_of("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
+    let dslx_stdlib_path = matches.value_of("dslx_stdlib_path");
+    let dslx_path = matches.value_of("dslx_path");
 
     // Stub function for DSLX to SV type conversion
-    dslx2sv_types(input_path);
+    dslx2sv_types(input_path, dslx_stdlib_path, dslx_path);
 }
 
 fn run_codegen_pipeline(
@@ -382,9 +384,24 @@ fn ir2opt(input_file: &std::path::Path, top: &str, tool_path: Option<&str>) {
     }
 }
 
-fn dslx2sv_types(input_file: &std::path::Path) {
+fn dslx2sv_types(input_file: &std::path::Path,
+        dslx_stdlib_path: Option<&str>,
+        dslx_path: Option<&str>) {
     let dslx = std::fs::read_to_string(input_file).unwrap();
-    let mut import_data = xlsynth::dslx::ImportData::default();
+    let dslx_stdlib_path_buf: Option<std::path::PathBuf> = dslx_stdlib_path.map(|s| std::path::Path::new(s).to_path_buf());
+    let dslx_stdlib_path = dslx_stdlib_path_buf.as_ref().map(|p| p.as_path());
+
+    let mut additional_search_path_bufs: Vec<std::path::PathBuf> = vec![];
+    if let Some(dslx_path) = dslx_path {
+        for path in dslx_path.split(';') {
+            additional_search_path_bufs.push(std::path::Path::new(path).to_path_buf());
+        }
+    }
+    
+    // We need the `Path` view type instead of `PathBuf`.
+    let additional_search_path_views: Vec<&std::path::Path> = additional_search_path_bufs.iter().map(|p| p.as_path()).collect::<Vec<_>>();
+    
+    let mut import_data = xlsynth::dslx::ImportData::new(dslx_stdlib_path, &additional_search_path_views);
     let mut builder = xlsynth::sv_bridge_builder::SvBridgeBuilder::new();
     xlsynth::dslx_bridge::convert_leaf_module(&mut import_data, &dslx, input_file, &mut builder)
         .unwrap();

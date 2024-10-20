@@ -125,7 +125,7 @@ impl BridgeBuilder for SvBridgeBuilder {
     ) -> Result<(), XlsynthError> {
         let mut lines = vec![];
         lines.push(format!("typedef struct packed {{"));
-        for (i, (member_name, member_ty)) in members.iter().enumerate() {
+        for (member_name, member_ty) in members {
             if member_ty.is_array() {
                 // Arrays are displayed differently from other members, the size is after the
                 // name, separated from the element type.
