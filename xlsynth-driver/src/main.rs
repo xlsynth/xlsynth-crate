@@ -33,8 +33,28 @@
 //! ```
 
 use clap::{App, Arg, ArgMatches, SubCommand};
+use serde::Deserialize;
 use std::process;
 use std::process::Command;
+use xlsynth::DslxConvertOptions;
+
+#[derive(Deserialize)]
+struct ToolchainConfig {
+    /// Path to the DSLX standard library.
+    dslx_stdlib_path: Option<String>,
+
+    /// Additional paths to use in the DSLX module search, i.e. as roots for
+    /// import statements.
+    dslx_path: Vec<String>,
+
+    /// Directory path for the XLS toolset, e.g. codegen_main, opt_main, etc.
+    tool_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct XlsynthToolchain {
+    toolchain: ToolchainConfig,
+}
 
 trait AppExt {
     fn add_delay_model_arg(self) -> Self;
@@ -99,10 +119,10 @@ fn main() {
         .version("0.1.0")
         .about("Command line driver for XLS/xlsynth capabilities")
         .arg(
-            Arg::with_name("tool_path")
-                .long("tool_path")
-                .value_name("TOOL_PATH")
-                .help("Path to a directory containing binary tools to use in lieu of runtime APIs")
+            Arg::with_name("toolchain")
+                .long("toolchain")
+                .value_name("TOOLCHAIN")
+                .help("Path to a xlsynth-toolchain.toml file")
                 .takes_value(true),
         )
         .subcommand(
@@ -200,18 +220,30 @@ fn main() {
         )
         .get_matches();
 
-    let tool_path = matches.value_of("tool_path");
+    let toml_path = matches.value_of("toolchain");
+    let toml_value: Option<toml::Value> = toml_path.map(|path| {
+        // If we got a toolchain toml file, read/parse it.
+        let toml_str = std::fs::read_to_string(path).expect("Failed to read toolchain toml file");
+        toml::from_str(&toml_str).expect("Failed to parse toolchain toml file")
+    });
+    let config = toml_value.map(|v| {
+        let toolchain_config = v
+            .clone()
+            .try_into::<XlsynthToolchain>()
+            .expect(&format!("Failed to parse toolchain config; value: {}", v));
+        toolchain_config.toolchain
+    });
 
     if let Some(matches) = matches.subcommand_matches("dslx2pipeline") {
-        handle_dslx2pipeline(matches, tool_path);
+        handle_dslx2pipeline(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2ir") {
-        handle_dslx2ir(matches, tool_path);
+        handle_dslx2ir(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2opt") {
-        handle_ir2opt(matches, tool_path);
+        handle_ir2opt(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2pipeline") {
-        handle_ir2pipeline(matches, tool_path);
+        handle_ir2pipeline(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
-        handle_dslx2sv_types(matches, tool_path);
+        handle_dslx2sv_types(matches, &config);
     } else {
         eprintln!("No valid subcommand provided.");
         process::exit(1);
@@ -230,11 +262,11 @@ fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
         PipelineSpec::ClockPeriodPs(clock_period_ps.parse().unwrap())
     } else {
         eprintln!("Must provide either --pipeline_stages or --clock_period_ps");
-        process::exit(1);
+        process::exit(1)
     }
 }
 
-fn handle_ir2pipeline(matches: &ArgMatches, tool_path: Option<&str>) {
+fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.value_of("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
     let delay_model = matches.value_of("DELAY_MODEL").unwrap();
@@ -242,10 +274,10 @@ fn handle_ir2pipeline(matches: &ArgMatches, tool_path: Option<&str>) {
     // See which of pipeline_stages or clock_period_ps we're using.
     let pipeline_spec = extract_pipeline_spec(matches);
 
-    ir2pipeline(input_path, delay_model, &pipeline_spec, tool_path);
+    ir2pipeline(input_path, delay_model, &pipeline_spec, config);
 }
 
-fn handle_dslx2pipeline(matches: &ArgMatches, tool_path: Option<&str>) {
+fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.value_of("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
     let top = matches.value_of("TOP").unwrap();
@@ -264,30 +296,63 @@ fn handle_dslx2pipeline(matches: &ArgMatches, tool_path: Option<&str>) {
         dslx_path,
         delay_model,
         keep_temps,
-        tool_path,
+        config,
     );
 }
 
-fn handle_dslx2ir(matches: &ArgMatches, tool_path: Option<&str>) {
+/// Helper for extracting the DSLX standard library path from the command line
+/// flag, if specified, or the toolchain config if it's present and the cmdline
+/// flag isn't specified.
+fn get_dslx_stdlib_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Option<String> {
+    let dslx_stdlib_path = matches.value_of("dslx_stdlib_path");
+    if let Some(dslx_stdlib_path) = dslx_stdlib_path {
+        Some(dslx_stdlib_path.to_string())
+    } else if let Some(config) = config {
+        config.dslx_stdlib_path.clone()
+    } else {
+        None
+    }
+}
+
+/// Helper for retrieving supplemental DSLX search paths from the command line
+/// flag, if specified, or the toolchain config if it's present and the cmdline
+/// flag isn't specified.
+fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Option<String> {
+    let dslx_path = matches.value_of("dslx_path");
+    if let Some(dslx_path) = dslx_path {
+        Some(dslx_path.to_string())
+    } else if let Some(config) = config {
+        Some(config.dslx_path.join(";"))
+    } else {
+        None
+    }
+}
+
+fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.value_of("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
     let top = matches.value_of("TOP");
-    let dslx_stdlib_path = matches.value_of("dslx_stdlib_path");
-    let dslx_path = matches.value_of("dslx_path");
+    let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
+    let dslx_stdlib_path = dslx_stdlib_path.as_deref();
+
+    let dslx_path = get_dslx_path(matches, config);
+    let dslx_path = dslx_path.as_deref();
+
+    let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
     // Stub function for DSLX to IR conversion
     dslx2ir(input_path, top, dslx_stdlib_path, dslx_path, tool_path);
 }
 
-fn handle_ir2opt(matches: &ArgMatches, tool_path: Option<&str>) {
+fn handle_ir2opt(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.value_of("INPUT_FILE").unwrap();
     let top = matches.value_of("TOP").unwrap();
     let input_path = std::path::Path::new(input_file);
 
-    ir2opt(input_path, top, tool_path);
+    ir2opt(input_path, top, config);
 }
 
-fn handle_dslx2sv_types(matches: &ArgMatches, _tool_path: Option<&str>) {
+fn handle_dslx2sv_types(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.value_of("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
     let dslx_stdlib_path = matches.value_of("dslx_stdlib_path");
@@ -341,9 +406,9 @@ fn ir2pipeline(
     input_file: &std::path::Path,
     delay_model: &str,
     pipeline_spec: &PipelineSpec,
-    tool_path: Option<&str>,
+    config: &Option<ToolchainConfig>,
 ) {
-    if let Some(tool_path) = tool_path {
+    if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         let output = run_codegen_pipeline(input_file, delay_model, pipeline_spec, tool_path);
         println!("{}", output);
     } else {
@@ -351,6 +416,7 @@ fn ir2pipeline(
     }
 }
 
+/// Runs the IR optimization command line tool and returns the output.
 fn run_opt_main(input_file: &std::path::Path, top: Option<&str>, tool_path: &str) -> String {
     let opt_main_path = format!("{}/opt_main", tool_path);
     if !std::path::Path::new(&opt_main_path).exists() {
@@ -375,8 +441,8 @@ fn run_opt_main(input_file: &std::path::Path, top: Option<&str>, tool_path: &str
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
-fn ir2opt(input_file: &std::path::Path, top: &str, tool_path: Option<&str>) {
-    if let Some(tool_path) = tool_path {
+fn ir2opt(input_file: &std::path::Path, top: &str, config: &Option<ToolchainConfig>) {
+    if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         let output = run_opt_main(input_file, Some(top), tool_path);
         println!("{}", output);
     } else {
@@ -424,9 +490,9 @@ fn dslx2pipeline(
     dslx_path: Option<&str>,
     delay_model: &str,
     keep_temps: bool,
-    tool_path: Option<&str>,
+    config: &Option<ToolchainConfig>,
 ) {
-    if let Some(tool_path) = tool_path {
+    if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
         let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
@@ -463,6 +529,7 @@ fn dslx2pipeline(
     }
 }
 
+/// Runs the IR converter command line tool and returns the output.
 fn run_ir_converter_main(
     input_file: &std::path::Path,
     top: Option<&str>,
@@ -513,6 +580,21 @@ fn dslx2ir(
         let output = run_ir_converter_main(input_file, top, dslx_stdlib_path, dslx_path, tool_path);
         println!("{}", output);
     } else {
-        todo!("dslx2ir subcommand using runtime APIs")
+        let dslx_contents = std::fs::read_to_string(input_file).expect("file read successful");
+        let dslx_stdlib_path: Option<&std::path::Path> =
+            dslx_stdlib_path.map(|s| std::path::Path::new(s));
+        let additional_search_paths: Vec<&std::path::Path> = dslx_path
+            .map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect())
+            .unwrap_or_default();
+        let output = xlsynth::xls_convert_dslx_to_ir(
+            &dslx_contents,
+            input_file,
+            &DslxConvertOptions {
+                dslx_stdlib_path,
+                additional_search_paths,
+            },
+        )
+        .expect("successful conversion");
+        println!("{}", output);
     }
 }

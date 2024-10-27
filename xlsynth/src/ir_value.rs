@@ -176,6 +176,7 @@ impl Drop for IrValue {
 /// compile-time-known bit width and whose type notes the value
 /// should be treated as unsigned.
 pub struct IrUBits<const BIT_COUNT: usize> {
+    #[allow(dead_code)]
     wrapped: IrBits,
 }
 
@@ -198,6 +199,7 @@ impl<const BIT_COUNT: usize> IrUBits<BIT_COUNT> {
 /// compile-time-known bit width and whose type notes the value
 /// should be treated as signed.
 pub struct IrSBits<const BIT_COUNT: usize> {
+    #[allow(dead_code)]
     wrapped: IrBits,
 }
 
