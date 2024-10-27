@@ -14,3 +14,5 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 xlsynth = { path = "../xlsynth", version = "0.0.34" }
 clap = "2.33"
 tempfile = "3.13"
+toml = "0.8.19"
+serde = { version = "1.0", features = ["derive"] }

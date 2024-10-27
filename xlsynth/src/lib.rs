@@ -55,19 +55,42 @@ pub fn dslx_path_to_module_name(path: &std::path::Path) -> Result<&str, XlsynthE
     }
 }
 
-pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<String, XlsynthError> {
+pub struct DslxConvertOptions<'a> {
+    pub dslx_stdlib_path: Option<&'a std::path::Path>,
+    pub additional_search_paths: Vec<&'a std::path::Path>,
+}
+
+impl<'a> Default for DslxConvertOptions<'a> {
+    fn default() -> Self {
+        DslxConvertOptions {
+            dslx_stdlib_path: None,
+            additional_search_paths: vec![],
+        }
+    }
+}
+
+pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path, options: &DslxConvertOptions) -> Result<String, XlsynthError> {
     // Extract the module name from the path; e.g. "foo/bar/baz.x" -> "baz"
     let module_name = dslx_path_to_module_name(path)?;
     let path_str = path.to_str().unwrap();
+    let stdlib_path = options.dslx_stdlib_path.unwrap_or_else(|| std::path::Path::new(xlsynth_sys::DSLX_STDLIB_PATH));
+    let stdlib_path = stdlib_path.to_str().unwrap();
+    let search_paths = options.additional_search_paths.iter().map(|p| p.to_str().unwrap()).collect::<Vec<&str>>();
+
+    let mut search_paths_cstrs = vec![];
+    for p in search_paths {
+        search_paths_cstrs.push(CString::new(p).unwrap());
+    }
+
+    let dslx = CString::new(dslx).unwrap();
+    let c_path = CString::new(path_str).unwrap();
+    let c_module_name = CString::new(module_name).unwrap();
+    let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
+
+    eprintln!("dslx_stdlib_path: {:?}", dslx_stdlib_path);
 
     unsafe {
-        let dslx = CString::new(dslx).unwrap();
-        let c_path = CString::new(path_str).unwrap();
-        let c_module_name = CString::new(module_name).unwrap();
-        let stdlib_path = xlsynth_sys::DSLX_STDLIB_PATH;
-        let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
-
-        let additional_search_paths_ptrs: Vec<*const std::os::raw::c_char> = vec![];
+        let additional_search_paths_ptrs: Vec<*const std::os::raw::c_char> = search_paths_cstrs.iter().map(|cstr| cstr.as_ptr()).collect();
 
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -475,6 +498,22 @@ pub(crate) fn xls_package_to_string(p: *const CIrPackage) -> Result<String, Xlsy
     }
 }
 
+pub fn convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<IrPackage, XlsynthError> {
+    let ir_text = xls_convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
+    // Get the filename as an Option<&str>
+    let filename = path.file_name().and_then(|s| s.to_str());
+    IrPackage::parse_ir(&ir_text, filename)
+}
+
+pub fn optimize_ir(ir: &IrPackage, top: &str) -> Result<IrPackage, XlsynthError> {
+    let ir_text = xls_optimize_ir(&ir.to_string(), top)?;
+    IrPackage::parse_ir(&ir_text, ir.filename())
+}
+
+pub fn mangle_dslx_name(module: &str, name: &str) -> Result<String, XlsynthError> {
+    xls_mangle_dslx_name(module, name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +523,7 @@ mod tests {
         let ir = xls_convert_dslx_to_ir(
             "fn f(x: u32) -> u32 { x }",
             std::path::Path::new("/memfile/test_mod.x"),
+            &DslxConvertOptions::default(),
         )
         .expect("ir conversion should succeed");
         assert_eq!(
@@ -527,19 +567,4 @@ fn __test_mod__f(x: bits[32] id=1) -> bits[32] {
         xls_format_preference_from_string("blah")
             .expect_err("should not convert to format preference");
     }
-}
-pub fn convert_dslx_to_ir(dslx: &str, path: &std::path::Path) -> Result<IrPackage, XlsynthError> {
-    let ir_text = xls_convert_dslx_to_ir(dslx, path)?;
-    // Get the filename as an Option<&str>
-    let filename = path.file_name().and_then(|s| s.to_str());
-    IrPackage::parse_ir(&ir_text, filename)
-}
-
-pub fn optimize_ir(ir: &IrPackage, top: &str) -> Result<IrPackage, XlsynthError> {
-    let ir_text = xls_optimize_ir(&ir.to_string(), top)?;
-    IrPackage::parse_ir(&ir_text, ir.filename())
-}
-
-pub fn mangle_dslx_name(module: &str, name: &str) -> Result<String, XlsynthError> {
-    xls_mangle_dslx_name(module, name)
 }
