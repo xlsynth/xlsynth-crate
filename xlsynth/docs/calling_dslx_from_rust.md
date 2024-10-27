@@ -2,8 +2,8 @@
 
 When developing DSLX code code, we often want to be able to:
 
-* easily invoke the DSLX functionality, or
-* interoperate with DSLX types
+- easily invoke the DSLX functionality, or
+- interoperate with DSLX types
 
 from Rust project code-bases. Additionally, we want to be able to
 interoperate with SystemVerilog code bases with "Single Source of Truth" type definitions.
