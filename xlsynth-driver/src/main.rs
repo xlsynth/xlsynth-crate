@@ -33,17 +33,18 @@
 //! ```
 
 use clap::{App, Arg, ArgMatches, SubCommand};
-use xlsynth::DslxConvertOptions;
+use serde::Deserialize;
 use std::process;
 use std::process::Command;
-use serde::Deserialize;
+use xlsynth::DslxConvertOptions;
 
 #[derive(Deserialize)]
 struct ToolchainConfig {
     /// Path to the DSLX standard library.
     dslx_stdlib_path: Option<String>,
 
-    /// Additional paths to use in the DSLX module search, i.e. as roots for import statements.
+    /// Additional paths to use in the DSLX module search, i.e. as roots for
+    /// import statements.
     dslx_path: Vec<String>,
 
     /// Directory path for the XLS toolset, e.g. codegen_main, opt_main, etc.
@@ -222,12 +223,14 @@ fn main() {
     let toml_path = matches.value_of("toolchain");
     let toml_value: Option<toml::Value> = toml_path.map(|path| {
         // If we got a toolchain toml file, read/parse it.
-        let toml_str = std::fs::read_to_string(path).expect
-            ("Failed to read toolchain toml file");
+        let toml_str = std::fs::read_to_string(path).expect("Failed to read toolchain toml file");
         toml::from_str(&toml_str).expect("Failed to parse toolchain toml file")
     });
     let config = toml_value.map(|v| {
-        let toolchain_config = v.clone().try_into::<XlsynthToolchain>().expect(&format!("Failed to parse toolchain config; value: {}", v));
+        let toolchain_config = v
+            .clone()
+            .try_into::<XlsynthToolchain>()
+            .expect(&format!("Failed to parse toolchain config; value: {}", v));
         toolchain_config.toolchain
     });
 
@@ -297,7 +300,9 @@ fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     );
 }
 
-/// Helper for extracting the DSLX standard library path from the command line flag, if specified, or the toolchain config if it's present and the cmdline flag isn't specified.
+/// Helper for extracting the DSLX standard library path from the command line
+/// flag, if specified, or the toolchain config if it's present and the cmdline
+/// flag isn't specified.
 fn get_dslx_stdlib_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Option<String> {
     let dslx_stdlib_path = matches.value_of("dslx_stdlib_path");
     if let Some(dslx_stdlib_path) = dslx_stdlib_path {
@@ -309,7 +314,9 @@ fn get_dslx_stdlib_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     }
 }
 
-/// Helper for retrieving supplemental DSLX search paths from the command line flag, if specified, or the toolchain config if it's present and the cmdline flag isn't specified.
+/// Helper for retrieving supplemental DSLX search paths from the command line
+/// flag, if specified, or the toolchain config if it's present and the cmdline
+/// flag isn't specified.
 fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Option<String> {
     let dslx_path = matches.value_of("dslx_path");
     if let Some(dslx_path) = dslx_path {
@@ -330,7 +337,7 @@ fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
 
     let dslx_path = get_dslx_path(matches, config);
     let dslx_path = dslx_path.as_deref();
-    
+
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
     // Stub function for DSLX to IR conversion
@@ -574,9 +581,20 @@ fn dslx2ir(
         println!("{}", output);
     } else {
         let dslx_contents = std::fs::read_to_string(input_file).expect("file read successful");
-        let dslx_stdlib_path: Option<&std::path::Path> = dslx_stdlib_path.map(|s| std::path::Path::new(s));
-        let additional_search_paths: Vec<&std::path::Path> = dslx_path.map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect()).unwrap_or_default();
-        let output = xlsynth::xls_convert_dslx_to_ir(&dslx_contents, input_file, &DslxConvertOptions { dslx_stdlib_path, additional_search_paths }).expect("successful conversion");
+        let dslx_stdlib_path: Option<&std::path::Path> =
+            dslx_stdlib_path.map(|s| std::path::Path::new(s));
+        let additional_search_paths: Vec<&std::path::Path> = dslx_path
+            .map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect())
+            .unwrap_or_default();
+        let output = xlsynth::xls_convert_dslx_to_ir(
+            &dslx_contents,
+            input_file,
+            &DslxConvertOptions {
+                dslx_stdlib_path,
+                additional_search_paths,
+            },
+        )
+        .expect("successful conversion");
         println!("{}", output);
     }
 }

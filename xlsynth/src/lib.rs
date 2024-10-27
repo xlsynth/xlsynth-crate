@@ -69,13 +69,23 @@ impl<'a> Default for DslxConvertOptions<'a> {
     }
 }
 
-pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path, options: &DslxConvertOptions) -> Result<String, XlsynthError> {
+pub fn xls_convert_dslx_to_ir(
+    dslx: &str,
+    path: &std::path::Path,
+    options: &DslxConvertOptions,
+) -> Result<String, XlsynthError> {
     // Extract the module name from the path; e.g. "foo/bar/baz.x" -> "baz"
     let module_name = dslx_path_to_module_name(path)?;
     let path_str = path.to_str().unwrap();
-    let stdlib_path = options.dslx_stdlib_path.unwrap_or_else(|| std::path::Path::new(xlsynth_sys::DSLX_STDLIB_PATH));
+    let stdlib_path = options
+        .dslx_stdlib_path
+        .unwrap_or_else(|| std::path::Path::new(xlsynth_sys::DSLX_STDLIB_PATH));
     let stdlib_path = stdlib_path.to_str().unwrap();
-    let search_paths = options.additional_search_paths.iter().map(|p| p.to_str().unwrap()).collect::<Vec<&str>>();
+    let search_paths = options
+        .additional_search_paths
+        .iter()
+        .map(|p| p.to_str().unwrap())
+        .collect::<Vec<&str>>();
 
     let mut search_paths_cstrs = vec![];
     for p in search_paths {
@@ -90,7 +100,10 @@ pub fn xls_convert_dslx_to_ir(dslx: &str, path: &std::path::Path, options: &Dslx
     eprintln!("dslx_stdlib_path: {:?}", dslx_stdlib_path);
 
     unsafe {
-        let additional_search_paths_ptrs: Vec<*const std::os::raw::c_char> = search_paths_cstrs.iter().map(|cstr| cstr.as_ptr()).collect();
+        let additional_search_paths_ptrs: Vec<*const std::os::raw::c_char> = search_paths_cstrs
+            .iter()
+            .map(|cstr| cstr.as_ptr())
+            .collect();
 
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
