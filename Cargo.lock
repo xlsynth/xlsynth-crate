@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "curl",
  "docmatic",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-driver"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "clap",
  "tempfile",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.33"
+version = "0.0.34"
 dependencies = [
  "curl",
  "flate2",
