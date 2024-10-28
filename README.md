@@ -45,3 +45,15 @@ $ ls $DEV_XLS_DSO_WORKSPACE/bazel-bin/xls/public/libxls.so
 $ cargo test -vv |& grep -i workspace
 [xlsynth-sys ...] cargo:info=Using DSO from workspace: ...
 ```
+
+#### Pre-Commit
+
+The `pre-commit` tool is used to help with local checks before PRs are created:
+
+```shell
+$ sudo apt-get install pre-commit
+$ pre-commit install
+$ pre-commit run --all-files
+```
+
+This `pre-commit` step is also run as part of continuous integration.
