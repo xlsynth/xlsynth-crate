@@ -145,6 +145,13 @@ impl BridgeBuilder for SvBridgeBuilder {
         self.lines.push(lines.join("\n"));
         Ok(())
     }
+
+    fn add_alias(&mut self, dslx_name: &str, bits_type: dslx::Type) -> Result<(), XlsynthError> {
+        let sv_ty = Self::convert_type(&bits_type)?;
+        let sv_name = format!("{}_t", camel_to_snake(dslx_name));
+        self.lines.push(format!("typedef {} {};\n", sv_ty, sv_name));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -194,5 +201,15 @@ mod tests {
 } my_struct_t;
 "#
         );
+    }
+
+    #[test]
+    fn test_convert_leaf_module_type_alias_to_bits_type_only() {
+        let dslx = "type MyType = u8;";
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = SvBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(builder.build(), "typedef logic [7:0] my_type_t;\n");
     }
 }

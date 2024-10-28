@@ -157,6 +157,31 @@ pub struct CDslxTypeAnnotation {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+#[repr(C)]
+pub struct CDslxTypeRefTypeAnnotation {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxTypeRef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxImport {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxColonRef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxTypeDefinition {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 pub type XlsFormatPreference = i32;
 
 pub type VastFileType = i32;
@@ -403,11 +428,11 @@ extern "C" {
 
     pub fn xls_dslx_type_info_get_type_struct_def(
         type_info: *mut CDslxTypeInfo,
-        enum_def: *mut CDslxStructDef,
+        node: *mut CDslxStructDef,
     ) -> *mut CDslxType;
     pub fn xls_dslx_type_info_get_type_enum_def(
         type_info: *mut CDslxTypeInfo,
-        enum_def: *mut CDslxEnumDef,
+        node: *mut CDslxEnumDef,
     ) -> *mut CDslxType;
     pub fn xls_dslx_type_info_get_type_struct_member(
         type_info: *mut CDslxTypeInfo,
@@ -415,7 +440,7 @@ extern "C" {
     ) -> *mut CDslxType;
     pub fn xls_dslx_type_info_get_type_type_alias(
         type_info: *mut CDslxTypeInfo,
-        enum_def: *mut CDslxTypeAlias,
+        node: *mut CDslxTypeAlias,
     ) -> *mut CDslxType;
 
     /// Gets the concrete type for a TypeAnnotation AST node.
@@ -423,6 +448,46 @@ extern "C" {
         type_info: *mut CDslxTypeInfo,
         type_annotation: *mut CDslxTypeAnnotation,
     ) -> *mut CDslxType;
+
+    // -- TypeAlias
+
+    pub fn xls_dslx_type_alias_get_identifier(
+        type_alias: *const CDslxTypeAlias,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_type_alias_get_type_annotation(
+        type_alias: *const CDslxTypeAlias,
+    ) -> *mut CDslxTypeAnnotation;
+
+    // -- TypeAnnotation
+
+    pub fn xls_dslx_type_annotation_get_type_ref_type_annotation(
+        type_annotation: *const CDslxTypeAnnotation,
+    ) -> *mut CDslxTypeRefTypeAnnotation;
+
+    // -- TypeRef
+
+    pub fn xls_dslx_type_ref_get_type_definition(
+        type_ref: *const CDslxTypeRef,
+    ) -> *mut CDslxTypeDefinition;
+
+    // -- ColonRef
+
+    pub fn xls_dslx_colon_ref_resolve_import_subject(
+        colon_ref: *const CDslxColonRef,
+    ) -> *mut CDslxImport;
+
+    // -- TypeDefinition
+
+    pub fn xls_dslx_type_definition_get_colon_ref(
+        type_definition: *const CDslxTypeDefinition,
+    ) -> *mut CDslxColonRef;
+
+    // -- TypeRefTypeAnnotation
+
+    pub fn xls_dslx_type_ref_type_annotation_get_type_ref(
+        type_ref_type_annotation: *const CDslxTypeRefTypeAnnotation,
+    ) -> *mut CDslxTypeRef;
 
     // -- StructDef
 
