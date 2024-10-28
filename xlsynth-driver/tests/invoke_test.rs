@@ -62,9 +62,12 @@ struct MyStruct {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout.trim(), "typedef struct packed {
+    assert_eq!(
+        stdout.trim(),
+        "typedef struct packed {
     logic [4:0] data;
-} my_struct_t;");
+} my_struct_t;"
+    );
 }
 
 /// Tests that we can point at a xlsynth-toolchain.toml file to get a DSLX_PATH

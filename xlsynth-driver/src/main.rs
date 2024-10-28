@@ -357,12 +357,13 @@ fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     let input_path = std::path::Path::new(input_file);
 
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
-    let dslx_stdlib_path: Option<std::path::PathBuf> = dslx_stdlib_path.map(|s| std::path::Path::new(&s).to_path_buf());
+    let dslx_stdlib_path: Option<std::path::PathBuf> =
+        dslx_stdlib_path.map(|s| std::path::Path::new(&s).to_path_buf());
     let dslx_stdlib_path = dslx_stdlib_path.as_ref().map(|p| p.as_path());
 
     let dslx_path = get_dslx_path(matches, config);
     let dslx_path = dslx_path.as_deref();
-    
+
     // Stub function for DSLX to SV type conversion
     dslx2sv_types(input_path, dslx_stdlib_path, dslx_path);
 }
@@ -461,7 +462,7 @@ fn dslx2sv_types(
     dslx_path: Option<&str>,
 ) {
     let dslx = std::fs::read_to_string(input_file).unwrap();
-    
+
     let dslx_stdlib_path_buf: Option<std::path::PathBuf> =
         dslx_stdlib_path.map(|s| std::path::Path::new(s).to_path_buf());
     let dslx_stdlib_path = dslx_stdlib_path_buf.as_ref().map(|p| p.as_path());
