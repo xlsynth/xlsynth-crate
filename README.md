@@ -50,7 +50,7 @@ $ cargo test -vv |& grep -i workspace
 
 The `pre-commit` tool is used to help with local checks before PRs are created:
 
-```
+```shell
 $ sudo apt-get install pre-commit
 $ pre-commit install
 $ pre-commit run --all-files
