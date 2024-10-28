@@ -195,4 +195,16 @@ mod tests {
 "#
         );
     }
+
+    #[test]
+    fn test_convert_leaf_module_type_alias_to_bits_type_only() {
+        let dslx = "type MyType = u8;";
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = SvBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            "typedef logic [7:0] my_type_t");
+    }
 }

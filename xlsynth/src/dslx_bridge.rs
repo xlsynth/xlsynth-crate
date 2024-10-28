@@ -31,6 +31,13 @@ pub trait BridgeBuilder {
         dslx_name: &str,
         members: &[(String, dslx::Type)],
     ) -> Result<(), XlsynthError>;
+
+    /// Invoked when there is a type alias for a primitive type (i.e. not an import-style type
+    /// alias that refers via a ColonRef to a definition in a different module).
+    fn add_alias_to_bits_type(
+        &mut self,
+        dslx_name: &str,
+        bits_type: dslx::Type) -> Result<(), XlsynthError>;
 }
 
 fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, IrValue)> {
@@ -104,7 +111,12 @@ pub fn convert_leaf_module(
                 let struct_def = module.get_type_definition_as_struct_def(i).unwrap();
                 convert_struct(&struct_def, &type_info, builder)?
             }
-            dslx::TypeDefinitionKind::TypeAlias => todo!("convert type alias from DSLX to Rust"),
+            dslx::TypeDefinitionKind::TypeAlias => {
+                let type_alias: TypeAlias = module.get_type_definition_as_type_alias(i).unwrap();
+                let alias_name = type_alias.get_name();
+
+                todo!("convert type alias from DSLX to Rust")
+            }
             dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),
         }
     }
