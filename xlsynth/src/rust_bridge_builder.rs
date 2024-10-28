@@ -309,4 +309,24 @@ pub struct MyStruct {
 } // mod my_module"#
         );
     }
+
+    #[test]
+    fn test_convert_leaf_module_type_alias_to_bits_type_only() {
+        let dslx = "type MyType = u8;";
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = RustBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            r#"mod my_module {
+#![allow(dead_code)]
+#![allow(unused_imports)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+pub type MyType = IrUBits<8>;
+
+} // mod my_module"#
+        );
+    }
 }

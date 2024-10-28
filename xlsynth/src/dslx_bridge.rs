@@ -106,8 +106,7 @@ fn convert_type_alias(
     }
 
     let alias_type = type_info.get_type_for_type_annotation(type_annotation);
-    builder.add_alias(&alias_name, alias_type);
-    Ok(())
+    builder.add_alias(&alias_name, alias_type)
 }
 
 pub fn convert_leaf_module(
