@@ -116,7 +116,7 @@ impl AppExt for App<'_, '_> {
 
 fn main() {
     let matches = App::new("xlsynth-driver")
-        .version("0.1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("Command line driver for XLS/xlsynth capabilities")
         .arg(
             Arg::with_name("toolchain")

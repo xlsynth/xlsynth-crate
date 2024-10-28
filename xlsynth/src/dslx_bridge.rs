@@ -32,12 +32,10 @@ pub trait BridgeBuilder {
         members: &[(String, dslx::Type)],
     ) -> Result<(), XlsynthError>;
 
-    /// Invoked when there is a type alias for a primitive type (i.e. not an import-style type
-    /// alias that refers via a ColonRef to a definition in a different module).
-    fn add_alias_to_bits_type(
-        &mut self,
-        dslx_name: &str,
-        bits_type: dslx::Type) -> Result<(), XlsynthError>;
+    /// Invoked when there is a type alias to emit for this module (i.e. not an
+    /// import-style type alias that refers, via a ColonRef, to a definition
+    /// in a different module).
+    fn add_alias(&mut self, dslx_name: &str, ty: dslx::Type) -> Result<(), XlsynthError>;
 }
 
 fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, IrValue)> {
@@ -85,6 +83,33 @@ fn convert_struct(
     builder.add_struct_def(&struct_name, &members)
 }
 
+fn convert_type_alias(
+    type_alias: &dslx::TypeAlias,
+    type_info: &dslx::TypeInfo,
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
+    let alias_name = type_alias.get_identifier();
+
+    // If the alias right-hand-side is a ColonRef with a different module as a
+    // subject we skip it, because it's an import style re-binding pattern.
+    let type_annotation = type_alias.get_type_annotation();
+
+    if let Some(type_ref_type_annotation) = type_annotation.to_type_ref_type_annotation() {
+        let type_ref: dslx::TypeRef = type_ref_type_annotation.get_type_ref();
+        let type_definition: dslx::TypeDefinition = type_ref.get_type_definition();
+        if let Some(colon_ref) = type_definition.to_colon_ref() {
+            if let Some(_import) = colon_ref.resolve_import_subject() {
+                // Skip the "use-style" typedef.
+                return Ok(());
+            }
+        }
+    }
+
+    let alias_type = type_info.get_type_for_type_annotation(type_annotation);
+    builder.add_alias(&alias_name, alias_type);
+    Ok(())
+}
+
 pub fn convert_leaf_module(
     import_data: &mut dslx::ImportData,
     dslx_program: &str,
@@ -112,10 +137,8 @@ pub fn convert_leaf_module(
                 convert_struct(&struct_def, &type_info, builder)?
             }
             dslx::TypeDefinitionKind::TypeAlias => {
-                let type_alias: TypeAlias = module.get_type_definition_as_type_alias(i).unwrap();
-                let alias_name = type_alias.get_name();
-
-                todo!("convert type alias from DSLX to Rust")
+                let type_alias = module.get_type_definition_as_type_alias(i).unwrap();
+                convert_type_alias(&type_alias, &type_info, builder)?
             }
             dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),
         }
