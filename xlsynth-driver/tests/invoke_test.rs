@@ -32,6 +32,41 @@ fn test_dslx2sv_types_subcommand() {
     );
 }
 
+#[test]
+fn test_dslx2sv_types_with_std_clog2() {
+    let dslx = "import std;
+
+const COUNT = u32:24;
+const WIDTH = std::clog2(COUNT);
+
+struct MyStruct {
+    data: bits[WIDTH],
+}
+";
+    // Make a temporary file to hold the DSLX code.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    // Run the dslx2sv subcommand.
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2sv-types")
+        .arg(dslx_path.to_str().unwrap())
+        .output()
+        .expect("Failed to run xlsynth-driver");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "typedef struct packed {
+    logic [4:0] data;
+} my_struct_t;");
+}
+
 /// Tests that we can point at a xlsynth-toolchain.toml file to get a DSLX_PATH
 /// value.
 #[test]

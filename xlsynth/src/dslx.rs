@@ -43,7 +43,8 @@ impl ImportData {
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
     ) -> Self {
-        let dslx_stdlib_path = dslx_stdlib_path.unwrap_or(std::path::Path::new("xls/dslx/stdlib"));
+        let default_dslx_stdlib_path = std::path::PathBuf::from(xlsynth_sys::DSLX_STDLIB_PATH);
+        let dslx_stdlib_path = dslx_stdlib_path.unwrap_or(&default_dslx_stdlib_path);
 
         let dslx_stdlib_path_c_str =
             std::ffi::CString::new(dslx_stdlib_path.to_str().unwrap()).unwrap();
@@ -571,10 +572,10 @@ pub fn parse_and_typecheck(
     module_name: &str,
     import_data: &mut ImportData,
 ) -> Result<TypecheckedModule, XlsynthError> {
+    let program_c_str = std::ffi::CString::new(dslx).unwrap();
+    let path_c_str = std::ffi::CString::new(path).unwrap();
+    let module_name_c_str = std::ffi::CString::new(module_name).unwrap();
     unsafe {
-        let program_c_str = std::ffi::CString::new(dslx).unwrap();
-        let path_c_str = std::ffi::CString::new(path).unwrap();
-        let module_name_c_str = std::ffi::CString::new(module_name).unwrap();
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut result_out: *mut sys::CDslxTypecheckedModule = std::ptr::null_mut();
         let success = sys::xls_dslx_parse_and_typecheck(
