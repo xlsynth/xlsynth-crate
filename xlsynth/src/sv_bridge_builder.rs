@@ -70,6 +70,14 @@ impl SvBridgeBuilder {
         format!("{}_e", camel_to_snake(dslx_name))
     }
 
+    fn enum_member_name_to_sv(dslx_name: &str) -> String {
+        if !dslx_name.chars().all(char::is_uppercase) {
+            camel_to_snake(dslx_name).to_uppercase()
+        } else {
+            dslx_name.to_string()
+        }
+    }
+
     /// Converts a DSLX struct name in CamelCase to a SystemVerilog struct name
     /// in snake_case with a _t suffix
     fn struct_name_to_sv(dslx_name: &str) -> String {
@@ -108,9 +116,10 @@ impl BridgeBuilder for SvBridgeBuilder {
             let member_value_str = member_value.to_string_fmt(format)?;
             let digits = member_value_str.split(':').nth(1).expect("split success");
             let maybe_comma = if i < members.len() - 1 { "," } else { "" };
+            let sv_member_name = Self::enum_member_name_to_sv(member_name);
             lines.push(format!(
                 "    {} = {}'d{}{}",
-                member_name, underlying_bit_count, digits, maybe_comma
+                sv_member_name, underlying_bit_count, digits, maybe_comma
             ));
         }
         lines.push(format!("}} {};\n", sv_name));
@@ -177,6 +186,27 @@ mod tests {
     READ = 2'd0,
     WRITE = 2'd1
 } op_type_e;
+"#
+        );
+    }
+
+    /// Demonstrates that we convert enums that are defined as CamelCase in DSLX
+    /// into enums defined with SCREAMING_SNAKE_CASE in SystemVerilog.
+    #[test]
+    fn test_convert_leaf_module_enum_def_camel_case() {
+        let dslx = r#"
+        enum MyEnum : u2 { MyFirstValue = 0, MySecondValue = 1 }
+        "#;
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = SvBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            r#"typedef enum logic [1:0] {
+    MY_FIRST_VALUE = 2'd0,
+    MY_SECOND_VALUE = 2'd1
+} my_enum_e;
 "#
         );
     }
