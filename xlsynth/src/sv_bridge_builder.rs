@@ -11,8 +11,9 @@ use crate::{
 
 pub struct SvBridgeBuilder {
     lines: Vec<String>,
-    /// We keep a record of all the names we define flat within the namespace so that we can
-    /// detect and report collisions at generation time instead of in a subsequent linting step.
+    /// We keep a record of all the names we define flat within the namespace so
+    /// that we can detect and report collisions at generation time instead
+    /// of in a subsequent linting step.
     defined: HashSet<String>,
 }
 
@@ -28,7 +29,13 @@ fn camel_to_snake(name: &str) -> String {
 }
 
 fn is_screaming_snake_case(name: &str) -> bool {
-    name.chars().all(|c| if c.is_ascii_alphabetic() { c.is_ascii_uppercase() } else { true })
+    name.chars().all(|c| {
+        if c.is_ascii_alphabetic() {
+            c.is_ascii_uppercase()
+        } else {
+            true
+        }
+    })
 }
 
 fn make_bit_span_suffix(bit_count: usize) -> String {
@@ -43,7 +50,10 @@ fn make_bit_span_suffix(bit_count: usize) -> String {
 
 impl SvBridgeBuilder {
     pub fn new() -> Self {
-        Self { lines: vec![], defined: HashSet::new() }
+        Self {
+            lines: vec![],
+            defined: HashSet::new(),
+        }
     }
 
     pub fn build(&self) -> String {
@@ -261,9 +271,10 @@ mod tests {
         assert_eq!(sv, "typedef logic [7:0] my_type_t;\n");
     }
 
-    /// Demonstrates that we get an error when we attempt to emit two enums who have the same
-    /// member name -- while this is acceptable in DSLX the fact we flatten the enum names
-    /// into a single namespace in SV means we have an error to flag, in which case we currently expect
+    /// Demonstrates that we get an error when we attempt to emit two enums who
+    /// have the same member name -- while this is acceptable in DSLX the
+    /// fact we flatten the enum names into a single namespace in SV means
+    /// we have an error to flag, in which case we currently expect
     /// user correction.
     #[test]
     fn test_convert_leaf_module_enum_defs_with_collision() {
