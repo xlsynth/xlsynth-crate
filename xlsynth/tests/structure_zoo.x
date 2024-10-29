@@ -69,8 +69,8 @@ struct Cache {
 // --
 
 enum OpType : u2 {
-    READ = 0,
-    WRITE = 1,
+    OP_READ = 0,
+    OP_WRITE = 1,
 }
 
 /// Struct with a ready/valid handshake and enum type.

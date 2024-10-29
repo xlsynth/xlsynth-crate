@@ -57,8 +57,8 @@ typedef struct packed {
 } cache_t;
 
 typedef enum logic [1:0] {
-    READ = 2'd0,
-    WRITE = 2'd1
+    OP_READ = 2'd0,
+    OP_WRITE = 2'd1
 } op_type_e;
 
 typedef struct packed {
