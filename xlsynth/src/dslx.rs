@@ -155,6 +155,18 @@ impl Module {
             ptr,
         })
     }
+
+    pub fn get_type_definition_as_type_alias(&self, idx: usize) -> Result<TypeAlias, XlsynthError> {
+        let ptr =
+            unsafe { sys::xls_dslx_module_get_type_definition_as_type_alias(self.ptr, idx as i64) };
+        if ptr.is_null() {
+            return Err(XlsynthError("Failed to get type alias".to_string()));
+        }
+        Ok(TypeAlias {
+            parent: self.parent.clone(),
+            ptr,
+        })
+    }
 }
 
 pub struct EnumMember {
@@ -217,11 +229,104 @@ impl EnumDef {
     }
 }
 
+// -- TypeRefTypeAnnotation (note in C++ this is a subtype of `TypeAnnotation`)
+
+pub struct TypeRefTypeAnnotation {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxTypeRefTypeAnnotation,
+}
+
+impl TypeRefTypeAnnotation {
+    pub fn get_type_ref(&self) -> TypeRef {
+        TypeRef {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_type_ref_type_annotation_get_type_ref(self.ptr) },
+        }
+    }
+}
+
 // -- TypeAnnotation
 
 pub struct TypeAnnotation {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxTypeAnnotation,
+}
+
+impl TypeAnnotation {
+    pub fn to_type_ref_type_annotation(&self) -> Option<TypeRefTypeAnnotation> {
+        let casted =
+            unsafe { sys::xls_dslx_type_annotation_get_type_ref_type_annotation(self.ptr) };
+        if casted.is_null() {
+            return None;
+        }
+        Some(TypeRefTypeAnnotation {
+            parent: self.parent.clone(),
+            ptr: casted,
+        })
+    }
+}
+
+// -- Import
+
+pub struct Import {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxImport,
+}
+
+// -- ColonRef
+
+pub struct ColonRef {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxColonRef,
+}
+
+impl ColonRef {
+    pub fn resolve_import_subject(&self) -> Option<Import> {
+        let casted = unsafe { sys::xls_dslx_colon_ref_resolve_import_subject(self.ptr) };
+        if casted.is_null() {
+            return None;
+        }
+        Some(Import {
+            parent: self.parent.clone(),
+            ptr: casted,
+        })
+    }
+}
+
+// -- TypeDefinition
+
+pub struct TypeDefinition {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxTypeDefinition,
+}
+
+impl TypeDefinition {
+    pub fn to_colon_ref(&self) -> Option<ColonRef> {
+        let casted = unsafe { sys::xls_dslx_type_definition_get_colon_ref(self.ptr) };
+        if casted.is_null() {
+            return None;
+        }
+        Some(ColonRef {
+            parent: self.parent.clone(),
+            ptr: casted,
+        })
+    }
+}
+
+// -- TypeRef
+
+pub struct TypeRef {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxTypeRef,
+}
+
+impl TypeRef {
+    pub fn get_type_definition(&self) -> TypeDefinition {
+        TypeDefinition {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_type_ref_get_type_definition(self.ptr) },
+        }
+    }
 }
 
 // -- StructDef
@@ -276,6 +381,27 @@ impl StructDef {
         };
         assert!(!result.ptr.is_null());
         result
+    }
+}
+
+pub struct TypeAlias {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxTypeAlias,
+}
+
+impl TypeAlias {
+    pub fn get_identifier(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_type_alias_get_identifier(self.ptr);
+            c_str_to_rust(c_str)
+        }
+    }
+
+    pub fn get_type_annotation(&self) -> TypeAnnotation {
+        TypeAnnotation {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_type_alias_get_type_annotation(self.ptr) },
+        }
     }
 }
 
