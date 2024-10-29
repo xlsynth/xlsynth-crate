@@ -3,12 +3,17 @@
 //! Builder that creates SystemVerilog type definitions from DSLX type
 //! definitions.
 
+use std::collections::HashSet;
+
 use crate::{
     dslx, dslx_bridge::BridgeBuilder, ir_value::IrFormatPreference, IrValue, XlsynthError,
 };
 
 pub struct SvBridgeBuilder {
     lines: Vec<String>,
+    /// We keep a record of all the names we define flat within the namespace so that we can
+    /// detect and report collisions at generation time instead of in a subsequent linting step.
+    defined: HashSet<String>,
 }
 
 fn camel_to_snake(name: &str) -> String {
@@ -20,6 +25,10 @@ fn camel_to_snake(name: &str) -> String {
         snake.push(c.to_ascii_lowercase());
     }
     snake
+}
+
+fn is_screaming_snake_case(name: &str) -> bool {
+    name.chars().all(|c| if c.is_ascii_alphabetic() { c.is_ascii_uppercase() } else { true })
 }
 
 fn make_bit_span_suffix(bit_count: usize) -> String {
@@ -34,11 +43,22 @@ fn make_bit_span_suffix(bit_count: usize) -> String {
 
 impl SvBridgeBuilder {
     pub fn new() -> Self {
-        Self { lines: vec![] }
+        Self { lines: vec![], defined: HashSet::new() }
     }
 
     pub fn build(&self) -> String {
         self.lines.join("\n")
+    }
+
+    fn define_or_error(&mut self, name: &str, ctx: &str) -> Result<(), XlsynthError> {
+        let inserted = self.defined.insert(name.to_string());
+        if inserted {
+            Ok(())
+        } else {
+            Err(XlsynthError(format!(
+                "Building SV; name collision detected for SV name in generated module namespace: `{name}` context: {ctx}"
+            )))
+        }
     }
 
     fn convert_type(ty: &dslx::Type) -> Result<String, XlsynthError> {
@@ -71,7 +91,7 @@ impl SvBridgeBuilder {
     }
 
     fn enum_member_name_to_sv(dslx_name: &str) -> String {
-        if !dslx_name.chars().all(char::is_uppercase) {
+        if !is_screaming_snake_case(dslx_name) {
             camel_to_snake(dslx_name).to_uppercase()
         } else {
             dslx_name.to_string()
@@ -107,6 +127,7 @@ impl BridgeBuilder for SvBridgeBuilder {
             "typedef enum logic{} {{",
             make_bit_span_suffix(underlying_bit_count)
         ));
+        let ctx = format!("DSLX enum `{dslx_name}`");
         for (i, (member_name, member_value)) in members.iter().enumerate() {
             let format = if is_signed {
                 IrFormatPreference::SignedDecimal
@@ -117,6 +138,7 @@ impl BridgeBuilder for SvBridgeBuilder {
             let digits = member_value_str.split(':').nth(1).expect("split success");
             let maybe_comma = if i < members.len() - 1 { "," } else { "" };
             let sv_member_name = Self::enum_member_name_to_sv(member_name);
+            self.define_or_error(&sv_member_name, &ctx)?;
             lines.push(format!(
                 "    {} = {}'d{}{}",
                 sv_member_name, underlying_bit_count, digits, maybe_comma
@@ -171,17 +193,22 @@ mod tests {
 
     use super::*;
 
+    fn simple_convert_for_test(dslx: &str) -> Result<String, XlsynthError> {
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = SvBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder)?;
+        Ok(builder.build())
+    }
+
     #[test]
     fn test_convert_leaf_module_enum_def_only() {
         let dslx = r#"
         enum OpType : u2 { READ = 0, WRITE = 1 }
         "#;
-        let mut import_data = dslx::ImportData::default();
-        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
-        let mut builder = SvBridgeBuilder::new();
-        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(
-            builder.build(),
+            sv,
             r#"typedef enum logic [1:0] {
     READ = 2'd0,
     WRITE = 2'd1
@@ -197,12 +224,9 @@ mod tests {
         let dslx = r#"
         enum MyEnum : u2 { MyFirstValue = 0, MySecondValue = 1 }
         "#;
-        let mut import_data = dslx::ImportData::default();
-        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
-        let mut builder = SvBridgeBuilder::new();
-        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(
-            builder.build(),
+            sv,
             r#"typedef enum logic [1:0] {
     MY_FIRST_VALUE = 2'd0,
     MY_SECOND_VALUE = 2'd1
@@ -219,12 +243,9 @@ mod tests {
             word_data: u16,
         }
         "#;
-        let mut import_data = dslx::ImportData::default();
-        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
-        let mut builder = SvBridgeBuilder::new();
-        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(
-            builder.build(),
+            sv,
             r#"typedef struct packed {
     logic [7:0] byte_data;
     logic [15:0] word_data;
@@ -236,10 +257,30 @@ mod tests {
     #[test]
     fn test_convert_leaf_module_type_alias_to_bits_type_only() {
         let dslx = "type MyType = u8;";
-        let mut import_data = dslx::ImportData::default();
-        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
-        let mut builder = SvBridgeBuilder::new();
-        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
-        assert_eq!(builder.build(), "typedef logic [7:0] my_type_t;\n");
+        let sv = simple_convert_for_test(dslx).unwrap();
+        assert_eq!(sv, "typedef logic [7:0] my_type_t;\n");
+    }
+
+    /// Demonstrates that we get an error when we attempt to emit two enums who have the same
+    /// member name -- while this is acceptable in DSLX the fact we flatten the enum names
+    /// into a single namespace in SV means we have an error to flag, in which case we currently expect
+    /// user correction.
+    #[test]
+    fn test_convert_leaf_module_enum_defs_with_collision() {
+        let dslx = "enum MyFirstEnum : u1 { A = 0, B = 1 }
+        enum MySecondEnum: u3 { A = 3, B = 4 }";
+        let result = simple_convert_for_test(dslx);
+        // We expect this caused a collision error on `A`.
+        let err = result.expect_err("expect collision");
+        assert!(err.to_string().contains("name collision detected for SV name in generated module namespace: `A` context: DSLX enum `MySecondEnum`"));
+    }
+
+    #[test]
+    fn test_is_screaming_snake_case() {
+        assert!(is_screaming_snake_case("FOO_BAR"));
+        assert!(is_screaming_snake_case("ONEWORD"));
+
+        assert!(!is_screaming_snake_case("FooBar"));
+        assert!(!is_screaming_snake_case("blah"));
     }
 }
