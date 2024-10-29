@@ -489,6 +489,65 @@ fn dslx2sv_types(
     println!("{}", sv);
 }
 
+fn run_dslx2pipeline_via_tools(
+    input_file: &std::path::Path,
+    top: &str,
+    pipeline_spec: &PipelineSpec,
+    dslx_stdlib_path: Option<&str>,
+    dslx_path: Option<&str>,
+    delay_model: &str,
+    keep_temps: bool,
+    tool_path: &str,
+) {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
+
+    let unopt_ir = run_ir_converter_main(
+        input_file,
+        Some(top),
+        dslx_stdlib_path,
+        dslx_path,
+        tool_path,
+    );
+    let unopt_ir_path = temp_dir.path().join("unopt.ir");
+    std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
+
+    let ir_top = xlsynth::mangle_dslx_name(module_name, top).unwrap();
+
+    let opt_ir = run_opt_main(&unopt_ir_path, Some(&ir_top), tool_path);
+    let opt_ir_path = temp_dir.path().join("opt.ir");
+    std::fs::write(&opt_ir_path, opt_ir).unwrap();
+
+    let sv = run_codegen_pipeline(&opt_ir_path, delay_model, pipeline_spec, tool_path);
+    let sv_path = temp_dir.path().join("output.sv");
+    std::fs::write(&sv_path, &sv).unwrap();
+
+    if keep_temps {
+        eprintln!(
+            "Pipeline generation successful. Output written to: {}",
+            temp_dir.into_path().to_str().unwrap()
+        );
+    }
+    println!("{}", sv);
+}
+
+fn run_dslx2pipeline_via_apis(
+    _input_file: &std::path::Path,
+    _top: &str,
+    _pipeline_spec: &PipelineSpec,
+    _dslx_stdlib_path: Option<&str>,
+    _dslx_path: Option<&str>,
+    _delay_model: &str,
+    _keep_temps: bool,
+    _config: &Option<ToolchainConfig>,
+) {
+    // First we convert to IR.
+    // Then we optimize IR.
+    // Then we schedule-and-codegen.
+    todo!("dslx2pipeline subcommand using runtime APIs")
+}
+
 fn dslx2pipeline(
     input_file: &std::path::Path,
     top: &str,
@@ -500,39 +559,27 @@ fn dslx2pipeline(
     config: &Option<ToolchainConfig>,
 ) {
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-
-        let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
-
-        let unopt_ir = run_ir_converter_main(
+        run_dslx2pipeline_via_tools(
             input_file,
-            Some(top),
+            top,
+            pipeline_spec,
             dslx_stdlib_path,
             dslx_path,
+            delay_model,
+            keep_temps,
             tool_path,
         );
-        let unopt_ir_path = temp_dir.path().join("unopt.ir");
-        std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
-
-        let ir_top = xlsynth::mangle_dslx_name(module_name, top).unwrap();
-
-        let opt_ir = run_opt_main(&unopt_ir_path, Some(&ir_top), tool_path);
-        let opt_ir_path = temp_dir.path().join("opt.ir");
-        std::fs::write(&opt_ir_path, opt_ir).unwrap();
-
-        let sv = run_codegen_pipeline(&opt_ir_path, delay_model, pipeline_spec, tool_path);
-        let sv_path = temp_dir.path().join("output.sv");
-        std::fs::write(&sv_path, &sv).unwrap();
-
-        if keep_temps {
-            eprintln!(
-                "Pipeline generation successful. Output written to: {}",
-                temp_dir.into_path().to_str().unwrap()
-            );
-        }
-        println!("{}", sv);
     } else {
-        todo!("dslx2pipeline subcommand using runtime APIs")
+        run_dslx2pipeline_via_apis(
+            input_file,
+            top,
+            pipeline_spec,
+            dslx_stdlib_path,
+            dslx_path,
+            delay_model,
+            keep_temps,
+            config,
+        );
     }
 }
 

@@ -127,3 +127,33 @@ dslx_path = []
 }"
     ))
 }
+
+#[test]
+fn test_dslx2pipeline_identity_fn_one_stage() {
+    let dslx = "fn main(x: u32) -> u32 { x }";
+    // Make a temporary file to hold the DSLX code.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    // Run the dslx2pipeline subcommand.
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2pipeline")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("main")
+        .arg("--delay_model")
+        .arg("unit")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .output()
+        .expect("Failed to run xlsynth-driver");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "blah");
+}
