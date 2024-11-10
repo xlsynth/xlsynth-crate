@@ -4,6 +4,7 @@ use lazy_static::lazy_static;
 ///! Example of multi-threaded invocation of XLS functions.
 use rayon::prelude::*;
 use xlsynth::IrPackage;
+use xlsynth::IrValue;
 
 fn load_package(cargo_relpath: &str) -> IrPackage {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(cargo_relpath);
@@ -26,19 +27,24 @@ lazy_static! {
     };
 }
 
+fn run_dslx_add1(x: u32) -> u32 {
+    let x_ir = IrValue::u32(x);
+    let result = ADD1_FUNCTION
+        .interpret(&[x_ir])
+        .expect("interpretation success");
+    result.to_u32().unwrap()
+}
+
 pub fn validate_all_threads_compute_add1() {
     // Use rayon to compute the "add1" function in parallel on every available core.
-    let results: Vec<xlsynth::IrValue> = (0..num_cpus::get())
+    let results: Vec<u32> = (0..num_cpus::get() as u32)
         .into_par_iter()
-        .map(|i| {
-            let i_ir = xlsynth::IrValue::parse_typed(&format!("bits[32]:{}", i)).unwrap();
-            ADD1_FUNCTION.interpret(&[i_ir]).expect("interpret failed")
-        })
+        .map(|i| run_dslx_add1(i))
         .collect();
 
     // Check that all the results are index+1.
     for (i, result) in results.iter().enumerate() {
-        let want = xlsynth::IrValue::parse_typed(&format!("bits[32]:{}", i + 1)).unwrap();
+        let want = i as u32 + 1;
         assert_eq!(*result, want);
     }
 }
