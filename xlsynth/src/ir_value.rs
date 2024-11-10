@@ -54,9 +54,14 @@ impl IrValue {
         xls_parse_typed_value(s)
     }
 
-    pub fn u64(value: u64) -> Result<Self, XlsynthError> {
+    pub fn u32(value: u32) -> Self {
         // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
-        Self::parse_typed(std::format!("bits[64]:{}", value).as_str())
+        Self::parse_typed(std::format!("bits[32]:{}", value).as_str()).unwrap()
+    }
+
+    pub fn u64(value: u64) -> Self {
+        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
+        Self::parse_typed(std::format!("bits[64]:{}", value).as_str()).unwrap()
     }
 
     pub fn make_bits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
@@ -124,6 +129,18 @@ impl IrValue {
             Ok(i) => Ok(i),
             Err(e) => Err(XlsynthError(format!(
                 "IrValue::to_u64() failed to parse u64 from string: {}",
+                e
+            ))),
+        }
+    }
+
+    pub fn to_u32(&self) -> Result<u32, XlsynthError> {
+        let string = self.to_string_fmt(IrFormatPreference::UnsignedDecimal)?;
+        let number = string.split(':').nth(1).expect("split success");
+        match number.parse::<u32>() {
+            Ok(i) => Ok(i),
+            Err(e) => Err(XlsynthError(format!(
+                "IrValue::to_u32() failed to parse u32 from string: {}",
                 e
             ))),
         }
@@ -296,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_ir_value_from_rust() {
-        let v = IrValue::u64(42).expect("u64 success");
+        let v = IrValue::u64(42);
 
         // Check formatting for default stringification.
         assert_eq!(
