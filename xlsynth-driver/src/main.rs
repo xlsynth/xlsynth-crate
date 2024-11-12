@@ -125,6 +125,7 @@ fn main() {
                 .help("Path to a xlsynth-toolchain.toml file")
                 .takes_value(true),
         )
+        .subcommand(SubCommand::with_name("version").about("Prints the version of the driver"))
         .subcommand(
             SubCommand::with_name("dslx2pipeline")
                 .about("Converts DSLX to SystemVerilog")
@@ -244,6 +245,8 @@ fn main() {
         handle_ir2pipeline(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
         handle_dslx2sv_types(matches, &config);
+    } else if let Some(_matches) = matches.subcommand_matches("version") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
     } else {
         eprintln!("No valid subcommand provided.");
         process::exit(1);
