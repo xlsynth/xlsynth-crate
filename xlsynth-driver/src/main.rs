@@ -667,7 +667,7 @@ fn dslx2pipeline(
         let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
 
         let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
-        let dslx_path = config.as_ref().and_then(|c| Some(c.dslx_path.join(";")));
+        let dslx_path = config.as_ref().and_then(|c| Some(c.dslx_path.join(":")));
         let dslx_path_ref = dslx_path.as_ref().map(|s| s.as_str());
 
         let unopt_ir = run_ir_converter_main(
