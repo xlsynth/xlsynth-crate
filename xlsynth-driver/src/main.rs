@@ -23,9 +23,9 @@
 //! Sample usage:
 //!
 //! ```shell
-//! $ cargo run -- --tool_path=/home/cdleary/opt/xlsynth/latest/ \
+//! $ cargo run -- --toolchain=$HOME/xlsynth-toolchain.toml \
 //!     dslx2ir ../sample-usage/src/sample.x
-//! $ cargo run -- --tool_path=/home/cdleary/opt/xlsynth/latest/ \
+//! $ cargo run -- --toolchain=$HOME/xlsynth-toolchain.toml \
 //!     dslx2pipeline ../sample-usage/src/sample.x add1 \
 //!     --delay_model=asap7 --pipeline_stages=2
 //! $ cargo run -- \
@@ -143,8 +143,6 @@ fn main() {
                 )
                 .add_delay_model_arg()
                 .add_pipeline_args()
-                .add_dslx_stdlib_path_arg()
-                .add_dslx_path_arg()
                 // --keep_temps flag to keep temporary files
                 .arg(
                     Arg::with_name("keep_temps")
@@ -284,8 +282,6 @@ fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     let input_file = matches.value_of("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
     let top = matches.value_of("TOP").unwrap();
-    let dslx_stdlib_path = matches.value_of("dslx_stdlib_path");
-    let dslx_path = matches.value_of("dslx_path");
     let pipeline_spec = extract_pipeline_spec(matches);
     let delay_model = matches.value_of("DELAY_MODEL").unwrap();
     let keep_temps = matches.is_present("keep_temps");
@@ -295,8 +291,6 @@ fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
         input_path,
         top,
         &pipeline_spec,
-        dslx_stdlib_path,
-        dslx_path,
         delay_model,
         keep_temps,
         config,
@@ -496,8 +490,6 @@ fn dslx2pipeline(
     input_file: &std::path::Path,
     top: &str,
     pipeline_spec: &PipelineSpec,
-    dslx_stdlib_path: Option<&str>,
-    dslx_path: Option<&str>,
     delay_model: &str,
     keep_temps: bool,
     config: &Option<ToolchainConfig>,
@@ -507,11 +499,15 @@ fn dslx2pipeline(
 
         let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
 
+        let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
+        let dslx_path = config.as_ref().and_then(|c| Some(c.dslx_path.join(";")));
+        let dslx_path_ref = dslx_path.as_ref().map(|s| s.as_str());
+
         let unopt_ir = run_ir_converter_main(
             input_file,
             Some(top),
             dslx_stdlib_path,
-            dslx_path,
+            dslx_path_ref,
             tool_path,
         );
         let unopt_ir_path = temp_dir.path().join("unopt.ir");
