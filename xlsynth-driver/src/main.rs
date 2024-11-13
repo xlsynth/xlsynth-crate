@@ -27,7 +27,9 @@
 //!     dslx2ir ../sample-usage/src/sample.x
 //! $ cargo run -- --toolchain=$HOME/xlsynth-toolchain.toml \
 //!     dslx2pipeline ../sample-usage/src/sample.x add1 \
-//!     --delay_model=asap7 --pipeline_stages=2
+//!     --delay_model=asap7 --pipeline_stages=2 \
+//!     --input_valid_signal=input_valid \
+//!     --output_valid_signal=output_valid
 //! $ cargo run -- \
 //!     dslx2sv-types ../tests/structure_zoo.x
 //! ```
@@ -61,6 +63,7 @@ trait AppExt {
     fn add_pipeline_args(self) -> Self;
     fn add_dslx_path_arg(self) -> Self;
     fn add_dslx_stdlib_path_arg(self) -> Self;
+    fn add_codegen_args(self) -> Self;
 }
 
 impl AppExt for App<'_, '_> {
@@ -112,9 +115,78 @@ impl AppExt for App<'_, '_> {
                 .takes_value(true),
         )
     }
+
+    fn add_codegen_args(self) -> Self {
+        (self as App)
+            .arg(
+                Arg::with_name("input_valid_signal")
+                    .long("input_valid_signal")
+                    .value_name("INPUT_VALID_SIGNAL")
+                    .help("Load enable signal for pipeline registers"),
+            )
+            .arg(
+                Arg::with_name("output_valid_signal")
+                    .long("output_valid_signal")
+                    .value_name("OUTPUT_VALID_SIGNAL")
+                    .help("Output port holding pipelined valid signal"),
+            )
+            .arg(
+                Arg::with_name("flop_input_ports")
+                    .long("flop_input_ports")
+                    .value_name("BOOL")
+                    .takes_value(true)
+                    .possible_values(&["true", "false"])
+                    .min_values(0)
+                    .help("Flop input ports"),
+            )
+            .arg(
+                Arg::with_name("flop_outputs")
+                    .long("flop_outputs")
+                    .value_name("BOOL")
+                    .takes_value(true)
+                    .possible_values(&["true", "false"])
+                    .min_values(0)
+                    .help("Flop output ports"),
+            )
+            .arg(
+                Arg::with_name("add_idle_output")
+                    .long("add_idle_output")
+                    .value_name("BOOL")
+                    .takes_value(true)
+                    .possible_values(&["true", "false"])
+                    .min_values(0)
+                    .help("Add an idle output port"),
+            )
+            .arg(
+                Arg::with_name("module_name")
+                    .long("module_name")
+                    .value_name("MODULE_NAME")
+                    .help("Name of the generated module"),
+            )
+            .arg(
+                Arg::with_name("array_index_bounds_checking")
+                    .long("array_index_bounds_checking")
+                    .value_name("BOOL")
+                    .takes_value(true)
+                    .possible_values(&["true", "false"])
+                    .min_values(0)
+                    .help("Array index bounds checking"),
+            )
+            .arg(
+                Arg::with_name("separate_lines")
+                    .long("separate_lines")
+                    .value_name("BOOL")
+                    .takes_value(true)
+                    .possible_values(&["true", "false"])
+                    .min_values(0)
+                    .help("Separate lines in generated code"),
+            )
+    }
 }
 
 fn main() {
+    let _ = env_logger::try_init();
+
     let matches = App::new("xlsynth-driver")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Command line driver for XLS/xlsynth capabilities")
@@ -143,6 +215,7 @@ fn main() {
                 )
                 .add_delay_model_arg()
                 .add_pipeline_args()
+                .add_codegen_args()
                 // --keep_temps flag to keep temporary files
                 .arg(
                     Arg::with_name("keep_temps")
@@ -215,6 +288,7 @@ fn main() {
                         .index(1),
                 )
                 .add_delay_model_arg()
+                .add_codegen_args()
                 .add_pipeline_args(),
         )
         .get_matches();
@@ -267,6 +341,28 @@ fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
     }
 }
 
+/// Extracts flags that we pass to the "codegen" step of the process (i.e.
+/// generating lowered Verilog).
+fn extract_codegen_flags(matches: &ArgMatches) -> CodegenFlags {
+    CodegenFlags {
+        input_valid_signal: matches
+            .value_of("input_valid_signal")
+            .map(|s| s.to_string()),
+        output_valid_signal: matches
+            .value_of("output_valid_signal")
+            .map(|s| s.to_string()),
+        use_system_verilog: matches.value_of("use_system_verilog").map(|s| s == "true"),
+        flop_inputs: matches.value_of("flop_inputs").map(|s| s == "true"),
+        flop_outputs: matches.value_of("flop_outputs").map(|s| s == "true"),
+        add_idle_output: matches.value_of("add_idle_output").map(|s| s == "true"),
+        module_name: matches.value_of("module_name").map(|s| s.to_string()),
+        array_index_bounds_checking: matches
+            .value_of("array_index_bounds_checking")
+            .map(|s| s == "true"),
+        separate_lines: matches.value_of("separate_lines").map(|s| s == "true"),
+    }
+}
+
 fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.value_of("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
@@ -275,7 +371,15 @@ fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     // See which of pipeline_stages or clock_period_ps we're using.
     let pipeline_spec = extract_pipeline_spec(matches);
 
-    ir2pipeline(input_path, delay_model, &pipeline_spec, config);
+    let codegen_flags = extract_codegen_flags(matches);
+
+    ir2pipeline(
+        input_path,
+        delay_model,
+        &pipeline_spec,
+        &codegen_flags,
+        config,
+    );
 }
 
 fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
@@ -285,12 +389,14 @@ fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     let pipeline_spec = extract_pipeline_spec(matches);
     let delay_model = matches.value_of("DELAY_MODEL").unwrap();
     let keep_temps = matches.is_present("keep_temps");
+    let codegen_flags = extract_codegen_flags(matches);
 
     // Stub function for DSLX to SV conversion
     dslx2pipeline(
         input_path,
         top,
         &pipeline_spec,
+        &codegen_flags,
         delay_model,
         keep_temps,
         config,
@@ -365,10 +471,59 @@ fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     dslx2sv_types(input_path, dslx_stdlib_path, dslx_path);
 }
 
+struct CodegenFlags {
+    input_valid_signal: Option<String>,
+    output_valid_signal: Option<String>,
+    use_system_verilog: Option<bool>,
+    flop_inputs: Option<bool>,
+    flop_outputs: Option<bool>,
+    add_idle_output: Option<bool>,
+    module_name: Option<String>,
+    array_index_bounds_checking: Option<bool>,
+    separate_lines: Option<bool>,
+}
+
+/// Adds the given code-generation flags to the command in command-line-arg
+/// form.
+fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
+    if let Some(use_system_verilog) = codegen_flags.use_system_verilog {
+        command.arg(format!("--use_system_verilog={use_system_verilog}"));
+    }
+    if let Some(input_valid_signal) = &codegen_flags.input_valid_signal {
+        command.arg("--input_valid_signal").arg(input_valid_signal);
+    }
+    if let Some(output_valid_signal) = &codegen_flags.output_valid_signal {
+        command
+            .arg("--output_valid_signal")
+            .arg(output_valid_signal);
+    }
+    if let Some(flop_inputs) = codegen_flags.flop_inputs {
+        command.arg(format!("--flop_inputs={flop_inputs}"));
+    }
+    if let Some(flop_outputs) = codegen_flags.flop_outputs {
+        command.arg(format!("--flop_outputs={flop_outputs}"));
+    }
+    if let Some(add_idle_output) = codegen_flags.add_idle_output {
+        command.arg(format!("--add_idle_output={add_idle_output}"));
+    }
+    if let Some(module_name) = &codegen_flags.module_name {
+        command.arg("--module_name").arg(module_name);
+    }
+    if let Some(array_index_bounds_checking) = codegen_flags.array_index_bounds_checking {
+        command.arg(format!(
+            "--array_index_bounds_checking={array_index_bounds_checking}"
+        ));
+    }
+    if let Some(separate_lines) = codegen_flags.separate_lines {
+        command.arg(format!("--separate_lines={separate_lines}"));
+    }
+}
+
 fn run_codegen_pipeline(
     input_file: &std::path::Path,
     delay_model: &str,
     pipeline_spec: &PipelineSpec,
+    codegen_flags: &CodegenFlags,
     tool_path: &str,
 ) -> String {
     // Give an error if the codegen_main tool is not found.
@@ -384,12 +539,16 @@ fn run_codegen_pipeline(
         .arg("--delay_model")
         .arg(delay_model);
 
+    add_codegen_flags(&mut command, codegen_flags);
+
     let command = match pipeline_spec {
         PipelineSpec::Stages(stages) => command.arg("--pipeline_stages").arg(stages.to_string()),
         PipelineSpec::ClockPeriodPs(clock_period_ps) => command
             .arg("--clock_period_ps")
             .arg(clock_period_ps.to_string()),
     };
+
+    log::info!("Running command: {:?}", command);
 
     // We run the codegen_main tool on the given input file.
     let output = command.output().expect("Failed to execute codegen_main");
@@ -409,10 +568,17 @@ fn ir2pipeline(
     input_file: &std::path::Path,
     delay_model: &str,
     pipeline_spec: &PipelineSpec,
+    codegen_flags: &CodegenFlags,
     config: &Option<ToolchainConfig>,
 ) {
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
-        let output = run_codegen_pipeline(input_file, delay_model, pipeline_spec, tool_path);
+        let output = run_codegen_pipeline(
+            input_file,
+            delay_model,
+            pipeline_spec,
+            codegen_flags,
+            tool_path,
+        );
         println!("{}", output);
     } else {
         todo!("ir2pipeline subcommand using runtime APIs")
@@ -490,6 +656,7 @@ fn dslx2pipeline(
     input_file: &std::path::Path,
     top: &str,
     pipeline_spec: &PipelineSpec,
+    codegen_flags: &CodegenFlags,
     delay_model: &str,
     keep_temps: bool,
     config: &Option<ToolchainConfig>,
@@ -519,7 +686,13 @@ fn dslx2pipeline(
         let opt_ir_path = temp_dir.path().join("opt.ir");
         std::fs::write(&opt_ir_path, opt_ir).unwrap();
 
-        let sv = run_codegen_pipeline(&opt_ir_path, delay_model, pipeline_spec, tool_path);
+        let sv = run_codegen_pipeline(
+            &opt_ir_path,
+            delay_model,
+            pipeline_spec,
+            codegen_flags,
+            tool_path,
+        );
         let sv_path = temp_dir.path().join("output.sv");
         std::fs::write(&sv_path, &sv).unwrap();
 
