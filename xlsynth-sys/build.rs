@@ -226,7 +226,8 @@ fn main() {
         std::os::unix::fs::symlink(&dso_path, &dso_dest).unwrap();
 
         println!(
-            "cargo:info=Using DSO from workspace: {}",
+            "cargo:info=Using DSO from workspace; src: {} dst symlink: {}",
+            dso_path.display(),
             dso_dest.display()
         );
         println!("cargo:rerun-if-changed=build.rs");

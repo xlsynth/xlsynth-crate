@@ -81,6 +81,11 @@ pub struct CVastSlice {
 }
 
 #[repr(C)]
+pub struct CVastIndex {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CVastIndexableExpression {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -311,17 +316,48 @@ extern "C" {
         bit_count: i64,
         is_signed: bool,
     ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_extern_package_type(
+        f: *mut CVastFile,
+        package_name: *const std::os::raw::c_char,
+        type_name: *const std::os::raw::c_char,
+    ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_packed_array_type(
+        f: *mut CVastFile,
+        element_type: *mut CVastDataType,
+        dims: *const i64,
+        dim_count: libc::size_t,
+    ) -> *mut CVastDataType;
+
     pub fn xls_vast_verilog_file_make_continuous_assignment(
         f: *mut CVastFile,
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastContinuousAssignment;
+
+    pub fn xls_vast_verilog_file_make_concat(
+        f: *mut CVastFile,
+        expressions: *mut *mut CVastExpression,
+        expression_count: libc::size_t,
+    ) -> *mut CVastExpression;
+
     pub fn xls_vast_verilog_file_make_slice_i64(
         f: *mut CVastFile,
         subject: *mut CVastIndexableExpression,
         hi: i64,
         lo: i64,
     ) -> *mut CVastSlice;
+
+    pub fn xls_vast_verilog_file_make_index(
+        f: *mut CVastFile,
+        subject: *mut CVastIndexableExpression,
+        index: *mut CVastExpression,
+    ) -> *mut CVastIndex;
+    pub fn xls_vast_verilog_file_make_index_i64(
+        f: *mut CVastFile,
+        subject: *mut CVastIndexableExpression,
+        index: i64,
+    ) -> *mut CVastIndex;
+
     pub fn xls_vast_verilog_file_make_instantiation(
         f: *mut CVastFile,
         module_name: *const std::os::raw::c_char,
@@ -371,9 +407,14 @@ extern "C" {
     pub fn xls_vast_logic_ref_as_indexable_expression(
         v: *mut CVastLogicRef,
     ) -> *mut CVastIndexableExpression;
+    pub fn xls_vast_index_as_indexable_expression(
+        v: *mut CVastIndex,
+    ) -> *mut CVastIndexableExpression;
+
     pub fn xls_vast_literal_as_expression(v: *mut CVastLiteral) -> *mut CVastExpression;
     pub fn xls_vast_logic_ref_as_expression(v: *mut CVastLogicRef) -> *mut CVastExpression;
     pub fn xls_vast_slice_as_expression(v: *mut CVastSlice) -> *mut CVastExpression;
+    pub fn xls_vast_index_as_expression(v: *mut CVastIndex) -> *mut CVastExpression;
 
     pub fn xls_vast_verilog_file_add_include(f: *mut CVastFile, path: *const std::os::raw::c_char);
     pub fn xls_vast_verilog_file_emit(f: *const CVastFile) -> *mut std::os::raw::c_char;
