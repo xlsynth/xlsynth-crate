@@ -42,7 +42,7 @@ library resides; e.g.
 $ export DEV_XLS_DSO_WORKSPACE=$HOME/proj/xlsynth/
 $ ls $DEV_XLS_DSO_WORKSPACE/bazel-bin/xls/public/libxls.so
 /home/cdleary/proj/xlsynth//bazel-bin/xls/public/libxls.so
-$ cargo test -vv |& grep -i workspace
+$ cargo test -vv |& grep -i "DSO from workspace"
 [xlsynth-sys ...] cargo:info=Using DSO from workspace: ...
 ```
 

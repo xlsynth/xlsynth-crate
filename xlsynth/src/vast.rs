@@ -82,6 +82,31 @@ impl Slice {
     }
 }
 
+pub struct Index {
+    pub(crate) inner: *mut sys::CVastIndex,
+    pub(crate) parent: Arc<Mutex<VastFilePtr>>,
+}
+
+impl Index {
+    pub fn to_expr(&self) -> Expr {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_index_as_expression(self.inner) };
+        Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn to_indexable_expr(&self) -> IndexableExpr {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_index_as_indexable_expression(self.inner) };
+        IndexableExpr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
 pub struct Instantiation {
     pub(crate) inner: *mut sys::CVastInstantiation,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
@@ -302,11 +327,75 @@ impl VastFile {
         }
     }
 
+    pub fn make_extern_package_type(
+        &mut self,
+        package_name: &str,
+        type_name: &str,
+    ) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let c_package_name = CString::new(package_name).unwrap();
+        let c_type_name = CString::new(type_name).unwrap();
+        let data_type = unsafe {
+            sys::xls_vast_verilog_file_make_extern_package_type(
+                locked.0,
+                c_package_name.as_ptr(),
+                c_type_name.as_ptr(),
+            )
+        };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_packed_array_type(
+        &mut self,
+        element_type: VastDataType,
+        dimensions: &[i64],
+    ) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let data_type = unsafe {
+            sys::xls_vast_verilog_file_make_packed_array_type(
+                locked.0,
+                element_type.inner,
+                dimensions.as_ptr(),
+                dimensions.len(),
+            )
+        };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
     pub fn make_slice(&mut self, indexable: &IndexableExpr, hi: i64, lo: i64) -> Slice {
         let locked = self.ptr.lock().unwrap();
         let inner =
             unsafe { sys::xls_vast_verilog_file_make_slice_i64(locked.0, indexable.inner, hi, lo) };
         Slice {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_index(&mut self, indexable: &IndexableExpr, index: i64) -> Index {
+        let locked = self.ptr.lock().unwrap();
+        let inner =
+            unsafe { sys::xls_vast_verilog_file_make_index_i64(locked.0, indexable.inner, index) };
+        Index {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_concat(&mut self, exprs: &[&Expr]) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let mut expr_ptrs: Vec<*mut sys::CVastExpression> =
+            exprs.iter().map(|expr| expr.inner).collect();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_concat(locked.0, expr_ptrs.as_mut_ptr(), exprs.len())
+        };
+        Expr {
             inner,
             parent: self.ptr.clone(),
         }
@@ -431,6 +520,92 @@ endmodule
   assign bus = 128'hffee_ddcc_bbaa_9988_7766_5544_3322_1100;
 endmodule
 ";
+        assert_eq!(verilog, want);
+    }
+
+    /// Tests that we can make a port with an external-package-defined struct as
+    /// the type, and we also place it in a packed array.
+    #[test]
+    fn test_port_with_external_package_struct() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let my_struct = file.make_extern_package_type("mypack", "mystruct_t");
+        let input_type = file.make_packed_array_type(my_struct, &[2, 3, 4]);
+        module.add_input("my_input", &input_type);
+        let want = "module my_module(
+  input mypack::mystruct_t [1:0][2:0][3:0] my_input
+);
+
+endmodule
+";
+        assert_eq!(file.emit(), want);
+    }
+
+    /// Tests that we can build a module with a simple concatenation.
+    #[test]
+    fn test_simple_concat() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let input_type = file.make_bit_vector_type(8, false);
+        let output_type = file.make_bit_vector_type(16, false);
+        let input = module.add_input("my_input", &input_type);
+        let output = module.add_output("my_output", &output_type);
+        let concat = file.make_concat(&[&input.to_expr(), &input.to_expr()]);
+        let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
+        module.add_member_continuous_assignment(assignment);
+        let verilog = file.emit();
+        let want = "module my_module(
+  input wire [7:0] my_input,
+  output wire [15:0] my_output
+);
+  assign my_output = {my_input, my_input};
+endmodule
+";
+        assert_eq!(verilog, want);
+    }
+
+    /// Tests that we can reference a slice of a multidimensional packed array
+    /// on the LHS or RHS of an assign statement.
+    #[test]
+    fn test_slice_on_both_sides_of_assignment() {
+        let want = "module my_module;
+  wire [1:0][2:0][4:0] a;
+  wire [1:0] b;
+  wire [2:0] c;
+  assign a[1][2][3:4] = b[1:0];
+  assign a[3:4] = c[2:1];
+endmodule
+";
+
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let u2 = file.make_bit_vector_type(2, false);
+        let a_type = file.make_packed_array_type(u2, &[3, 5]);
+        let b_type = file.make_bit_vector_type(2, false);
+        let c_type = file.make_bit_vector_type(3, false);
+        let a = module.add_wire("a", &a_type);
+        let b = module.add_wire("b", &b_type);
+        let c = module.add_wire("c", &c_type);
+
+        // First assignment.
+        {
+            let a_1 = file.make_index(&a.to_indexable_expr(), 1);
+            let a_2 = file.make_index(&a_1.to_indexable_expr(), 2);
+            let a_lhs = file.make_slice(&a_2.to_indexable_expr(), 3, 4);
+            let b_slice = file.make_slice(&b.to_indexable_expr(), 1, 0);
+            let assignment = file.make_continuous_assignment(&a_lhs.to_expr(), &b_slice.to_expr());
+            module.add_member_continuous_assignment(assignment);
+        }
+
+        // Second assignment.
+        {
+            let a_lhs = file.make_slice(&a.to_indexable_expr(), 3, 4);
+            let c_slice = file.make_slice(&c.to_indexable_expr(), 2, 1);
+            let assignment = file.make_continuous_assignment(&a_lhs.to_expr(), &c_slice.to_expr());
+            module.add_member_continuous_assignment(assignment);
+        }
+
+        let verilog = file.emit();
         assert_eq!(verilog, want);
     }
 }
