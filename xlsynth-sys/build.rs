@@ -5,7 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.109";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.111";
 
 struct DsoInfo {
     extension: &'static str,
@@ -226,7 +226,8 @@ fn main() {
         std::os::unix::fs::symlink(&dso_path, &dso_dest).unwrap();
 
         println!(
-            "cargo:info=Using DSO from workspace: {}",
+            "cargo:info=Using DSO from workspace; src: {} dst symlink: {}",
+            dso_path.display(),
             dso_dest.display()
         );
         println!("cargo:rerun-if-changed=build.rs");
