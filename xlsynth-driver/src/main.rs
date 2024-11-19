@@ -131,8 +131,8 @@ impl AppExt for App<'_, '_> {
                     .help("Output port holding pipelined valid signal"),
             )
             .arg(
-                Arg::with_name("flop_input_ports")
-                    .long("flop_input_ports")
+                Arg::with_name("flop_inputs")
+                    .long("flop_inputs")
                     .value_name("BOOL")
                     .takes_value(true)
                     .possible_values(&["true", "false"])
