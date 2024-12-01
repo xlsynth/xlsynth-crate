@@ -32,6 +32,8 @@ pub trait BridgeBuilder {
         members: &[(String, dslx::Type)],
     ) -> Result<(), XlsynthError>;
 
+    fn add_imports(&mut self, imported_modules: &[String]) -> Result<(), XlsynthError>;
+
     /// Invoked when there is a type alias to emit for this module (i.e. not an
     /// import-style type alias that refers, via a ColonRef, to a definition
     /// in a different module).
@@ -109,6 +111,22 @@ fn convert_type_alias(
     builder.add_alias(&alias_name, alias_type)
 }
 
+fn get_imported_module_names(dslx_program: &str) -> Vec<String> {
+    let mut imported_modules = vec![];
+    for line in dslx_program.lines() {
+        let line = line.trim();
+        if line.starts_with("import ") {
+            // Remove 'import ' prefix and any trailing semicolon
+            let module_path = line.strip_prefix("import ").unwrap().trim_end_matches(';');
+            // Split the module path on '.', take the last component
+            if let Some(module_name) = module_path.split('.').last() {
+                imported_modules.push(module_name.to_string());
+            }
+        }
+    }
+    imported_modules
+}
+
 pub fn convert_leaf_module(
     import_data: &mut dslx::ImportData,
     dslx_program: &str,
@@ -124,6 +142,7 @@ pub fn convert_leaf_module(
     let type_info = typechecked_module.get_type_info();
 
     builder.start_module(module_name)?;
+    builder.add_imports(&get_imported_module_names(dslx_program))?;
     for i in 0..module.get_type_definition_count() {
         let type_def_kind = module.get_type_definition_kind(i);
         match type_def_kind {

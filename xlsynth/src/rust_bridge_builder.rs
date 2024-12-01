@@ -120,6 +120,10 @@ impl BridgeBuilder for RustBridgeBuilder {
         Ok(())
     }
 
+    fn add_imports(&mut self, _imported_modules: &[String]) -> Result<(), XlsynthError> {
+        Ok(())
+    }
+
     fn add_alias(&mut self, dslx_name: &str, bits_type: dslx::Type) -> Result<(), XlsynthError> {
         let rust_ty = Self::convert_type(&bits_type)?;
         self.lines
