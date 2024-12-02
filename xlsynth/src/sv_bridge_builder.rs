@@ -292,7 +292,7 @@ mod tests {
     fn test_convert_leaf_module_struct_def_only() {
         let dslx = r#"
         struct MyStruct {
-            byte_data: u8[10],
+            byte_array: u8[10],
             word_data: u16,
         }
         "#;
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(
             sv,
             r#"typedef struct packed {
-    logic [9:0] [7:0] byte_data;
+    logic [9:0] [7:0] byte_array;
     logic [15:0] word_data;
 } my_struct_t;
 "#
