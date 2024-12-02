@@ -111,6 +111,10 @@ fn convert_type_alias(
     builder.add_alias(&alias_name, alias_type)
 }
 
+/// Get the names of non standard imported modules from a DSLX program
+/// Ideally this should be done using DSLX API, but this is a quick and dirty
+/// implementation.
+/// TODO(@cdleary) to fix it the right way.
 fn get_imported_module_names(dslx_program: &str) -> Vec<String> {
     let mut imported_modules = vec![];
     for line in dslx_program.lines() {
@@ -120,7 +124,10 @@ fn get_imported_module_names(dslx_program: &str) -> Vec<String> {
             let module_path = line.strip_prefix("import ").unwrap().trim_end_matches(';');
             // Split the module path on '.', take the last component
             if let Some(module_name) = module_path.split('.').last() {
-                imported_modules.push(module_name.to_string());
+                // Filter out standard imports like `import std;`
+                if module_name != "std" {
+                    imported_modules.push(module_name.to_string());
+                }
             }
         }
     }
