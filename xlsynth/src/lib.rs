@@ -535,8 +535,12 @@ fn x_path_to_rs_filename(path: &std::path::Path) -> String {
 
 /// Converts a DSLX module (i.e. `.x` file) into its corresponding Rust bridge
 /// code, and emits that Rust code to a corresponding filename in the `out_dir`.
-pub fn x_path_to_rs_bridge(relpath: &str, out_dir: &std::path::Path) -> std::path::PathBuf {
-    let mut import_data = dslx::ImportData::default();
+pub fn x_path_to_rs_bridge(
+    relpath: &str,
+    out_dir: &std::path::Path,
+    root_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    let mut import_data = dslx::ImportData::new(None, &[root_dir]);
     let path = std::path::PathBuf::from(relpath);
     let dslx =
         std::fs::read_to_string(&path).expect(&format!("DSLX file should be readable: {path:?}"));
@@ -553,12 +557,18 @@ pub fn x_path_to_rs_bridge(relpath: &str, out_dir: &std::path::Path) -> std::pat
     out_path
 }
 
-// Wrapper around `x_path_to_rs_bridge` where the `out_dir` comes from the
-// environment variable `OUT_DIR` which is populated e.g. by `cargo` in
-// `build.rs` execution.
+// Wrapper around `x_path_to_rs_bridge` where:
+//
+// - the `out_dir` comes from the environment variable `OUT_DIR` which is
+//   populated e.g. by `cargo` in `build.rs` execution.
+// - the working directory comes from the repository root
 pub fn x_path_to_rs_bridge_via_env(relpath: &str) -> std::path::PathBuf {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR should be set");
-    x_path_to_rs_bridge(relpath, std::path::Path::new(&out_dir))
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .exec()
+        .expect("cargo metadata should be available");
+    let root_dir = metadata.workspace_root.as_path().as_std_path();
+    x_path_to_rs_bridge(relpath, std::path::Path::new(&out_dir), root_dir)
 }
 
 #[cfg(test)]

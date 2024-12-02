@@ -26,9 +26,9 @@ fn test_dslx2sv_types_subcommand() {
     assert_eq!(
         stdout.trim(),
         r"typedef enum logic [1:0] {
-    READ = 2'd0,
-    WRITE = 2'd1
-} op_type_e;"
+    Read = 2'd0,
+    Write = 2'd1
+} op_type_t;"
     );
 }
 

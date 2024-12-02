@@ -5,7 +5,11 @@
 //! This helps us e.g. call DSLX functions from Rust code, i.e. it enables
 //! Rust->DSLX FFI interop.
 
-use crate::{dslx, dslx_bridge::BridgeBuilder, IrValue, XlsynthError};
+use crate::{
+    dslx,
+    dslx_bridge::{BridgeBuilder, StructMemberData},
+    IrValue, XlsynthError,
+};
 
 pub struct RustBridgeBuilder {
     lines: Vec<String>,
@@ -109,12 +113,13 @@ impl BridgeBuilder for RustBridgeBuilder {
     fn add_struct_def(
         &mut self,
         dslx_name: &str,
-        members: &[(String, dslx::Type)],
+        members: &[StructMemberData],
     ) -> Result<(), XlsynthError> {
         self.lines.push(format!("pub struct {} {{", dslx_name));
-        for (name, ty) in members.iter() {
-            let rust_ty = Self::convert_type(ty)?;
-            self.lines.push(format!("    pub {}: {},", name, rust_ty));
+        for member in members {
+            let rust_ty = Self::convert_type(&member.concrete_type)?;
+            self.lines
+                .push(format!("    pub {}: {},", member.name, rust_ty));
         }
         self.lines.push("}\n".to_string());
         Ok(())
@@ -132,7 +137,7 @@ impl BridgeBuilder for RustBridgeBuilder {
 mod tests {
     use std::str::FromStr;
 
-    use crate::dslx_bridge::convert_leaf_module;
+    use crate::dslx_bridge::{convert_imported_module, convert_leaf_module};
 
     use super::*;
 
@@ -327,6 +332,36 @@ use xlsynth::{IrValue, IrUBits, IrSBits};
 pub type MyType = IrUBits<8>;
 
 } // mod my_module"#
+        );
+    }
+
+    #[test]
+    fn test_struct_with_extern_type_ref_member() {
+        let imported_dslx = "pub struct MyImportedStruct { a: u8 }";
+        let importer_dslx = "import imported; struct MyStruct { a: imported::MyImportedStruct }";
+
+        let mut import_data = dslx::ImportData::default();
+        let _imported_typechecked =
+            dslx::parse_and_typecheck(imported_dslx, "imported.x", "imported", &mut import_data)
+                .unwrap();
+        let importer_typechecked =
+            dslx::parse_and_typecheck(importer_dslx, "importer.x", "importer", &mut import_data)
+                .unwrap();
+
+        let mut builder = RustBridgeBuilder::new();
+        convert_imported_module(&importer_typechecked, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            "mod importer {
+#![allow(dead_code)]
+#![allow(unused_imports)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+pub struct MyStruct {
+    pub a: MyImportedStruct,
+}
+
+} // mod importer"
         );
     }
 }

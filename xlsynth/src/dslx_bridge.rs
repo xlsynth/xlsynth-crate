@@ -9,6 +9,19 @@
 
 use crate::{dslx, IrValue, XlsynthError};
 
+/// Encapsulates information that the bridge builder gets about a struct member
+/// -- the name, type annotation AST node, and deduced concrete type that the
+/// annotation corresponds to are all provided.
+///
+/// The annotation can be used to determine if the type is an external type
+/// reference, in which case the bridge builder may want to take different
+/// actions.
+pub struct StructMemberData {
+    pub name: String,
+    pub type_annotation: dslx::TypeAnnotation,
+    pub concrete_type: dslx::Type,
+}
+
 /// Abstract interface for building bridge code; i.e. interop to or from DSLX
 /// with another language like Rust or SystemVerilog.
 pub trait BridgeBuilder {
@@ -29,7 +42,7 @@ pub trait BridgeBuilder {
     fn add_struct_def(
         &mut self,
         dslx_name: &str,
-        members: &[(String, dslx::Type)],
+        members: &[StructMemberData],
     ) -> Result<(), XlsynthError>;
 
     /// Invoked when there is a type alias to emit for this module (i.e. not an
@@ -77,8 +90,13 @@ fn convert_struct(
     for i in 0..struct_def.get_member_count() {
         let member = struct_def.get_member(i);
         let member_name = member.get_name();
+        let member_type_annotation = member.get_type();
         let member_type = type_info.get_type_for_struct_member(&member);
-        members.push((member_name, member_type));
+        members.push(StructMemberData {
+            name: member_name,
+            type_annotation: member_type_annotation,
+            concrete_type: member_type,
+        });
     }
     builder.add_struct_def(&struct_name, &members)
 }
@@ -109,21 +127,14 @@ fn convert_type_alias(
     builder.add_alias(&alias_name, alias_type)
 }
 
-pub fn convert_leaf_module(
-    import_data: &mut dslx::ImportData,
-    dslx_program: &str,
-    path: &std::path::Path,
+pub fn convert_imported_module(
+    typechecked_module: &dslx::TypecheckedModule,
     builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
-    // If the path is `path/to/foo.x` then the module name is `foo`.
-    let module_name = path.file_stem().unwrap().to_str().unwrap();
-    let path_str = path.to_str().unwrap();
-    let typechecked_module =
-        dslx::parse_and_typecheck(dslx_program, path_str, module_name, import_data)?;
     let module = typechecked_module.get_module();
     let type_info = typechecked_module.get_type_info();
-
-    builder.start_module(module_name)?;
+    let module_name = module.get_name();
+    builder.start_module(&module_name)?;
     for i in 0..module.get_type_definition_count() {
         let type_def_kind = module.get_type_definition_kind(i);
         match type_def_kind {
@@ -142,6 +153,21 @@ pub fn convert_leaf_module(
             dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),
         }
     }
-    builder.end_module(module_name)?;
+    builder.end_module(&module_name)?;
     Ok(())
+}
+
+pub fn convert_leaf_module(
+    import_data: &mut dslx::ImportData,
+    dslx_program: &str,
+    path: &std::path::Path,
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
+    // If the path is `path/to/foo.x` then the module name is `foo`.
+    let module_name = path.file_stem().unwrap().to_str().unwrap();
+    let path_str = path.to_str().unwrap();
+    let typechecked_module =
+        dslx::parse_and_typecheck(dslx_program, path_str, module_name, import_data)?;
+
+    convert_imported_module(&typechecked_module, builder)
 }

@@ -4,16 +4,13 @@
 //!
 //! Note: the structs in here are nonsense, just for testing.
 
-enum TransactionType : u1 {
-    READ = 0,
-    WRITE = 1,
-}
+import xlsynth.tests.common_zoo;
 
 /// Struct with an enum field.
 struct Transaction {
     address: u32,
     data: u32,
-    ty: TransactionType,
+    ty: common_zoo::TransactionType,
 }
 
 struct Control {

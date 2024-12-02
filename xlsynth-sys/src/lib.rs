@@ -447,6 +447,8 @@ extern "C" {
         module: *mut CDslxTypecheckedModule,
     ) -> *mut CDslxTypeInfo;
 
+    pub fn xls_dslx_module_get_name(module: *const CDslxModule) -> *mut std::os::raw::c_char;
+
     pub fn xls_dslx_module_get_type_definition_count(module: *const CDslxModule) -> i64;
 
     pub fn xls_dslx_module_get_type_definition_kind(
@@ -466,6 +468,9 @@ extern "C" {
         module: *const CDslxModule,
         i: i64,
     ) -> *mut CDslxTypeAlias;
+    pub fn xls_dslx_colon_ref_get_attr(
+        colon_ref: *const CDslxColonRef,
+    ) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_type_info_get_type_struct_def(
         type_info: *mut CDslxTypeInfo,
@@ -511,6 +516,14 @@ extern "C" {
     pub fn xls_dslx_type_ref_get_type_definition(
         type_ref: *const CDslxTypeRef,
     ) -> *mut CDslxTypeDefinition;
+
+    // -- Import
+
+    pub fn xls_dslx_import_get_subject_count(import: *const CDslxImport) -> i64;
+    pub fn xls_dslx_import_get_subject(
+        import: *const CDslxImport,
+        i: i64,
+    ) -> *mut std::os::raw::c_char;
 
     // -- ColonRef
 

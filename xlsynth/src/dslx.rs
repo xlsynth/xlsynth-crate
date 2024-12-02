@@ -117,6 +117,13 @@ pub struct Module {
 }
 
 impl Module {
+    pub fn get_name(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_module_get_name(self.ptr);
+            c_str_to_rust(c_str)
+        }
+    }
+
     pub fn get_type_definition_count(&self) -> usize {
         unsafe { sys::xls_dslx_module_get_type_definition_count(self.ptr) as usize }
     }
@@ -273,6 +280,21 @@ pub struct Import {
     ptr: *mut sys::CDslxImport,
 }
 
+impl Import {
+    pub fn get_subject(&self) -> Vec<String> {
+        let mut result = vec![];
+        let subject_count = unsafe { sys::xls_dslx_import_get_subject_count(self.ptr) };
+        for i in 0..subject_count {
+            let s = unsafe {
+                let c_str = sys::xls_dslx_import_get_subject(self.ptr, i as i64);
+                c_str_to_rust(c_str)
+            };
+            result.push(s);
+        }
+        result
+    }
+}
+
 // -- ColonRef
 
 pub struct ColonRef {
@@ -290,6 +312,13 @@ impl ColonRef {
             parent: self.parent.clone(),
             ptr: casted,
         })
+    }
+
+    pub fn get_attr(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_colon_ref_get_attr(self.ptr);
+            c_str_to_rust(c_str)
+        }
     }
 }
 

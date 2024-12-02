@@ -6,7 +6,10 @@
 use std::collections::HashSet;
 
 use crate::{
-    dslx, dslx_bridge::BridgeBuilder, ir_value::IrFormatPreference, IrValue, XlsynthError,
+    dslx,
+    dslx_bridge::{BridgeBuilder, StructMemberData},
+    ir_value::IrFormatPreference,
+    IrValue, XlsynthError,
 };
 
 pub struct SvBridgeBuilder {
@@ -28,6 +31,20 @@ fn camel_to_snake(name: &str) -> String {
     snake
 }
 
+fn screaming_snake_to_upper_camel(name: &str) -> String {
+    name.split('_')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let mut chars = s.chars();
+            chars
+                .next()
+                .map(|c| c.to_ascii_uppercase().to_string())
+                .unwrap_or_default()
+                + &chars.as_str().to_ascii_lowercase()
+        })
+        .collect()
+}
+
 fn is_screaming_snake_case(name: &str) -> bool {
     name.chars().all(|c| {
         if c.is_ascii_alphabetic() {
@@ -38,6 +55,14 @@ fn is_screaming_snake_case(name: &str) -> bool {
     })
 }
 
+fn make_array_span_suffix(array_size: usize) -> String {
+    if array_size <= 1 {
+        "".to_string()
+    } else {
+        format!(" [{}:0]", array_size - 1)
+    }
+}
+
 fn make_bit_span_suffix(bit_count: usize) -> String {
     // More study required on how compatible
     assert!(bit_count > 0);
@@ -46,6 +71,17 @@ fn make_bit_span_suffix(bit_count: usize) -> String {
     } else {
         format!(" [{}:0]", bit_count - 1)
     }
+}
+
+/// Note: this only supports a very simple package naming and associated
+/// hierarchy for the time being.
+fn import_to_pkg_name(import: &dslx::Import) -> Result<String, XlsynthError> {
+    let subject = import.get_subject();
+    assert!(
+        subject.len() > 0,
+        "import subjects always have at least one token"
+    );
+    Ok(format!("{}_sv_pkg", subject.last().unwrap()))
 }
 
 impl SvBridgeBuilder {
@@ -71,21 +107,35 @@ impl SvBridgeBuilder {
         }
     }
 
-    fn convert_type(ty: &dslx::Type) -> Result<String, XlsynthError> {
+    fn convert_type(ty: &dslx::Type, array_size: Option<usize>) -> Result<String, XlsynthError> {
         if let Some((is_signed, bit_count)) = ty.is_bits_like() {
             let leader = if is_signed { "logic signed" } else { "logic" };
-            Ok(format!("{}{}", leader, make_bit_span_suffix(bit_count)))
+            Ok(format!(
+                "{}{}{}",
+                leader,
+                make_array_span_suffix(array_size.unwrap_or(0)),
+                make_bit_span_suffix(bit_count)
+            ))
         } else if ty.is_enum() {
             let enum_def = ty.get_enum_def().unwrap();
-            Ok(Self::enum_name_to_sv(&enum_def.get_identifier()))
+            Ok(format!(
+                "{}{}",
+                Self::enum_name_to_sv(&enum_def.get_identifier()),
+                make_array_span_suffix(array_size.unwrap_or(0))
+            ))
         } else if ty.is_struct() {
             let struct_def = ty.get_struct_def().unwrap();
-            Ok(Self::struct_name_to_sv(&struct_def.get_identifier()))
+            Ok(format!(
+                "{}{}",
+                Self::struct_name_to_sv(&struct_def.get_identifier()),
+                make_array_span_suffix(array_size.unwrap_or(0))
+            ))
         } else if ty.is_array() {
             let array_ty = ty.get_array_element_type();
             let array_size = ty.get_array_size();
-            let sv_ty = Self::convert_type(&array_ty)?;
-            Ok(format!("{}[{}]", sv_ty, array_size))
+            let sv_ty = Self::convert_type(&array_ty, Some(array_size))?;
+            println!("sv_ty: {}", sv_ty);
+            Ok(sv_ty)
         } else {
             Err(XlsynthError(format!(
                 "Unsupported type for conversion from DSLX to SystemVerilog: {:?}",
@@ -95,14 +145,14 @@ impl SvBridgeBuilder {
     }
 
     /// Converts a DSLX enum name in CamelCase to a SystemVerilog enum name in
-    /// snake_case with an _e suffix i.e. `MyEnum` -> `my_enum_e`
+    /// snake_case with an _t suffix i.e. `MyEnum` -> `my_enum_t`
     fn enum_name_to_sv(dslx_name: &str) -> String {
-        format!("{}_e", camel_to_snake(dslx_name))
+        format!("{}_t", camel_to_snake(dslx_name))
     }
 
     fn enum_member_name_to_sv(dslx_name: &str) -> String {
-        if !is_screaming_snake_case(dslx_name) {
-            camel_to_snake(dslx_name).to_uppercase()
+        if is_screaming_snake_case(dslx_name) {
+            screaming_snake_to_upper_camel(dslx_name)
         } else {
             dslx_name.to_string()
         }
@@ -162,23 +212,38 @@ impl BridgeBuilder for SvBridgeBuilder {
     fn add_struct_def(
         &mut self,
         dslx_name: &str,
-        members: &[(String, dslx::Type)],
+        members: &[StructMemberData],
     ) -> Result<(), XlsynthError> {
         let mut lines = vec![];
         lines.push(format!("typedef struct packed {{"));
-        for (member_name, member_ty) in members {
-            if member_ty.is_array() {
+        for member in members {
+            let member_name = &member.name;
+            let member_concrete_ty = &member.concrete_type;
+            let member_annotated_ty = &member.type_annotation;
+            if let Some(type_ref_type_annotation) =
+                member_annotated_ty.to_type_ref_type_annotation()
+            {
+                let type_ref = type_ref_type_annotation.get_type_ref();
+                let type_def = type_ref.get_type_definition();
+                if let Some(colon_ref) = type_def.to_colon_ref() {
+                    if let Some(import) = colon_ref.resolve_import_subject() {
+                        let pkg_name = import_to_pkg_name(&import)?;
+                        let attr_sv_type_name = Self::convert_type(member_concrete_ty, None)?;
+                        let extern_ref = format!("{pkg_name}::{attr_sv_type_name}");
+                        lines.push(format!("    {} {};", extern_ref, member_name));
+                        continue;
+                    }
+                }
+            }
+            if member_concrete_ty.is_array() {
                 // Arrays are displayed differently from other members, the size is after the
                 // name, separated from the element type.
-                let element_ty = member_ty.get_array_element_type();
-                let element_sv_ty = Self::convert_type(&element_ty)?;
-                let array_size = member_ty.get_array_size();
-                lines.push(format!(
-                    "    {} {}[{}];",
-                    element_sv_ty, member_name, array_size
-                ));
+                let element_ty = member_concrete_ty.get_array_element_type();
+                let array_size = member_concrete_ty.get_array_size();
+                let struct_string = Self::convert_type(&element_ty, Some(array_size))?;
+                lines.push(format!("    {} {};", struct_string, member_name));
             } else {
-                let member_sv_ty = Self::convert_type(member_ty)?;
+                let member_sv_ty = Self::convert_type(member_concrete_ty, None)?;
                 lines.push(format!("    {} {};", member_sv_ty, member_name));
             }
         }
@@ -188,7 +253,7 @@ impl BridgeBuilder for SvBridgeBuilder {
     }
 
     fn add_alias(&mut self, dslx_name: &str, bits_type: dslx::Type) -> Result<(), XlsynthError> {
-        let sv_ty = Self::convert_type(&bits_type)?;
+        let sv_ty = Self::convert_type(&bits_type, None)?;
         let sv_name = format!("{}_t", camel_to_snake(dslx_name));
         self.lines.push(format!("typedef {} {};\n", sv_ty, sv_name));
         Ok(())
@@ -199,7 +264,7 @@ impl BridgeBuilder for SvBridgeBuilder {
 mod tests {
     use std::str::FromStr;
 
-    use crate::dslx_bridge::convert_leaf_module;
+    use crate::dslx_bridge::{convert_imported_module, convert_leaf_module};
 
     use super::*;
 
@@ -211,36 +276,39 @@ mod tests {
         Ok(builder.build())
     }
 
+    /// Demonstrates that we do not change the case of enum members that are
+    /// defined as UpperCamelCase in DSLX.
     #[test]
     fn test_convert_leaf_module_enum_def_only() {
         let dslx = r#"
-        enum OpType : u2 { READ = 0, WRITE = 1 }
+        enum OpType : u2 { Read = 0, Write = 1 }
         "#;
         let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(
             sv,
             r#"typedef enum logic [1:0] {
-    READ = 2'd0,
-    WRITE = 2'd1
-} op_type_e;
+    Read = 2'd0,
+    Write = 2'd1
+} op_type_t;
 "#
         );
     }
 
-    /// Demonstrates that we convert enums that are defined as CamelCase in DSLX
-    /// into enums defined with SCREAMING_SNAKE_CASE in SystemVerilog.
+    /// Demonstrates that we convert enums that are defined as
+    /// SCREAMING_SNAKE_CASE in DSLX into enums defined with UpperCamelCase
+    /// in SystemVerilog.
     #[test]
     fn test_convert_leaf_module_enum_def_camel_case() {
         let dslx = r#"
-        enum MyEnum : u2 { MyFirstValue = 0, MySecondValue = 1 }
+        enum MyEnum : u2 { MY_FIRST_VALUE = 0, MY_SECOND_VALUE = 1 }
         "#;
         let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(
             sv,
             r#"typedef enum logic [1:0] {
-    MY_FIRST_VALUE = 2'd0,
-    MY_SECOND_VALUE = 2'd1
-} my_enum_e;
+    MyFirstValue = 2'd0,
+    MySecondValue = 2'd1
+} my_enum_t;
 "#
         );
     }
@@ -249,7 +317,7 @@ mod tests {
     fn test_convert_leaf_module_struct_def_only() {
         let dslx = r#"
         struct MyStruct {
-            byte_data: u8,
+            byte_array: u8[10],
             word_data: u16,
         }
         "#;
@@ -257,7 +325,7 @@ mod tests {
         assert_eq!(
             sv,
             r#"typedef struct packed {
-    logic [7:0] byte_data;
+    logic [9:0] [7:0] byte_array;
     logic [15:0] word_data;
 } my_struct_t;
 "#
@@ -293,5 +361,29 @@ mod tests {
 
         assert!(!is_screaming_snake_case("FooBar"));
         assert!(!is_screaming_snake_case("blah"));
+    }
+
+    #[test]
+    fn test_struct_with_extern_type_ref_member_type_ref_member() {
+        let imported_dslx = "pub struct MyImportedStruct { a: u8 }";
+        let importer_dslx = "import imported; struct MyStruct { a: imported::MyImportedStruct }";
+
+        let mut import_data = dslx::ImportData::default();
+        let _imported_typechecked =
+            dslx::parse_and_typecheck(imported_dslx, "imported.x", "imported", &mut import_data)
+                .unwrap();
+        let importer_typechecked =
+            dslx::parse_and_typecheck(importer_dslx, "importer.x", "importer", &mut import_data)
+                .unwrap();
+
+        let mut builder = SvBridgeBuilder::new();
+        convert_imported_module(&importer_typechecked, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            "typedef struct packed {
+    imported_sv_pkg::my_imported_struct_t a;
+} my_struct_t;
+"
+        );
     }
 }
