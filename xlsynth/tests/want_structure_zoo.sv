@@ -1,9 +1,7 @@
-import common_zoo_sv_pkg::*;
-
 typedef struct packed {
     logic [31:0] address;
     logic [31:0] data;
-    transaction_type_t ty;
+    common_zoo_sv_pkg::transaction_type_t ty;
 } transaction_t;
 
 typedef struct packed {

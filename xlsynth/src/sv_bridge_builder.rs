@@ -6,7 +6,10 @@
 use std::collections::HashSet;
 
 use crate::{
-    dslx, dslx_bridge::BridgeBuilder, ir_value::IrFormatPreference, IrValue, XlsynthError,
+    dslx,
+    dslx_bridge::{BridgeBuilder, StructMemberData},
+    ir_value::IrFormatPreference,
+    IrValue, XlsynthError,
 };
 
 pub struct SvBridgeBuilder {
@@ -68,6 +71,17 @@ fn make_bit_span_suffix(bit_count: usize) -> String {
     } else {
         format!(" [{}:0]", bit_count - 1)
     }
+}
+
+/// Note: this only supports a very simple package naming and associated
+/// hierarchy for the time being.
+fn import_to_pkg_name(import: &dslx::Import) -> Result<String, XlsynthError> {
+    let subject = import.get_subject();
+    assert!(
+        subject.len() > 0,
+        "import subjects always have at least one token"
+    );
+    Ok(format!("{}_sv_pkg", subject.last().unwrap()))
 }
 
 impl SvBridgeBuilder {
@@ -198,32 +212,43 @@ impl BridgeBuilder for SvBridgeBuilder {
     fn add_struct_def(
         &mut self,
         dslx_name: &str,
-        members: &[(String, dslx::Type)],
+        members: &[StructMemberData],
     ) -> Result<(), XlsynthError> {
         let mut lines = vec![];
         lines.push(format!("typedef struct packed {{"));
-        for (member_name, member_ty) in members {
-            if member_ty.is_array() {
+        for member in members {
+            let member_name = &member.name;
+            let member_concrete_ty = &member.concrete_type;
+            let member_annotated_ty = &member.type_annotation;
+            if let Some(type_ref_type_annotation) =
+                member_annotated_ty.to_type_ref_type_annotation()
+            {
+                let type_ref = type_ref_type_annotation.get_type_ref();
+                let type_def = type_ref.get_type_definition();
+                if let Some(colon_ref) = type_def.to_colon_ref() {
+                    if let Some(import) = colon_ref.resolve_import_subject() {
+                        let pkg_name = import_to_pkg_name(&import)?;
+                        let attr_sv_type_name = Self::convert_type(member_concrete_ty, None)?;
+                        let extern_ref = format!("{pkg_name}::{attr_sv_type_name}");
+                        lines.push(format!("    {} {};", extern_ref, member_name));
+                        continue;
+                    }
+                }
+            }
+            if member_concrete_ty.is_array() {
                 // Arrays are displayed differently from other members, the size is after the
                 // name, separated from the element type.
-                let element_ty = member_ty.get_array_element_type();
-                let array_size = member_ty.get_array_size();
+                let element_ty = member_concrete_ty.get_array_element_type();
+                let array_size = member_concrete_ty.get_array_size();
                 let struct_string = Self::convert_type(&element_ty, Some(array_size))?;
                 lines.push(format!("    {} {};", struct_string, member_name));
             } else {
-                let member_sv_ty = Self::convert_type(member_ty, None)?;
+                let member_sv_ty = Self::convert_type(member_concrete_ty, None)?;
                 lines.push(format!("    {} {};", member_sv_ty, member_name));
             }
         }
         lines.push(format!("}} {};\n", Self::struct_name_to_sv(dslx_name)));
         self.lines.push(lines.join("\n"));
-        Ok(())
-    }
-
-    fn add_imports(&mut self, imported_modules: &[String]) -> Result<(), XlsynthError> {
-        for module in imported_modules {
-            self.lines.push(format!("import {}_sv_pkg::*;\n", module));
-        }
         Ok(())
     }
 
@@ -239,7 +264,7 @@ impl BridgeBuilder for SvBridgeBuilder {
 mod tests {
     use std::str::FromStr;
 
-    use crate::dslx_bridge::convert_leaf_module;
+    use crate::dslx_bridge::{convert_imported_module, convert_leaf_module};
 
     use super::*;
 
@@ -336,5 +361,29 @@ mod tests {
 
         assert!(!is_screaming_snake_case("FooBar"));
         assert!(!is_screaming_snake_case("blah"));
+    }
+
+    #[test]
+    fn test_struct_with_extern_type_ref_member_type_ref_member() {
+        let imported_dslx = "pub struct MyImportedStruct { a: u8 }";
+        let importer_dslx = "import imported; struct MyStruct { a: imported::MyImportedStruct }";
+
+        let mut import_data = dslx::ImportData::default();
+        let _imported_typechecked =
+            dslx::parse_and_typecheck(imported_dslx, "imported.x", "imported", &mut import_data)
+                .unwrap();
+        let importer_typechecked =
+            dslx::parse_and_typecheck(importer_dslx, "importer.x", "importer", &mut import_data)
+                .unwrap();
+
+        let mut builder = SvBridgeBuilder::new();
+        convert_imported_module(&importer_typechecked, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            "typedef struct packed {
+    imported_sv_pkg::my_imported_struct_t a;
+} my_struct_t;
+"
+        );
     }
 }
