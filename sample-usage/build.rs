@@ -8,8 +8,10 @@ fn main() {
         sample_with_enum_def_rs_path.display()
     );
 
-    let rs_path = xlsynth::x_path_to_rs_bridge_via_env("../xlsynth/tests/structure_zoo.x");
-    println!("cargo:rustc-env=DSLX_STRUCTURE_ZOO={}", rs_path.display());
+    // TODO(cdleary): 2024-12-02: Broken for the moment due to the type that has an
+    // extern-type member. let rs_path =
+    // xlsynth::x_path_to_rs_bridge_via_env("../xlsynth/tests/structure_zoo.x");
+    // println!("cargo:rustc-env=DSLX_STRUCTURE_ZOO={}", rs_path.display());
 
     let rs_path = xlsynth::x_path_to_rs_bridge_via_env("src/sample_with_struct_def.x");
     println!(
