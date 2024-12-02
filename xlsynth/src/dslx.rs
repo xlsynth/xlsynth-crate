@@ -16,6 +16,7 @@ pub enum TypeDefinitionKind {
     StructDef = 1,
     EnumDef = 2,
     ColonRef = 3,
+    ProcDef = 4,
 }
 
 struct ImportDataPtr {

@@ -139,6 +139,9 @@ pub fn convert_leaf_module(
                 let type_alias = module.get_type_definition_as_type_alias(i).unwrap();
                 convert_type_alias(&type_alias, &type_info, builder)?
             }
+            dslx::TypeDefinitionKind::ProcDef => {
+                todo!("convert impl-style proc definition from DSLX to Rust")
+            }
             dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),
         }
     }
