@@ -34,7 +34,8 @@
 //!     dslx2sv-types ../tests/structure_zoo.x
 //! ```
 
-use clap::{App, Arg, ArgMatches, SubCommand};
+use clap;
+use clap::{Arg, ArgAction, ArgMatches};
 use serde::Deserialize;
 use std::process;
 use std::process::Command;
@@ -66,119 +67,119 @@ trait AppExt {
     fn add_codegen_args(self) -> Self;
 }
 
-impl AppExt for App<'_, '_> {
+impl AppExt for clap::Command {
     fn add_delay_model_arg(self) -> Self {
-        (self as App).arg(
-            Arg::with_name("DELAY_MODEL")
+        (self as clap::Command).arg(
+            Arg::new("DELAY_MODEL")
                 .long("delay_model")
                 .value_name("DELAY_MODEL")
                 .help("The delay model to use")
                 .required(true)
-                .takes_value(true),
+                .action(ArgAction::Set),
         )
     }
 
     fn add_pipeline_args(self) -> Self {
-        (self as App)
+        (self as clap::Command)
             .arg(
-                Arg::with_name("pipeline_stages")
+                Arg::new("pipeline_stages")
                     .long("pipeline_stages")
                     .value_name("PIPELINE_STAGES")
                     .help("Number of pipeline stages")
-                    .takes_value(true),
+                    .action(ArgAction::Set),
             )
             .arg(
-                Arg::with_name("clock_period_ps")
+                Arg::new("clock_period_ps")
                     .long("clock_period_ps")
                     .value_name("CLOCK_PERIOD_PS")
                     .help("Clock period in picoseconds")
-                    .takes_value(true),
+                    .action(ArgAction::Set),
             )
     }
 
     fn add_dslx_path_arg(self) -> Self {
-        (self as App).arg(
-            Arg::with_name("dslx_path")
+        (self as clap::Command).arg(
+            Arg::new("dslx_path")
                 .long("dslx_path")
                 .value_name("DSLX_PATH_SEMI_SEPARATED")
                 .help("Semi-separated paths for DSLX")
-                .takes_value(true),
+                .action(ArgAction::Set),
         )
     }
 
     fn add_dslx_stdlib_path_arg(self) -> Self {
-        (self as App).arg(
-            Arg::with_name("dslx_stdlib_path")
+        (self as clap::Command).arg(
+            Arg::new("dslx_stdlib_path")
                 .long("dslx_stdlib_path")
                 .value_name("DSLX_STDLIB_PATH")
                 .help("Path to the DSLX standard library")
-                .takes_value(true),
+                .action(ArgAction::Set),
         )
     }
 
     fn add_codegen_args(self) -> Self {
-        (self as App)
+        (self as clap::Command)
             .arg(
-                Arg::with_name("input_valid_signal")
+                Arg::new("input_valid_signal")
                     .long("input_valid_signal")
                     .value_name("INPUT_VALID_SIGNAL")
                     .help("Load enable signal for pipeline registers"),
             )
             .arg(
-                Arg::with_name("output_valid_signal")
+                Arg::new("output_valid_signal")
                     .long("output_valid_signal")
                     .value_name("OUTPUT_VALID_SIGNAL")
                     .help("Output port holding pipelined valid signal"),
             )
             .arg(
-                Arg::with_name("flop_inputs")
+                Arg::new("flop_inputs")
                     .long("flop_inputs")
                     .value_name("BOOL")
-                    .takes_value(true)
-                    .possible_values(&["true", "false"])
-                    .min_values(0)
+                    .action(ArgAction::Set)
+                    .value_parser(["true", "false"])
+                    .num_args(0)
                     .help("Flop input ports"),
             )
             .arg(
-                Arg::with_name("flop_outputs")
+                Arg::new("flop_outputs")
                     .long("flop_outputs")
                     .value_name("BOOL")
-                    .takes_value(true)
-                    .possible_values(&["true", "false"])
-                    .min_values(0)
+                    .action(ArgAction::Set)
+                    .value_parser(["true", "false"])
+                    .num_args(0)
                     .help("Flop output ports"),
             )
             .arg(
-                Arg::with_name("add_idle_output")
+                Arg::new("add_idle_output")
                     .long("add_idle_output")
                     .value_name("BOOL")
-                    .takes_value(true)
-                    .possible_values(&["true", "false"])
-                    .min_values(0)
+                    .action(ArgAction::Set)
+                    .value_parser(["true", "false"])
+                    .num_args(0)
                     .help("Add an idle output port"),
             )
             .arg(
-                Arg::with_name("module_name")
+                Arg::new("module_name")
                     .long("module_name")
                     .value_name("MODULE_NAME")
                     .help("Name of the generated module"),
             )
             .arg(
-                Arg::with_name("array_index_bounds_checking")
+                Arg::new("array_index_bounds_checking")
                     .long("array_index_bounds_checking")
                     .value_name("BOOL")
-                    .takes_value(true)
-                    .possible_values(&["true", "false"])
-                    .min_values(0)
+                    .action(ArgAction::Set)
+                    .value_parser(["true", "false"])
+                    .num_args(0)
                     .help("Array index bounds checking"),
             )
             .arg(
-                Arg::with_name("separate_lines")
+                Arg::new("separate_lines")
                     .long("separate_lines")
                     .value_name("BOOL")
-                    .takes_value(true)
-                    .possible_values(&["true", "false"])
-                    .min_values(0)
+                    .action(ArgAction::Set)
+                    .value_parser(["true", "false"])
+                    .num_args(0)
                     .help("Separate lines in generated code"),
             )
     }
@@ -187,28 +188,28 @@ impl AppExt for App<'_, '_> {
 fn main() {
     let _ = env_logger::try_init();
 
-    let matches = App::new("xlsynth-driver")
+    let matches = clap::Command::new("xlsynth-driver")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Command line driver for XLS/xlsynth capabilities")
         .arg(
-            Arg::with_name("toolchain")
+            Arg::new("toolchain")
                 .long("toolchain")
                 .value_name("TOOLCHAIN")
                 .help("Path to a xlsynth-toolchain.toml file")
-                .takes_value(true),
+                .action(ArgAction::Set),
         )
-        .subcommand(SubCommand::with_name("version").about("Prints the version of the driver"))
+        .subcommand(clap::Command::new("version").about("Prints the version of the driver"))
         .subcommand(
-            SubCommand::with_name("dslx2pipeline")
+            clap::Command::new("dslx2pipeline")
                 .about("Converts DSLX to SystemVerilog")
                 .arg(
-                    Arg::with_name("INPUT_FILE")
+                    Arg::new("INPUT_FILE")
                         .help("The input DSLX file")
                         .required(true)
                         .index(1),
                 )
                 .arg(
-                    Arg::with_name("TOP")
+                    Arg::new("TOP")
                         .help("The top-level entry point")
                         .required(true)
                         .index(2),
@@ -218,23 +219,23 @@ fn main() {
                 .add_codegen_args()
                 // --keep_temps flag to keep temporary files
                 .arg(
-                    Arg::with_name("keep_temps")
+                    Arg::new("keep_temps")
                         .long("keep_temps")
                         .help("Keep temporary files")
-                        .takes_value(false),
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
-            SubCommand::with_name("dslx2ir")
+            clap::Command::new("dslx2ir")
                 .about("Converts DSLX to IR")
                 .arg(
-                    Arg::with_name("INPUT_FILE")
+                    Arg::new("INPUT_FILE")
                         .help("The input DSLX file")
                         .required(true)
                         .index(1),
                 )
                 .arg(
-                    Arg::with_name("TOP")
+                    Arg::new("TOP")
                         .help("The top-level entry point (optional)")
                         .required(false)
                         .index(2),
@@ -244,10 +245,10 @@ fn main() {
         )
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
-            SubCommand::with_name("dslx2sv-types")
+            clap::Command::new("dslx2sv-types")
                 .about("Converts DSLX type definitions to SystemVerilog")
                 .arg(
-                    Arg::with_name("INPUT_FILE")
+                    Arg::new("INPUT_FILE")
                         .help("The input DSLX file")
                         .required(true)
                         .index(1),
@@ -257,32 +258,32 @@ fn main() {
         )
         // ir2opt subcommand requires a top symbol
         .subcommand(
-            SubCommand::with_name("ir2opt")
+            clap::Command::new("ir2opt")
                 .about("Converts IR to optimized IR")
                 .arg(
-                    Arg::with_name("INPUT_FILE")
+                    Arg::new("INPUT_FILE")
                         .help("The input IR file")
                         .required(true)
                         .index(1),
                 )
                 // Top is given as a (non-positional) flag for symmetry but it is required.
                 .arg(
-                    Arg::with_name("TOP")
+                    Arg::new("TOP")
                         .long("top")
                         .value_name("TOP")
                         .help("The top-level entry point")
                         .required(true)
-                        .takes_value(true),
+                        .action(ArgAction::Set),
                 ),
         )
         // ir2pipeline subcommand
         // requires a delay model flag
         // takes either a --clock_period_ps or pipeline_stages flag
         .subcommand(
-            SubCommand::with_name("ir2pipeline")
+            clap::Command::new("ir2pipeline")
                 .about("Converts IR to a pipeline")
                 .arg(
-                    Arg::with_name("INPUT_FILE")
+                    Arg::new("INPUT_FILE")
                         .help("The input IR file")
                         .required(true)
                         .index(1),
@@ -292,17 +293,17 @@ fn main() {
                 .add_pipeline_args(),
         )
         .subcommand(
-            SubCommand::with_name("ir2delayinfo")
+            clap::Command::new("ir2delayinfo")
                 .about("Converts IR entry point to delay info output")
                 .add_delay_model_arg()
                 .arg(
-                    Arg::with_name("INPUT_FILE")
+                    Arg::new("INPUT_FILE")
                         .help("The input IR file")
                         .required(true)
                         .index(1),
                 )
                 .arg(
-                    Arg::with_name("TOP")
+                    Arg::new("TOP")
                         .help("The top-level entry point")
                         .required(true)
                         .index(2),
@@ -310,7 +311,7 @@ fn main() {
         )
         .get_matches();
 
-    let toml_path = matches.value_of("toolchain");
+    let toml_path = matches.get_one::<String>("toolchain");
     let toml_value: Option<toml::Value> = toml_path.map(|path| {
         // If we got a toolchain toml file, read/parse it.
         let toml_str = std::fs::read_to_string(path).expect("Failed to read toolchain toml file");
@@ -350,9 +351,9 @@ enum PipelineSpec {
 }
 
 fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
-    if let Some(pipeline_stages) = matches.value_of("pipeline_stages") {
+    if let Some(pipeline_stages) = matches.get_one::<String>("pipeline_stages") {
         PipelineSpec::Stages(pipeline_stages.parse().unwrap())
-    } else if let Some(clock_period_ps) = matches.value_of("clock_period_ps") {
+    } else if let Some(clock_period_ps) = matches.get_one::<String>("clock_period_ps") {
         PipelineSpec::ClockPeriodPs(clock_period_ps.parse().unwrap())
     } else {
         eprintln!("Must provide either --pipeline_stages or --clock_period_ps");
@@ -365,27 +366,39 @@ fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
 fn extract_codegen_flags(matches: &ArgMatches) -> CodegenFlags {
     CodegenFlags {
         input_valid_signal: matches
-            .value_of("input_valid_signal")
+            .get_one::<String>("input_valid_signal")
             .map(|s| s.to_string()),
         output_valid_signal: matches
-            .value_of("output_valid_signal")
+            .get_one::<String>("output_valid_signal")
             .map(|s| s.to_string()),
-        use_system_verilog: matches.value_of("use_system_verilog").map(|s| s == "true"),
-        flop_inputs: matches.value_of("flop_inputs").map(|s| s == "true"),
-        flop_outputs: matches.value_of("flop_outputs").map(|s| s == "true"),
-        add_idle_output: matches.value_of("add_idle_output").map(|s| s == "true"),
-        module_name: matches.value_of("module_name").map(|s| s.to_string()),
-        array_index_bounds_checking: matches
-            .value_of("array_index_bounds_checking")
+        use_system_verilog: matches
+            .get_one::<String>("use_system_verilog")
             .map(|s| s == "true"),
-        separate_lines: matches.value_of("separate_lines").map(|s| s == "true"),
+        flop_inputs: matches
+            .get_one::<String>("flop_inputs")
+            .map(|s| s == "true"),
+        flop_outputs: matches
+            .get_one::<String>("flop_outputs")
+            .map(|s| s == "true"),
+        add_idle_output: matches
+            .get_one::<String>("add_idle_output")
+            .map(|s| s == "true"),
+        module_name: matches
+            .get_one::<String>("module_name")
+            .map(|s| s.to_string()),
+        array_index_bounds_checking: matches
+            .get_one::<String>("array_index_bounds_checking")
+            .map(|s| s == "true"),
+        separate_lines: matches
+            .get_one::<String>("separate_lines")
+            .map(|s| s == "true"),
     }
 }
 
 fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.value_of("INPUT_FILE").unwrap();
+    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
-    let delay_model = matches.value_of("DELAY_MODEL").unwrap();
+    let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
 
     // See which of pipeline_stages or clock_period_ps we're using.
     let pipeline_spec = extract_pipeline_spec(matches);
@@ -402,12 +415,12 @@ fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
 }
 
 fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.value_of("INPUT_FILE").unwrap();
+    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
-    let top = matches.value_of("TOP").unwrap();
+    let top = matches.get_one::<String>("TOP").unwrap();
     let pipeline_spec = extract_pipeline_spec(matches);
-    let delay_model = matches.value_of("DELAY_MODEL").unwrap();
-    let keep_temps = matches.is_present("keep_temps");
+    let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
+    let keep_temps = matches.get_flag("keep_temps");
     let codegen_flags = extract_codegen_flags(matches);
 
     // Stub function for DSLX to SV conversion
@@ -426,7 +439,7 @@ fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
 /// flag, if specified, or the toolchain config if it's present and the cmdline
 /// flag isn't specified.
 fn get_dslx_stdlib_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Option<String> {
-    let dslx_stdlib_path = matches.value_of("dslx_stdlib_path");
+    let dslx_stdlib_path = matches.get_one::<String>("dslx_stdlib_path");
     if let Some(dslx_stdlib_path) = dslx_stdlib_path {
         Some(dslx_stdlib_path.to_string())
     } else if let Some(config) = config {
@@ -440,7 +453,7 @@ fn get_dslx_stdlib_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
 /// flag, if specified, or the toolchain config if it's present and the cmdline
 /// flag isn't specified.
 fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Option<String> {
-    let dslx_path = matches.value_of("dslx_path");
+    let dslx_path = matches.get_one::<String>("dslx_path");
     if let Some(dslx_path) = dslx_path {
         Some(dslx_path.to_string())
     } else if let Some(config) = config {
@@ -451,9 +464,14 @@ fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Opti
 }
 
 fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.value_of("INPUT_FILE").unwrap();
+    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
-    let top = matches.value_of("TOP");
+    let top = if let Some(top) = matches.get_one::<String>("TOP") {
+        Some(top.to_string())
+    } else {
+        None
+    };
+    let top = top.as_deref();
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
     let dslx_stdlib_path = dslx_stdlib_path.as_deref();
 
@@ -467,15 +485,15 @@ fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
 }
 
 fn handle_ir2opt(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.value_of("INPUT_FILE").unwrap();
-    let top = matches.value_of("TOP").unwrap();
+    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
+    let top = matches.get_one::<String>("TOP").unwrap();
     let input_path = std::path::Path::new(input_file);
 
     ir2opt(input_path, top, config);
 }
 
 fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.value_of("INPUT_FILE").unwrap();
+    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
     let input_path = std::path::Path::new(input_file);
 
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
@@ -491,10 +509,10 @@ fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
 }
 
 fn handle_ir2delayinfo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.value_of("INPUT_FILE").unwrap();
-    let top = matches.value_of("TOP").unwrap();
+    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
+    let top = matches.get_one::<String>("TOP").unwrap();
     let input_path = std::path::Path::new(input_file);
-    let delay_model = matches.value_of("DELAY_MODEL").unwrap();
+    let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
 
     ir2delayinfo(input_path, top, delay_model, config);
 }

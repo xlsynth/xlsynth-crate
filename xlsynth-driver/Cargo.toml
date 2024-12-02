@@ -12,7 +12,7 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
 xlsynth = { path = "../xlsynth", version = "0.0.54" }
-clap = "2.33"
+clap = "4.5.21"
 tempfile = "3.13"
 toml = "0.8.19"
 serde = { version = "1.0", features = ["derive"] }
