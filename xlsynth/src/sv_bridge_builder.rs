@@ -284,6 +284,7 @@ mod tests {
         enum OpType : u2 { Read = 0, Write = 1 }
         "#;
         let sv = simple_convert_for_test(dslx).unwrap();
+        test_helpers::assert_valid_sv(&sv);
         assert_eq!(
             sv,
             r#"typedef enum logic [1:0] {
@@ -303,6 +304,7 @@ mod tests {
         enum MyEnum : u2 { MY_FIRST_VALUE = 0, MY_SECOND_VALUE = 1 }
         "#;
         let sv = simple_convert_for_test(dslx).unwrap();
+        test_helpers::assert_valid_sv(&sv);
         assert_eq!(
             sv,
             r#"typedef enum logic [1:0] {
@@ -337,6 +339,7 @@ mod tests {
         let dslx = "type MyType = u8;";
         let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(sv, "typedef logic [7:0] my_type_t;\n");
+        test_helpers::assert_valid_sv(&sv);
     }
 
     /// Demonstrates that we get an error when we attempt to emit two enums who
@@ -378,8 +381,9 @@ mod tests {
 
         let mut builder = SvBridgeBuilder::new();
         convert_imported_module(&importer_typechecked, &mut builder).unwrap();
+        let sv = builder.build();
         assert_eq!(
-            builder.build(),
+            sv,
             "typedef struct packed {
     imported_sv_pkg::my_imported_struct_t a;
 } my_struct_t;

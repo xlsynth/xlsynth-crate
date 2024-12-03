@@ -1,16 +1,57 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use pretty_assertions::assert_eq;
-use xlsynth::{dslx, dslx_bridge::convert_leaf_module, sv_bridge_builder::SvBridgeBuilder};
+use xlsynth::{dslx, dslx_bridge::convert_imported_module, sv_bridge_builder::SvBridgeBuilder};
 
 /// Tests that we can convert the whole "structure_zoo.x" file to SystemVerilog.
 #[test]
 fn test_sv_bridge_structure_zoo() {
-    let dslx = std::fs::read_to_string("tests/structure_zoo.x").unwrap();
     let mut import_data = dslx::ImportData::default();
-    let path = std::path::PathBuf::from("tests/structure_zoo.x");
+
+    let common_zoo_relpath = "tests/common_zoo.x";
+    let common_zoo_dslx = std::fs::read_to_string(common_zoo_relpath).unwrap();
+    let common_zoo = dslx::parse_and_typecheck(
+        &common_zoo_dslx,
+        common_zoo_relpath,
+        "common_zoo",
+        &mut import_data,
+    )
+    .unwrap();
+
+    let zoo_relpath = "tests/structure_zoo.x";
+    let zoo_dslx = std::fs::read_to_string(zoo_relpath).unwrap();
+    let zoo = dslx::parse_and_typecheck(&zoo_dslx, zoo_relpath, "structure_zoo", &mut import_data)
+        .unwrap();
+
+    // Make a builder to convert the "imported" module.
+    let imported_sv = {
+        let mut builder = SvBridgeBuilder::new();
+        convert_imported_module(&common_zoo, &mut builder).unwrap();
+        let contents = builder.build();
+        format!(
+            "package common_zoo_sv_pkg;\n{}endpackage : common_zoo_sv_pkg",
+            contents
+        )
+    };
+
+    // Make a builder to convert the "importer" module.
     let mut builder = SvBridgeBuilder::new();
-    convert_leaf_module(&mut import_data, &dslx, &path, &mut builder).unwrap();
+    convert_imported_module(&zoo, &mut builder).unwrap();
+    let got_sv = builder.build();
+
+    // Check that the SV we got is also valid SV.
+    test_helpers::assert_valid_sv_flist(&[
+        test_helpers::FlistEntry {
+            filename: "common_zoo.sv".to_string(),
+            contents: imported_sv,
+        },
+        test_helpers::FlistEntry {
+            filename: "structure_zoo.sv".to_string(),
+            contents: got_sv.clone(),
+        },
+    ]);
+
+    // Check that our generated SV matches the golden (expected) output.
     let structure_zoo_sv_golden = std::fs::read_to_string("tests/want_structure_zoo.sv").unwrap();
-    assert_eq!(builder.build(), structure_zoo_sv_golden);
+    assert_eq!(got_sv, structure_zoo_sv_golden);
 }
