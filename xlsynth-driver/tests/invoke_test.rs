@@ -23,6 +23,7 @@ fn test_dslx2sv_types_subcommand() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    test_helpers::assert_valid_sv(&stdout);
     assert_eq!(
         stdout.trim(),
         r"typedef enum logic [1:0] {
@@ -62,6 +63,7 @@ struct MyStruct {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    test_helpers::assert_valid_sv(&stdout);
     assert_eq!(
         stdout.trim(),
         "typedef struct packed {
