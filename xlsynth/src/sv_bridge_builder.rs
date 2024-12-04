@@ -84,6 +84,55 @@ fn import_to_pkg_name(import: &dslx::Import) -> Result<String, XlsynthError> {
     Ok(format!("{}_sv_pkg", subject.last().unwrap()))
 }
 
+/// Converts a DSLX enum name in CamelCase to a SystemVerilog enum name in
+/// snake_case with an _t suffix i.e. `MyEnum` -> `my_enum_t`
+fn enum_name_to_sv(dslx_name: &str) -> String {
+    format!("{}_t", camel_to_snake(dslx_name))
+}
+
+/// Converts a DSLX struct name in CamelCase to a SystemVerilog struct name
+/// in snake_case with a _t suffix
+fn struct_name_to_sv(dslx_name: &str) -> String {
+    format!("{}_t", camel_to_snake(dslx_name))
+}
+
+// Converts a DSLX type into a SystemVerilog type string.
+fn convert_type(ty: &dslx::Type, array_size: Option<usize>) -> Result<String, XlsynthError> {
+    if let Some((is_signed, bit_count)) = ty.is_bits_like() {
+        let leader = if is_signed { "logic signed" } else { "logic" };
+        Ok(format!(
+            "{}{}{}",
+            leader,
+            make_array_span_suffix(array_size.unwrap_or(0)),
+            make_bit_span_suffix(bit_count)
+        ))
+    } else if ty.is_enum() {
+        let enum_def = ty.get_enum_def().unwrap();
+        Ok(format!(
+            "{}{}",
+            enum_name_to_sv(&enum_def.get_identifier()),
+            make_array_span_suffix(array_size.unwrap_or(0))
+        ))
+    } else if ty.is_struct() {
+        let struct_def = ty.get_struct_def().unwrap();
+        Ok(format!(
+            "{}{}",
+            struct_name_to_sv(&struct_def.get_identifier()),
+            make_array_span_suffix(array_size.unwrap_or(0))
+        ))
+    } else if ty.is_array() {
+        let element_ty = ty.get_array_element_type();
+        let array_size = ty.get_array_size();
+        let sv_ty = convert_type(&element_ty, Some(array_size))?;
+        Ok(sv_ty)
+    } else {
+        Err(XlsynthError(format!(
+            "Unsupported type for conversion from DSLX to SystemVerilog: {:?}",
+            ty.to_string()?
+        )))
+    }
+}
+
 impl SvBridgeBuilder {
     pub fn new() -> Self {
         Self {
@@ -107,61 +156,12 @@ impl SvBridgeBuilder {
         }
     }
 
-    fn convert_type(ty: &dslx::Type, array_size: Option<usize>) -> Result<String, XlsynthError> {
-        if let Some((is_signed, bit_count)) = ty.is_bits_like() {
-            let leader = if is_signed { "logic signed" } else { "logic" };
-            Ok(format!(
-                "{}{}{}",
-                leader,
-                make_array_span_suffix(array_size.unwrap_or(0)),
-                make_bit_span_suffix(bit_count)
-            ))
-        } else if ty.is_enum() {
-            let enum_def = ty.get_enum_def().unwrap();
-            Ok(format!(
-                "{}{}",
-                Self::enum_name_to_sv(&enum_def.get_identifier()),
-                make_array_span_suffix(array_size.unwrap_or(0))
-            ))
-        } else if ty.is_struct() {
-            let struct_def = ty.get_struct_def().unwrap();
-            Ok(format!(
-                "{}{}",
-                Self::struct_name_to_sv(&struct_def.get_identifier()),
-                make_array_span_suffix(array_size.unwrap_or(0))
-            ))
-        } else if ty.is_array() {
-            let array_ty = ty.get_array_element_type();
-            let array_size = ty.get_array_size();
-            let sv_ty = Self::convert_type(&array_ty, Some(array_size))?;
-            println!("sv_ty: {}", sv_ty);
-            Ok(sv_ty)
-        } else {
-            Err(XlsynthError(format!(
-                "Unsupported type for conversion from DSLX to SystemVerilog: {:?}",
-                ty.to_string()?
-            )))
-        }
-    }
-
-    /// Converts a DSLX enum name in CamelCase to a SystemVerilog enum name in
-    /// snake_case with an _t suffix i.e. `MyEnum` -> `my_enum_t`
-    fn enum_name_to_sv(dslx_name: &str) -> String {
-        format!("{}_t", camel_to_snake(dslx_name))
-    }
-
     fn enum_member_name_to_sv(dslx_name: &str) -> String {
         if is_screaming_snake_case(dslx_name) {
             screaming_snake_to_upper_camel(dslx_name)
         } else {
             dslx_name.to_string()
         }
-    }
-
-    /// Converts a DSLX struct name in CamelCase to a SystemVerilog struct name
-    /// in snake_case with a _t suffix
-    fn struct_name_to_sv(dslx_name: &str) -> String {
-        format!("{}_t", camel_to_snake(dslx_name))
     }
 }
 
@@ -182,7 +182,7 @@ impl BridgeBuilder for SvBridgeBuilder {
         members: &[(String, IrValue)],
     ) -> Result<(), XlsynthError> {
         let mut lines = vec![];
-        let sv_name = Self::enum_name_to_sv(dslx_name);
+        let sv_name = enum_name_to_sv(dslx_name);
         lines.push(format!(
             "typedef enum logic{} {{",
             make_bit_span_suffix(underlying_bit_count)
@@ -228,32 +228,23 @@ impl BridgeBuilder for SvBridgeBuilder {
                 if let Some(colon_ref) = type_def.to_colon_ref() {
                     if let Some(import) = colon_ref.resolve_import_subject() {
                         let pkg_name = import_to_pkg_name(&import)?;
-                        let attr_sv_type_name = Self::convert_type(member_concrete_ty, None)?;
+                        let attr_sv_type_name = convert_type(member_concrete_ty, None)?;
                         let extern_ref = format!("{pkg_name}::{attr_sv_type_name}");
                         lines.push(format!("    {} {};", extern_ref, member_name));
                         continue;
                     }
                 }
             }
-            if member_concrete_ty.is_array() {
-                // Arrays are displayed differently from other members, the size is after the
-                // name, separated from the element type.
-                let element_ty = member_concrete_ty.get_array_element_type();
-                let array_size = member_concrete_ty.get_array_size();
-                let struct_string = Self::convert_type(&element_ty, Some(array_size))?;
-                lines.push(format!("    {} {};", struct_string, member_name));
-            } else {
-                let member_sv_ty = Self::convert_type(member_concrete_ty, None)?;
-                lines.push(format!("    {} {};", member_sv_ty, member_name));
-            }
+            let member_sv_ty = convert_type(member_concrete_ty, None)?;
+            lines.push(format!("    {} {};", member_sv_ty, member_name));
         }
-        lines.push(format!("}} {};\n", Self::struct_name_to_sv(dslx_name)));
+        lines.push(format!("}} {};\n", struct_name_to_sv(dslx_name)));
         self.lines.push(lines.join("\n"));
         Ok(())
     }
 
     fn add_alias(&mut self, dslx_name: &str, bits_type: dslx::Type) -> Result<(), XlsynthError> {
-        let sv_ty = Self::convert_type(&bits_type, None)?;
+        let sv_ty = convert_type(&bits_type, None)?;
         let sv_name = format!("{}_t", camel_to_snake(dslx_name));
         self.lines.push(format!("typedef {} {};\n", sv_ty, sv_name));
         Ok(())
