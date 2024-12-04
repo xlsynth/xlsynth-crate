@@ -13,7 +13,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-20.04]
+        os: [ubuntu-24.04, ubuntu-22.04]
       fail-fast: false
 
     steps:
@@ -53,10 +53,14 @@ jobs:
           export SLANG_PATH=`realpath slang` 
           cargo test --workspace
 
-  # Note: we don't currently have a downloadable binary for slang on macOS, so we make a job that
-  # skips the slang download / envvar export.
-  build-and-test-macos-latest:
-    runs-on: macos-latest
+  # Note: we don't currently have a downloadable binary for slang on macOS or older Ubuntu (due to
+  # GLIBC compatibility), so we make a job that skips the slang download / envvar export.
+  build-and-test-no-slang:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-20.04]
+      fail-fast: false
     steps:
       - name: Check out code
         uses: actions/checkout@v2
