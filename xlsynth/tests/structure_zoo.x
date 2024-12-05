@@ -90,3 +90,7 @@ struct MixedStruct {
     flags: u4,
 }
 
+/// Struct with multi-dim arrays.
+struct MultiArrayStruct {
+    data: u8[4][3][2],
+}
