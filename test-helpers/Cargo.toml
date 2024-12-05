@@ -2,6 +2,7 @@
 name = "test-helpers"
 version = "0.0.1"
 edition = "2018"
+publish = false
 
 [dependencies]
 slang-rs = "0.12.0"
