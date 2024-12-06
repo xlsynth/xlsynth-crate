@@ -583,6 +583,7 @@ impl TypeDimWrapper {
     }
 }
 
+#[derive(Clone)]
 pub struct Type {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxType,
