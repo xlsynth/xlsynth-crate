@@ -12,6 +12,15 @@ use crate::{
     IrValue, XlsynthError,
 };
 
+/// The suffix used when we typedef logic to a type name.
+const LOGIC_ALIAS_SUFFIX: &str = "_t";
+
+/// The suffix used when we typedef an enum to a type name.
+const ENUM_ALIAS_SUFFIX: &str = "_t";
+
+/// The suffix used when we typedef a struct to a type name.
+const STRUCT_ALIAS_SUFFIX: &str = "_t";
+
 pub struct SvBridgeBuilder {
     lines: Vec<String>,
     /// We keep a record of all the names we define flat within the namespace so
@@ -55,14 +64,6 @@ fn is_screaming_snake_case(name: &str) -> bool {
     })
 }
 
-fn make_array_span_suffix(array_sizes: Vec<usize>) -> String {
-    let mut suffix_parts = Vec::new();
-    for array_size in array_sizes.iter() {
-        suffix_parts.push(format!(" [{}:0]", array_size - 1));
-    }
-    suffix_parts.join("")
-}
-
 fn make_bit_span_suffix(bit_count: usize) -> String {
     // More study required on how compatible
     assert!(bit_count > 0);
@@ -87,51 +88,152 @@ fn import_to_pkg_name(import: &dslx::Import) -> Result<String, XlsynthError> {
 /// Converts a DSLX enum name in CamelCase to a SystemVerilog enum name in
 /// snake_case with an _t suffix i.e. `MyEnum` -> `my_enum_t`
 fn enum_name_to_sv(dslx_name: &str) -> String {
-    format!("{}_t", camel_to_snake(dslx_name))
+    format!("{}{}", camel_to_snake(dslx_name), ENUM_ALIAS_SUFFIX)
 }
 
 /// Converts a DSLX struct name in CamelCase to a SystemVerilog struct name
 /// in snake_case with a _t suffix
 fn struct_name_to_sv(dslx_name: &str) -> String {
-    format!("{}_t", camel_to_snake(dslx_name))
+    format!("{}{}", camel_to_snake(dslx_name), STRUCT_ALIAS_SUFFIX)
+}
+
+/// A version of `dslx::Type`'s meaningful contents that we can match on in
+/// match expressions.
+enum MatchableDslxType {
+    BitsLike {
+        is_signed: bool,
+        bit_count: usize,
+    },
+    Enum(dslx::EnumDef),
+    Struct(dslx::StructDef),
+    Array {
+        element_ty: Box<DslxType>,
+        size: usize,
+    },
+}
+
+struct DslxType {
+    ty: dslx::Type,
+    matchable_ty: MatchableDslxType,
+}
+
+/// Converts a DSLX type into a Rust-matchable version.
+fn dslx_type_to_matchable(ty: &dslx::Type) -> Result<DslxType, XlsynthError> {
+    if let Some((is_signed, bit_count)) = ty.is_bits_like() {
+        Ok(DslxType {
+            ty: ty.clone(),
+            matchable_ty: MatchableDslxType::BitsLike {
+                is_signed,
+                bit_count,
+            },
+        })
+    } else if ty.is_enum() {
+        Ok(DslxType {
+            ty: ty.clone(),
+            matchable_ty: MatchableDslxType::Enum(ty.get_enum_def().unwrap()),
+        })
+    } else if ty.is_struct() {
+        Ok(DslxType {
+            ty: ty.clone(),
+            matchable_ty: MatchableDslxType::Struct(ty.get_struct_def().unwrap()),
+        })
+    } else if ty.is_array() {
+        Ok(DslxType {
+            ty: ty.clone(),
+            matchable_ty: MatchableDslxType::Array {
+                element_ty: Box::new(dslx_type_to_matchable(&ty.get_array_element_type())?),
+                size: ty.get_array_size(),
+            },
+        })
+    } else {
+        Err(XlsynthError(format!(
+            "Unsupported type for conversion from DSLX to matchable type: {:?}",
+            ty.to_string()?
+        )))
+    }
+}
+
+/// Helper for making the packed array representation string suffix -- this
+/// comes after the type name.
+fn make_array_span_suffix(array_sizes: Vec<usize>) -> String {
+    let mut suffix_parts = Vec::new();
+    for array_size in array_sizes.iter() {
+        suffix_parts.push(format!(" [{}:0]", array_size - 1));
+    }
+    suffix_parts.join("")
 }
 
 // Converts a DSLX type into a SystemVerilog type string.
 fn convert_type(ty: &dslx::Type, array_sizes: Option<Vec<usize>>) -> Result<String, XlsynthError> {
-    if let Some((is_signed, bit_count)) = ty.is_bits_like() {
-        let leader = if is_signed { "logic signed" } else { "logic" };
-        Ok(format!(
-            "{}{}{}",
-            leader,
-            make_array_span_suffix(array_sizes.unwrap_or(vec![])),
-            make_bit_span_suffix(bit_count)
-        ))
-    } else if ty.is_enum() {
-        let enum_def = ty.get_enum_def().unwrap();
-        Ok(format!(
+    let matchable_ty = dslx_type_to_matchable(ty)?;
+
+    match matchable_ty.matchable_ty {
+        MatchableDslxType::BitsLike {
+            is_signed,
+            bit_count,
+        } => {
+            let leader = if is_signed { "logic signed" } else { "logic" };
+            Ok(format!(
+                "{}{}{}",
+                leader,
+                make_array_span_suffix(array_sizes.unwrap_or(vec![])),
+                make_bit_span_suffix(bit_count)
+            ))
+        }
+        MatchableDslxType::Enum(enum_def) => Ok(format!(
             "{}{}",
             enum_name_to_sv(&enum_def.get_identifier()),
             make_array_span_suffix(array_sizes.unwrap_or(vec![]))
-        ))
-    } else if ty.is_struct() {
-        let struct_def = ty.get_struct_def().unwrap();
-        Ok(format!(
+        )),
+        MatchableDslxType::Struct(struct_def) => Ok(format!(
             "{}{}",
             struct_name_to_sv(&struct_def.get_identifier()),
             make_array_span_suffix(array_sizes.unwrap_or(vec![]))
-        ))
-    } else if ty.is_array() {
-        let element_ty = ty.get_array_element_type();
-        let array_size = ty.get_array_size();
-        let mut array_sizes = array_sizes.unwrap_or(vec![]);
-        array_sizes.push(array_size);
-        let sv_ty = convert_type(&element_ty, Some(array_sizes))?;
-        Ok(sv_ty)
-    } else {
-        Err(XlsynthError(format!(
-            "Unsupported type for conversion from DSLX to SystemVerilog: {:?}",
-            ty.to_string()?
-        )))
+        )),
+        MatchableDslxType::Array { element_ty, size } => {
+            let mut array_sizes = array_sizes.unwrap_or(vec![]);
+            array_sizes.push(size);
+            convert_type(&element_ty.ty, Some(array_sizes))
+        }
+    }
+}
+
+/// Converts a DSLX type -- one that was determined to be an extern type
+/// reference -- into a SystemVerilog type string.
+fn convert_extern_type(
+    pkg_name: &str,
+    attr: Option<&str>,
+    ty: &dslx::Type,
+    array_sizes: Option<Vec<usize>>,
+) -> Result<String, XlsynthError> {
+    let matchable_ty = dslx_type_to_matchable(ty)?;
+    match matchable_ty.matchable_ty {
+        MatchableDslxType::BitsLike { .. } => {
+            if let Some(attr) = attr {
+                let attr_sv = format!("{}{}", camel_to_snake(attr), LOGIC_ALIAS_SUFFIX);
+                Ok(format!("{pkg_name}::{attr_sv}"))
+            } else {
+                convert_type(ty, array_sizes)
+            }
+        }
+        MatchableDslxType::Enum(enum_def) => Ok(format!(
+            "{pkg_name}::{ty_name}",
+            ty_name = enum_name_to_sv(&enum_def.get_identifier())
+        )),
+        MatchableDslxType::Struct(struct_def) => Ok(format!(
+            "{pkg_name}::{ty_name}",
+            ty_name = struct_name_to_sv(&struct_def.get_identifier())
+        )),
+        MatchableDslxType::Array { element_ty, size } => {
+            let mut array_sizes = array_sizes.unwrap_or(vec![]);
+            array_sizes.push(size);
+            Ok(convert_extern_type(
+                pkg_name,
+                None,
+                &element_ty.ty,
+                Some(array_sizes),
+            )?)
+        }
     }
 }
 
@@ -220,18 +322,35 @@ impl BridgeBuilder for SvBridgeBuilder {
         lines.push(format!("typedef struct packed {{"));
         for member in members {
             let member_name = &member.name;
+
+            // Note: this is the type that type inference determined the member is; i.e. it
+            // will be something like `BitsType`, `StructType`, `ArrayType`,
+            // etc.
             let member_concrete_ty = &member.concrete_type;
+
             let member_annotated_ty = &member.type_annotation;
+
+            // We look to see the type annotation is a reference to a type defined in
+            // another module.
             if let Some(type_ref_type_annotation) =
                 member_annotated_ty.to_type_ref_type_annotation()
             {
                 let type_ref = type_ref_type_annotation.get_type_ref();
-                let type_def = type_ref.get_type_definition();
-                if let Some(colon_ref) = type_def.to_colon_ref() {
+
+                // Inspect whether the type definition is a colon-reference where the subject is
+                // another module.
+                let type_definition = type_ref.get_type_definition();
+                if let Some(colon_ref) = type_definition.to_colon_ref() {
                     if let Some(import) = colon_ref.resolve_import_subject() {
+                        // It is a reference to a type defined in another module -- refer to its in
+                        // its external module.
                         let pkg_name = import_to_pkg_name(&import)?;
-                        let attr_sv_type_name = convert_type(member_concrete_ty, None)?;
-                        let extern_ref = format!("{pkg_name}::{attr_sv_type_name}");
+                        let extern_ref = convert_extern_type(
+                            &pkg_name,
+                            Some(&colon_ref.get_attr()),
+                            member_concrete_ty,
+                            None,
+                        )?;
                         lines.push(format!("    {} {};", extern_ref, member_name));
                         continue;
                     }
@@ -261,12 +380,21 @@ mod tests {
 
     use super::*;
 
+    /// Reusable scaffolding for converting a single DSLX module contents to SV.
     fn simple_convert_for_test(dslx: &str) -> Result<String, XlsynthError> {
         let mut import_data = dslx::ImportData::default();
         let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
         let mut builder = SvBridgeBuilder::new();
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder)?;
         Ok(builder.build())
+    }
+
+    #[test]
+    fn test_type_alias_of_u64_array() {
+        let dslx = "type MyType = u64[4];";
+        let sv = simple_convert_for_test(dslx).unwrap();
+        assert_eq!(sv, "typedef logic [3:0] [63:0] my_type_t;\n");
+        test_helpers::assert_valid_sv(&sv);
     }
 
     /// Demonstrates that we do not change the case of enum members that are

@@ -54,7 +54,13 @@ pub fn assert_valid_sv_flist(files: &[FlistEntry]) {
         sources: &sources_strs,
         ..Default::default()
     };
-    slang_rs::run_slang(&cfg).expect("expect SystemVerilog file list is valid");
+    let result = slang_rs::run_slang(&cfg);
+    if result.is_err() {
+        panic!(
+            "expect we can parse valid SystemVerilog via whole file list; error:\n{}",
+            result.err().unwrap().to_string().replace("\\n", "\n")
+        );
+    }
 }
 
 #[cfg(test)]

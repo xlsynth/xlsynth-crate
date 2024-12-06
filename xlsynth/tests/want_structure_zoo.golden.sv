@@ -75,3 +75,11 @@ typedef struct packed {
 typedef struct packed {
     logic [1:0] [2:0] [3:0] [7:0] data;
 } multi_array_struct_t;
+
+typedef struct packed {
+    common_zoo_sv_pkg::my_u8_t data;
+} external_alias_struct_t;
+
+typedef struct packed {
+    logic [7:0] data;
+} external_alias_through_local_alias_struct_t;

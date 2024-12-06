@@ -94,3 +94,16 @@ struct MixedStruct {
 struct MultiArrayStruct {
     data: u8[4][3][2],
 }
+
+/// Struct that refers to an external type alias directly.
+struct ExternalAliasStruct {
+    data: common_zoo::MyU8,
+}
+
+/// Struct that refers to an external type alias through a local type alias.
+
+type MyU8 = common_zoo::MyU8;
+
+struct ExternalAliasThroughLocalAliasStruct {
+    data: MyU8,
+}

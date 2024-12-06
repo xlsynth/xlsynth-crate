@@ -34,6 +34,12 @@ fn test_sv_bridge_structure_zoo() {
         )
     };
 
+    // Check that our generated `imported_sv` matches a golden expectation too,
+    // because why not.
+    test_helpers::assert_valid_sv(&imported_sv);
+    let imported_sv_golden = std::fs::read_to_string("tests/want_common_zoo.golden.sv").unwrap();
+    assert_eq!(imported_sv, imported_sv_golden);
+
     // Make a builder to convert the "importer" module.
     let mut builder = SvBridgeBuilder::new();
     convert_imported_module(&zoo, &mut builder).unwrap();
