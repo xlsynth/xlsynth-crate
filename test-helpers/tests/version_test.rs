@@ -116,3 +116,23 @@ fn test_xlsynth_driver_crate_version() {
     let workspace_path = workspace_root.join("xlsynth-driver");
     validate_local_version_gt_released("xlsynth-driver", &workspace_path).unwrap();
 }
+
+#[test]
+fn test_crate_versions_are_equal() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let workspace_root = get_workspace_root();
+    let released_crate_dirs = [
+        workspace_root.join("xlsynth"),
+        workspace_root.join("xlsynth-sys"),
+        workspace_root.join("xlsynth-driver"),
+    ];
+    let mut local_versions = vec![];
+    for dir in released_crate_dirs {
+        local_versions.push(fetch_local_version(&dir).unwrap());
+    }
+    // Check all the local versions are the same.
+    let first_version = &local_versions[0];
+    for version in &local_versions[1..] {
+        assert_eq!(version, first_version);
+    }
+}
