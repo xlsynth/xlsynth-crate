@@ -966,10 +966,14 @@ name = "test-helpers"
 version = "0.0.1"
 dependencies = [
  "cargo_metadata",
+ "curl",
  "env_logger 0.10.2",
  "log",
+ "semver",
+ "serde_json",
  "slang-rs",
  "tempfile",
+ "toml 0.5.11",
  "xlsynth",
  "xlsynth-sys",
 ]
@@ -1260,15 +1264,10 @@ name = "xlsynth"
 version = "0.0.48"
 dependencies = [
  "cargo_metadata",
- "curl",
- "docmatic",
  "env_logger 0.11.5",
  "log",
  "pretty_assertions",
- "semver",
- "serde_json",
  "test-helpers",
- "toml 0.5.11",
  "xlsynth-sys",
 ]
 
