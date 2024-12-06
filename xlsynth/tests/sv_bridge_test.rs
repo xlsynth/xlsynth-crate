@@ -52,6 +52,7 @@ fn test_sv_bridge_structure_zoo() {
     ]);
 
     // Check that our generated SV matches the golden (expected) output.
-    let structure_zoo_sv_golden = std::fs::read_to_string("tests/want_structure_zoo.sv").unwrap();
+    let structure_zoo_sv_golden =
+        std::fs::read_to_string("tests/want_structure_zoo.golden.sv").unwrap();
     assert_eq!(got_sv, structure_zoo_sv_golden);
 }

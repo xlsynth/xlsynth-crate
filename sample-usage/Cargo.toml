@@ -14,3 +14,8 @@ mimalloc = "0.1.43"
 
 [build-dependencies]
 xlsynth = { path = "../xlsynth" }
+
+[dev-dependencies]
+docmatic = "0.1.2"
+cargo_metadata = "0.18"
+xlsynth-sys = { path = "../xlsynth-sys" }

@@ -9,3 +9,8 @@ slang-rs = "0.12.0"
 tempfile = "3.13"
 log = "0.4"
 env_logger = "0.10"
+
+[dev-dependencies]
+xlsynth-sys = { path = "../xlsynth-sys" }
+cargo_metadata = "0.18"
+xlsynth = { path = "../xlsynth" }
