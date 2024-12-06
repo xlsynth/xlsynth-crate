@@ -94,3 +94,16 @@ struct MixedStruct {
 struct MultiArrayStruct {
     data: u8[4][3][2],
 }
+
+type TxnType = common_zoo::TransactionType;
+/// Struct with a type alias.
+struct MaybeTransaction {
+    valid: bool,
+    ty: TxnType,
+}
+
+/// Struct with field that is just bits.
+struct RegInfo {
+    reg_id: common_zoo::RegId,
+    valid: bool,
+}

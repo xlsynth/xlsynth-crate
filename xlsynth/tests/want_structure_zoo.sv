@@ -75,3 +75,13 @@ typedef struct packed {
 typedef struct packed {
     logic [1:0] [2:0] [3:0] [7:0] data;
 } multi_array_struct_t;
+
+typedef struct packed {
+    logic valid;
+    common_zoo_sv_pkg::transaction_type_t ty;
+} maybe_transaction_t;
+
+typedef struct packed {
+    common_zoo_sv_pkg::reg_id_t reg_id;
+    logic valid;
+} reg_info_t;
