@@ -14,3 +14,7 @@ env_logger = "0.10"
 xlsynth-sys = { path = "../xlsynth-sys" }
 cargo_metadata = "0.18"
 xlsynth = { path = "../xlsynth" }
+toml = "0.5"
+curl = "0.4"
+serde_json = "1.0"
+semver = "1.0"
