@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::process::Command;
 
 /// Simple test that converts a DSLX module with an enum into a SV definition.
