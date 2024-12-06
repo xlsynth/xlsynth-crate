@@ -55,12 +55,12 @@ fn is_screaming_snake_case(name: &str) -> bool {
     })
 }
 
-fn make_array_span_suffix(array_size: usize) -> String {
-    if array_size <= 1 {
-        "".to_string()
-    } else {
-        format!(" [{}:0]", array_size - 1)
+fn make_array_span_suffix(array_sizes: Vec<usize>) -> String {
+    let mut suffix_parts = Vec::new();
+    for array_size in array_sizes.iter() {
+        suffix_parts.push(format!(" [{}:0]", array_size - 1));
     }
+    suffix_parts.join("")
 }
 
 fn make_bit_span_suffix(bit_count: usize) -> String {
@@ -97,13 +97,13 @@ fn struct_name_to_sv(dslx_name: &str) -> String {
 }
 
 // Converts a DSLX type into a SystemVerilog type string.
-fn convert_type(ty: &dslx::Type, array_size: Option<usize>) -> Result<String, XlsynthError> {
+fn convert_type(ty: &dslx::Type, array_sizes: Option<Vec<usize>>) -> Result<String, XlsynthError> {
     if let Some((is_signed, bit_count)) = ty.is_bits_like() {
         let leader = if is_signed { "logic signed" } else { "logic" };
         Ok(format!(
             "{}{}{}",
             leader,
-            make_array_span_suffix(array_size.unwrap_or(0)),
+            make_array_span_suffix(array_sizes.unwrap_or(vec![])),
             make_bit_span_suffix(bit_count)
         ))
     } else if ty.is_enum() {
@@ -111,19 +111,21 @@ fn convert_type(ty: &dslx::Type, array_size: Option<usize>) -> Result<String, Xl
         Ok(format!(
             "{}{}",
             enum_name_to_sv(&enum_def.get_identifier()),
-            make_array_span_suffix(array_size.unwrap_or(0))
+            make_array_span_suffix(array_sizes.unwrap_or(vec![]))
         ))
     } else if ty.is_struct() {
         let struct_def = ty.get_struct_def().unwrap();
         Ok(format!(
             "{}{}",
             struct_name_to_sv(&struct_def.get_identifier()),
-            make_array_span_suffix(array_size.unwrap_or(0))
+            make_array_span_suffix(array_sizes.unwrap_or(vec![]))
         ))
     } else if ty.is_array() {
         let element_ty = ty.get_array_element_type();
         let array_size = ty.get_array_size();
-        let sv_ty = convert_type(&element_ty, Some(array_size))?;
+        let mut array_sizes = array_sizes.unwrap_or(vec![]);
+        array_sizes.push(array_size);
+        let sv_ty = convert_type(&element_ty, Some(array_sizes))?;
         Ok(sv_ty)
     } else {
         Err(XlsynthError(format!(

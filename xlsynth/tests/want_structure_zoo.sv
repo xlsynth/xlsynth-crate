@@ -71,3 +71,7 @@ typedef struct packed {
     data_t [3:0] packets;
     logic [3:0] flags;
 } mixed_struct_t;
+
+typedef struct packed {
+    logic [1:0] [2:0] [3:0] [7:0] data;
+} multi_array_struct_t;
