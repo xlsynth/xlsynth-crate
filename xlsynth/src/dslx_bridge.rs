@@ -48,11 +48,12 @@ pub trait BridgeBuilder {
     /// Invoked when there is a type alias to emit for this module.
     ///
     /// Args:
-    ///   dslx_name: The name of the type alias (i.e. `Foo` in `type Foo =
-    /// Bar`).   type_annotation: The type annotation for the alias (i.e.
-    /// `Bar` in `type Foo = Bar`).   ty: The concrete type that this
-    /// resolves to; i.e. after types have been     resolved toconcrete
-    /// values.
+    /// - `dslx_name`: The name of the type alias (i.e. `Foo` in `type Foo =
+    ///   Bar`).
+    /// - `type_annotation`: The type annotation for the alias (i.e. `Bar` in
+    ///   `type Foo = Bar`).
+    /// - `ty`: The concrete type that this resolves to; i.e. after types have
+    /// been resolved to concrete values.
     fn add_alias(
         &mut self,
         dslx_name: &str,
