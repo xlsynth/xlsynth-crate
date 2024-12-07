@@ -80,6 +80,18 @@ typedef struct packed {
     common_zoo_sv_pkg::my_u8_t data;
 } external_alias_struct_t;
 
+typedef common_zoo_sv_pkg::my_u8_t my_u8_t;
+
 typedef struct packed {
     logic [7:0] data;
 } external_alias_through_local_alias_struct_t;
+
+typedef struct packed {
+    common_zoo_sv_pkg::point_t point;
+} has_external_struct_t;
+
+typedef common_zoo_sv_pkg::point_t point_t;
+
+typedef struct packed {
+    point_t point;
+} has_external_struct_through_local_alias_t;

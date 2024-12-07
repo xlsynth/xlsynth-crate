@@ -45,10 +45,21 @@ pub trait BridgeBuilder {
         members: &[StructMemberData],
     ) -> Result<(), XlsynthError>;
 
-    /// Invoked when there is a type alias to emit for this module (i.e. not an
-    /// import-style type alias that refers, via a ColonRef, to a definition
-    /// in a different module).
-    fn add_alias(&mut self, dslx_name: &str, ty: dslx::Type) -> Result<(), XlsynthError>;
+    /// Invoked when there is a type alias to emit for this module.
+    ///
+    /// Args:
+    /// - `dslx_name`: The name of the type alias (i.e. `Foo` in `type Foo =
+    ///   Bar`).
+    /// - `type_annotation`: The type annotation for the alias (i.e. `Bar` in
+    ///   `type Foo = Bar`).
+    /// - `ty`: The concrete type that this resolves to; i.e. after types have
+    /// been resolved to concrete values.
+    fn add_alias(
+        &mut self,
+        dslx_name: &str,
+        type_annotation: &dslx::TypeAnnotation,
+        ty: &dslx::Type,
+    ) -> Result<(), XlsynthError>;
 }
 
 fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, IrValue)> {
@@ -72,7 +83,7 @@ fn convert_enum(
     builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
     let tups = enum_as_tups(enum_def, type_info);
-    let enum_underlying = type_info.get_type_for_type_annotation(enum_def.get_underlying());
+    let enum_underlying = type_info.get_type_for_type_annotation(&enum_def.get_underlying());
     let (is_signed, underlying_bit_count) = enum_underlying.is_bits_like().expect(&format!(
         "enum underlying type should be bits-like; got: {enum_underlying}"
     ));
@@ -107,24 +118,9 @@ fn convert_type_alias(
     builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
     let alias_name = type_alias.get_identifier();
-
-    // If the alias right-hand-side is a ColonRef with a different module as a
-    // subject we skip it, because it's an import style re-binding pattern.
     let type_annotation = type_alias.get_type_annotation();
-
-    if let Some(type_ref_type_annotation) = type_annotation.to_type_ref_type_annotation() {
-        let type_ref: dslx::TypeRef = type_ref_type_annotation.get_type_ref();
-        let type_definition: dslx::TypeDefinition = type_ref.get_type_definition();
-        if let Some(colon_ref) = type_definition.to_colon_ref() {
-            if let Some(_import) = colon_ref.resolve_import_subject() {
-                // Skip the "use-style" typedef.
-                return Ok(());
-            }
-        }
-    }
-
-    let alias_type = type_info.get_type_for_type_annotation(type_annotation);
-    builder.add_alias(&alias_name, alias_type)
+    let alias_type = type_info.get_type_for_type_annotation(&type_annotation);
+    builder.add_alias(&alias_name, &type_annotation, &alias_type)
 }
 
 pub fn convert_imported_module(

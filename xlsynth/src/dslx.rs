@@ -499,7 +499,7 @@ impl TypeInfo {
         }
     }
 
-    pub fn get_type_for_type_annotation(&self, type_annotation: TypeAnnotation) -> Type {
+    pub fn get_type_for_type_annotation(&self, type_annotation: &TypeAnnotation) -> Type {
         Type {
             parent: self.parent.clone(),
             ptr: unsafe {
@@ -826,7 +826,7 @@ mod tests {
         let type_a = member_a.get_type();
         // Inspect the inferred type information for the type AST node.
         {
-            let concrete_type_a = type_info.get_type_for_type_annotation(type_a);
+            let concrete_type_a = type_info.get_type_for_type_annotation(&type_a);
             assert_eq!(concrete_type_a.to_string().unwrap(), "uN[32]");
             assert_eq!(concrete_type_a.get_total_bit_count().unwrap(), 32);
 
@@ -841,7 +841,7 @@ mod tests {
         let type_b = member_b.get_type();
         // Inspect the inferred type information for the type AST node.
         {
-            let concrete_type_b = type_info.get_type_for_type_annotation(type_b);
+            let concrete_type_b = type_info.get_type_for_type_annotation(&type_b);
             assert_eq!(concrete_type_b.to_string().unwrap(), "uN[16]");
             assert_eq!(concrete_type_b.get_total_bit_count().unwrap(), 16);
 
