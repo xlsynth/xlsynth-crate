@@ -127,17 +127,14 @@ impl BridgeBuilder for RustBridgeBuilder {
 
     fn add_alias(
         &mut self,
-        _dslx_name: &str,
+        dslx_name: &str,
         _type_annotation: &dslx::TypeAnnotation,
-        _bits_type: &dslx::Type,
+        bits_type: &dslx::Type,
     ) -> Result<(), XlsynthError> {
-        todo!()
-        /*
-        let rust_ty = Self::convert_type(&bits_type)?;
+        let rust_ty = Self::convert_type(bits_type)?;
         self.lines
             .push(format!("pub type {} = {};\n", dslx_name, rust_ty));
         Ok(())
-        */
     }
 }
 
