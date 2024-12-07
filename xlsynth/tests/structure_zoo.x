@@ -107,3 +107,15 @@ type MyU8 = common_zoo::MyU8;
 struct ExternalAliasThroughLocalAliasStruct {
     data: MyU8,
 }
+
+/// Struct that refers to an external struct type directly.
+struct HasExternalStruct {
+    point: common_zoo::Point,
+}
+
+/// Struct that refers to an external struct type through a local alias.
+type Point = common_zoo::Point;
+
+struct HasExternalStructThroughLocalAlias {
+    point: Point,
+}

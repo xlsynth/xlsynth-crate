@@ -21,6 +21,9 @@ const ENUM_ALIAS_SUFFIX: &str = "_t";
 /// The suffix used when we typedef a struct to a type name.
 const STRUCT_ALIAS_SUFFIX: &str = "_t";
 
+/// The suffix used when we typedef a type alias to a type name.
+const TYPE_ALIAS_SUFFIX: &str = "_t";
+
 pub struct SvBridgeBuilder {
     lines: Vec<String>,
     /// We keep a record of all the names we define flat within the namespace so
@@ -76,13 +79,13 @@ fn make_bit_span_suffix(bit_count: usize) -> String {
 
 /// Note: this only supports a very simple package naming and associated
 /// hierarchy for the time being.
-fn import_to_pkg_name(import: &dslx::Import) -> Result<String, XlsynthError> {
+fn import_to_pkg_name(import: &dslx::Import) -> String {
     let subject = import.get_subject();
     assert!(
         subject.len() > 0,
         "import subjects always have at least one token"
     );
-    Ok(format!("{}_sv_pkg", subject.last().unwrap()))
+    format!("{}_sv_pkg", subject.last().unwrap())
 }
 
 /// Converts a DSLX enum name in CamelCase to a SystemVerilog enum name in
@@ -95,6 +98,32 @@ fn enum_name_to_sv(dslx_name: &str) -> String {
 /// in snake_case with a _t suffix
 fn struct_name_to_sv(dslx_name: &str) -> String {
     format!("{}{}", camel_to_snake(dslx_name), STRUCT_ALIAS_SUFFIX)
+}
+
+/// Returns the extern type reference if the type annotation is an extern type.
+fn get_extern_type_ref(
+    type_annotation: &dslx::TypeAnnotation,
+    concrete_ty: &dslx::Type,
+) -> Option<String> {
+    if let Some(type_ref_type_annotation) = type_annotation.to_type_ref_type_annotation() {
+        let type_ref = type_ref_type_annotation.get_type_ref();
+
+        // Inspect whether the type definition is a colon-reference where the subject is
+        // another module.
+        let type_definition = type_ref.get_type_definition();
+        if let Some(colon_ref) = type_definition.to_colon_ref() {
+            if let Some(import) = colon_ref.resolve_import_subject() {
+                // It is a reference to a type defined in another module -- refer to its in
+                // its external module.
+                let pkg_name = import_to_pkg_name(&import);
+                let extern_ref =
+                    convert_extern_type(&pkg_name, Some(&colon_ref.get_attr()), concrete_ty, None)
+                        .unwrap();
+                return Some(extern_ref);
+            }
+        }
+    }
+    None
 }
 
 /// A version of `dslx::Type`'s meaningful contents that we can match on in
@@ -330,32 +359,11 @@ impl BridgeBuilder for SvBridgeBuilder {
 
             let member_annotated_ty = &member.type_annotation;
 
-            // We look to see the type annotation is a reference to a type defined in
-            // another module.
-            if let Some(type_ref_type_annotation) =
-                member_annotated_ty.to_type_ref_type_annotation()
-            {
-                let type_ref = type_ref_type_annotation.get_type_ref();
-
-                // Inspect whether the type definition is a colon-reference where the subject is
-                // another module.
-                let type_definition = type_ref.get_type_definition();
-                if let Some(colon_ref) = type_definition.to_colon_ref() {
-                    if let Some(import) = colon_ref.resolve_import_subject() {
-                        // It is a reference to a type defined in another module -- refer to its in
-                        // its external module.
-                        let pkg_name = import_to_pkg_name(&import)?;
-                        let extern_ref = convert_extern_type(
-                            &pkg_name,
-                            Some(&colon_ref.get_attr()),
-                            member_concrete_ty,
-                            None,
-                        )?;
-                        lines.push(format!("    {} {};", extern_ref, member_name));
-                        continue;
-                    }
-                }
+            if let Some(extern_ref) = get_extern_type_ref(member_annotated_ty, member_concrete_ty) {
+                lines.push(format!("    {} {};", extern_ref, member_name));
+                continue;
             }
+
             let member_sv_ty = convert_type(member_concrete_ty, None)?;
             lines.push(format!("    {} {};", member_sv_ty, member_name));
         }
@@ -364,10 +372,20 @@ impl BridgeBuilder for SvBridgeBuilder {
         Ok(())
     }
 
-    fn add_alias(&mut self, dslx_name: &str, bits_type: dslx::Type) -> Result<(), XlsynthError> {
-        let sv_ty = convert_type(&bits_type, None)?;
-        let sv_name = format!("{}_t", camel_to_snake(dslx_name));
-        self.lines.push(format!("typedef {} {};\n", sv_ty, sv_name));
+    fn add_alias(
+        &mut self,
+        dslx_name: &str,
+        type_annotation: &dslx::TypeAnnotation,
+        ty: &dslx::Type,
+    ) -> Result<(), XlsynthError> {
+        let sv_name = format!("{}{}", camel_to_snake(dslx_name), TYPE_ALIAS_SUFFIX);
+        if let Some(extern_ref) = get_extern_type_ref(type_annotation, ty) {
+            self.lines
+                .push(format!("typedef {} {};\n", extern_ref, sv_name));
+        } else {
+            let sv_ty = convert_type(ty, None)?;
+            self.lines.push(format!("typedef {} {};\n", sv_ty, sv_name));
+        }
         Ok(())
     }
 }

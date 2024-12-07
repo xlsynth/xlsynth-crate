@@ -6,6 +6,7 @@ use xlsynth::{dslx, dslx_bridge::convert_imported_module, sv_bridge_builder::SvB
 /// Tests that we can convert the whole "structure_zoo.x" file to SystemVerilog.
 #[test]
 fn test_sv_bridge_structure_zoo() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let mut import_data = dslx::ImportData::default();
 
     let common_zoo_relpath = "tests/common_zoo.x";
@@ -44,6 +45,7 @@ fn test_sv_bridge_structure_zoo() {
     let mut builder = SvBridgeBuilder::new();
     convert_imported_module(&zoo, &mut builder).unwrap();
     let got_sv = builder.build();
+    log::info!("structure_zoo.sv:\n{}", got_sv);
 
     // Check that the SV we got is also valid SV.
     test_helpers::assert_valid_sv_flist(&[
