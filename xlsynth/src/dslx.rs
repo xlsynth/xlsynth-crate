@@ -18,6 +18,48 @@ pub enum TypeDefinitionKind {
     ColonRef = 3,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ModuleMemberKind {
+    Function = 0,
+    Proc = 1,
+    TestFunction = 2,
+    TestProc = 3,
+    QuickCheck = 4,
+    TypeAlias = 5,
+    StructDef = 6,
+    ProcDef = 7,
+    EnumDef = 8,
+    ConstantDef = 9,
+    Import = 10,
+    ConstAssert = 11,
+    Impl = 12,
+    VerbatimNode = 13,
+}
+
+impl From<sys::DslxModuleMemberKind> for ModuleMemberKind {
+    fn from(kind: sys::DslxModuleMemberKind) -> Self {
+        let result = match kind {
+            0 => ModuleMemberKind::Function,
+            1 => ModuleMemberKind::Proc,
+            2 => ModuleMemberKind::TestFunction,
+            3 => ModuleMemberKind::TestProc,
+            4 => ModuleMemberKind::QuickCheck,
+            5 => ModuleMemberKind::TypeAlias,
+            6 => ModuleMemberKind::StructDef,
+            7 => ModuleMemberKind::ProcDef,
+            8 => ModuleMemberKind::EnumDef,
+            9 => ModuleMemberKind::ConstantDef,
+            10 => ModuleMemberKind::Import,
+            11 => ModuleMemberKind::ConstAssert,
+            12 => ModuleMemberKind::Impl,
+            13 => ModuleMemberKind::VerbatimNode,
+            _ => panic!("Unknown module member kind: {}", kind),
+        };
+        assert_eq!(result as i32, kind);
+        result
+    }
+}
+
 struct ImportDataPtr {
     ptr: *mut CDslxImportData,
 }
@@ -111,6 +153,77 @@ impl TypecheckedModule {
     }
 }
 
+pub struct ConstantDef {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxConstantDef,
+}
+
+impl ConstantDef {
+    pub fn get_name(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_constant_def_get_name(self.ptr);
+            c_str_to_rust(c_str)
+        }
+    }
+
+    pub fn get_value(&self) -> Expr {
+        Expr {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_constant_def_get_value(self.ptr) },
+        }
+    }
+}
+
+pub struct ModuleMember {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxModuleMember,
+}
+
+pub enum MatchableModuleMember {
+    EnumDef(EnumDef),
+    StructDef(StructDef),
+    TypeAlias(TypeAlias),
+    ConstantDef(ConstantDef),
+}
+
+impl ModuleMember {
+    pub fn to_matchable(&self) -> Option<MatchableModuleMember> {
+        let kind = unsafe { sys::xls_dslx_module_member_get_kind(self.ptr) };
+        match ModuleMemberKind::from(kind) {
+            ModuleMemberKind::EnumDef => {
+                let enum_def = unsafe { sys::xls_dslx_module_member_get_enum_def(self.ptr) };
+                Some(MatchableModuleMember::EnumDef(EnumDef {
+                    parent: self.parent.clone(),
+                    ptr: enum_def,
+                }))
+            }
+            ModuleMemberKind::StructDef => {
+                let struct_def = unsafe { sys::xls_dslx_module_member_get_struct_def(self.ptr) };
+                Some(MatchableModuleMember::StructDef(StructDef {
+                    parent: self.parent.clone(),
+                    ptr: struct_def,
+                }))
+            }
+            ModuleMemberKind::TypeAlias => {
+                let type_alias = unsafe { sys::xls_dslx_module_member_get_type_alias(self.ptr) };
+                Some(MatchableModuleMember::TypeAlias(TypeAlias {
+                    parent: self.parent.clone(),
+                    ptr: type_alias,
+                }))
+            }
+            ModuleMemberKind::ConstantDef => {
+                let constant_def =
+                    unsafe { sys::xls_dslx_module_member_get_constant_def(self.ptr) };
+                Some(MatchableModuleMember::ConstantDef(ConstantDef {
+                    parent: self.parent.clone(),
+                    ptr: constant_def,
+                }))
+            }
+            _ => None,
+        }
+    }
+}
+
 pub struct Module {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxModule,
@@ -121,6 +234,21 @@ impl Module {
         unsafe {
             let c_str = sys::xls_dslx_module_get_name(self.ptr);
             c_str_to_rust(c_str)
+        }
+    }
+
+    pub fn get_member_count(&self) -> usize {
+        unsafe { sys::xls_dslx_module_get_member_count(self.ptr) as usize }
+    }
+
+    pub fn get_member(&self, idx: usize) -> ModuleMember {
+        let member_ptr = unsafe { sys::xls_dslx_module_get_member(self.ptr, idx as i64) };
+        if member_ptr.is_null() {
+            panic!("Failed to get module member at index {}", idx);
+        }
+        ModuleMember {
+            parent: self.parent.clone(),
+            ptr: member_ptr,
         }
     }
 
@@ -475,7 +603,7 @@ pub struct TypeInfo {
 }
 
 impl TypeInfo {
-    pub fn get_const_expr(&self, expr: Expr) -> Result<InterpValue, XlsynthError> {
+    pub fn get_const_expr(&self, expr: &Expr) -> Result<InterpValue, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();
         let success = unsafe {
@@ -512,6 +640,15 @@ impl TypeInfo {
         Type {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_type_info_get_type_enum_def(self.ptr, enum_def.ptr) },
+        }
+    }
+
+    pub fn get_type_for_constant_def(&self, constant_def: &ConstantDef) -> Type {
+        Type {
+            parent: self.parent.clone(),
+            ptr: unsafe {
+                sys::xls_dslx_type_info_get_type_constant_def(self.ptr, constant_def.ptr)
+            },
         }
     }
 
@@ -790,7 +927,7 @@ mod tests {
 
         let type_info = typechecked_module.get_type_info();
         let interp_value = type_info
-            .get_const_expr(expr)
+            .get_const_expr(&expr)
             .expect("get_const_expr success");
         let ir_value = interp_value.convert_to_ir().expect("convert_to_ir success");
         assert_eq!(

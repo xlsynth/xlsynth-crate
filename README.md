@@ -22,7 +22,7 @@ fn main() {
 }
 ```
 
-### Development Notes
+## Development Notes
 
 The `xlsynth` Rust crate leverages a dynamic library with XLS' core functionality (i.e. `libxls.so`
 / `libxls.dylib`).
@@ -53,7 +53,13 @@ Where in `~/proj/xlsynth/` (the root of the xlsynth workspace) we build the DSO 
 $ bazel build -c opt //xls/public:libxls.so
 ```
 
-#### Pre-Commit
+Note that on OS X you additionally will have to set:
+
+```shell
+$ export DYLD_LIBRARY_PATH=$HOME/proj/xlsynth/bazel-bin/xls/public/:$DYLD_LIBRARY_PATH
+```
+
+### Pre-Commit
 
 The `pre-commit` tool is used to help with local checks before PRs are created:
 

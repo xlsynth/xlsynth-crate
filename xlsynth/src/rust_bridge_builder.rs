@@ -136,6 +136,16 @@ impl BridgeBuilder for RustBridgeBuilder {
             .push(format!("pub type {} = {};\n", dslx_name, rust_ty));
         Ok(())
     }
+
+    fn add_constant(
+        &mut self,
+        _name: &str,
+        _constant_def: &dslx::ConstantDef,
+        _ty: &dslx::Type,
+        _ir_value: &IrValue,
+    ) -> Result<(), XlsynthError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
