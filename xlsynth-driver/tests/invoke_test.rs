@@ -68,7 +68,11 @@ struct MyStruct {
     test_helpers::assert_valid_sv(&stdout);
     assert_eq!(
         stdout.trim(),
-        "typedef struct packed {
+        "localparam bit unsigned [31:0] Count = 'h18;
+
+localparam bit unsigned [31:0] Width = 'h5;
+
+typedef struct packed {
     logic [4:0] data;
 } my_struct_t;"
     );
