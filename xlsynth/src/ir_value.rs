@@ -28,7 +28,9 @@ pub enum IrFormatPreference {
     UnsignedDecimal,
     Hex,
     PlainBinary,
+    ZeroPaddedBinary,
     PlainHex,
+    ZeroPaddedHex,
 }
 
 impl IrFormatPreference {
@@ -40,7 +42,9 @@ impl IrFormatPreference {
             IrFormatPreference::UnsignedDecimal => "unsigned_decimal",
             IrFormatPreference::Hex => "hex",
             IrFormatPreference::PlainBinary => "plain_binary",
+            IrFormatPreference::ZeroPaddedBinary => "zero_padded_binary",
             IrFormatPreference::PlainHex => "plain_hex",
+            IrFormatPreference::ZeroPaddedHex => "zero_padded_hex",
         }
     }
 }
