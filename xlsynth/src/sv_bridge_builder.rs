@@ -388,6 +388,33 @@ impl BridgeBuilder for SvBridgeBuilder {
         }
         Ok(())
     }
+
+    fn add_constant(
+        &mut self,
+        name: &str,
+        _constant_def: &dslx::ConstantDef,
+        ty: &dslx::Type,
+        ir_value: &IrValue,
+    ) -> Result<(), XlsynthError> {
+        if let Some((is_signed, bit_count)) = ty.is_bits_like() {
+            let sv_name = if is_screaming_snake_case(name) {
+                screaming_snake_to_upper_camel(name)
+            } else {
+                name.to_string()
+            };
+            self.lines.push(format!(
+                "localparam bit {} [{}:0] {name} = 'h{value};\n",
+                if is_signed { "signed" } else { "unsigned" },
+                bit_count - 1,
+                name = sv_name,
+                value = ir_value.to_string_fmt_no_prefix(IrFormatPreference::PlainHex)?
+            ));
+            Ok(())
+        } else {
+            log::warn!("Unsupported constant type: {:?}", ir_value);
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

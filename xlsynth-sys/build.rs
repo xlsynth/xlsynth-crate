@@ -208,7 +208,12 @@ fn main() {
         // Grab the DSO from the build artifacts.
         let workspace = std::env::var("DEV_XLS_DSO_WORKSPACE").unwrap();
         // The DSO is in the workspace subdir bazel-bin/xls/public/libxls.so
-        let dso_path = PathBuf::from(workspace).join("bazel-bin/xls/public/libxls.so");
+        const DSO_RELPATH: &str = if cfg!(target_os = "macos") {
+            "bazel-bin/xls/public/libxls.dylib"
+        } else {
+            "bazel-bin/xls/public/libxls.so"
+        };
+        let dso_path = PathBuf::from(workspace).join(DSO_RELPATH);
         let dso_info = DsoInfo {
             extension: "so",
             lib_suffix: "ubuntu2004",
@@ -222,6 +227,13 @@ fn main() {
             "DEV_XLS_DSO_WORKSPACE env var only supported in UNIX-like environments"
         );
         std::fs::remove_file(&dso_dest).ok();
+
+        println!(
+            "cargo:info=Symlinking DSO from workspace; src: {} dst symlink: {}",
+            dso_path.display(),
+            dso_dest.display()
+        );
+
         #[cfg(unix)]
         std::os::unix::fs::symlink(&dso_path, &dso_dest).unwrap();
 
@@ -230,7 +242,9 @@ fn main() {
             dso_path.display(),
             dso_dest.display()
         );
+
         println!("cargo:rerun-if-changed=build.rs");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir);
         println!("cargo:rustc-link-search=native={}", out_dir);
         println!("cargo:rustc-link-lib=dylib={}", dso_info.get_dso_name());
         println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);

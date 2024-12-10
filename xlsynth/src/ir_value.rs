@@ -93,6 +93,19 @@ impl IrValue {
         xls_value_to_string_format_preference(self.ptr, fmt_pref)
     }
 
+    pub fn to_string_fmt_no_prefix(
+        &self,
+        format: IrFormatPreference,
+    ) -> Result<String, XlsynthError> {
+        let s = self.to_string_fmt(format)?;
+        if s.starts_with("bits[") {
+            let parts: Vec<&str> = s.split(':').collect();
+            Ok(parts[1].to_string())
+        } else {
+            Ok(s)
+        }
+    }
+
     pub fn to_bool(&self) -> Result<bool, XlsynthError> {
         if self.bit_count() != 1 {
             return Err(XlsynthError(format!(
