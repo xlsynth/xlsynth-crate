@@ -407,12 +407,7 @@ impl BridgeBuilder for SvBridgeBuilder {
                 .to_string_fmt_no_prefix(IrFormatPreference::ZeroPaddedHex)?
                 .replace("_", "");
 
-            let value_str = format!(
-                "{}'{}{}",
-                bit_count,
-                hex_prefix,
-                hex_digits,
-            );
+            let value_str = format!("{}'{}{}", bit_count, hex_prefix, hex_digits,);
             self.lines.push(format!(
                 "localparam bit {signedness} [{}:0] {name} = {value_str};\n",
                 bit_count - 1,
