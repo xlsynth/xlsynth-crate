@@ -28,7 +28,9 @@ pub enum IrFormatPreference {
     UnsignedDecimal,
     Hex,
     PlainBinary,
+    ZeroPaddedBinary,
     PlainHex,
+    ZeroPaddedHex,
 }
 
 impl IrFormatPreference {
@@ -40,7 +42,9 @@ impl IrFormatPreference {
             IrFormatPreference::UnsignedDecimal => "unsigned_decimal",
             IrFormatPreference::Hex => "hex",
             IrFormatPreference::PlainBinary => "plain_binary",
+            IrFormatPreference::ZeroPaddedBinary => "zero_padded_binary",
             IrFormatPreference::PlainHex => "plain_hex",
+            IrFormatPreference::ZeroPaddedHex => "zero_padded_hex",
         }
     }
 }
@@ -91,6 +95,19 @@ impl IrValue {
         let fmt_pref: xlsynth_sys::XlsFormatPreference =
             xls_format_preference_from_string(format.to_string())?;
         xls_value_to_string_format_preference(self.ptr, fmt_pref)
+    }
+
+    pub fn to_string_fmt_no_prefix(
+        &self,
+        format: IrFormatPreference,
+    ) -> Result<String, XlsynthError> {
+        let s = self.to_string_fmt(format)?;
+        if s.starts_with("bits[") {
+            let parts: Vec<&str> = s.split(':').collect();
+            Ok(parts[1].to_string())
+        } else {
+            Ok(s)
+        }
     }
 
     pub fn to_bool(&self) -> Result<bool, XlsynthError> {

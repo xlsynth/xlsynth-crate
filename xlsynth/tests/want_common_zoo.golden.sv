@@ -4,6 +4,8 @@ typedef enum logic {
     Write = 1'd1
 } transaction_type_t;
 
+localparam bit unsigned [31:0] ValuesToHold = 32'h000000ff;
+
 typedef logic [7:0] my_u8_t;
 
 typedef struct packed {

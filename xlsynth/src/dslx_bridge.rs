@@ -60,6 +60,14 @@ pub trait BridgeBuilder {
         type_annotation: &dslx::TypeAnnotation,
         ty: &dslx::Type,
     ) -> Result<(), XlsynthError>;
+
+    fn add_constant(
+        &mut self,
+        name: &str,
+        constant_def: &dslx::ConstantDef,
+        ty: &dslx::Type,
+        ir_value: &IrValue,
+    ) -> Result<(), XlsynthError>;
 }
 
 fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, IrValue)> {
@@ -69,7 +77,7 @@ fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(St
         let member_name = member.get_name();
         let member_expr = member.get_value();
         let member_const = type_info
-            .get_const_expr(member_expr)
+            .get_const_expr(&member_expr)
             .expect("enum values should be constexpr");
         let member_const_ir = member_const.convert_to_ir().unwrap();
         tups.push((member_name, member_const_ir));
@@ -123,6 +131,18 @@ fn convert_type_alias(
     builder.add_alias(&alias_name, &type_annotation, &alias_type)
 }
 
+fn convert_constant(
+    constant_def: &dslx::ConstantDef,
+    type_info: &dslx::TypeInfo,
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
+    let ty = type_info.get_type_for_constant_def(&constant_def);
+    let value = constant_def.get_value();
+    let interp_value = type_info.get_const_expr(&value)?;
+    let ir_value = interp_value.convert_to_ir()?;
+    builder.add_constant(&constant_def.get_name(), &constant_def, &ty, &ir_value)
+}
+
 pub fn convert_imported_module(
     typechecked_module: &dslx::TypecheckedModule,
     builder: &mut dyn BridgeBuilder,
@@ -131,24 +151,29 @@ pub fn convert_imported_module(
     let type_info = typechecked_module.get_type_info();
     let module_name = module.get_name();
     builder.start_module(&module_name)?;
-    for i in 0..module.get_type_definition_count() {
-        let type_def_kind = module.get_type_definition_kind(i);
-        match type_def_kind {
-            dslx::TypeDefinitionKind::EnumDef => {
-                let enum_def = module.get_type_definition_as_enum_def(i).unwrap();
+
+    for i in 0..module.get_member_count() {
+        let member = module.get_member(i);
+        let matchable_member = member.to_matchable();
+        if matchable_member.is_none() {
+            continue;
+        }
+        match matchable_member.unwrap() {
+            dslx::MatchableModuleMember::EnumDef(enum_def) => {
                 convert_enum(&enum_def, &type_info, builder)?
             }
-            dslx::TypeDefinitionKind::StructDef => {
-                let struct_def = module.get_type_definition_as_struct_def(i).unwrap();
+            dslx::MatchableModuleMember::StructDef(struct_def) => {
                 convert_struct(&struct_def, &type_info, builder)?
             }
-            dslx::TypeDefinitionKind::TypeAlias => {
-                let type_alias = module.get_type_definition_as_type_alias(i).unwrap();
+            dslx::MatchableModuleMember::TypeAlias(type_alias) => {
                 convert_type_alias(&type_alias, &type_info, builder)?
             }
-            dslx::TypeDefinitionKind::ColonRef => todo!("convert colon ref from DSLX to Rust"),
+            dslx::MatchableModuleMember::ConstantDef(constant_def) => {
+                convert_constant(&constant_def, &type_info, builder)?
+            }
         }
     }
+
     builder.end_module(&module_name)?;
     Ok(())
 }

@@ -187,11 +187,23 @@ pub struct CDslxTypeDefinition {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+#[repr(C)]
+pub struct CDslxConstantDef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxModuleMember {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 pub type XlsFormatPreference = i32;
 
 pub type VastFileType = i32;
 
 pub type DslxTypeDefinitionKind = i32;
+
+pub type DslxModuleMemberKind = i32;
 
 extern "C" {
     pub fn xls_convert_dslx_to_ir(
@@ -451,6 +463,11 @@ extern "C" {
 
     pub fn xls_dslx_module_get_type_definition_count(module: *const CDslxModule) -> i64;
 
+    pub fn xls_dslx_module_get_member_count(module: *const CDslxModule) -> i64;
+
+    pub fn xls_dslx_module_get_member(module: *const CDslxModule, i: i64)
+        -> *mut CDslxModuleMember;
+
     pub fn xls_dslx_module_get_type_definition_kind(
         module: *const CDslxModule,
         i: i64,
@@ -468,6 +485,24 @@ extern "C" {
         module: *const CDslxModule,
         i: i64,
     ) -> *mut CDslxTypeAlias;
+
+    // -- xls_dslx_module_member
+    pub fn xls_dslx_module_member_get_kind(
+        member: *const CDslxModuleMember,
+    ) -> DslxModuleMemberKind;
+    pub fn xls_dslx_module_member_get_constant_def(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxConstantDef;
+    pub fn xls_dslx_module_member_get_type_alias(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxTypeAlias;
+    pub fn xls_dslx_module_member_get_struct_def(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxStructDef;
+    pub fn xls_dslx_module_member_get_enum_def(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxEnumDef;
+
     pub fn xls_dslx_colon_ref_get_attr(
         colon_ref: *const CDslxColonRef,
     ) -> *mut std::os::raw::c_char;
@@ -488,12 +523,25 @@ extern "C" {
         type_info: *mut CDslxTypeInfo,
         node: *mut CDslxTypeAlias,
     ) -> *mut CDslxType;
+    pub fn xls_dslx_type_info_get_type_constant_def(
+        type_info: *mut CDslxTypeInfo,
+        node: *mut CDslxConstantDef,
+    ) -> *mut CDslxType;
 
     /// Gets the concrete type for a TypeAnnotation AST node.
     pub fn xls_dslx_type_info_get_type_type_annotation(
         type_info: *mut CDslxTypeInfo,
         type_annotation: *mut CDslxTypeAnnotation,
     ) -> *mut CDslxType;
+
+    // -- ConstantDef
+
+    pub fn xls_dslx_constant_def_get_name(
+        constant_def: *const CDslxConstantDef,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_constant_def_get_value(constant_def: *const CDslxConstantDef)
+        -> *mut CDslxExpr;
 
     // -- TypeAlias
 
