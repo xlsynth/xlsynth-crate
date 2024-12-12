@@ -219,7 +219,7 @@ impl VastFile {
         parameter_port_names: &[&str],
         parameter_expressions: &[&Expr],
         connection_port_names: &[&str],
-        connection_expressions: &[&Expr],
+        connection_expressions: &[Option<&Expr>],
     ) -> Instantiation {
         let c_module_name = CString::new(module_name).unwrap();
         let c_instance_name = CString::new(instance_name).unwrap();
@@ -244,8 +244,21 @@ impl VastFile {
                 .collect()
         }
 
+        fn to_opt_expr_ptrs(exprs: &[Option<&Expr>]) -> Vec<*const sys::CVastExpression> {
+            exprs
+                .iter()
+                .map(|expr| {
+                    if let Some(expr) = expr {
+                        expr.inner as *const sys::CVastExpression
+                    } else {
+                        std::ptr::null()
+                    }
+                })
+                .collect()
+        }
+
         let c_param_expr_ptrs = to_expr_ptrs(parameter_expressions);
-        let c_conn_expr_ptrs = to_expr_ptrs(connection_expressions);
+        let c_conn_expr_ptrs = to_opt_expr_ptrs(connection_expressions);
 
         let locked = self.ptr.lock().unwrap();
 
@@ -480,7 +493,7 @@ endmodule
             &["a_param"],
             &[&param_value],
             &["bus"],
-            &[&bus.to_expr()],
+            &[Some(&bus.to_expr())],
         ));
 
         let verilog = file.emit();
