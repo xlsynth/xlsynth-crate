@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.50"
+version = "0.0.51"
 dependencies = [
  "cargo_metadata",
  "env_logger 0.11.5",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-driver"
-version = "0.0.50"
+version = "0.0.51"
 dependencies = [
  "clap",
  "env_logger 0.11.5",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.50"
+version = "0.0.51"
 dependencies = [
  "curl",
  "flate2",

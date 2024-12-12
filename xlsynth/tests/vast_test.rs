@@ -60,8 +60,8 @@ endmodule
             "a_i",
             &["a_param"],
             &[&param_value],
-            &["bus"],
-            &[&bus.to_expr()],
+            &["bus", "empty_thing"],
+            &[Some(&bus.to_expr()), None],
         ));
 
         let verilog = file.emit();
@@ -75,7 +75,8 @@ module B;
   A #(
     .a_param(32'd42)
   ) a_i (
-    .bus(bus)
+    .bus(bus),
+    .empty_thing()
   );
 endmodule
 ";
