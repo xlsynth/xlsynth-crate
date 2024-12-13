@@ -704,7 +704,46 @@ fn dslx2pipeline(
         }
         println!("{}", sv);
     } else {
-        todo!("dslx2pipeline subcommand using runtime APIs")
+        let dslx = std::fs::read_to_string(input_file).unwrap();
+
+        let dslx_path = config.as_ref().and_then(|c| Some(&c.dslx_path));
+        let dslx_path_vec = match dslx_path {
+            Some(entries) => entries
+                .iter()
+                .map(|p| std::path::Path::new(p))
+                .collect::<Vec<_>>(),
+            None => vec![],
+        };
+        let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
+        let convert_options = xlsynth::DslxConvertOptions {
+            dslx_stdlib_path: dslx_stdlib_path.map(|p| std::path::Path::new(p)),
+            additional_search_paths: dslx_path_vec,
+        };
+        let ir = xlsynth::convert_dslx_to_ir(&dslx, input_file, &convert_options)
+            .expect("successful conversion");
+
+        let opt_ir = xlsynth::optimize_ir(&ir, top).unwrap();
+
+        let mut sched_opt_lines = vec![format!("delay_model: \"{}\"", delay_model)];
+        match pipeline_spec {
+            PipelineSpec::Stages(stages) => {
+                sched_opt_lines.push(format!("pipeline_stages: {}", stages))
+            }
+            PipelineSpec::ClockPeriodPs(clock_period_ps) => {
+                sched_opt_lines.push(format!("clock_period_ps: {}", clock_period_ps))
+            }
+        }
+        let scheduling_options_flags_proto = sched_opt_lines.join("\n");
+        let codegen_flags_proto = "register_merge_strategy: STRATEGY_IDENTITY_ONLY
+generator: GENERATOR_KIND_PIPELINE";
+        let codegen_result = xlsynth::schedule_and_codegen(
+            &opt_ir,
+            &scheduling_options_flags_proto,
+            &codegen_flags_proto,
+        )
+        .unwrap();
+        let sv = codegen_result.get_verilog_text().unwrap();
+        println!("{}", sv);
     }
 }
 
@@ -765,7 +804,7 @@ fn dslx2ir(
         let additional_search_paths: Vec<&std::path::Path> = dslx_path
             .map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect())
             .unwrap_or_default();
-        let output = xlsynth::xls_convert_dslx_to_ir(
+        let output = xlsynth::convert_dslx_to_ir_text(
             &dslx_contents,
             input_file,
             &DslxConvertOptions {

@@ -3,8 +3,11 @@
 use xlsynth_sys::{xls_bits_get_bit_count, CIrBits, CIrValue};
 
 use crate::{
-    xls_format_preference_from_string, xls_parse_typed_value, xls_value_eq, xls_value_free,
-    xls_value_get_bits, xls_value_to_string, xls_value_to_string_format_preference,
+    lib_support::{
+        xls_format_preference_from_string, xls_value_eq, xls_value_free, xls_value_get_bits,
+        xls_value_to_string, xls_value_to_string_format_preference,
+    },
+    xls_parse_typed_value,
     xlsynth_error::XlsynthError,
 };
 

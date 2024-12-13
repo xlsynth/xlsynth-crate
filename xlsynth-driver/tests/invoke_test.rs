@@ -135,3 +135,44 @@ dslx_path = []
 }"
     ))
 }
+
+#[test]
+fn test_dslx2pipeline_with_update_of_1d_array() {
+    let dslx = "import std;
+
+struct MyStruct {
+    some_bool: bool,
+    data: u32,
+}
+
+fn main(x: MyStruct[4]) -> MyStruct[4] {
+    update(x, u32:1, MyStruct{some_bool: false, data: u32:42})
+}
+";
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg(dslx_path.to_str().unwrap())
+        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .output()
+        .expect("Failed to run xlsynth-driver");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("{}", stdout);
+    test_helpers::assert_valid_sv(&stdout);
+}

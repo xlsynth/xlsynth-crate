@@ -4,7 +4,7 @@
 
 #![allow(unused)]
 
-use xlsynth_sys as sys;
+use xlsynth_sys::{self as sys};
 
 use std::{
     ffi::CString,
@@ -12,7 +12,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{c_str_to_rust, ir_value::IrFormatPreference, XlsynthError};
+use crate::{
+    c_str_to_rust, ir_value::IrFormatPreference, lib_support::xls_format_preference_from_string,
+    xls_parse_typed_value, XlsynthError,
+};
 
 pub(crate) struct VastFilePtr(pub *mut sys::CVastFile);
 
@@ -293,8 +296,8 @@ impl VastFile {
         s: &str,
         fmt: &IrFormatPreference,
     ) -> Result<Expr, XlsynthError> {
-        let v = crate::xls_parse_typed_value(s).unwrap();
-        let mut fmt = crate::xls_format_preference_from_string(fmt.to_string()).unwrap();
+        let v = xls_parse_typed_value(s).unwrap();
+        let mut fmt = xls_format_preference_from_string(fmt.to_string()).unwrap();
 
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut literal_out: *mut sys::CVastLiteral = std::ptr::null_mut();
