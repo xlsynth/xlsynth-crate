@@ -197,6 +197,11 @@ pub struct CDslxModuleMember {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+#[repr(C)]
+pub struct CScheduleAndCodegenResult {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 pub type XlsFormatPreference = i32;
 
 pub type VastFileType = i32;
@@ -448,6 +453,25 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         typechecked_module_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
+
+    // bool xls_schedule_and_codegen_package(
+    // struct xls_package* p, const char* scheduling_options_flags_proto,
+    // const char* codegen_flags_proto, bool with_delay_model, char** error_out,
+    // struct xls_schedule_and_codegen_result** result_out);
+    pub fn xls_schedule_and_codegen_package(
+        p: *mut CIrPackage,
+        scheduling_options_flags_proto: *const std::os::raw::c_char,
+        codegen_flags_proto: *const std::os::raw::c_char,
+        with_delay_model: bool,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CScheduleAndCodegenResult,
+    ) -> bool;
+
+    pub fn xls_schedule_and_codegen_result_get_verilog_text(
+        result: *mut CScheduleAndCodegenResult,
+    ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_schedule_and_codegen_result_free(result: *mut CScheduleAndCodegenResult);
 
     pub fn xls_dslx_typechecked_module_free(module: *mut CDslxTypecheckedModule);
 

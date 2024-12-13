@@ -3,6 +3,7 @@
 use lazy_static::lazy_static;
 ///! Example of multi-threaded invocation of XLS functions.
 use rayon::prelude::*;
+use xlsynth::DslxConvertOptions;
 use xlsynth::IrPackage;
 use xlsynth::IrValue;
 
@@ -10,7 +11,8 @@ fn load_package(cargo_relpath: &str) -> IrPackage {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(cargo_relpath);
     let dslx = std::fs::read_to_string(&path).expect("read_to_string failed");
     let package =
-        xlsynth::convert_dslx_to_ir(&dslx, path.as_path()).expect("convert_dslx_to_ir failed");
+        xlsynth::convert_dslx_to_ir(&dslx, path.as_path(), &DslxConvertOptions::default())
+            .expect("convert_dslx_to_ir failed");
     package
 }
 

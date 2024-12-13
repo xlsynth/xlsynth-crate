@@ -2,14 +2,47 @@
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::lib_support::c_str_to_rust;
 use crate::xlsynth_error::XlsynthError;
 use crate::{
-    xls_function_get_name, xls_function_get_type, xls_function_type_to_string,
-    xls_interpret_function, xls_package_free, xls_package_get_function,
-    xls_package_get_type_for_value, xls_package_to_string, xls_parse_ir_package,
-    xls_type_to_string, IrValue,
+    lib_support::{
+        xls_function_get_name, xls_function_get_type, xls_function_type_to_string,
+        xls_interpret_function, xls_package_free, xls_package_get_function,
+        xls_package_get_type_for_value, xls_package_to_string, xls_parse_ir_package,
+        xls_type_to_string,
+    },
+    IrValue,
 };
-use xlsynth_sys::{CIrFunction, CIrPackage};
+use xlsynth_sys::{CIrFunction, CIrPackage, CScheduleAndCodegenResult};
+
+// -- ScheduleAndCodegenResult
+
+pub struct ScheduleAndCodegenResult {
+    pub(crate) ptr: *mut CScheduleAndCodegenResult,
+}
+
+impl Drop for ScheduleAndCodegenResult {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                xlsynth_sys::xls_schedule_and_codegen_result_free(self.ptr);
+            }
+            self.ptr = std::ptr::null_mut();
+        }
+    }
+}
+
+impl ScheduleAndCodegenResult {
+    pub fn get_verilog_text(&self) -> Result<String, XlsynthError> {
+        unsafe {
+            let verilog = xlsynth_sys::xls_schedule_and_codegen_result_get_verilog_text(self.ptr);
+            let verilog_str = c_str_to_rust(verilog);
+            Ok(verilog_str)
+        }
+    }
+}
+
+// -- IrPackage & IrPackagePtr
 
 /// We wrap up the raw C pointer in this type that implements `Drop` trait --
 /// this allows us to wrap it up in an Arc so that types with derived lifetimes

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use multithread::validate_all_threads_compute_add1;
+use xlsynth::DslxConvertOptions;
 
 // Show that the API works even if the Rust (caller) program is using an
 // alternative allocator.
@@ -27,7 +28,8 @@ fn load_and_invoke(
     let dslx = std::fs::read_to_string(&dslx_path)?;
 
     // Convert the DSLX to IR.
-    let package = xlsynth::convert_dslx_to_ir(&dslx, dslx_path.as_path())?;
+    let package =
+        xlsynth::convert_dslx_to_ir(&dslx, dslx_path.as_path(), &DslxConvertOptions::default())?;
     let dslx_module_name = dslx_path.file_stem().unwrap().to_str().unwrap();
 
     // Determine what the mangled name is in the converted IR package.
