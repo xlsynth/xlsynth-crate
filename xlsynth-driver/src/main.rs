@@ -291,6 +291,23 @@ fn main() {
                 .add_codegen_args()
                 .add_pipeline_args(),
         )
+        .subcommand(
+            SubCommand::with_name("ir2delayinfo")
+                .about("Converts IR entry point to delay info output")
+                .add_delay_model_arg()
+                .arg(
+                    Arg::with_name("INPUT_FILE")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::with_name("TOP")
+                        .help("The top-level entry point")
+                        .required(true)
+                        .index(2),
+                ),
+        )
         .get_matches();
 
     let toml_path = matches.value_of("toolchain");
@@ -317,6 +334,8 @@ fn main() {
         handle_ir2pipeline(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
         handle_dslx2sv_types(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir2delayinfo") {
+        handle_ir2delayinfo(matches, &config);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {
@@ -471,6 +490,15 @@ fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     dslx2sv_types(input_path, dslx_stdlib_path, dslx_path);
 }
 
+fn handle_ir2delayinfo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
+    let input_file = matches.value_of("INPUT_FILE").unwrap();
+    let top = matches.value_of("TOP").unwrap();
+    let input_path = std::path::Path::new(input_file);
+    let delay_model = matches.value_of("DELAY_MODEL").unwrap();
+
+    ir2delayinfo(input_path, top, delay_model, config);
+}
+
 struct CodegenFlags {
     input_valid_signal: Option<String>,
     output_valid_signal: Option<String>,
@@ -616,6 +644,50 @@ fn ir2opt(input_file: &std::path::Path, top: &str, config: &Option<ToolchainConf
         println!("{}", output);
     } else {
         todo!("ir2opt subcommand using runtime APIs")
+    }
+}
+
+fn run_delay_info_main(
+    input_file: &std::path::Path,
+    top: Option<&str>,
+    delay_model: &str,
+    tool_path: &str,
+) -> String {
+    let delay_info_path = format!("{}/delay_info_main", tool_path);
+    if !std::path::Path::new(&delay_info_path).exists() {
+        eprintln!("Delay info tool not found at: {}", delay_info_path);
+        process::exit(1);
+    }
+
+    let mut command = Command::new(delay_info_path);
+    command.arg(input_file);
+    command.arg("--delay_model").arg(delay_model);
+    if top.is_some() {
+        command.arg("--top").arg(top.unwrap());
+    }
+
+    let output = command.output().expect("Failed to execute delay_info_main");
+
+    if !output.status.success() {
+        eprintln!("Delay info failed with status: {}", output.status);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        process::exit(1);
+    }
+
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn ir2delayinfo(
+    input_file: &std::path::Path,
+    top: &str,
+    delay_model: &str,
+    config: &Option<ToolchainConfig>,
+) {
+    if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
+        let output = run_delay_info_main(input_file, Some(top), delay_model, tool_path);
+        println!("{}", output);
+    } else {
+        todo!("ir2delayinfo subcommand using runtime APIs")
     }
 }
 
