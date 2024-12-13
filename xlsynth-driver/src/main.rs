@@ -666,10 +666,7 @@ fn run_delay_info_main(
         command.arg("--top").arg(top.unwrap());
     }
 
-    log::info!("Running command: {:?}", command);
-
     let output = command.output().expect("Failed to execute delay_info_main");
-    log::info!("Output: {:?}", output);
 
     if !output.status.success() {
         eprintln!("Delay info failed with status: {}", output.status);
@@ -687,7 +684,6 @@ fn ir2delayinfo(
     config: &Option<ToolchainConfig>,
 ) {
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
-        log::info!("Running delay info tool at: {}", tool_path);
         let output = run_delay_info_main(input_file, Some(top), delay_model, tool_path);
         println!("{}", output);
     } else {
