@@ -211,6 +211,9 @@ impl Drop for IrValue {
 
 impl Clone for IrValue {
     fn clone(&self) -> Self {
+        // TODO(cdleary): 2024-12-14 We should either add a C API for cloning IR values
+        // more efficiently than this text serdes, or implement refcounted CIrValue
+        // pointers on the Rust side of the fence.
         IrValue::parse_typed(&self.to_string()).unwrap()
     }
 }
