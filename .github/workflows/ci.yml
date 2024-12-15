@@ -27,6 +27,16 @@ jobs:
           curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang"
           chmod +x slang
 
+      - name: Install protobuf compiler
+        run: |
+          wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          unzip protoc-29.1-linux-x86_64.zip -d protoc
+          sudo mv protoc/bin/protoc /usr/local/bin/protoc
+          sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
+          sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
+          # Emit the protobuf compiler version number.
+          protoc --version
+
       - name: Install pre-commit
         run: |
           python -m pip install --upgrade pip
@@ -55,17 +65,66 @@ jobs:
           export SLANG_PATH=`realpath slang` 
           cargo test --workspace
 
-  # Note: we don't currently have a downloadable binary for slang on macOS or older Ubuntu (due to
+  # Note: we don't currently have a downloadable binary for slang on older Ubuntu (due to
   # GLIBC compatibility), so we make a job that skips the slang download / envvar export.
-  build-and-test-no-slang:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [macos-latest, ubuntu-20.04]
-      fail-fast: false
+  build-and-test-ubuntu-2004-no-slang:
+    runs-on: ubuntu-20.04
     steps:
       - name: Check out code
         uses: actions/checkout@v2
+
+      - name: Install protobuf compiler
+        run: |
+          wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          unzip protoc-29.1-linux-x86_64.zip -d protoc
+          sudo mv protoc/bin/protoc /usr/local/bin/protoc
+          sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
+          sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
+          # Emit the protobuf compiler version number.
+          protoc --version
+
+      - name: Install pre-commit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pre-commit
+
+      - name: Run pre-commit
+        env:
+          SKIP: no-commit-to-branch
+        run: |
+          pre-commit install
+          pre-commit run --all-files
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Build crate
+        run: cargo build --workspace -vv
+
+      - name: Test crate
+        run: |
+          cargo clean
+          cargo test --workspace
+  
+  build-and-test-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Install protobuf compiler
+        run: |
+          wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
+          unzip protoc-29.1-osx-aarch_64.zip -d protoc
+          sudo mv protoc/bin/protoc /usr/local/bin/protoc
+          sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
+          sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
+          # Emit the protobuf compiler version number.
+          protoc --version
 
       - name: Install pre-commit
         run: |
@@ -102,9 +161,21 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v2
 
+      - name: Install protobuf compiler
+        run: |
+          yum install -y wget unzip
+          wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          unzip protoc-29.1-linux-x86_64.zip -d protoc
+          mv protoc/bin/protoc /usr/local/bin/protoc
+          mv protoc /tmp/  # Move these out of the way to not interfere with build.
+          mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
+          # Emit the protobuf compiler version number.
+          protoc --version
+
       - name: Set up dependencies
         run: |
           yum install -y gcc openssl-devel libffi-devel make curl
+          yum install -y protobuf-compiler
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env
