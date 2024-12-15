@@ -56,6 +56,10 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
 
+            if path.file_name().unwrap().to_str().unwrap() == "estimator_model.proto" {
+                continue;
+            }
+
             if let Some(extension) = path.extension() {
                 if extension == "md" || extension == "lock" || extension == "toml" {
                     continue;

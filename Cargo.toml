@@ -3,6 +3,7 @@ members = [
     "xlsynth",
     "xlsynth-sys",
     "xlsynth-driver",
+    "xlsynth-estimator",
     "sample-usage",
 ]
 resolver = "2"
