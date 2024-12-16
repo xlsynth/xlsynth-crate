@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package xlsynth.estimator;
+
+/// A sample node structure with the information that's required for testing the delay estimator.
+message SampleNode {
+    string op = 1;
+    uint64 result_bit_count = 2;
+    repeated uint64 operand_bit_count = 3;
+    repeated uint64 operand_element_count = 4;
+    repeated uint64 operand_element_bit_count = 5;
+    uint64 operand_count = 6;
+    repeated bool operand_is_literal = 7;
+    bool all_operands_identical = 8;
+    bool has_literal_operand = 9;
+    repeated bool literal_operands = 10;
+}
