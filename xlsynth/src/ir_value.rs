@@ -209,6 +209,15 @@ impl Drop for IrValue {
     }
 }
 
+impl Clone for IrValue {
+    fn clone(&self) -> Self {
+        // TODO(cdleary): 2024-12-14 We should either add a C API for cloning IR values
+        // more efficiently than this text serdes, or implement refcounted CIrValue
+        // pointers on the Rust side of the fence.
+        IrValue::parse_typed(&self.to_string()).unwrap()
+    }
+}
+
 /// Typed wrapper around an `IrBits` value that has a particular
 /// compile-time-known bit width and whose type notes the value
 /// should be treated as unsigned.
@@ -382,5 +391,19 @@ mod tests {
                 .expect("fmt success"),
             "bits[2]:3"
         );
+    }
+
+    #[test]
+    fn test_ir_value_parse_array_value() {
+        let text = "[bits[32]:1, bits[32]:2]";
+        let v = IrValue::parse_typed(text).expect("parse success");
+        assert_eq!(v.to_string(), text);
+    }
+
+    #[test]
+    fn test_ir_value_parse_2d_array_value() {
+        let text = "[[bits[32]:1, bits[32]:2], [bits[32]:3, bits[32]:4], [bits[32]:5, bits[32]:6]]";
+        let v = IrValue::parse_typed(text).expect("parse success");
+        assert_eq!(v.to_string(), text);
     }
 }

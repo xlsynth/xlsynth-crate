@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth"
-version = "0.0.53"
+version = "0.0.54"
 edition = "2018"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
@@ -13,7 +13,7 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 readme = "../README.md"
 
 [dependencies]
-xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.53"}
+xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.54"}
 cargo_metadata = "0.18"
 log = "0.4"
 
