@@ -190,7 +190,7 @@ impl AppExt for clap::Command {
                     .value_parser(["true", "false"])
                     .num_args(0)
                     .help("Output System Verilog"),
-            )            
+            )
     }
 }
 
@@ -234,7 +234,7 @@ fn main() {
                         .value_name("BOOL")
                         .action(ArgAction::Set)
                         .value_parser(["true", "false"])
-                        .num_args(0)
+                        .num_args(0),
                 ),
         )
         .subcommand(
@@ -432,8 +432,7 @@ fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     let top = matches.get_one::<String>("TOP").unwrap();
     let pipeline_spec = extract_pipeline_spec(matches);
     let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
-    let keep_temps = matches.get_one::<String>("keep_temps")
-        .map(|s| s == "true");
+    let keep_temps = matches.get_one::<String>("keep_temps").map(|s| s == "true");
     let codegen_flags = extract_codegen_flags(matches);
 
     // Stub function for DSLX to SV conversion
