@@ -366,7 +366,9 @@ impl BridgeBuilder for SvBridgeBuilder {
 
             // If the member_annotated_ty is a local alias, we want to emit the type via
             // its local identifier.
-            if let Some(type_ref_type_annotation) = member_annotated_ty.to_type_ref_type_annotation() {
+            if let Some(type_ref_type_annotation) =
+                member_annotated_ty.to_type_ref_type_annotation()
+            {
                 let type_ref = type_ref_type_annotation.get_type_ref();
                 let type_def = type_ref.get_type_definition();
                 if let Some(type_alias) = type_def.to_type_alias() {
