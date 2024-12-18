@@ -110,7 +110,7 @@ fn get_extern_type_ref(
 
         // Inspect whether the type definition is a colon-reference where the subject is
         // another module.
-        let type_definition = type_ref.get_type_definition();
+        let type_definition: dslx::TypeDefinition = type_ref.get_type_definition();
         if let Some(colon_ref) = type_definition.to_colon_ref() {
             if let Some(import) = colon_ref.resolve_import_subject() {
                 // It is a reference to a type defined in another module -- refer to its in
@@ -362,6 +362,20 @@ impl BridgeBuilder for SvBridgeBuilder {
             if let Some(extern_ref) = get_extern_type_ref(member_annotated_ty, member_concrete_ty) {
                 lines.push(format!("    {} {};", extern_ref, member_name));
                 continue;
+            }
+
+            // If the member_annotated_ty is a local alias, we want to emit the type via
+            // its local identifier.
+            if let Some(type_ref_type_annotation) =
+                member_annotated_ty.to_type_ref_type_annotation()
+            {
+                let type_ref = type_ref_type_annotation.get_type_ref();
+                let type_def = type_ref.get_type_definition();
+                if let Some(type_alias) = type_def.to_type_alias() {
+                    let sv_type_name = struct_name_to_sv(&type_alias.get_identifier());
+                    lines.push(format!("    {} {};", sv_type_name, member_name));
+                    continue;
+                }
             }
 
             let member_sv_ty = convert_type(member_concrete_ty, None)?;

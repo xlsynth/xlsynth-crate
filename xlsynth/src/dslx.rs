@@ -468,6 +468,17 @@ impl TypeDefinition {
             ptr: casted,
         })
     }
+
+    pub fn to_type_alias(&self) -> Option<TypeAlias> {
+        let casted = unsafe { sys::xls_dslx_type_definition_get_type_alias(self.ptr) };
+        if casted.is_null() {
+            return None;
+        }
+        Some(TypeAlias {
+            parent: self.parent.clone(),
+            ptr: casted,
+        })
+    }
 }
 
 // -- TypeRef
