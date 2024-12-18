@@ -15,6 +15,16 @@ jobs:
     - name: Check out code
       uses: actions/checkout@v3
 
+    - name: Install protobuf compiler
+      run: |
+        wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
+        unzip protoc-29.1-osx-aarch_64.zip -d protoc
+        sudo mv protoc/bin/protoc /usr/local/bin/protoc
+        sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
+        sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
+        # Emit the protobuf compiler version number.
+        protoc --version
+
     - name: Set up Rust
       uses: actions-rs/toolchain@v1
       with:
