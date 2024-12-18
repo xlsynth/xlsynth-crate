@@ -182,6 +182,15 @@ impl AppExt for clap::Command {
                     .num_args(0)
                     .help("Separate lines in generated code"),
             )
+            .arg(
+                Arg::new("use_system_verilog")
+                    .long("use_system_verilog")
+                    .value_name("BOOL")
+                    .action(ArgAction::Set)
+                    .value_parser(["true", "false"])
+                    .num_args(0)
+                    .help("Output System Verilog"),
+            )            
     }
 }
 
@@ -222,7 +231,10 @@ fn main() {
                     Arg::new("keep_temps")
                         .long("keep_temps")
                         .help("Keep temporary files")
-                        .action(ArgAction::Set),
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(0)
                 ),
         )
         .subcommand(
@@ -420,7 +432,8 @@ fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
     let top = matches.get_one::<String>("TOP").unwrap();
     let pipeline_spec = extract_pipeline_spec(matches);
     let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
-    let keep_temps = matches.get_flag("keep_temps");
+    let keep_temps = matches.get_one::<String>("keep_temps")
+        .map(|s| s == "true");
     let codegen_flags = extract_codegen_flags(matches);
 
     // Stub function for DSLX to SV conversion
@@ -430,7 +443,7 @@ fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
         &pipeline_spec,
         &codegen_flags,
         delay_model,
-        keep_temps,
+        &keep_temps,
         config,
     );
 }
@@ -748,7 +761,7 @@ fn dslx2pipeline(
     pipeline_spec: &PipelineSpec,
     codegen_flags: &CodegenFlags,
     delay_model: &str,
-    keep_temps: bool,
+    keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
 ) {
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
@@ -786,7 +799,7 @@ fn dslx2pipeline(
         let sv_path = temp_dir.path().join("output.sv");
         std::fs::write(&sv_path, &sv).unwrap();
 
-        if keep_temps {
+        if let Some(_) = keep_temps {
             eprintln!(
                 "Pipeline generation successful. Output written to: {}",
                 temp_dir.into_path().to_str().unwrap()
