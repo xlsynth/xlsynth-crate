@@ -608,6 +608,9 @@ extern "C" {
     pub fn xls_dslx_type_definition_get_colon_ref(
         type_definition: *const CDslxTypeDefinition,
     ) -> *mut CDslxColonRef;
+    pub fn xls_dslx_type_definition_get_type_alias(
+        type_definition: *const CDslxTypeDefinition,
+    ) -> *mut CDslxTypeAlias;
 
     // -- TypeRefTypeAnnotation
 

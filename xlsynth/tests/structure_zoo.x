@@ -114,8 +114,8 @@ struct HasExternalStruct {
 }
 
 /// Struct that refers to an external struct type through a local alias.
-type Point = common_zoo::Point;
+type MyPoint = common_zoo::Point;
 
 struct HasExternalStructThroughLocalAlias {
-    point: Point,
+    point: MyPoint,
 }
