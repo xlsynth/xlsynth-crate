@@ -359,11 +359,6 @@ impl BridgeBuilder for SvBridgeBuilder {
 
             let member_annotated_ty = &member.type_annotation;
 
-            log::info!(
-                "member_name: {member_name} concrete_ty: {}",
-                member_concrete_ty
-            );
-
             if let Some(extern_ref) = get_extern_type_ref(member_annotated_ty, member_concrete_ty) {
                 lines.push(format!("    {} {};", extern_ref, member_name));
                 continue;
