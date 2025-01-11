@@ -65,6 +65,7 @@ trait AppExt {
     fn add_dslx_path_arg(self) -> Self;
     fn add_dslx_stdlib_path_arg(self) -> Self;
     fn add_codegen_args(self) -> Self;
+    fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
 }
 
 impl AppExt for clap::Command {
@@ -117,8 +118,28 @@ impl AppExt for clap::Command {
         )
     }
 
+    /// Adds a boolean argument to the command -- the helper ensures we have a
+    /// uniform uniform style/handling for boolean arguments.
+    fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self {
+        (self as clap::Command).arg(
+            Arg::new(long)
+                .long(long)
+                .value_name("BOOL")
+                .action(ArgAction::Set)
+                .value_parser(["true", "false"])
+                .num_args(1)
+                .help(help),
+        )
+    }
+
     fn add_codegen_args(self) -> Self {
-        (self as clap::Command)
+        let result = (self as clap::Command)
+            .arg(
+                Arg::new("module_name")
+                    .long("module_name")
+                    .value_name("MODULE_NAME")
+                    .help("Name of the generated module"),
+            )
             .arg(
                 Arg::new("input_valid_signal")
                     .long("input_valid_signal")
@@ -130,66 +151,22 @@ impl AppExt for clap::Command {
                     .long("output_valid_signal")
                     .value_name("OUTPUT_VALID_SIGNAL")
                     .help("Output port holding pipelined valid signal"),
+            );
+        result
+            .add_bool_arg(
+                "flop_inputs",
+                "Whether to flop input ports (vs leaving combinational delay into the I/Os)",
             )
-            .arg(
-                Arg::new("flop_inputs")
-                    .long("flop_inputs")
-                    .value_name("BOOL")
-                    .action(ArgAction::Set)
-                    .value_parser(["true", "false"])
-                    .num_args(1)
-                    .help("Whether to flop input ports (vs leaving combinational delay into the I/Os)"),
+            .add_bool_arg(
+                "flop_outputs",
+                "Whether to flop output ports (vs leaving combinational delay into the I/Os)",
             )
-            .arg(
-                Arg::new("flop_outputs")
-                    .long("flop_outputs")
-                    .value_name("BOOL")
-                    .action(ArgAction::Set)
-                    .value_parser(["true", "false"])
-                    .num_args(1)
-                    .help("Whether to flop output ports (vs leaving combinational delay into the I/Os)"),
-            )
-            .arg(
-                Arg::new("add_idle_output")
-                    .long("add_idle_output")
-                    .value_name("BOOL")
-                    .action(ArgAction::Set)
-                    .value_parser(["true", "false"])
-                    .num_args(1)
-                    .help("Add an idle output port"),
-            )
-            .arg(
-                Arg::new("module_name")
-                    .long("module_name")
-                    .value_name("MODULE_NAME")
-                    .help("Name of the generated module"),
-            )
-            .arg(
-                Arg::new("array_index_bounds_checking")
-                    .long("array_index_bounds_checking")
-                    .value_name("BOOL")
-                    .action(ArgAction::Set)
-                    .value_parser(["true", "false"])
-                    .num_args(1)
-                    .help("Array index bounds checking"),
-            )
-            .arg(
-                Arg::new("separate_lines")
-                    .long("separate_lines")
-                    .value_name("BOOL")
-                    .action(ArgAction::Set)
-                    .value_parser(["true", "false"])
-                    .num_args(1)
-                    .help("Separate lines in generated code"),
-            )
-            .arg(
-                Arg::new("use_system_verilog")
-                    .long("use_system_verilog")
-                    .value_name("BOOL")
-                    .action(ArgAction::Set)
-                    .value_parser(["true", "false"])
-                    .num_args(1)
-                    .help("Output System Verilog"),
+            .add_bool_arg("add_idle_output", "Add an idle output port")
+            .add_bool_arg("array_index_bounds_checking", "Array index bounds checking")
+            .add_bool_arg("separate_lines", "Separate lines in generated code")
+            .add_bool_arg(
+                "use_system_verilog",
+                "Whether to emit System Verilog instead of Verilog",
             )
     }
 }
