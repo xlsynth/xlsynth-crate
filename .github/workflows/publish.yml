@@ -15,6 +15,15 @@ jobs:
     - name: Check out code
       uses: actions/checkout@v3
 
+    - name: Validate version matches
+      run: |
+        # GITHUB_REF will be something like "refs/tags/v0.0.57"
+        # We'll strip off the "refs/tags/" part, leaving "v0.0.57".
+        VERSION="${GITHUB_REF#refs/tags/}"
+        
+        # Now invoke the Python script, passing the version.
+        python check_version_is.py "$VERSION"
+
     - name: Install protobuf compiler
       run: |
         wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
