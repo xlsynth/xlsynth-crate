@@ -203,16 +203,7 @@ fn main() {
                 .add_delay_model_arg()
                 .add_pipeline_args()
                 .add_codegen_args()
-                // --keep_temps flag to keep temporary files
-                .arg(
-                    Arg::new("keep_temps")
-                        .long("keep_temps")
-                        .help("Keep temporary files")
-                        .value_name("BOOL")
-                        .action(ArgAction::Set)
-                        .value_parser(["true", "false"])
-                        .num_args(0),
-                ),
+                .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(
             clap::Command::new("dslx2ir")
