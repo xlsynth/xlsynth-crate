@@ -7,25 +7,43 @@ use std::path::{Path, PathBuf};
 
 fn check_spdx_identifier(file_path: &Path) -> bool {
     let filename = file_path.file_name().unwrap().to_str().unwrap();
-    let comment_prefix = if filename.ends_with(".yml") || filename.ends_with(".yaml") {
-        "#"
-    } else {
-        "//"
-    };
+    let comment_prefix =
+        if filename.ends_with(".yml") || filename.ends_with(".yaml") || filename.ends_with(".py") {
+            "#"
+        } else {
+            "//"
+        };
+    let expect_shebang = filename.ends_with(".py");
     let expected_spdx_identifier = format!("{comment_prefix} SPDX-License-Identifier: Apache-2.0");
 
     let file = fs::File::open(file_path).unwrap();
     let reader = io::BufReader::new(file);
-    if let Some(Ok(first_line)) = reader.lines().next() {
-        let ok = first_line.starts_with(&expected_spdx_identifier);
-        if ok {
-            println!("Found SPDX identifier in file: {:?}", file_path);
+    let mut lines = reader.lines();
+    let ok = if expect_shebang {
+        let first_line = lines.next().unwrap().unwrap();
+        if first_line.starts_with("#!") {
+            lines
+                .next()
+                .unwrap()
+                .unwrap()
+                .starts_with(&expected_spdx_identifier)
         } else {
-            eprintln!("Missing SPDX identifier in file: {:?}", file_path);
+            first_line.starts_with(&expected_spdx_identifier)
         }
-        return ok;
+    } else {
+        let first_line = lines.next();
+        if let Some(Ok(line)) = first_line {
+            line.starts_with(&expected_spdx_identifier)
+        } else {
+            false
+        }
+    };
+    if ok {
+        println!("Found SPDX identifier in file: {:?}", file_path);
+    } else {
+        eprintln!("Missing SPDX identifier in file: {:?}", file_path);
     }
-    false
+    ok
 }
 
 fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
