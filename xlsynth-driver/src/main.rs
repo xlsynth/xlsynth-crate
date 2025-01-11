@@ -137,8 +137,8 @@ impl AppExt for clap::Command {
                     .value_name("BOOL")
                     .action(ArgAction::Set)
                     .value_parser(["true", "false"])
-                    .num_args(0)
-                    .help("Flop input ports"),
+                    .num_args(1)
+                    .help("Whether to flop input ports (vs leaving combinational delay into the I/Os)"),
             )
             .arg(
                 Arg::new("flop_outputs")
@@ -146,8 +146,8 @@ impl AppExt for clap::Command {
                     .value_name("BOOL")
                     .action(ArgAction::Set)
                     .value_parser(["true", "false"])
-                    .num_args(0)
-                    .help("Flop output ports"),
+                    .num_args(1)
+                    .help("Whether to flop output ports (vs leaving combinational delay into the I/Os)"),
             )
             .arg(
                 Arg::new("add_idle_output")
@@ -155,7 +155,7 @@ impl AppExt for clap::Command {
                     .value_name("BOOL")
                     .action(ArgAction::Set)
                     .value_parser(["true", "false"])
-                    .num_args(0)
+                    .num_args(1)
                     .help("Add an idle output port"),
             )
             .arg(
@@ -170,7 +170,7 @@ impl AppExt for clap::Command {
                     .value_name("BOOL")
                     .action(ArgAction::Set)
                     .value_parser(["true", "false"])
-                    .num_args(0)
+                    .num_args(1)
                     .help("Array index bounds checking"),
             )
             .arg(
@@ -179,7 +179,7 @@ impl AppExt for clap::Command {
                     .value_name("BOOL")
                     .action(ArgAction::Set)
                     .value_parser(["true", "false"])
-                    .num_args(0)
+                    .num_args(1)
                     .help("Separate lines in generated code"),
             )
             .arg(
@@ -188,7 +188,7 @@ impl AppExt for clap::Command {
                     .value_name("BOOL")
                     .action(ArgAction::Set)
                     .value_parser(["true", "false"])
-                    .num_args(0)
+                    .num_args(1)
                     .help("Output System Verilog"),
             )
     }
@@ -376,7 +376,7 @@ fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
 /// Extracts flags that we pass to the "codegen" step of the process (i.e.
 /// generating lowered Verilog).
 fn extract_codegen_flags(matches: &ArgMatches) -> CodegenFlags {
-    CodegenFlags {
+    let result = CodegenFlags {
         input_valid_signal: matches
             .get_one::<String>("input_valid_signal")
             .map(|s| s.to_string()),
@@ -404,7 +404,42 @@ fn extract_codegen_flags(matches: &ArgMatches) -> CodegenFlags {
         separate_lines: matches
             .get_one::<String>("separate_lines")
             .map(|s| s == "true"),
+    };
+    result
+}
+
+fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
+    let mut pieces = vec![];
+    if let Some(input_valid_signal) = &codegen_flags.input_valid_signal {
+        pieces.push(format!("input_valid_signal: \"{input_valid_signal}\""));
     }
+    if let Some(output_valid_signal) = &codegen_flags.output_valid_signal {
+        pieces.push(format!("output_valid_signal: \"{output_valid_signal}\""));
+    }
+    if let Some(use_system_verilog) = codegen_flags.use_system_verilog {
+        pieces.push(format!("use_system_verilog: {use_system_verilog}"));
+    }
+    if let Some(flop_inputs) = codegen_flags.flop_inputs {
+        pieces.push(format!("flop_inputs: {flop_inputs}"));
+    }
+    if let Some(flop_outputs) = codegen_flags.flop_outputs {
+        pieces.push(format!("flop_outputs: {flop_outputs}"));
+    }
+    if let Some(add_idle_output) = codegen_flags.add_idle_output {
+        pieces.push(format!("add_idle_output: {add_idle_output}"));
+    }
+    if let Some(module_name) = &codegen_flags.module_name {
+        pieces.push(format!("module_name: \"{module_name}\""));
+    }
+    if let Some(array_index_bounds_checking) = codegen_flags.array_index_bounds_checking {
+        pieces.push(format!(
+            "array_index_bounds_checking: {array_index_bounds_checking}"
+        ));
+    }
+    if let Some(separate_lines) = codegen_flags.separate_lines {
+        pieces.push(format!("separate_lines: {separate_lines}"));
+    }
+    pieces.join("\n")
 }
 
 fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
@@ -529,6 +564,7 @@ fn handle_ir2delayinfo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     ir2delayinfo(input_path, top, delay_model, config);
 }
 
+#[derive(Debug)]
 struct CodegenFlags {
     input_valid_signal: Option<String>,
     output_valid_signal: Option<String>,
@@ -836,8 +872,10 @@ fn dslx2pipeline(
             }
         }
         let scheduling_options_flags_proto = sched_opt_lines.join("\n");
-        let codegen_flags_proto = "register_merge_strategy: STRATEGY_IDENTITY_ONLY
-generator: GENERATOR_KIND_PIPELINE";
+        let codegen_flags_proto = format!(
+            "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\n{}",
+            codegen_flags_to_textproto(codegen_flags)
+        );
         let codegen_result = xlsynth::schedule_and_codegen(
             &opt_ir,
             &scheduling_options_flags_proto,

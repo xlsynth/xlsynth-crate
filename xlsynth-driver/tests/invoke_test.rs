@@ -161,6 +161,12 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
         .arg("1")
         .arg("--delay_model")
         .arg("asap7")
+        .arg("--flop_inputs=true")
+        .arg("--flop_outputs=false")
+        .arg("--add_idle_output=true")
+        .arg("--separate_lines=false")
+        .arg("--use_system_verilog=true")
+        .arg("--array_index_bounds_checking=true")
         .arg(dslx_path.to_str().unwrap())
         .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
         .output()
@@ -175,4 +181,9 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
     let stdout = String::from_utf8_lossy(&output.stdout);
     println!("{}", stdout);
     test_helpers::assert_valid_sv(&stdout);
+
+    let golden_path =
+        std::path::Path::new("tests/test_dslx2pipeline_with_update_of_1d_array.golden.sv");
+    let golden_sv = std::fs::read_to_string(golden_path).unwrap();
+    assert_eq!(stdout, golden_sv);
 }
