@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_sys::{xls_bits_get_bit_count, CIrBits, CIrValue};
+use xlsynth_sys::{CIrBits, CIrValue};
 
 use crate::{
     lib_support::{
-        xls_format_preference_from_string, xls_value_eq, xls_value_free, xls_value_get_bits,
-        xls_value_to_string, xls_value_to_string_format_preference,
+        xls_bits_to_debug_str, xls_format_preference_from_string, xls_value_eq, xls_value_free,
+        xls_value_get_bits, xls_value_to_string, xls_value_to_string_format_preference,
     },
     xls_parse_typed_value,
     xlsynth_error::XlsynthError,
@@ -18,9 +18,38 @@ pub struct IrBits {
 
 impl IrBits {
     pub fn get_bit_count(&self) -> usize {
-        let bit_count = unsafe { xls_bits_get_bit_count(self.ptr) };
+        let bit_count = unsafe { xlsynth_sys::xls_bits_get_bit_count(self.ptr) };
         assert!(bit_count >= 0);
         bit_count as usize
+    }
+
+    pub fn to_debug_str(&self) -> String {
+        xls_bits_to_debug_str(self.ptr)
+    }
+
+    pub fn get_bit(&self, index: usize) -> Result<bool, XlsynthError> {
+        if self.get_bit_count() <= index {
+            return Err(XlsynthError(format!(
+                "Index {} out of bounds for bits[{}]:{}",
+                index,
+                self.get_bit_count(),
+                self.to_debug_str()
+            )));
+        }
+        let bit = unsafe { xlsynth_sys::xls_bits_get_bit(self.ptr, index as i64) };
+        Ok(bit)
+    }
+}
+
+impl std::cmp::PartialEq for IrBits {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { xlsynth_sys::xls_bits_eq(self.ptr, other.ptr) }
+    }
+}
+
+impl std::fmt::Debug for IrBits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_debug_str())
     }
 }
 
@@ -369,9 +398,35 @@ mod tests {
     #[test]
     fn test_ir_value_get_bits() {
         let v = IrValue::parse_typed("bits[32]:42").expect("parse success");
-        let _bits = v.to_bits().expect("to_bits success");
-        // TODO(cdleary): 2024-09-15 No APIs exposed to do anything directly
-        // with bits yet.
+        let bits = v.to_bits().expect("to_bits success");
+
+        // Equality comparison.
+        let v2 = IrValue::make_bits(32, 42).expect("make_bits success");
+        assert_eq!(v, v2);
+
+        // Getting at bit values; 42 = 0b101010.
+        assert_eq!(bits.get_bit(0).unwrap(), false);
+        assert_eq!(bits.get_bit(1).unwrap(), true);
+        assert_eq!(bits.get_bit(2).unwrap(), false);
+        assert_eq!(bits.get_bit(3).unwrap(), true);
+        assert_eq!(bits.get_bit(4).unwrap(), false);
+        assert_eq!(bits.get_bit(5).unwrap(), true);
+        assert_eq!(bits.get_bit(6).unwrap(), false);
+        for i in 7..32 {
+            assert_eq!(bits.get_bit(i).unwrap(), false);
+        }
+        assert!(
+            bits.get_bit(32).is_err(),
+            "Expected an error for out of bounds index"
+        );
+        assert!(bits
+            .get_bit(32)
+            .unwrap_err()
+            .to_string()
+            .contains("Index 32 out of bounds for bits[32]:0b00000000000000000000000000101010"));
+
+        let debug_fmt = format!("{:?}", bits);
+        assert_eq!(debug_fmt, "0b00000000000000000000000000101010");
     }
 
     #[test]

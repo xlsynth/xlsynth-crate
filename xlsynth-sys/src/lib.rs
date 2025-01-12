@@ -236,6 +236,9 @@ extern "C" {
     ) -> bool;
     pub fn xls_bits_free(bits: *mut CIrBits);
     pub fn xls_bits_get_bit_count(bits: *const CIrBits) -> i64;
+    pub fn xls_bits_get_bit(bits: *const CIrBits, index: i64) -> bool;
+    pub fn xls_bits_eq(bits: *const CIrBits, other: *const CIrBits) -> bool;
+    pub fn xls_bits_to_debug_string(bits: *const CIrBits) -> *mut std::os::raw::c_char;
 
     pub fn xls_package_free(package: *mut CIrPackage);
     pub fn xls_c_str_free(c_str: *mut std::os::raw::c_char);
