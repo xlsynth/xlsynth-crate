@@ -47,6 +47,12 @@ impl std::cmp::PartialEq for IrBits {
     }
 }
 
+impl std::fmt::Debug for IrBits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_debug_str())
+    }
+}
+
 pub enum IrFormatPreference {
     Default,
     Binary,
@@ -418,6 +424,9 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Index 32 out of bounds for bits[32]:0b00000000000000000000000000101010"));
+
+        let debug_fmt = format!("{:?}", bits);
+        assert_eq!(debug_fmt, "0b00000000000000000000000000101010");
     }
 
     #[test]
