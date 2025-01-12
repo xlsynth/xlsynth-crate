@@ -83,6 +83,13 @@ pub(crate) fn xls_value_to_string(p: *mut CIrValue) -> Result<String, XlsynthErr
     }
 }
 
+pub(crate) fn xls_bits_to_debug_str(p: *const CIrBits) -> String {
+    unsafe {
+        let c_str_out = xlsynth_sys::xls_bits_to_debug_string(p);
+        return c_str_to_rust(c_str_out);
+    }
+}
+
 pub(crate) fn xls_value_get_bits(p: *const CIrValue) -> Result<IrBits, XlsynthError> {
     unsafe {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
