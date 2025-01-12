@@ -4,8 +4,9 @@ use xlsynth_sys::{CIrBits, CIrValue};
 
 use crate::{
     lib_support::{
-        xls_bits_to_debug_str, xls_format_preference_from_string, xls_value_eq, xls_value_free,
-        xls_value_get_bits, xls_value_to_string, xls_value_to_string_format_preference,
+        xls_bits_to_debug_str, xls_bits_to_string, xls_format_preference_from_string, xls_value_eq,
+        xls_value_free, xls_value_get_bits, xls_value_to_string,
+        xls_value_to_string_format_preference,
     },
     xls_parse_typed_value,
     xlsynth_error::XlsynthError,
@@ -17,6 +18,11 @@ pub struct IrBits {
 }
 
 impl IrBits {
+    pub fn new(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
+        let value = IrValue::make_bits(bit_count, value)?;
+        Ok(value.to_bits()?)
+    }
+
     pub fn get_bit_count(&self) -> usize {
         let bit_count = unsafe { xlsynth_sys::xls_bits_get_bit_count(self.ptr) };
         assert!(bit_count >= 0);
@@ -39,6 +45,82 @@ impl IrBits {
         let bit = unsafe { xlsynth_sys::xls_bits_get_bit(self.ptr, index as i64) };
         Ok(bit)
     }
+
+    pub fn to_string_fmt(&self, format: IrFormatPreference, include_bit_count: bool) -> String {
+        let fmt_pref: xlsynth_sys::XlsFormatPreference =
+            xls_format_preference_from_string(format.to_string()).unwrap();
+        xls_bits_to_string(self.ptr, fmt_pref, include_bit_count).unwrap()
+    }
+
+    fn to_hex_string(&self) -> String {
+        let value = self.to_string_fmt(IrFormatPreference::Hex, false);
+        format!("bits[{}]:{}", self.get_bit_count(), value)
+    }
+
+    pub fn umul(&self, rhs: &IrBits) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_umul(self.ptr, rhs.ptr) };
+        IrBits { ptr: result }
+    }
+
+    pub fn smul(&self, rhs: &IrBits) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_smul(self.ptr, rhs.ptr) };
+        IrBits { ptr: result }
+    }
+
+    pub fn negate(&self) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_negate(self.ptr) };
+        IrBits { ptr: result }
+    }
+
+    pub fn abs(&self) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_abs(self.ptr) };
+        IrBits { ptr: result }
+    }
+
+    pub fn msb(&self) -> bool {
+        self.get_bit(self.get_bit_count() - 1).unwrap()
+    }
+
+    pub fn shll(&self, shift_amount: i64) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_shift_left_logical(self.ptr, shift_amount) };
+        IrBits { ptr: result }
+    }
+
+    pub fn shrl(&self, shift_amount: i64) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_shift_right_logical(self.ptr, shift_amount) };
+        IrBits { ptr: result }
+    }
+
+    pub fn shra(&self, shift_amount: i64) -> IrBits {
+        let result =
+            unsafe { xlsynth_sys::xls_bits_shift_right_arithmetic(self.ptr, shift_amount) };
+        IrBits { ptr: result }
+    }
+
+    pub fn width_slice(&self, start: i64, width: i64) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_width_slice(self.ptr, start, width) };
+        IrBits { ptr: result }
+    }
+
+    pub fn not(&self) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_not(self.ptr) };
+        IrBits { ptr: result }
+    }
+
+    pub fn and(&self, rhs: &IrBits) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_and(self.ptr, rhs.ptr) };
+        IrBits { ptr: result }
+    }
+
+    pub fn or(&self, rhs: &IrBits) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_or(self.ptr, rhs.ptr) };
+        IrBits { ptr: result }
+    }
+
+    pub fn xor(&self, rhs: &IrBits) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_xor(self.ptr, rhs.ptr) };
+        IrBits { ptr: result }
+    }
 }
 
 impl std::cmp::PartialEq for IrBits {
@@ -50,6 +132,65 @@ impl std::cmp::PartialEq for IrBits {
 impl std::fmt::Debug for IrBits {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_debug_str())
+    }
+}
+
+impl From<&IrBits> for IrValue {
+    fn from(bits: &IrBits) -> Self {
+        IrValue::from_bits(bits)
+    }
+}
+
+impl std::fmt::Display for IrBits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "bits[{}]:{}",
+            self.get_bit_count(),
+            self.to_string_fmt(IrFormatPreference::Default, false)
+        )
+    }
+}
+
+impl std::ops::Add for IrBits {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        let result = unsafe { xlsynth_sys::xls_bits_add(self.ptr, rhs.ptr) };
+        Self { ptr: result }
+    }
+}
+
+impl std::ops::BitAnd for IrBits {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        let result = unsafe { xlsynth_sys::xls_bits_and(self.ptr, rhs.ptr) };
+        Self { ptr: result }
+    }
+}
+
+impl std::ops::BitOr for IrBits {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        IrBits::or(&self, &rhs)
+    }
+}
+
+impl std::ops::BitXor for IrBits {
+    type Output = Self;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        IrBits::xor(&self, &rhs)
+    }
+}
+
+impl std::ops::Not for IrBits {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        IrBits::not(&self)
     }
 }
 
@@ -86,6 +227,11 @@ pub struct IrValue {
 }
 
 impl IrValue {
+    pub fn from_bits(bits: &IrBits) -> Self {
+        let ptr = unsafe { xlsynth_sys::xls_value_from_bits(bits.ptr) };
+        Self { ptr }
+    }
+
     pub fn parse_typed(s: &str) -> Result<Self, XlsynthError> {
         xls_parse_typed_value(s)
     }
@@ -460,5 +606,82 @@ mod tests {
         let text = "[[bits[32]:1, bits[32]:2], [bits[32]:3, bits[32]:4], [bits[32]:5, bits[32]:6]]";
         let v = IrValue::parse_typed(text).expect("parse success");
         assert_eq!(v.to_string(), text);
+    }
+
+    #[test]
+    fn test_ir_bits_add_two_plus_three() {
+        let two = IrBits::new(32, 2).expect("make_bits success");
+        let three = IrBits::new(32, 3).expect("make_bits success");
+        let sum = two + three;
+        assert_eq!(sum.to_string(), "bits[32]:5");
+    }
+
+    #[test]
+    fn test_ir_bits_umul_two_times_three() {
+        let two = IrBits::new(32, 2).expect("make_bits success");
+        let three = IrBits::new(32, 3).expect("make_bits success");
+        let product = two.umul(&three);
+        assert_eq!(product.to_string(), "bits[64]:6");
+    }
+
+    #[test]
+    fn test_ir_bits_smul_two_times_neg_three() {
+        let two = IrBits::new(32, 2).expect("make_bits success");
+        let neg_three = IrBits::new(32, 3).expect("make_bits success").negate();
+        let product = two.smul(&neg_three);
+        assert_eq!(product.msb(), true);
+        assert_eq!(product.abs().to_string(), "bits[64]:6");
+    }
+
+    #[test]
+    fn test_ir_bits_width_slice() {
+        let bits = IrBits::new(32, 0x12345678).expect("make_bits success");
+        let slice = bits.width_slice(8, 16);
+        assert_eq!(slice.to_hex_string(), "bits[16]:0x3456");
+    }
+
+    #[test]
+    fn test_ir_bits_shll() {
+        let bits = IrBits::new(32, 0x12345678).expect("make_bits success");
+        let shifted = bits.shll(8);
+        assert_eq!(shifted.to_hex_string(), "bits[32]:0x3456_7800");
+    }
+
+    #[test]
+    fn test_ir_bits_shrl() {
+        let bits = IrBits::new(32, 0x12345678).expect("make_bits success");
+        let shifted = bits.shrl(8);
+        assert_eq!(shifted.to_hex_string(), "bits[32]:0x12_3456");
+    }
+
+    #[test]
+    fn test_ir_bits_shra() {
+        let bits = IrBits::new(32, 0x92345678).expect("make_bits success");
+        let shifted = bits.shra(8);
+        assert_eq!(shifted.to_hex_string(), "bits[32]:0xff92_3456");
+    }
+
+    #[test]
+    fn test_ir_bits_and() {
+        let lhs = IrBits::new(32, 0x5a5a5a5a).expect("make_bits success");
+        let rhs = IrBits::new(32, 0xa5a5a5a5).expect("make_bits success");
+        assert_eq!(lhs.and(&rhs).to_hex_string(), "bits[32]:0x0");
+        assert_eq!(lhs.and(&rhs.not()).to_hex_string(), "bits[32]:0x5a5a_5a5a");
+    }
+
+    #[test]
+    fn test_ir_bits_or() {
+        let lhs = IrBits::new(32, 0x5a5a5a5a).expect("make_bits success");
+        let rhs = IrBits::new(32, 0xa5a5a5a5).expect("make_bits success");
+        assert_eq!(lhs.or(&rhs).to_hex_string(), "bits[32]:0xffff_ffff");
+        assert_eq!(lhs.or(&rhs.not()).to_hex_string(), "bits[32]:0x5a5a_5a5a");
+    }
+
+    #[test]
+    fn test_ir_bits_xor() {
+        let lhs = IrBits::new(32, 0x5a5a5a5a).expect("make_bits success");
+        let rhs = IrBits::new(32, 0xa5a5a5a5).expect("make_bits success");
+        assert_eq!(lhs.xor(&rhs).to_hex_string(), "bits[32]:0xffff_ffff");
+        assert_eq!(lhs.xor(&rhs.not()).to_hex_string(), "bits[32]:0x0");
     }
 }
