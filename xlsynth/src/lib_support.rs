@@ -145,6 +145,29 @@ pub(crate) fn xls_value_to_string_format_preference(
     }
 }
 
+pub(crate) fn xls_bits_to_string(
+    p: *const CIrBits,
+    fmt: XlsFormatPreference,
+    include_bit_count: bool,
+) -> Result<String, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = xlsynth_sys::xls_bits_to_string(
+            p,
+            fmt,
+            include_bit_count,
+            &mut error_out,
+            &mut c_str_out,
+        );
+        if success {
+            return Ok(c_str_to_rust(c_str_out));
+        }
+        let error_out_str: String = c_str_to_rust(error_out);
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
 pub(crate) fn xls_value_eq(
     lhs: *const CIrValue,
     rhs: *const CIrValue,

@@ -234,11 +234,33 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         bits_out: *mut *mut CIrBits,
     ) -> bool;
+
+    pub fn xls_value_from_bits(bits: *const CIrBits) -> *mut CIrValue;
+
     pub fn xls_bits_free(bits: *mut CIrBits);
     pub fn xls_bits_get_bit_count(bits: *const CIrBits) -> i64;
     pub fn xls_bits_get_bit(bits: *const CIrBits, index: i64) -> bool;
     pub fn xls_bits_eq(bits: *const CIrBits, other: *const CIrBits) -> bool;
     pub fn xls_bits_to_debug_string(bits: *const CIrBits) -> *mut std::os::raw::c_char;
+    pub fn xls_bits_add(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_umul(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_smul(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_negate(bits: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_abs(bits: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_not(bits: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_and(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_or(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_xor(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+
+    pub fn xls_bits_shift_left_logical(bits: *const CIrBits, shift_amount: i64) -> *mut CIrBits;
+    pub fn xls_bits_shift_right_logical(bits: *const CIrBits, shift_amount: i64) -> *mut CIrBits;
+    pub fn xls_bits_shift_right_arithmetic(bits: *const CIrBits, shift_amount: i64)
+        -> *mut CIrBits;
+
+    // struct xls_bits* xls_bits_width_slice(const struct xls_bits* bits, int64_t
+    // start, int64_t width);
+
+    pub fn xls_bits_width_slice(bits: *const CIrBits, start: i64, width: i64) -> *mut CIrBits;
 
     pub fn xls_package_free(package: *mut CIrPackage);
     pub fn xls_c_str_free(c_str: *mut std::os::raw::c_char);
@@ -251,12 +273,21 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut XlsFormatPreference,
     ) -> bool;
+
     pub fn xls_value_to_string_format_preference(
         value: *const CIrValue,
         fmt: XlsFormatPreference,
         error_out: *mut *mut std::os::raw::c_char,
         str_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_bits_to_string(
+        bits: *const CIrBits,
+        fmt: XlsFormatPreference,
+        include_bit_count: bool,
+        error_out: *mut *mut std::os::raw::c_char,
+        str_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
     pub fn xls_value_eq(value: *const CIrValue, value: *const CIrValue) -> bool;
     pub fn xls_parse_ir_package(
         ir: *const std::os::raw::c_char,
