@@ -262,7 +262,7 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
     // Ensure the out directory exists.
-    if !std::path::exists(&out_dir) {
+    if !std::fs::metadata(&out_dir).unwrap().is_dir() {
         std::fs::create_dir_all(&out_dir).unwrap();
     }
 
