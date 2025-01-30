@@ -24,7 +24,7 @@ jobs:
 
       - name: Download Slang
         run: |
-          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang"
+          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
           chmod +x slang
 
       - name: Install protobuf compiler
