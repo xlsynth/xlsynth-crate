@@ -11,15 +11,19 @@ if len(sys.argv) < 2:
 
 # The argument might be e.g. "v0.0.57" or "0.0.57"
 arg_version = sys.argv[1]
+print(f"Argument version: {arg_version!r}")
 
 # If you expect the script to always receive e.g. "v0.0.57",
 # you can strip the leading 'v' here:
 tag_version = arg_version.lstrip('v')
+print(f"Tag version:       {tag_version!r}")
 
 # Read the version from xlsynth-sys/Cargo.toml
 toml_path = os.path.join("xlsynth-sys", "Cargo.toml")
 with open(toml_path, "r", encoding="utf-8") as f:
     cargo_toml = f.read()
+
+print(f"Cargo.toml: {cargo_toml!r}")
 
 # Use a regex to extract the version from a line like: version = "0.0.57"
 match = re.search(r'^version\s*=\s*"([^"]+)"', cargo_toml, re.MULTILINE)
@@ -29,14 +33,14 @@ if not match:
 
 cargo_version = match.group(1)
 
-print(f"Tag version:       {tag_version}")
-print(f"Cargo.toml version: {cargo_version}")
+print(f"Tag version:       {tag_version!r}")
+print(f"Cargo.toml version: {cargo_version!r}")
 
 # Compare the extracted version with the tag version
 if cargo_version != tag_version:
     print(
         f"Error: version mismatch. "
-        f"Tag is {tag_version}, but xlsynth-sys/Cargo.toml is {cargo_version}."
+        f"Tag is {tag_version!r}, but xlsynth-sys/Cargo.toml is {cargo_version!r}."
     )
     sys.exit(1)
 
