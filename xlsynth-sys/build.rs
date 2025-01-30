@@ -106,7 +106,8 @@ fn high_integrity_download(
     }
     // Checksum matches expectation, now we can move the file to its target
     // destination.
-    std::fs::rename(&tmp_out_path, out_path).unwrap();
+    std::fs::copy(&tmp_out_path, out_path).unwrap();
+    std::fs::remove_file(&tmp_out_path).unwrap();
     Ok(())
 }
 
