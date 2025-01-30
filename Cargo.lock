@@ -1469,6 +1469,7 @@ dependencies = [
  "curl",
  "flate2",
  "libc",
+ "sha2",
  "tar",
 ]
 

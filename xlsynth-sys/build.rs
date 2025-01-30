@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use sha2::Digest;
 use std::io::BufRead;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.126";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.133";
 
 struct DsoInfo {
     extension: &'static str,
@@ -27,6 +28,87 @@ impl DsoInfo {
     fn get_dso_url(&self, url_base: &str) -> String {
         format!("{url_base}libxls-{}.{}", self.lib_suffix, self.extension)
     }
+}
+
+/// Performs a "high integrity" download of a file from a URL by doing the
+/// following:
+/// - Downloading a checksum file first.
+/// - Downloading the file not to the target destination path but to a temporary
+///   location.
+/// - Verifying the checksum of the downloaded file against the checksum file.
+/// - If the checksum is correct, move the file to the target destination path.
+/// - If the checksum is incorrect, return an error.
+///
+/// The checksum URL is assumed to be the original URL with a `.sha256` suffix.
+///
+/// `out_path` should be a file path where we ultimately want to place the
+/// downloaded file, not a directory path.
+fn high_integrity_download(
+    url: &str,
+    out_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tmp_dir = PathBuf::from(std::env::temp_dir()).join("xlsynth-sys-tmp");
+    // Make the temp dir.
+    std::fs::create_dir_all(&tmp_dir).expect("Failed to create temp directory");
+
+    // Download the sha256 checksum file to the temp directory.
+    let checksum_url = format!("{}.sha256", url);
+    println!("cargo:info=downloading checksum at {}", checksum_url);
+
+    let filename = out_path.file_name().unwrap();
+    let checksum_path = tmp_dir.join(format!("{}.sha256", filename.to_str().unwrap()));
+    let status = Command::new("curl")
+        .arg("-L")
+        .arg("--fail")
+        .arg("-o")
+        .arg(&checksum_path)
+        .arg(checksum_url)
+        .status()
+        .expect("Failed to download checksum file");
+    if !status.success() {
+        return Err("Failed to download checksum file".into());
+    }
+
+    let want_checksum_str = std::fs::read_to_string(checksum_path).unwrap();
+    let want_checksum_str = want_checksum_str.split_whitespace().next().unwrap();
+    println!(
+        "cargo:info=want checksum for {} to be {}",
+        filename.to_str().unwrap(),
+        want_checksum_str
+    );
+
+    // Download the URL with the file itself to the temp directory.
+    let tmp_out_path = tmp_dir.join(filename);
+    let status = Command::new("curl")
+        .arg("-L")
+        .arg("--fail")
+        .arg("-o")
+        .arg(&tmp_out_path)
+        .arg(url)
+        .status()
+        .expect("Failed to download file");
+    if !status.success() {
+        return Err("Failed to download file".into());
+    }
+    // Get the sha256sum for the downloaded file.
+    // Do this with a Rust library call to avoid any OS requirements or differences.
+    let sha256 = sha2::Sha256::digest(std::fs::read(&tmp_out_path).unwrap());
+    let got_checksum_str = format!("{:x}", sha256);
+
+    if want_checksum_str != got_checksum_str {
+        return Err(format!(
+            "Checksum mismatch for file: {} want: {} got: {}",
+            out_path.display(),
+            want_checksum_str,
+            got_checksum_str
+        )
+        .into());
+    }
+    // Checksum matches expectation, now we can move the file to its target
+    // destination.
+    std::fs::copy(&tmp_out_path, out_path).unwrap();
+    std::fs::remove_file(&tmp_out_path).unwrap();
+    Ok(())
 }
 
 fn is_rocky() -> bool {
@@ -115,25 +197,12 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
     );
 
     // Download the DSO
-    let status = Command::new("curl")
-        .arg("-L")
-        .arg("--fail")
-        .arg("-o")
-        .arg(&dso_path)
-        .arg(dso_url)
-        .status()
-        .expect("Failed to download DSO");
-
-    if !status.success() {
-        // Remove the output file path.
-        std::fs::remove_file(&dso_path).expect("Failed to remove file");
-        panic!("Download failed with status: {:?}", status);
-    }
+    high_integrity_download(&dso_url, &dso_path).expect("Failed to download DSO");
 
     if cfg!(target_os = "macos") {
         let dso_filename = dso_info.get_dso_filename();
         println!("cargo:info=Fixing DSO id: to {}", dso_filename);
-        // Download the DSO id
+        // Fix the DSO id so it can be found via the rpath.
         let status = Command::new("install_name_tool")
             .arg("-id")
             .arg(format!("@rpath/{}", &dso_filename))
@@ -161,23 +230,9 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
     }
     let tarball_path = PathBuf::from(&out_dir).join("dslx_stdlib.tar.gz");
     let tarball_url = format!("{url_base}/dslx_stdlib.tar.gz");
-    let status = Command::new("curl")
-        .arg("-L")
-        .arg("--fail")
-        .arg("-o")
-        .arg(&tarball_path)
-        .arg(&tarball_url)
-        .status()
-        .expect("Failed to download DSO");
+    high_integrity_download(&tarball_url, &tarball_path)
+        .expect("Failed to download stdlib tarball");
 
-    if !status.success() {
-        // Remove the output file path if it got created -- if not it's ok.
-        let _ = std::fs::remove_file(&tarball_path);
-        panic!(
-            "Download of {tarball_url:?} failed with status: {:?}",
-            status
-        );
-    }
     let tar_gz = std::fs::File::open(tarball_path).unwrap();
     let tar = flate2::read::GzDecoder::new(tar_gz);
     let mut archive = tar::Archive::new(tar);

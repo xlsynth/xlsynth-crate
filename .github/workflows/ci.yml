@@ -24,7 +24,9 @@ jobs:
 
       - name: Download Slang
         run: |
-          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang"
+          # We use the rocky8 binary for these systems since it has an easier requirements for glibc
+          # version that works for ubuntu 22.04.
+          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
           chmod +x slang
 
       - name: Install protobuf compiler
