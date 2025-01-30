@@ -54,7 +54,7 @@ fn high_integrity_download(
         env_tmp_dir.display()
     );
 
-    let tmp_dir = env_tmp_dir.join("xlsynth-sys-tmp");
+    let tmp_dir = env_tmp_dir.join(format!("xlsynth-sys-tmp-{}", std::process::id()));
     // Make the temp dir.
     std::fs::create_dir_all(&tmp_dir).expect("Failed to create temp directory");
 
@@ -64,23 +64,14 @@ fn high_integrity_download(
     let filename = out_path.file_name().unwrap();
     let checksum_path = tmp_dir.join(format!("{}.sha256", filename.to_str().unwrap()));
     println!(
-        "cargo:info=downloading checksum at {} to {}",
+        "cargo:info=downloading checksum from {} to {}",
         checksum_url,
         checksum_path.display()
     );
-    let status = Command::new("curl")
-        .arg("-L")
-        .arg("--fail")
-        .arg("-o")
-        .arg(&checksum_path)
-        .arg(checksum_url)
-        .status()
-        .expect("Failed to download checksum file");
-    if !status.success() {
-        return Err("Failed to download checksum file".into());
-    }
 
-    let want_checksum_str = std::fs::read_to_string(checksum_path).unwrap();
+    download_file_via_https(&checksum_url, &checksum_path)?;
+
+    let want_checksum_str = std::fs::read_to_string(&checksum_path)?;
     let want_checksum_str = want_checksum_str.split_whitespace().next().unwrap();
     println!(
         "cargo:info=want checksum for {} to be {}",
@@ -91,24 +82,26 @@ fn high_integrity_download(
     // Download the URL with the file itself to the temp directory.
     let tmp_out_path = tmp_dir.join(filename);
     println!(
-        "cargo:info=downloading file at {} to {}",
+        "cargo:info=downloading file from {} to {}",
         url,
         tmp_out_path.display()
     );
-    let status = Command::new("curl")
-        .arg("-L")
-        .arg("--fail")
-        .arg("-o")
-        .arg(&tmp_out_path)
-        .arg(url)
-        .status()
-        .expect("Failed to download file");
-    if !status.success() {
-        return Err("Failed to download file".into());
+
+    download_file_via_https(url, &tmp_out_path)?;
+
+    if !tmp_out_path.exists() {
+        return Err(format!(
+            "Failed to download file {}; file does not exist after request completed",
+            tmp_out_path.display()
+        )
+        .into());
     }
-    // Get the sha256sum for the downloaded file.
-    // Do this with a Rust library call to avoid any OS requirements or differences.
-    let sha256 = sha2::Sha256::digest(std::fs::read(&tmp_out_path).unwrap());
+
+    println!(
+        "cargo:info=downloaded file to {}; verifying checksum...",
+        tmp_out_path.display()
+    );
+    let sha256 = sha2::Sha256::digest(std::fs::read(&tmp_out_path)?);
     let got_checksum_str = format!("{:x}", sha256);
 
     if want_checksum_str != got_checksum_str {
@@ -124,7 +117,7 @@ fn high_integrity_download(
     // Checksum matches expectation, now we can move the file to its target
     // destination.
     println!(
-        "cargo:info=copying file from temp location {} to {}",
+        "cargo:info=checksums match; copying file from {} to {}",
         tmp_out_path.display(),
         out_path.display()
     );
@@ -141,8 +134,20 @@ fn high_integrity_download(
         out_path_dir.display()
     );
 
-    std::fs::copy(&tmp_out_path, out_path).unwrap();
-    std::fs::remove_file(&tmp_out_path).unwrap();
+    std::fs::copy(&tmp_out_path, out_path)?;
+    std::fs::remove_file(&tmp_out_path)?;
+    Ok(())
+}
+
+/// Simple helper that downloads a file to the given path using HTTPS with reqwest.
+fn download_file_via_https(
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = reqwest::blocking::get(url)?.error_for_status()?;
+    let mut file = std::fs::File::create(dest)?;
+    let bytes = response.bytes()?;
+    std::io::copy(&mut bytes.as_ref(), &mut file)?;
     Ok(())
 }
 

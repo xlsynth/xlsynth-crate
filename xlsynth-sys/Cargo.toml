@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-sys"
-version = "0.0.62"
+version = "0.0.63"
 edition = "2018"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust (Native Library)"
@@ -14,7 +14,7 @@ links = "xlsynth"
 libc = "0.2"
 
 [build-dependencies]
-curl = "0.4"
+reqwest = { version = "0.12", features = ["blocking"] }
 flate2 = "1.0"
 tar = "0.4"
 sha2 = "0.10"
