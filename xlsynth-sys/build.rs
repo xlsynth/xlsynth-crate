@@ -47,16 +47,27 @@ fn high_integrity_download(
     url: &str,
     out_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let tmp_dir = PathBuf::from(std::env::temp_dir()).join("xlsynth-sys-tmp");
+    let env_tmp_dir = PathBuf::from(std::env::temp_dir());
+    assert!(
+        env_tmp_dir.exists(),
+        "environment-based temp directory {} does not exist",
+        env_tmp_dir.display()
+    );
+
+    let tmp_dir = env_tmp_dir.join("xlsynth-sys-tmp");
     // Make the temp dir.
     std::fs::create_dir_all(&tmp_dir).expect("Failed to create temp directory");
 
     // Download the sha256 checksum file to the temp directory.
     let checksum_url = format!("{}.sha256", url);
-    println!("cargo:info=downloading checksum at {}", checksum_url);
 
     let filename = out_path.file_name().unwrap();
     let checksum_path = tmp_dir.join(format!("{}.sha256", filename.to_str().unwrap()));
+    println!(
+        "cargo:info=downloading checksum at {} to {}",
+        checksum_url,
+        checksum_path.display()
+    );
     let status = Command::new("curl")
         .arg("-L")
         .arg("--fail")
@@ -79,6 +90,11 @@ fn high_integrity_download(
 
     // Download the URL with the file itself to the temp directory.
     let tmp_out_path = tmp_dir.join(filename);
+    println!(
+        "cargo:info=downloading file at {} to {}",
+        url,
+        tmp_out_path.display()
+    );
     let status = Command::new("curl")
         .arg("-L")
         .arg("--fail")
@@ -112,6 +128,19 @@ fn high_integrity_download(
         tmp_out_path.display(),
         out_path.display()
     );
+    assert!(
+        tmp_out_path.exists(),
+        "temp file {} does not exist",
+        tmp_out_path.display()
+    );
+
+    let out_path_dir = out_path.parent().unwrap();
+    assert!(
+        out_path_dir.exists(),
+        "output directory {} does not exist",
+        out_path_dir.display()
+    );
+
     std::fs::copy(&tmp_out_path, out_path).unwrap();
     std::fs::remove_file(&tmp_out_path).unwrap();
     Ok(())
