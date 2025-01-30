@@ -104,8 +104,14 @@ fn high_integrity_download(
         )
         .into());
     }
+
     // Checksum matches expectation, now we can move the file to its target
     // destination.
+    println!(
+        "cargo:info=copying file from temp location {} to {}",
+        tmp_out_path.display(),
+        out_path.display()
+    );
     std::fs::copy(&tmp_out_path, out_path).unwrap();
     std::fs::remove_file(&tmp_out_path).unwrap();
     Ok(())
@@ -254,6 +260,12 @@ fn main() {
         RELEASE_LIB_VERSION_TAG
     );
     let out_dir = std::env::var("OUT_DIR").unwrap();
+
+    // Ensure the out directory exists.
+    if !std::fs::metadata(&out_dir).unwrap().is_dir() {
+        std::fs::create_dir_all(&out_dir).unwrap();
+    }
+
     let stdlib_path: PathBuf = download_stdlib_if_dne(&url_base, &out_dir);
     let stdlib_path_full = format!("{}/xls/dslx/stdlib/", stdlib_path.display());
     println!("cargo:rustc-env=DSLX_STDLIB_PATH={stdlib_path_full}");
