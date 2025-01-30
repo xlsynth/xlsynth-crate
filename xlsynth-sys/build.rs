@@ -128,10 +128,18 @@ fn high_integrity_download(
         tmp_out_path.display(),
         out_path.display()
     );
-    assert!(tmp_out_path.exists(), "temp file {} does not exist", tmp_out_path.display());
+    assert!(
+        tmp_out_path.exists(),
+        "temp file {} does not exist",
+        tmp_out_path.display()
+    );
 
     let out_path_dir = out_path.parent().unwrap();
-    assert!(out_path_dir.exists(), "output directory {} does not exist", out_path_dir.display());
+    assert!(
+        out_path_dir.exists(),
+        "output directory {} does not exist",
+        out_path_dir.display()
+    );
 
     std::fs::copy(&tmp_out_path, out_path).unwrap();
     std::fs::remove_file(&tmp_out_path).unwrap();
