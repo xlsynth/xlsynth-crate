@@ -139,7 +139,8 @@ fn high_integrity_download(
     Ok(())
 }
 
-/// Simple helper that downloads a file to the given path using HTTPS with reqwest.
+/// Simple helper that downloads a file to the given path using HTTPS with
+/// reqwest.
 fn download_file_via_https(
     url: &str,
     dest: &std::path::Path,
