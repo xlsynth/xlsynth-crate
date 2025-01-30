@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use sha2::Digest;
 use std::io::BufRead;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use sha2::Digest;
 
 const RELEASE_LIB_VERSION_TAG: &str = "v0.0.133";
 
@@ -30,17 +30,23 @@ impl DsoInfo {
     }
 }
 
-/// Performs a "high integrity" download of a file from a URL by doing the following:
+/// Performs a "high integrity" download of a file from a URL by doing the
+/// following:
 /// - Downloading a checksum file first.
-/// - Downloading the file not to the target destination path but to a temporary location.
+/// - Downloading the file not to the target destination path but to a temporary
+///   location.
 /// - Verifying the checksum of the downloaded file against the checksum file.
 /// - If the checksum is correct, move the file to the target destination path.
 /// - If the checksum is incorrect, return an error.
 ///
 /// The checksum URL is assumed to be the original URL with a `.sha256` suffix.
 ///
-/// `out_path` should be a file path where we ultimately want to place the downloaded file, not a directory path.
-fn high_integrity_download(url: &str, out_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+/// `out_path` should be a file path where we ultimately want to place the
+/// downloaded file, not a directory path.
+fn high_integrity_download(
+    url: &str,
+    out_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let tmp_dir = PathBuf::from(std::env::temp_dir()).join("xlsynth-sys-tmp");
     // Make the temp dir.
     std::fs::create_dir_all(&tmp_dir).expect("Failed to create temp directory");
@@ -65,7 +71,11 @@ fn high_integrity_download(url: &str, out_path: &std::path::Path) -> Result<(), 
 
     let want_checksum_str = std::fs::read_to_string(checksum_path).unwrap();
     let want_checksum_str = want_checksum_str.split_whitespace().next().unwrap();
-    println!("cargo:info=want checksum for {} to be {}", filename.to_str().unwrap(), want_checksum_str);
+    println!(
+        "cargo:info=want checksum for {} to be {}",
+        filename.to_str().unwrap(),
+        want_checksum_str
+    );
 
     // Download the URL with the file itself to the temp directory.
     let tmp_out_path = tmp_dir.join(filename);
@@ -86,9 +96,16 @@ fn high_integrity_download(url: &str, out_path: &std::path::Path) -> Result<(), 
     let got_checksum_str = format!("{:x}", sha256);
 
     if want_checksum_str != got_checksum_str {
-        return Err(format!("Checksum mismatch for file: {} want: {} got: {}", out_path.display(), want_checksum_str, got_checksum_str).into());
+        return Err(format!(
+            "Checksum mismatch for file: {} want: {} got: {}",
+            out_path.display(),
+            want_checksum_str,
+            got_checksum_str
+        )
+        .into());
     }
-    // Checksum matches expectation, now we can move the file to its target destination.
+    // Checksum matches expectation, now we can move the file to its target
+    // destination.
     std::fs::rename(&tmp_out_path, out_path).unwrap();
     Ok(())
 }
@@ -212,7 +229,8 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
     }
     let tarball_path = PathBuf::from(&out_dir).join("dslx_stdlib.tar.gz");
     let tarball_url = format!("{url_base}/dslx_stdlib.tar.gz");
-    high_integrity_download(&tarball_url, &tarball_path).expect("Failed to download stdlib tarball");
+    high_integrity_download(&tarball_url, &tarball_path)
+        .expect("Failed to download stdlib tarball");
 
     let tar_gz = std::fs::File::open(tarball_path).unwrap();
     let tar = flate2::read::GzDecoder::new(tar_gz);
