@@ -292,7 +292,12 @@ fn test_dslx2pipeline_with_unused_binding() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("is not used in function"), "stdout: {}\nstderr: {}", stdout, stderr);
+    assert!(
+        stderr.contains("is not used in function"),
+        "stdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
 
     // Now run again with the warning disabled via toml config.
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
@@ -321,6 +326,11 @@ disable_warnings = ["unused_definition"]
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(output.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
     assert!(!stdout.contains("is not used in function"));
 }
