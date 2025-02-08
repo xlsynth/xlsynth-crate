@@ -58,14 +58,18 @@ struct ToolchainConfig {
     /// Treat warnings as errors.
     warnings_as_errors: Option<bool>,
 
-    /// Enable warnings (versus the default warning set) for the given list of warning names.
-    /// 
-    /// Enabling a warning that is already enabled in the default set is fine and has no effect.
+    /// Enable warnings (versus the default warning set) for the given list of
+    /// warning names.
+    ///
+    /// Enabling a warning that is already enabled in the default set is fine
+    /// and has no effect.
     enable_warnings: Option<Vec<String>>,
 
-    /// Disable warnings (versus the default warning set) for the given list of warning names.
+    /// Disable warnings (versus the default warning set) for the given list of
+    /// warning names.
     ///
-    /// Disabling a warning that is already disabled in the default set is fine and has no effect.
+    /// Disabling a warning that is already disabled in the default set is fine
+    /// and has no effect.
     disable_warnings: Option<Vec<String>>,
 }
 
@@ -109,22 +113,24 @@ impl AppExt for clap::Command {
                     .long("dslx_top")
                     .value_name("DSLX_TOP")
                     .help("The top-level entry point")
-                    .required(true)
+                    .required(true),
             )
         }
-        command = command.arg(
-            Arg::new("dslx_path")
-                .long("dslx_path")
-                .value_name("DSLX_PATH_SEMI_SEPARATED")
-                .help("Semi-separated paths for DSLX")
-                .action(ArgAction::Set),
-        ).arg(
-            Arg::new("dslx_stdlib_path")
-                .long("dslx_stdlib_path")
-                .value_name("DSLX_STDLIB_PATH")
-                .help("Path to the DSLX standard library")
-                .action(ArgAction::Set),
-        );
+        command = command
+            .arg(
+                Arg::new("dslx_path")
+                    .long("dslx_path")
+                    .value_name("DSLX_PATH_SEMI_SEPARATED")
+                    .help("Semi-separated paths for DSLX")
+                    .action(ArgAction::Set),
+            )
+            .arg(
+                Arg::new("dslx_stdlib_path")
+                    .long("dslx_stdlib_path")
+                    .value_name("DSLX_STDLIB_PATH")
+                    .help("Path to the DSLX standard library")
+                    .action(ArgAction::Set),
+            );
         command.add_bool_arg("warnings_as_errors", "Treat warnings as errors")
     }
 
@@ -202,7 +208,10 @@ impl AppExt for clap::Command {
 fn main() {
     let _ = env_logger::try_init();
 
-    log::info!("xlsynth-driver starting; version: {}", env!("CARGO_PKG_VERSION"));
+    log::info!(
+        "xlsynth-driver starting; version: {}",
+        env!("CARGO_PKG_VERSION")
+    );
 
     let matches = clap::Command::new("xlsynth-driver")
         .version(env!("CARGO_PKG_VERSION"))
@@ -500,7 +509,15 @@ fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
 
     // Stub function for DSLX to IR conversion
-    dslx2ir(input_path, top, dslx_stdlib_path, dslx_path, tool_path, enable_warnings, disable_warnings);
+    dslx2ir(
+        input_path,
+        top,
+        dslx_stdlib_path,
+        dslx_path,
+        tool_path,
+        enable_warnings,
+        disable_warnings,
+    );
 }
 
 fn handle_ir2opt(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
@@ -773,8 +790,8 @@ fn dslx2sv_types(
     println!("{}", sv);
 }
 
-/// Converts the DSLX source in `input_file` using the top level entry point named `top` into a
-/// Verilog pipeline and prints that to stdout.
+/// Converts the DSLX source in `input_file` using the top level entry point
+/// named `top` into a Verilog pipeline and prints that to stdout.
 fn dslx2pipeline(
     input_file: &std::path::Path,
     top: &str,
@@ -845,24 +862,37 @@ fn dslx2pipeline(
         let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
         let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
         let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
-        let warnings_as_errors = config.as_ref().and_then(|c| c.warnings_as_errors).unwrap_or(DEFAULT_WARNINGS_AS_ERRORS);
+        let warnings_as_errors = config
+            .as_ref()
+            .and_then(|c| c.warnings_as_errors)
+            .unwrap_or(DEFAULT_WARNINGS_AS_ERRORS);
         let convert_options = xlsynth::DslxConvertOptions {
             dslx_stdlib_path: dslx_stdlib_path.map(|p| std::path::Path::new(p)),
             additional_search_paths: dslx_path_vec,
             enable_warnings: enable_warnings,
             disable_warnings: disable_warnings,
         };
-        let convert_result: xlsynth::DslxToIrPackageResult = xlsynth::convert_dslx_to_ir(&dslx, input_file, &convert_options).expect("successful conversion");
+        let convert_result: xlsynth::DslxToIrPackageResult =
+            xlsynth::convert_dslx_to_ir(&dslx, input_file, &convert_options)
+                .expect("successful conversion");
         if warnings_as_errors && !convert_result.warnings.is_empty() {
             for warning in convert_result.warnings {
-                eprintln!("DSLX warning for {}: {}", input_file.to_str().unwrap(), warning);
+                eprintln!(
+                    "DSLX warning for {}: {}",
+                    input_file.to_str().unwrap(),
+                    warning
+                );
             }
             eprintln!("DSLX warnings found with warnings-as-errors enabled; exiting.");
             process::exit(1);
         }
 
         for warning in convert_result.warnings {
-            log::warn!("DSLX warning for {}: {}", input_file.to_str().unwrap(), warning);
+            log::warn!(
+                "DSLX warning for {}: {}",
+                input_file.to_str().unwrap(),
+                warning
+            );
         }
 
         let opt_ir = xlsynth::optimize_ir(&convert_result.ir, top).unwrap();
@@ -924,7 +954,9 @@ fn run_ir_converter_main(
     }
 
     if let Some(enable_warnings) = enable_warnings {
-        command.arg("--enable_warnings").arg(enable_warnings.join(","));
+        command
+            .arg("--enable_warnings")
+            .arg(enable_warnings.join(","));
     }
 
     let output = command.output().expect("Failed to execute ir_convert");
@@ -977,7 +1009,11 @@ fn dslx2ir(
         )
         .expect("successful conversion");
         for warning in result.warnings {
-            log::warn!("DSLX warning for {}: {}", input_file.to_str().unwrap(), warning);
+            log::warn!(
+                "DSLX warning for {}: {}",
+                input_file.to_str().unwrap(),
+                warning
+            );
         }
         println!("{}", result.ir);
     }

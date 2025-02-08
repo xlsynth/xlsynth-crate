@@ -195,8 +195,8 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
     assert_eq!(stdout, golden_sv);
 }
 
-// To get the redundant match arm to flag a warning we have to enable a non-default warning as of
-// DSO v0.0.134.
+// To get the redundant match arm to flag a warning we have to enable a
+// non-default warning as of DSO v0.0.134.
 #[test]
 fn test_dslx2pipeline_with_redundant_match_arm() {
     let _ = env_logger::try_init();
@@ -240,10 +240,20 @@ dslx_path = []
         .output()
         .expect("Failed to run xlsynth-driver");
 
-    // Check that the output shows the warning and that the return code is non-success because we
-    // have warnings-as-errors on.
+    // Check that the output shows the warning and that the return code is
+    // non-success because we have warnings-as-errors on.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
-    assert!(stderr.contains("Match is already exhaustive"), "stdout: {}\nstderr: {}", stdout, stderr);
+    assert!(
+        !output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stderr.contains("Match is already exhaustive"),
+        "stdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
 }

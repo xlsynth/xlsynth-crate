@@ -31,7 +31,11 @@ fn load_and_invoke(
     let result =
         xlsynth::convert_dslx_to_ir(&dslx, dslx_path.as_path(), &DslxConvertOptions::default())?;
     for warning in result.warnings {
-        log::warn!("DSLX warning for {}: {}", dslx_path.to_str().unwrap(), warning);
+        log::warn!(
+            "DSLX warning for {}: {}",
+            dslx_path.to_str().unwrap(),
+            warning
+        );
     }
     let package = result.ir;
     let dslx_module_name = dslx_path.file_stem().unwrap().to_str().unwrap();

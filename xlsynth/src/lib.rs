@@ -100,13 +100,33 @@ pub fn convert_dslx_to_ir_text(
             .map(|cstr| cstr.as_ptr())
             .collect();
 
-        let enable_warnings_cstrs = options.enable_warnings.as_ref().map(|warnings| warnings.iter().map(|w| CString::new(w.as_str()).unwrap()).collect::<Vec<_>>());
-        let enable_warnings_cstrs_ptrs = enable_warnings_cstrs.as_ref().map(|cstrs| cstrs.iter().map(|cstr| cstr.as_ptr()).collect::<Vec<_>>());
-        let disable_warnings_cstrs = options.disable_warnings.as_ref().map(|warnings| warnings.iter().map(|w| CString::new(w.as_str()).unwrap()).collect::<Vec<_>>());
-        let disable_warnings_cstrs_ptrs = disable_warnings_cstrs.as_ref().map(|cstrs| cstrs.iter().map(|cstr| cstr.as_ptr()).collect::<Vec<_>>());
+        let enable_warnings_cstrs = options.enable_warnings.as_ref().map(|warnings| {
+            warnings
+                .iter()
+                .map(|w| CString::new(w.as_str()).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let enable_warnings_cstrs_ptrs = enable_warnings_cstrs
+            .as_ref()
+            .map(|cstrs| cstrs.iter().map(|cstr| cstr.as_ptr()).collect::<Vec<_>>());
+        let disable_warnings_cstrs = options.disable_warnings.as_ref().map(|warnings| {
+            warnings
+                .iter()
+                .map(|w| CString::new(w.as_str()).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let disable_warnings_cstrs_ptrs = disable_warnings_cstrs
+            .as_ref()
+            .map(|cstrs| cstrs.iter().map(|cstr| cstr.as_ptr()).collect::<Vec<_>>());
 
-        let enable_warnings_ptr = enable_warnings_cstrs_ptrs.as_ref().map(|ptrs| ptrs.as_ptr()).unwrap_or(std::ptr::null());
-        let disable_warnings_ptr = disable_warnings_cstrs_ptrs.as_ref().map(|ptrs| ptrs.as_ptr()).unwrap_or(std::ptr::null());
+        let enable_warnings_ptr = enable_warnings_cstrs_ptrs
+            .as_ref()
+            .map(|ptrs| ptrs.as_ptr())
+            .unwrap_or(std::ptr::null());
+        let disable_warnings_ptr = disable_warnings_cstrs_ptrs
+            .as_ref()
+            .map(|ptrs| ptrs.as_ptr())
+            .unwrap_or(std::ptr::null());
 
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -127,7 +147,8 @@ pub fn convert_dslx_to_ir_text(
             disable_warnings_ptr,
             disable_warnings_cstrs_ptrs.unwrap_or_default().len(),
             false,
-            &mut warnings_out, &mut warnings_out_count,
+            &mut warnings_out,
+            &mut warnings_out_count,
             &mut error_out,
             &mut ir_out,
         );
@@ -142,7 +163,10 @@ pub fn convert_dslx_to_ir_text(
         xlsynth_sys::xls_c_strs_free(warnings_out, warnings_out_count);
 
         if success {
-            return Ok(DslxToIrTextResult { ir: c_str_to_rust(ir_out), warnings });
+            return Ok(DslxToIrTextResult {
+                ir: c_str_to_rust(ir_out),
+                warnings,
+            });
         } else {
             let error_out_str = c_str_to_rust(error_out);
             return Err(XlsynthError(error_out_str));
@@ -181,7 +205,10 @@ pub fn convert_dslx_to_ir(
     // Get the filename as an Option<&str>
     let filename = path.file_name().and_then(|s| s.to_str());
     let ir = IrPackage::parse_ir(&convert_result.ir, filename)?;
-    Ok(DslxToIrPackageResult { ir, warnings: convert_result.warnings })
+    Ok(DslxToIrPackageResult {
+        ir,
+        warnings: convert_result.warnings,
+    })
 }
 
 /// Optimizes an IR package -- this produces a new IR package with the optimized
