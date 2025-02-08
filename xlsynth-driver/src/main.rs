@@ -811,7 +811,7 @@ fn dslx2pipeline(
 
         let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
         let dslx_path_slice = config.as_ref().and_then(|c| c.dslx_path.as_deref());
-        let dslx_path = dslx_path_slice.map(|s| s.join(";"));
+        let dslx_path = dslx_path_slice.map(|s| s.join(":"));
         let dslx_path_ref = dslx_path.as_ref().map(|s| s.as_str());
 
         let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());

@@ -334,3 +334,66 @@ disable_warnings = ["unused_definition"]
     );
     assert!(!stdout.contains("is not used in function"));
 }
+
+#[test]
+fn test_dslx2pipeline_with_dslx_path_two_entries() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // Make dir `a` and `b` in the temp dir.
+    let a_dir = temp_dir.path().join("a");
+    std::fs::create_dir(&a_dir).unwrap();
+    let b_dir = temp_dir.path().join("b");
+    std::fs::create_dir(&b_dir).unwrap();
+
+    // Make a file `a/a.x` and `b/b.x` in the temp dir with constants `A` and `B`
+    // respectively.
+    let a_path = a_dir.join("a.x");
+    std::fs::write(&a_path, "pub const A: u32 = u32:42;").unwrap();
+    let b_path = b_dir.join("b.x");
+    std::fs::write(&b_path, "pub const B: u32 = u32:64;").unwrap();
+
+    // Write out the main file that just imports `a` and `b` and adds a::A + b::B.
+    let main_path = temp_dir.path().join("main.x");
+    std::fs::write(
+        &main_path,
+        "import a; import b; fn main() -> u32 { a::A + b::B }",
+    )
+    .unwrap();
+
+    // Run the dslx2pipeline command with the DSLX_PATH set to `a:b` via the
+    // toolchain config.
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = format!(
+        r#"[toolchain]
+dslx_path = ["{}", "{}"]
+"#,
+        a_dir.to_str().unwrap(),
+        b_dir.to_str().unwrap()
+    );
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--dslx_input_file")
+        .arg(main_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg(xlsynth::mangle_dslx_name("main", "main").unwrap())
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("06a"),
+        "stdout: {} stderr: {}",
+        stdout,
+        stderr
+    );
+}
