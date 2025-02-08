@@ -310,15 +310,10 @@ fn test_dslx2pipeline_with_unused_binding() {
 
     // Now run again with the warning disabled via toml config.
     // Also use the tool path instead of the runtime APIs.
-    let tool_path = std::env::var("XLSYNTH_TOOL_PATH").unwrap();
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
-    let toolchain_toml_contents = format!(
-        r#"[toolchain]
-tool_path = "{}"
+    let toolchain_toml_contents = r#"[toolchain]
 disable_warnings = ["unused_definition", "empty_range_literal"]
-"#,
-        tool_path
-    );
+"#;
     std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
 
     log::info!("running again with warnings disabled...");
