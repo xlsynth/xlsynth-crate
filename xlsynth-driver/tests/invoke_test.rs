@@ -260,10 +260,15 @@ enable_warnings = ["already_exhaustive_match"]
 
 #[test]
 fn test_dslx2pipeline_with_unused_binding() {
+    let _ = env_logger::try_init();
+    log::info!("test_dslx2pipeline_with_unused_binding");
+
     let dslx = "fn main() -> u32 {
-        let x = u32:42;
-        u32:64
-    }";
+    let x = u32:42;  // unused_definition
+    for (i, accum) in u32:0..u32:0 {  // empty_range_literal
+        accum
+    }(u32:64)
+}";
 
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("my_module.x");
@@ -271,6 +276,7 @@ fn test_dslx2pipeline_with_unused_binding() {
 
     // Initial run should fail since we don't disable the warning.
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
     let output = Command::new(command_path)
         .arg("dslx2pipeline")
         .arg("--pipeline_stages")
@@ -280,7 +286,8 @@ fn test_dslx2pipeline_with_unused_binding() {
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .arg("main")
+        .env("RUST_LOG", &rust_log)
         .output()
         .expect("Failed to run xlsynth-driver");
 
@@ -292,6 +299,8 @@ fn test_dslx2pipeline_with_unused_binding() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
     assert!(
         stderr.contains("is not used in function"),
         "stdout: {}\nstderr: {}",
@@ -300,14 +309,19 @@ fn test_dslx2pipeline_with_unused_binding() {
     );
 
     // Now run again with the warning disabled via toml config.
+    // Also use the tool path instead of the runtime APIs.
+    let tool_path = std::env::var("XLSYNTH_TOOL_PATH").unwrap();
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = format!(
         r#"[toolchain]
-disable_warnings = ["unused_definition"]
-"#
+tool_path = "{}"
+disable_warnings = ["unused_definition", "empty_range_literal"]
+"#,
+        tool_path
     );
     std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
 
+    log::info!("running again with warnings disabled...");
     let output = Command::new(command_path)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
@@ -319,12 +333,15 @@ disable_warnings = ["unused_definition"]
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .arg("main")
+        .env("RUST_LOG", &rust_log)
         .output()
         .expect("Failed to run xlsynth-driver");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
 
     assert!(
         output.status.success(),
@@ -373,6 +390,7 @@ dslx_path = ["{}", "{}"]
     );
     std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
 
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
     let output = Command::new(command_path)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
@@ -385,6 +403,7 @@ dslx_path = ["{}", "{}"]
         .arg(main_path.to_str().unwrap())
         .arg("--dslx_top")
         .arg(xlsynth::mangle_dslx_name("main", "main").unwrap())
+        .env("RUST_LOG", rust_log)
         .output()
         .expect("xlsynth-driver should succeed");
 

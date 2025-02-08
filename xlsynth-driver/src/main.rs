@@ -815,6 +815,7 @@ fn dslx2pipeline(
         let dslx_path_ref = dslx_path.as_ref().map(|s| s.as_str());
 
         let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
+        let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
         let unopt_ir = run_ir_converter_main(
             input_file,
             Some(top),
@@ -822,6 +823,7 @@ fn dslx2pipeline(
             dslx_path_ref,
             tool_path,
             enable_warnings,
+            disable_warnings,
         );
         let unopt_ir_path = temp_dir.path().join("unopt.ir");
         std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
@@ -932,6 +934,7 @@ fn run_ir_converter_main(
     dslx_path: Option<&str>,
     tool_path: &str,
     enable_warnings: Option<&[String]>,
+    disable_warnings: Option<&[String]>,
 ) -> String {
     log::info!("run_ir_converter_main");
     let ir_convert_path = format!("{}/ir_converter_main", tool_path);
@@ -959,6 +962,12 @@ fn run_ir_converter_main(
         command
             .arg("--enable_warnings")
             .arg(enable_warnings.join(","));
+    }
+
+    if let Some(disable_warnings) = disable_warnings {
+        command
+            .arg("--disable_warnings")
+            .arg(disable_warnings.join(","));
     }
 
     let output = command.output().expect("Failed to execute ir_convert");
@@ -990,6 +999,7 @@ fn dslx2ir(
             dslx_path,
             tool_path,
             enable_warnings,
+            disable_warnings,
         );
         println!("{}", output);
     } else {
