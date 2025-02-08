@@ -7,7 +7,9 @@ use xlsynth::*;
 fn test_ir_interpret_array_values() {
     let path = std::path::Path::new("tests/function_zoo.x");
     let dslx = std::fs::read_to_string(path).unwrap();
-    let ir = convert_dslx_to_ir(&dslx, &path, &DslxConvertOptions::default()).unwrap();
+    let result = convert_dslx_to_ir(&dslx, &path, &DslxConvertOptions::default()).unwrap();
+    assert!(result.warnings.is_empty());
+    let ir = result.ir;
 
     let make_u32x2_mangled = mangle_dslx_name("function_zoo", "make_u32x2").unwrap();
     let make_u32x2 = ir.get_function(&make_u32x2_mangled).unwrap();

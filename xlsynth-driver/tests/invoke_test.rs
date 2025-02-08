@@ -14,6 +14,7 @@ fn test_dslx2sv_types_subcommand() {
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .output()
         .expect("Failed to run xlsynth-driver");
@@ -54,6 +55,7 @@ struct MyStruct {
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .output()
         .expect("Failed to run xlsynth-driver");
@@ -118,7 +120,10 @@ dslx_path = []
         .arg("--toolchain")
         .arg(toolchain_path.to_str().unwrap())
         .arg("dslx2ir")
+        .arg("--dslx_input_file")
         .arg(client_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg(xlsynth::mangle_dslx_name("client", "main").unwrap())
         .output()
         .expect("Failed to run xlsynth-driver");
 
@@ -167,7 +172,9 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
         .arg("--separate_lines=false")
         .arg("--use_system_verilog=true")
         .arg("--array_index_bounds_checking=true")
+        .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
         .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
         .output()
         .expect("Failed to run xlsynth-driver");
@@ -186,4 +193,57 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
         std::path::Path::new("tests/test_dslx2pipeline_with_update_of_1d_array.golden.sv");
     let golden_sv = std::fs::read_to_string(golden_path).unwrap();
     assert_eq!(stdout, golden_sv);
+}
+
+// To get the redundant match arm to flag a warning we have to enable a non-default warning as of
+// DSO v0.0.134.
+#[test]
+fn test_dslx2pipeline_with_redundant_match_arm() {
+    let _ = env_logger::try_init();
+    log::info!("test_dslx2pipeline_with_redundant_match_arm");
+    let dslx = "fn main(x: bool) -> u32 {
+        match x {
+            true => u32:42,
+            false => u32:64,
+            _ => u32:128,
+        }
+    }";
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = format!(
+        r#"[toolchain]
+enable_warnings = ["already_exhaustive_match"]
+dslx_path = []
+"#
+    );
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .env("RUST_LOG", rust_log)
+        .output()
+        .expect("Failed to run xlsynth-driver");
+
+    // Check that the output shows the warning and that the return code is non-success because we
+    // have warnings-as-errors on.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    assert!(stderr.contains("Match is already exhaustive"), "stdout: {}\nstderr: {}", stdout, stderr);
 }

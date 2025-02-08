@@ -52,6 +52,7 @@ impl IrBits {
         xls_bits_to_string(self.ptr, fmt_pref, include_bit_count).unwrap()
     }
 
+    #[allow(dead_code)]
     fn to_hex_string(&self) -> String {
         let value = self.to_string_fmt(IrFormatPreference::Hex, false);
         format!("bits[{}]:{}", self.get_bit_count(), value)
