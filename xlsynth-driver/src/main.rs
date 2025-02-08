@@ -41,6 +41,8 @@ use std::process;
 use std::process::Command;
 use xlsynth::DslxConvertOptions;
 
+const DEFAULT_WARNINGS_AS_ERRORS: bool = true;
+
 #[derive(Deserialize)]
 struct ToolchainConfig {
     /// Path to the DSLX standard library.
@@ -52,6 +54,23 @@ struct ToolchainConfig {
 
     /// Directory path for the XLS toolset, e.g. codegen_main, opt_main, etc.
     tool_path: Option<String>,
+
+    /// Treat warnings as errors.
+    warnings_as_errors: Option<bool>,
+
+    /// Enable warnings (versus the default warning set) for the given list of
+    /// warning names.
+    ///
+    /// Enabling a warning that is already enabled in the default set is fine
+    /// and has no effect.
+    enable_warnings: Option<Vec<String>>,
+
+    /// Disable warnings (versus the default warning set) for the given list of
+    /// warning names.
+    ///
+    /// Disabling a warning that is already disabled in the default set is fine
+    /// and has no effect.
+    disable_warnings: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -62,8 +81,7 @@ struct XlsynthToolchain {
 trait AppExt {
     fn add_delay_model_arg(self) -> Self;
     fn add_pipeline_args(self) -> Self;
-    fn add_dslx_path_arg(self) -> Self;
-    fn add_dslx_stdlib_path_arg(self) -> Self;
+    fn add_dslx_input_args(self, include_top: bool) -> Self;
     fn add_codegen_args(self) -> Self;
     fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
 }
@@ -78,6 +96,42 @@ impl AppExt for clap::Command {
                 .required(true)
                 .action(ArgAction::Set),
         )
+    }
+
+    fn add_dslx_input_args(self, include_top: bool) -> Self {
+        let mut command = (self as clap::Command).arg(
+            Arg::new("dslx_input_file")
+                .long("dslx_input_file")
+                .value_name("DSLX_INPUT_FILE")
+                .help("The input DSLX file")
+                .required(true)
+                .action(ArgAction::Set),
+        );
+        if include_top {
+            command = command.arg(
+                Arg::new("dslx_top")
+                    .long("dslx_top")
+                    .value_name("DSLX_TOP")
+                    .help("The top-level entry point")
+                    .required(true),
+            )
+        }
+        command = command
+            .arg(
+                Arg::new("dslx_path")
+                    .long("dslx_path")
+                    .value_name("DSLX_PATH_SEMI_SEPARATED")
+                    .help("Semi-separated paths for DSLX")
+                    .action(ArgAction::Set),
+            )
+            .arg(
+                Arg::new("dslx_stdlib_path")
+                    .long("dslx_stdlib_path")
+                    .value_name("DSLX_STDLIB_PATH")
+                    .help("Path to the DSLX standard library")
+                    .action(ArgAction::Set),
+            );
+        command.add_bool_arg("warnings_as_errors", "Treat warnings as errors")
     }
 
     fn add_pipeline_args(self) -> Self {
@@ -96,26 +150,6 @@ impl AppExt for clap::Command {
                     .help("Clock period in picoseconds")
                     .action(ArgAction::Set),
             )
-    }
-
-    fn add_dslx_path_arg(self) -> Self {
-        (self as clap::Command).arg(
-            Arg::new("dslx_path")
-                .long("dslx_path")
-                .value_name("DSLX_PATH_SEMI_SEPARATED")
-                .help("Semi-separated paths for DSLX")
-                .action(ArgAction::Set),
-        )
-    }
-
-    fn add_dslx_stdlib_path_arg(self) -> Self {
-        (self as clap::Command).arg(
-            Arg::new("dslx_stdlib_path")
-                .long("dslx_stdlib_path")
-                .value_name("DSLX_STDLIB_PATH")
-                .help("Path to the DSLX standard library")
-                .action(ArgAction::Set),
-        )
     }
 
     /// Adds a boolean argument to the command -- the helper ensures we have a
@@ -174,6 +208,11 @@ impl AppExt for clap::Command {
 fn main() {
     let _ = env_logger::try_init();
 
+    log::info!(
+        "xlsynth-driver starting; version: {}",
+        env!("CARGO_PKG_VERSION")
+    );
+
     let matches = clap::Command::new("xlsynth-driver")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Command line driver for XLS/xlsynth capabilities")
@@ -188,19 +227,8 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx2pipeline")
                 .about("Converts DSLX to SystemVerilog")
-                .arg(
-                    Arg::new("INPUT_FILE")
-                        .help("The input DSLX file")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    Arg::new("TOP")
-                        .help("The top-level entry point")
-                        .required(true)
-                        .index(2),
-                )
                 .add_delay_model_arg()
+                .add_dslx_input_args(true)
                 .add_pipeline_args()
                 .add_codegen_args()
                 .add_bool_arg("keep_temps", "Keep temporary files"),
@@ -208,47 +236,27 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx2ir")
                 .about("Converts DSLX to IR")
-                .arg(
-                    Arg::new("INPUT_FILE")
-                        .help("The input DSLX file")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    Arg::new("TOP")
-                        .help("The top-level entry point (optional)")
-                        .required(false)
-                        .index(2),
-                )
-                .add_dslx_stdlib_path_arg()
-                .add_dslx_path_arg(),
+                .add_dslx_input_args(true),
         )
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
             clap::Command::new("dslx2sv-types")
                 .about("Converts DSLX type definitions to SystemVerilog")
-                .arg(
-                    Arg::new("INPUT_FILE")
-                        .help("The input DSLX file")
-                        .required(true)
-                        .index(1),
-                )
-                .add_dslx_stdlib_path_arg()
-                .add_dslx_path_arg(),
+                .add_dslx_input_args(false),
         )
         // ir2opt subcommand requires a top symbol
         .subcommand(
             clap::Command::new("ir2opt")
                 .about("Converts IR to optimized IR")
                 .arg(
-                    Arg::new("INPUT_FILE")
+                    Arg::new("ir_input_file")
                         .help("The input IR file")
                         .required(true)
                         .index(1),
                 )
                 // Top is given as a (non-positional) flag for symmetry but it is required.
                 .arg(
-                    Arg::new("TOP")
+                    Arg::new("ir_top")
                         .long("top")
                         .value_name("TOP")
                         .help("The top-level entry point")
@@ -263,7 +271,7 @@ fn main() {
             clap::Command::new("ir2pipeline")
                 .about("Converts IR to a pipeline")
                 .arg(
-                    Arg::new("INPUT_FILE")
+                    Arg::new("ir_input_file")
                         .help("The input IR file")
                         .required(true)
                         .index(1),
@@ -277,13 +285,13 @@ fn main() {
                 .about("Converts IR entry point to delay info output")
                 .add_delay_model_arg()
                 .arg(
-                    Arg::new("INPUT_FILE")
+                    Arg::new("ir_input_file")
                         .help("The input IR file")
                         .required(true)
                         .index(1),
                 )
                 .arg(
-                    Arg::new("TOP")
+                    Arg::new("ir_top")
                         .help("The top-level entry point")
                         .required(true)
                         .index(2),
@@ -411,7 +419,7 @@ fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
 }
 
 fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
+    let input_file = matches.get_one::<String>("ir_input_file").unwrap();
     let input_path = std::path::Path::new(input_file);
     let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
 
@@ -430,9 +438,10 @@ fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
 }
 
 fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
+    log::info!("handle_dslx2pipeline");
+    let input_file = matches.get_one::<String>("dslx_input_file").unwrap();
     let input_path = std::path::Path::new(input_file);
-    let top = matches.get_one::<String>("TOP").unwrap();
+    let top = matches.get_one::<String>("dslx_top").unwrap();
     let pipeline_spec = extract_pipeline_spec(matches);
     let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
     let keep_temps = matches.get_one::<String>("keep_temps").map(|s| s == "true");
@@ -479,9 +488,10 @@ fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Opti
 }
 
 fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
+    log::info!("handle_dslx2ir");
+    let input_file = matches.get_one::<String>("dslx_input_file").unwrap();
     let input_path = std::path::Path::new(input_file);
-    let top = if let Some(top) = matches.get_one::<String>("TOP") {
+    let top = if let Some(top) = matches.get_one::<String>("dslx_top") {
         Some(top.to_string())
     } else {
         None
@@ -495,20 +505,33 @@ fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
+    let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
+    let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
+
     // Stub function for DSLX to IR conversion
-    dslx2ir(input_path, top, dslx_stdlib_path, dslx_path, tool_path);
+    dslx2ir(
+        input_path,
+        top,
+        dslx_stdlib_path,
+        dslx_path,
+        tool_path,
+        enable_warnings,
+        disable_warnings,
+    );
 }
 
 fn handle_ir2opt(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
-    let top = matches.get_one::<String>("TOP").unwrap();
+    log::info!("handle_ir2opt");
+    let input_file = matches.get_one::<String>("ir_input_file").unwrap();
+    let top = matches.get_one::<String>("ir_top").unwrap();
     let input_path = std::path::Path::new(input_file);
 
     ir2opt(input_path, top, config);
 }
 
 fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
+    log::info!("handle_dslx2sv_types");
+    let input_file = matches.get_one::<String>("dslx_input_file").unwrap();
     let input_path = std::path::Path::new(input_file);
 
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
@@ -524,8 +547,9 @@ fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) 
 }
 
 fn handle_ir2delayinfo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let input_file = matches.get_one::<String>("INPUT_FILE").unwrap();
-    let top = matches.get_one::<String>("TOP").unwrap();
+    log::info!("handle_ir2delayinfo");
+    let input_file = matches.get_one::<String>("ir_input_file").unwrap();
+    let top = matches.get_one::<String>("ir_top").unwrap();
     let input_path = std::path::Path::new(input_file);
     let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
 
@@ -548,6 +572,7 @@ struct CodegenFlags {
 /// Adds the given code-generation flags to the command in command-line-arg
 /// form.
 fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
+    log::info!("add_codegen_flags");
     if let Some(use_system_verilog) = codegen_flags.use_system_verilog {
         command.arg(format!("--use_system_verilog={use_system_verilog}"));
     }
@@ -588,6 +613,7 @@ fn run_codegen_pipeline(
     codegen_flags: &CodegenFlags,
     tool_path: &str,
 ) -> String {
+    log::info!("run_codegen_pipeline");
     // Give an error if the codegen_main tool is not found.
     let codegen_main_path = format!("{}/codegen_main", tool_path);
     if !std::path::Path::new(&codegen_main_path).exists() {
@@ -633,6 +659,7 @@ fn ir2pipeline(
     codegen_flags: &CodegenFlags,
     config: &Option<ToolchainConfig>,
 ) {
+    log::info!("ir2pipeline");
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         let output = run_codegen_pipeline(
             input_file,
@@ -649,6 +676,7 @@ fn ir2pipeline(
 
 /// Runs the IR optimization command line tool and returns the output.
 fn run_opt_main(input_file: &std::path::Path, top: Option<&str>, tool_path: &str) -> String {
+    log::info!("run_opt_main");
     let opt_main_path = format!("{}/opt_main", tool_path);
     if !std::path::Path::new(&opt_main_path).exists() {
         eprintln!("IR optimization tool not found at: {}", opt_main_path);
@@ -673,6 +701,7 @@ fn run_opt_main(input_file: &std::path::Path, top: Option<&str>, tool_path: &str
 }
 
 fn ir2opt(input_file: &std::path::Path, top: &str, config: &Option<ToolchainConfig>) {
+    log::info!("ir2opt");
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         let output = run_opt_main(input_file, Some(top), tool_path);
         println!("{}", output);
@@ -687,6 +716,7 @@ fn run_delay_info_main(
     delay_model: &str,
     tool_path: &str,
 ) -> String {
+    log::info!("run_delay_info_main");
     let delay_info_path = format!("{}/delay_info_main", tool_path);
     if !std::path::Path::new(&delay_info_path).exists() {
         eprintln!("Delay info tool not found at: {}", delay_info_path);
@@ -717,6 +747,7 @@ fn ir2delayinfo(
     delay_model: &str,
     config: &Option<ToolchainConfig>,
 ) {
+    log::info!("ir2delayinfo");
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         let output = run_delay_info_main(input_file, Some(top), delay_model, tool_path);
         println!("{}", output);
@@ -730,6 +761,7 @@ fn dslx2sv_types(
     dslx_stdlib_path: Option<&std::path::Path>,
     dslx_path: Option<&str>,
 ) {
+    log::info!("dslx2sv_types");
     let dslx = std::fs::read_to_string(input_file).unwrap();
 
     let dslx_stdlib_path_buf: Option<std::path::PathBuf> =
@@ -758,6 +790,8 @@ fn dslx2sv_types(
     println!("{}", sv);
 }
 
+/// Converts the DSLX source in `input_file` using the top level entry point
+/// named `top` into a Verilog pipeline and prints that to stdout.
 fn dslx2pipeline(
     input_file: &std::path::Path,
     top: &str,
@@ -767,7 +801,9 @@ fn dslx2pipeline(
     keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
 ) {
+    log::info!("dslx2pipeline");
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
+        log::info!("dslx2pipeline using tool path: {}", tool_path);
         let temp_dir = tempfile::TempDir::new().unwrap();
 
         let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
@@ -776,12 +812,14 @@ fn dslx2pipeline(
         let dslx_path = config.as_ref().and_then(|c| Some(c.dslx_path.join(":")));
         let dslx_path_ref = dslx_path.as_ref().map(|s| s.as_str());
 
+        let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
         let unopt_ir = run_ir_converter_main(
             input_file,
             Some(top),
             dslx_stdlib_path,
             dslx_path_ref,
             tool_path,
+            enable_warnings,
         );
         let unopt_ir_path = temp_dir.path().join("unopt.ir");
         std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
@@ -810,6 +848,7 @@ fn dslx2pipeline(
         }
         println!("{}", sv);
     } else {
+        log::info!("dslx2pipeline using runtime APIs");
         let dslx = std::fs::read_to_string(input_file).unwrap();
 
         let dslx_path = config.as_ref().and_then(|c| Some(&c.dslx_path));
@@ -821,14 +860,42 @@ fn dslx2pipeline(
             None => vec![],
         };
         let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
+        let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
+        let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
+        let warnings_as_errors = config
+            .as_ref()
+            .and_then(|c| c.warnings_as_errors)
+            .unwrap_or(DEFAULT_WARNINGS_AS_ERRORS);
         let convert_options = xlsynth::DslxConvertOptions {
             dslx_stdlib_path: dslx_stdlib_path.map(|p| std::path::Path::new(p)),
             additional_search_paths: dslx_path_vec,
+            enable_warnings: enable_warnings,
+            disable_warnings: disable_warnings,
         };
-        let ir = xlsynth::convert_dslx_to_ir(&dslx, input_file, &convert_options)
-            .expect("successful conversion");
+        let convert_result: xlsynth::DslxToIrPackageResult =
+            xlsynth::convert_dslx_to_ir(&dslx, input_file, &convert_options)
+                .expect("successful conversion");
+        if warnings_as_errors && !convert_result.warnings.is_empty() {
+            for warning in convert_result.warnings {
+                eprintln!(
+                    "DSLX warning for {}: {}",
+                    input_file.to_str().unwrap(),
+                    warning
+                );
+            }
+            eprintln!("DSLX warnings found with warnings-as-errors enabled; exiting.");
+            process::exit(1);
+        }
 
-        let opt_ir = xlsynth::optimize_ir(&ir, top).unwrap();
+        for warning in convert_result.warnings {
+            log::warn!(
+                "DSLX warning for {}: {}",
+                input_file.to_str().unwrap(),
+                warning
+            );
+        }
+
+        let opt_ir = xlsynth::optimize_ir(&convert_result.ir, top).unwrap();
 
         let mut sched_opt_lines = vec![format!("delay_model: \"{}\"", delay_model)];
         match pipeline_spec {
@@ -862,7 +929,9 @@ fn run_ir_converter_main(
     dslx_stdlib_path: Option<&str>,
     dslx_path: Option<&str>,
     tool_path: &str,
+    enable_warnings: Option<&[String]>,
 ) -> String {
+    log::info!("run_ir_converter_main");
     let ir_convert_path = format!("{}/ir_converter_main", tool_path);
     if !std::path::Path::new(&ir_convert_path).exists() {
         eprintln!("IR conversion tool not found at: {}", ir_convert_path);
@@ -884,6 +953,12 @@ fn run_ir_converter_main(
         command.arg("--dslx_path").arg(dslx_path);
     }
 
+    if let Some(enable_warnings) = enable_warnings {
+        command
+            .arg("--enable_warnings")
+            .arg(enable_warnings.join(","));
+    }
+
     let output = command.output().expect("Failed to execute ir_convert");
 
     if !output.status.success() {
@@ -901,9 +976,19 @@ fn dslx2ir(
     dslx_stdlib_path: Option<&str>,
     dslx_path: Option<&str>,
     tool_path: Option<&str>,
+    enable_warnings: Option<&[String]>,
+    disable_warnings: Option<&[String]>,
 ) {
+    log::info!("dslx2ir");
     if let Some(tool_path) = tool_path {
-        let output = run_ir_converter_main(input_file, top, dslx_stdlib_path, dslx_path, tool_path);
+        let output = run_ir_converter_main(
+            input_file,
+            top,
+            dslx_stdlib_path,
+            dslx_path,
+            tool_path,
+            enable_warnings,
+        );
         println!("{}", output);
     } else {
         let dslx_contents = std::fs::read_to_string(input_file).expect("file read successful");
@@ -912,15 +997,24 @@ fn dslx2ir(
         let additional_search_paths: Vec<&std::path::Path> = dslx_path
             .map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect())
             .unwrap_or_default();
-        let output = xlsynth::convert_dslx_to_ir_text(
+        let result = xlsynth::convert_dslx_to_ir_text(
             &dslx_contents,
             input_file,
             &DslxConvertOptions {
                 dslx_stdlib_path,
                 additional_search_paths,
+                enable_warnings,
+                disable_warnings,
             },
         )
         .expect("successful conversion");
-        println!("{}", output);
+        for warning in result.warnings {
+            log::warn!(
+                "DSLX warning for {}: {}",
+                input_file.to_str().unwrap(),
+                warning
+            );
+        }
+        println!("{}", result.ir);
     }
 }

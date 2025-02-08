@@ -16,7 +16,7 @@ use std::ffi::CString;
 use ir_package::ScheduleAndCodegenResult;
 pub use ir_value::{IrBits, IrSBits, IrUBits};
 use lib_support::xls_schedule_and_codegen_package;
-use lib_support::{c_str_to_rust, xls_mangle_dslx_name, xls_optimize_ir};
+use lib_support::{c_str_to_rust, c_str_to_rust_no_dealloc, xls_mangle_dslx_name, xls_optimize_ir};
 
 pub use ir_package::IrFunction;
 pub use ir_package::IrPackage;
@@ -41,6 +41,8 @@ pub fn dslx_path_to_module_name(path: &std::path::Path) -> Result<&str, XlsynthE
 pub struct DslxConvertOptions<'a> {
     pub dslx_stdlib_path: Option<&'a std::path::Path>,
     pub additional_search_paths: Vec<&'a std::path::Path>,
+    pub enable_warnings: Option<&'a [String]>,
+    pub disable_warnings: Option<&'a [String]>,
 }
 
 impl<'a> Default for DslxConvertOptions<'a> {
@@ -48,8 +50,15 @@ impl<'a> Default for DslxConvertOptions<'a> {
         DslxConvertOptions {
             dslx_stdlib_path: None,
             additional_search_paths: vec![],
+            enable_warnings: None,
+            disable_warnings: None,
         }
     }
+}
+
+pub struct DslxToIrTextResult {
+    pub ir: String,
+    pub warnings: Vec<String>,
 }
 
 /// Converts a DSLX module's source text into an IR package. Returns the IR
@@ -61,7 +70,7 @@ pub fn convert_dslx_to_ir_text(
     dslx: &str,
     path: &std::path::Path,
     options: &DslxConvertOptions,
-) -> Result<String, XlsynthError> {
+) -> Result<DslxToIrTextResult, XlsynthError> {
     // Extract the module name from the path; e.g. "foo/bar/baz.x" -> "baz"
     let module_name = dslx_path_to_module_name(path)?;
     let path_str = path.to_str().unwrap();
@@ -85,31 +94,79 @@ pub fn convert_dslx_to_ir_text(
     let c_module_name = CString::new(module_name).unwrap();
     let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
 
-    eprintln!("dslx_stdlib_path: {:?}", dslx_stdlib_path);
-
     unsafe {
         let additional_search_paths_ptrs: Vec<*const std::os::raw::c_char> = search_paths_cstrs
             .iter()
             .map(|cstr| cstr.as_ptr())
             .collect();
 
+        let enable_warnings_cstrs = options.enable_warnings.as_ref().map(|warnings| {
+            warnings
+                .iter()
+                .map(|w| CString::new(w.as_str()).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let enable_warnings_cstrs_ptrs = enable_warnings_cstrs
+            .as_ref()
+            .map(|cstrs| cstrs.iter().map(|cstr| cstr.as_ptr()).collect::<Vec<_>>());
+        let disable_warnings_cstrs = options.disable_warnings.as_ref().map(|warnings| {
+            warnings
+                .iter()
+                .map(|w| CString::new(w.as_str()).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let disable_warnings_cstrs_ptrs = disable_warnings_cstrs
+            .as_ref()
+            .map(|cstrs| cstrs.iter().map(|cstr| cstr.as_ptr()).collect::<Vec<_>>());
+
+        let enable_warnings_ptr = enable_warnings_cstrs_ptrs
+            .as_ref()
+            .map(|ptrs| ptrs.as_ptr())
+            .unwrap_or(std::ptr::null());
+        let disable_warnings_ptr = disable_warnings_cstrs_ptrs
+            .as_ref()
+            .map(|ptrs| ptrs.as_ptr())
+            .unwrap_or(std::ptr::null());
+
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
 
+        let mut warnings_out: *mut *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut warnings_out_count: usize = 0;
+
         // Call the function
-        let success = xlsynth_sys::xls_convert_dslx_to_ir(
+        let success = xlsynth_sys::xls_convert_dslx_to_ir_with_warnings(
             dslx.as_ptr(),
             c_path.as_ptr(),
             c_module_name.as_ptr(),
             dslx_stdlib_path.as_ptr(),
             additional_search_paths_ptrs.as_ptr(),
             additional_search_paths_ptrs.len(),
+            enable_warnings_ptr,
+            enable_warnings_cstrs_ptrs.unwrap_or_default().len(),
+            disable_warnings_ptr,
+            disable_warnings_cstrs_ptrs.unwrap_or_default().len(),
+            false,
+            &mut warnings_out,
+            &mut warnings_out_count,
             &mut error_out,
             &mut ir_out,
         );
 
+        let mut warnings = Vec::new();
+        if warnings_out_count > 0 {
+            for i in 0..warnings_out_count {
+                let warning = *warnings_out.wrapping_add(i);
+                warnings.push(c_str_to_rust_no_dealloc(warning));
+            }
+        }
+        xlsynth_sys::xls_c_strs_free(warnings_out, warnings_out_count);
+
         if success {
-            return Ok(c_str_to_rust(ir_out));
+            return Ok(DslxToIrTextResult {
+                ir: c_str_to_rust(ir_out),
+                warnings,
+            });
         } else {
             let error_out_str = c_str_to_rust(error_out);
             return Err(XlsynthError(error_out_str));
@@ -133,16 +190,25 @@ pub fn xls_parse_typed_value(s: &str) -> Result<IrValue, XlsynthError> {
     }
 }
 
+pub struct DslxToIrPackageResult {
+    pub ir: IrPackage,
+    pub warnings: Vec<String>,
+}
+
 /// Converts DSLX source text into an IR package.
 pub fn convert_dslx_to_ir(
     dslx: &str,
     path: &std::path::Path,
     options: &DslxConvertOptions,
-) -> Result<IrPackage, XlsynthError> {
-    let ir_text = convert_dslx_to_ir_text(dslx, path, options)?;
+) -> Result<DslxToIrPackageResult, XlsynthError> {
+    let convert_result = convert_dslx_to_ir_text(dslx, path, options)?;
     // Get the filename as an Option<&str>
     let filename = path.file_name().and_then(|s| s.to_str());
-    IrPackage::parse_ir(&ir_text, filename)
+    let ir = IrPackage::parse_ir(&convert_result.ir, filename)?;
+    Ok(DslxToIrPackageResult {
+        ir,
+        warnings: convert_result.warnings,
+    })
 }
 
 /// Optimizes an IR package -- this produces a new IR package with the optimized
@@ -231,7 +297,7 @@ mod tests {
         )
         .expect("ir conversion should succeed");
         assert_eq!(
-            ir,
+            ir.ir,
             "package test_mod
 
 file_number 0 \"/memfile/test_mod.x\"
@@ -241,6 +307,7 @@ fn __test_mod__f(x: bits[32] id=1) -> bits[32] {
 }
 "
         );
+        assert!(ir.warnings.is_empty());
     }
 
     #[test]

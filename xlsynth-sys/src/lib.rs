@@ -222,6 +222,24 @@ extern "C" {
         ir_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
 
+    pub fn xls_convert_dslx_to_ir_with_warnings(
+        dslx: *const std::os::raw::c_char,
+        path: *const std::os::raw::c_char,
+        module_name: *const std::os::raw::c_char,
+        dslx_stdlib_path: *const std::os::raw::c_char,
+        additional_search_paths: *const *const std::os::raw::c_char,
+        additional_search_paths_count: libc::size_t,
+        enable_warnings: *const *const std::os::raw::c_char,
+        enable_warnings_count: libc::size_t,
+        disable_warnings: *const *const std::os::raw::c_char,
+        disable_warnings_count: libc::size_t,
+        warnings_as_errors: bool,
+        warnings_out: *mut *mut *mut std::os::raw::c_char,
+        warnings_out_count: *mut libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        ir_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
     pub fn xls_parse_typed_value(
         text: *const std::os::raw::c_char,
         error_out: *mut *mut std::os::raw::c_char,
@@ -264,6 +282,7 @@ extern "C" {
 
     pub fn xls_package_free(package: *mut CIrPackage);
     pub fn xls_c_str_free(c_str: *mut std::os::raw::c_char);
+    pub fn xls_c_strs_free(c_strs: *mut *mut std::os::raw::c_char, count: libc::size_t);
     pub fn xls_value_to_string(
         value: *const CIrValue,
         str_out: *mut *mut std::os::raw::c_char,

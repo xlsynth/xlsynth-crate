@@ -3,13 +3,15 @@
 Rust bindings to the functionality in the "Accelerated Hardware Synthesis" library.
 
 ```rust
-use xlsynth::{IrValue, IrPackage, IrFunction, XlsynthError};
+use xlsynth::{DslxToIrPackageResult, IrValue, IrPackage, IrFunction, XlsynthError};
 
 fn sample() -> Result<IrValue, XlsynthError> {
-    let package: IrPackage = xlsynth::convert_dslx_to_ir(
+    let converted: DslxToIrPackageResult = xlsynth::convert_dslx_to_ir(
         "fn id(x: u32) -> u32 { x }",
         std::path::Path::new("/memfile/sample.x"),
         &xlsynth::DslxConvertOptions::default())?;
+    assert!(converted.warnings.is_empty());
+    let package: IrPackage = converted.ir;
     let mangled = xlsynth::mangle_dslx_name("sample", "id")?;
     let f: IrFunction = package.get_function(&mangled)?;
     let ft: IrValue = IrValue::parse_typed("bits[32]:42")?;

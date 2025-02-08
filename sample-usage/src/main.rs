@@ -28,8 +28,16 @@ fn load_and_invoke(
     let dslx = std::fs::read_to_string(&dslx_path)?;
 
     // Convert the DSLX to IR.
-    let package =
+    let result =
         xlsynth::convert_dslx_to_ir(&dslx, dslx_path.as_path(), &DslxConvertOptions::default())?;
+    for warning in result.warnings {
+        log::warn!(
+            "DSLX warning for {}: {}",
+            dslx_path.to_str().unwrap(),
+            warning
+        );
+    }
+    let package = result.ir;
     let dslx_module_name = dslx_path.file_stem().unwrap().to_str().unwrap();
 
     // Determine what the mangled name is in the converted IR package.
