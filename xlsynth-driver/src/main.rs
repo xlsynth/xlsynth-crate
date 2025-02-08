@@ -50,7 +50,7 @@ struct ToolchainConfig {
 
     /// Additional paths to use in the DSLX module search, i.e. as roots for
     /// import statements.
-    dslx_path: Vec<String>,
+    dslx_path: Option<Vec<String>>,
 
     /// Directory path for the XLS toolset, e.g. codegen_main, opt_main, etc.
     tool_path: Option<String>,
@@ -481,7 +481,8 @@ fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Opti
     if let Some(dslx_path) = dslx_path {
         Some(dslx_path.to_string())
     } else if let Some(config) = config {
-        Some(config.dslx_path.join(";"))
+        let dslx_path = config.dslx_path.as_deref().unwrap_or(&[]);
+        Some(dslx_path.join(";"))
     } else {
         None
     }
@@ -809,7 +810,8 @@ fn dslx2pipeline(
         let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
 
         let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
-        let dslx_path = config.as_ref().and_then(|c| Some(c.dslx_path.join(":")));
+        let dslx_path_slice = config.as_ref().and_then(|c| c.dslx_path.as_deref());
+        let dslx_path = dslx_path_slice.map(|s| s.join(";"));
         let dslx_path_ref = dslx_path.as_ref().map(|s| s.as_str());
 
         let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
@@ -851,7 +853,7 @@ fn dslx2pipeline(
         log::info!("dslx2pipeline using runtime APIs");
         let dslx = std::fs::read_to_string(input_file).unwrap();
 
-        let dslx_path = config.as_ref().and_then(|c| Some(&c.dslx_path));
+        let dslx_path = config.as_ref().and_then(|c| c.dslx_path.as_deref());
         let dslx_path_vec = match dslx_path {
             Some(entries) => entries
                 .iter()

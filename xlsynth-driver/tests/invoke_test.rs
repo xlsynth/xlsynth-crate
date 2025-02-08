@@ -108,7 +108,6 @@ fn test_dslx2ir_with_toolchain_toml() {
     let toolchain_toml = format!(
         r#"[toolchain]
 dslx_stdlib_path = "{}"
-dslx_path = []
 "#,
         stdlib_dir.to_str().unwrap()
     );
@@ -220,7 +219,6 @@ fn test_dslx2pipeline_with_redundant_match_arm() {
     let toolchain_toml_contents = format!(
         r#"[toolchain]
 enable_warnings = ["already_exhaustive_match"]
-dslx_path = []
 "#
     );
     std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
@@ -258,4 +256,71 @@ dslx_path = []
         stdout,
         stderr
     );
+}
+
+#[test]
+fn test_dslx2pipeline_with_unused_binding() {
+    let dslx = "fn main() -> u32 {
+        let x = u32:42;
+        u32:64
+    }";
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    // Initial run should fail since we don't disable the warning.
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .output()
+        .expect("Failed to run xlsynth-driver");
+
+    assert!(
+        !output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is not used in function"), "stdout: {}\nstderr: {}", stdout, stderr);
+
+    // Now run again with the warning disabled via toml config.
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = format!(
+        r#"[toolchain]
+disable_warnings = ["unused_definition"]
+"#
+    );
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .output()
+        .expect("Failed to run xlsynth-driver");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    assert!(!stdout.contains("is not used in function"));
 }
