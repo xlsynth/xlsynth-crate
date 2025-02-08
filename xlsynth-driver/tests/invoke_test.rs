@@ -214,6 +214,8 @@ fn test_dslx2pipeline_with_redundant_match_arm() {
     std::fs::write(&dslx_path, dslx).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // Enable the warning explicitly in the configuration toml.
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = format!(
         r#"[toolchain]
