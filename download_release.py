@@ -11,15 +11,23 @@ from optparse import OptionParser
 GITHUB_API_URL = "https://api.github.com/repos/xlsynth/xlsynth/releases"
 SUPPORTED_PLATFORMS = ["ubuntu2004", "ubuntu2204", "rocky8", "arm64", "x64"]
 
+def get_headers():
+    """
+    Returns a dictionary of HTTP headers to use in requests.
+    If the GH_PAT environment variable is set, it adds the token for authentication.
+    """
+    gh_pat = os.getenv('GH_PAT')
+    if gh_pat:
+        return {"Authorization": f"token {gh_pat}"}
+    return {}
 
 def get_latest_release():
     print("Discovering the latest release version...")
-    response = requests.get(f"{GITHUB_API_URL}/latest")
+    response = requests.get(f"{GITHUB_API_URL}/latest", headers=get_headers())
     response.raise_for_status()
     latest_version = response.json()["tag_name"]
     print(f"Latest version discovered: {latest_version}")
     return latest_version
-
 
 def high_integrity_download(base_url, filename, target_dir, is_binary=False, platform=None):
     print(f"Starting download of {filename}...")
@@ -32,14 +40,16 @@ def high_integrity_download(base_url, filename, target_dir, is_binary=False, pla
         sha256_path = os.path.join(temp_dir, f"{filename}.sha256")
         artifact_path = os.path.join(temp_dir, filename)
 
+        headers = get_headers()
+
         # Download SHA256 file
-        with requests.get(sha256_url, stream=True) as r:
+        with requests.get(sha256_url, stream=True, headers=headers) as r:
             r.raise_for_status()
             with open(sha256_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
         # Download the artifact
-        with requests.get(artifact_url, stream=True) as r:
+        with requests.get(artifact_url, stream=True, headers=headers) as r:
             r.raise_for_status()
             with open(artifact_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
@@ -73,7 +83,6 @@ def high_integrity_download(base_url, filename, target_dir, is_binary=False, pla
         elapsed_time = time.time() - start_time
         file_size = os.path.getsize(target_path) / (1024 * 1024)  # Size in MiB
         print(f"Downloaded {target_filename}: {file_size:.2f} MiB in {elapsed_time:.2f} seconds")
-
 
 def main():
     parser = OptionParser()
@@ -109,7 +118,6 @@ def main():
     stdlib_filename = "dslx_stdlib.tar.gz"
     high_integrity_download(base_url, stdlib_filename, options.output_dir, is_binary=False)
     shutil.unpack_archive(os.path.join(options.output_dir, stdlib_filename), options.output_dir)
-
 
 if __name__ == "__main__":
     main()
