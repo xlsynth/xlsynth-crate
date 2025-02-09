@@ -59,7 +59,7 @@ jobs:
 
       - name: Download xlsynth binaries
         run: |
-          python3 download_xlsynth_latest.py ubuntu2204 xlsynth_tools
+          python3 download_release.py -p ubuntu2204 -o xlsynth_tools
 
       - name: Download Slang
         run: |
@@ -108,7 +108,7 @@ jobs:
 
       - name: Download xlsynth binaries
         run: |
-          python3 download_xlsynth_latest.py ubuntu2004 xlsynth_tools
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
       - name: Install protobuf compiler
         run: |
@@ -161,7 +161,7 @@ jobs:
 
       - name: Download xlsynth binaries
         run: |
-          python3 download_xlsynth_latest.py x64 xlsynth_tools
+          python3 download_release.py -p arm64 -o xlsynth_tools
 
       - name: Install protobuf compiler
         run: |
@@ -214,7 +214,7 @@ jobs:
 
       - name: Download xlsynth binaries
         run: |
-          python3 download_xlsynth_latest.py rocky8 xlsynth_tools
+          python3 download_release.py -p rocky8 -o xlsynth_tools
 
       - name: Install protobuf compiler
         run: |
