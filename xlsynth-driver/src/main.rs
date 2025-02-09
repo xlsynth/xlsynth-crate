@@ -676,8 +676,8 @@ fn ir2pipeline(
 }
 
 /// Runs the IR optimization command line tool and returns the output.
-fn run_opt_main(input_file: &std::path::Path, top: Option<&str>, tool_path: &str) -> String {
-    log::info!("run_opt_main");
+fn run_opt_main(input_file: &std::path::Path, ir_top: Option<&str>, tool_path: &str) -> String {
+    log::info!("run_opt_main; ir_top: {:?}", ir_top);
     let opt_main_path = format!("{}/opt_main", tool_path);
     if !std::path::Path::new(&opt_main_path).exists() {
         eprintln!("IR optimization tool not found at: {}", opt_main_path);
@@ -686,8 +686,8 @@ fn run_opt_main(input_file: &std::path::Path, top: Option<&str>, tool_path: &str
 
     let mut command = Command::new(opt_main_path);
     command.arg(input_file);
-    if top.is_some() {
-        command.arg("--top").arg(top.unwrap());
+    if ir_top.is_some() {
+        command.arg("--top").arg(ir_top.unwrap());
     }
 
     let output = command.output().expect("Failed to execute IR optimization");
@@ -795,19 +795,20 @@ fn dslx2sv_types(
 /// named `top` into a Verilog pipeline and prints that to stdout.
 fn dslx2pipeline(
     input_file: &std::path::Path,
-    top: &str,
+    dslx_top: &str,
     pipeline_spec: &PipelineSpec,
     codegen_flags: &CodegenFlags,
     delay_model: &str,
     keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
 ) {
-    log::info!("dslx2pipeline");
+    let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
+    let ir_top = xlsynth::mangle_dslx_name(module_name, dslx_top).unwrap();
+    log::info!("dslx2pipeline; dslx_top: {}; ir_top: {}", dslx_top, ir_top);
+
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         log::info!("dslx2pipeline using tool path: {}", tool_path);
         let temp_dir = tempfile::TempDir::new().unwrap();
-
-        let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
 
         let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
         let dslx_path_slice = config.as_ref().and_then(|c| c.dslx_path.as_deref());
@@ -818,7 +819,7 @@ fn dslx2pipeline(
         let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
         let unopt_ir = run_ir_converter_main(
             input_file,
-            Some(top),
+            Some(dslx_top),
             dslx_stdlib_path,
             dslx_path_ref,
             tool_path,
@@ -827,8 +828,6 @@ fn dslx2pipeline(
         );
         let unopt_ir_path = temp_dir.path().join("unopt.ir");
         std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
-
-        let ir_top = xlsynth::mangle_dslx_name(module_name, top).unwrap();
 
         let opt_ir = run_opt_main(&unopt_ir_path, Some(&ir_top), tool_path);
         let opt_ir_path = temp_dir.path().join("opt.ir");
@@ -899,7 +898,7 @@ fn dslx2pipeline(
             );
         }
 
-        let opt_ir = xlsynth::optimize_ir(&convert_result.ir, top).unwrap();
+        let opt_ir = xlsynth::optimize_ir(&convert_result.ir, &ir_top).unwrap();
 
         let mut sched_opt_lines = vec![format!("delay_model: \"{}\"", delay_model)];
         match pipeline_spec {
@@ -929,14 +928,18 @@ fn dslx2pipeline(
 /// Runs the IR converter command line tool and returns the output.
 fn run_ir_converter_main(
     input_file: &std::path::Path,
-    top: Option<&str>,
+    dslx_top: Option<&str>,
     dslx_stdlib_path: Option<&str>,
     dslx_path: Option<&str>,
     tool_path: &str,
     enable_warnings: Option<&[String]>,
     disable_warnings: Option<&[String]>,
 ) -> String {
-    log::info!("run_ir_converter_main");
+    log::info!(
+        "run_ir_converter_main; enable_warnings: {:?}; disable_warnings: {:?}",
+        enable_warnings,
+        disable_warnings
+    );
     let ir_convert_path = format!("{}/ir_converter_main", tool_path);
     if !std::path::Path::new(&ir_convert_path).exists() {
         eprintln!("IR conversion tool not found at: {}", ir_convert_path);
@@ -946,8 +949,8 @@ fn run_ir_converter_main(
     let mut command = Command::new(ir_convert_path);
     command.arg(input_file);
 
-    if let Some(top) = top {
-        command.arg("--top").arg(top);
+    if let Some(dslx_top) = dslx_top {
+        command.arg("--top").arg(dslx_top);
     }
 
     if let Some(dslx_stdlib_path) = dslx_stdlib_path {
@@ -970,6 +973,7 @@ fn run_ir_converter_main(
             .arg(disable_warnings.join(","));
     }
 
+    log::info!("command: {:?}", command);
     let output = command.output().expect("Failed to execute ir_convert");
 
     if !output.status.success() {
@@ -978,12 +982,14 @@ fn run_ir_converter_main(
         process::exit(1);
     }
 
-    String::from_utf8_lossy(&output.stdout).to_string()
+    let ir_text = String::from_utf8_lossy(&output.stdout).to_string();
+    log::info!("ir_text: {}", ir_text);
+    ir_text
 }
 
 fn dslx2ir(
     input_file: &std::path::Path,
-    top: Option<&str>,
+    dslx_top: Option<&str>,
     dslx_stdlib_path: Option<&str>,
     dslx_path: Option<&str>,
     tool_path: Option<&str>,
@@ -994,7 +1000,7 @@ fn dslx2ir(
     if let Some(tool_path) = tool_path {
         let output = run_ir_converter_main(
             input_file,
-            top,
+            dslx_top,
             dslx_stdlib_path,
             dslx_path,
             tool_path,
