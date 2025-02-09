@@ -217,8 +217,7 @@ jobs:
 
       - name: Download xlsynth binaries
         run: |
-          python -V  # Print the python version.
-          dnf install -y python3
+          dnf install -y python3 python3-pip
           python3 -V  # Print the python3 version.
           pip3 install requests
           python3 download_release.py -p rocky8 -o xlsynth_tools
