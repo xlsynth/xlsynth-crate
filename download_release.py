@@ -21,10 +21,32 @@ def get_headers():
         return {"Authorization": f"token {gh_pat}"}
     return {}
 
+def request_with_retry(url, stream, headers, max_attempts=4):
+    """
+    Attempts to send a GET request to a given URL with exponential backoff.
+    Retries up to max_attempts times.
+    """
+    attempt = 0
+    delay = 1  # initial delay in seconds
+    while attempt < max_attempts:
+        attempt += 1
+        try:
+            response = requests.get(url, stream=stream, headers=headers)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            if attempt == max_attempts:
+                print(f"All {max_attempts} attempts failed for {url}")
+                raise
+            else:
+                print(f"Attempt {attempt} failed for {url}. Error: {e}. Retrying in {delay} seconds...")
+                time.sleep(delay)
+                delay *= 2  # exponential backoff
+
 def get_latest_release():
     print("Discovering the latest release version...")
-    response = requests.get(f"{GITHUB_API_URL}/latest", headers=get_headers())
-    response.raise_for_status()
+    print("PAT present? ", os.getenv('GH_PAT') is not None)
+    response = request_with_retry(f"{GITHUB_API_URL}/latest", stream=False, headers=get_headers())
     latest_version = response.json()["tag_name"]
     print(f"Latest version discovered: {latest_version}")
     return latest_version
@@ -42,15 +64,13 @@ def high_integrity_download(base_url, filename, target_dir, is_binary=False, pla
 
         headers = get_headers()
 
-        # Download SHA256 file
-        with requests.get(sha256_url, stream=True, headers=headers) as r:
-            r.raise_for_status()
+        # Download SHA256 file with retry support
+        with request_with_retry(sha256_url, stream=True, headers=headers) as r:
             with open(sha256_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
-        # Download the artifact
-        with requests.get(artifact_url, stream=True, headers=headers) as r:
-            r.raise_for_status()
+        # Download the artifact with retry support
+        with request_with_retry(artifact_url, stream=True, headers=headers) as r:
             with open(artifact_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
