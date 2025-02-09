@@ -2,17 +2,42 @@
 
 use std::process::Command;
 
+use test_case::test_case;
+
+fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
+    let tool_path = std::env::var("XLSYNTH_TOOLS").unwrap();
+    format!(
+        "{}
+tool_path = \"{}\"",
+        toolchain_toml_contents, tool_path
+    )
+}
+
 /// Simple test that converts a DSLX module with an enum into a SV definition.
-#[test]
-fn test_dslx2sv_types_subcommand() {
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_dslx2sv_types_subcommand(use_tool_path: bool) {
     let dslx = "enum OpType : u2 { READ = 0, WRITE = 1 }";
     // Make a temporary file to hold the DSLX code.
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("my_module.x");
     std::fs::write(&dslx_path, dslx).unwrap();
+
     // Run the dslx2sv subcommand.
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml = "[toolchain]\n";
+    let toolchain_toml_path = if use_tool_path {
+        add_tool_path_value(&toolchain_toml)
+    } else {
+        toolchain_toml.to_string()
+    };
+    std::fs::write(&toolchain_path, toolchain_toml_path).unwrap();
+
     let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
         .arg("dslx2sv-types")
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
@@ -80,10 +105,11 @@ typedef struct packed {
     );
 }
 
-/// Tests that we can point at a xlsynth-toolchain.toml file to get a DSLX_PATH
-/// value.
-#[test]
-fn test_dslx2ir_with_toolchain_toml() {
+/// Tests that we can point at a xlsynth-toolchain.toml file to get
+/// an alternative DSLX stdlib implementation.
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_dslx2ir_with_toolchain_toml(use_tool_path: bool) {
     let dslx = "import std; fn main(x: u32) -> u32 { std::popcount(x) }";
     let fake_std = "pub fn popcount(x: u32) -> u32 { x }";
     // Get a temporary directory to use as a root.
@@ -111,7 +137,12 @@ dslx_stdlib_path = "{}"
 "#,
         stdlib_dir.to_str().unwrap()
     );
-    std::fs::write(&toolchain_path, toolchain_toml).unwrap();
+    let toolchain_toml_path = if use_tool_path {
+        add_tool_path_value(&toolchain_toml)
+    } else {
+        toolchain_toml
+    };
+    std::fs::write(&toolchain_path, toolchain_toml_path).unwrap();
 
     // Run the dslx2ir subcommand.
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
@@ -122,7 +153,7 @@ dslx_stdlib_path = "{}"
         .arg("--dslx_input_file")
         .arg(client_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(xlsynth::mangle_dslx_name("client", "main").unwrap())
+        .arg("main")
         .output()
         .expect("Failed to run xlsynth-driver");
 
@@ -174,7 +205,7 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .arg("main")
         .output()
         .expect("Failed to run xlsynth-driver");
 
@@ -196,8 +227,9 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
 
 // To get the redundant match arm to flag a warning we have to enable a
 // non-default warning as of DSO v0.0.134.
-#[test]
-fn test_dslx2pipeline_with_redundant_match_arm() {
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_dslx2pipeline_with_redundant_match_arm(use_tool_path: bool) {
     let _ = env_logger::try_init();
     log::info!("test_dslx2pipeline_with_redundant_match_arm");
     let dslx = "fn main(x: bool) -> u32 {
@@ -221,7 +253,12 @@ fn test_dslx2pipeline_with_redundant_match_arm() {
 enable_warnings = ["already_exhaustive_match"]
 "#
     );
-    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+    let toolchain_toml_path = if use_tool_path {
+        add_tool_path_value(&toolchain_toml_contents)
+    } else {
+        toolchain_toml_contents
+    };
+    std::fs::write(&toolchain_toml, toolchain_toml_path).unwrap();
 
     let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
     let output = Command::new(command_path)
@@ -235,7 +272,7 @@ enable_warnings = ["already_exhaustive_match"]
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .arg("main")
         .env("RUST_LOG", rust_log)
         .output()
         .expect("Failed to run xlsynth-driver");
@@ -258,20 +295,37 @@ enable_warnings = ["already_exhaustive_match"]
     );
 }
 
-#[test]
-fn test_dslx2pipeline_with_unused_binding() {
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_dslx2pipeline_with_unused_binding(use_tool_path: bool) {
+    let _ = env_logger::try_init();
+    log::info!("test_dslx2pipeline_with_unused_binding");
+
     let dslx = "fn main() -> u32 {
-        let x = u32:42;
-        u32:64
-    }";
+    let x = u32:42;  // unused_definition
+    for (i, accum) in u32:0..u32:0 {  // empty_range_literal
+        accum
+    }(u32:64)
+}";
 
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("my_module.x");
     std::fs::write(&dslx_path, dslx).unwrap();
 
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml = "[toolchain]\n";
+    let toolchain_toml_contents = if use_tool_path {
+        add_tool_path_value(&toolchain_toml)
+    } else {
+        toolchain_toml.to_string()
+    };
+    std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
     // Initial run should fail since we don't disable the warning.
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
     let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
         .arg("dslx2pipeline")
         .arg("--pipeline_stages")
         .arg("1")
@@ -280,7 +334,8 @@ fn test_dslx2pipeline_with_unused_binding() {
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .arg("main")
+        .env("RUST_LOG", &rust_log)
         .output()
         .expect("Failed to run xlsynth-driver");
 
@@ -292,6 +347,8 @@ fn test_dslx2pipeline_with_unused_binding() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
     assert!(
         stderr.contains("is not used in function"),
         "stdout: {}\nstderr: {}",
@@ -300,14 +357,19 @@ fn test_dslx2pipeline_with_unused_binding() {
     );
 
     // Now run again with the warning disabled via toml config.
+    // Also use the tool path instead of the runtime APIs.
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
-    let toolchain_toml_contents = format!(
-        r#"[toolchain]
-disable_warnings = ["unused_definition"]
-"#
-    );
-    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+    let toolchain_toml_contents = r#"[toolchain]
+disable_warnings = ["unused_definition", "empty_range_literal"]
+"#;
+    let toolchain_toml_path = if use_tool_path {
+        add_tool_path_value(&toolchain_toml_contents)
+    } else {
+        toolchain_toml_contents.to_string()
+    };
+    std::fs::write(&toolchain_toml, toolchain_toml_path).unwrap();
 
+    log::info!("running again with warnings disabled...");
     let output = Command::new(command_path)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
@@ -319,12 +381,15 @@ disable_warnings = ["unused_definition"]
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(xlsynth::mangle_dslx_name("my_module", "main").unwrap())
+        .arg("main")
+        .env("RUST_LOG", &rust_log)
         .output()
         .expect("Failed to run xlsynth-driver");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
 
     assert!(
         output.status.success(),
@@ -335,8 +400,9 @@ disable_warnings = ["unused_definition"]
     assert!(!stdout.contains("is not used in function"));
 }
 
-#[test]
-fn test_dslx2pipeline_with_dslx_path_two_entries() {
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_dslx2pipeline_with_dslx_path_two_entries(use_tool_path: bool) {
     let temp_dir = tempfile::tempdir().unwrap();
 
     // Make dir `a` and `b` in the temp dir.
@@ -356,13 +422,17 @@ fn test_dslx2pipeline_with_dslx_path_two_entries() {
     let main_path = temp_dir.path().join("main.x");
     std::fs::write(
         &main_path,
-        "import a; import b; fn main() -> u32 { a::A + b::B }",
+        "import a;
+import b;
+fn main() -> u32 { a::A + b::B }",
     )
     .unwrap();
 
     // Run the dslx2pipeline command with the DSLX_PATH set to `a:b` via the
     // toolchain config.
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // Write out toolchain configuration.
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = format!(
         r#"[toolchain]
@@ -371,8 +441,14 @@ dslx_path = ["{}", "{}"]
         a_dir.to_str().unwrap(),
         b_dir.to_str().unwrap()
     );
+    let toolchain_toml_contents = if use_tool_path {
+        add_tool_path_value(&toolchain_toml_contents)
+    } else {
+        toolchain_toml_contents
+    };
     std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
 
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
     let output = Command::new(command_path)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
@@ -384,12 +460,15 @@ dslx_path = ["{}", "{}"]
         .arg("--dslx_input_file")
         .arg(main_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(xlsynth::mangle_dslx_name("main", "main").unwrap())
+        .arg("main")
+        .env("RUST_LOG", rust_log)
         .output()
         .expect("xlsynth-driver should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
     assert!(
         stdout.contains("06a"),
         "stdout: {} stderr: {}",

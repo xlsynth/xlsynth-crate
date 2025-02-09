@@ -57,6 +57,11 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v2
 
+      - name: Download xlsynth binaries
+        run: |
+          pip3 install requests
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools
+
       - name: Download Slang
         run: |
           # We use the rocky8 binary for these systems since it has an easier requirements for glibc
@@ -88,6 +93,7 @@ jobs:
         run: |
           cargo clean
           export SLANG_PATH=`realpath slang`
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
 
   # -----------------------------------------------------------
@@ -100,6 +106,11 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v2
+
+      - name: Download xlsynth binaries
+        run: |
+          pip3 install requests
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
       - name: Install protobuf compiler
         run: |
@@ -136,6 +147,7 @@ jobs:
       - name: Test crate
         run: |
           cargo clean
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
 
   # -----------------------------------------------------------
@@ -148,6 +160,14 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v2
+
+      - name: Download xlsynth binaries
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          python3 -V  # Print the python3 version.
+          pip3 install --break-system-packages requests
+          python3 download_release.py -p arm64 -o xlsynth_tools
 
       - name: Install protobuf compiler
         run: |
@@ -183,6 +203,7 @@ jobs:
       - name: Test crate
         run: |
           cargo clean
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
 
   # -----------------------------------------------------------
@@ -196,6 +217,13 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v2
+
+      - name: Download xlsynth binaries
+        run: |
+          dnf install -y python3 python3-pip
+          python3 -V  # Print the python3 version.
+          pip3 install requests
+          python3 download_release.py -p rocky8 -o xlsynth_tools
 
       - name: Install protobuf compiler
         run: |
@@ -231,4 +259,5 @@ jobs:
           source $HOME/.cargo/env
           cargo clean
           export SLANG_PATH=`realpath slang`
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace

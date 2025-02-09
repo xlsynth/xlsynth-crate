@@ -21,6 +21,7 @@ log = "0.4"
 
 [dev-dependencies]
 test-helpers = { path = "../test-helpers" }
+test-case = "3.3.1"
 
 [build-dependencies]
 prost-build = "0.12"
