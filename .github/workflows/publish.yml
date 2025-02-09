@@ -24,6 +24,14 @@ jobs:
         # Now invoke the Python script, passing the version.
         python check_version_is.py "$VERSION"
 
+    - name: Download xlsynth binaries
+      env:
+        GH_PAT: ${{ secrets.GH_PAT }}
+      run: |
+        python3 -V  # Print the python3 version.
+        pip3 install --break-system-packages requests
+        python3 download_release.py -p arm64 -o xlsynth_tools
+
     - name: Install protobuf compiler
       run: |
         wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
@@ -56,7 +64,9 @@ jobs:
           ${{ runner.os }}-cargo-index-
 
     - name: Build and test
-      run: cargo test --workspace --verbose
+      run: |
+        export XLSYNTH_TOOLS=`realpath xlsynth_tools`
+        cargo test --workspace
 
     - name: Publish xlsynth-sys to crates.io
       env:
