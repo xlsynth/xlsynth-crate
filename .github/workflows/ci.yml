@@ -93,7 +93,7 @@ jobs:
         run: |
           cargo clean
           export SLANG_PATH=`realpath slang`
-          export XLSYNTH_TOOLS_PATH=`realpath xlsynth_tools`
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
 
   # -----------------------------------------------------------
@@ -147,7 +147,7 @@ jobs:
       - name: Test crate
         run: |
           cargo clean
-          export XLSYNTH_TOOLS_PATH=`realpath xlsynth_tools`
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
 
   # -----------------------------------------------------------
@@ -201,7 +201,7 @@ jobs:
       - name: Test crate
         run: |
           cargo clean
-          export XLSYNTH_TOOLS_PATH=`realpath xlsynth_tools`
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
 
   # -----------------------------------------------------------
@@ -257,5 +257,5 @@ jobs:
           source $HOME/.cargo/env
           cargo clean
           export SLANG_PATH=`realpath slang`
-          export XLSYNTH_TOOLS_PATH=`realpath xlsynth_tools`
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace

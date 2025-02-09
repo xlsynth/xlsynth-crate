@@ -5,7 +5,7 @@ use std::process::Command;
 use test_case::test_case;
 
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
-    let tool_path = std::env::var("XLSYNTH_TOOL_PATH").unwrap();
+    let tool_path = std::env::var("XLSYNTH_TOOLS").unwrap();
     format!(
         "{}
 tool_path = \"{}\"",
