@@ -5,7 +5,8 @@ use std::process::Command;
 use test_case::test_case;
 
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
-    let tool_path = std::env::var("XLSYNTH_TOOLS").unwrap();
+    let tool_path =
+        std::env::var("XLSYNTH_TOOLS").expect("XLSYNTH_TOOLS environment variable must be set");
     format!(
         "{}
 tool_path = \"{}\"",
