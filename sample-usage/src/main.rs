@@ -96,6 +96,14 @@ fn validate_fail() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+fn validate_use() -> Result<(), Box<dyn std::error::Error>> {
+    let file = "src/sample_with_use.x";
+    let result = load_and_invoke(file, "main")?;
+    let want = xlsynth::IrValue::parse_typed("bits[32]:4294967295")?;
+    assert_eq!(result, want);
+    Ok(())
+}
+
 /// Validates that we can convert an enum value that we generated using the
 /// bridge into an IR value.
 fn validate_passing_generated_enum() -> Result<(), Box<dyn std::error::Error>> {
@@ -144,5 +152,11 @@ mod tests {
     fn test_validate_fail() {
         let _ = env_logger::try_init();
         validate_fail().expect("validation should succeed");
+    }
+
+    #[test]
+    fn test_validate_use() {
+        let _ = env_logger::try_init();
+        validate_use().expect("validation should succeed");
     }
 }
