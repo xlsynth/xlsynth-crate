@@ -31,3 +31,7 @@ harness = false
 [[bench]]
 name = "build_f32_tuple"
 harness = false
+
+[[bench]]
+name = "bits_ops"
+harness = false

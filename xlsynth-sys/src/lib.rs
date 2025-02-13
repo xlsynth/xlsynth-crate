@@ -296,6 +296,20 @@ extern "C" {
     // Boxes an IR bits object into an IR value.
     pub fn xls_value_from_bits(bits: *const CIrBits) -> *mut CIrValue;
 
+    pub fn xls_bits_make_ubits(
+        bit_count: i64,
+        value: u64,
+        error_out: *mut *mut std::os::raw::c_char,
+        bits_out: *mut *mut CIrBits,
+    ) -> bool;
+
+    pub fn xls_bits_make_sbits(
+        bit_count: i64,
+        value: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        bits_out: *mut *mut CIrBits,
+    ) -> bool;
+
     pub fn xls_bits_free(bits: *mut CIrBits);
     pub fn xls_bits_get_bit_count(bits: *const CIrBits) -> i64;
     pub fn xls_bits_get_bit(bits: *const CIrBits, index: i64) -> bool;
