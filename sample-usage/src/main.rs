@@ -130,6 +130,9 @@ fn main() {
 
     validate_all_threads_compute_add1();
     println!("multi-threaded validation complete");
+
+    validate_use().expect("use validation should work");
+    println!("use validation complete");
 }
 
 #[cfg(test)]
