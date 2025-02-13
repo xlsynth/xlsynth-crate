@@ -19,11 +19,10 @@ lazy_static! {
             std::path::Path::new("/memfile/make_f32.x"),
             &xlsynth::DslxConvertOptions::default(),
         )
-        .expect("convert_dslx_to_ir failed");
+        .unwrap();
         let package: xlsynth::IrPackage = convert_result.ir;
-        let mangled =
-            xlsynth::mangle_dslx_name("make_f32", "make_f32").expect("mangle_dslx_name failed");
-        let function = package.get_function(&mangled).expect("get_function failed");
+        let mangled = xlsynth::mangle_dslx_name("make_f32", "make_f32").unwrap();
+        let function = package.get_function(&mangled).unwrap();
         function
     };
 }
@@ -39,7 +38,7 @@ fn bench_call_dslx(c: &mut Criterion) {
         let frac = IrValue::make_ubits(23, 0).unwrap();
         let args = vec![s, bexp, frac];
         b.iter(|| {
-            let result: IrValue = MAKE_F32.interpret(&args).expect("call should succeed");
+            let result: IrValue = MAKE_F32.interpret(&args).unwrap();
             black_box(result);
         });
     });
