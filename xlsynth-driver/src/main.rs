@@ -279,14 +279,15 @@ fn main() {
     let toml_path = matches.get_one::<String>("toolchain");
     let toml_value: Option<toml::Value> = toml_path.map(|path| {
         // If we got a toolchain toml file, read/parse it.
-        let toml_str = std::fs::read_to_string(path).expect("Failed to read toolchain toml file");
-        toml::from_str(&toml_str).expect("Failed to parse toolchain toml file")
+        let toml_str =
+            std::fs::read_to_string(path).expect("read toolchain toml file should succeed");
+        toml::from_str(&toml_str).expect("parse toolchain toml file should succeed")
     });
     let config = toml_value.map(|v| {
-        let toolchain_config = v
-            .clone()
-            .try_into::<XlsynthToolchain>()
-            .expect(&format!("Failed to parse toolchain config; value: {}", v));
+        let toolchain_config = v.clone().try_into::<XlsynthToolchain>().expect(&format!(
+            "parse toolchain config should succeed; value: {}",
+            v
+        ));
         toolchain_config.toolchain
     });
 

@@ -40,7 +40,7 @@ pub fn run_codegen_pipeline(
     log::info!("Running command: {:?}", command);
 
     // We run the codegen_main tool on the given input file.
-    let output = command.output().expect("Failed to execute codegen_main");
+    let output = command.output().expect("codegen_main should succeed");
 
     if !output.status.success() {
         eprintln!("Pipeline generation failed with status: {}", output.status);
@@ -66,7 +66,7 @@ pub fn run_opt_main(input_file: &std::path::Path, ir_top: Option<&str>, tool_pat
         command.arg("--top").arg(ir_top.unwrap());
     }
 
-    let output = command.output().expect("Failed to execute IR optimization");
+    let output = command.output().expect("opt_main should succeed");
 
     if !output.status.success() {
         eprintln!("IR optimization failed with status: {}", output.status);
@@ -126,7 +126,7 @@ pub fn run_ir_converter_main(
     }
 
     log::info!("command: {:?}", command);
-    let output = command.output().expect("Failed to execute ir_convert");
+    let output = command.output().expect("ir_converter_main should succeed");
 
     if !output.status.success() {
         eprintln!("IR conversion failed with status: {}", output.status);

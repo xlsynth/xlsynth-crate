@@ -79,7 +79,7 @@ fn validate_fail() -> Result<(), Box<dyn std::error::Error>> {
     let result = load_and_invoke(file, "always_fail");
     match result {
         Ok(_) => Err(Box::new(xlsynth::XlsynthError(
-            "expected function to fail".to_string(),
+            "expected function call to fail".to_string(),
         ))),
         Err(e) => {
             if e.to_string()

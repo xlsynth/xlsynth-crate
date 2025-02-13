@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-estimator"
-version = "0.0.71"
+version = "0.0.72"
 edition = "2021"
 
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]

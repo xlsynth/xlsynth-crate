@@ -43,7 +43,7 @@ fn test_dslx2sv_types_subcommand(use_tool_path: bool) {
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .output()
-        .expect("Failed to run xlsynth-driver");
+        .unwrap();
 
     assert!(
         output.status.success(),
@@ -84,7 +84,7 @@ struct MyStruct {
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .output()
-        .expect("Failed to run xlsynth-driver");
+        .unwrap();
 
     assert!(
         output.status.success(),
@@ -156,7 +156,7 @@ dslx_stdlib_path = "{}"
         .arg("--dslx_top")
         .arg("main")
         .output()
-        .expect("Failed to run xlsynth-driver");
+        .unwrap();
 
     assert!(
         output.status.success(),
@@ -208,7 +208,7 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
         .arg("--dslx_top")
         .arg("main")
         .output()
-        .expect("Failed to run xlsynth-driver");
+        .unwrap();
 
     assert!(
         output.status.success(),
@@ -276,7 +276,7 @@ enable_warnings = ["already_exhaustive_match"]
         .arg("main")
         .env("RUST_LOG", rust_log)
         .output()
-        .expect("Failed to run xlsynth-driver");
+        .unwrap();
 
     // Check that the output shows the warning and that the return code is
     // non-success because we have warnings-as-errors on.
@@ -338,7 +338,7 @@ fn test_dslx2pipeline_with_unused_binding(use_tool_path: bool) {
         .arg("main")
         .env("RUST_LOG", &rust_log)
         .output()
-        .expect("Failed to run xlsynth-driver");
+        .unwrap();
 
     assert!(
         !output.status.success(),
@@ -385,7 +385,7 @@ disable_warnings = ["unused_definition", "empty_range_literal"]
         .arg("main")
         .env("RUST_LOG", &rust_log)
         .output()
-        .expect("Failed to run xlsynth-driver");
+        .unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
