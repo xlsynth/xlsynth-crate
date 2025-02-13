@@ -97,9 +97,10 @@ impl BridgeBuilder for RustBridgeBuilder {
         for (member_name, value) in members.iter() {
             let value_str = value_to_string(value)?;
             self.lines.push(format!(
-                "            {}::{} => IrValue::make_bits({}, {}).unwrap(),",
+                "            {}::{} => IrValue::make_{}bits({}, {}).unwrap(),",
                 dslx_name,
                 member_name,
+                if is_signed { "s" } else { "u" },
                 value.bit_count(),
                 value_str
             ));
