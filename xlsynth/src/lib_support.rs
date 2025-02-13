@@ -86,10 +86,117 @@ pub(crate) fn xls_value_to_string(p: *mut CIrValue) -> Result<String, XlsynthErr
     }
 }
 
+pub(crate) fn xls_value_get_element(
+    p: *mut CIrValue,
+    index: usize,
+) -> Result<IrValue, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut element_out: *mut CIrValue = std::ptr::null_mut();
+        let success =
+            xlsynth_sys::xls_value_get_element(p, index, &mut error_out, &mut element_out);
+        if success {
+            return Ok(IrValue { ptr: element_out });
+        }
+        let error_out_str: String = c_str_to_rust(error_out);
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+pub(crate) fn xls_value_get_element_count(p: *const CIrValue) -> Result<usize, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut count: i64 = 0;
+        let success = xlsynth_sys::xls_value_get_element_count(p, &mut error_out, &mut count);
+        if success {
+            return Ok(count as usize);
+        }
+        let error_out_str: String = c_str_to_rust(error_out);
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+pub(crate) fn xls_value_make_ubits(value: u64, bit_count: usize) -> Result<IrValue, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut result: *mut CIrValue = std::ptr::null_mut();
+        let success =
+            xlsynth_sys::xls_value_make_ubits(bit_count as i64, value, &mut error_out, &mut result);
+        if success {
+            return Ok(IrValue { ptr: result });
+        }
+        let error_out_str: String = c_str_to_rust(error_out);
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+pub(crate) fn xls_value_make_sbits(value: i64, bit_count: usize) -> Result<IrValue, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut result: *mut CIrValue = std::ptr::null_mut();
+        let success =
+            xlsynth_sys::xls_value_make_sbits(bit_count as i64, value, &mut error_out, &mut result);
+        if success {
+            return Ok(IrValue { ptr: result });
+        }
+        let error_out_str: String = c_str_to_rust(error_out);
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+pub(crate) fn xls_value_make_tuple(elements: &[IrValue]) -> IrValue {
+    unsafe {
+        // The C API call takes ownership of the elements that are in the array.
+        let elements_ptrs: Vec<*mut CIrValue> = elements
+            .iter()
+            .map(|v| -> *mut CIrValue { xlsynth_sys::xls_value_clone(v.ptr) })
+            .collect();
+        let result = xlsynth_sys::xls_value_make_tuple(elements_ptrs.len(), elements_ptrs.as_ptr());
+        assert!(!result.is_null());
+        IrValue { ptr: result }
+    }
+}
+
 pub(crate) fn xls_bits_to_debug_str(p: *const CIrBits) -> String {
     unsafe {
         let c_str_out = xlsynth_sys::xls_bits_to_debug_string(p);
         return c_str_to_rust(c_str_out);
+    }
+}
+
+pub(crate) fn xls_bits_make_ubits(bit_count: usize, value: u64) -> Result<IrBits, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut bits_out: *mut CIrBits = std::ptr::null_mut();
+        let success = xlsynth_sys::xls_bits_make_ubits(
+            bit_count as i64,
+            value,
+            &mut error_out,
+            &mut bits_out,
+        );
+        if success {
+            return Ok(IrBits { ptr: bits_out });
+        }
+        let error_out_str: String = c_str_to_rust(error_out);
+        return Err(XlsynthError(error_out_str));
+    }
+}
+
+pub(crate) fn xls_bits_make_sbits(bit_count: usize, value: i64) -> Result<IrBits, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut bits_out: *mut CIrBits = std::ptr::null_mut();
+        let success = xlsynth_sys::xls_bits_make_sbits(
+            bit_count as i64,
+            value,
+            &mut error_out,
+            &mut bits_out,
+        );
+        if success {
+            return Ok(IrBits { ptr: bits_out });
+        }
+        let error_out_str: String = c_str_to_rust(error_out);
+        return Err(XlsynthError(error_out_str));
     }
 }
 

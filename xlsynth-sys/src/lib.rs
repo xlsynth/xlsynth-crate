@@ -247,13 +247,68 @@ extern "C" {
     ) -> bool;
     pub fn xls_value_free(value: *mut CIrValue);
 
+    pub fn xls_value_clone(value: *const CIrValue) -> *mut CIrValue;
+
+    // Extracts a bits value from a (boxed) value or gives an error.
     pub fn xls_value_get_bits(
         value: *const CIrValue,
         error_out: *mut *mut std::os::raw::c_char,
         bits_out: *mut *mut CIrBits,
     ) -> bool;
 
+    // Turns a span of IR values into a tuple value.
+    pub fn xls_value_make_tuple(
+        value_count: libc::size_t,
+        values: *const *mut CIrValue,
+    ) -> *mut CIrValue;
+
+    // Extracts an element from a tuple/array value or gives an error (e.g. if this
+    // value is not a tuple/array or the index is out of bounds).
+    pub fn xls_value_get_element(
+        tuple: *const CIrValue,
+        index: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        element_out: *mut *mut CIrValue,
+    ) -> bool;
+
+    pub fn xls_value_get_element_count(
+        value: *const CIrValue,
+        error_out: *mut *mut std::os::raw::c_char,
+        count_out: *mut i64,
+    ) -> bool;
+
+    // Creates a bits value (via an unsigned integer) that is boxed in an IrValue.
+    pub fn xls_value_make_ubits(
+        bit_count: i64,
+        value: u64,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CIrValue,
+    ) -> bool;
+
+    // Creates a bits value (via a signed integer) that is boxed in an IrValue.
+    pub fn xls_value_make_sbits(
+        bit_count: i64,
+        value: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CIrValue,
+    ) -> bool;
+
+    // Boxes an IR bits object into an IR value.
     pub fn xls_value_from_bits(bits: *const CIrBits) -> *mut CIrValue;
+
+    pub fn xls_bits_make_ubits(
+        bit_count: i64,
+        value: u64,
+        error_out: *mut *mut std::os::raw::c_char,
+        bits_out: *mut *mut CIrBits,
+    ) -> bool;
+
+    pub fn xls_bits_make_sbits(
+        bit_count: i64,
+        value: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        bits_out: *mut *mut CIrBits,
+    ) -> bool;
 
     pub fn xls_bits_free(bits: *mut CIrBits);
     pub fn xls_bits_get_bit_count(bits: *const CIrBits) -> i64;
