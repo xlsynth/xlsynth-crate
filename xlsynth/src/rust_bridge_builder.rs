@@ -101,7 +101,7 @@ impl BridgeBuilder for RustBridgeBuilder {
                 dslx_name,
                 member_name,
                 if is_signed { "s" } else { "u" },
-                value.bit_count(),
+                value.bit_count()?,
                 value_str
             ));
         }

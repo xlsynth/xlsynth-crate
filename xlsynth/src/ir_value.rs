@@ -266,22 +266,10 @@ impl IrValue {
         xls_value_make_sbits(value, bit_count)
     }
 
-    pub fn bit_count(&self) -> usize {
-        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
-        let s = self
-            .to_string_fmt(IrFormatPreference::Default)
-            .expect("fmt success");
-        // Look at the decimal value in the formatted result; e.g. `bits[7]:42` => `7`
-        let parts: Vec<&str> = s
-            .split(':')
-            .nth(0)
-            .expect("split success")
-            .split('[')
-            .nth(1)
-            .expect("split success")
-            .split(']')
-            .collect();
-        return parts[0].parse::<usize>().expect("parse success");
+    pub fn bit_count(&self) -> Result<usize, XlsynthError> {
+        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this from libxls.so
+        let bits = self.to_bits()?;
+        Ok(bits.get_bit_count())
     }
 
     pub fn to_string_fmt(&self, format: IrFormatPreference) -> Result<String, XlsynthError> {
@@ -304,20 +292,14 @@ impl IrValue {
     }
 
     pub fn to_bool(&self) -> Result<bool, XlsynthError> {
-        if self.bit_count() != 1 {
+        let bits = self.to_bits()?;
+        if bits.get_bit_count() != 1 {
             return Err(XlsynthError(format!(
                 "IrValue {} is not single-bit; must be bits[1] to convert to bool",
                 self.to_string()
             )));
         }
-        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
-        let s = self.to_string_fmt(IrFormatPreference::PlainBinary)?;
-        let v = s.split(':').nth(1).expect("split success");
-        match v {
-            "0" => return Ok(false),
-            "1" => return Ok(true),
-            _ => panic!("Unexpected stringified value for single-bit IrValue: {}", s),
-        }
+        bits.get_bit(0)
     }
 
     pub fn to_i64(&self) -> Result<i64, XlsynthError> {
@@ -557,7 +539,7 @@ mod tests {
             "bits[64]:42"
         );
         // Check the bit count is as we specified.
-        assert_eq!(v.bit_count(), 64);
+        assert_eq!(v.bit_count().unwrap(), 64);
 
         // Check we can't convert a 64-bit value to a bool.
         v.to_bool().expect_err("bool conversion fail for u64");
