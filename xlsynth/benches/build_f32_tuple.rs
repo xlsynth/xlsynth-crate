@@ -37,5 +37,24 @@ fn bench_unpack_f32_tuple(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_build_f32_tuple, bench_unpack_f32_tuple);
+fn bench_clone_f32_tuple(c: &mut Criterion) {
+    c.bench_function("clone_f32_tuple", |b| {
+        let orig = IrValue::make_tuple(&[
+            IrValue::make_ubits(1, 0).unwrap(),
+            IrValue::make_ubits(8, 127).unwrap(),
+            IrValue::make_ubits(23, 0).unwrap(),
+        ]);
+        b.iter(|| {
+            let clone = orig.clone();
+            black_box(clone);
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_build_f32_tuple,
+    bench_unpack_f32_tuple,
+    bench_clone_f32_tuple
+);
 criterion_main!(benches);
