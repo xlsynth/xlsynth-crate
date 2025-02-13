@@ -369,17 +369,10 @@ impl IrValue {
     }
 
     pub fn get_elements(&self) -> Result<Vec<IrValue>, XlsynthError> {
-        log::info!("IrValue::get_elements: {}", self.to_string());
         let count = self.get_element_count()?;
-        log::info!(
-            "IrValue::get_elements: {}; count: {}",
-            self.to_string(),
-            count
-        );
         let mut elements = Vec::new();
         for i in 0..count {
             let element = self.get_element(i)?;
-            log::info!("get_element({}) => {}", i, element.to_string());
             elements.push(element);
         }
         Ok(elements)
