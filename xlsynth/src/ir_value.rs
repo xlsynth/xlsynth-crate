@@ -355,7 +355,7 @@ impl IrValue {
 
     pub fn get_elements(&self) -> Result<Vec<IrValue>, XlsynthError> {
         let count = self.get_element_count()?;
-        let mut elements = Vec::new();
+        let mut elements = Vec::with_capacity(count);
         for i in 0..count {
             let element = self.get_element(i)?;
             elements.push(element);
