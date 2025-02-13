@@ -395,7 +395,7 @@ impl std::fmt::Debug for IrValue {
 
 impl Drop for IrValue {
     fn drop(&mut self) {
-        xls_value_free(self.ptr).expect("dealloc success");
+        xls_value_free(self.ptr)
     }
 }
 

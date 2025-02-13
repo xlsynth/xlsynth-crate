@@ -487,7 +487,8 @@ pub(crate) fn xls_interpret_function(
     args: &[IrValue],
 ) -> Result<IrValue, XlsynthError> {
     unsafe {
-        let args_ptrs: Vec<*const CIrValue> = args.iter().map(|v| v.ptr).collect();
+        let args_ptrs: Vec<*const CIrValue> =
+            args.iter().map(|v| -> *const CIrValue { v.ptr }).collect();
         let argc = args_ptrs.len();
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut result_out: *mut CIrValue = std::ptr::null_mut();
