@@ -86,7 +86,10 @@ pub(crate) fn xls_value_to_string(p: *mut CIrValue) -> Result<String, XlsynthErr
     }
 }
 
-pub(crate) fn xls_value_get_element(p: *mut CIrValue, index: i64) -> Result<IrValue, XlsynthError> {
+pub(crate) fn xls_value_get_element(
+    p: *mut CIrValue,
+    index: usize,
+) -> Result<IrValue, XlsynthError> {
     unsafe {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut element_out: *mut CIrValue = std::ptr::null_mut();
@@ -103,10 +106,10 @@ pub(crate) fn xls_value_get_element(p: *mut CIrValue, index: i64) -> Result<IrVa
 pub(crate) fn xls_value_get_element_count(p: *const CIrValue) -> Result<usize, XlsynthError> {
     unsafe {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let mut count_out: *mut i64 = std::ptr::null_mut();
-        let success = xlsynth_sys::xls_value_get_element_count(p, &mut error_out, &mut count_out);
+        let mut count: i64 = 0;
+        let success = xlsynth_sys::xls_value_get_element_count(p, &mut error_out, &mut count);
         if success {
-            return Ok(*count_out as usize);
+            return Ok(count as usize);
         }
         let error_out_str: String = c_str_to_rust(error_out);
         return Err(XlsynthError(error_out_str));
@@ -142,13 +145,14 @@ pub(crate) fn xls_value_make_sbits(value: i64, bit_count: usize) -> Result<IrVal
 }
 
 pub(crate) fn xls_value_make_tuple(elements: &[IrValue]) -> IrValue {
+    log::info!("xls_value_make_tuple; elements: {:?}", elements);
     unsafe {
-        let elements_ptrs: Vec<*const CIrValue> = elements
+        // The C API call takes ownership of the elements that are in the array.
+        let elements_ptrs: Vec<*mut CIrValue> = elements
             .iter()
-            .map(|v| -> *const CIrValue { v.ptr })
+            .map(|v| -> *mut CIrValue { xlsynth_sys::xls_value_clone(v.ptr) })
             .collect();
-        let result =
-            xlsynth_sys::xls_value_make_tuple(elements_ptrs.as_ptr(), elements_ptrs.len() as usize);
+        let result = xlsynth_sys::xls_value_make_tuple(elements_ptrs.len(), elements_ptrs.as_ptr());
         assert!(!result.is_null());
         IrValue { ptr: result }
     }

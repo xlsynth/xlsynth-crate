@@ -361,7 +361,7 @@ impl IrValue {
     }
 
     pub fn get_element(&self, index: usize) -> Result<IrValue, XlsynthError> {
-        xls_value_get_element(self.ptr, index as i64)
+        xls_value_get_element(self.ptr, index)
     }
 
     pub fn get_element_count(&self) -> Result<usize, XlsynthError> {
@@ -369,9 +369,18 @@ impl IrValue {
     }
 
     pub fn get_elements(&self) -> Result<Vec<IrValue>, XlsynthError> {
+        log::info!("IrValue::get_elements: {}", self.to_string());
+        let count = self.get_element_count()?;
+        log::info!(
+            "IrValue::get_elements: {}; count: {}",
+            self.to_string(),
+            count
+        );
         let mut elements = Vec::new();
-        for i in 0..self.get_element_count()? {
-            elements.push(self.get_element(i)?);
+        for i in 0..count {
+            let element = self.get_element(i)?;
+            log::info!("get_element({}) => {}", i, element.to_string());
+            elements.push(element);
         }
         Ok(elements)
     }
@@ -711,5 +720,22 @@ mod tests {
         let rhs = IrBits::new(32, 0xa5a5a5a5).expect("make_bits success");
         assert_eq!(lhs.xor(&rhs).to_hex_string(), "bits[32]:0xffff_ffff");
         assert_eq!(lhs.xor(&rhs.not()).to_hex_string(), "bits[32]:0x0");
+    }
+
+    #[test]
+    fn test_make_tuple_and_get_elements() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let b1_v0 = IrValue::make_ubits(1, 0).expect("make_ubits success");
+        let b2_v1 = IrValue::make_ubits(2, 1).expect("make_ubits success");
+        let b3_v2 = IrValue::make_ubits(3, 2).expect("make_ubits success");
+        let tuple = IrValue::make_tuple(&[b1_v0.clone(), b2_v1.clone(), b3_v2.clone()]);
+        let elements = tuple.get_elements().expect("get_elements success");
+        assert_eq!(elements.len(), 3);
+        assert_eq!(elements[0].to_string(), "bits[1]:0");
+        assert_eq!(elements[0], b1_v0);
+        assert_eq!(elements[1].to_string(), "bits[2]:1");
+        assert_eq!(elements[1], b2_v1);
+        assert_eq!(elements[2].to_string(), "bits[3]:2");
+        assert_eq!(elements[2], b3_v2);
     }
 }

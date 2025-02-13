@@ -16,6 +16,7 @@ fn bench_build_f32_tuple(c: &mut Criterion) {
 }
 
 fn bench_unpack_f32_tuple(c: &mut Criterion) {
+    let _ = env_logger::builder().is_test(true).try_init();
     c.bench_function("unpack_f32_tuple", |b| {
         let orig = IrValue::make_tuple(&[
             IrValue::make_ubits(1, 0).unwrap(),
@@ -23,7 +24,9 @@ fn bench_unpack_f32_tuple(c: &mut Criterion) {
             IrValue::make_ubits(23, 0).unwrap(),
         ]);
         b.iter(|| {
+            log::info!("unpack_f32_tuple: {}", orig.to_string());
             let elements = orig.get_elements().unwrap();
+            log::info!("unpack_f32_tuple; elements: {:?}", elements);
             let [sign, bexp, frac] = elements.as_slice() else {
                 panic!("expected 3 elements");
             };

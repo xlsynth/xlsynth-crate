@@ -247,6 +247,8 @@ extern "C" {
     ) -> bool;
     pub fn xls_value_free(value: *mut CIrValue);
 
+    pub fn xls_value_clone(value: *const CIrValue) -> *mut CIrValue;
+
     // Extracts a bits value from a (boxed) value or gives an error.
     pub fn xls_value_get_bits(
         value: *const CIrValue,
@@ -256,15 +258,15 @@ extern "C" {
 
     // Turns a span of IR values into a tuple value.
     pub fn xls_value_make_tuple(
-        values: *const *const CIrValue,
         value_count: libc::size_t,
+        values: *const *mut CIrValue,
     ) -> *mut CIrValue;
 
     // Extracts an element from a tuple/array value or gives an error (e.g. if this
     // value is not a tuple/array or the index is out of bounds).
     pub fn xls_value_get_element(
         tuple: *const CIrValue,
-        index: i64,
+        index: libc::size_t,
         error_out: *mut *mut std::os::raw::c_char,
         element_out: *mut *mut CIrValue,
     ) -> bool;
@@ -272,7 +274,7 @@ extern "C" {
     pub fn xls_value_get_element_count(
         value: *const CIrValue,
         error_out: *mut *mut std::os::raw::c_char,
-        count_out: *mut *mut i64,
+        count_out: *mut i64,
     ) -> bool;
 
     // Creates a bits value (via an unsigned integer) that is boxed in an IrValue.
