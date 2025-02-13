@@ -181,8 +181,8 @@ pub enum MyEnum {
 impl Into<IrValue> for MyEnum {
     fn into(self) -> IrValue {
         match self {
-            MyEnum::A => IrValue::make_bits(2, 0).unwrap(),
-            MyEnum::B => IrValue::make_bits(2, 3).unwrap(),
+            MyEnum::A => IrValue::make_ubits(2, 0).unwrap(),
+            MyEnum::B => IrValue::make_ubits(2, 3).unwrap(),
         }
     }
 }
@@ -247,8 +247,8 @@ pub enum MyEnum {
 impl Into<IrValue> for MyEnum {
     fn into(self) -> IrValue {
         match self {
-            MyEnum::A => IrValue::make_bits(2, 0).unwrap(),
-            MyEnum::B => IrValue::make_bits(2, 3).unwrap(),
+            MyEnum::A => IrValue::make_ubits(2, 0).unwrap(),
+            MyEnum::B => IrValue::make_ubits(2, 3).unwrap(),
         }
     }
 }
