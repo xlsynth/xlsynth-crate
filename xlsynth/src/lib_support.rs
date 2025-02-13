@@ -145,7 +145,6 @@ pub(crate) fn xls_value_make_sbits(value: i64, bit_count: usize) -> Result<IrVal
 }
 
 pub(crate) fn xls_value_make_tuple(elements: &[IrValue]) -> IrValue {
-    log::info!("xls_value_make_tuple; elements: {:?}", elements);
     unsafe {
         // The C API call takes ownership of the elements that are in the array.
         let elements_ptrs: Vec<*mut CIrValue> = elements

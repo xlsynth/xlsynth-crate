@@ -28,9 +28,9 @@ lazy_static! {
     };
 }
 
-// Benchmark calling the DSLX function with pre-created values.
+// Benchmarks calling the DSLX function with pre-created values.
 //
-// Notably this still creates a result value that we then are deallocating in
+// Notably this still creates a result value that we are then deallocating in
 // each trip.
 fn bench_call_dslx(c: &mut Criterion) {
     c.bench_function("call_dslx", |b| {

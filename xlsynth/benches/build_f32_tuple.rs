@@ -3,6 +3,8 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use xlsynth::IrValue;
 
+/// Benchmarks making 3 bits values and packing them into a tuple (in the shape
+/// of a DSLX `float32::F32`).
 fn bench_build_f32_tuple(c: &mut Criterion) {
     c.bench_function("build_f32_tuple", |b| {
         b.iter(|| {
@@ -15,6 +17,8 @@ fn bench_build_f32_tuple(c: &mut Criterion) {
     });
 }
 
+/// Benchmarks unpacking a tuple into 3 bits values (in the shape of a DSLX
+/// `float32::F32`).
 fn bench_unpack_f32_tuple(c: &mut Criterion) {
     let _ = env_logger::builder().is_test(true).try_init();
     c.bench_function("unpack_f32_tuple", |b| {
@@ -24,9 +28,7 @@ fn bench_unpack_f32_tuple(c: &mut Criterion) {
             IrValue::make_ubits(23, 0).unwrap(),
         ]);
         b.iter(|| {
-            log::info!("unpack_f32_tuple: {}", orig.to_string());
             let elements = orig.get_elements().unwrap();
-            log::info!("unpack_f32_tuple; elements: {:?}", elements);
             let [sign, bexp, frac] = elements.as_slice() else {
                 panic!("expected 3 elements");
             };
