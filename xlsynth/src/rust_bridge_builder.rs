@@ -97,10 +97,11 @@ impl BridgeBuilder for RustBridgeBuilder {
         for (member_name, value) in members.iter() {
             let value_str = value_to_string(value)?;
             self.lines.push(format!(
-                "            {}::{} => IrValue::make_bits({}, {}).unwrap(),",
+                "            {}::{} => IrValue::make_{}bits({}, {}).unwrap(),",
                 dslx_name,
                 member_name,
-                value.bit_count(),
+                if is_signed { "s" } else { "u" },
+                value.bit_count()?,
                 value_str
             ));
         }
@@ -180,8 +181,8 @@ pub enum MyEnum {
 impl Into<IrValue> for MyEnum {
     fn into(self) -> IrValue {
         match self {
-            MyEnum::A => IrValue::make_bits(2, 0).unwrap(),
-            MyEnum::B => IrValue::make_bits(2, 3).unwrap(),
+            MyEnum::A => IrValue::make_ubits(2, 0).unwrap(),
+            MyEnum::B => IrValue::make_ubits(2, 3).unwrap(),
         }
     }
 }
@@ -246,8 +247,8 @@ pub enum MyEnum {
 impl Into<IrValue> for MyEnum {
     fn into(self) -> IrValue {
         match self {
-            MyEnum::A => IrValue::make_bits(2, 0).unwrap(),
-            MyEnum::B => IrValue::make_bits(2, 3).unwrap(),
+            MyEnum::A => IrValue::make_ubits(2, 0).unwrap(),
+            MyEnum::B => IrValue::make_ubits(2, 3).unwrap(),
         }
     }
 }

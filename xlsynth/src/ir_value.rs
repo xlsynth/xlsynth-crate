@@ -4,8 +4,10 @@ use xlsynth_sys::{CIrBits, CIrValue};
 
 use crate::{
     lib_support::{
-        xls_bits_to_debug_str, xls_bits_to_string, xls_format_preference_from_string, xls_value_eq,
-        xls_value_free, xls_value_get_bits, xls_value_to_string,
+        xls_bits_make_sbits, xls_bits_make_ubits, xls_bits_to_debug_str, xls_bits_to_string,
+        xls_format_preference_from_string, xls_value_eq, xls_value_free, xls_value_get_bits,
+        xls_value_get_element, xls_value_get_element_count, xls_value_make_sbits,
+        xls_value_make_tuple, xls_value_make_ubits, xls_value_to_string,
         xls_value_to_string_format_preference,
     },
     xls_parse_typed_value,
@@ -18,9 +20,12 @@ pub struct IrBits {
 }
 
 impl IrBits {
-    pub fn new(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
-        let value = IrValue::make_bits(bit_count, value)?;
-        Ok(value.to_bits()?)
+    pub fn make_ubits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
+        xls_bits_make_ubits(bit_count, value)
+    }
+
+    pub fn make_sbits(bit_count: usize, value: i64) -> Result<Self, XlsynthError> {
+        xls_bits_make_sbits(bit_count, value)
     }
 
     pub fn get_bit_count(&self) -> usize {
@@ -195,6 +200,8 @@ impl std::ops::Not for IrBits {
     }
 }
 
+// --
+
 pub enum IrFormatPreference {
     Default,
     Binary,
@@ -228,6 +235,10 @@ pub struct IrValue {
 }
 
 impl IrValue {
+    pub fn make_tuple(elements: &[IrValue]) -> Self {
+        xls_value_make_tuple(elements)
+    }
+
     pub fn from_bits(bits: &IrBits) -> Self {
         let ptr = unsafe { xlsynth_sys::xls_value_from_bits(bits.ptr) };
         Self { ptr }
@@ -238,36 +249,27 @@ impl IrValue {
     }
 
     pub fn u32(value: u32) -> Self {
-        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
-        Self::parse_typed(std::format!("bits[32]:{}", value).as_str()).unwrap()
+        // Unwrap should be ok since the u32 always fits.
+        xls_value_make_ubits(value as u64, 32).unwrap()
     }
 
     pub fn u64(value: u64) -> Self {
-        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
-        Self::parse_typed(std::format!("bits[64]:{}", value).as_str()).unwrap()
+        // Unwrap should be ok since the u64 always fits.
+        xls_value_make_ubits(value as u64, 64).unwrap()
     }
 
-    pub fn make_bits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
-        // TODO(cdleary): 2024-10-06 Expose a more efficient API for this.
-        Self::parse_typed(std::format!("bits[{}]:{}", bit_count, value).as_str())
+    pub fn make_ubits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
+        xls_value_make_ubits(value as u64, bit_count)
     }
 
-    pub fn bit_count(&self) -> usize {
-        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
-        let s = self
-            .to_string_fmt(IrFormatPreference::Default)
-            .expect("fmt success");
-        // Look at the decimal value in the formatted result; e.g. `bits[7]:42` => `7`
-        let parts: Vec<&str> = s
-            .split(':')
-            .nth(0)
-            .expect("split success")
-            .split('[')
-            .nth(1)
-            .expect("split success")
-            .split(']')
-            .collect();
-        return parts[0].parse::<usize>().expect("parse success");
+    pub fn make_sbits(bit_count: usize, value: i64) -> Result<Self, XlsynthError> {
+        xls_value_make_sbits(value, bit_count)
+    }
+
+    pub fn bit_count(&self) -> Result<usize, XlsynthError> {
+        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this from libxls.so
+        let bits = self.to_bits()?;
+        Ok(bits.get_bit_count())
     }
 
     pub fn to_string_fmt(&self, format: IrFormatPreference) -> Result<String, XlsynthError> {
@@ -290,20 +292,14 @@ impl IrValue {
     }
 
     pub fn to_bool(&self) -> Result<bool, XlsynthError> {
-        if self.bit_count() != 1 {
+        let bits = self.to_bits()?;
+        if bits.get_bit_count() != 1 {
             return Err(XlsynthError(format!(
                 "IrValue {} is not single-bit; must be bits[1] to convert to bool",
                 self.to_string()
             )));
         }
-        // TODO(cdleary): 2024-06-23 Expose a more efficient API for this.
-        let s = self.to_string_fmt(IrFormatPreference::PlainBinary)?;
-        let v = s.split(':').nth(1).expect("split success");
-        match v {
-            "0" => return Ok(false),
-            "1" => return Ok(true),
-            _ => panic!("Unexpected stringified value for single-bit IrValue: {}", s),
-        }
+        bits.get_bit(0)
     }
 
     pub fn to_i64(&self) -> Result<i64, XlsynthError> {
@@ -348,6 +344,24 @@ impl IrValue {
     pub fn to_bits(&self) -> Result<IrBits, XlsynthError> {
         xls_value_get_bits(self.ptr)
     }
+
+    pub fn get_element(&self, index: usize) -> Result<IrValue, XlsynthError> {
+        xls_value_get_element(self.ptr, index)
+    }
+
+    pub fn get_element_count(&self) -> Result<usize, XlsynthError> {
+        xls_value_get_element_count(self.ptr)
+    }
+
+    pub fn get_elements(&self) -> Result<Vec<IrValue>, XlsynthError> {
+        let count = self.get_element_count()?;
+        let mut elements = Vec::with_capacity(count);
+        for i in 0..count {
+            let element = self.get_element(i)?;
+            elements.push(element);
+        }
+        Ok(elements)
+    }
 }
 
 unsafe impl Send for IrValue {}
@@ -381,16 +395,14 @@ impl std::fmt::Debug for IrValue {
 
 impl Drop for IrValue {
     fn drop(&mut self) {
-        xls_value_free(self.ptr).expect("dealloc success");
+        xls_value_free(self.ptr)
     }
 }
 
 impl Clone for IrValue {
     fn clone(&self) -> Self {
-        // TODO(cdleary): 2024-12-14 We should either add a C API for cloning IR values
-        // more efficiently than this text serdes, or implement refcounted CIrValue
-        // pointers on the Rust side of the fence.
-        IrValue::parse_typed(&self.to_string()).unwrap()
+        let ptr = unsafe { xlsynth_sys::xls_value_clone(self.ptr) };
+        Self { ptr }
     }
 }
 
@@ -527,10 +539,11 @@ mod tests {
             "bits[64]:42"
         );
         // Check the bit count is as we specified.
-        assert_eq!(v.bit_count(), 64);
+        assert_eq!(v.bit_count().unwrap(), 64);
 
         // Check we can't convert a 64-bit value to a bool.
-        v.to_bool().expect_err("bool conversion fail for u64");
+        v.to_bool()
+            .expect_err("bool conversion should error for u64");
 
         let v_i64 = v.to_i64().expect("i64 conversion success");
         assert_eq!(v_i64, 42);
@@ -548,7 +561,7 @@ mod tests {
         let bits = v.to_bits().expect("to_bits success");
 
         // Equality comparison.
-        let v2 = IrValue::make_bits(32, 42).expect("make_bits success");
+        let v2 = IrValue::make_ubits(32, 42).expect("make_ubits success");
         assert_eq!(v, v2);
 
         // Getting at bit values; 42 = 0b101010.
@@ -578,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_ir_value_make_bits() {
-        let zero_u2 = IrValue::make_bits(2, 0).expect("make_bits success");
+        let zero_u2 = IrValue::make_ubits(2, 0).expect("make_ubits success");
         assert_eq!(
             zero_u2
                 .to_string_fmt(IrFormatPreference::Default)
@@ -586,7 +599,7 @@ mod tests {
             "bits[2]:0"
         );
 
-        let three_u2 = IrValue::make_bits(2, 3).expect("make_bits success");
+        let three_u2 = IrValue::make_ubits(2, 3).expect("make_ubits success");
         assert_eq!(
             three_u2
                 .to_string_fmt(IrFormatPreference::Default)
@@ -611,24 +624,26 @@ mod tests {
 
     #[test]
     fn test_ir_bits_add_two_plus_three() {
-        let two = IrBits::new(32, 2).expect("make_bits success");
-        let three = IrBits::new(32, 3).expect("make_bits success");
+        let two = IrBits::make_ubits(32, 2).expect("make_ubits success");
+        let three = IrBits::make_ubits(32, 3).expect("make_ubits success");
         let sum = two + three;
         assert_eq!(sum.to_string(), "bits[32]:5");
     }
 
     #[test]
     fn test_ir_bits_umul_two_times_three() {
-        let two = IrBits::new(32, 2).expect("make_bits success");
-        let three = IrBits::new(32, 3).expect("make_bits success");
+        let two = IrBits::make_ubits(32, 2).expect("make_ubits success");
+        let three = IrBits::make_ubits(32, 3).expect("make_ubits success");
         let product = two.umul(&three);
         assert_eq!(product.to_string(), "bits[64]:6");
     }
 
     #[test]
     fn test_ir_bits_smul_two_times_neg_three() {
-        let two = IrBits::new(32, 2).expect("make_bits success");
-        let neg_three = IrBits::new(32, 3).expect("make_bits success").negate();
+        let two = IrBits::make_ubits(32, 2).expect("make_ubits success");
+        let neg_three = IrBits::make_ubits(32, 3)
+            .expect("make_ubits success")
+            .negate();
         let product = two.smul(&neg_three);
         assert_eq!(product.msb(), true);
         assert_eq!(product.abs().to_string(), "bits[64]:6");
@@ -636,53 +651,83 @@ mod tests {
 
     #[test]
     fn test_ir_bits_width_slice() {
-        let bits = IrBits::new(32, 0x12345678).expect("make_bits success");
+        let bits = IrBits::make_ubits(32, 0x12345678).expect("make_ubits success");
         let slice = bits.width_slice(8, 16);
         assert_eq!(slice.to_hex_string(), "bits[16]:0x3456");
     }
 
     #[test]
     fn test_ir_bits_shll() {
-        let bits = IrBits::new(32, 0x12345678).expect("make_bits success");
+        let bits = IrBits::make_ubits(32, 0x12345678).expect("make_ubits success");
         let shifted = bits.shll(8);
         assert_eq!(shifted.to_hex_string(), "bits[32]:0x3456_7800");
     }
 
     #[test]
     fn test_ir_bits_shrl() {
-        let bits = IrBits::new(32, 0x12345678).expect("make_bits success");
+        let bits = IrBits::make_ubits(32, 0x12345678).expect("make_ubits success");
         let shifted = bits.shrl(8);
         assert_eq!(shifted.to_hex_string(), "bits[32]:0x12_3456");
     }
 
     #[test]
     fn test_ir_bits_shra() {
-        let bits = IrBits::new(32, 0x92345678).expect("make_bits success");
+        let bits = IrBits::make_ubits(32, 0x92345678).expect("make_ubits success");
         let shifted = bits.shra(8);
         assert_eq!(shifted.to_hex_string(), "bits[32]:0xff92_3456");
     }
 
     #[test]
     fn test_ir_bits_and() {
-        let lhs = IrBits::new(32, 0x5a5a5a5a).expect("make_bits success");
-        let rhs = IrBits::new(32, 0xa5a5a5a5).expect("make_bits success");
+        let lhs = IrBits::make_ubits(32, 0x5a5a5a5a).expect("make_ubits success");
+        let rhs = IrBits::make_ubits(32, 0xa5a5a5a5).expect("make_ubits success");
         assert_eq!(lhs.and(&rhs).to_hex_string(), "bits[32]:0x0");
         assert_eq!(lhs.and(&rhs.not()).to_hex_string(), "bits[32]:0x5a5a_5a5a");
     }
 
     #[test]
     fn test_ir_bits_or() {
-        let lhs = IrBits::new(32, 0x5a5a5a5a).expect("make_bits success");
-        let rhs = IrBits::new(32, 0xa5a5a5a5).expect("make_bits success");
+        let lhs = IrBits::make_ubits(32, 0x5a5a5a5a).expect("make_ubits success");
+        let rhs = IrBits::make_ubits(32, 0xa5a5a5a5).expect("make_ubits success");
         assert_eq!(lhs.or(&rhs).to_hex_string(), "bits[32]:0xffff_ffff");
         assert_eq!(lhs.or(&rhs.not()).to_hex_string(), "bits[32]:0x5a5a_5a5a");
     }
 
     #[test]
     fn test_ir_bits_xor() {
-        let lhs = IrBits::new(32, 0x5a5a5a5a).expect("make_bits success");
-        let rhs = IrBits::new(32, 0xa5a5a5a5).expect("make_bits success");
+        let lhs = IrBits::make_ubits(32, 0x5a5a5a5a).expect("make_ubits success");
+        let rhs = IrBits::make_ubits(32, 0xa5a5a5a5).expect("make_ubits success");
         assert_eq!(lhs.xor(&rhs).to_hex_string(), "bits[32]:0xffff_ffff");
         assert_eq!(lhs.xor(&rhs.not()).to_hex_string(), "bits[32]:0x0");
+    }
+
+    #[test]
+    fn test_make_tuple_and_get_elements() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let b1_v0 = IrValue::make_ubits(1, 0).expect("make_ubits success");
+        let b2_v1 = IrValue::make_ubits(2, 1).expect("make_ubits success");
+        let b3_v2 = IrValue::make_ubits(3, 2).expect("make_ubits success");
+        let tuple = IrValue::make_tuple(&[b1_v0.clone(), b2_v1.clone(), b3_v2.clone()]);
+        let elements = tuple.get_elements().expect("get_elements success");
+        assert_eq!(elements.len(), 3);
+        assert_eq!(elements[0].to_string(), "bits[1]:0");
+        assert_eq!(elements[0], b1_v0);
+        assert_eq!(elements[1].to_string(), "bits[2]:1");
+        assert_eq!(elements[1], b2_v1);
+        assert_eq!(elements[2].to_string(), "bits[3]:2");
+        assert_eq!(elements[2], b3_v2);
+    }
+
+    #[test]
+    fn test_make_ir_value_bits_that_does_not_fit() {
+        let result = IrValue::make_ubits(1, 2);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("0x2 requires 2 bits to fit in an unsigned datatype, but attempting to fit in 1 bit"), "got: {}", error);
+
+        let result = IrValue::make_sbits(1, -2);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("0xfffffffffffffffe requires 2 bits to fit in an signed datatype, but attempting to fit in 1 bit"), "got: {}", error);
     }
 }

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.143";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.144";
 
 struct DsoInfo {
     extension: &'static str,
@@ -56,7 +56,7 @@ fn high_integrity_download(
 
     let tmp_dir = env_tmp_dir.join(format!("xlsynth-sys-tmp-{}", std::process::id()));
     // Make the temp dir.
-    std::fs::create_dir_all(&tmp_dir).expect("Failed to create temp directory");
+    std::fs::create_dir_all(&tmp_dir).expect("create temp directory should succeed");
 
     // Download the sha256 checksum file to the temp directory.
     let checksum_url = format!("{}.sha256", url);
@@ -238,7 +238,7 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
     );
 
     // Download the DSO
-    high_integrity_download(&dso_url, &dso_path).expect("Failed to download DSO");
+    high_integrity_download(&dso_url, &dso_path).expect("download of DSO should succeed");
 
     if cfg!(target_os = "macos") {
         let dso_filename = dso_info.get_dso_filename();
@@ -249,7 +249,7 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
             .arg(format!("@rpath/{}", &dso_filename))
             .arg(&dso_path)
             .status()
-            .expect("Failed to fix DSO id");
+            .expect("fixing DSO id should succeed");
 
         if !status.success() {
             panic!("Fixing DSO id failed with status: {:?}", status);
@@ -272,7 +272,7 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
     let tarball_path = PathBuf::from(&out_dir).join("dslx_stdlib.tar.gz");
     let tarball_url = format!("{url_base}/dslx_stdlib.tar.gz");
     high_integrity_download(&tarball_url, &tarball_path)
-        .expect("Failed to download stdlib tarball");
+        .expect("download of stdlib tarball should succeed");
 
     let tar_gz = std::fs::File::open(tarball_path).unwrap();
     let tar = flate2::read::GzDecoder::new(tar_gz);

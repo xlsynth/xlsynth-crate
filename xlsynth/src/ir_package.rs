@@ -62,7 +62,7 @@ impl IrPackagePtr {
 impl Drop for IrPackagePtr {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            xls_package_free(self.0).expect("dealloc success");
+            xls_package_free(self.0);
             self.0 = std::ptr::null_mut();
         }
     }

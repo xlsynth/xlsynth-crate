@@ -9,9 +9,9 @@ use xlsynth::IrValue;
 
 fn load_package(cargo_relpath: &str) -> IrPackage {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(cargo_relpath);
-    let dslx = std::fs::read_to_string(&path).expect("read_to_string failed");
-    let result = xlsynth::convert_dslx_to_ir(&dslx, path.as_path(), &DslxConvertOptions::default())
-        .expect("convert_dslx_to_ir failed");
+    let dslx = std::fs::read_to_string(&path).unwrap();
+    let result =
+        xlsynth::convert_dslx_to_ir(&dslx, path.as_path(), &DslxConvertOptions::default()).unwrap();
     for warning in result.warnings {
         log::warn!("DSLX warning for {}: {}", path.to_str().unwrap(), warning);
     }
@@ -24,8 +24,8 @@ lazy_static! {
     // interpreter.
     static ref ADD1_FUNCTION: xlsynth::IrFunction = {
         let package = load_package("src/sample.x");
-        let mangled = xlsynth::mangle_dslx_name("sample", "add1").expect("mangle_dslx_name failed");
-        let function = package.get_function(&mangled).expect("get_function failed");
+        let mangled = xlsynth::mangle_dslx_name("sample", "add1").unwrap();
+        let function = package.get_function(&mangled).unwrap();
         assert_eq!(function.get_name(), mangled);
         function
     };
@@ -33,9 +33,7 @@ lazy_static! {
 
 fn run_dslx_add1(x: u32) -> u32 {
     let x_ir = IrValue::u32(x);
-    let result = ADD1_FUNCTION
-        .interpret(&[x_ir])
-        .expect("interpretation success");
+    let result = ADD1_FUNCTION.interpret(&[x_ir]).unwrap();
     result.to_u32().unwrap()
 }
 

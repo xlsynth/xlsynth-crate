@@ -21,7 +21,7 @@ fn make_readme_snippet_file() {
     println!("cargo:rerun-if-changed=README.md");
 
     // Read entire README
-    let readme_contents = std::fs::read_to_string("README.md").expect("Failed to read README.md");
+    let readme_contents = std::fs::read_to_string("README.md").unwrap();
 
     // Extract the snippet between ```rust and ``` lines
     let snippet = extract_rust_fence(&readme_contents)
@@ -51,7 +51,7 @@ mod readme_snippet {{
     // Now write that out:
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let test_file = std::path::Path::new(&out_dir).join("readme_snippet_test.rs");
-    std::fs::write(&test_file, test_code).expect("Failed to write readme_snippet_test.rs");
+    std::fs::write(&test_file, test_code).expect("write readme_snippet_test.rs should succeed");
 }
 
 fn main() {

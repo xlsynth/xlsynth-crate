@@ -26,7 +26,7 @@ fn run_delay_info_main(
         command.arg("--top").arg(top.unwrap());
     }
 
-    let output = command.output().expect("Failed to execute delay_info_main");
+    let output = command.output().expect("delay_info_main should succeed");
 
     if !output.status.success() {
         eprintln!("Delay info failed with status: {}", output.status);
