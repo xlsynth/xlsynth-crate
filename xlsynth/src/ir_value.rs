@@ -717,4 +717,17 @@ mod tests {
         assert_eq!(elements[2].to_string(), "bits[3]:2");
         assert_eq!(elements[2], b3_v2);
     }
+
+    #[test]
+    fn test_make_ir_value_bits_that_does_not_fit() {
+        let result = IrValue::make_ubits(1, 2);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("0x2 requires 2 bits to fit in an unsigned datatype, but attempting to fit in 1 bit"), "got: {}", error);
+
+        let result = IrValue::make_sbits(1, -2);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("0xfffffffffffffffe requires 2 bits to fit in an signed datatype, but attempting to fit in 1 bit"), "got: {}", error);
+    }
 }
