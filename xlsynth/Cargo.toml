@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth"
-version = "0.0.72"
+version = "0.0.73"
 edition = "2018"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
@@ -13,7 +13,7 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 readme = "../README.md"
 
 [dependencies]
-xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.72"}
+xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.73"}
 cargo_metadata = "0.18"
 log = "0.4"
 
@@ -34,4 +34,8 @@ harness = false
 
 [[bench]]
 name = "bits_ops"
+harness = false
+
+[[bench]]
+name = "f32_add"
 harness = false

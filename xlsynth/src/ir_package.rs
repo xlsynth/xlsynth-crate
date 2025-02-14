@@ -2,7 +2,8 @@
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::lib_support::c_str_to_rust;
+pub use crate::lib_support::RunResult;
+use crate::lib_support::{c_str_to_rust, xls_function_jit_run, xls_make_function_jit};
 use crate::xlsynth_error::XlsynthError;
 use crate::{
     lib_support::{
@@ -148,6 +149,37 @@ impl IrFunction {
     pub fn get_type(&self) -> Result<IrFunctionType, XlsynthError> {
         let package_write_guard: RwLockWriteGuard<IrPackagePtr> = self.parent.write().unwrap();
         xls_function_get_type(&package_write_guard, self.ptr)
+    }
+}
+
+pub struct IrFunctionJit {
+    pub(crate) parent: Arc<RwLock<IrPackagePtr>>,
+    pub(crate) ptr: *mut xlsynth_sys::CIrFunctionJit,
+}
+
+impl Drop for IrFunctionJit {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                xlsynth_sys::xls_function_jit_free(self.ptr);
+            }
+        }
+    }
+}
+
+impl IrFunctionJit {
+    pub fn new(function: &IrFunction) -> Result<Self, XlsynthError> {
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = function.parent.read().unwrap();
+        let ptr = xls_make_function_jit(&package_read_guard, function.ptr)?;
+        Ok(IrFunctionJit {
+            parent: function.parent.clone(),
+            ptr,
+        })
+    }
+
+    pub fn run(&self, args: &[IrValue]) -> Result<RunResult, XlsynthError> {
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        xls_function_jit_run(&package_read_guard, self.ptr, args)
     }
 }
 
