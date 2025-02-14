@@ -14,12 +14,21 @@ fn sample() -> Result<IrValue, XlsynthError> {
     let package: IrPackage = converted.ir;
     let mangled = xlsynth::mangle_dslx_name("sample", "id")?;
     let f: IrFunction = package.get_function(&mangled)?;
-    let ft: IrValue = IrValue::parse_typed("bits[32]:42")?;
-    f.interpret(&[ft])
+    let mol: IrValue = IrValue::make_ubits(32, 42)?;
+
+    // Use the IR interpreter.
+    let interp_result: IrValue = f.interpret(&[mol.clone()])?;
+
+    // Use the IR JIT.
+    let jit = xlsynth::IrFunctionJit::new(&f)?;
+    let jit_result: xlsynth::RunResult = jit.run(&[mol])?;
+    assert_eq!(jit_result.value, interp_result);
+
+    Ok(jit_result.value)
 }
 
 fn main() {
-    assert_eq!(sample().unwrap(), IrValue::parse_typed("bits[32]:42").unwrap());
+    assert_eq!(sample().unwrap(), IrValue::make_ubits(32, 42).unwrap());
 }
 ```
 

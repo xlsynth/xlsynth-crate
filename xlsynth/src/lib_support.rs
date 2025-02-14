@@ -12,8 +12,8 @@ use std::{
 };
 
 use xlsynth_sys::{
-    CIrBits, CIrFunction, CIrFunctionType, CIrPackage, CIrType, CIrValue,
-    CScheduleAndCodegenResult, XlsFormatPreference,
+    CIrBits, CIrFunction, CIrFunctionJit, CIrFunctionType, CIrPackage, CIrType, CIrValue,
+    CScheduleAndCodegenResult, CTraceMessage, XlsFormatPreference,
 };
 
 use crate::{
@@ -299,6 +299,100 @@ pub(crate) fn xls_optimize_ir(ir: &str, top: &str) -> Result<String, XlsynthErro
     xls_ffi_call!(xlsynth_sys::xls_optimize_ir, ir.as_ptr(), top.as_ptr(); ir_out)?;
     let ir_str = unsafe { c_str_to_rust(ir_out) };
     Ok(ir_str)
+}
+
+pub struct TraceMessage {
+    pub message: String,
+    pub verbosity: i64,
+}
+
+pub struct RunResult {
+    pub value: IrValue,
+    pub trace_messages: Vec<TraceMessage>,
+    pub assert_messages: Vec<String>,
+}
+
+// Helper that converts the trace messages to Rust objects and deallocates the C
+// value.
+unsafe fn trace_messages_to_rust(
+    c_trace_messages: *mut CTraceMessage,
+    count: usize,
+) -> Vec<TraceMessage> {
+    if c_trace_messages.is_null() {
+        return Vec::new();
+    }
+    let mut trace_messages: Vec<TraceMessage> = Vec::new();
+    for i in 0..count {
+        let trace_message: &CTraceMessage = unsafe { &*c_trace_messages.wrapping_add(i) };
+        trace_messages.push(TraceMessage {
+            message: unsafe { c_str_to_rust_no_dealloc(trace_message.message) },
+            verbosity: trace_message.verbosity,
+        });
+    }
+    xlsynth_sys::xls_trace_messages_free(c_trace_messages, count);
+    trace_messages
+}
+
+unsafe fn c_strs_to_rust(c_strs: *mut *mut std::os::raw::c_char, count: usize) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    for i in 0..count {
+        let xls_c_str: *mut std::os::raw::c_char = unsafe { *c_strs.wrapping_add(i) };
+        result.push(c_str_to_rust_no_dealloc(xls_c_str));
+    }
+    result
+}
+
+pub(crate) fn xls_make_function_jit(
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
+    function: *const CIrFunction,
+) -> Result<*mut CIrFunctionJit, XlsynthError> {
+    let mut ptr: *mut CIrFunctionJit = std::ptr::null_mut();
+    xls_ffi_call!(xlsynth_sys::xls_make_function_jit, function; ptr)?;
+    Ok(ptr)
+}
+
+pub(crate) fn xls_function_jit_run(
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
+    jit: *const CIrFunctionJit,
+    args: &[IrValue],
+) -> Result<RunResult, XlsynthError> {
+    let mut result_out: *mut CIrValue = std::ptr::null_mut();
+    let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let argc = args.len();
+    let args_ptrs: Vec<*const CIrValue> =
+        args.iter().map(|v| -> *const CIrValue { v.ptr }).collect();
+    let mut trace_messages_out: *mut CTraceMessage = std::ptr::null_mut();
+    let mut trace_messages_count: usize = 0;
+    let mut assert_messages_out: *mut *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut assert_messages_count: usize = 0;
+    let success = unsafe {
+        xlsynth_sys::xls_function_jit_run(
+            jit,
+            argc,
+            args_ptrs.as_ptr(),
+            &mut error_out,
+            &mut trace_messages_out,
+            &mut trace_messages_count,
+            &mut assert_messages_out,
+            &mut assert_messages_count,
+            &mut result_out,
+        )
+    };
+    if !success {
+        let error_message = unsafe { c_str_to_rust(error_out) };
+        return Err(XlsynthError(format!(
+            "Failed to run JIT function: {}",
+            error_message
+        )));
+    }
+    let trace_messages =
+        unsafe { trace_messages_to_rust(trace_messages_out, trace_messages_count) };
+    let assert_messages = unsafe { c_strs_to_rust(assert_messages_out, assert_messages_count) };
+    Ok(RunResult {
+        value: IrValue { ptr: result_out },
+        trace_messages,
+        assert_messages,
+    })
 }
 
 pub(crate) fn xls_mangle_dslx_name(

@@ -25,6 +25,17 @@ pub struct CIrFunction {
 }
 
 #[repr(C)]
+pub struct CIrFunctionJit {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CTraceMessage {
+    pub message: *mut std::os::raw::c_char,
+    pub verbosity: i64,
+}
+
+#[repr(C)]
 pub struct CIrType {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -424,6 +435,25 @@ extern "C" {
         p: *const CIrPackage,
         string_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+
+    pub fn xls_make_function_jit(
+        function: *const CIrFunction,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CIrFunctionJit,
+    ) -> bool;
+    pub fn xls_function_jit_free(jit: *mut CIrFunctionJit);
+    pub fn xls_function_jit_run(
+        jit: *const CIrFunctionJit,
+        argc: libc::size_t,
+        args: *const *const CIrValue,
+        error_out: *mut *mut std::os::raw::c_char,
+        trace_messages_out: *mut *mut CTraceMessage,
+        trace_messages_count_out: *mut libc::size_t,
+        assert_messages_out: *mut *mut *mut std::os::raw::c_char,
+        assert_messages_count_out: *mut libc::size_t,
+        result_out: *mut *mut CIrValue,
+    ) -> bool;
+    pub fn xls_trace_messages_free(trace_messages: *mut CTraceMessage, count: libc::size_t);
 
     // -- VAST APIs
 

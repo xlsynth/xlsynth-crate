@@ -19,7 +19,9 @@ use lib_support::xls_schedule_and_codegen_package;
 use lib_support::{c_str_to_rust, c_str_to_rust_no_dealloc, xls_mangle_dslx_name, xls_optimize_ir};
 
 pub use ir_package::IrFunction;
+pub use ir_package::IrFunctionJit;
 pub use ir_package::IrPackage;
+pub use ir_package::RunResult;
 pub use ir_value::IrValue;
 pub use xlsynth_error::XlsynthError;
 use xlsynth_sys::CIrValue;
