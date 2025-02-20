@@ -270,7 +270,7 @@ extern "C" {
     // Turns a span of IR values into a tuple value.
     pub fn xls_value_make_tuple(
         value_count: libc::size_t,
-        values: *const *mut CIrValue,
+        values: *const *const CIrValue,
     ) -> *mut CIrValue;
 
     // Extracts an element from a tuple/array value or gives an error (e.g. if this

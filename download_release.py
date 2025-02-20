@@ -21,7 +21,7 @@ def get_headers():
         return {"Authorization": f"token {gh_pat}"}
     return {}
 
-def request_with_retry(url, stream, headers, max_attempts=4):
+def request_with_retry(url, stream, headers, max_attempts):
     """
     Attempts to send a GET request to a given URL with exponential backoff.
     Retries up to max_attempts times.
@@ -43,15 +43,15 @@ def request_with_retry(url, stream, headers, max_attempts=4):
                 time.sleep(delay)
                 delay *= 2  # exponential backoff
 
-def get_latest_release():
+def get_latest_release(max_attempts):
     print("Discovering the latest release version...")
     print("PAT present? ", os.getenv('GH_PAT') is not None)
-    response = request_with_retry(f"{GITHUB_API_URL}/latest", stream=False, headers=get_headers())
+    response = request_with_retry(f"{GITHUB_API_URL}/latest", stream=False, headers=get_headers(), max_attempts=max_attempts)
     latest_version = response.json()["tag_name"]
     print(f"Latest version discovered: {latest_version}")
     return latest_version
 
-def high_integrity_download(base_url, filename, target_dir, is_binary=False, platform=None):
+def high_integrity_download(base_url, filename, target_dir, max_attempts, is_binary=False, platform=None):
     print(f"Starting download of {filename}...")
     start_time = time.time()
 
@@ -65,12 +65,12 @@ def high_integrity_download(base_url, filename, target_dir, is_binary=False, pla
         headers = get_headers()
 
         # Download SHA256 file with retry support
-        with request_with_retry(sha256_url, stream=True, headers=headers) as r:
+        with request_with_retry(sha256_url, stream=True, headers=headers, max_attempts=max_attempts) as r:
             with open(sha256_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
         # Download the artifact with retry support
-        with request_with_retry(artifact_url, stream=True, headers=headers) as r:
+        with request_with_retry(artifact_url, stream=True, headers=headers, max_attempts=max_attempts) as r:
             with open(artifact_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
@@ -109,16 +109,20 @@ def main():
     parser.add_option("-v", "--version", dest="version", help="Specify release version (e.g., v0.0.0)")
     parser.add_option("-o", "--output", dest="output_dir", help="Output directory for artifacts")
     parser.add_option("-p", "--platform", dest="platform", help="Target platform (e.g., ubuntu2004, rocky8)")
+    parser.add_option('--max_attempts', dest='max_attempts', help='Maximum number of attempts to download', type='int', default=10)
 
     (options, args) = parser.parse_args()
 
+    if args:
+        parser.error("No positional arguments are allowed.")
+
     if not options.output_dir or not options.platform:
-        parser.error("Output directory and platform are required.")
+        parser.error("output directory argument and -p/--platform flag are required.")
 
     if options.platform not in SUPPORTED_PLATFORMS:
         parser.error(f"Unsupported platform '{options.platform}'. Supported platforms: {', '.join(SUPPORTED_PLATFORMS)}")
 
-    version = options.version if options.version else get_latest_release()
+    version = options.version if options.version else get_latest_release(options.max_attempts)
     base_url = f"https://github.com/xlsynth/xlsynth/releases/download/{version}"
 
     artifacts = [
@@ -132,11 +136,11 @@ def main():
 
     for artifact, is_binary in artifacts:
         filename = f"{artifact}-{options.platform}"
-        high_integrity_download(base_url, filename, options.output_dir, is_binary, options.platform)
+        high_integrity_download(base_url, filename, options.output_dir, options.max_attempts, is_binary, options.platform)
 
     # Download and extract dslx_stdlib.tar.gz
     stdlib_filename = "dslx_stdlib.tar.gz"
-    high_integrity_download(base_url, stdlib_filename, options.output_dir, is_binary=False)
+    high_integrity_download(base_url, stdlib_filename, options.output_dir, options.max_attempts, is_binary=False)
     shutil.unpack_archive(os.path.join(options.output_dir, stdlib_filename), options.output_dir)
 
 if __name__ == "__main__":
