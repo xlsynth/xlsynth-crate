@@ -136,11 +136,8 @@ pub(crate) fn xls_value_make_sbits(value: i64, bit_count: usize) -> Result<IrVal
 
 pub(crate) fn xls_value_make_tuple(elements: &[IrValue]) -> IrValue {
     unsafe {
-        // The C API call takes ownership of the elements that are in the array.
-        let elements_ptrs: Vec<*mut CIrValue> = elements
-            .iter()
-            .map(|v| xlsynth_sys::xls_value_clone(v.ptr))
-            .collect();
+        let elements_ptrs: Vec<*const CIrValue> =
+            elements.iter().map(|v| v.ptr as *const CIrValue).collect();
         let result = xlsynth_sys::xls_value_make_tuple(elements_ptrs.len(), elements_ptrs.as_ptr());
         assert!(!result.is_null());
         IrValue { ptr: result }
