@@ -312,7 +312,7 @@ jobs:
         run: |
           export SLANG_PATH=$(realpath slang)
           export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
-          cp $(find $(realpath xlsynth_tools) -maxdepth 1 -name 'libxls-v*-*.so' | head -n 1) .
+          cp $(find -name 'libxls-v*-*.so' | head -n 1) .
           export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
           python3 run_valgrind_on_tests.py
 
