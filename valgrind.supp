@@ -129,3 +129,35 @@
    fun:_ZN6google8protobuf8internal14AddDescriptorsEPKNS1_15DescriptorTableE
    fun:_ZN6google8protobuf8internal14AddDescriptorsEPKNS1_15DescriptorTableE
 }
+{
+   dslx_sig_to_lambda_map
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls4dslx12_GLOBAL__N_128PopulateSignatureToLambdaMapB5cxx11Ev
+   ...
+}
+{
+   dslx_string_to_op
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls10StringToOpESt17basic_string_viewIcSt11char_traitsIcEE
+   ...
+}
+{
+   dslx_parametric_builtins
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls4dslx21GetParametricBuiltinsB5cxx11Ev
+   ...
+}
+{
+   dslx_scanner_keywords
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls4dslx7Scanner10GetKeywordESt17basic_string_viewIcSt11char_traitsIcEE
+   ...
+}
