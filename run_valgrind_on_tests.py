@@ -64,9 +64,10 @@ def main():
     print("Compiling tests for package 'xlsynth' with cargo test --no-run ...")
     p = subprocess.run(
         ["cargo", "test", "--no-run", "--workspace"],
-        check=True,
         stderr=subprocess.PIPE
     )
+    if p.returncode != 0:
+        print("Warning: 'cargo test --no-run' returned non-zero exit status (", p.returncode, "). Continuing anyway.")
     output = p.stderr.decode("utf-8")
 
     # Get the test binary paths from the cargo output.

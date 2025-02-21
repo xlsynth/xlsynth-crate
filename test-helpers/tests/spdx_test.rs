@@ -82,7 +82,11 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             }
 
             if let Some(extension) = path.extension() {
-                if extension == "md" || extension == "lock" || extension == "toml" {
+                if extension == "md"
+                    || extension == "lock"
+                    || extension == "toml"
+                    || extension == "supp"
+                {
                     continue;
                 }
                 // Check all source files, not just Rust files

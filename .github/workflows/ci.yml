@@ -283,6 +283,11 @@ jobs:
           pip3 install requests termcolor
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
+      - name: Download Slang
+        run: |
+          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
+          chmod +x slang
+
       - name: Setup Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -290,8 +295,12 @@ jobs:
           profile: minimal
           override: true
 
+      - name: Build crate
+        run: cargo build --workspace -vv
+
       - name: Run Valgrind Tests
         run: |
+          export SLANG_PATH=$(realpath slang)
           export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
           python3 run_valgrind_on_tests.py
 
