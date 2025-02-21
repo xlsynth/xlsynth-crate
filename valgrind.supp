@@ -1,5 +1,5 @@
 {
-   <insert_a_suppression_name_here>
+   asap7_delay_model_registry
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
@@ -10,7 +10,7 @@
    obj:/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 }
 {
-   <insert_a_suppression_name_here>
+   sky130_delay_model_registry
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
@@ -21,7 +21,7 @@
    obj:/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 }
 {
-   <insert_a_suppression_name_here>
+   unit_delay_model_registry
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
@@ -32,7 +32,7 @@
    obj:/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 }
 {
-   <insert_a_suppression_name_here>
+   ortools_init
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
@@ -48,7 +48,7 @@
    obj:/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 }
 {
-   <insert_a_suppression_name_here>
+   protobuf_init
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
@@ -63,7 +63,7 @@
    obj:/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 }
 {
-   <insert_a_suppression_name_here>
+   sky130_delay_estimator
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
@@ -80,7 +80,7 @@
    obj:/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 }
 {
-   <insert_a_suppression_name_here>
+   protobuf_descriptor_table
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
@@ -97,7 +97,7 @@
    obj:/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 }
 {
-   <insert_a_suppression_name_here>
+   protobuf_descriptor_table
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
@@ -113,7 +113,7 @@
    obj:/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 }
 {
-   <insert_a_suppression_name_here>
+   protobuf_descriptor_table
    Memcheck:Leak
    match-leak-kinds: possible
    fun:_Znwm
