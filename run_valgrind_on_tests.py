@@ -17,7 +17,8 @@ def get_target_to_cwd_mapping():
     p = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
         capture_output=True,
-        check=True
+        check=True,
+        env=os.environ
     )
     metadata = json.loads(p.stdout.decode("utf-8"))
     mapping = {}
@@ -56,7 +57,8 @@ def run_xlsynth_test(exe, cwd):
     subprocess.run(
         ["valgrind", "--suppressions=valgrind.supp", "--leak-check=full", exe, test_str],
         check=True,
-        cwd=cwd
+        cwd=cwd,
+        env=os.environ
     )
 
 def main():
@@ -64,10 +66,10 @@ def main():
     print("Compiling tests for package 'xlsynth' with cargo test --no-run ...")
     p = subprocess.run(
         ["cargo", "test", "--no-run", "--workspace"],
-        stderr=subprocess.PIPE
+        check=True,
+        stderr=subprocess.PIPE,
+        env=os.environ
     )
-    if p.returncode != 0:
-        print("Warning: 'cargo test --no-run' returned non-zero exit status (", p.returncode, "). Continuing anyway.")
     output = p.stderr.decode("utf-8")
 
     # Get the test binary paths from the cargo output.
@@ -122,7 +124,7 @@ def main():
                 exe
             ]
             termcolor.cprint(f'Running command: {subprocess.list2cmdline(valgrind_command)}', 'cyan')
-            subprocess.run(valgrind_command, check=True, cwd=cwd, env=dict(XLSYNTH_TOOLS=os.environ["XLSYNTH_TOOLS"]))
+            subprocess.run(valgrind_command, check=True, cwd=cwd, env=os.environ)
 
 
 if __name__ == "__main__":
