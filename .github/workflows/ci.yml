@@ -280,7 +280,7 @@ jobs:
 
       - name: Download xlsynth binaries
         run: |
-          pip3 install requests
+          pip3 install requests termcolor
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
       - name: Setup Rust
