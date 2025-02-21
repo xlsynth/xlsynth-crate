@@ -6,7 +6,20 @@ use xlsynth::*;
 #[test]
 fn test_ir_interpret_array_values() {
     let path = std::path::Path::new("tests/function_zoo.x");
-    let dslx = std::fs::read_to_string(path).unwrap();
+    let dslx = match std::fs::read_to_string(path) {
+        Ok(dslx) => dslx,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                panic!(
+                    "Could not find file: {}; cwd: {}",
+                    path.display(),
+                    std::env::current_dir().unwrap().display()
+                );
+            } else {
+                panic!("Error reading file: {}", e);
+            }
+        }
+    };
     let result = convert_dslx_to_ir(&dslx, &path, &DslxConvertOptions::default()).unwrap();
     assert!(result.warnings.is_empty());
     let ir = result.ir;

@@ -129,6 +129,12 @@ impl IrBits {
     }
 }
 
+impl Drop for IrBits {
+    fn drop(&mut self) {
+        unsafe { xlsynth_sys::xls_bits_free(self.ptr) }
+    }
+}
+
 impl std::cmp::PartialEq for IrBits {
     fn eq(&self, other: &Self) -> bool {
         unsafe { xlsynth_sys::xls_bits_eq(self.ptr, other.ptr) }
