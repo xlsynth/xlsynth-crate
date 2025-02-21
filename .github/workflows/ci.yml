@@ -261,3 +261,38 @@ jobs:
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
+
+  # -----------------------------------------------------------
+  # 6) Valgrind Tests job on Ubuntu Latest
+  # -----------------------------------------------------------
+  valgrind-tests:
+    name: Valgrind Tests on Ubuntu Latest
+    needs: [lint-check-ubuntu]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Download xlsynth binaries
+        run: |
+          pip3 install requests
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Run Valgrind Tests
+        run: |
+          export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
+          python3 run_valgrind_on_tests.py
+
+          
