@@ -261,3 +261,59 @@ jobs:
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
+
+  # -----------------------------------------------------------
+  # 6) Valgrind Tests job on Ubuntu Latest
+  # -----------------------------------------------------------
+  valgrind-tests:
+    name: Valgrind Tests on Ubuntu Latest
+    needs: [lint-check-ubuntu]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Install protobuf compiler
+        run: |
+          wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          unzip protoc-29.1-linux-x86_64.zip -d protoc
+          sudo mv protoc/bin/protoc /usr/local/bin/protoc
+          sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
+          sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
+          # Emit the protobuf compiler version number.
+          protoc --version
+
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Download xlsynth binaries
+        run: |
+          pip3 install requests termcolor
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools
+
+      - name: Download Slang
+        run: |
+          curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
+          chmod +x slang
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Build crate
+        run: cargo build --workspace -vv
+
+      - name: Run Valgrind Tests
+        run: |
+          export SLANG_PATH=$(realpath slang)
+          export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
+          cp $(find -name 'libxls-v*-*.so' | head -n 1) .
+          export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
+          python3 run_valgrind_on_tests.py
+
+          

@@ -209,8 +209,8 @@ pub(crate) fn xls_parse_ir_package(
     filename: Option<&str>,
 ) -> Result<crate::ir_package::IrPackage, XlsynthError> {
     let ir_cstring = CString::new(ir).unwrap();
-    let filename_ptr = filename
-        .map(|s| CString::new(s).unwrap())
+    let filename_cstr = filename.map(|s| CString::new(s).unwrap());
+    let filename_ptr = filename_cstr
         .map(|s| s.as_ptr())
         .unwrap_or(std::ptr::null());
     let mut xls_package_out: *mut CIrPackage = std::ptr::null_mut();
