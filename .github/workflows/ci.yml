@@ -351,13 +351,6 @@ jobs:
           curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
           chmod +x slang
 
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-
       - name: Build crate
         run: cargo build --workspace -vv
 
