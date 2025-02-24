@@ -313,6 +313,13 @@ jobs:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     steps:
+      - name: Set up Rust nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          profile: minimal
+          override: true
+
       - name: Check out code
         uses: actions/checkout@v2
 
@@ -361,5 +368,3 @@ jobs:
           cp $(find -name 'libxls-v*-*.so' | head -n 1) .
           export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
           python3 run_valgrind_on_tests.py
-
-          
