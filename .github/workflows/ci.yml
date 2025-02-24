@@ -326,6 +326,16 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
+      - name: Install libc++ from llvm-18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          cd /tmp/
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+
       - name: Install valgrind
         run: |
           sudo apt-get update
