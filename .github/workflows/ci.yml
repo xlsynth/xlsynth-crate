@@ -58,6 +58,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget gnupg
+          cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 18
@@ -153,6 +154,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget gnupg
+          cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 18
