@@ -54,6 +54,15 @@ jobs:
       fail-fast: false
 
     steps:
+      - name: Install libc++ from llvm-18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+
       - name: Check out code
         uses: actions/checkout@v2
 
@@ -104,6 +113,24 @@ jobs:
     runs-on: ubuntu-20.04
 
     steps:
+      - name: Verify non-root user
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then
+            echo "Script is running as root, which is not allowed."
+            exit 1
+          else
+            echo "Running as non-root user: $(whoami)"
+          fi
+
+      - name: Verify sudoers for current user
+        run: |
+          if sudo -l &> /dev/null; then
+            echo "User has sudo privileges."
+          else
+            echo "User does not have sudo privileges."
+            exit 1
+          fi
+
       - name: Check out code
         uses: actions/checkout@v2
 
@@ -122,6 +149,27 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
+      - name: Install libc++ from llvm-18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Show rustfmt and cargo versions
+        run: |
+          rustfmt --version
+          cargo --version
+
       - name: Set up Python + pre-commit
         run: |
           python -m pip install --upgrade pip
@@ -133,13 +181,6 @@ jobs:
         run: |
           pre-commit install
           pre-commit run --all-files
-
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
 
       - name: Build crate
         run: cargo build --workspace -vv
