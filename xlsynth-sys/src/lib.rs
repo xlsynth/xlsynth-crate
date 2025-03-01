@@ -273,6 +273,14 @@ extern "C" {
         values: *const *const CIrValue,
     ) -> *mut CIrValue;
 
+    /// Returns an error if the elements do not all have the same type.
+    pub fn xls_value_make_array(
+        element_count: libc::size_t,
+        elements: *const *const CIrValue,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CIrValue,
+    ) -> bool;
+
     // Extracts an element from a tuple/array value or gives an error (e.g. if this
     // value is not a tuple/array or the index is out of bounds).
     pub fn xls_value_get_element(

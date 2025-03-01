@@ -144,6 +144,14 @@ pub(crate) fn xls_value_make_tuple(elements: &[IrValue]) -> IrValue {
     }
 }
 
+pub(crate) fn xls_value_make_array(elements: &[IrValue]) -> Result<IrValue, XlsynthError> {
+    let elements_ptrs: Vec<*const CIrValue> =
+        elements.iter().map(|v| v.ptr as *const CIrValue).collect();
+    let mut result: *mut CIrValue = std::ptr::null_mut();
+    xls_ffi_call!(xlsynth_sys::xls_value_make_array, elements_ptrs.len(), elements_ptrs.as_ptr(); result)?;
+    Ok(IrValue { ptr: result })
+}
+
 pub(crate) fn xls_bits_to_debug_str(p: *const CIrBits) -> String {
     unsafe {
         let c_str_out = xlsynth_sys::xls_bits_to_debug_string(p);
