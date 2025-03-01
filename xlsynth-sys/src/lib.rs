@@ -273,7 +273,10 @@ extern "C" {
         values: *const *const CIrValue,
     ) -> *mut CIrValue;
 
-    /// Returns an error if the elements do not all have the same type.
+    /// Returns an error:
+    /// * if the elements do not all have the same type, or
+    /// * if the array is empty (because then we cannot determine the element
+    ///   type)
     pub fn xls_value_make_array(
         element_count: libc::size_t,
         elements: *const *const CIrValue,
