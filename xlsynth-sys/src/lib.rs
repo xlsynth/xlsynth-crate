@@ -217,6 +217,8 @@ pub type XlsFormatPreference = i32;
 
 pub type VastFileType = i32;
 
+pub type VastOperatorKind = i32;
+
 pub type DslxTypeDefinitionKind = i32;
 
 pub type DslxModuleMemberKind = i32;
@@ -523,6 +525,26 @@ extern "C" {
         subject: *mut CVastIndexableExpression,
         index: i64,
     ) -> *mut CVastIndex;
+
+    pub fn xls_vast_verilog_file_make_unary(
+        f: *mut CVastFile,
+        arg: *mut CVastExpression,
+        op: VastOperatorKind,
+    ) -> *mut CVastExpression;
+
+    pub fn xls_vast_verilog_file_make_binary(
+        f: *mut CVastFile,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+        op: VastOperatorKind,
+    ) -> *mut CVastExpression;
+
+    pub fn xls_vast_verilog_file_make_ternary(
+        f: *mut CVastFile,
+        cond: *mut CVastExpression,
+        consequent: *mut CVastExpression,
+        alternate: *mut CVastExpression,
+    ) -> *mut CVastExpression;
 
     pub fn xls_vast_verilog_file_make_instantiation(
         f: *mut CVastFile,
