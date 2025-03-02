@@ -6,8 +6,8 @@ use crate::{
     lib_support::{
         xls_bits_make_sbits, xls_bits_make_ubits, xls_bits_to_debug_str, xls_bits_to_string,
         xls_format_preference_from_string, xls_value_eq, xls_value_free, xls_value_get_bits,
-        xls_value_get_element, xls_value_get_element_count, xls_value_make_sbits,
-        xls_value_make_tuple, xls_value_make_ubits, xls_value_to_string,
+        xls_value_get_element, xls_value_get_element_count, xls_value_make_array,
+        xls_value_make_sbits, xls_value_make_tuple, xls_value_make_ubits, xls_value_to_string,
         xls_value_to_string_format_preference,
     },
     xls_parse_typed_value,
@@ -243,6 +243,11 @@ pub struct IrValue {
 impl IrValue {
     pub fn make_tuple(elements: &[IrValue]) -> Self {
         xls_value_make_tuple(elements)
+    }
+
+    /// Returns an error if the elements do not all have the same type.
+    pub fn make_array(elements: &[IrValue]) -> Result<Self, XlsynthError> {
+        xls_value_make_array(elements)
     }
 
     pub fn from_bits(bits: &IrBits) -> Self {
@@ -735,5 +740,33 @@ mod tests {
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.to_string().contains("0xfffffffffffffffe requires 2 bits to fit in an signed datatype, but attempting to fit in 1 bit"), "got: {}", error);
+    }
+
+    #[test]
+    fn test_make_ir_value_array() {
+        let b2_v0 = IrValue::make_ubits(2, 0).expect("make_ubits success");
+        let b2_v1 = IrValue::make_ubits(2, 1).expect("make_ubits success");
+        let b2_v2 = IrValue::make_ubits(2, 2).expect("make_ubits success");
+        let b2_v3 = IrValue::make_ubits(2, 3).expect("make_ubits success");
+        let array = IrValue::make_array(&[b2_v0, b2_v1, b2_v2, b2_v3]).expect("make_array success");
+        assert_eq!(
+            array.to_string(),
+            "[bits[2]:0, bits[2]:1, bits[2]:2, bits[2]:3]"
+        );
+    }
+
+    #[test]
+    fn test_make_ir_value_empty_array() {
+        IrValue::make_array(&[]).expect_err("make_array should fail for empty array");
+    }
+
+    #[test]
+    fn test_make_ir_value_array_with_mixed_types() {
+        let b2_v0 = IrValue::make_ubits(2, 0).expect("make_ubits success");
+        let b3_v1 = IrValue::make_ubits(3, 1).expect("make_ubits success");
+        let result = IrValue::make_array(&[b2_v0, b3_v1]);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("SameTypeAs"));
     }
 }

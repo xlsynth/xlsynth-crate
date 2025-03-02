@@ -103,6 +103,6 @@
    Memcheck:Leak
    match-leak-kinds: possible
    ...
-   fun:_ZN3std3sys12thread_local6native4lazy20Storage$LT$T$C$D$GT$10initialize17h1171ab3067dd2eb7E
+   fun:_ZN3std3sys12thread_local6native4lazy20Storage*
    ...
 }
