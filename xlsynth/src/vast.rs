@@ -19,6 +19,42 @@ use crate::{
 
 pub(crate) struct VastFilePtr(pub *mut sys::CVastFile);
 
+enum VastOperatorKind {
+    // unary operators
+    Negate = 0,
+    BitwiseNot = 1,
+    LogicalNot = 2,
+    AndReduce = 3,
+    OrReduce = 4,
+    XorReduce = 5,
+
+    // binary operators
+    Add = 6,
+    LogicalAnd = 7,
+    BitwiseAnd = 8,
+    Ne = 9,
+    CaseNe = 10,
+    Eq = 11,
+    CaseEq = 12,
+    Ge = 13,
+    Gt = 14,
+    Le = 15,
+    Lt = 16,
+    Div = 17,
+    Mod = 18,
+    Mul = 19,
+    Power = 20,
+    BitwiseOr = 21,
+    LogicalOr = 22,
+    BitwiseXor = 23,
+    Shll = 24,
+    Shra = 25,
+    Shrl = 26,
+    Sub = 27,
+    NeX = 28,
+    EqX = 29,
+}
+
 impl Drop for VastFilePtr {
     fn drop(&mut self) {
         unsafe { sys::xls_vast_verilog_file_free(self.0) }
@@ -417,6 +453,174 @@ impl VastFile {
         }
     }
 
+    fn make_unary(&mut self, op: VastOperatorKind, expr: &Expr) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let op_i32 = op as i32;
+        let inner = unsafe { sys::xls_vast_verilog_file_make_unary(locked.0, expr.inner, op_i32) };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_not(&mut self, expr: &Expr) -> Expr {
+        self.make_unary(VastOperatorKind::BitwiseNot, expr)
+    }
+
+    pub fn make_negate(&mut self, expr: &Expr) -> Expr {
+        self.make_unary(VastOperatorKind::Negate, expr)
+    }
+
+    pub fn make_logical_not(&mut self, expr: &Expr) -> Expr {
+        self.make_unary(VastOperatorKind::LogicalNot, expr)
+    }
+
+    pub fn make_and_reduce(&mut self, expr: &Expr) -> Expr {
+        self.make_unary(VastOperatorKind::AndReduce, expr)
+    }
+
+    pub fn make_or_reduce(&mut self, expr: &Expr) -> Expr {
+        self.make_unary(VastOperatorKind::OrReduce, expr)
+    }
+
+    pub fn make_xor_reduce(&mut self, expr: &Expr) -> Expr {
+        self.make_unary(VastOperatorKind::XorReduce, expr)
+    }
+
+    // -- binary ops
+
+    fn make_binary(&mut self, op: VastOperatorKind, lhs: &Expr, rhs: &Expr) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let op_i32 = op as i32;
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_binary(locked.0, lhs.inner, rhs.inner, op_i32)
+        };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_add(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Add, lhs, rhs)
+    }
+
+    pub fn make_sub(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Sub, lhs, rhs)
+    }
+
+    pub fn make_mul(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Mul, lhs, rhs)
+    }
+
+    pub fn make_div(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Div, lhs, rhs)
+    }
+
+    pub fn make_mod(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Mod, lhs, rhs)
+    }
+
+    pub fn make_power(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Power, lhs, rhs)
+    }
+
+    pub fn make_bitwise_and(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::BitwiseAnd, lhs, rhs)
+    }
+
+    pub fn make_bitwise_or(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::BitwiseOr, lhs, rhs)
+    }
+
+    pub fn make_bitwise_xor(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::BitwiseXor, lhs, rhs)
+    }
+
+    pub fn make_bitwise_not(&mut self, expr: &Expr) -> Expr {
+        self.make_unary(VastOperatorKind::BitwiseNot, expr)
+    }
+
+    pub fn make_shll(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Shll, lhs, rhs)
+    }
+
+    pub fn make_shra(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Shra, lhs, rhs)
+    }
+
+    pub fn make_shrl(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Shrl, lhs, rhs)
+    }
+
+    pub fn make_ne(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Ne, lhs, rhs)
+    }
+
+    pub fn make_case_ne(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::CaseNe, lhs, rhs)
+    }
+
+    pub fn make_eq(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Eq, lhs, rhs)
+    }
+
+    pub fn make_case_eq(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::CaseEq, lhs, rhs)
+    }
+
+    pub fn make_ge(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Ge, lhs, rhs)
+    }
+
+    pub fn make_gt(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Gt, lhs, rhs)
+    }
+
+    pub fn make_le(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Le, lhs, rhs)
+    }
+
+    pub fn make_lt(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::Lt, lhs, rhs)
+    }
+
+    pub fn make_logical_and(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::LogicalAnd, lhs, rhs)
+    }
+
+    pub fn make_logical_or(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::LogicalOr, lhs, rhs)
+    }
+
+    pub fn make_ne_x(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::NeX, lhs, rhs)
+    }
+
+    pub fn make_eq_x(&mut self, lhs: &Expr, rhs: &Expr) -> Expr {
+        self.make_binary(VastOperatorKind::EqX, lhs, rhs)
+    }
+
+    // Creates a ternary operator that selects between `then_expr` and `else_expr`
+    // based on the value of `cond`.
+    pub fn make_ternary(&mut self, cond: &Expr, then_expr: &Expr, else_expr: &Expr) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_ternary(
+                locked.0,
+                cond.inner,
+                then_expr.inner,
+                else_expr.inner,
+            )
+        };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    // Creates an `assign` statement that drives `lhs` with the `rhs` expression
+    // given.
     pub fn make_continuous_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> ContinuousAssignment {
         let locked = self.ptr.lock().unwrap();
         let inner = unsafe {
@@ -622,6 +826,167 @@ endmodule
         }
 
         let verilog = file.emit();
+        assert_eq!(verilog, want);
+    }
+
+    #[test]
+    fn test_unary_ops() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let input = module.add_input("my_input", &file.make_bit_vector_type(8, false));
+        let not_input = file.make_not(&input.to_expr());
+        let negate_input = file.make_negate(&input.to_expr());
+        let bitwise_not_input = file.make_bitwise_not(&input.to_expr());
+        let logical_not_input = file.make_logical_not(&input.to_expr());
+        let and_reduce_input = file.make_and_reduce(&input.to_expr());
+        let or_reduce_input = file.make_or_reduce(&input.to_expr());
+        let xor_reduce_input = file.make_xor_reduce(&input.to_expr());
+        let concat = file.make_concat(&[
+            &not_input,         // 8 bits
+            &negate_input,      // 8 bits
+            &bitwise_not_input, // 8 bits
+            &logical_not_input, // 1 bit
+            &and_reduce_input,  // 1 bit
+            &or_reduce_input,   // 1 bit
+            &xor_reduce_input,  // 1 bit
+        ]);
+        let concat_type = file.make_bit_vector_type(8 + 8 + 1 + 1 + 1 + 1, false);
+        let output = module.add_output("my_output", &concat_type);
+        let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
+        module.add_member_continuous_assignment(assignment);
+        let verilog = file.emit();
+        let want = "module my_module(
+  input wire [7:0] my_input,
+  output wire [19:0] my_output
+);
+  assign my_output = {~my_input, -my_input, ~my_input, !my_input, &my_input, |my_input, ^my_input};
+endmodule
+";
+        assert_eq!(verilog, want);
+    }
+
+    #[test]
+    fn test_binary_ops() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let u8 = file.make_bit_vector_type(8, false);
+        let u1 = file.make_bit_vector_type(1, false);
+        let lhs = module.add_input("lhs", &u8);
+        let rhs = module.add_input("rhs", &u8);
+        let functions: Vec<(&str, fn(&mut VastFile, &Expr, &Expr) -> Expr, &VastDataType)> = vec![
+            ("add", VastFile::make_add, &u8),
+            ("logical_and", VastFile::make_logical_and, &u1),
+            ("bitwise_and", VastFile::make_bitwise_and, &u8),
+            ("ne", VastFile::make_ne, &u1),
+            ("case_ne", VastFile::make_case_ne, &u1),
+            ("eq", VastFile::make_eq, &u1),
+            ("case_eq", VastFile::make_case_eq, &u1),
+            ("ge", VastFile::make_ge, &u1),
+            ("gt", VastFile::make_gt, &u1),
+            ("le", VastFile::make_le, &u1),
+            ("lt", VastFile::make_lt, &u1),
+            ("div", VastFile::make_div, &u8),
+            ("mod", VastFile::make_mod, &u8),
+            ("mul", VastFile::make_mul, &u8),
+            ("power", VastFile::make_power, &u8),
+            ("bitwise_or", VastFile::make_bitwise_or, &u8),
+            ("logical_or", VastFile::make_logical_or, &u1),
+            ("bitwise_xor", VastFile::make_bitwise_xor, &u8),
+            ("shll", VastFile::make_shll, &u8),
+            ("shra", VastFile::make_shra, &u8),
+            ("shrl", VastFile::make_shrl, &u8),
+            ("sub", VastFile::make_sub, &u8),
+            ("ne_x", VastFile::make_ne_x, &u1),
+            ("eq_x", VastFile::make_eq_x, &u1),
+        ];
+        for (name, f, output_type) in functions {
+            let wire = module.add_wire(name, output_type);
+            let rhs = f(&mut file, &lhs.to_expr(), &rhs.to_expr());
+            let assignment = file.make_continuous_assignment(&wire.to_expr(), &rhs);
+            module.add_member_continuous_assignment(assignment);
+        }
+
+        // Now emit the VAST as text.
+        let verilog = file.emit();
+        let want = r#"module my_module(
+  input wire [7:0] lhs,
+  input wire [7:0] rhs
+);
+  wire [7:0] add;
+  assign add = lhs + rhs;
+  wire logical_and;
+  assign logical_and = lhs && rhs;
+  wire [7:0] bitwise_and;
+  assign bitwise_and = lhs & rhs;
+  wire ne;
+  assign ne = lhs != rhs;
+  wire case_ne;
+  assign case_ne = lhs !== rhs;
+  wire eq;
+  assign eq = lhs == rhs;
+  wire case_eq;
+  assign case_eq = lhs === rhs;
+  wire ge;
+  assign ge = lhs >= rhs;
+  wire gt;
+  assign gt = lhs > rhs;
+  wire le;
+  assign le = lhs <= rhs;
+  wire lt;
+  assign lt = lhs < rhs;
+  wire [7:0] div;
+  assign div = lhs / rhs;
+  wire [7:0] mod;
+  assign mod = lhs % rhs;
+  wire [7:0] mul;
+  assign mul = lhs * rhs;
+  wire [7:0] power;
+  assign power = lhs ** rhs;
+  wire [7:0] bitwise_or;
+  assign bitwise_or = lhs | rhs;
+  wire logical_or;
+  assign logical_or = lhs || rhs;
+  wire [7:0] bitwise_xor;
+  assign bitwise_xor = lhs ^ rhs;
+  wire [7:0] shll;
+  assign shll = lhs << rhs;
+  wire [7:0] shra;
+  assign shra = lhs >>> rhs;
+  wire [7:0] shrl;
+  assign shrl = lhs >> rhs;
+  wire [7:0] sub;
+  assign sub = lhs - rhs;
+  wire ne_x;
+  assign ne_x = lhs !== rhs;
+  wire eq_x;
+  assign eq_x = lhs === rhs;
+endmodule
+"#;
+        assert_eq!(verilog, want);
+    }
+
+    #[test]
+    fn test_ternary() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let selector = module.add_input("selector", &file.make_bit_vector_type(8, false));
+        let on_true = module.add_input("on_true", &file.make_bit_vector_type(8, false));
+        let on_false = module.add_input("on_false", &file.make_bit_vector_type(8, false));
+        let ternary =
+            file.make_ternary(&selector.to_expr(), &on_true.to_expr(), &on_false.to_expr());
+        let output = module.add_output("my_output", &file.make_bit_vector_type(8, false));
+        let assignment = file.make_continuous_assignment(&output.to_expr(), &ternary);
+        module.add_member_continuous_assignment(assignment);
+        let verilog = file.emit();
+        let want = "module my_module(
+  input wire [7:0] selector,
+  input wire [7:0] on_true,
+  input wire [7:0] on_false,
+  output wire [7:0] my_output
+);
+  assign my_output = selector ? on_true : on_false;
+endmodule
+";
         assert_eq!(verilog, want);
     }
 }
