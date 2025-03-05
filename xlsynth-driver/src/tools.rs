@@ -138,3 +138,40 @@ pub fn run_ir_converter_main(
     log::info!("ir_text: {}", ir_text);
     ir_text
 }
+
+pub fn run_check_ir_equivalence_main(
+    lhs: &std::path::Path,
+    rhs: &std::path::Path,
+    top: Option<&str>,
+    tool_path: &str,
+) -> Result<String, std::process::Output> {
+    log::info!("run_check_ir_equivalence_main");
+    let irequiv_path = format!("{}/check_ir_equivalence_main", tool_path);
+    if !std::path::Path::new(&irequiv_path).exists() {
+        eprintln!("IR equivalence tool not found at: {}", irequiv_path);
+        process::exit(1);
+    }
+
+    let mut command = Command::new(irequiv_path);
+    command.arg(lhs);
+    command.arg(rhs);
+    if let Some(top) = top {
+        command.arg("--top").arg(top);
+    }
+
+    log::info!("command: {:?}", command);
+    let output = command
+        .output()
+        .expect("check_ir_equivalence_main should succeed");
+
+    if !output.status.success() {
+        log::info!("IR equivalence check failed with status: {}", output.status);
+        return Err(output);
+    }
+
+    log::info!(
+        "IR equivalence check succeeded so ignoring stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}

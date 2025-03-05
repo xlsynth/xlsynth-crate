@@ -3,7 +3,7 @@
 use clap::ArgMatches;
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct ToolchainConfig {
     /// Path to the DSLX standard library.
     pub dslx_stdlib_path: Option<String>,
