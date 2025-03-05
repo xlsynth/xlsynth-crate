@@ -129,7 +129,8 @@ def main():
         ("dslx_interpreter_main", True),
         ("ir_converter_main", True),
         ("codegen_main", True),
-        ("opt_main", True)
+        ("opt_main", True),
+        ("check_ir_equivalence_main", True),
     ]
 
     os.makedirs(options.output_dir, exist_ok=True)

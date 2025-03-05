@@ -41,6 +41,7 @@ mod dslx2sv_types;
 mod ir2delayinfo;
 mod ir2opt;
 mod ir2pipeline;
+mod irequiv;
 mod toolchain_config;
 mod tools;
 
@@ -61,6 +62,7 @@ trait AppExt {
     fn add_dslx_input_args(self, include_top: bool) -> Self;
     fn add_codegen_args(self) -> Self;
     fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
+    fn add_ir_top_arg(self, required: bool) -> Self;
 }
 
 impl AppExt for clap::Command {
@@ -180,6 +182,17 @@ impl AppExt for clap::Command {
                 "Whether to emit System Verilog instead of Verilog",
             )
     }
+
+    fn add_ir_top_arg(self, required: bool) -> Self {
+        (self as clap::Command).arg(
+            Arg::new("ir_top")
+                .long("top")
+                .value_name("TOP")
+                .help("The top-level entry point to use for the IR")
+                .required(required)
+                .action(ArgAction::Set),
+        )
+    }
 }
 
 fn main() {
@@ -274,6 +287,23 @@ fn main() {
                         .index(2),
                 ),
         )
+        .subcommand(
+            clap::Command::new("irequiv")
+                .about("Checks if two IRs are equivalent")
+                .arg(
+                    Arg::new("lhs_ir_file")
+                        .help("The left-hand side IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("rhs_ir_file")
+                        .help("The right-hand side IR file")
+                        .required(true)
+                        .index(2),
+                )
+                .add_ir_top_arg(false),
+        )
         .get_matches();
 
     let toml_path = matches.get_one::<String>("toolchain");
@@ -303,6 +333,8 @@ fn main() {
         dslx2sv_types::handle_dslx2sv_types(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2delayinfo") {
         ir2delayinfo::handle_ir2delayinfo(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("irequiv") {
+        irequiv::handle_irequiv(matches, &config);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {
