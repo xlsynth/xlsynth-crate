@@ -42,6 +42,9 @@ jobs:
           pre-commit install
           pre-commit run --all-files
 
+      - name: Run version check test
+        run: cargo test --test version_test
+
   # -----------------------------------------------------------
   # 2) Build/test on Ubuntu 22.04 and 24.04
   # -----------------------------------------------------------
