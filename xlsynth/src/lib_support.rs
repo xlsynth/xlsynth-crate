@@ -79,6 +79,21 @@ macro_rules! xls_ffi_call {
     }};
 }
 
+// Variant of the above macro for when we have no return value.
+macro_rules! xls_ffi_call_noreturn {
+    ($func:path $(, $arg:expr )*) => {{
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let success = $func($($arg,)* &mut error_out);
+            if success {
+                Ok(())
+            } else {
+                Err(XlsynthError(c_str_to_rust(error_out)))
+            }
+        }
+    }};
+}
+
 pub(crate) fn xls_package_to_string(p: *const CIrPackage) -> Result<String, XlsynthError> {
     unsafe {
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -459,6 +474,16 @@ pub(crate) fn xls_type_to_string(t: *const CIrType) -> Result<String, XlsynthErr
     let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_type_to_string, t; c_str_out)?;
     Ok(unsafe { c_str_to_rust(c_str_out) })
+}
+
+pub(crate) fn xls_package_set_top_by_name(
+    package: *mut CIrPackage,
+    name: &str,
+) -> Result<(), XlsynthError> {
+    let name_cstr = CString::new(name).unwrap();
+    let name_ptr = name_cstr.as_ptr();
+    xls_ffi_call_noreturn!(xlsynth_sys::xls_package_set_top_by_name, package, name_ptr)?;
+    Ok(())
 }
 
 pub(crate) fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: u64) -> IrType {
