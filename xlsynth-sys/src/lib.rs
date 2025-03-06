@@ -463,6 +463,11 @@ extern "C" {
         p: *const CIrPackage,
         string_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_package_set_top_by_name(
+        p: *mut CIrPackage,
+        name: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
 
     pub fn xls_make_function_jit(
         function: *const CIrFunction,

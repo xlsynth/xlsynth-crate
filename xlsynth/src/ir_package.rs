@@ -89,6 +89,11 @@ impl IrPackage {
         xls_parse_ir_package(ir, filename)
     }
 
+    pub fn set_top_by_name(&mut self, name: &str) -> Result<(), XlsynthError> {
+        let write_guard = self.ptr.write().unwrap();
+        lib_support::xls_package_set_top_by_name(write_guard.mut_c_ptr(), name)
+    }
+
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
         let read_guard = self.ptr.read().unwrap();
         xls_package_get_function(&self.ptr, read_guard, name)
@@ -194,6 +199,8 @@ impl IrFunctionJit {
 
 #[cfg(test)]
 mod tests {
+    use crate::FnBuilder;
+
     use super::*;
 
     #[test]
@@ -231,6 +238,32 @@ mod tests {
         assert_eq!(
             package.get_type_for_value(&want).unwrap().to_string(),
             "bits[32]".to_string()
+        );
+    }
+
+    #[test]
+    fn test_ir_package_set_top_by_name() {
+        let mut package = IrPackage::new("test_package").unwrap();
+        // Build the identity function inside of the package that is not marked as top.
+        let u32 = package.get_bits_type(32);
+        let mut builder = FnBuilder::new(&mut package, "f", true);
+        let x = builder.param("x", &u32);
+        let _f = builder.build_with_return_value(&x);
+
+        assert_eq!(
+            package.to_string(),
+            "package test_package\n\nfn f(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
+}
+"
+        );
+        package.set_top_by_name("f").unwrap();
+        assert_eq!(
+            package.to_string(),
+            "package test_package\n\ntop fn f(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
+}
+"
         );
     }
 }
