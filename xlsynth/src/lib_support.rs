@@ -12,14 +12,44 @@ use std::{
 };
 
 use xlsynth_sys::{
-    CIrBits, CIrFunction, CIrFunctionJit, CIrFunctionType, CIrPackage, CIrType, CIrValue,
-    CScheduleAndCodegenResult, CTraceMessage, XlsFormatPreference,
+    CIrBValue, CIrBits, CIrFunction, CIrFunctionJit, CIrFunctionType, CIrPackage, CIrType,
+    CIrValue, CScheduleAndCodegenResult, CTraceMessage, XlsFormatPreference,
 };
 
 use crate::{
     ir_package::{IrFunctionType, IrPackagePtr, IrType, ScheduleAndCodegenResult},
-    IrBits, IrValue, XlsynthError,
+    IrBits, IrFunction, IrValue, XlsynthError,
 };
+
+// Wrapper around the raw pointer that frees (i.e. when the wrapping refcount
+// drops to zero).
+pub(crate) struct IrFnBuilderPtr {
+    pub(crate) ptr: *mut xlsynth_sys::CIrFunctionBuilder,
+}
+
+impl Drop for IrFnBuilderPtr {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                xlsynth_sys::xls_function_builder_free(self.ptr);
+            }
+        }
+    }
+}
+
+// Wrapper around the raw pointer that frees (i.e. when the wrapping refcount
+// drops to zero).
+pub(crate) struct BValuePtr {
+    ptr: *mut CIrBValue,
+}
+
+impl Drop for BValuePtr {
+    fn drop(&mut self) {
+        unsafe {
+            xlsynth_sys::xls_bvalue_free(self.ptr);
+        }
+    }
+}
 
 /// Macro for performing FFI calls to fallible functions with a trailing output
 /// parameter.
@@ -230,10 +260,119 @@ pub(crate) fn xls_parse_ir_package(
     Ok(package)
 }
 
+pub(crate) fn xls_package_new(name: &str) -> Result<crate::ir_package::IrPackage, XlsynthError> {
+    let name_cstr = CString::new(name).unwrap();
+    let xls_package_out: *mut CIrPackage =
+        unsafe { xlsynth_sys::xls_package_create(name_cstr.as_ptr()) };
+    Ok(crate::ir_package::IrPackage {
+        ptr: Arc::new(RwLock::new(IrPackagePtr(xls_package_out))),
+        filename: None,
+    })
+}
+
+pub(crate) fn xls_function_builder_new(
+    package: *mut CIrPackage,
+    name: &str,
+    should_verify: bool,
+) -> Arc<RwLock<IrFnBuilderPtr>> {
+    let name_cstr = CString::new(name).unwrap();
+    let name_ptr = name_cstr.as_ptr();
+    let fn_builder =
+        unsafe { xlsynth_sys::xls_function_builder_create(name_ptr, package, should_verify) };
+    assert!(!fn_builder.is_null());
+    Arc::new(RwLock::new(IrFnBuilderPtr { ptr: fn_builder }))
+}
+
+pub(crate) fn xls_function_builder_add_parameter(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    name: &str,
+    type_: &IrType,
+) -> BValuePtr {
+    let name_cstr = CString::new(name).unwrap();
+    let name_ptr = name_cstr.as_ptr();
+    let type_raw = type_.ptr;
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_function_builder_add_parameter(builder.ptr, name_ptr, type_raw) };
+    BValuePtr { ptr: bvalue_raw }
+}
+
+pub(crate) fn xls_function_builder_add_and(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    b: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> BValuePtr {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = if let Some(name_cstr) = name_cstr {
+        name_cstr.as_ptr()
+    } else {
+        std::ptr::null()
+    };
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_and(builder_base, a.ptr, b.ptr, name_ptr) };
+    BValuePtr { ptr: bvalue_raw }
+}
+
+pub(crate) fn xls_function_builder_add_or(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    b: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> BValuePtr {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = if let Some(name_cstr) = name_cstr {
+        name_cstr.as_ptr()
+    } else {
+        std::ptr::null()
+    };
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_or(builder_base, a.ptr, b.ptr, name_ptr) };
+    BValuePtr { ptr: bvalue_raw }
+}
+
+pub(crate) fn xls_function_builder_add_not(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> BValuePtr {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = if let Some(name_cstr) = name_cstr {
+        name_cstr.as_ptr()
+    } else {
+        std::ptr::null()
+    };
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_not(builder_base, a.ptr, name_ptr) };
+    BValuePtr { ptr: bvalue_raw }
+}
+
+pub(crate) fn xls_function_builder_build_with_return_value(
+    package: &Arc<RwLock<IrPackagePtr>>,
+    _package_guard: RwLockWriteGuard<IrPackagePtr>,
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    return_value: RwLockReadGuard<BValuePtr>,
+) -> Result<IrFunction, XlsynthError> {
+    let return_value_ptr = return_value.ptr;
+    let mut result_out: *mut CIrFunction = std::ptr::null_mut();
+    xls_ffi_call!(xlsynth_sys::xls_function_builder_build_with_return_value, builder.ptr, return_value_ptr; result_out)?;
+    Ok(IrFunction {
+        parent: package.clone(),
+        ptr: result_out,
+    })
+}
+
 pub(crate) fn xls_type_to_string(t: *const CIrType) -> Result<String, XlsynthError> {
     let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_type_to_string, t; c_str_out)?;
     Ok(unsafe { c_str_to_rust(c_str_out) })
+}
+
+pub(crate) fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: u64) -> IrType {
+    let type_raw = unsafe { xlsynth_sys::xls_package_get_bits_type(package, bit_count as i64) };
+    IrType { ptr: type_raw }
 }
 
 pub(crate) fn xls_package_get_type_for_value(

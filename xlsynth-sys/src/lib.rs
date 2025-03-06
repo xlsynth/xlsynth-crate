@@ -213,6 +213,21 @@ pub struct CScheduleAndCodegenResult {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+#[repr(C)]
+pub struct CIrBuilderBase {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CIrBValue {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CIrFunctionBuilder {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 pub type XlsFormatPreference = i32;
 
 pub type VastFileType = i32;
@@ -899,6 +914,76 @@ extern "C" {
 
     pub fn xls_dslx_type_array_get_element_type(ty: *const CDslxType) -> *mut CDslxType;
     pub fn xls_dslx_type_array_get_size(ty: *const CDslxType) -> *mut CDslxTypeDim;
+
+    // -- IR builder APIs
+
+    pub fn xls_package_create(name: *const std::os::raw::c_char) -> *mut CIrPackage;
+    pub fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: i64) -> *mut CIrType;
+    pub fn xls_package_get_tuple_type(
+        package: *mut CIrPackage,
+        members: *mut *mut CIrType,
+        member_count: i64,
+    ) -> *mut CIrType;
+    pub fn xls_function_builder_create(
+        name: *const std::os::raw::c_char,
+        package: *mut CIrPackage,
+        should_verify: bool,
+    ) -> *mut CIrFunctionBuilder;
+    pub fn xls_function_builder_as_builder_base(
+        builder: *mut CIrFunctionBuilder,
+    ) -> *mut CIrBuilderBase;
+    pub fn xls_function_builder_free(builder: *mut CIrFunctionBuilder);
+    pub fn xls_bvalue_free(bvalue: *mut CIrBValue);
+    pub fn xls_function_builder_add_parameter(
+        builder: *mut CIrFunctionBuilder,
+        name: *const std::os::raw::c_char,
+        type_: *mut CIrType,
+    ) -> *mut CIrBValue;
+    pub fn xls_function_builder_build(
+        builder: *mut CIrFunctionBuilder,
+        error_out: *mut *mut std::os::raw::c_char,
+        function_out: *mut *mut CIrFunction,
+    ) -> bool;
+    pub fn xls_function_builder_build_with_return_value(
+        builder: *mut CIrFunctionBuilder,
+        return_value: *mut CIrBValue,
+        error_out: *mut *mut std::os::raw::c_char,
+        function_out: *mut *mut CIrFunction,
+    ) -> bool;
+    pub fn xls_builder_base_add_and(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_or(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_not(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_literal(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_tuple(
+        builder: *mut CIrBuilderBase,
+        operands: *mut *mut CIrBValue,
+        operand_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_tuple_index(
+        builder: *mut CIrBuilderBase,
+        tuple: *mut CIrBValue,
+        index: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");

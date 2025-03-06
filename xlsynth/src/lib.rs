@@ -2,14 +2,14 @@
 
 pub mod dslx;
 pub mod dslx_bridge;
+pub mod ir_builder;
 pub mod ir_package;
 pub mod ir_value;
 mod lib_support;
-pub mod vast;
-pub mod xlsynth_error;
-
 pub mod rust_bridge_builder;
 pub mod sv_bridge_builder;
+pub mod vast;
+pub mod xlsynth_error;
 
 use std::ffi::CString;
 
@@ -18,9 +18,12 @@ pub use ir_value::{IrBits, IrSBits, IrUBits};
 use lib_support::xls_schedule_and_codegen_package;
 use lib_support::{c_str_to_rust, c_str_to_rust_no_dealloc, xls_mangle_dslx_name, xls_optimize_ir};
 
+pub use ir_builder::BValue;
+pub use ir_builder::FnBuilder;
 pub use ir_package::IrFunction;
 pub use ir_package::IrFunctionJit;
 pub use ir_package::IrPackage;
+pub use ir_package::IrType;
 pub use ir_package::RunResult;
 pub use ir_value::IrValue;
 pub use xlsynth_error::XlsynthError;
