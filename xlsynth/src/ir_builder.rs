@@ -137,6 +137,17 @@ impl FnBuilder {
             ptr: Arc::new(RwLock::new(bvalue_ptr)),
         }
     }
+
+    pub fn tuple(&mut self, elements: &[&BValue], name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let elements_locks: Vec<RwLockReadGuard<BValuePtr>> =
+            elements.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_tuple(fn_builder_guard, &elements_locks, name);
+        BValue {
+            ptr: Arc::new(RwLock::new(bvalue_ptr)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +273,32 @@ fn literal() -> bits[2] {
 
         let result = f.interpret(&[]).unwrap();
         assert_eq!(result, IrValue::make_ubits(2, 0b10).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_tuple() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "tuple_and_then_index", true);
+        let u2 = package.get_bits_type(2);
+        let a = builder.param("a", &u2);
+        let b = builder.param("b", &u2);
+        let tuple = builder.tuple(&[&a, &b], None);
+        let f = builder.build_with_return_value(&tuple).unwrap();
+
+        let package_text = package.to_string();
+        assert_eq!(
+            package_text,
+            "package sample_package
+
+fn tuple_and_then_index(a: bits[2] id=1, b: bits[2] id=2) -> (bits[2], bits[2]) {
+  ret tuple.3: (bits[2], bits[2]) = tuple(a, b, id=3)
+}
+"
+        );
+
+        let a_value = IrValue::make_ubits(2, 0b01).unwrap();
+        let b_value = IrValue::make_ubits(2, 0b10).unwrap();
+        let result = f.interpret(&[a_value.clone(), b_value.clone()]).unwrap();
+        assert_eq!(result, IrValue::make_tuple(&[a_value, b_value]));
     }
 }
