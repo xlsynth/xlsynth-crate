@@ -182,4 +182,10 @@ mod tests {
         let _ = env_logger::try_init();
         validate_use().expect("validation should succeed");
     }
+
+    #[test]
+    fn test_validate_add_invert_via_ir_builder() {
+        let _ = env_logger::try_init();
+        validate_add_invert_via_ir_builder().expect("validation should succeed");
+    }
 }
