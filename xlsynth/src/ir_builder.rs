@@ -13,6 +13,7 @@ use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
 
+#[derive(Clone)]
 pub struct BValue {
     ptr: Arc<RwLock<BValuePtr>>,
 }
@@ -299,6 +300,21 @@ fn tuple_and_then_index(a: bits[2] id=1, b: bits[2] id=2) -> (bits[2], bits[2]) 
         let a_value = IrValue::make_ubits(2, 0b01).unwrap();
         let b_value = IrValue::make_ubits(2, 0b10).unwrap();
         let result = f.interpret(&[a_value.clone(), b_value.clone()]).unwrap();
+        assert_eq!(result, IrValue::make_tuple(&[a_value, b_value]));
+    }
+
+    #[test]
+    fn test_ir_builder_bvalue_clone() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "make_tuple_literal", true);
+        let a_value = IrValue::make_ubits(2, 0b01).unwrap();
+        let b_value = IrValue::make_ubits(2, 0b10).unwrap();
+        let a = builder.literal(&a_value, None);
+        let b = builder.literal(&b_value, None);
+        let tuple = builder.tuple(&[&a, &b], None);
+        let tuple2 = tuple.clone();
+        let f = builder.build_with_return_value(&tuple2).unwrap();
+        let result = f.interpret(&[]).unwrap();
         assert_eq!(result, IrValue::make_tuple(&[a_value, b_value]));
     }
 }
