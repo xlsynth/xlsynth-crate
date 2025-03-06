@@ -399,6 +399,23 @@ pub(crate) fn xls_function_builder_add_concat(
     BValuePtr { ptr: bvalue_raw }
 }
 
+pub(crate) fn xls_function_builder_add_literal(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    value: &IrValue,
+    name: Option<&str>,
+) -> BValuePtr {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = if let Some(name_cstr) = name_cstr {
+        name_cstr.as_ptr()
+    } else {
+        std::ptr::null()
+    };
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_literal(builder_base, value.ptr, name_ptr) };
+    BValuePtr { ptr: bvalue_raw }
+}
+
 pub(crate) fn xls_function_builder_build_with_return_value(
     package: &Arc<RwLock<IrPackagePtr>>,
     _package_guard: RwLockWriteGuard<IrPackagePtr>,
