@@ -416,6 +416,30 @@ pub(crate) fn xls_function_builder_add_literal(
     BValuePtr { ptr: bvalue_raw }
 }
 
+pub(crate) fn xls_function_builder_add_tuple(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    elements: &[RwLockReadGuard<BValuePtr>],
+    name: Option<&str>,
+) -> BValuePtr {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = if let Some(name_cstr) = name_cstr {
+        name_cstr.as_ptr()
+    } else {
+        std::ptr::null()
+    };
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let mut elements_ptrs: Vec<*mut CIrBValue> = elements.iter().map(|v| v.ptr).collect();
+    let bvalue_raw = unsafe {
+        xlsynth_sys::xls_builder_base_add_tuple(
+            builder_base,
+            elements_ptrs.as_mut_ptr(),
+            elements.len() as i64,
+            name_ptr,
+        )
+    };
+    BValuePtr { ptr: bvalue_raw }
+}
+
 pub(crate) fn xls_function_builder_build_with_return_value(
     package: &Arc<RwLock<IrPackagePtr>>,
     _package_guard: RwLockWriteGuard<IrPackagePtr>,
