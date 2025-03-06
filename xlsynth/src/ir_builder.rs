@@ -95,11 +95,44 @@ impl FnBuilder {
             ptr: Arc::new(RwLock::new(bvalue_ptr)),
         }
     }
+
+    pub fn bit_slice(
+        &mut self,
+        value: &BValue,
+        start: u64,
+        width: u64,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let value_guard: RwLockReadGuard<BValuePtr> = value.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_bit_slice(
+            fn_builder_guard,
+            value_guard,
+            start,
+            width,
+            name,
+        );
+        BValue {
+            ptr: Arc::new(RwLock::new(bvalue_ptr)),
+        }
+    }
+
+    pub fn concat(&mut self, args: &[&BValue], name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let args_locks: Vec<RwLockReadGuard<BValuePtr>> =
+            args.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_concat(fn_builder_guard, &args_locks, name);
+        BValue {
+            ptr: Arc::new(RwLock::new(bvalue_ptr)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IrValue;
 
     #[test]
     fn test_ir_builder() {
@@ -149,5 +182,53 @@ fn aoi21(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
 }
 "
         );
+    }
+
+    #[test]
+    fn test_ir_builder_concat() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "concat", true);
+        let u2 = package.get_bits_type(2);
+        let a = builder.param("a", &u2);
+        let b = builder.param("b", &u2);
+        let concat = builder.concat(&[&a, &b], None);
+        let f = builder.build_with_return_value(&concat).unwrap();
+
+        let result = f
+            .interpret(&[
+                IrValue::make_ubits(2, 0b10).unwrap(),
+                IrValue::make_ubits(2, 0b00).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(4, 0b1000).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_concat_and_slice() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "concat_and_slice", true);
+        let u2 = package.get_bits_type(2);
+        let a = builder.param("a", &u2);
+        let b = builder.param("b", &u2);
+        let concat = builder.concat(&[&a, &b], None);
+        let slice = builder.bit_slice(&concat, 1, 2, None);
+        let f = builder.build_with_return_value(&slice).unwrap();
+        assert_eq!(f.get_name(), "concat_and_slice");
+
+        let result = f
+            .interpret(&[
+                IrValue::make_ubits(2, 0b01).unwrap(),
+                IrValue::make_ubits(2, 0b10).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0b11).unwrap());
+
+        let result = f
+            .interpret(&[
+                IrValue::make_ubits(2, 0b00).unwrap(),
+                IrValue::make_ubits(2, 0b10).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0b01).unwrap());
     }
 }

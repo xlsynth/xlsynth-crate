@@ -984,6 +984,19 @@ extern "C" {
         index: i64,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_bit_slice(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        start: i64,
+        width: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_concat(
+        builder: *mut CIrBuilderBase,
+        values: *const *mut CIrBValue,
+        value_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
