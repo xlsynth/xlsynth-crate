@@ -6,6 +6,7 @@ use crate::ir_package::IrType;
 use crate::lib_support;
 use crate::lib_support::{BValuePtr, IrFnBuilderPtr};
 use crate::IrFunction;
+use crate::IrValue;
 use crate::XlsynthError;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -53,6 +54,15 @@ impl FnBuilder {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_parameter(fn_builder_guard, name, type_);
+        BValue {
+            ptr: Arc::new(RwLock::new(bvalue_ptr)),
+        }
+    }
+
+    pub fn literal(&mut self, value: &IrValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_literal(fn_builder_guard, value, name);
         BValue {
             ptr: Arc::new(RwLock::new(bvalue_ptr)),
         }
@@ -230,5 +240,27 @@ fn aoi21(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
             ])
             .unwrap();
         assert_eq!(result, IrValue::make_ubits(2, 0b01).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_literal() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "literal", true);
+        let literal = builder.literal(&IrValue::make_ubits(2, 0b10).unwrap(), None);
+        let f = builder.build_with_return_value(&literal).unwrap();
+
+        let package_text = package.to_string();
+        assert_eq!(
+            package_text,
+            "package sample_package
+
+fn literal() -> bits[2] {
+  ret literal.1: bits[2] = literal(value=2, id=1)
+}
+"
+        );
+
+        let result = f.interpret(&[]).unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0b10).unwrap());
     }
 }
