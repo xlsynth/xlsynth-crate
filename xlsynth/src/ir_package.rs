@@ -3,7 +3,7 @@
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub use crate::lib_support::RunResult;
-use crate::lib_support::{c_str_to_rust, xls_function_jit_run, xls_make_function_jit};
+use crate::lib_support::{self, c_str_to_rust, xls_function_jit_run, xls_make_function_jit};
 use crate::xlsynth_error::XlsynthError;
 use crate::{
     lib_support::{
@@ -81,6 +81,10 @@ unsafe impl Send for IrPackage {}
 unsafe impl Sync for IrPackage {}
 
 impl IrPackage {
+    pub fn new(name: &str) -> Result<Self, XlsynthError> {
+        lib_support::xls_package_new(name)
+    }
+
     pub fn parse_ir(ir: &str, filename: Option<&str>) -> Result<Self, XlsynthError> {
         xls_parse_ir_package(ir, filename)
     }
@@ -98,6 +102,11 @@ impl IrPackage {
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
         let write_guard = self.ptr.write().unwrap();
         xls_package_get_type_for_value(write_guard.mut_c_ptr(), value.ptr)
+    }
+
+    pub fn get_bits_type(&self, bit_count: u64) -> IrType {
+        let write_guard = self.ptr.write().unwrap();
+        lib_support::xls_package_get_bits_type(write_guard.mut_c_ptr(), bit_count)
     }
 
     pub fn filename(&self) -> Option<&str> {

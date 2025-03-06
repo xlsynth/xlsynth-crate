@@ -113,6 +113,23 @@ fn validate_passing_generated_enum() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn validate_add_invert_via_ir_builder() -> Result<(), Box<dyn std::error::Error>> {
+    let mut package = xlsynth::IrPackage::new("sample_package")?;
+    let mut builder = xlsynth::FnBuilder::new(&mut package, "add_invert", true);
+    let u1: xlsynth::IrType = package.get_bits_type(1);
+    let a = builder.param("a", &u1);
+    let invert = builder.not(&a, Some("invert"));
+    let result: xlsynth::IrFunction = builder.build_with_return_value(&invert)?;
+
+    let xlsynth_false = xlsynth::IrValue::make_ubits(1, 0)?;
+    let xlsynth_true = xlsynth::IrValue::make_ubits(1, 1)?;
+
+    assert_eq!(result.interpret(&[xlsynth_false.clone()])?, xlsynth_true);
+    assert_eq!(result.interpret(&[xlsynth_true.clone()])?, xlsynth_false);
+
+    Ok(())
+}
+
 fn main() {
     let _ = env_logger::try_init();
     let mol_result = validate_mol();
@@ -133,6 +150,9 @@ fn main() {
 
     validate_use().expect("use validation should work");
     println!("use validation complete");
+
+    validate_add_invert_via_ir_builder().expect("add_invert validation should work");
+    println!("add_invert validation complete");
 }
 
 #[cfg(test)]
