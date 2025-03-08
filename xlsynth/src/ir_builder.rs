@@ -65,9 +65,42 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn add(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_add(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn sub(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_sub(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn and(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_and(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn nand(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_nand(
             fn_builder_guard,
             a.ptr.read().unwrap(),
             b.ptr.read().unwrap(),
@@ -87,9 +120,92 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn xor(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_xor(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn eq(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_eq(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn ne(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_ne(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn not(&mut self, a: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_not(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn neg(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_negate(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn rev(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_reverse(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn or_reduce(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_or_reduce(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn and_reduce(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_and_reduce(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn xor_reduce(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_xor_reduce(
             fn_builder_guard,
             a.ptr.read().unwrap(),
             name,
@@ -328,5 +444,83 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
 }
 "
         );
+    }
+
+    #[test]
+    fn test_ir_builder_add() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "add", true);
+        let a = builder.param("a", &package.get_bits_type(32));
+        let b = builder.param("b", &package.get_bits_type(32));
+        let result = builder.add(&a, &b, None);
+        let f = builder.build_with_return_value(&result).unwrap();
+
+        let result = f
+            .interpret(&[
+                IrValue::make_ubits(32, 1).unwrap(),
+                IrValue::make_ubits(32, 2).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(32, 3).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_bitwise_reductions() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "f", true);
+        let x = builder.param("x", &package.get_bits_type(3));
+        let and_reduce = builder.and_reduce(&x, None);
+        let or_reduce = builder.or_reduce(&x, None);
+        let xor_reduce = builder.xor_reduce(&x, None);
+        let t = builder.tuple(&[&and_reduce, &or_reduce, &xor_reduce], None);
+        let f = builder.build_with_return_value(&t).unwrap();
+        assert_eq!(f.get_name(), "f");
+
+        let result = f
+            .interpret(&[IrValue::make_ubits(3, 0b110).unwrap()])
+            .unwrap();
+        assert_eq!(
+            result,
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(1, 0).unwrap(), // and_reduce
+                IrValue::make_ubits(1, 1).unwrap(), // or_reduce
+                IrValue::make_ubits(1, 0).unwrap(), // xor_reduce
+            ])
+        );
+
+        let result = f
+            .interpret(&[IrValue::make_ubits(3, 0b111).unwrap()])
+            .unwrap();
+        assert_eq!(
+            result,
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(1, 1).unwrap(), // and_reduce
+                IrValue::make_ubits(1, 1).unwrap(), // or_reduce
+                IrValue::make_ubits(1, 1).unwrap(), // xor_reduce
+            ])
+        );
+    }
+
+    #[test]
+    fn test_ir_builder_nand() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "nand", true);
+        let a = builder.param("a", &package.get_bits_type(1));
+        let b = builder.param("b", &package.get_bits_type(1));
+        let nand = builder.nand(&a, &b, None);
+        let f = builder.build_with_return_value(&nand).unwrap();
+        assert_eq!(f.get_name(), "nand");
+
+        let truth_table = vec![(0, 0, 1), (0, 1, 1), (1, 0, 1), (1, 1, 0)];
+
+        for (a, b, expected) in truth_table {
+            let result = f
+                .interpret(&[
+                    IrValue::make_ubits(1, a).unwrap(),
+                    IrValue::make_ubits(1, b).unwrap(),
+                ])
+                .unwrap();
+            assert_eq!(result, IrValue::make_ubits(1, expected).unwrap());
+        }
     }
 }
