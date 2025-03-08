@@ -961,6 +961,12 @@ extern "C" {
         rhs: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_nand(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_or(
         builder: *mut CIrBuilderBase,
         lhs: *mut CIrBValue,

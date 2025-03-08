@@ -500,4 +500,27 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
             ])
         );
     }
+
+    #[test]
+    fn test_ir_builder_nand() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "nand", true);
+        let a = builder.param("a", &package.get_bits_type(1));
+        let b = builder.param("b", &package.get_bits_type(1));
+        let nand = builder.nand(&a, &b, None);
+        let f = builder.build_with_return_value(&nand).unwrap();
+        assert_eq!(f.get_name(), "nand");
+
+        let truth_table = vec![(0, 0, 1), (0, 1, 1), (1, 0, 1), (1, 1, 0)];
+
+        for (a, b, expected) in truth_table {
+            let result = f
+                .interpret(&[
+                    IrValue::make_ubits(1, a).unwrap(),
+                    IrValue::make_ubits(1, b).unwrap(),
+                ])
+                .unwrap();
+            assert_eq!(result, IrValue::make_ubits(1, expected).unwrap());
+        }
+    }
 }
