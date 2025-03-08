@@ -967,7 +967,33 @@ extern "C" {
         rhs: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_xor(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_not(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_neg(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_or_reduce(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_and_reduce(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_xor_reduce(
         builder: *mut CIrBuilderBase,
         value: *mut CIrBValue,
         name: *const std::os::raw::c_char,
@@ -1000,6 +1026,42 @@ extern "C" {
         builder: *mut CIrBuilderBase,
         values: *const *mut CIrBValue,
         value_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_add(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_sub(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_umul(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_smul(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_eq(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_ne(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
 }

@@ -311,6 +311,34 @@ pub(crate) fn xls_function_builder_add_parameter(
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
+pub(crate) fn xls_function_builder_add_add(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    b: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_add(builder_base, a.ptr, b.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
+pub(crate) fn xls_function_builder_add_sub(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    b: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_sub(builder_base, a.ptr, b.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
 pub(crate) fn xls_function_builder_add_and(
     builder: RwLockWriteGuard<IrFnBuilderPtr>,
     a: RwLockReadGuard<BValuePtr>,
@@ -339,6 +367,48 @@ pub(crate) fn xls_function_builder_add_or(
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
+pub(crate) fn xls_function_builder_add_xor(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    b: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_xor(builder_base, a.ptr, b.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
+pub(crate) fn xls_function_builder_add_eq(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    b: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_eq(builder_base, a.ptr, b.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
+pub(crate) fn xls_function_builder_add_ne(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    b: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_ne(builder_base, a.ptr, b.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
 pub(crate) fn xls_function_builder_add_not(
     builder: RwLockWriteGuard<IrFnBuilderPtr>,
     a: RwLockReadGuard<BValuePtr>,
@@ -349,6 +419,58 @@ pub(crate) fn xls_function_builder_add_not(
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw =
         unsafe { xlsynth_sys::xls_builder_base_add_not(builder_base, a.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
+pub(crate) fn xls_function_builder_add_neg(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_neg(builder_base, a.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
+pub(crate) fn xls_function_builder_add_or_reduce(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_or_reduce(builder_base, a.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
+pub(crate) fn xls_function_builder_add_and_reduce(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_and_reduce(builder_base, a.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
+pub(crate) fn xls_function_builder_add_xor_reduce(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_xor_reduce(builder_base, a.ptr, name_ptr) };
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
