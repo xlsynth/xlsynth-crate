@@ -320,11 +320,11 @@ fn tuple_and_then_index(a: bits[2] id=1, b: bits[2] id=2) -> (bits[2], bits[2]) 
             "package sample_package
 
 fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
-  and.3: bits[32] = and(x, y, id=3)
-  or.4: bits[32] = or(x, y, id=4)
-  or.5: bits[32] = or(x, and.3, id=5)
-  or.6: bits[32] = or(y, or.4, id=6)
-  ret tuple.7: (bits[32], bits[32]) = tuple(or.5, or.6, id=7)
+  x_mul_y: bits[32] = and(x, y, id=3)
+  x_plus_y: bits[32] = or(x, y, id=4)
+  a: bits[32] = or(x, x_mul_y, id=5)
+  b: bits[32] = or(y, x_plus_y, id=6)
+  ret result: (bits[32], bits[32]) = tuple(a, b, id=7)
 }
 "
         );
