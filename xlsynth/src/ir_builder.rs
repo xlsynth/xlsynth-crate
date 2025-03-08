@@ -98,6 +98,17 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn nand(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_nand(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn or(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_or(
