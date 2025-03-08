@@ -830,6 +830,29 @@ endmodule
     }
 
     #[test]
+    fn test_concat_various_expressions() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let input = module.add_input("my_input", &file.make_bit_vector_type(8, false));
+        let output = module.add_output("my_output", &file.make_bit_vector_type(9, false));
+        let input_indexable = input.to_indexable_expr();
+        let index = file.make_index(&input_indexable, 0);
+        let slice = file.make_slice(&input_indexable, 7, 0);
+        let concat = file.make_concat(&[&index.to_expr(), &slice.to_expr()]);
+        let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
+        module.add_member_continuous_assignment(assignment);
+        let verilog = file.emit();
+        let want = "module my_module(
+  input wire [7:0] my_input,
+  output wire [8:0] my_output
+);
+  assign my_output = {my_input[0], my_input[7:0]};
+endmodule
+";
+        assert_eq!(verilog, want);
+    }
+
+    #[test]
     fn test_unary_ops() {
         let mut file = VastFile::new(VastFileType::Verilog);
         let mut module = file.add_module("my_module");
