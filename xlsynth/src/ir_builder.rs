@@ -55,18 +55,14 @@ impl FnBuilder {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_parameter(fn_builder_guard, name, type_);
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn literal(&mut self, value: &IrValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_literal(fn_builder_guard, value, name);
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn and(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
@@ -77,9 +73,7 @@ impl FnBuilder {
             b.ptr.read().unwrap(),
             name,
         );
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn or(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
@@ -90,9 +84,7 @@ impl FnBuilder {
             b.ptr.read().unwrap(),
             name,
         );
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn not(&mut self, a: &BValue, name: Option<&str>) -> BValue {
@@ -102,9 +94,7 @@ impl FnBuilder {
             a.ptr.read().unwrap(),
             name,
         );
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn bit_slice(
@@ -123,9 +113,7 @@ impl FnBuilder {
             width,
             name,
         );
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn concat(&mut self, args: &[&BValue], name: Option<&str>) -> BValue {
@@ -134,9 +122,7 @@ impl FnBuilder {
             args.iter().map(|v| v.ptr.read().unwrap()).collect();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_concat(fn_builder_guard, &args_locks, name);
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn tuple(&mut self, elements: &[&BValue], name: Option<&str>) -> BValue {
@@ -145,9 +131,7 @@ impl FnBuilder {
             elements.iter().map(|v| v.ptr.read().unwrap()).collect();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_tuple(fn_builder_guard, &elements_locks, name);
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 }
 
