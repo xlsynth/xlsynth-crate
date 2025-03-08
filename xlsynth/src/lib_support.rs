@@ -435,6 +435,19 @@ pub(crate) fn xls_function_builder_add_negate(
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
+pub(crate) fn xls_function_builder_add_reverse(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    a: RwLockReadGuard<BValuePtr>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw =
+        unsafe { xlsynth_sys::xls_builder_base_add_reverse(builder_base, a.ptr, name_ptr) };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
 pub(crate) fn xls_function_builder_add_or_reduce(
     builder: RwLockWriteGuard<IrFnBuilderPtr>,
     a: RwLockReadGuard<BValuePtr>,

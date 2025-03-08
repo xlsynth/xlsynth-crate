@@ -162,6 +162,16 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn rev(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_reverse(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn or_reduce(&mut self, a: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_or_reduce(

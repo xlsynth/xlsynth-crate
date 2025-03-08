@@ -983,6 +983,11 @@ extern "C" {
         value: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_reverse(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_or_reduce(
         builder: *mut CIrBuilderBase,
         value: *mut CIrBValue,
