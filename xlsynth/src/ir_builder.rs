@@ -55,18 +55,14 @@ impl FnBuilder {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_parameter(fn_builder_guard, name, type_);
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn literal(&mut self, value: &IrValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_literal(fn_builder_guard, value, name);
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn and(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
@@ -77,9 +73,7 @@ impl FnBuilder {
             b.ptr.read().unwrap(),
             name,
         );
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn or(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
@@ -90,9 +84,7 @@ impl FnBuilder {
             b.ptr.read().unwrap(),
             name,
         );
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn not(&mut self, a: &BValue, name: Option<&str>) -> BValue {
@@ -102,9 +94,7 @@ impl FnBuilder {
             a.ptr.read().unwrap(),
             name,
         );
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn bit_slice(
@@ -123,9 +113,7 @@ impl FnBuilder {
             width,
             name,
         );
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn concat(&mut self, args: &[&BValue], name: Option<&str>) -> BValue {
@@ -134,9 +122,7 @@ impl FnBuilder {
             args.iter().map(|v| v.ptr.read().unwrap()).collect();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_concat(fn_builder_guard, &args_locks, name);
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 
     pub fn tuple(&mut self, elements: &[&BValue], name: Option<&str>) -> BValue {
@@ -145,9 +131,7 @@ impl FnBuilder {
             elements.iter().map(|v| v.ptr.read().unwrap()).collect();
         let bvalue_ptr =
             lib_support::xls_function_builder_add_tuple(fn_builder_guard, &elements_locks, name);
-        BValue {
-            ptr: Arc::new(RwLock::new(bvalue_ptr)),
-        }
+        BValue { ptr: bvalue_ptr }
     }
 }
 
@@ -316,5 +300,33 @@ fn tuple_and_then_index(a: bits[2] id=1, b: bits[2] id=2) -> (bits[2], bits[2]) 
         let f = builder.build_with_return_value(&tuple2).unwrap();
         let result = f.interpret(&[]).unwrap();
         assert_eq!(result, IrValue::make_tuple(&[a_value, b_value]));
+    }
+
+    #[test]
+    fn test_ir_builder_bvalue_reuse() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "f", true);
+        let x = builder.param("x", &package.get_bits_type(32));
+        let y = builder.param("y", &package.get_bits_type(32));
+        let x_mul_y = builder.and(&x, &y, None);
+        let x_plus_y = builder.or(&x, &y, None);
+        let a = builder.or(&x, &x_mul_y, None);
+        let b = builder.or(&y, &x_plus_y, None);
+        let result = builder.tuple(&[&a, &b], None);
+        let _f = builder.build_with_return_value(&result).unwrap();
+
+        assert_eq!(
+            package.to_string(),
+            "package sample_package
+
+fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
+  and.3: bits[32] = and(x, y, id=3)
+  or.4: bits[32] = or(x, y, id=4)
+  or.5: bits[32] = or(x, and.3, id=5)
+  or.6: bits[32] = or(y, or.4, id=6)
+  ret tuple.7: (bits[32], bits[32]) = tuple(or.5, or.6, id=7)
+}
+"
+        );
     }
 }
