@@ -40,7 +40,7 @@ impl Drop for IrFnBuilderPtr {
 // Wrapper around the raw pointer that frees (i.e. when the wrapping refcount
 // drops to zero).
 pub(crate) struct BValuePtr {
-    ptr: *mut CIrBValue,
+    pub(crate) ptr: *mut CIrBValue,
 }
 
 impl Drop for BValuePtr {
@@ -318,11 +318,7 @@ pub(crate) fn xls_function_builder_add_and(
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
     let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = if let Some(name_cstr) = name_cstr {
-        name_cstr.as_ptr()
-    } else {
-        std::ptr::null()
-    };
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw =
         unsafe { xlsynth_sys::xls_builder_base_add_and(builder_base, a.ptr, b.ptr, name_ptr) };
@@ -336,11 +332,7 @@ pub(crate) fn xls_function_builder_add_or(
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
     let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = if let Some(name_cstr) = name_cstr {
-        name_cstr.as_ptr()
-    } else {
-        std::ptr::null()
-    };
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw =
         unsafe { xlsynth_sys::xls_builder_base_add_or(builder_base, a.ptr, b.ptr, name_ptr) };
@@ -353,11 +345,7 @@ pub(crate) fn xls_function_builder_add_not(
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
     let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = if let Some(name_cstr) = name_cstr {
-        name_cstr.as_ptr()
-    } else {
-        std::ptr::null()
-    };
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw =
         unsafe { xlsynth_sys::xls_builder_base_add_not(builder_base, a.ptr, name_ptr) };
@@ -372,11 +360,7 @@ pub(crate) fn xls_function_builder_add_bit_slice(
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
     let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = if let Some(name_cstr) = name_cstr {
-        name_cstr.as_ptr()
-    } else {
-        std::ptr::null()
-    };
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw = unsafe {
         xlsynth_sys::xls_builder_base_add_bit_slice(
@@ -396,11 +380,7 @@ pub(crate) fn xls_function_builder_add_concat(
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
     let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = if let Some(name_cstr) = name_cstr {
-        name_cstr.as_ptr()
-    } else {
-        std::ptr::null()
-    };
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     let values_ptrs: Vec<*mut CIrBValue> = values.iter().map(|v| v.ptr).collect();
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw = unsafe {
@@ -420,11 +400,7 @@ pub(crate) fn xls_function_builder_add_literal(
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
     let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = if let Some(name_cstr) = name_cstr {
-        name_cstr.as_ptr()
-    } else {
-        std::ptr::null()
-    };
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw =
         unsafe { xlsynth_sys::xls_builder_base_add_literal(builder_base, value.ptr, name_ptr) };
@@ -437,11 +413,7 @@ pub(crate) fn xls_function_builder_add_tuple(
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
     let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = if let Some(name_cstr) = name_cstr {
-        name_cstr.as_ptr()
-    } else {
-        std::ptr::null()
-    };
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let mut elements_ptrs: Vec<*mut CIrBValue> = elements.iter().map(|v| v.ptr).collect();
     let bvalue_raw = unsafe {
