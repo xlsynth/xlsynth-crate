@@ -154,7 +154,7 @@ impl FnBuilder {
 
     pub fn neg(&mut self, a: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_neg(
+        let bvalue_ptr = lib_support::xls_function_builder_add_negate(
             fn_builder_guard,
             a.ptr.read().unwrap(),
             name,

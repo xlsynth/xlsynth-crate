@@ -978,7 +978,7 @@ extern "C" {
         value: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
-    pub fn xls_builder_base_add_neg(
+    pub fn xls_builder_base_add_negate(
         builder: *mut CIrBuilderBase,
         value: *mut CIrBValue,
         name: *const std::os::raw::c_char,
