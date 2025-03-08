@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.85"
+version = "0.0.86"
 dependencies = [
  "cargo_metadata",
  "criterion",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-driver"
-version = "0.0.85"
+version = "0.0.86"
 dependencies = [
  "clap 4.5.29",
  "env_logger",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-estimator"
-version = "0.0.85"
+version = "0.0.86"
 dependencies = [
  "env_logger",
  "log",
@@ -2816,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.85"
+version = "0.0.86"
 dependencies = [
  "flate2",
  "libc",
