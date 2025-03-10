@@ -114,6 +114,11 @@ impl IrPackage {
         lib_support::xls_package_get_bits_type(write_guard.mut_c_ptr(), bit_count)
     }
 
+    pub fn get_tuple_type(&self, members: &[IrType]) -> IrType {
+        let write_guard = self.ptr.write().unwrap();
+        lib_support::xls_package_get_tuple_type(write_guard.mut_c_ptr(), members)
+    }
+
     pub fn filename(&self) -> Option<&str> {
         match self.filename {
             Some(ref s) => Some(s),
@@ -265,5 +270,14 @@ mod tests {
 }
 "
         );
+    }
+
+    #[test]
+    fn test_ir_type_tuple() {
+        let package = IrPackage::new("test_package").unwrap();
+        let u32 = package.get_bits_type(32);
+        let u64 = package.get_bits_type(64);
+        let tuple = package.get_tuple_type(&[u32, u64]);
+        assert_eq!(tuple.to_string(), "(bits[32], bits[64])");
     }
 }
