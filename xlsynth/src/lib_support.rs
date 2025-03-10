@@ -612,6 +612,15 @@ pub(crate) fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: u64
     IrType { ptr: type_raw }
 }
 
+pub(crate) fn xls_package_get_tuple_type(package: *mut CIrPackage, members: &[IrType]) -> IrType {
+    let mut members_ptrs: Vec<*mut CIrType> = members.iter().map(|v| v.ptr).collect();
+    let members_ptr = members_ptrs.as_mut_ptr();
+    let member_count = members_ptrs.len() as i64;
+    let type_raw =
+        unsafe { xlsynth_sys::xls_package_get_tuple_type(package, members_ptr, member_count) };
+    IrType { ptr: type_raw }
+}
+
 pub(crate) fn xls_package_get_type_for_value(
     package: *const CIrPackage,
     value: *const CIrValue,
