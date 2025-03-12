@@ -924,11 +924,21 @@ extern "C" {
 
     pub fn xls_package_create(name: *const std::os::raw::c_char) -> *mut CIrPackage;
     pub fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: i64) -> *mut CIrType;
+
     pub fn xls_package_get_tuple_type(
         package: *mut CIrPackage,
         members: *mut *mut CIrType,
         member_count: i64,
     ) -> *mut CIrType;
+
+    pub fn xls_package_get_array_type(
+        package: *mut CIrPackage,
+        element_type: *mut CIrType,
+        size: i64,
+    ) -> *mut CIrType;
+
+    pub fn xls_package_get_token_type(package: *mut CIrPackage) -> *mut CIrType;
+
     pub fn xls_function_builder_create(
         name: *const std::os::raw::c_char,
         package: *mut CIrPackage,
@@ -1095,6 +1105,40 @@ extern "C" {
         builder: *mut CIrBuilderBase,
         lhs: *mut CIrBValue,
         rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_shra(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        b: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_shrl(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        b: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_shll(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        b: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_nor(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        b: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_clz(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_ctz(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
 }

@@ -336,12 +336,76 @@ impl FnBuilder {
         );
         BValue { ptr: bvalue_ptr }
     }
+
+    pub fn shra(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_shra(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn shrl(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_shrl(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn shll(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_shll(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn nor(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_nor(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn clz(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_clz(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn ctz(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_ctz(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IrValue;
+    use crate::{ir_value::IrFormatPreference, IrValue};
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -713,16 +777,78 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let x = builder.param("x", &u4);
         let y = builder.param("y", &u2);
         let start = builder.param("start", &u2);
-        let updated = builder.bit_slice_update(&x, &y, &start, None);
+        let updated = builder.bit_slice_update(&x, &start, &y, None);
         let f = builder.build_with_return_value(&updated).unwrap();
 
-        let result = f
+        let got = f
             .interpret(&[
                 IrValue::make_ubits(4, 0b1001).unwrap(),
                 IrValue::make_ubits(2, 0b11).unwrap(),
                 IrValue::make_ubits(2, 1).unwrap(),
             ])
             .unwrap();
-        assert_eq!(result, IrValue::make_ubits(4, 0b1111).unwrap());
+        let want = IrValue::make_ubits(4, 0b1111).unwrap();
+        assert_eq!(
+            got.to_string_fmt(IrFormatPreference::Binary).unwrap(),
+            want.to_string_fmt(IrFormatPreference::Binary).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_ir_builder_shift_ops() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "shift_ops", true);
+        let x = builder.param("x", &package.get_bits_type(4));
+        let amount = builder.param("amount", &package.get_bits_type(2));
+        let shra = builder.shra(&x, &amount, None);
+        let shrl = builder.shrl(&x, &amount, None);
+        let shll = builder.shll(&x, &amount, None);
+        let result = builder.tuple(&[&shra, &shrl, &shll], None);
+        let f = builder.build_with_return_value(&result).unwrap();
+
+        let got = f
+            .interpret(&[
+                IrValue::make_ubits(4, 0b1010).unwrap(),
+                IrValue::make_ubits(2, 2).unwrap(),
+            ])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 0b1110).unwrap(), // shra
+            IrValue::make_ubits(4, 0b0010).unwrap(), // shrl
+            IrValue::make_ubits(4, 0b1000).unwrap(), // shll
+        ]);
+        assert_eq!(
+            got.to_string_fmt(IrFormatPreference::Binary).unwrap(),
+            want.to_string_fmt(IrFormatPreference::Binary).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_ir_builder_count_zeros() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "count_zeros", true);
+        let x = builder.param("x", &package.get_bits_type(4));
+        let clz = builder.clz(&x, None);
+        let ctz = builder.ctz(&x, None);
+        let t = builder.tuple(&[&clz, &ctz], None);
+        let f = builder.build_with_return_value(&t).unwrap();
+
+        let got = f
+            .interpret(&[IrValue::make_ubits(4, 0b0010).unwrap()])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 2).unwrap(), // clz
+            IrValue::make_ubits(4, 1).unwrap(), // ctz
+        ]);
+        assert_eq!(got, want);
+
+        let got = f
+            .interpret(&[IrValue::make_ubits(4, 0b0000).unwrap()])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 4).unwrap(), // clz
+            IrValue::make_ubits(4, 4).unwrap(), // ctz
+        ]);
+        assert_eq!(got, want);
     }
 }
