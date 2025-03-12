@@ -475,6 +475,16 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn identity(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_identity(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn select(
         &mut self,
         selector: &BValue,
@@ -495,6 +505,17 @@ impl FnBuilder {
             name,
         );
         BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn last_value(&self) -> Result<BValue, XlsynthError> {
+        let fn_builder_guard = self.fn_builder.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_last_value(fn_builder_guard)?;
+        Ok(BValue { ptr: bvalue_ptr })
+    }
+
+    pub fn get_type(&self, value: &BValue) -> Option<IrType> {
+        let fn_builder_guard = self.fn_builder.read().unwrap();
+        lib_support::xls_function_builder_get_type(fn_builder_guard, value.ptr.read().unwrap())
     }
 }
 
@@ -1070,5 +1091,40 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         ])
         .unwrap();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ir_builder_get_type_of_last_value_identity_function() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "f", true);
+        let u4 = package.get_bits_type(4);
+        let x = fb.param("x", &u4);
+        let _identity = fb.identity(&x, None);
+        let last_value = fb.last_value().unwrap();
+        let last_value_type = fb.get_type(&last_value).unwrap();
+        assert!(package.types_eq(&last_value_type, &u4).unwrap());
+
+        let f = fb.build_with_return_value(&last_value).unwrap();
+        let result = f
+            .interpret(&[IrValue::make_ubits(4, 0b1010).unwrap()])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(4, 0b1010).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_get_last_value_after_construction_error() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "f", true);
+        let u4 = package.get_bits_type(4);
+        let x = fb.param("x", &u4);
+        let u5 = package.get_bits_type(5);
+        let y = fb.param("y", &u5);
+        fb.add(&x, &y, None);
+        let last_value = fb.last_value();
+        assert!(last_value.is_err());
+        let error_str = last_value.err().unwrap().to_string();
+        log::info!("error_str: {}", error_str);
+        assert!(error_str.contains("bits[4], has type bits[5]"));
     }
 }

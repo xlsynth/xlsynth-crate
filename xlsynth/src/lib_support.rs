@@ -1011,6 +1011,29 @@ pub(crate) fn xls_function_builder_add_array_update(
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
+pub(crate) fn xls_function_builder_last_value(
+    builder: RwLockReadGuard<IrFnBuilderPtr>,
+) -> Result<Arc<RwLock<BValuePtr>>, XlsynthError> {
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let mut bvalue_raw: *mut CIrBValue = std::ptr::null_mut();
+    xls_ffi_call!(xlsynth_sys::xls_builder_base_get_last_value, builder_base; bvalue_raw)?;
+    assert!(!bvalue_raw.is_null());
+    Ok(Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw })))
+}
+
+pub(crate) fn xls_function_builder_get_type(
+    builder: RwLockReadGuard<IrFnBuilderPtr>,
+    value: RwLockReadGuard<BValuePtr>,
+) -> Option<IrType> {
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let type_raw = unsafe { xlsynth_sys::xls_builder_base_get_type(builder_base, value.ptr) };
+    if type_raw.is_null() {
+        None
+    } else {
+        Some(IrType { ptr: type_raw })
+    }
+}
+
 macro_rules! impl_binary_ir_builder {
     ($fn_name:ident, $ffi_func:ident) => {
         pub(crate) fn $fn_name(
@@ -1058,3 +1081,7 @@ impl_unary_ir_builder!(xls_function_builder_add_ctz, xls_builder_base_add_ctz);
 impl_unary_ir_builder!(xls_function_builder_add_clz, xls_builder_base_add_clz);
 impl_unary_ir_builder!(xls_function_builder_add_encode, xls_builder_base_add_encode);
 impl_unary_ir_builder!(xls_function_builder_add_decode, xls_builder_base_add_decode);
+impl_unary_ir_builder!(
+    xls_function_builder_add_identity,
+    xls_builder_base_add_identity
+);
