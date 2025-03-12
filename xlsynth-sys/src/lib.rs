@@ -1159,6 +1159,19 @@ extern "C" {
         default_value: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array_concat(
+        builder: *mut CIrBuilderBase,
+        arrays: *const *mut CIrBValue,
+        array_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array_slice(
+        builder: *mut CIrBuilderBase,
+        array: *mut CIrBValue,
+        start: *mut CIrBValue,
+        width: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");

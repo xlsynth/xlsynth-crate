@@ -943,6 +943,48 @@ pub(crate) fn xls_function_builder_add_select(
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
+pub(crate) fn xls_function_builder_add_array_concat(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    arrays: &[RwLockReadGuard<BValuePtr>],
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let arrays_ptrs: Vec<*mut CIrBValue> = arrays.iter().map(|v| v.ptr).collect();
+    let bvalue_raw = unsafe {
+        xlsynth_sys::xls_builder_base_add_array_concat(
+            builder_base,
+            arrays_ptrs.as_ptr(),
+            arrays_ptrs.len() as i64,
+            name_ptr,
+        )
+    };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
+pub(crate) fn xls_function_builder_add_array_slice(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    array: RwLockReadGuard<BValuePtr>,
+    start: RwLockReadGuard<BValuePtr>,
+    width: i64,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let bvalue_raw = unsafe {
+        xlsynth_sys::xls_builder_base_add_array_slice(
+            builder_base,
+            array.ptr,
+            start.ptr,
+            width,
+            name_ptr,
+        )
+    };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
 macro_rules! impl_binary_ir_builder {
     ($fn_name:ident, $ffi_func:ident) => {
         pub(crate) fn $fn_name(

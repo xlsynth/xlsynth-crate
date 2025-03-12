@@ -337,6 +337,38 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn array_concat(&mut self, arrays: &[&BValue], name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let arrays_guards: Vec<RwLockReadGuard<BValuePtr>> =
+            arrays.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array_concat(
+            fn_builder_guard,
+            &arrays_guards,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn array_slice(
+        &mut self,
+        array: &BValue,
+        start: &BValue,
+        width: u64,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
+        let start_guard: RwLockReadGuard<BValuePtr> = start.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array_slice(
+            fn_builder_guard,
+            array_guard,
+            start_guard,
+            width as i64,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn shra(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_shra(
@@ -949,5 +981,41 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
             IrValue::make_ubits(4, 0b1000).unwrap(), // nor
         ]);
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ir_builder_array_concat_and_slice() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "array_concat", true);
+        let u4 = package.get_bits_type(4);
+        let lhs_array_type = package.get_array_type(&u4, 2);
+        let rhs_array_type = package.get_array_type(&u4, 3);
+        let lhs_array = fb.param("lhs_array", &lhs_array_type);
+        let rhs_array = fb.param("rhs_array", &rhs_array_type);
+        let concat = fb.array_concat(&[&lhs_array, &rhs_array], None);
+        let start = fb.literal(&IrValue::make_ubits(4, 2).unwrap(), None);
+        let slice = fb.array_slice(&concat, &start, 2, None);
+        let f = fb.build_with_return_value(&slice).unwrap();
+
+        let lhs_array_value = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0b0000).unwrap(),
+            IrValue::make_ubits(4, 0b0001).unwrap(),
+        ])
+        .unwrap();
+        let rhs_array_value = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0b0010).unwrap(),
+            IrValue::make_ubits(4, 0b0011).unwrap(),
+            IrValue::make_ubits(4, 0b0100).unwrap(),
+        ])
+        .unwrap();
+        let result = f.interpret(&[lhs_array_value, rhs_array_value]).unwrap();
+        assert_eq!(
+            result,
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0b0010).unwrap(),
+                IrValue::make_ubits(4, 0b0011).unwrap(),
+            ])
+            .unwrap()
+        );
     }
 }
