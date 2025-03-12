@@ -1187,12 +1187,6 @@ extern "C" {
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
 
-    /*
-    bool xls_builder_base_get_last_value(struct xls_builder_base* builder,
-                                     char** error_out,
-                                     struct xls_bvalue** value_out);
-     */
-
     pub fn xls_builder_base_get_last_value(
         builder: *mut CIrBuilderBase,
         error_out: *mut *mut std::os::raw::c_char,
