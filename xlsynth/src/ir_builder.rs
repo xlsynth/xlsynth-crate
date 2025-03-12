@@ -420,6 +420,28 @@ impl FnBuilder {
         );
         BValue { ptr: bvalue_ptr }
     }
+
+    pub fn select(
+        &mut self,
+        selector: &BValue,
+        cases: &[&BValue],
+        default_value: &BValue,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let selector_guard: RwLockReadGuard<BValuePtr> = selector.ptr.read().unwrap();
+        let cases_guards: Vec<RwLockReadGuard<BValuePtr>> =
+            cases.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let default_value_guard: RwLockReadGuard<BValuePtr> = default_value.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_select(
+            fn_builder_guard,
+            selector_guard,
+            &cases_guards,
+            default_value_guard,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
 }
 
 #[cfg(test)]
