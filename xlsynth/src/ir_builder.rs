@@ -232,6 +232,27 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn bit_slice_update(
+        &mut self,
+        value: &BValue,
+        start: &BValue,
+        update: &BValue,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let value_guard: RwLockReadGuard<BValuePtr> = value.ptr.read().unwrap();
+        let start_guard: RwLockReadGuard<BValuePtr> = start.ptr.read().unwrap();
+        let update_guard: RwLockReadGuard<BValuePtr> = update.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_bit_slice_update(
+            fn_builder_guard,
+            value_guard,
+            start_guard,
+            update_guard,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn concat(&mut self, args: &[&BValue], name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let args_locks: Vec<RwLockReadGuard<BValuePtr>> =
@@ -681,5 +702,27 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
             ])
             .unwrap();
         assert_eq!(result, IrValue::make_ubits(2, 0b10).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_make_bit_slice_update() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "make_bit_slice_update", true);
+        let u4 = package.get_bits_type(4);
+        let u2 = package.get_bits_type(2);
+        let x = builder.param("x", &u4);
+        let y = builder.param("y", &u2);
+        let start = builder.param("start", &u2);
+        let updated = builder.bit_slice_update(&x, &y, &start, None);
+        let f = builder.build_with_return_value(&updated).unwrap();
+
+        let result = f
+            .interpret(&[
+                IrValue::make_ubits(4, 0b1001).unwrap(),
+                IrValue::make_ubits(2, 0b11).unwrap(),
+                IrValue::make_ubits(2, 1).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(4, 0b1111).unwrap());
     }
 }

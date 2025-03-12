@@ -1048,6 +1048,13 @@ extern "C" {
         width: i64,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_bit_slice_update(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        start: *mut CIrBValue,
+        update: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_concat(
         builder: *mut CIrBuilderBase,
         values: *const *mut CIrBValue,
