@@ -261,6 +261,28 @@ impl FnBuilder {
         );
         BValue { ptr: bvalue_ptr }
     }
+
+    pub fn umul(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_umul(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn smul(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_smul(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
 }
 
 #[cfg(test)]
@@ -553,5 +575,33 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
             ])])
             .unwrap();
         assert_eq!(result, IrValue::make_ubits(4, 2).unwrap());
+    }
+
+    // Note: because the current signature takes N bit operands and produces an N
+    // bit result, we cannot distinguish between umul and smul.
+    #[test]
+    fn test_ir_builder_umul_vs_smul() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "umul_vs_smul", true);
+        let a = builder.param("a", &package.get_bits_type(3));
+        let b = builder.param("b", &package.get_bits_type(3));
+        let umul = builder.umul(&a, &b, None);
+        let smul = builder.smul(&a, &b, None);
+        let result = builder.tuple(&[&umul, &smul], None);
+        let f = builder.build_with_return_value(&result).unwrap();
+
+        let result = f
+            .interpret(&[
+                IrValue::make_ubits(3, 2).unwrap(),
+                IrValue::make_ubits(3, 0b110).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(
+            result,
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(3, 0b100).unwrap(),
+                IrValue::make_ubits(3, 0b100).unwrap(),
+            ])
+        );
     }
 }
