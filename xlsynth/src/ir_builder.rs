@@ -249,6 +249,18 @@ impl FnBuilder {
             lib_support::xls_function_builder_add_tuple(fn_builder_guard, &elements_locks, name);
         BValue { ptr: bvalue_ptr }
     }
+
+    pub fn tuple_index(&mut self, tuple: &BValue, index: u64, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let tuple_guard: RwLockReadGuard<BValuePtr> = tuple.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_tuple_index(
+            fn_builder_guard,
+            tuple_guard,
+            index,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
 }
 
 #[cfg(test)]
@@ -522,5 +534,24 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
                 .unwrap();
             assert_eq!(result, IrValue::make_ubits(1, expected).unwrap());
         }
+    }
+
+    #[test]
+    fn test_ir_builder_tuple_index() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "tuple_index", true);
+        let tuple_type =
+            package.get_tuple_type(&[package.get_bits_type(2), package.get_bits_type(4)]);
+        let x = builder.param("x", &tuple_type);
+        let index = builder.tuple_index(&x, 1, None);
+        let f = builder.build_with_return_value(&index).unwrap();
+
+        let result = f
+            .interpret(&[IrValue::make_tuple(&[
+                IrValue::make_ubits(2, 1).unwrap(),
+                IrValue::make_ubits(4, 2).unwrap(),
+            ])])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(4, 2).unwrap());
     }
 }
