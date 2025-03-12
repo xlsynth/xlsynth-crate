@@ -369,6 +369,28 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn array_update(
+        &mut self,
+        array: &BValue,
+        update_value: &BValue,
+        index: &BValue,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
+        let update_value_guard: RwLockReadGuard<BValuePtr> = update_value.ptr.read().unwrap();
+        let index_guard: RwLockReadGuard<BValuePtr> = index.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array_update(
+            fn_builder_guard,
+            array_guard,
+            update_value_guard,
+            &[index_guard],
+            false,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn shra(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_shra(
@@ -1017,5 +1039,36 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
             ])
             .unwrap()
         );
+    }
+
+    #[test]
+    fn test_ir_builder_array_update() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "array_update", true);
+        let u4 = package.get_bits_type(4);
+        let array = fb.param("array", &package.get_array_type(&u4, 2));
+        let index = fb.param("index", &package.get_bits_type(1));
+        let update_value = fb.param("update_value", &u4);
+        let updated = fb.array_update(&array, &update_value, &index, None);
+        let f = fb.build_with_return_value(&updated).unwrap();
+
+        let array_value = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0b0000).unwrap(),
+            IrValue::make_ubits(4, 0b0001).unwrap(),
+        ])
+        .unwrap();
+        let index_value = IrValue::make_ubits(1, 1).unwrap();
+        let update_value = IrValue::make_ubits(4, 0b1111).unwrap();
+
+        let got = f
+            .interpret(&[array_value, index_value, update_value])
+            .unwrap();
+
+        let want = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0b0000).unwrap(),
+            IrValue::make_ubits(4, 0b1111).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(got, want);
     }
 }

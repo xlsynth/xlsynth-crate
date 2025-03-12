@@ -985,6 +985,32 @@ pub(crate) fn xls_function_builder_add_array_slice(
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
+pub(crate) fn xls_function_builder_add_array_update(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    array: RwLockReadGuard<BValuePtr>,
+    update_value: RwLockReadGuard<BValuePtr>,
+    indices: &[RwLockReadGuard<BValuePtr>],
+    assumed_in_bounds: bool,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let indices_ptrs: Vec<*mut CIrBValue> = indices.iter().map(|v| v.ptr).collect();
+    let bvalue_raw = unsafe {
+        xlsynth_sys::xls_builder_base_add_array_update(
+            builder_base,
+            array.ptr,
+            update_value.ptr,
+            indices_ptrs.as_ptr(),
+            indices_ptrs.len() as i64,
+            assumed_in_bounds,
+            name_ptr,
+        )
+    };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
 macro_rules! impl_binary_ir_builder {
     ($fn_name:ident, $ffi_func:ident) => {
         pub(crate) fn $fn_name(
