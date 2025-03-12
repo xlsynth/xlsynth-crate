@@ -119,6 +119,21 @@ impl IrPackage {
         lib_support::xls_package_get_tuple_type(write_guard.mut_c_ptr(), members)
     }
 
+    pub fn types_eq(&self, a: &IrType, b: &IrType) -> Result<bool, XlsynthError> {
+        let _read_guard = self.ptr.read().unwrap();
+        Ok(a.ptr == b.ptr)
+    }
+
+    pub fn get_token_type(&self) -> IrType {
+        let write_guard = self.ptr.write().unwrap();
+        lib_support::xls_package_get_token_type(write_guard.mut_c_ptr())
+    }
+
+    pub fn get_array_type(&self, element_type: &IrType, size: i64) -> IrType {
+        let write_guard = self.ptr.write().unwrap();
+        lib_support::xls_package_get_array_type(write_guard.mut_c_ptr(), element_type.ptr, size)
+    }
+
     pub fn filename(&self) -> Option<&str> {
         match self.filename {
             Some(ref s) => Some(s),

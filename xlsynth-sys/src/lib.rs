@@ -924,11 +924,21 @@ extern "C" {
 
     pub fn xls_package_create(name: *const std::os::raw::c_char) -> *mut CIrPackage;
     pub fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: i64) -> *mut CIrType;
+
     pub fn xls_package_get_tuple_type(
         package: *mut CIrPackage,
         members: *mut *mut CIrType,
         member_count: i64,
     ) -> *mut CIrType;
+
+    pub fn xls_package_get_array_type(
+        package: *mut CIrPackage,
+        element_type: *mut CIrType,
+        size: i64,
+    ) -> *mut CIrType;
+
+    pub fn xls_package_get_token_type(package: *mut CIrPackage) -> *mut CIrType;
+
     pub fn xls_function_builder_create(
         name: *const std::os::raw::c_char,
         package: *mut CIrPackage,
@@ -1026,11 +1036,33 @@ extern "C" {
         index: i64,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array(
+        builder: *mut CIrBuilderBase,
+        element_type: *mut CIrType,
+        elements: *const *mut CIrBValue,
+        element_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array_index(
+        builder: *mut CIrBuilderBase,
+        array: *mut CIrBValue,
+        indices: *const *mut CIrBValue,
+        index_count: i64,
+        assumed_in_bounds: bool,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_bit_slice(
         builder: *mut CIrBuilderBase,
         value: *mut CIrBValue,
         start: i64,
         width: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_bit_slice_update(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        start: *mut CIrBValue,
+        update: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_concat(
@@ -1075,6 +1107,96 @@ extern "C" {
         rhs: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_shra(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        b: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_shrl(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        b: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_shll(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        b: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_nor(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        b: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_clz(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_ctz(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_encode(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_decode(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_select(
+        builder: *mut CIrBuilderBase,
+        selector: *mut CIrBValue,
+        cases: *const *mut CIrBValue,
+        case_count: i64,
+        default_value: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array_concat(
+        builder: *mut CIrBuilderBase,
+        arrays: *const *mut CIrBValue,
+        array_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array_slice(
+        builder: *mut CIrBuilderBase,
+        array: *mut CIrBValue,
+        start: *mut CIrBValue,
+        width: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array_update(
+        builder: *mut CIrBuilderBase,
+        array: *mut CIrBValue,
+        update_value: *mut CIrBValue,
+        indices: *const *mut CIrBValue,
+        index_count: i64,
+        assumed_in_bounds: bool,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_identity(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+
+    pub fn xls_builder_base_get_last_value(
+        builder: *mut CIrBuilderBase,
+        error_out: *mut *mut std::os::raw::c_char,
+        value_out: *mut *mut CIrBValue,
+    ) -> bool;
+
+    pub fn xls_builder_base_get_type(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+    ) -> *mut CIrType;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");

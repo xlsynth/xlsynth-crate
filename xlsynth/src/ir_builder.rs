@@ -232,6 +232,27 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn bit_slice_update(
+        &mut self,
+        value: &BValue,
+        start: &BValue,
+        update: &BValue,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let value_guard: RwLockReadGuard<BValuePtr> = value.ptr.read().unwrap();
+        let start_guard: RwLockReadGuard<BValuePtr> = start.ptr.read().unwrap();
+        let update_guard: RwLockReadGuard<BValuePtr> = update.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_bit_slice_update(
+            fn_builder_guard,
+            value_guard,
+            start_guard,
+            update_guard,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn concat(&mut self, args: &[&BValue], name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let args_locks: Vec<RwLockReadGuard<BValuePtr>> =
@@ -283,12 +304,226 @@ impl FnBuilder {
         );
         BValue { ptr: bvalue_ptr }
     }
+
+    pub fn array(
+        &mut self,
+        element_type: &IrType,
+        elements: &[&BValue],
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let elements_locks: Vec<RwLockReadGuard<BValuePtr>> =
+            elements.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array(
+            fn_builder_guard,
+            element_type,
+            &elements_locks,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn array_index(&mut self, array: &BValue, index: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
+        let index_guard: RwLockReadGuard<BValuePtr> = index.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array_index_multi(
+            fn_builder_guard,
+            array_guard,
+            &[index_guard],
+            false,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn array_concat(&mut self, arrays: &[&BValue], name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let arrays_guards: Vec<RwLockReadGuard<BValuePtr>> =
+            arrays.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array_concat(
+            fn_builder_guard,
+            &arrays_guards,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn array_slice(
+        &mut self,
+        array: &BValue,
+        start: &BValue,
+        width: u64,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
+        let start_guard: RwLockReadGuard<BValuePtr> = start.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array_slice(
+            fn_builder_guard,
+            array_guard,
+            start_guard,
+            width as i64,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn array_update(
+        &mut self,
+        array: &BValue,
+        update_value: &BValue,
+        index: &BValue,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
+        let update_value_guard: RwLockReadGuard<BValuePtr> = update_value.ptr.read().unwrap();
+        let index_guard: RwLockReadGuard<BValuePtr> = index.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array_update(
+            fn_builder_guard,
+            array_guard,
+            update_value_guard,
+            &[index_guard],
+            false,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn shra(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_shra(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn shrl(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_shrl(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn shll(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_shll(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn nor(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_nor(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn clz(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_clz(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn ctz(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_ctz(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn encode(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_encode(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn decode(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_decode(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn identity(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_identity(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn select(
+        &mut self,
+        selector: &BValue,
+        cases: &[&BValue],
+        default_value: &BValue,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let selector_guard: RwLockReadGuard<BValuePtr> = selector.ptr.read().unwrap();
+        let cases_guards: Vec<RwLockReadGuard<BValuePtr>> =
+            cases.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let default_value_guard: RwLockReadGuard<BValuePtr> = default_value.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_select(
+            fn_builder_guard,
+            selector_guard,
+            &cases_guards,
+            default_value_guard,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn last_value(&self) -> Result<BValue, XlsynthError> {
+        let fn_builder_guard = self.fn_builder.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_last_value(fn_builder_guard)?;
+        Ok(BValue { ptr: bvalue_ptr })
+    }
+
+    pub fn get_type(&self, value: &BValue) -> Option<IrType> {
+        let fn_builder_guard = self.fn_builder.read().unwrap();
+        lib_support::xls_function_builder_get_type(fn_builder_guard, value.ptr.read().unwrap())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IrValue;
+    use crate::{ir_value::IrFormatPreference, IrValue};
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_ir_builder() {
@@ -603,5 +838,293 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
                 IrValue::make_ubits(3, 0b100).unwrap(),
             ])
         );
+    }
+
+    #[test]
+    fn test_ir_builder_make_array_and_index() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "make_array_and_index", true);
+        let u2 = package.get_bits_type(2);
+        let u1 = package.get_bits_type(1);
+        let x = builder.param("x", &u2);
+        let y = builder.param("y", &u2);
+        let i = builder.param("i", &u1);
+        let array = builder.array(&u2, &[&x, &y], None);
+        let index = builder.array_index(&array, &i, None);
+        let f = builder.build_with_return_value(&index).unwrap();
+
+        assert_eq!(
+            package.to_string(),
+            "package sample_package
+
+fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bits[2] {
+  array.4: bits[2][2] = array(x, y, id=4)
+  ret array_index.5: bits[2] = array_index(array.4, indices=[i], id=5)
+}
+"
+        );
+
+        let x_value = IrValue::make_ubits(2, 0b01).unwrap();
+        let y_value = IrValue::make_ubits(2, 0b10).unwrap();
+        let result = f
+            .interpret(&[
+                x_value.clone(),
+                y_value.clone(),
+                IrValue::make_ubits(1, 0).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0b01).unwrap());
+
+        let result = f
+            .interpret(&[
+                x_value.clone(),
+                y_value.clone(),
+                IrValue::make_ubits(1, 1).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0b10).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_make_bit_slice_update() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "make_bit_slice_update", true);
+        let u4 = package.get_bits_type(4);
+        let u2 = package.get_bits_type(2);
+        let x = builder.param("x", &u4);
+        let y = builder.param("y", &u2);
+        let start = builder.param("start", &u2);
+        let updated = builder.bit_slice_update(&x, &start, &y, None);
+        let f = builder.build_with_return_value(&updated).unwrap();
+
+        let got = f
+            .interpret(&[
+                IrValue::make_ubits(4, 0b1001).unwrap(),
+                IrValue::make_ubits(2, 0b11).unwrap(),
+                IrValue::make_ubits(2, 1).unwrap(),
+            ])
+            .unwrap();
+        let want = IrValue::make_ubits(4, 0b1111).unwrap();
+        assert_eq!(
+            got.to_string_fmt(IrFormatPreference::Binary).unwrap(),
+            want.to_string_fmt(IrFormatPreference::Binary).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_ir_builder_shift_ops() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "shift_ops", true);
+        let x = builder.param("x", &package.get_bits_type(4));
+        let amount = builder.param("amount", &package.get_bits_type(2));
+        let shra = builder.shra(&x, &amount, None);
+        let shrl = builder.shrl(&x, &amount, None);
+        let shll = builder.shll(&x, &amount, None);
+        let result = builder.tuple(&[&shra, &shrl, &shll], None);
+        let f = builder.build_with_return_value(&result).unwrap();
+
+        let got = f
+            .interpret(&[
+                IrValue::make_ubits(4, 0b1010).unwrap(),
+                IrValue::make_ubits(2, 2).unwrap(),
+            ])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 0b1110).unwrap(), // shra
+            IrValue::make_ubits(4, 0b0010).unwrap(), // shrl
+            IrValue::make_ubits(4, 0b1000).unwrap(), // shll
+        ]);
+        assert_eq!(
+            got.to_string_fmt(IrFormatPreference::Binary).unwrap(),
+            want.to_string_fmt(IrFormatPreference::Binary).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_ir_builder_count_zeros() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "count_zeros", true);
+        let x = builder.param("x", &package.get_bits_type(4));
+        let clz = builder.clz(&x, None);
+        let ctz = builder.ctz(&x, None);
+        let t = builder.tuple(&[&clz, &ctz], None);
+        let f = builder.build_with_return_value(&t).unwrap();
+
+        let got = f
+            .interpret(&[IrValue::make_ubits(4, 0b0010).unwrap()])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 2).unwrap(), // clz
+            IrValue::make_ubits(4, 1).unwrap(), // ctz
+        ]);
+        assert_eq!(got, want);
+
+        let got = f
+            .interpret(&[IrValue::make_ubits(4, 0b0000).unwrap()])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 4).unwrap(), // clz
+            IrValue::make_ubits(4, 4).unwrap(), // ctz
+        ]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ir_builder_encode() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "do_encode", true);
+        let x = builder.param("x", &package.get_bits_type(4));
+        let encoded = builder.encode(&x, None);
+        let f = builder.build_with_return_value(&encoded).unwrap();
+
+        let result = f
+            .interpret(&[IrValue::make_ubits(4, 0b1000).unwrap()])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 3).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_decode() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "do_decode", true);
+        let x = builder.param("x", &package.get_bits_type(2));
+        let decoded = builder.decode(&x, None);
+        let f = builder.build_with_return_value(&decoded).unwrap();
+
+        let result = f.interpret(&[IrValue::make_ubits(2, 3).unwrap()]).unwrap();
+        assert_eq!(result, IrValue::make_ubits(4, 0b1000).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_bitops() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "bitops", true);
+        let u4 = package.get_bits_type(4);
+        let a = builder.param("a", &u4);
+        let b = builder.param("b", &u4);
+        let nor = builder.nor(&a, &b, None);
+        let xor = builder.xor(&a, &b, None);
+        let and = builder.and(&a, &b, None);
+        let or = builder.or(&a, &b, None);
+        let nand = builder.nand(&a, &b, None);
+        let result = builder.tuple(&[&xor, &and, &nand, &or, &nor], None);
+        let f = builder.build_with_return_value(&result).unwrap();
+
+        let got = f
+            .interpret(&[
+                IrValue::make_ubits(4, 0b0011).unwrap(),
+                IrValue::make_ubits(4, 0b0101).unwrap(),
+            ])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 0b0110).unwrap(), // xor
+            IrValue::make_ubits(4, 0b0001).unwrap(), // and
+            IrValue::make_ubits(4, 0b1110).unwrap(), // nand
+            IrValue::make_ubits(4, 0b0111).unwrap(), // or
+            IrValue::make_ubits(4, 0b1000).unwrap(), // nor
+        ]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ir_builder_array_concat_and_slice() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "array_concat", true);
+        let u4 = package.get_bits_type(4);
+        let lhs_array_type = package.get_array_type(&u4, 2);
+        let rhs_array_type = package.get_array_type(&u4, 3);
+        let lhs_array = fb.param("lhs_array", &lhs_array_type);
+        let rhs_array = fb.param("rhs_array", &rhs_array_type);
+        let concat = fb.array_concat(&[&lhs_array, &rhs_array], None);
+        let start = fb.literal(&IrValue::make_ubits(4, 2).unwrap(), None);
+        let slice = fb.array_slice(&concat, &start, 2, None);
+        let f = fb.build_with_return_value(&slice).unwrap();
+
+        let lhs_array_value = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0b0000).unwrap(),
+            IrValue::make_ubits(4, 0b0001).unwrap(),
+        ])
+        .unwrap();
+        let rhs_array_value = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0b0010).unwrap(),
+            IrValue::make_ubits(4, 0b0011).unwrap(),
+            IrValue::make_ubits(4, 0b0100).unwrap(),
+        ])
+        .unwrap();
+        let result = f.interpret(&[lhs_array_value, rhs_array_value]).unwrap();
+        assert_eq!(
+            result,
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0b0010).unwrap(),
+                IrValue::make_ubits(4, 0b0011).unwrap(),
+            ])
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_ir_builder_array_update() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "array_update", true);
+        let u4 = package.get_bits_type(4);
+        let array = fb.param("array", &package.get_array_type(&u4, 2));
+        let index = fb.param("index", &package.get_bits_type(1));
+        let update_value = fb.param("update_value", &u4);
+        let updated = fb.array_update(&array, &update_value, &index, None);
+        let f = fb.build_with_return_value(&updated).unwrap();
+
+        let array_value = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0b0000).unwrap(),
+            IrValue::make_ubits(4, 0b0001).unwrap(),
+        ])
+        .unwrap();
+        let index_value = IrValue::make_ubits(1, 1).unwrap();
+        let update_value = IrValue::make_ubits(4, 0b1111).unwrap();
+
+        let got = f
+            .interpret(&[array_value, index_value, update_value])
+            .unwrap();
+
+        let want = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0b0000).unwrap(),
+            IrValue::make_ubits(4, 0b1111).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ir_builder_get_type_of_last_value_identity_function() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "f", true);
+        let u4 = package.get_bits_type(4);
+        let x = fb.param("x", &u4);
+        let _identity = fb.identity(&x, None);
+        let last_value = fb.last_value().unwrap();
+        let last_value_type = fb.get_type(&last_value).unwrap();
+        assert!(package.types_eq(&last_value_type, &u4).unwrap());
+
+        let f = fb.build_with_return_value(&last_value).unwrap();
+        let result = f
+            .interpret(&[IrValue::make_ubits(4, 0b1010).unwrap()])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(4, 0b1010).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_get_last_value_after_construction_error() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "f", true);
+        let u4 = package.get_bits_type(4);
+        let x = fb.param("x", &u4);
+        let u5 = package.get_bits_type(5);
+        let y = fb.param("y", &u5);
+        fb.add(&x, &y, None);
+        let last_value = fb.last_value();
+        assert!(last_value.is_err());
+        let error_str = last_value.err().unwrap().to_string();
+        log::info!("error_str: {}", error_str);
+        assert!(error_str.contains("bits[4], has type bits[5]"));
     }
 }
