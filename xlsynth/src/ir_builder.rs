@@ -897,4 +897,35 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let result = f.interpret(&[IrValue::make_ubits(2, 3).unwrap()]).unwrap();
         assert_eq!(result, IrValue::make_ubits(4, 0b1000).unwrap());
     }
+
+    #[test]
+    fn test_ir_builder_bitops() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "bitops", true);
+        let u4 = package.get_bits_type(4);
+        let a = builder.param("a", &u4);
+        let b = builder.param("b", &u4);
+        let nor = builder.nor(&a, &b, None);
+        let xor = builder.xor(&a, &b, None);
+        let and = builder.and(&a, &b, None);
+        let or = builder.or(&a, &b, None);
+        let nand = builder.nand(&a, &b, None);
+        let result = builder.tuple(&[&xor, &and, &nand, &or, &nor], None);
+        let f = builder.build_with_return_value(&result).unwrap();
+
+        let got = f
+            .interpret(&[
+                IrValue::make_ubits(4, 0b0011).unwrap(),
+                IrValue::make_ubits(4, 0b0101).unwrap(),
+            ])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 0b0110).unwrap(), // xor
+            IrValue::make_ubits(4, 0b0001).unwrap(), // and
+            IrValue::make_ubits(4, 0b1110).unwrap(), // nand
+            IrValue::make_ubits(4, 0b0111).unwrap(), // or
+            IrValue::make_ubits(4, 0b1000).unwrap(), // nor
+        ]);
+        assert_eq!(got, want);
+    }
 }
