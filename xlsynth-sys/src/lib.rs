@@ -1026,6 +1026,21 @@ extern "C" {
         index: i64,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array(
+        builder: *mut CIrBuilderBase,
+        element_type: *mut CIrType,
+        elements: *const *mut CIrBValue,
+        element_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_array_index(
+        builder: *mut CIrBuilderBase,
+        array: *mut CIrBValue,
+        indices: *const *mut CIrBValue,
+        index_count: i64,
+        assumed_in_bounds: bool,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_bit_slice(
         builder: *mut CIrBuilderBase,
         value: *mut CIrBValue,

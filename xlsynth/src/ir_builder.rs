@@ -283,12 +283,45 @@ impl FnBuilder {
         );
         BValue { ptr: bvalue_ptr }
     }
+
+    pub fn array(
+        &mut self,
+        element_type: &IrType,
+        elements: &[&BValue],
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let elements_locks: Vec<RwLockReadGuard<BValuePtr>> =
+            elements.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array(
+            fn_builder_guard,
+            element_type,
+            &elements_locks,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn array_index(&mut self, array: &BValue, index: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
+        let index_guard: RwLockReadGuard<BValuePtr> = index.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_array_index_multi(
+            fn_builder_guard,
+            array_guard,
+            &[index_guard],
+            false,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::IrValue;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_ir_builder() {
@@ -603,5 +636,50 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
                 IrValue::make_ubits(3, 0b100).unwrap(),
             ])
         );
+    }
+
+    #[test]
+    fn test_ir_builder_make_array_and_index() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "make_array_and_index", true);
+        let u2 = package.get_bits_type(2);
+        let u1 = package.get_bits_type(1);
+        let x = builder.param("x", &u2);
+        let y = builder.param("y", &u2);
+        let i = builder.param("i", &u1);
+        let array = builder.array(&u2, &[&x, &y], None);
+        let index = builder.array_index(&array, &i, None);
+        let f = builder.build_with_return_value(&index).unwrap();
+
+        assert_eq!(
+            package.to_string(),
+            "package sample_package
+
+fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bits[2] {
+  array.4: bits[2][2] = array(x, y, id=4)
+  ret array_index.5: bits[2] = array_index(array.4, indices=[i], id=5)
+}
+"
+        );
+
+        let x_value = IrValue::make_ubits(2, 0b01).unwrap();
+        let y_value = IrValue::make_ubits(2, 0b10).unwrap();
+        let result = f
+            .interpret(&[
+                x_value.clone(),
+                y_value.clone(),
+                IrValue::make_ubits(1, 0).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0b01).unwrap());
+
+        let result = f
+            .interpret(&[
+                x_value.clone(),
+                y_value.clone(),
+                IrValue::make_ubits(1, 1).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0b10).unwrap());
     }
 }
