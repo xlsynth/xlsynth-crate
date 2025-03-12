@@ -1141,6 +1141,16 @@ extern "C" {
         a: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_encode(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_decode(
+        builder: *mut CIrBuilderBase,
+        a: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
