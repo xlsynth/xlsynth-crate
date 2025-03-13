@@ -1238,6 +1238,19 @@ extern "C" {
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
 
+    pub fn xls_builder_base_add_sign_extend(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        new_bit_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_zero_extend(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        new_bit_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+
     pub fn xls_builder_base_get_last_value(
         builder: *mut CIrBuilderBase,
         error_out: *mut *mut std::os::raw::c_char,
