@@ -153,6 +153,94 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn ule(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_ule(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn ult(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_ult(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn uge(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_uge(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn ugt(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_ugt(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn sle(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_sle(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn slt(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_slt(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn sge(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_sge(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn sgt(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_sgt(
+            fn_builder_guard,
+            a.ptr.read().unwrap(),
+            b.ptr.read().unwrap(),
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn not(&mut self, a: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_not(
@@ -1126,5 +1214,59 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let error_str = last_value.err().unwrap().to_string();
         log::info!("error_str: {}", error_str);
         assert!(error_str.contains("bits[4], has type bits[5]"));
+    }
+
+    #[test]
+    fn test_ir_builder_comparisons() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "comparisons", true);
+        let u4 = package.get_bits_type(4);
+        let a = fb.param("a", &u4);
+        let b = fb.param("b", &u4);
+        let ule = fb.ule(&a, &b, None);
+        let ult = fb.ult(&a, &b, None);
+        let uge = fb.uge(&a, &b, None);
+        let ugt = fb.ugt(&a, &b, None);
+        let sle = fb.sle(&a, &b, None);
+        let slt = fb.slt(&a, &b, None);
+        let sge = fb.sge(&a, &b, None);
+        let sgt = fb.sgt(&a, &b, None);
+        let result = fb.tuple(&[&ule, &ult, &uge, &ugt, &sle, &slt, &sge, &sgt], None);
+        let f = fb.build_with_return_value(&result).unwrap();
+
+        let got_ir = package.to_string();
+        let want_ir = "package sample_package
+
+fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], bits[1], bits[1], bits[1], bits[1], bits[1]) {
+  ule.3: bits[1] = ule(a, b, id=3)
+  ult.4: bits[1] = ult(a, b, id=4)
+  uge.5: bits[1] = uge(a, b, id=5)
+  ugt.6: bits[1] = ugt(a, b, id=6)
+  sle.7: bits[1] = sle(a, b, id=7)
+  slt.8: bits[1] = slt(a, b, id=8)
+  sge.9: bits[1] = sge(a, b, id=9)
+  sgt.10: bits[1] = sgt(a, b, id=10)
+  ret tuple.11: (bits[1], bits[1], bits[1], bits[1], bits[1], bits[1], bits[1], bits[1]) = tuple(ule.3, ult.4, uge.5, ugt.6, sle.7, slt.8, sge.9, sgt.10, id=11)
+}
+";
+        assert_eq!(got_ir, want_ir);
+
+        let got = f
+            .interpret(&[
+                IrValue::make_ubits(4, 0b0010).unwrap(),
+                IrValue::make_ubits(4, 0b0011).unwrap(),
+            ])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            true.into(),  // ule
+            true.into(),  // ult
+            false.into(), // uge
+            false.into(), // ugt
+            true.into(),  // sle
+            true.into(),  // slt
+            false.into(), // sge
+            false.into(), // sgt
+        ]);
+        assert_eq!(got, want);
     }
 }

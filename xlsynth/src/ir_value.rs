@@ -259,6 +259,10 @@ impl IrValue {
         xls_parse_typed_value(s)
     }
 
+    pub fn bool(value: bool) -> Self {
+        xls_value_make_ubits(value as u64, 1).unwrap()
+    }
+
     pub fn u32(value: u32) -> Self {
         // Unwrap should be ok since the u32 always fits.
         xls_value_make_ubits(value as u64, 32).unwrap()
@@ -377,6 +381,24 @@ impl IrValue {
 
 unsafe impl Send for IrValue {}
 unsafe impl Sync for IrValue {}
+
+impl Into<IrValue> for bool {
+    fn into(self) -> IrValue {
+        IrValue::bool(self)
+    }
+}
+
+impl Into<IrValue> for u32 {
+    fn into(self) -> IrValue {
+        IrValue::u32(self)
+    }
+}
+
+impl Into<IrValue> for u64 {
+    fn into(self) -> IrValue {
+        IrValue::u64(self)
+    }
+}
 
 impl std::cmp::PartialEq for IrValue {
     fn eq(&self, other: &Self) -> bool {
