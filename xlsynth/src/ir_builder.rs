@@ -301,6 +301,38 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn sign_extend(
+        &mut self,
+        value: &BValue,
+        new_bit_count: u64,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_sign_extend(
+            fn_builder_guard,
+            value.ptr.read().unwrap(),
+            new_bit_count as i64,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
+    pub fn zero_extend(
+        &mut self,
+        value: &BValue,
+        new_bit_count: u64,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_zero_extend(
+            fn_builder_guard,
+            value.ptr.read().unwrap(),
+            new_bit_count as i64,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn bit_slice(
         &mut self,
         value: &BValue,
@@ -1266,6 +1298,27 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
             true.into(),  // slt
             false.into(), // sge
             false.into(), // sgt
+        ]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ir_builder_extend_ops() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "extend_ops", true);
+        let u4 = package.get_bits_type(4);
+        let x = fb.param("x", &u4);
+        let sign_extend = fb.sign_extend(&x, 8, None);
+        let zero_extend = fb.zero_extend(&x, 8, None);
+        let result = fb.tuple(&[&sign_extend, &zero_extend], None);
+        let f = fb.build_with_return_value(&result).unwrap();
+
+        let got = f
+            .interpret(&[IrValue::make_ubits(4, 0b1010).unwrap()])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(8, 0b11111010).unwrap(),
+            IrValue::make_ubits(8, 0b00001010).unwrap(),
         ]);
         assert_eq!(got, want);
     }
