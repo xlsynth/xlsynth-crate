@@ -1107,6 +1107,57 @@ extern "C" {
         rhs: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+
+    // -- comparisons
+    pub fn xls_builder_base_add_ule(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_ult(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_uge(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_ugt(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_sle(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_slt(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_sgt(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_sge(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+
     pub fn xls_builder_base_add_shra(
         builder: *mut CIrBuilderBase,
         a: *mut CIrBValue,

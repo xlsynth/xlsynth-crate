@@ -875,6 +875,14 @@ impl_binary_ir_builder!(xls_function_builder_add_or, xls_builder_base_add_or);
 impl_binary_ir_builder!(xls_function_builder_add_xor, xls_builder_base_add_xor);
 impl_binary_ir_builder!(xls_function_builder_add_eq, xls_builder_base_add_eq);
 impl_binary_ir_builder!(xls_function_builder_add_ne, xls_builder_base_add_ne);
+impl_binary_ir_builder!(xls_function_builder_add_ule, xls_builder_base_add_ule);
+impl_binary_ir_builder!(xls_function_builder_add_ult, xls_builder_base_add_ult);
+impl_binary_ir_builder!(xls_function_builder_add_uge, xls_builder_base_add_uge);
+impl_binary_ir_builder!(xls_function_builder_add_ugt, xls_builder_base_add_ugt);
+impl_binary_ir_builder!(xls_function_builder_add_sle, xls_builder_base_add_sle);
+impl_binary_ir_builder!(xls_function_builder_add_slt, xls_builder_base_add_slt);
+impl_binary_ir_builder!(xls_function_builder_add_sgt, xls_builder_base_add_sgt);
+impl_binary_ir_builder!(xls_function_builder_add_sge, xls_builder_base_add_sge);
 impl_binary_ir_builder!(xls_function_builder_add_umul, xls_builder_base_add_umul);
 impl_binary_ir_builder!(xls_function_builder_add_smul, xls_builder_base_add_smul);
 
