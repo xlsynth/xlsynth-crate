@@ -627,6 +627,17 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn one_hot(&mut self, input: &BValue, lsb_is_priority: bool, name: Option<&str>) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_one_hot(
+            fn_builder_guard,
+            input.ptr.read().unwrap(),
+            lsb_is_priority,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn last_value(&self) -> Result<BValue, XlsynthError> {
         let fn_builder_guard = self.fn_builder.read().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_last_value(fn_builder_guard)?;
@@ -1319,6 +1330,38 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
         let want = IrValue::make_tuple(&[
             IrValue::make_ubits(8, 0b11111010).unwrap(),
             IrValue::make_ubits(8, 0b00001010).unwrap(),
+        ]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ir_builder_one_hot() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "one_hot", true);
+        let u4 = package.get_bits_type(4);
+        let x = fb.param("x", &u4);
+        let one_hot_lsb_priority = fb.one_hot(&x, true, None);
+        let one_hot_msb_priority = fb.one_hot(&x, false, None);
+        let result = fb.tuple(&[&one_hot_lsb_priority, &one_hot_msb_priority], None);
+        let f = fb.build_with_return_value(&result).unwrap();
+
+        // Try one value that shows a distinction between the two.
+        let got = f
+            .interpret(&[IrValue::make_ubits(4, 0b1010).unwrap()])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(5, 0b00010).unwrap(),
+            IrValue::make_ubits(5, 0b01000).unwrap(),
+        ]);
+        assert_eq!(got, want);
+
+        // Try the zero value.
+        let got = f
+            .interpret(&[IrValue::make_ubits(4, 0b0000).unwrap()])
+            .unwrap();
+        let want = IrValue::make_tuple(&[
+            IrValue::make_ubits(5, 0b10000).unwrap(),
+            IrValue::make_ubits(5, 0b10000).unwrap(),
         ]);
         assert_eq!(got, want);
     }
