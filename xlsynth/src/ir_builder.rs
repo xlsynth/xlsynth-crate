@@ -649,6 +649,25 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn one_hot_select(
+        &mut self,
+        selector: &BValue,
+        cases: &[BValue],
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let selector_guard: RwLockReadGuard<BValuePtr> = selector.ptr.read().unwrap();
+        let cases_guards: Vec<RwLockReadGuard<BValuePtr>> =
+            cases.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let bvalue_ptr = lib_support::xls_function_builder_add_one_hot_select(
+            fn_builder_guard,
+            selector_guard,
+            &cases_guards,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn one_hot(&mut self, input: &BValue, lsb_is_priority: bool, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_one_hot(
@@ -1434,5 +1453,42 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
             .interpret(&[IrValue::make_ubits(4, 0xf).unwrap()])
             .unwrap();
         assert_eq!(got_all_set, cases0_value);
+    }
+
+    #[test]
+    fn test_ir_builder_one_hot_select() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "one_hot_select", true);
+        let u4 = package.get_bits_type(4);
+        let selector = fb.param("selector", &u4);
+
+        let zero_value = IrValue::make_ubits(4, 0b0000).unwrap();
+        let cases0_value = IrValue::make_ubits(4, 0b0001).unwrap();
+        let cases1_value = IrValue::make_ubits(4, 0b0010).unwrap();
+        let cases2_value = IrValue::make_ubits(4, 0b0011).unwrap();
+        let cases3_value = IrValue::make_ubits(4, 0b0100).unwrap();
+        let cases = vec![
+            fb.literal(&cases0_value, None),
+            fb.literal(&cases1_value, None),
+            fb.literal(&cases2_value, None),
+            fb.literal(&cases3_value, None),
+        ];
+        let result = fb.one_hot_select(&selector, &cases, None);
+        let f = fb.build_with_return_value(&result).unwrap();
+
+        let no_bit_set = f.interpret(&[IrValue::make_ubits(4, 0).unwrap()]).unwrap();
+        assert_eq!(no_bit_set, zero_value);
+
+        let got_lsb0_set = f.interpret(&[IrValue::make_ubits(4, 1).unwrap()]).unwrap();
+        assert_eq!(got_lsb0_set, cases0_value);
+
+        let got_lsb1_set = f.interpret(&[IrValue::make_ubits(4, 2).unwrap()]).unwrap();
+        assert_eq!(got_lsb1_set, cases1_value);
+
+        let got_lsb2_set = f.interpret(&[IrValue::make_ubits(4, 4).unwrap()]).unwrap();
+        assert_eq!(got_lsb2_set, cases2_value);
+
+        let got_lsb3_set = f.interpret(&[IrValue::make_ubits(4, 8).unwrap()]).unwrap();
+        assert_eq!(got_lsb3_set, cases3_value);
     }
 }

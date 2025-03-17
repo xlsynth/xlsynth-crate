@@ -1258,6 +1258,14 @@ extern "C" {
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
 
+    pub fn xls_builder_base_add_one_hot_select(
+        builder: *mut CIrBuilderBase,
+        selector: *mut CIrBValue,
+        cases: *const *mut CIrBValue,
+        case_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+
     pub fn xls_builder_base_add_priority_select(
         builder: *mut CIrBuilderBase,
         selector: *mut CIrBValue,
