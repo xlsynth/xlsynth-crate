@@ -627,6 +627,28 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn priority_select(
+        &mut self,
+        selector: &BValue,
+        cases: &[BValue],
+        default_value: &BValue,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let selector_guard: RwLockReadGuard<BValuePtr> = selector.ptr.read().unwrap();
+        let cases_guards: Vec<RwLockReadGuard<BValuePtr>> =
+            cases.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let default_value_guard: RwLockReadGuard<BValuePtr> = default_value.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_priority_select(
+            fn_builder_guard,
+            selector_guard,
+            &cases_guards,
+            default_value_guard,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn one_hot(&mut self, input: &BValue, lsb_is_priority: bool, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_one_hot(
@@ -1364,5 +1386,53 @@ fn comparisons(a: bits[4] id=1, b: bits[4] id=2) -> (bits[1], bits[1], bits[1], 
             IrValue::make_ubits(5, 0b10000).unwrap(),
         ]);
         assert_eq!(got, want);
+    }
+
+    /// Demonstrates that the priority select is analogous to a one hot select
+    /// but where if multiple bits are set the least significant bit is used.
+    #[test]
+    fn test_ir_builder_priority_select() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut fb = FnBuilder::new(&mut package, "priority_select", true);
+        // We use a u4 to select among the four values (plus a default for when no bits
+        // are set).
+        let u4 = package.get_bits_type(4);
+        let selector = fb.param("selector", &u4);
+
+        // The values we select are all u4s.
+        let cases0_value = IrValue::make_ubits(4, 0b0000).unwrap();
+        let cases1_value = IrValue::make_ubits(4, 0b0001).unwrap();
+        let cases2_value = IrValue::make_ubits(4, 0b0010).unwrap();
+        let cases3_value = IrValue::make_ubits(4, 0b0011).unwrap();
+        let cases = vec![
+            fb.literal(&cases0_value, None),
+            fb.literal(&cases1_value, None),
+            fb.literal(&cases2_value, None),
+            fb.literal(&cases3_value, None),
+        ];
+        let default_value = IrValue::make_ubits(4, 0b1111).unwrap();
+        let default = fb.literal(&default_value, None);
+        let result = fb.priority_select(&selector, &cases, &default, None);
+        let f = fb.build_with_return_value(&result).unwrap();
+
+        let got_zero = f.interpret(&[IrValue::make_ubits(4, 0).unwrap()]).unwrap();
+        let want = default_value;
+        assert_eq!(got_zero, want);
+
+        let got_lsb0_set = f.interpret(&[IrValue::make_ubits(4, 1).unwrap()]).unwrap();
+        assert_eq!(got_lsb0_set, cases0_value);
+
+        let got_lsb1_set = f.interpret(&[IrValue::make_ubits(4, 2).unwrap()]).unwrap();
+        assert_eq!(got_lsb1_set, cases1_value);
+
+        let got_lsb01_set = f
+            .interpret(&[IrValue::make_ubits(4, 0x3).unwrap()])
+            .unwrap();
+        assert_eq!(got_lsb01_set, cases0_value);
+
+        let got_all_set = f
+            .interpret(&[IrValue::make_ubits(4, 0xf).unwrap()])
+            .unwrap();
+        assert_eq!(got_all_set, cases0_value);
     }
 }
