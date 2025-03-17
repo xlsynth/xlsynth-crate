@@ -585,11 +585,12 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
-    pub fn decode(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+    pub fn decode(&mut self, a: &BValue, width: Option<u64>, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_decode(
             fn_builder_guard,
             a.ptr.read().unwrap(),
+            width,
             name,
         );
         BValue { ptr: bvalue_ptr }
@@ -1156,15 +1157,40 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
     }
 
     #[test]
-    fn test_ir_builder_decode() {
+    fn test_ir_builder_decode_no_width() {
         let mut package = IrPackage::new("sample_package").unwrap();
         let mut builder = FnBuilder::new(&mut package, "do_decode", true);
         let x = builder.param("x", &package.get_bits_type(2));
-        let decoded = builder.decode(&x, None);
+        let decoded = builder.decode(&x, None, None);
         let f = builder.build_with_return_value(&decoded).unwrap();
 
         let result = f.interpret(&[IrValue::make_ubits(2, 3).unwrap()]).unwrap();
         assert_eq!(result, IrValue::make_ubits(4, 0b1000).unwrap());
+    }
+
+    #[test]
+    fn test_ir_builder_decode_with_width() {
+        let mut package = IrPackage::new("sample_package").unwrap();
+        let mut builder = FnBuilder::new(&mut package, "do_decode", true);
+        let x = builder.param("x", &package.get_bits_type(2));
+        let decoded = builder.decode(&x, Some(2), None);
+        let f = builder.build_with_return_value(&decoded).unwrap();
+
+        // Value fits in the width.
+        let result = f.interpret(&[IrValue::make_ubits(2, 0).unwrap()]).unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 1).unwrap());
+
+        // Value fits in the width.
+        let result = f.interpret(&[IrValue::make_ubits(2, 1).unwrap()]).unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 2).unwrap());
+
+        // Value does not fit in the width.
+        let result = f.interpret(&[IrValue::make_ubits(2, 2).unwrap()]).unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0).unwrap());
+
+        // Value does not fit in the width.
+        let result = f.interpret(&[IrValue::make_ubits(2, 3).unwrap()]).unwrap();
+        assert_eq!(result, IrValue::make_ubits(2, 0).unwrap());
     }
 
     #[test]

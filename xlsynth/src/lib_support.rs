@@ -927,6 +927,28 @@ pub(crate) fn xls_function_builder_add_one_hot_select(
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
+pub(crate) fn xls_function_builder_add_decode(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    value: RwLockReadGuard<BValuePtr>,
+    width: Option<u64>,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+
+    let mut width_value = width.unwrap_or(0);
+    let width_ptr: *mut i64 = if width.is_some() {
+        &mut width_value as *mut u64 as *mut i64
+    } else {
+        std::ptr::null_mut()
+    };
+    let bvalue_raw = unsafe {
+        xlsynth_sys::xls_builder_base_add_decode(builder_base, value.ptr, width_ptr, name_ptr)
+    };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
 pub(crate) fn xls_function_builder_last_value(
     builder: RwLockReadGuard<IrFnBuilderPtr>,
 ) -> Result<Arc<RwLock<BValuePtr>>, XlsynthError> {
@@ -1030,7 +1052,6 @@ impl_unary_ir_builder!(
 impl_unary_ir_builder!(xls_function_builder_add_ctz, xls_builder_base_add_ctz);
 impl_unary_ir_builder!(xls_function_builder_add_clz, xls_builder_base_add_clz);
 impl_unary_ir_builder!(xls_function_builder_add_encode, xls_builder_base_add_encode);
-impl_unary_ir_builder!(xls_function_builder_add_decode, xls_builder_base_add_decode);
 impl_unary_ir_builder!(
     xls_function_builder_add_identity,
     xls_builder_base_add_identity

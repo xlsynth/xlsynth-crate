@@ -1197,9 +1197,11 @@ extern "C" {
         a: *mut CIrBValue,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+
     pub fn xls_builder_base_add_decode(
         builder: *mut CIrBuilderBase,
         a: *mut CIrBValue,
+        width: *mut i64,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_select(
