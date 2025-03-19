@@ -227,7 +227,8 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx2ir")
                 .about("Converts DSLX to IR")
-                .add_dslx_input_args(true),
+                .add_dslx_input_args(true)
+                .add_bool_arg("opt", "Optimize the IR we emit as well"),
         )
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
@@ -318,7 +319,24 @@ fn main() {
         )
         .get_matches();
 
-    let toml_path = matches.get_one::<String>("toolchain");
+    let mut toml_path: Option<String> = matches
+        .get_one::<String>("toolchain")
+        .map(|s| s.to_string());
+
+    // If there is no toolchain flag specified, but there is a
+    // xlsynth-toolchain.toml in the current directory, use that.
+    if toml_path.is_none() {
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_toml_path = cwd.join("xlsynth-toolchain.toml");
+        if cwd_toml_path.exists() {
+            log::info!(
+                "Using xlsynth-toolchain.toml in current directory: {}",
+                cwd_toml_path.display()
+            );
+            toml_path = Some(cwd_toml_path.to_str().unwrap().to_string());
+        }
+    }
+
     let toml_value: Option<toml::Value> = toml_path.map(|path| {
         // If we got a toolchain toml file, read/parse it.
         let toml_str =

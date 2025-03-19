@@ -662,3 +662,77 @@ fn my_main(x: bits[32], y: bits[32]) -> bits[32] {
     assert_eq!(json_text["live_nodes"], Value::Number(96.into()));
     assert_eq!(json_text["deepest_path"], Value::Number(2.into()));
 }
+
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_toolchain_picked_up_when_in_cwd_even_if_no_cmdline_flag(use_tool_path: bool) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    // Create a DSLX stdlib path that points at our temp dir so we can see things
+    // worked.
+    let dslx_stdlib_path = temp_dir.path().join("dslx_stdlib");
+    std::fs::create_dir(&dslx_stdlib_path).unwrap();
+    let dslx_stdlib_path_str = dslx_stdlib_path.to_str().unwrap();
+    let toolchain_toml_contents = format!(
+        r#"[toolchain]
+dslx_stdlib_path = "{}"
+"#,
+        dslx_stdlib_path_str
+    );
+    let toolchain_toml_contents = if use_tool_path {
+        add_tool_path_value(&toolchain_toml_contents)
+    } else {
+        toolchain_toml_contents
+    };
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    // Create a std.x file that just has a popcount that always returns 1. This
+    // distinguishes it from the real standard library.
+    let std_path = dslx_stdlib_path.join("std.x");
+    std::fs::write(&std_path, "pub fn popcount(x: u32) -> u32 { u32:1 }").unwrap();
+
+    // Create a main.x file that just imports std and calls popcount.
+    let main_path = temp_dir.path().join("main.x");
+    std::fs::write(
+        &main_path,
+        "import std; fn main() -> u32 { std::popcount(u32:42) }",
+    )
+    .unwrap();
+
+    // We run the command without an explicit --toolchain flag but in the directory
+    // where the toolchain.toml is located.
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(main_path.to_str().unwrap())
+        .arg("--opt=true")
+        .arg("--dslx_top")
+        .arg("main")
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    // Command should succeed.
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+
+    // The IR should just be the literal value 1.
+    assert!(
+        stdout.contains(
+            "top fn __main__main() -> bits[32] {
+  ret literal.5: bits[32] = literal(value=1, id=5, pos=[(1,0,44)])
+}"
+        ),
+        "stdout: {}",
+        stdout
+    );
+}
