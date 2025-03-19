@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! These are helper routines for the process of mapping XLS IR operations to gates.
+//! These are helper routines for the process of mapping XLS IR operations to
+//! gates.
 //!
 //! * gatify_add_ripple_carry: instantiates a ripple-carry adder
 //! * gatify_barrel_shifter: instantiates a barrel shifter (logarithmic stages)
@@ -9,8 +10,9 @@ use crate::gate::{self, AigBitVector, AigOperand, GateBuilder};
 
 /// Emits a carry-select adder for the given inputs.
 ///
-/// A carry-select adder specializes groups of bits on whether the carry-in to the group is zero or one. Then you just incur the mux propagation time across the groups
-/// if they are matched in their production delay times.
+/// A carry-select adder specializes groups of bits on whether the carry-in to
+/// the group is zero or one. Then you just incur the mux propagation time
+/// across the groups if they are matched in their production delay times.
 #[allow(dead_code)]
 pub fn gatify_add_carry_select(
     lhs: &AigBitVector,
@@ -65,7 +67,8 @@ pub fn gatify_add_carry_select(
     (c_in, AigBitVector::from_lsb_is_index_0(&results))
 }
 
-// Returns `(carry_out, result_gates)` where `result_gates` is the same size as the input bit-vectors.
+// Returns `(carry_out, result_gates)` where `result_gates` is the same size as
+// the input bit-vectors.
 pub fn gatify_add_ripple_carry(
     lhs: &AigBitVector,
     rhs: &AigBitVector,
@@ -136,7 +139,8 @@ pub enum Direction {
     Right,
 }
 
-// Implements a stage-based barrel shifter (with logarithmic stages) using 2:1 muxes.
+// Implements a stage-based barrel shifter (with logarithmic stages) using 2:1
+// muxes.
 fn gatify_barrel_shifter_internal(
     arg_gates: &AigBitVector,
     amount_gates: &AigBitVector,
@@ -156,8 +160,9 @@ fn gatify_barrel_shifter_internal(
         match direction {
             Direction::Right => {
                 // For a right shift:
-                // If control == 1 then output bit at position j becomes current[j + shift] (if within range),
-                // or false otherwise; if control == 0 then remain unchanged.
+                // If control == 1 then output bit at position j becomes current[j + shift] (if
+                // within range), or false otherwise; if control == 0 then
+                // remain unchanged.
                 for j in 0..bit_count {
                     let candidate = if j + shift < bit_count {
                         current[j + shift]
@@ -172,8 +177,9 @@ fn gatify_barrel_shifter_internal(
             }
             Direction::Left => {
                 // For a left shift:
-                // If control == 1 then output bit at position j becomes current[j - shift] (if possible),
-                // or false if j < shift; if control == 0 then remain unchanged.
+                // If control == 1 then output bit at position j becomes current[j - shift] (if
+                // possible), or false if j < shift; if control == 0 then remain
+                // unchanged.
                 for j in 0..bit_count {
                     let candidate = if j >= shift {
                         current[j - shift]
@@ -214,8 +220,9 @@ pub fn gatify_barrel_shifter(
 ) -> AigBitVector {
     let natural_amount_bits = (arg_gates.get_bit_count() as f64).log2().ceil() as usize;
     let amount_can_be_oversize = amount_gates.get_bit_count() > natural_amount_bits;
-    // The "amount" value is limited in what it can realistically cause to happen by the number of bits in the arg value.
-    // If the number is larger than that, we can just give back zero.
+    // The "amount" value is limited in what it can realistically cause to happen by
+    // the number of bits in the arg value. If the number is larger than that,
+    // we can just give back zero.
     if amount_can_be_oversize {
         let gate::Split { msbs, lsbs } =
             amount_gates.get_lsb_partition(natural_amount_bits as usize);
@@ -237,7 +244,8 @@ pub fn gatify_barrel_shifter(
 /// `selector_bits` should have one bit for every case, N bits total.
 /// `cases` should have N bit vectors.
 ///
-/// This does `bitwise_or_reduce([masked_case for case in cases])` where `masked_case` is `case & selector_bits[i]`.
+/// This does `bitwise_or_reduce([masked_case for case in cases])` where
+/// `masked_case` is `case & selector_bits[i]`.
 pub fn gatify_one_hot_select(
     gb: &mut GateBuilder,
     selector_bits: &AigBitVector,

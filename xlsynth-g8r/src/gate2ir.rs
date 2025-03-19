@@ -2,7 +2,8 @@
 
 //! Functionality for converting a gate function into an IR function.
 //!
-//! This is useful for getting it "back into" XLS IR form after transforms so we can test equivalence.
+//! This is useful for getting it "back into" XLS IR form after transforms so we
+//! can test equivalence.
 
 use std::collections::HashMap;
 use std::iter::zip;
@@ -59,17 +60,19 @@ fn flatten(param: &BValue, ty: &ir::Type, fb: &mut FnBuilder) -> BValue {
             fb.concat(&elements_refs, None)
         }
         ir::Type::Token => {
-            // Tokens are zero bits so the nearest definition that makes sense for flattening is that we make a zero-bit literal value.
+            // Tokens are zero bits so the nearest definition that makes sense for
+            // flattening is that we make a zero-bit literal value.
             fb.literal(&IrValue::make_ubits(0, 0).unwrap(), None)
         }
     }
 }
 
-// Since the node env tracks individual bits we decompose inputs (which are vectors) into bits
-// to place them into the map.
+// Since the node env tracks individual bits we decompose inputs (which are
+// vectors) into bits to place them into the map.
 //
-// We also need to match the given param_type in the function signature, so we may need to grab
-// things out like tuple members at the very start of the function.
+// We also need to match the given param_type in the function signature, so we
+// may need to grab things out like tuple members at the very start of the
+// function.
 fn add_param_for_gate_fn_input(
     fb: &mut FnBuilder,
     node_env: &mut HashMap<AigOperand, BValue>,
@@ -78,7 +81,8 @@ fn add_param_for_gate_fn_input(
     param_type: &ir::Type,
 ) -> Result<(), XlsynthError> {
     log::debug!("Processing input {:?}", input);
-    // Note that inputs are bitvectors, so we add them as a single parameter and then slice out all the bits for the environment.
+    // Note that inputs are bitvectors, so we add them as a single parameter and
+    // then slice out all the bits for the environment.
     let param_bit_count = input.get_bit_count() as u64;
     let ty: IrType = make_xlsynth_type(param_type, package);
     let param = fb.param(input.name.as_str(), &ty);
@@ -179,7 +183,8 @@ fn make_return_value_from_outputs(
     unflatten(&output_bits_msb_is_0, ret_type, fb, package)
 }
 
-/// Returns an IR package with a single function as the top, which is the given "gate function".
+/// Returns an IR package with a single function as the top, which is the given
+/// "gate function".
 pub fn gate_fn_to_xlsynth_ir(
     gate_fn: &gate::GateFn,
     package_name: &str,

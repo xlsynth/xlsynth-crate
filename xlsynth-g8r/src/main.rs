@@ -35,7 +35,8 @@ struct Args {
     input: String,
 }
 
-/// Returns a mapping that shows {depth: count} where the count is in number of gates.
+/// Returns a mapping that shows {depth: count} where the count is in number of
+/// gates.
 fn get_gate_depth(
     gate_fn: &gate::GateFn,
     live_nodes: &[gate::AigRef],
@@ -65,7 +66,8 @@ fn get_gate_depth(
         }
     }
 
-    // Filter to just the nodes that are outputs to determine the deepest primary output.
+    // Filter to just the nodes that are outputs to determine the deepest primary
+    // output.
     let mut deepest_primary_output: Option<(gate::AigRef, usize)> = None;
     for output in gate_fn.outputs.iter() {
         for operand in output.bit_vector.iter_lsb_to_msb() {

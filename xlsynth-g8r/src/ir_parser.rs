@@ -789,7 +789,8 @@ impl Parser {
                 )
             }
             "after_all" => {
-                // This is a variadic operation that puts the variadic node refs at the top level instead of in an attribute.
+                // This is a variadic operation that puts the variadic node refs at the top
+                // level instead of in an attribute.
                 let mut operands = Vec::new();
                 loop {
                     self.drop_whitespace();
@@ -814,7 +815,8 @@ impl Parser {
                 (ir::NodePayload::AfterAll(operands), maybe_id.unwrap())
             }
             "invoke" => {
-                // This is a variadic operands that puts the variadic node refs at the top level instead of in an attribute.
+                // This is a variadic operands that puts the variadic node refs at the top level
+                // instead of in an attribute.
                 let mut operands = Vec::new();
                 loop {
                     self.drop_whitespace();
@@ -1423,7 +1425,8 @@ fn bar(x: bits[8] id=3) -> bits[8] {
         println!("{:?}", node);
     }
 
-    /// Replaces all instances of `, pos=[...]` in the text with the empty string.
+    /// Replaces all instances of `, pos=[...]` in the text with the empty
+    /// string.
     fn strip_pos_data(s: &str) -> String {
         let regex = regex::Regex::new(r", pos=\[(\(\d+,\d+,\d+\),?)+\]").unwrap();
         regex.replace_all(s, "").to_string()

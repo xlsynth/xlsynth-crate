@@ -22,7 +22,8 @@ impl IrNodeEnv {
         }
     }
 
-    /// We add nodes by providing their `id` (always) but also an optional `name` they are also known by.
+    /// We add nodes by providing their `id` (always) but also an optional
+    /// `name` they are also known by.
     pub fn add(&mut self, name: Option<String>, id: usize, node: ir::NodeRef) {
         assert!(id > 0, "Invalid node id {}, must be greater than zero", id);
         log::debug!(
@@ -37,9 +38,10 @@ impl IrNodeEnv {
         self.id_to_node.insert(id, node);
     }
 
-    /// We look up nodes by either their `id` or `name` -- in references either the a name is
-    /// provided (e.g. in the case of params or named nodes) or the referred-to node is unnamed
-    /// and we refer to it via its `operator.id` in the text, where the operator can be implicit
+    /// We look up nodes by either their `id` or `name` -- in references either
+    /// the a name is provided (e.g. in the case of params or named nodes)
+    /// or the referred-to node is unnamed and we refer to it via its
+    /// `operator.id` in the text, where the operator can be implicit
     /// so only the `id` is required.
     pub fn name_id_to_ref(&self, key: &NameOrId) -> Option<&ir::NodeRef> {
         match key {

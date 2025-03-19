@@ -6,7 +6,8 @@ use crate::gate;
 
 /// Computes a use count for the nodes in the gate function.
 ///
-/// This indicates both which nodes are unused and indicates which nodes have high fanout.
+/// This indicates both which nodes are unused and indicates which nodes have
+/// high fanout.
 pub fn get_id_to_use_count(gate_fn: &gate::GateFn) -> HashMap<gate::AigRef, usize> {
     let mut id_to_use_count: HashMap<gate::AigRef, usize> = HashMap::new();
     let mut bump_use_count = |node: gate::AigRef| {
@@ -14,8 +15,10 @@ pub fn get_id_to_use_count(gate_fn: &gate::GateFn) -> HashMap<gate::AigRef, usiz
     };
     let mut processed_nodes = HashSet::new();
 
-    // The worklist represents the set of nodes for which we observed that they were used but we haven't yet traversed to their arguments.
-    // If a node is in "processed" that means we have already traversed to its arguments so we should not do it again.
+    // The worklist represents the set of nodes for which we observed that they were
+    // used but we haven't yet traversed to their arguments. If a node is in
+    // "processed" that means we have already traversed to its arguments so we
+    // should not do it again.
     let mut worklist = Vec::new();
 
     log::info!("Adding {} outputs to worklist", gate_fn.outputs.len());
@@ -28,7 +31,8 @@ pub fn get_id_to_use_count(gate_fn: &gate::GateFn) -> HashMap<gate::AigRef, usiz
         }
     }
 
-    // Process the worklist - each time a node is used as an argument, increment its use count
+    // Process the worklist - each time a node is used as an argument, increment its
+    // use count
     while let Some(node) = worklist.pop() {
         // Skip if we've already processed this node's arguments
         let first_time_seen = processed_nodes.insert(node);

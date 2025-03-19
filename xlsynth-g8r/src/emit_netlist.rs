@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Uses the xlsynth VAST APIs to build a netlist verilog representation of the given gates.
+//! Uses the xlsynth VAST APIs to build a netlist verilog representation of the
+//! given gates.
 
 use crate::gate;
 use std::collections::HashMap;

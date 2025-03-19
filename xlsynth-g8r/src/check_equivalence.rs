@@ -71,9 +71,10 @@ pub fn validate_same_signature(orig_fn: &ir::Fn, gate_fn: &gate::GateFn) -> Resu
     Ok(())
 }
 
-/// Note: if the original IR function has a different signature than the gate function (because gate
-/// functions generally have flattened signatures into a bit vector for each parameter / result tuple element)
-/// then we adjust in the conversion from "gate IR" to "XLS IR" to use the original function's
+/// Note: if the original IR function has a different signature than the gate
+/// function (because gate functions generally have flattened signatures into a
+/// bit vector for each parameter / result tuple element) then we adjust in the
+/// conversion from "gate IR" to "XLS IR" to use the original function's
 /// signature so we can check XLS IR equivalence directly.
 pub fn validate_same_fn(orig_fn: &ir::Fn, gate_fn: &gate::GateFn) -> Result<(), String> {
     let orig_ir_fn_text: String = orig_fn.to_string();

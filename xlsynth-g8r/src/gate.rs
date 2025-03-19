@@ -163,7 +163,8 @@ impl AigBitVector {
         }
     }
 
-    /// Creates a bit vector from a slice where index 0 of the slice is the least significant bit.
+    /// Creates a bit vector from a slice where index 0 of the slice is the
+    /// least significant bit.
     pub fn from_lsb_is_index_0(operands: &[AigOperand]) -> Self {
         Self {
             operands: operands.to_vec(),
@@ -223,7 +224,9 @@ fn io_to_string(name: &str, bit_vector: &AigBitVector) -> String {
     )
 }
 
-/// An input has a name (which should be unique among inputs/outputs) and a vector of gate references that make up this named entity; i.e. we have bit vectors for named inputs.
+/// An input has a name (which should be unique among inputs/outputs) and a
+/// vector of gate references that make up this named entity; i.e. we have bit
+/// vectors for named inputs.
 #[derive(Debug, Clone)]
 pub struct Input {
     pub name: String,
@@ -295,8 +298,9 @@ impl GateFn {
         }
     }
 
-    /// Implementation note: we emit nodes here and the negation is folded into the node emission process, which means we need a
-    /// sweep over the outputs to negate those explicitly.
+    /// Implementation note: we emit nodes here and the negation is folded into
+    /// the node emission process, which means we need a sweep over the
+    /// outputs to negate those explicitly.
     pub fn to_string(&self) -> String {
         let mut s = String::new();
         let input_str = self
@@ -384,7 +388,8 @@ impl GateFn {
         &self.gates[aig_ref.id]
     }
 
-    // In post-order a node comes after all of its dependencies, i.e. return values are last.
+    // In post-order a node comes after all of its dependencies, i.e. return values
+    // are last.
     pub fn post_order(&self, discard_inputs: bool) -> Vec<AigOperand> {
         let mut seen = HashSet::new();
         let mut order = Vec::new();
@@ -422,9 +427,11 @@ impl GateFn {
 /// Helper for getting the post-order of the nodes in the AIG.
 ///
 /// If operand is already seen, immediately returns.
-/// Otherwise, does any required traversal on operands and then adds the operand to the order.
+/// Otherwise, does any required traversal on operands and then adds the operand
+/// to the order.
 ///
-/// Note that this is a recursive implementation for simplicity though a worklist oriented algorithm will scale better in the future.
+/// Note that this is a recursive implementation for simplicity though a
+/// worklist oriented algorithm will scale better in the future.
 fn post_order(
     operand: &AigOperand,
     f: &GateFn,
@@ -805,7 +812,8 @@ impl GateBuilder {
         self.add_not(and)
     }
 
-    // Performs an `or` across all the gates given in `args` to produce a single bit output.
+    // Performs an `or` across all the gates given in `args` to produce a single bit
+    // output.
     pub fn add_or_nary(&mut self, args: &[AigOperand]) -> AigOperand {
         if self.fold {
             if args.iter().any(|arg| self.is_known_true(*arg)) {
@@ -853,7 +861,8 @@ impl GateBuilder {
         )
     }
 
-    /// Returns a bit that indicates if any of the bits in `bit_vector` are non-zero.
+    /// Returns a bit that indicates if any of the bits in `bit_vector` are
+    /// non-zero.
     pub fn add_nez(&mut self, bit_vector: &AigBitVector) -> AigOperand {
         assert!(
             bit_vector.get_bit_count() > 0,
@@ -875,7 +884,8 @@ impl GateBuilder {
 
     pub fn add_or_vec_nary(&mut self, args: &[AigBitVector]) -> AigBitVector {
         let bit_count = args[0].get_bit_count();
-        // Assert all vectors are the same length -- we're going to or-reduce the bit positions.
+        // Assert all vectors are the same length -- we're going to or-reduce the bit
+        // positions.
         for arg in args {
             assert_eq!(arg.get_bit_count(), bit_count);
         }
@@ -901,7 +911,8 @@ impl GateBuilder {
     }
 
     pub fn add_xor_vec_nary(&mut self, args: &[&[AigOperand]]) -> AigBitVector {
-        // Assert all vectors are the same length -- we're going to xor-reduce the bit positions.
+        // Assert all vectors are the same length -- we're going to xor-reduce the bit
+        // positions.
         for arg in args {
             assert_eq!(arg.len(), args[0].len());
         }

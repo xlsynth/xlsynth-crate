@@ -22,7 +22,8 @@ pub enum Type {
     Array(ArrayTypeData),
 }
 
-/// Represents an interval of the form `[start, limit)` i.e. inclusive start exclusive limit.
+/// Represents an interval of the form `[start, limit)` i.e. inclusive start
+/// exclusive limit.
 pub struct StartAndLimit {
     pub start: usize,
     pub limit: usize,
@@ -49,13 +50,14 @@ impl Type {
         }
     }
 
-    /// Returns the start and limit bits for our bitwise representation of a tuple access at the
-    /// given index.
+    /// Returns the start and limit bits for our bitwise representation of a
+    /// tuple access at the given index.
     ///
     /// E.g. consider `tuple(a, b, c)`, we represent this in a bit vector as:
-    /// `a_msb, ..., a_lsb, b_msb, ..., b_lsb, c_msb, ..., c_lsb` where c_lsb is the least
-    /// significant bit of the overall bit vector. That means to access index `i` we have to slice
-    /// out all the members that come after it; e.g. if we want to access b we have to skip `c`
+    /// `a_msb, ..., a_lsb, b_msb, ..., b_lsb, c_msb, ..., c_lsb` where c_lsb is
+    /// the least significant bit of the overall bit vector. That means to
+    /// access index `i` we have to slice out all the members that come
+    /// after it; e.g. if we want to access b we have to skip `c`
     /// least significant bits.
     pub fn tuple_get_flat_bit_slice_for_index(
         &self,
@@ -684,7 +686,8 @@ impl NodePayload {
 pub struct Node {
     /// All nodes have known ids.
     pub text_id: usize,
-    /// Some nodes also have names -- params must have names, other nodes optionally have names.
+    /// Some nodes also have names -- params must have names, other nodes
+    /// optionally have names.
     pub name: Option<String>,
     pub ty: Type,
     pub payload: NodePayload,

@@ -15,8 +15,8 @@ fn extract_or_pattern(a: AigOperand, g8_builder: &GateBuilder) -> Option<(AigOpe
     }
 }
 
-// If the gate is an and with one side being "true" and the other operand being negated, it's an effective "not"
-// and we return the operand being negated.
+// If the gate is an and with one side being "true" and the other operand being
+// negated, it's an effective "not" and we return the operand being negated.
 #[allow(dead_code)]
 fn extract_not_pattern(gate: &AigNode, g8_builder: &GateBuilder) -> Option<AigRef> {
     match gate {

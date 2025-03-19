@@ -111,10 +111,11 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     }
 }
 
-/// Returns a topologically sorted list of node references for the given IR function.
+/// Returns a topologically sorted list of node references for the given IR
+/// function.
 ///
-/// The ordering guarantees that for any node, all its dependency nodes will appear
-/// before it in the returned vector.
+/// The ordering guarantees that for any node, all its dependency nodes will
+/// appear before it in the returned vector.
 pub fn get_topological(f: &Fn) -> Vec<NodeRef> {
     let n = f.nodes.len();
     let mut visited = vec![false; n];
