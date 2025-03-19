@@ -397,6 +397,7 @@ jobs:
         env:
           XLS_DSO_PATH: ${{ github.workspace }}/pre_download/libxls-ubuntu2004.so
           DSLX_STDLIB_PATH: ${{ github.workspace }}/pre_download/xls/dslx/stdlib
+          LD_LIBRARY_PATH: ${{ github.workspace }}/pre_download:$LD_LIBRARY_PATH
         run: |
           echo "Using XLS_DSO_PATH=${XLS_DSO_PATH}"
           echo "Using DSLX_STDLIB_PATH=${DSLX_STDLIB_PATH}"
