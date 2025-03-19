@@ -51,6 +51,25 @@ def get_latest_release(max_attempts):
     print(f"Latest version discovered: {latest_version}")
     return latest_version
 
+def check_sha256sum(artifact_path: str, sha256_path: str) -> bool:
+    """
+    Checks if the artifact at `artifact_path` has the same sha256sum as the file at `sha256_path`.
+    """
+    if not os.path.exists(sha256_path) or not os.path.exists(artifact_path):
+        return False
+
+    with open(sha256_path, 'r') as f:
+        expected_checksum = f.read().strip().split()[0]
+
+    hasher = hashlib.sha256()
+    with open(artifact_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hasher.update(chunk)
+    actual_checksum = hasher.hexdigest()
+
+    return expected_checksum == actual_checksum
+
+
 def high_integrity_download(base_url, filename, target_dir, max_attempts, is_binary=False, platform=None):
     print(f"Starting download of {filename}...")
     start_time = time.time()
@@ -62,6 +81,12 @@ def high_integrity_download(base_url, filename, target_dir, max_attempts, is_bin
         sha256_path = os.path.join(temp_dir, f"{filename}.sha256")
         artifact_path = os.path.join(temp_dir, filename)
 
+        # Determine target filename and associated path.
+        target_filename = filename
+        if is_binary and platform and filename.endswith(f"-{platform}"):
+            target_filename = filename[:-(len(platform) + 1)]  # Remove '-platform'
+        target_path = os.path.join(target_dir, target_filename)
+
         headers = get_headers()
 
         # Download SHA256 file with retry support
@@ -69,31 +94,21 @@ def high_integrity_download(base_url, filename, target_dir, max_attempts, is_bin
             with open(sha256_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
+        # If the file already exists at the target location with the correct sha256sum, skip the
+        # download.
+        if os.path.exists(target_path) and check_sha256sum(target_path, sha256_path):
+            print(f"Skipping download of {filename} because it already exists and has the correct sha256sum")
+            return
+
         # Download the artifact with retry support
         with request_with_retry(artifact_url, stream=True, headers=headers, max_attempts=max_attempts) as r:
             with open(artifact_path, 'wb') as f:
                 shutil.copyfileobj(r.raw, f)
 
         # Verify checksum
-        with open(sha256_path, 'r') as f:
-            expected_checksum = f.read().strip().split()[0]
-
-        hasher = hashlib.sha256()
-        with open(artifact_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hasher.update(chunk)
-        actual_checksum = hasher.hexdigest()
-
-        if expected_checksum != actual_checksum:
+        if not check_sha256sum(artifact_path, sha256_path):
             raise ValueError(f"Checksum mismatch for {filename}")
 
-        # Determine target filename
-        target_filename = filename
-        if is_binary and platform and filename.endswith(f"-{platform}"):
-            target_filename = filename[:-(len(platform) + 1)]  # Remove '-platform'
-
-        # Move to target directory
-        target_path = os.path.join(target_dir, target_filename)
         shutil.move(artifact_path, target_path)
 
         # Make binary artifacts executable
@@ -109,6 +124,7 @@ def main():
     parser.add_option("-v", "--version", dest="version", help="Specify release version (e.g., v0.0.0)")
     parser.add_option("-o", "--output", dest="output_dir", help="Output directory for artifacts")
     parser.add_option("-p", "--platform", dest="platform", help="Target platform (e.g., ubuntu2004, rocky8)")
+    parser.add_option("-d", "--dso", dest="dso", help="Download the DSO library", action="store_true", default=False)
     parser.add_option('--max_attempts', dest='max_attempts', help='Maximum number of attempts to download', type='int', default=10)
 
     (options, args) = parser.parse_args()
@@ -125,18 +141,22 @@ def main():
     version = options.version if options.version else get_latest_release(options.max_attempts)
     base_url = f"https://github.com/xlsynth/xlsynth/releases/download/{version}"
 
+    # Tuples of `(artifact_to_download, is_binary)` -- if it's noted to be a binary it is marked
+    # as executable.
     artifacts = [
-        ("dslx_interpreter_main", True),
-        ("ir_converter_main", True),
-        ("codegen_main", True),
-        ("opt_main", True),
-        ("check_ir_equivalence_main", True),
+        (f"dslx_interpreter_main-{options.platform}", True),
+        (f"ir_converter_main-{options.platform}", True),
+        (f"codegen_main-{options.platform}", True),
+        (f"opt_main-{options.platform}", True),
+        (f"check_ir_equivalence_main-{options.platform}", True),
     ]
+
+    if options.dso:
+        artifacts.append((f"libxls-{options.platform}.so", False))
 
     os.makedirs(options.output_dir, exist_ok=True)
 
-    for artifact, is_binary in artifacts:
-        filename = f"{artifact}-{options.platform}"
+    for filename, is_binary in artifacts:
         high_integrity_download(base_url, filename, options.output_dir, options.max_attempts, is_binary, options.platform)
 
     # Download and extract dslx_stdlib.tar.gz
