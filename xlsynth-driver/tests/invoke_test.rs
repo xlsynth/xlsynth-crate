@@ -5,6 +5,8 @@ use std::process::Command;
 use serde_json::Value;
 use test_case::test_case;
 
+use pretty_assertions::assert_eq;
+
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
     let tool_path =
         std::env::var("XLSYNTH_TOOLS").expect("XLSYNTH_TOOLS environment variable must be set");
@@ -400,6 +402,47 @@ disable_warnings = ["unused_definition", "empty_range_literal"]
         stderr
     );
     assert!(!stdout.contains("is not used in function"));
+}
+
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_ir2opt_subcommand(use_tool_path: bool) {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ir.ir");
+    std::fs::write(
+        &ir_path,
+        "package sample
+fn my_main(x: bits[32]) -> bits[32] {
+    literal.3: bits[32] = literal(value=0, id=3)
+    ret add.4: bits[32] = add(literal.3, x, id=4)
+}",
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("ir2opt")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir2opt should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout,
+        "package sample
+
+top fn my_main(x: bits[32] id=5) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=5)
+}\n\n"
+    );
 }
 
 #[test_case(true; "with_tool_path")]
