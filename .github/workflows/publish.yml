@@ -88,6 +88,16 @@ jobs:
     - name: Wait for crates.io to update
       run: sleep 20
 
+    - name: Publish xlsynth-g8r
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+      run: |
+        cd xlsynth-g8r
+        cargo publish --token $CARGO_REGISTRY_TOKEN
+
+    - name: Wait for crates.io to update
+      run: sleep 20
+
     - name: Publish xlsynth-driver
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
