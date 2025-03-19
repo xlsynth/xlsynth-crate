@@ -56,7 +56,7 @@ This shows sample use of the driver program which integrates XLS functionality f
 ```shell
 $ echo 'fn f(x: u32, y: u32) -> u32 { x + y }' > /tmp/add.x
 $ cargo run -p xlsynth-driver -- dslx2ir --dslx_input_file /tmp/add.x --dslx_top f > /tmp/add.ir
-$ cargo run -p xlsynth-driver -- ir2gates /tmp/add.ir --ir_top __add__f
+$ cargo run -p xlsynth-driver -- ir2gates /tmp/add.ir
 ```
 
 ## Development Notes
