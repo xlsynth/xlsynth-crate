@@ -420,8 +420,20 @@ fn my_main(x: bits[32]) -> bits[32] {
     )
     .unwrap();
 
+    // Write out toolchain configuration.
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = "[toolchain]\n".to_string();
+    let toolchain_toml_contents = if use_tool_path {
+        add_tool_path_value(&toolchain_toml_contents)
+    } else {
+        toolchain_toml_contents
+    };
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
         .arg("ir2opt")
         .arg(ir_path.to_str().unwrap())
         .arg("--top")
