@@ -16,7 +16,7 @@ fn ir2gates(input_file: &std::path::Path, quiet: bool) {
     }
 }
 
-pub fn handle_ir2gates(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
+pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
     let quiet = match matches.get_one::<String>("quiet").map(|s| s.as_str()) {
         Some("true") => true,
