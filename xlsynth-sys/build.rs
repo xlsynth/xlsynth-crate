@@ -296,11 +296,26 @@ fn main() {
         let dso_path = PathBuf::from(&dso_path_string);
         let dso_dir = dso_path.parent().unwrap();
         let dso_name = dso_path.file_name().unwrap();
+        // Strip the extension from the dso_name. We make sure we right-split one dot
+        // and the extension looks like a shared library.
+        let (dso_name, ext) = dso_name.to_str().unwrap().rsplit_once('.').unwrap();
+        match ext {
+            "dylib" | "so" => {}
+            _ => {
+                panic!("Expected shared library extension: {:?}", ext);
+            }
+        }
+        assert!(
+            dso_name.starts_with("lib"),
+            "DSO name should start with 'lib'"
+        );
+        let dso_name = &dso_name[3..];
         let stdlib_path_string = std::env::var("DSLX_STDLIB_PATH").unwrap();
         println!("cargo:rustc-env=XLS_DSO_PATH={}", dso_path.display());
         println!("cargo:rustc-env=DSLX_STDLIB_PATH={}", stdlib_path_string);
         println!("cargo:rustc-link-search=native={}", dso_dir.display());
-        println!("cargo:rustc-link-lib=dylib={}", dso_name.to_str().unwrap());
+        println!("cargo:rustc-link-lib=dylib={}", dso_name);
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dso_dir.display());
         return;
     }
 
