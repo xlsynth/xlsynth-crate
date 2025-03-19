@@ -389,13 +389,13 @@ jobs:
 
       - name: Pre-download artifacts using download_release.py
         run: |
-          # Specify the version, platform, and output directory.
-          # The -d flag indicates that the DSO should be downloaded.
-          python3 download_release.py -p ubuntu2004 -o pre_download -d
+          # Note we download rocky8 version just because they have the fewest/oldest system
+          # requirements.
+          python3 download_release.py -p rocky8 -o pre_download -d
 
       - name: Run cargo tests using pre-downloaded artifacts
         env:
-          XLS_DSO_PATH: ${{ github.workspace }}/pre_download/libxls-ubuntu2004.so
+          XLS_DSO_PATH: ${{ github.workspace }}/pre_download/libxls-rocky8.so
           DSLX_STDLIB_PATH: ${{ github.workspace }}/pre_download/xls/dslx/stdlib
           LD_LIBRARY_PATH: ${{ github.workspace }}/pre_download:$LD_LIBRARY_PATH
         run: |
