@@ -70,6 +70,8 @@ cargo clean
 export XLS_DSO_PATH=$HOME/opt/xlsynth/lib/libxls-v0.0.173-ubuntu2004.so
 export DSLX_STDLIB_PATH=$HOME/opt/xlsynth/latest/xls/dslx/stdlib/
 cargo build -vv -p xlsynth-sys |& grep "Using XLS_DSO_PATH"
+export LD_LIBRARY_PATH=$HOME/opt/xlsynth/lib/:$LD_LIBRARY_PATH
+cargo test --workspace
 ```
 
 ## Development Notes
