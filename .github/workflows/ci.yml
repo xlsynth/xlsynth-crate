@@ -372,3 +372,33 @@ jobs:
           cp $(find -name 'libxls-v*-*.so' | head -n 1) .
           export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
           python3 run_valgrind_on_tests.py
+
+  build-and-test-predownloaded:
+    runs-on: ubuntu-latest
+    name: Build and Test with Pre-Downloaded Artifacts
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          profile: minimal
+          override: true
+
+      - name: Pre-download artifacts using download_release.py
+        run: |
+          # Note we download rocky8 version just because they have the fewest/oldest system
+          # requirements.
+          python3 download_release.py -p rocky8 -o pre_download -d
+
+      - name: Run cargo tests using pre-downloaded artifacts
+        env:
+          XLS_DSO_PATH: ${{ github.workspace }}/pre_download/libxls-rocky8.so
+          DSLX_STDLIB_PATH: ${{ github.workspace }}/pre_download/xls/dslx/stdlib
+          LD_LIBRARY_PATH: ${{ github.workspace }}/pre_download:$LD_LIBRARY_PATH
+        run: |
+          echo "Using XLS_DSO_PATH=${XLS_DSO_PATH}"
+          echo "Using DSLX_STDLIB_PATH=${DSLX_STDLIB_PATH}"
+          cargo test -p xlsynth --verbose

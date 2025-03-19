@@ -54,9 +54,24 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
 This shows sample use of the driver program which integrates XLS functionality for command line use:
 
 ```shell
-$ echo 'fn f(x: u32, y: u32) -> u32 { x + y }' > /tmp/add.x
-$ cargo run -p xlsynth-driver -- dslx2ir --dslx_input_file /tmp/add.x --dslx_top f > /tmp/add.ir
-$ cargo run -p xlsynth-driver -- ir2gates /tmp/add.ir
+echo 'fn f(x: u32, y: u32) -> u32 { x + y }' > /tmp/add.x
+cargo run -p xlsynth-driver -- dslx2ir --dslx_input_file /tmp/add.x --dslx_top f > /tmp/add.ir
+cargo run -p xlsynth-driver -- ir2gates /tmp/add.ir
+```
+
+## Installing In Custom Environments
+
+By default the crate attempts to download the shared library and DSLX standard library that it needs
+for out-of-the-box operation. However, this can also be specified manually at build time with the
+following environment variables:
+
+```shell
+cargo clean
+export XLS_DSO_PATH=$HOME/opt/xlsynth/lib/libxls-v0.0.173-ubuntu2004.so
+export DSLX_STDLIB_PATH=$HOME/opt/xlsynth/latest/xls/dslx/stdlib/
+cargo build -vv -p xlsynth-sys |& grep "Using XLS_DSO_PATH"
+export LD_LIBRARY_PATH=$HOME/opt/xlsynth/lib/:$LD_LIBRARY_PATH
+cargo test --workspace
 ```
 
 ## Development Notes
