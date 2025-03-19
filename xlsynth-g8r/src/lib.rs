@@ -17,4 +17,5 @@ mod ir2gate_utils;
 mod ir_node_env;
 pub mod ir_parser;
 mod ir_utils;
+pub mod process_ir_path;
 pub mod use_count;

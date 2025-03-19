@@ -49,6 +49,16 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
   methodology
 - `xlsynth-g8r`: _experimental_ XLS IR to gate mapping library
 
+## Example Use
+
+This shows sample use of the driver program which integrates XLS functionality for command line use:
+
+```shell
+$ echo 'fn f(x: u32, y: u32) -> u32 { x + y }' > /tmp/add.x
+$ cargo run -p xlsynth-driver -- dslx2ir --dslx_input_file /tmp/add.x --dslx_top f > /tmp/add.ir
+$ cargo run -p xlsynth-driver -- ir2gates /tmp/add.ir
+```
+
 ## Development Notes
 
 The `xlsynth` Rust crate leverages a dynamic library with XLS' core functionality (i.e. `libxls.so`

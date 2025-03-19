@@ -2,6 +2,7 @@
 
 use std::process::Command;
 
+use serde_json::Value;
 use test_case::test_case;
 
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
@@ -572,4 +573,37 @@ fn my_main(x: bits[32]) -> bits[32] {
     log::info!("stdout: {}", stdout);
     log::info!("stderr: {}", stderr);
     assert!(stderr.contains("NOT equivalent; results differ for input"));
+}
+
+#[test]
+fn test_ir2gates_subcommand() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ir.ir");
+    let ir_text = "package identity
+fn my_main(x: bits[32], y: bits[32]) -> bits[32] {
+    ret and.3: bits[32] = and(x, y, id=3)
+}";
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--quiet=true")
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+
+    // stdout should have a JSON text object
+    let json_text: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(json_text.is_object());
+    assert!(json_text.get("live_nodes").unwrap().is_u64());
+    assert!(json_text.get("deepest_path").unwrap().is_u64());
+
+    assert_eq!(json_text["live_nodes"], Value::Number(96.into()));
+    assert_eq!(json_text["deepest_path"], Value::Number(2.into()));
 }
