@@ -2861,11 +2861,13 @@ dependencies = [
  "log",
  "prost-build",
  "serde",
+ "serde_json",
  "tempfile",
  "test-case",
  "test-helpers",
  "toml 0.8.20",
  "xlsynth",
+ "xlsynth-g8r",
 ]
 
 [[package]]
@@ -2894,6 +2896,8 @@ dependencies = [
  "log",
  "pretty_assertions",
  "regex",
+ "serde",
+ "serde_json",
  "tempfile",
  "test-case",
  "xlsynth",

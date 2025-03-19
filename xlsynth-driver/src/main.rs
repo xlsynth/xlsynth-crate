@@ -39,6 +39,7 @@ mod dslx2ir;
 mod dslx2pipeline;
 mod dslx2sv_types;
 mod ir2delayinfo;
+mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
 mod irequiv;
@@ -304,6 +305,17 @@ fn main() {
                 )
                 .add_ir_top_arg(false),
         )
+        .subcommand(
+            clap::Command::new("ir2gates")
+                .about("Converts IR to gates")
+                .arg(
+                    Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_bool_arg("quiet", "Quiet mode"),
+        )
         .get_matches();
 
     let toml_path = matches.get_one::<String>("toolchain");
@@ -335,6 +347,8 @@ fn main() {
         ir2delayinfo::handle_ir2delayinfo(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("irequiv") {
         irequiv::handle_irequiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
+        ir2gates::handle_ir2gates(matches, &config);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {

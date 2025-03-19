@@ -12,12 +12,14 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
 xlsynth = { path = "../xlsynth", version = "0.0.96" }
+xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.0.96" }
 clap = "4.5.21"
 tempfile = "3.3"
 toml = "0.8.19"
-serde = { version = "1.0", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dev-dependencies]
 test-helpers = { path = "../test-helpers" }
