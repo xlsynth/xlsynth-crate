@@ -264,6 +264,7 @@ pub(crate) fn xls_parse_ir_package(
     let ir_cstring = CString::new(ir).unwrap();
     let filename_cstr = filename.map(|s| CString::new(s).unwrap());
     let filename_ptr = filename_cstr
+        .as_ref()
         .map(|s| s.as_ptr())
         .unwrap_or(std::ptr::null());
     let mut xls_package_out: *mut CIrPackage = std::ptr::null_mut();

@@ -32,6 +32,23 @@ fn main() {
 }
 ```
 
+## Project Structure
+
+The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` releases created in
+<https://github.com/xlsynth/xlsynth/releases/> -- this is the underlying C/C++ core.
+
+- `xlsynth-sys`: wraps the shared library with Rust FFI bindings
+- `xlsynth`: provides Rust objects for interacting with core facilities; this includes:
+  - DSLX parsing/typechecking, conversion to XLS IR
+  - IR building
+  - JIT compilation and IR interpretation
+  - Creating Verilog AST directly for tools that need to do so
+  - Building Rust and SystemVerilog bridges for interacting with XLS/DSLX artifacts
+- `sample-usage`: demonstrates use of the APIs provided by the `xlsynth` crate
+- `xlsynth-estimator`: Rust implementation of the XLS IR operation-level delay estimation
+  methodology
+- `xlsynth-g8r`: _experimental_ XLS IR to gate mapping library
+
 ## Development Notes
 
 The `xlsynth` Rust crate leverages a dynamic library with XLS' core functionality (i.e. `libxls.so`
@@ -60,13 +77,13 @@ $ cargo test -vv |& grep -i "DSO from workspace"
 Where in `~/proj/xlsynth/` (the root of the xlsynth workspace) we build the DSO with
 
 ```shell
-$ bazel build -c opt //xls/public:libxls.so
+bazel build -c opt //xls/public:libxls.so
 ```
 
 Note that on OS X you additionally will have to set:
 
 ```shell
-$ export DYLD_LIBRARY_PATH=$HOME/proj/xlsynth/bazel-bin/xls/public/:$DYLD_LIBRARY_PATH
+export DYLD_LIBRARY_PATH=$HOME/proj/xlsynth/bazel-bin/xls/public/:$DYLD_LIBRARY_PATH
 ```
 
 ### Pre-Commit
@@ -74,9 +91,9 @@ $ export DYLD_LIBRARY_PATH=$HOME/proj/xlsynth/bazel-bin/xls/public/:$DYLD_LIBRAR
 The `pre-commit` tool is used to help with local checks before PRs are created:
 
 ```shell
-$ sudo apt-get install pre-commit
-$ pre-commit install
-$ pre-commit run --all-files
+sudo apt-get install pre-commit
+pre-commit install
+pre-commit run --all-files
 ```
 
 This `pre-commit` step is also run as part of continuous integration.

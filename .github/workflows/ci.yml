@@ -95,7 +95,7 @@ jobs:
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
           profile: minimal
           override: true
 
@@ -166,7 +166,7 @@ jobs:
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
           profile: minimal
           override: true
 
@@ -239,7 +239,7 @@ jobs:
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
           profile: minimal
           override: true
 
@@ -286,6 +286,7 @@ jobs:
         run: |
           yum install -y gcc openssl-devel libffi-devel make curl
           yum install -y protobuf-compiler
+          yum install -y llvm-toolset
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env

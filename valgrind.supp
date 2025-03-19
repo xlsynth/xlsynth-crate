@@ -75,11 +75,27 @@
    ...
 }
 {
+   dslx_sig_to_lambda_map_variant
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls4dslx12_GLOBAL__N_128PopulateSignatureToLambdaMapEv
+   ...
+}
+{
    dslx_string_to_op
    Memcheck:Leak
    match-leak-kinds: possible
    ...
    fun:_ZN3xls10StringToOpESt17basic_string_viewIcSt11char_traitsIcEE
+   ...
+}
+{
+   dslx_string_to_op_variant
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls10StringToOpENSt3__117basic_string_viewIcNS0_11char_traitsIcEEEE
    ...
 }
 {
@@ -91,11 +107,34 @@
    ...
 }
 {
+   dslx_parametric_builtins_variation
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls4dslx21GetParametricBuiltinsEv
+   ...
+}
+{
+   dslx_type_keywords
+   Memcheck:Leak
+   ...
+   fun:_ZN3xls4dslx15GetTypeKeywordsEv
+   ...
+}
+{
    dslx_scanner_keywords
    Memcheck:Leak
    match-leak-kinds: possible
    ...
    fun:_ZN3xls5Token11GetKeywordsEv
+   ...
+}
+{
+   dslx_scanner_get_keyword
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls4dslx7Scanner10GetKeywordENSt3__117basic_string_viewIcNS2_11char_traitsIcEEEE
    ...
 }
 {
