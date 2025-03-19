@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.96"
+version = "0.0.97"
 dependencies = [
  "cargo_metadata",
  "log",
@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-g8r"
-version = "0.0.96"
+version = "0.0.97"
 dependencies = [
  "clap",
  "env_logger",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.96"
+version = "0.0.97"
 dependencies = [
  "flate2",
  "libc",
