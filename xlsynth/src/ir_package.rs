@@ -89,6 +89,18 @@ impl IrPackage {
         xls_parse_ir_package(ir, filename)
     }
 
+    pub fn parse_ir_from_path(path: &std::path::Path) -> Result<Self, XlsynthError> {
+        let ir = match std::fs::read_to_string(path) {
+            Ok(ir) => ir,
+            Err(e) => {
+                return Err(XlsynthError(format!("Failed to read IR from path: {}", e)));
+            }
+        };
+        let filename = path.file_name().and_then(|s| s.to_str());
+        let ir_package = Self::parse_ir(&ir, filename)?;
+        Ok(ir_package)
+    }
+
     pub fn set_top_by_name(&mut self, name: &str) -> Result<(), XlsynthError> {
         let write_guard = self.ptr.write().unwrap();
         lib_support::xls_package_set_top_by_name(write_guard.mut_c_ptr(), name)

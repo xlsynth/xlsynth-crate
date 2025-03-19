@@ -2859,6 +2859,7 @@ dependencies = [
  "clap 4.5.29",
  "env_logger",
  "log",
+ "pretty_assertions",
  "prost-build",
  "serde",
  "serde_json",

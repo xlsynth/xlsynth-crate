@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use xlsynth::IrPackage;
 
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_opt_main;
@@ -11,7 +12,9 @@ fn ir2opt(input_file: &std::path::Path, top: &str, config: &Option<ToolchainConf
         let output = run_opt_main(input_file, Some(top), tool_path);
         println!("{}", output);
     } else {
-        todo!("ir2opt subcommand using runtime APIs")
+        let ir_package = IrPackage::parse_ir_from_path(input_file).unwrap();
+        let optimized_ir = xlsynth::optimize_ir(&ir_package, top).unwrap();
+        println!("{}", optimized_ir.to_string());
     }
 }
 
