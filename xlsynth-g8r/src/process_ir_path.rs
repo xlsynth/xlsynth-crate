@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::cmp::min;
 use std::collections::HashMap;
 

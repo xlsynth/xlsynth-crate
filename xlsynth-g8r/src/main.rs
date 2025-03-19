@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Parser;
-use g8r::process_ir_path::process_ir_path;
+use xlsynth_g8r::process_ir_path::process_ir_path;
 
 /// Simple program to parse an XLS IR file and emit a Verilog netlist.
 #[derive(Parser, Debug)]
@@ -27,5 +27,5 @@ fn main() {
     let args = Args::parse();
 
     let input_path = std::path::Path::new(&args.input);
-    process_ir_path(input_path, args.check_equivalence, args.fold);
+    process_ir_path(input_path, args.check_equivalence, args.fold, false);
 }

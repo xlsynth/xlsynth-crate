@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use g8r::check_equivalence::validate_same_fn;
-use g8r::ir2gate::{gatify, GatifyOptions};
-use g8r::ir_parser;
 use std::path::Path;
 use test_case::test_case;
+use xlsynth_g8r::check_equivalence;
+use xlsynth_g8r::ir2gate::{gatify, GatifyOptions};
+use xlsynth_g8r::ir_parser;
 
 fn do_test_ir_conversion(ir_package_text: &str, fold: bool) {
     // Now we'll parse the IR and turn it into a gate function.
@@ -29,7 +29,8 @@ fn do_test_ir_conversion(ir_package_text: &str, fold: bool) {
     assert_eq!(gate_outputs, ir_outputs);
     */
 
-    validate_same_fn(&ir_top, &gate_fn).expect("should validate IR to gate function equivalence");
+    check_equivalence::validate_same_fn(&ir_top, &gate_fn)
+        .expect("should validate IR to gate function equivalence");
 }
 
 #[test_case(1, false; "bit_count=1, fold=false")]

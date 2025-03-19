@@ -4,9 +4,10 @@
 
 use test_case::test_case;
 
-use g8r::gate2ir;
-use g8r::ir2gate;
-use g8r::ir_parser;
+use xlsynth_g8r::check_equivalence;
+use xlsynth_g8r::gate2ir;
+use xlsynth_g8r::ir2gate;
+use xlsynth_g8r::ir_parser;
 
 #[test_case(1)]
 fn test_n_bit_adder(n: usize) {
@@ -35,7 +36,6 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
         gate2ir::gate_fn_to_xlsynth_ir(&gate_fn, "adder", &orig_ir_fn.get_type()).unwrap();
     let gate_package_ir_text = gate_package.to_string();
 
-    let result =
-        g8r::check_equivalence::check_equivalence(&orig_package_ir_text, &gate_package_ir_text);
+    let result = check_equivalence::check_equivalence(&orig_package_ir_text, &gate_package_ir_text);
     assert!(result.is_ok(), "{}", result.unwrap_err());
 }
