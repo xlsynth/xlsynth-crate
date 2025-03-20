@@ -2,10 +2,10 @@
 
 #![no_main]
 use arbitrary::Arbitrary;
-use g8r::ir2gate::gatify;
-use g8r::ir_parser;
 use libfuzzer_sys::fuzz_target;
 use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
+use xlsynth_g8r::ir2gate::gatify;
+use xlsynth_g8r::ir_parser;
 
 #[derive(Debug, Arbitrary)]
 enum FuzzUnop {
@@ -434,7 +434,7 @@ fuzz_target!(|sample: FuzzSample| {
     // Convert to gates with folding disabled to make less machinery under test.
     let _gate_fn_no_fold = gatify(
         &parsed_fn,
-        g8r::ir2gate::GatifyOptions {
+        xlsynth_g8r::ir2gate::GatifyOptions {
             fold: false,
             check_equivalence: true,
         },
@@ -445,7 +445,7 @@ fuzz_target!(|sample: FuzzSample| {
     // Now check the folded version is also equivalent.
     let _gate_fn_fold = gatify(
         &parsed_fn,
-        g8r::ir2gate::GatifyOptions {
+        xlsynth_g8r::ir2gate::GatifyOptions {
             fold: true,
             check_equivalence: true,
         },

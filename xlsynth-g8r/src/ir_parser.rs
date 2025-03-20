@@ -855,7 +855,7 @@ impl Parser {
                     maybe_id.unwrap(),
                 )
             }
-            "and" | "nor" => {
+            "and" | "nor" | "or" | "xor" | "nand" => {
                 let operands = self.parse_variadic_op(&node_env, &mut maybe_id)?;
                 (
                     ir::NodePayload::Nary(
@@ -884,7 +884,7 @@ impl Parser {
             }
             "shll" | "shrl" | "add" | "sub" | "array_concat" | "smulp" | "umulp" | "umul"
             | "sdiv" | "eq" | "ne" | "ugt" | "ult" | "uge" | "ule" | "sgt" | "slt" | "sge"
-            | "sle" | "or" | "xor" | "nand" | "gate" => {
+            | "sle" | "gate" => {
                 let binop = ir::operator_to_binop(operator.as_str())
                     .expect(format!("operator {:?} should be known binop", operator).as_str());
                 let lhs = self.parse_node_ref(&node_env)?;
@@ -1477,5 +1477,35 @@ top fn main(t: token id=1) -> token {
         let mut parser = Parser::new(input);
         let package = parser.parse_package().unwrap();
         assert_eq!(package.to_string(), input);
+    }
+
+    #[test]
+    fn test_round_trip_or_nary_ir_node() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut node_env = IrNodeEnv::new();
+        node_env.add(
+            Some("is_result_nan".to_string()),
+            1,
+            ir::NodeRef { index: 1 },
+        );
+        node_env.add(
+            Some("is_operand_inf".to_string()),
+            2,
+            ir::NodeRef { index: 2 },
+        );
+        node_env.add(
+            Some("bit_slice".to_string()),
+            90408,
+            ir::NodeRef { index: 90408 },
+        );
+        node_env.add(
+            Some("and_reduce".to_string()),
+            90409,
+            ir::NodeRef { index: 90409 },
+        );
+        let input = "or.91095: bits[1] = or(is_result_nan, is_operand_inf, bit_slice.90408, and_reduce.90409, id=91095, pos=[(0,2144,26), (2,312,48), (3,2,51)])";
+        let mut parser = Parser::new(input);
+        let node = parser.parse_node(&mut node_env).unwrap();
+        println!("{:?}", node);
     }
 }

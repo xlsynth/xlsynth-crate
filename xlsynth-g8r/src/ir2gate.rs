@@ -511,27 +511,6 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
 
-            // -- bitwise binary operations
-            ir::NodePayload::Binop(ir::Binop::Xor, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("xor lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("xor rhs should be present");
-                let gates: AigBitVector = g8_builder.add_xor_vec(&a_bits, &b_bits);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Binop(ir::Binop::Or, a, b) => {
-                let a_gate_refs = env.get_bit_vector(*a).expect("or lhs should be present");
-                let b_gate_refs = env.get_bit_vector(*b).expect("or rhs should be present");
-                let gates: AigBitVector = g8_builder.add_or_vec(&a_gate_refs, &b_gate_refs);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Binop(ir::Binop::Nand, a, b) => {
-                let a_gate_refs = env.get_bit_vector(*a).expect("nand lhs should be present");
-                let b_gate_refs = env.get_bit_vector(*b).expect("nand rhs should be present");
-                let gates: AigBitVector = g8_builder.add_and_vec(&a_gate_refs, &b_gate_refs);
-                let gates = g8_builder.add_not_vec(&gates);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-
             // -- binary operations
             ir::NodePayload::Binop(ir::Binop::Eq, a, b) => {
                 let a_bits = env.get_bit_vector(*a).expect("eq lhs should be present");
@@ -600,6 +579,34 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                     .map(|arg| env.get_bit_vector(*arg).expect("nor arg should be present"))
                     .collect();
                 let gates: AigBitVector = g8_builder.add_or_vec_nary(&arg_gates);
+                let gates = g8_builder.add_not_vec(&gates);
+                env.add(node_ref, GateOrVec::BitVector(gates));
+            }
+            ir::NodePayload::Nary(ir::NaryOp::Or, args) => {
+                let arg_gates: Vec<AigBitVector> = args
+                    .iter()
+                    .map(|arg| env.get_bit_vector(*arg).expect("or arg should be present"))
+                    .collect();
+                let gates: AigBitVector = g8_builder.add_or_vec_nary(&arg_gates);
+                env.add(node_ref, GateOrVec::BitVector(gates));
+            }
+            ir::NodePayload::Nary(ir::NaryOp::Xor, args) => {
+                let arg_gates: Vec<AigBitVector> = args
+                    .iter()
+                    .map(|arg| env.get_bit_vector(*arg).expect("xor arg should be present"))
+                    .collect();
+                let gates: AigBitVector = g8_builder.add_xor_vec_nary(&arg_gates);
+                env.add(node_ref, GateOrVec::BitVector(gates));
+            }
+            ir::NodePayload::Nary(ir::NaryOp::Nand, args) => {
+                let arg_gates: Vec<AigBitVector> = args
+                    .iter()
+                    .map(|arg| {
+                        env.get_bit_vector(*arg)
+                            .expect("nand arg should be present")
+                    })
+                    .collect();
+                let gates: AigBitVector = g8_builder.add_and_vec_nary(&arg_gates);
                 let gates = g8_builder.add_not_vec(&gates);
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
