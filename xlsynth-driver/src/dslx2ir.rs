@@ -42,7 +42,10 @@ fn dslx2ir(
         }
         println!("{}", output);
     } else {
-        let dslx_contents = std::fs::read_to_string(input_file).expect("file read successful");
+        let dslx_contents = std::fs::read_to_string(input_file).expect(&format!(
+            "file read should succeed for path {:?}",
+            input_file
+        ));
         let dslx_stdlib_path: Option<&std::path::Path> =
             dslx_stdlib_path.map(|s| std::path::Path::new(s));
         let additional_search_paths: Vec<&std::path::Path> = dslx_path
