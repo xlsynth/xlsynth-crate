@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const RELEASE_LIB_VERSION_TAG: &str = "v0.0.173";
+const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
 
 struct DsoInfo {
     extension: &'static str,
@@ -139,6 +140,39 @@ fn high_integrity_download(
     Ok(())
 }
 
+/// Attempts to download a file with exponential backoff `max_attempts` times.
+/// If the file is downloaded successfully, returns `Ok(())`. If the file is not
+/// downloaded successfully after `max_attempts` attempts, returns an error.
+///
+/// The file is downloaded with exponential backoff. The initial delay is 1
+/// second and the delay is doubled each attempt.
+fn high_integrity_download_with_retries(
+    url: &str,
+    out_path: &std::path::Path,
+    max_attempts: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut attempts = 0;
+    let mut delay = 1;
+    while attempts < max_attempts {
+        attempts += 1;
+        match high_integrity_download(url, out_path) {
+            Ok(_) => return Ok(()),
+            Err(e) => println!(
+                "cargo:error=failed to download file on attempt {}: {}",
+                attempts, e
+            ),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(delay));
+        delay *= 2;
+    }
+    Err(format!(
+        "Failed to download file {} after {} attempts",
+        out_path.display(),
+        max_attempts
+    )
+    .into())
+}
+
 /// Simple helper that downloads a file to the given path using HTTPS with
 /// reqwest.
 fn download_file_via_https(
@@ -238,7 +272,8 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
     );
 
     // Download the DSO
-    high_integrity_download(&dso_url, &dso_path).expect("download of DSO should succeed");
+    high_integrity_download_with_retries(&dso_url, &dso_path, MAX_DOWNLOAD_ATTEMPTS)
+        .expect("download of DSO should succeed");
 
     if cfg!(target_os = "macos") {
         let dso_filename = dso_info.get_dso_filename();
@@ -271,7 +306,7 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
     }
     let tarball_path = PathBuf::from(&out_dir).join("dslx_stdlib.tar.gz");
     let tarball_url = format!("{url_base}/dslx_stdlib.tar.gz");
-    high_integrity_download(&tarball_url, &tarball_path)
+    high_integrity_download_with_retries(&tarball_url, &tarball_path, MAX_DOWNLOAD_ATTEMPTS)
         .expect("download of stdlib tarball should succeed");
 
     let tar_gz = std::fs::File::open(tarball_path).unwrap();
