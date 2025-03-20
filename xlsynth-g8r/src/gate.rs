@@ -905,20 +905,22 @@ impl GateBuilder {
 
     pub fn add_xor_vec(&mut self, a: &AigBitVector, b: &AigBitVector) -> AigBitVector {
         assert_eq!(a.get_bit_count(), b.get_bit_count());
-        let a_operands = a.iter_lsb_to_msb().cloned().collect::<Vec<_>>();
-        let b_operands = b.iter_lsb_to_msb().cloned().collect::<Vec<_>>();
-        self.add_xor_vec_nary(&[&a_operands, &b_operands])
+        self.add_xor_vec_nary(&[a.clone(), b.clone()])
     }
 
-    pub fn add_xor_vec_nary(&mut self, args: &[&[AigOperand]]) -> AigBitVector {
+    pub fn add_xor_vec_nary(&mut self, args: &[AigBitVector]) -> AigBitVector {
         // Assert all vectors are the same length -- we're going to xor-reduce the bit
         // positions.
         for arg in args {
-            assert_eq!(arg.len(), args[0].len());
+            assert_eq!(arg.get_bit_count(), args[0].get_bit_count());
         }
         let mut gates = Vec::new();
-        for i in 0..args[0].len() {
-            let bit_i_gates: Vec<AigOperand> = args.iter().map(|arg| arg[i]).collect();
+        for i in 0..args[0].get_bit_count() {
+            let bit_i_gates: Vec<AigOperand> = args
+                .iter()
+                .map(|arg| arg.get_lsb(i))
+                .cloned()
+                .collect::<Vec<AigOperand>>();
             gates.push(self.add_xor_nary(&bit_i_gates));
         }
         AigBitVector::from_lsb_is_index_0(&gates)

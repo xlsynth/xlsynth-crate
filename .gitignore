@@ -1,3 +1,4 @@
 *.swp
 target/
 .vscode
+xlsynth-g8r/fuzz/corpus/

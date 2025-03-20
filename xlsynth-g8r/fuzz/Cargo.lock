@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.99"
+version = "0.0.100"
 dependencies = [
  "cargo_metadata",
  "log",
@@ -1985,11 +1985,13 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-g8r"
-version = "0.0.99"
+version = "0.0.100"
 dependencies = [
  "clap",
  "env_logger",
  "log",
+ "serde",
+ "serde_json",
  "tempfile",
  "xlsynth",
 ]
@@ -2008,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.99"
+version = "0.0.100"
 dependencies = [
  "flate2",
  "libc",

@@ -109,10 +109,7 @@ impl std::fmt::Display for Type {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Binop {
     Add,
-
-    Or,
-    Xor,
-    Nand,
+    Sub,
 
     Shll,
     Shrl,
@@ -133,7 +130,6 @@ pub enum Binop {
     Sge,
     Slt,
     Sle,
-    Sub,
     Umul,
     Gate,
     Sdiv,
@@ -162,12 +158,10 @@ pub fn operator_to_binop(operator: &str) -> Option<Binop> {
         // arithmetic
         "sub" => Some(Binop::Sub),
         "umul" => Some(Binop::Umul),
-        "or" => Some(Binop::Or),
-        "xor" => Some(Binop::Xor),
-        "gate" => Some(Binop::Gate),
         "sdiv" => Some(Binop::Sdiv),
-        // boolean operations
-        "nand" => Some(Binop::Nand),
+
+        // "special" operations
+        "gate" => Some(Binop::Gate),
         _ => None,
     }
 }
@@ -175,9 +169,6 @@ pub fn operator_to_binop(operator: &str) -> Option<Binop> {
 pub fn binop_to_operator(binop: Binop) -> &'static str {
     match binop {
         Binop::Add => "add",
-        Binop::Or => "or",
-        Binop::Xor => "xor",
-        Binop::Nand => "nand",
         Binop::Shll => "shll",
         Binop::Shrl => "shrl",
         Binop::ArrayConcat => "array_concat",
@@ -243,6 +234,9 @@ pub fn unop_to_operator(unop: Unop) -> &'static str {
 pub enum NaryOp {
     And,
     Nor,
+    Or,
+    Xor,
+    Nand,
     Concat,
 }
 
@@ -250,6 +244,9 @@ pub fn operator_to_nary_op(operator: &str) -> Option<NaryOp> {
     match operator {
         "and" => Some(NaryOp::And),
         "nor" => Some(NaryOp::Nor),
+        "or" => Some(NaryOp::Or),
+        "xor" => Some(NaryOp::Xor),
+        "nand" => Some(NaryOp::Nand),
         "concat" => Some(NaryOp::Concat),
         _ => None,
     }
@@ -259,6 +256,9 @@ pub fn nary_op_to_operator(nary_op: NaryOp) -> &'static str {
     match nary_op {
         NaryOp::And => "and",
         NaryOp::Nor => "nor",
+        NaryOp::Or => "or",
+        NaryOp::Xor => "xor",
+        NaryOp::Nand => "nand",
         NaryOp::Concat => "concat",
     }
 }
