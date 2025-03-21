@@ -64,6 +64,8 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
                 if entry.file_name() != "target"
                     && entry.file_name() != ".git"
                     && entry.file_name() != "xlsynth_tools"
+                    && entry.file_name() != "__pycache__"
+                    && entry.file_name() != ".pytest_cache"
                 {
                     println!("Adding to directory worklist: {:?}", path);
                     dir_worklist.push(path.clone());
