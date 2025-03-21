@@ -3,12 +3,11 @@
 """
 Generates version compatibility table in markdown for our documentation.
 
-We do this by scanning repo history of `xlsynth-sys/build.rs` and extracting the
+We do this by scanning the repository history of `xlsynth-sys/build.rs` and extracting the
 release library version tag that it pulls in.
 
-For each release, the left-hand column is the xlsynth-crate release version (determined
-by the git tag on the commit) and the right-hand column is the RELEASE_LIB_VERSION_TAG
-value from `xlsynth-sys/build.rs` at that commit.
+For each release, the left-hand column is the xlsynth‑crate release version (determined by the git tag)
+and the right-hand column is the RELEASE_LIB_VERSION_TAG value from `xlsynth-sys/build.rs` at that tag.
 
 The table format is:
 
@@ -16,9 +15,9 @@ The table format is:
 |-----------------------|-------------------------|
 | X.Y.Z                 | A.B.C                   |
 
-The cells link to the corresponding release tag on GitHub:
-  - Left cell: "https://github.com/xlsynth/xlsynth-crate/releases/tag/vX.Y.Z"
-  - Right cell: "https://github.com/xlsynth/xlsynth/releases/tag/vA.B.C"
+The cells link to the corresponding release:
+  - Left cell: "https://crates.io/crates/xlsynth/{version}"
+  - Right cell: "https://github.com/xlsynth/xlsynth/releases/tag/v{version}"
 
 We place this result into `docs/version_metadata.md`.
 """
@@ -27,32 +26,8 @@ import re
 import os
 import subprocess
 import sys
-
-
-def get_git_commits(file_path):
-    """Return list of commit hashes that touched file_path."""
-    try:
-        result = subprocess.run([
-            'git', 'log', '--format=%H', '--', file_path
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
-        commits = result.stdout.strip().splitlines()
-        return commits
-    except subprocess.CalledProcessError as e:
-        print(f"Error getting git commits for {file_path}: {e.stderr}", file=sys.stderr)
-        return []
-
-
-def get_git_tags_at_commit(commit):
-    """Return list of tags that point at the given commit."""
-    try:
-        result = subprocess.run([
-            'git', 'tag', '--points-at', commit
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
-        tags = result.stdout.strip().splitlines()
-        return tags
-    except subprocess.CalledProcessError as e:
-        print(f"Error getting git tags for commit {commit}: {e.stderr}", file=sys.stderr)
-        return []
+import urllib.request
+import json
 
 
 def get_file_content_at_commit(commit, file_path):
@@ -73,25 +48,23 @@ def extract_version_from_content(content):
     """
     match = re.search(r'v(\d+\.\d+\.\d+)', content)
     if match:
-        return match.group(1)  # e.g. returns "0.0.173"
+        return match.group(1)
     return None
 
 
 def generate_markdown_table(mapping):
     """
     Generates a Markdown table from a mapping of:
-      xlsynth-crate version  -> library release version
+      xlsynth‑crate version -> library release version
 
-    The table header is as follows:
-      | xlsynth crate version | xlsynth release version |
-      |-----------------------|-------------------------|
-
-    Each cell is a markdown link, and this function dynamically pads each column based on the maximum cell width.
+    Each cell is a markdown link, and this function dynamically pads each column
+    based on the maximum cell width.
     """
-    crate_base_url = "https://github.com/xlsynth/xlsynth-crate/releases/tag/v{}"
+    # Link to the xlsynth crate on crates.io for the left column.
+    crate_base_url = "https://crates.io/crates/xlsynth/{}"
+    # Right column still links to the GitHub release for the lib.
     lib_base_url = "https://github.com/xlsynth/xlsynth/releases/tag/v{}"
     
-    # local helper for sorting versions
     def version_key(v):
         return tuple(int(x) for x in v.split('.'))
     
@@ -100,7 +73,6 @@ def generate_markdown_table(mapping):
     left_header = "xlsynth crate version"
     right_header = "xlsynth release version"
     
-    # Prepare rows: each row is a tuple of (left_cell, right_cell)
     rows = []
     for crate_ver in sorted_crate_versions:
         lib_ver = mapping[crate_ver]
@@ -108,50 +80,67 @@ def generate_markdown_table(mapping):
         right_cell = f"[{lib_ver}]({lib_base_url.format(lib_ver)})"
         rows.append((left_cell, right_cell))
     
-    # Calculate the maximum width for each column (comparing header and each cell's length)
     left_width = max(len(left_header), *(len(row[0]) for row in rows))
     right_width = max(len(right_header), *(len(row[1]) for row in rows))
     
-    # Construct the header row with padding
     header_row = f"| {left_header.ljust(left_width)} | {right_header.ljust(right_width)} |"
-    # Construct the separator row
     separator_row = f"| {'-' * left_width} | {'-' * right_width} |"
-    
-    # Construct each data row
     data_rows = [f"| {left.ljust(left_width)} | {right.ljust(right_width)} |" for left, right in rows]
     
     return "\n".join([header_row, separator_row] + data_rows) + "\n"
 
 
-# New helper function to get the mapping data without rendering
+def get_all_tags():
+    """Return a list of tags matching the pattern vX.Y.Z."""
+    try:
+        result = subprocess.run([
+            'git', 'tag', '--list', 'v[0-9]*.[0-9]*.[0-9]*'
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
+        tags = result.stdout.strip().splitlines()
+        return tags
+    except subprocess.CalledProcessError as e:
+        print(f"Error listing tags: {e.stderr}", file=sys.stderr)
+        return []
+
+
+def crate_published(crate_version):
+    """Check if the given crate version is published on crates.io for xlsynth."""
+    url = "https://crates.io/api/v1/crates/xlsynth/versions"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = resp.read().decode("utf-8")
+            jdata = json.loads(data)
+            versions = [v["num"] for v in jdata.get("versions", [])]
+            return crate_version in versions
+    except Exception as e:
+        print(f"Error checking crates.io for version {crate_version}: {e}", file=sys.stderr)
+        return False
+
 
 def get_version_mapping():
     file_path = "xlsynth-sys/build.rs"
-    commits = get_git_commits(file_path)
-    if not commits:
-        return {}
-    
+    all_tags = get_all_tags()
+    print(f"Found {len(all_tags)} tags. Processing...", flush=True)
     mappings = {}
-    for commit in commits:
-        tags = get_git_tags_at_commit(commit)
-        # Consider only tags that match the release format: vX.Y.Z
-        release_tags = [tag for tag in tags if re.fullmatch(r'v\d+\.\d+\.\d+', tag)]
-        if not release_tags:
-            continue
-        
-        content = get_file_content_at_commit(commit, file_path)
+    skipped_unpublished = 0
+    for tag in all_tags:
+        print(f"Processing tag {tag}...", flush=True)
+        content = get_file_content_at_commit(tag, file_path)
         if not content:
+            print(f"  Skipped tag {tag}: no file content found.", flush=True)
             continue
-        
         lib_version = extract_version_from_content(content)
         if not lib_version:
+            print(f"  Skipped tag {tag}: no lib version extracted.", flush=True)
             continue
-        
-        for tag in release_tags:
-            crate_version = tag.lstrip("v")
-            if crate_version not in mappings:
-                mappings[crate_version] = lib_version
-    
+        crate_version = tag.lstrip("v")
+        if not crate_published(crate_version):
+            print(f"  Skipped tag {tag}: crate version {crate_version} not published on crates.io.", flush=True)
+            skipped_unpublished += 1
+            continue
+        mappings[crate_version] = lib_version
+        print(f"  Mapped crate version {crate_version} -> lib version {lib_version}", flush=True)
+    print(f"Skipped {skipped_unpublished} tag(s) due to unpublished crate versions.", flush=True)
     return mappings
 
 
@@ -175,7 +164,6 @@ def main():
     if not mappings:
         print("No release tag mappings found in commit history", file=sys.stderr)
         sys.exit(1)
-    
     table = generate_markdown_table(mappings)
     last_tag_time = get_last_tag_time()
     full_content = f"# Version Map\n\nUpdated for tags as of: {last_tag_time}\n\n{table}"
@@ -190,6 +178,12 @@ def test_mapping_for_v0_0_101():
     mapping = get_version_mapping()
     assert "0.0.101" in mapping, "Mapping for xlsynth-crate v0.0.101 not found in mapping"
     assert mapping["0.0.101"] == "0.0.173", f"Expected mapping for v0.0.101 to be v0.0.173, got {mapping['0.0.101']}"
+
+
+def test_mapping_for_v0_0_100():
+    mapping = get_version_mapping()
+    assert "0.0.100" in mapping, "Mapping for xlsynth-crate v0.0.100 not found in mapping"
+    assert mapping["0.0.100"] == "0.0.173", f"Expected mapping for v0.0.100 to be v0.0.173, got {mapping['0.0.100']}"
 
 
 if __name__ == "__main__":
