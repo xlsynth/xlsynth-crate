@@ -28,9 +28,17 @@ import subprocess
 import sys
 import urllib.request
 import json
+from dataclasses import dataclass
+from typing import Optional, Dict, List
 
 
-def get_file_content_at_commit(commit, file_path):
+@dataclass
+class VersionMapping:
+    crate_version: str
+    lib_version: str
+
+
+def get_file_content_at_commit(commit: str, file_path: str) -> Optional[str]:
     """Return content of file at a specific commit. Returns None if an error occurs."""
     try:
         result = subprocess.run([
@@ -41,7 +49,7 @@ def get_file_content_at_commit(commit, file_path):
         return None
 
 
-def extract_version_from_content(content):
+def extract_version_from_content(content: str) -> Optional[str]:
     """
     Extract the first occurrence of a version in the form vX.Y.Z
     from the file content and return the version without the leading 'v'.
@@ -52,7 +60,7 @@ def extract_version_from_content(content):
     return None
 
 
-def generate_markdown_table(mapping):
+def generate_markdown_table(mapping: Dict[str, str]) -> str:
     """
     Generates a Markdown table from a mapping of:
       xlsynth‑crate version -> library release version
@@ -65,7 +73,7 @@ def generate_markdown_table(mapping):
     # Right column still links to the GitHub release for the lib.
     lib_base_url = "https://github.com/xlsynth/xlsynth/releases/tag/v{}"
     
-    def version_key(v):
+    def version_key(v: str):
         return tuple(int(x) for x in v.split('.'))
     
     sorted_crate_versions = sorted(mapping.keys(), key=version_key, reverse=True)
@@ -90,7 +98,7 @@ def generate_markdown_table(mapping):
     return "\n".join([header_row, separator_row] + data_rows) + "\n"
 
 
-def get_all_tags():
+def get_all_tags() -> List[str]:
     """Return a list of tags matching the pattern vX.Y.Z."""
     try:
         result = subprocess.run([
@@ -103,7 +111,7 @@ def get_all_tags():
         return []
 
 
-def crate_published(crate_version):
+def crate_published(crate_version: str) -> bool:
     """Check if the given crate version is published on crates.io for xlsynth."""
     url = "https://crates.io/api/v1/crates/xlsynth/versions"
     try:
@@ -117,11 +125,11 @@ def crate_published(crate_version):
         return False
 
 
-def get_version_mapping():
+def get_version_mapping() -> Dict[str, str]:
     file_path = "xlsynth-sys/build.rs"
     all_tags = get_all_tags()
     print(f"Found {len(all_tags)} tags. Processing...", flush=True)
-    mappings = {}
+    mappings: Dict[str, str] = {}
     skipped_unpublished = 0
     for tag in all_tags:
         print(f"Processing tag {tag}...", flush=True)
@@ -144,7 +152,7 @@ def get_version_mapping():
     return mappings
 
 
-def get_last_tag_time():
+def get_last_tag_time() -> str:
     """Return the creatordate (ISO8601) of the most recent tag matching v* or 'Unknown' if not available."""
     try:
         result = subprocess.run([
@@ -159,7 +167,29 @@ def get_last_tag_time():
         return "Unknown"
 
 
-def main():
+def get_single_version_mapping(crate_version: str) -> Optional[VersionMapping]:
+    """
+    Return a VersionMapping for a single crate version by processing tag v{crate_version}.
+    Returns a VersionMapping instance if successful, otherwise None.
+    """
+    file_path = "xlsynth-sys/build.rs"
+    tag = f"v{crate_version}"
+    print(f"Processing tag {tag} (single)...", flush=True)
+    content = get_file_content_at_commit(tag, file_path)
+    if not content:
+        print(f"  Skipped tag {tag}: no file content found.", flush=True)
+        return None
+    lib_version = extract_version_from_content(content)
+    if not lib_version:
+        print(f"  Skipped tag {tag}: no lib version extracted.", flush=True)
+        return None
+    if not crate_published(crate_version):
+        print(f"  Skipped tag {tag}: crate version {crate_version} not published on crates.io.", flush=True)
+        return None
+    return VersionMapping(crate_version=crate_version, lib_version=lib_version)
+
+
+def main() -> None:
     mappings = get_version_mapping()
     if not mappings:
         print("No release tag mappings found in commit history", file=sys.stderr)
@@ -174,16 +204,18 @@ def main():
     print(f"Version compatibility table written to {output_path}")
 
 
-def test_mapping_for_v0_0_101():
-    mapping = get_version_mapping()
-    assert "0.0.101" in mapping, "Mapping for xlsynth-crate v0.0.101 not found in mapping"
-    assert mapping["0.0.101"] == "0.0.173", f"Expected mapping for v0.0.101 to be v0.0.173, got {mapping['0.0.101']}"
+def test_mapping_for_v0_0_101() -> None:
+    mapping = get_single_version_mapping("0.0.101")
+    assert mapping is not None, "Mapping for xlsynth-crate v0.0.101 not found"
+    assert mapping.crate_version == "0.0.101", f"Expected crate version '0.0.101', got {mapping.crate_version}"
+    assert mapping.lib_version == "0.0.173", f"Expected lib version '0.0.173', got {mapping.lib_version}"
 
 
-def test_mapping_for_v0_0_100():
-    mapping = get_version_mapping()
-    assert "0.0.100" in mapping, "Mapping for xlsynth-crate v0.0.100 not found in mapping"
-    assert mapping["0.0.100"] == "0.0.173", f"Expected mapping for v0.0.100 to be v0.0.173, got {mapping['0.0.100']}"
+def test_mapping_for_v0_0_100() -> None:
+    mapping = get_single_version_mapping("0.0.100")
+    assert mapping is not None, "Mapping for xlsynth-crate v0.0.100 not found"
+    assert mapping.crate_version == "0.0.100", f"Expected crate version '0.0.100', got {mapping.crate_version}"
+    assert mapping.lib_version == "0.0.173", f"Expected lib version '0.0.173', got {mapping.lib_version}"
 
 
 if __name__ == "__main__":
