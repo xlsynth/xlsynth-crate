@@ -2,3 +2,5 @@
 target/
 .vscode
 xlsynth-g8r/fuzz/corpus/
+__pycache__
+.pytest_cache

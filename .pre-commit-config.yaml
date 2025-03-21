@@ -15,6 +15,14 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: mypy
+        name: mypy
+        description: Run mypy on gen_version_compat.py
+        entry: mypy gen_version_compat.py
+        language: python
+        additional_dependencies: ["mypy"]
+        pass_filenames: false
+
   - repo: https://github.com/executablebooks/mdformat
     rev: 0.7.17  # Use a version that supports Python 3.8
     hooks:
