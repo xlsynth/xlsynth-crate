@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::check_equivalence;
+use crate::emit_netlist;
 use crate::find_structures;
 use crate::gate;
 use crate::ir;
@@ -119,12 +120,14 @@ fn print_op_freqs(ir_top: &ir::Fn) {
     }
 }
 
-pub fn process_ir_path(
-    ir_path: &std::path::Path,
-    check_equivalence: bool,
-    fold: bool,
-    quiet: bool,
-) -> SummaryStats {
+pub struct Options {
+    pub check_equivalence: bool,
+    pub fold: bool,
+    pub quiet: bool,
+    pub emit_netlist: bool,
+}
+
+pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryStats {
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
@@ -144,14 +147,14 @@ pub fn process_ir_path(
 
     log::info!("IR top:\n{}", ir_top.to_string());
 
-    if !quiet {
+    if !options.quiet {
         print_op_freqs(&ir_top);
     }
 
     let gate_fn = ir2gate::gatify(
         &ir_top,
         ir2gate::GatifyOptions {
-            fold,
+            fold: options.fold,
             // We check equivalence below if it was requested by the caller.
             check_equivalence: false,
         },
@@ -160,7 +163,7 @@ pub fn process_ir_path(
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
 
-    if check_equivalence {
+    if options.check_equivalence {
         println!("== Checking equivalence...");
         let start = std::time::Instant::now();
         let eq = check_equivalence::validate_same_fn(&ir_top, &gate_fn);
@@ -169,7 +172,10 @@ pub fn process_ir_path(
         println!("Equivalence: {:?}", eq);
     }
 
-    //let netlist = emit_netlist::emit_netlist(&args.module_name, &gate_fn);
+    if options.emit_netlist {
+        let netlist = emit_netlist::emit_netlist(&ir_top.name, &gate_fn);
+        println!("{}", netlist);
+    }
 
     let id_to_use_count: HashMap<gate::AigRef, usize> = get_id_to_use_count(&gate_fn);
     let live_nodes: Vec<gate::AigRef> = id_to_use_count.keys().cloned().collect();
@@ -181,7 +187,7 @@ pub fn process_ir_path(
         deepest_path: deepest_path.len(),
     };
 
-    if quiet {
+    if options.quiet {
         return summary_stats;
     }
 

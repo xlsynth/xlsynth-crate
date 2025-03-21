@@ -66,6 +66,7 @@ pub struct VastDataType {
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
 }
 
+#[derive(Clone)]
 pub struct LogicRef {
     pub(crate) inner: *mut sys::CVastLogicRef,
     pub(crate) parent: Arc<Mutex<VastFilePtr>>,
