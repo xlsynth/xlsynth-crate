@@ -9,7 +9,13 @@ use xlsynth_g8r::process_ir_path;
 
 fn ir2gates(input_file: &std::path::Path, quiet: bool) {
     log::info!("ir2gates");
-    let stats = process_ir_path::process_ir_path(input_file, false, false, quiet);
+    let options = process_ir_path::Options {
+        check_equivalence: false,
+        fold: false,
+        quiet,
+        emit_netlist: false,
+    };
+    let stats = process_ir_path::process_ir_path(input_file, &options);
     if quiet {
         serde_json::to_writer(std::io::stdout(), &stats).unwrap();
         println!();
