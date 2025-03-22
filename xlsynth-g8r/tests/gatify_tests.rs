@@ -291,6 +291,28 @@ bit_count_test_cases!(test_priority_sel_builtin_to_gates, |input_bits: u32,
     );
 });
 
+bit_count_test_cases!(test_one_hot_lsb_prio_dslx_to_gates, |input_bits: u32,
+                                                            fold: bool|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        fold,
+        "const NP1: u32 = N + u32:1;
+        fn do_one_hot(x: uN[N]) -> uN[NP1] { one_hot(x, true) }",
+    );
+});
+
+bit_count_test_cases!(test_one_hot_msb_prio_dslx_to_gates, |input_bits: u32,
+                                                            fold: bool|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        fold,
+        "const NP1: u32 = N + u32:1;
+        fn do_one_hot(x: uN[N]) -> uN[NP1] { one_hot(x, false) }",
+    );
+});
+
 // Emits a one-hot-select via the DSLX builtin.
 bit_count_test_cases!(test_one_hot_select_builtin_to_gates, |input_bits: u32,
                                                              fold: bool|
