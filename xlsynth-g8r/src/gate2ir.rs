@@ -112,6 +112,13 @@ fn unflatten(
     fb: &mut FnBuilder,
     package: &mut xlsynth::IrPackage,
 ) -> BValue {
+    assert_eq!(
+        bits_msb_is_0.len(),
+        ty.bit_count(),
+        "attempting to unflatten {} bits with associated type {:?}",
+        bits_msb_is_0.len(),
+        ty
+    );
     match ty {
         ir::Type::Bits(width) => {
             assert_eq!(bits_msb_is_0.len(), *width);
