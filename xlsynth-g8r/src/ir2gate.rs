@@ -270,7 +270,8 @@ fn gatify_sign_ext(
 /// this output vector is at most one hot. If the width of the output
 /// is the full `output_bits = 2^input_bits`, then the output is
 /// guaranteed to be a one-hot bit vector.
-fn gatify_decode(
+#[allow(dead_code)]
+fn gatify_decode_naive(
     gb: &mut GateBuilder,
     output_width: usize,
     input_bits: &AigBitVector,
@@ -340,6 +341,34 @@ fn gatify_encode(
         };
     }
     AigBitVector::from_lsb_is_index_0(&encoded_output)
+}
+
+fn gatify_decode(
+    gb: &mut GateBuilder,
+    output_bit_count: usize,
+    arg_bits: &AigBitVector,
+) -> AigBitVector {
+    let input_count = arg_bits.get_bit_count();
+
+    let mut outputs = Vec::with_capacity(output_bit_count);
+    // For every possible output value...
+    for i in 0..output_bit_count {
+        let mut terms = Vec::with_capacity(input_count);
+        // For each bit in the input, choose whether to use the bit directly or its
+        // inversion.
+        for j in 0..input_count {
+            let bit = arg_bits.get_lsb(j);
+            if ((i >> j) & 1) == 1 {
+                terms.push(bit.clone());
+            } else {
+                terms.push(gb.add_not(*bit));
+            }
+        }
+        // AND the terms together to generate the one-hot output.
+        let out = gb.add_and_nary(&terms);
+        outputs.push(out);
+    }
+    AigBitVector::from_lsb_is_index_0(&outputs)
 }
 
 /// Converts the contents of the given IR function to our "g8" representation
