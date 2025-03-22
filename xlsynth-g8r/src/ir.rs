@@ -197,7 +197,6 @@ pub enum Unop {
     Not,
     Identity,
     Reverse,
-    Encode,
     OrReduce,
     AndReduce,
     XorReduce,
@@ -209,7 +208,6 @@ pub fn operator_to_unop(operator: &str) -> Option<Unop> {
         "not" => Some(Unop::Not),
         "identity" => Some(Unop::Identity),
         "reverse" => Some(Unop::Reverse),
-        "encode" => Some(Unop::Encode),
         "or_reduce" => Some(Unop::OrReduce),
         "and_reduce" => Some(Unop::AndReduce),
         "xor_reduce" => Some(Unop::XorReduce),
@@ -223,7 +221,6 @@ pub fn unop_to_operator(unop: Unop) -> &'static str {
         Unop::Not => "not",
         Unop::Identity => "identity",
         Unop::Reverse => "reverse",
-        Unop::Encode => "encode",
         Unop::OrReduce => "or_reduce",
         Unop::AndReduce => "and_reduce",
         Unop::XorReduce => "xor_reduce",
@@ -357,6 +354,9 @@ pub enum NodePayload {
         arg: NodeRef,
         width: usize,
     },
+    Encode {
+        arg: NodeRef,
+    },
 }
 
 impl NodePayload {
@@ -388,6 +388,7 @@ impl NodePayload {
             NodePayload::Sel { .. } => "sel",
             NodePayload::Cover { .. } => "cover",
             NodePayload::Decode { .. } => "decode",
+            NodePayload::Encode { .. } => "encode",
         }
     }
 
@@ -675,6 +676,9 @@ impl NodePayload {
             }
             NodePayload::Decode { arg, width } => {
                 format!("decode({}, width={}, id={})", get_name(*arg), width, id)
+            }
+            NodePayload::Encode { arg } => {
+                format!("encode({}, id={})", get_name(*arg), id)
             }
             NodePayload::GetParam(_) | NodePayload::Nil => return None,
         };

@@ -904,8 +904,7 @@ impl Parser {
                 self.maybe_drop_pos_attribute()?;
                 (ir::NodePayload::Binop(binop, lhs, rhs), maybe_id.unwrap())
             }
-            "not" | "neg" | "identity" | "reverse" | "encode" | "or_reduce" | "and_reduce"
-            | "xor_reduce" => {
+            "not" | "neg" | "identity" | "reverse" | "or_reduce" | "and_reduce" | "xor_reduce" => {
                 let operand = self.parse_node_ref(&node_env)?;
                 if self.peek_is(",") {
                     self.dropc()?;
@@ -939,6 +938,22 @@ impl Parser {
                 }
                 self.maybe_drop_pos_attribute()?;
                 (ir::NodePayload::Decode { arg, width }, maybe_id.unwrap())
+            }
+            "encode" => {
+                let arg = self.parse_node_ref(&node_env)?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for encode; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                self.maybe_drop_pos_attribute()?;
+                (ir::NodePayload::Encode { arg }, maybe_id.unwrap())
             }
             "one_hot" => {
                 let arg = self.parse_node_ref(&node_env)?;
@@ -1116,6 +1131,7 @@ impl Parser {
             ty: ir::Type::nil(),
             payload: ir::NodePayload::Nil,
         }];
+
         let mut node_env = IrNodeEnv::new();
 
         // For each of the params add it as a node.
@@ -1134,6 +1150,19 @@ impl Parser {
                 ret_node_ref = Some(node_ref);
             }
         }
+
+        // If the return type is not the same type as the return node, then we flag a
+        // validation error.
+        if ret_node_ref.is_some() {
+            let ret_node = &nodes[ret_node_ref.unwrap().index];
+            if ret_node.ty != ret_ty {
+                return Err(ParseError::new(format!(
+                    "return type mismatch; expected: {}, got: {} from node: {}",
+                    ret_ty, ret_node.ty, ret_node.text_id
+                )));
+            }
+        }
+
         Ok(ir::Fn {
             name: fn_name,
             params,

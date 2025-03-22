@@ -291,7 +291,8 @@ fn gatify_decode(
     AigBitVector::from_lsb_is_index_0(&bits)
 }
 
-fn gatify_encode(
+#[allow(dead_code)]
+fn gatify_encode_naive(
     gb: &mut GateBuilder,
     output_bit_count: usize,
     arg_bits: &AigBitVector,
@@ -310,6 +311,35 @@ fn gatify_encode(
     let or_reduced = gb.add_or_vec_nary(&to_or_reduce_slices);
     assert_eq!(or_reduced.get_bit_count(), output_bit_count);
     or_reduced
+}
+
+fn gatify_encode(
+    gb: &mut GateBuilder,
+    output_bit_count: usize,
+    arg_bits: &AigBitVector,
+) -> AigBitVector {
+    let input_bit_count = arg_bits.get_bit_count();
+    let mut encoded_output = vec![gb.get_false(); output_bit_count];
+    for j in 0..output_bit_count {
+        // Input bits that contribute to the jth output bit.
+        let mut or_candidates: Vec<AigOperand> = Vec::new();
+
+        // For each input bit, check if the j-th bit of its index is `1`. That means
+        // it contributes to the jth output bit.
+        for i in 0..input_bit_count {
+            if ((i >> j) & 1) == 1 {
+                or_candidates.push(arg_bits.get_lsb(i).clone());
+            }
+        }
+
+        // Now we compute the j-th output bit by or-reducing the candidates.
+        encoded_output[j] = if or_candidates.is_empty() {
+            gb.get_false()
+        } else {
+            gb.add_or_nary(&or_candidates)
+        };
+    }
+    AigBitVector::from_lsb_is_index_0(&encoded_output)
 }
 
 /// Converts the contents of the given IR function to our "g8" representation
@@ -752,11 +782,13 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 }
                 env.add(node_ref, GateOrVec::BitVector(bits));
             }
-            ir::NodePayload::Unop(ir::Unop::Encode, arg) => {
+            ir::NodePayload::Encode { arg } => {
+                log::info!("gatifying encode; ty: {}", node.ty);
                 let arg_bits = env
                     .get_bit_vector(*arg)
                     .expect("encode arg should be present");
                 let result_bits = gatify_encode(g8_builder, node.ty.bit_count(), &arg_bits);
+                assert_eq!(result_bits.get_bit_count(), node.ty.bit_count());
                 for (i, gate) in result_bits.iter_lsb_to_msb().enumerate() {
                     g8_builder.add_tag(
                         gate.node,
@@ -831,6 +863,14 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
     let gate_refs = env
         .get_bit_vector(ret_node_ref)
         .expect("return node should be present");
+    assert_eq!(
+        gate_refs.get_bit_count(),
+        f.ret_ty.bit_count(),
+        "return node bit count mismatch; expected: {} via return type {}, got: {}",
+        f.ret_ty.bit_count(),
+        f.ret_ty,
+        gate_refs.get_bit_count()
+    );
     g8_builder.add_output("output_value".to_string(), gate_refs);
 }
 

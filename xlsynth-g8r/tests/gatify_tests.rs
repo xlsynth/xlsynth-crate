@@ -92,6 +92,7 @@ macro_rules! bit_count_test_cases {
         #[test_case(7, true; "bit_count=7, fold=true")]
         #[test_case(8, true; "bit_count=8, fold=true")]
         fn $test_name(input_bits: u32, fold: bool) {
+            let _ = env_logger::builder().is_test(true).try_init();
             $lambda(input_bits, fold)
         }
     };
@@ -247,13 +248,13 @@ fn do_nand(x: bits[$BIT_COUNT], y: bits[$BIT_COUNT]) -> bits[$BIT_COUNT] {
     do_test_ir_conversion(&ir_text, fold);
 });
 
-bit_count_test_cases!(test_encode_ir_to_gates, |input_bits: u32,
-                                                fold: bool|
+bit_count_test_cases!(test_encode_dslx_to_gates, |input_bits: u32,
+                                                  fold: bool|
  -> () {
     do_test_dslx_conversion(
         input_bits,
         fold,
-        "fn do_encode(x: uN[N]) -> uN[N] { encode(x) as uN[N] }",
+        "fn do_encode(x: uN[N]) -> u32 { encode(x) as u32 }",
     );
 });
 
@@ -415,5 +416,21 @@ bit_count_test_cases!(test_uge_ir_to_gates, |input_bits: u32, fold: bool| -> () 
         input_bits,
         fold,
         "fn do_uge(x: uN[N], y: uN[N]) -> bool { x >= y }",
+    );
+});
+
+bit_count_test_cases!(test_encode_ir_to_gates, |input_bits: u32,
+                                                fold: bool|
+ -> () {
+    let output_bits = (input_bits as f32).log2().ceil() as u32;
+    log::info!("input_bits: {}, output_bits: {}", input_bits, output_bits);
+    do_test_ir_conversion(
+        &format!(
+            "package sample
+fn do_encode(x: bits[{input_bits}]) -> bits[{output_bits}] {{
+    ret result: bits[{output_bits}] = encode(x, id=2)
+}}"
+        ),
+        fold,
     );
 });
