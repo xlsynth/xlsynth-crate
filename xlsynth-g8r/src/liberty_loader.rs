@@ -1,37 +1,30 @@
-use std::collections::HashMap;
+// SPDX-License-Identifier: Apache-2.0
 
-struct LuTableTemplate {
-    variables: Vec<String>,
-    indices: Vec<Vec<f64>>,
-}
-
-struct LibertyLibrary {
-    name: String,
-    lu_table_templates: HashMap<String, LuTableTemplate>,
-    cells: Vec<LibertyCell>,
-}
-
-struct LibertyCell {
-    name: String,
-    area: f64,
-    pins: Vec<LibertyPin>,
-}
-
-struct LibertyPinTiming {
-    related_pin_name: String,
-}
-
-struct LibertyPin {
-    name: String,
-    direction: PinDirection,
-    function: Option<String>,
-    timing: LibertyPinTiming,
+#[derive(Debug, PartialEq)]
+enum Value {
+    String(String),
+    Number(f64),
+    Identifier(String),
+    Tuple(Vec<Box<Value>>),
 }
 
 #[derive(Debug, PartialEq)]
-enum PinDirection {
-    Input,
-    Output,
+struct BlockAttr {
+    attr_name: String,
+    value: Value,
+}
+
+#[derive(Debug, PartialEq)]
+enum BlockMember {
+    BlockAttr(BlockAttr),
+    SubBlock(Box<Block>),
+}
+
+#[derive(Debug, PartialEq)]
+struct Block {
+    block_type: String,
+    name: String,
+    members: Vec<BlockMember>,
 }
 
 struct LibertyParser {
@@ -53,29 +46,70 @@ impl LibertyParser {
         }
     }
 
+    fn skip_comment(&mut self) -> Result<(), String> {
+        if self.peek_is_noskip("/*")? {
+            self.pos += 2;
+            while !self.peek_is_noskip("*/")? {
+                self.pos += 1;
+                if self.pos >= self.chars.len() {
+                    return Err("Unterminated comment".to_string());
+                }
+            }
+            self.pos += 2;
+            Ok(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn skip_whitespace_and_comments(&mut self) -> Result<(), String> {
+        loop {
+            let start_pos = self.pos;
+            self.skip_whitespace();
+            self.skip_comment()?;
+            if self.pos == start_pos {
+                return Ok(());
+            }
+        }
+    }
+
     /// Note: skips whitespace before attempting to pop the value, as whitespace
     /// insensitivity is the most common case in liberty file reading.
-    fn pop_or_error(&mut self, expected: &str) -> Result<(), String> {
-        if self.peek_is(expected) {
+    fn pop_or_error(&mut self, expected: &str, context: &str) -> Result<(), String> {
+        if self.peek_is(expected)? {
             self.pos += expected.len();
             Ok(())
         } else {
             Err(format!(
-                "Expected: {:?}, rest: {:?}",
+                "Expected: {:?} at {}, rest: {:?}",
                 expected,
+                context,
                 self.peek_line()
             ))
         }
     }
 
-    fn peek_is(&mut self, expected: &str) -> bool {
-        self.skip_whitespace();
+    fn peek_is_noskip(&mut self, expected: &str) -> Result<bool, String> {
         for (i, c) in expected.chars().enumerate() {
             if self.chars[self.pos + i] != c {
-                return false;
+                return Ok(false);
             }
         }
-        true
+        Ok(true)
+    }
+
+    fn peek_is(&mut self, expected: &str) -> Result<bool, String> {
+        self.skip_whitespace_and_comments()?;
+        self.peek_is_noskip(expected)
+    }
+
+    fn try_pop(&mut self, expected: &str) -> Result<bool, String> {
+        if self.peek_is(expected)? {
+            self.pos += expected.len();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn peek_line(&mut self) -> String {
@@ -88,8 +122,8 @@ impl LibertyParser {
         line
     }
 
-    fn pop_identifier_or_error(&mut self) -> Result<String, String> {
-        self.skip_whitespace();
+    fn pop_identifier_or_error(&mut self, context: &str) -> Result<String, String> {
+        self.skip_whitespace_and_comments()?;
         let mut chars = String::new();
         while self.pos < self.chars.len() {
             let c = self.chars[self.pos];
@@ -100,11 +134,19 @@ impl LibertyParser {
                 break;
             }
         }
-        Ok(chars)
+        if chars.is_empty() {
+            Err(format!(
+                "Expected identifier in {}; rest: {:?}",
+                context,
+                self.peek_line()
+            ))
+        } else {
+            Ok(chars)
+        }
     }
 
     fn pop_number(&mut self) -> Result<f64, String> {
-        self.skip_whitespace();
+        self.skip_whitespace_and_comments()?;
         let mut chars = String::new();
         let mut saw_dot = false;
         while self.pos < self.chars.len() {
@@ -127,8 +169,8 @@ impl LibertyParser {
     }
 
     fn pop_string(&mut self) -> Result<String, String> {
-        self.skip_whitespace();
-        self.pop_or_error("\"")?;
+        self.skip_whitespace_and_comments()?;
+        self.pop_or_error("\"", "string value start")?;
         let mut chars = String::new();
         while self.pos < self.chars.len() {
             let c = self.chars[self.pos];
@@ -143,114 +185,99 @@ impl LibertyParser {
         Ok(chars)
     }
 
-    fn parse_pin(&mut self) -> Result<LibertyPin, String> {
-        self.pop_or_error("pin")?;
-        self.pop_or_error("(")?;
-        let pin_name = self.pop_identifier_or_error()?;
-        self.pop_or_error(")")?;
-        self.pop_or_error("{")?;
+    fn peek_is_numeric(&mut self) -> Result<bool, String> {
+        self.skip_whitespace_and_comments()?;
+        Ok(self.chars[self.pos].is_digit(10))
+    }
 
-        let mut direction = None;
-        let mut function = None;
-        let mut max_capacitance = None;
-        let mut capacitance = None;
-        while !self.peek_is("}") {
-            let attribute = self.pop_identifier_or_error()?;
-            self.pop_or_error(":")?;
-            match attribute.as_str() {
-                "direction" => {
-                    let direction_str = self.pop_identifier_or_error()?;
-                    direction = match direction_str.as_str() {
-                        "input" => Some(PinDirection::Input),
-                        "output" => Some(PinDirection::Output),
-                        _ => return Err(format!("Invalid pin direction: {}", direction_str)),
-                    };
-                }
-                "function" => {
-                    function = Some(self.pop_string()?);
-                }
-                "max_capacitance" => {
-                    max_capacitance = Some(self.pop_number()?);
-                }
-                "capacitance" => {
-                    capacitance = Some(self.pop_number()?);
-                }
-                _ => return Err(format!("Invalid pin attribute: {}", attribute)),
-            }
-            self.pop_or_error(";")?;
-        }
-        self.pop_or_error("}")?;
-        let timing = LibertyPinTiming {
-            related_pin_name: String::new(),
-        };
-        let direction = if let Some(direction) = direction {
-            direction
+    fn pop_value(&mut self) -> Result<Value, String> {
+        if self.peek_is("\"")? {
+            Ok(Value::String(self.pop_string()?))
+        } else if self.peek_is_numeric()? {
+            Ok(Value::Number(self.pop_number()?))
         } else {
-            return Err("Pin direction not specified".to_string());
-        };
-        Ok(LibertyPin {
-            name: pin_name,
-            direction,
-            function,
-            timing,
+            Ok(Value::Identifier(self.pop_identifier_or_error("value")?))
+        }
+    }
+
+    fn pop_tuple_rest(&mut self, leading_value: Value) -> Result<Value, String> {
+        let mut values = Vec::new();
+        values.push(Box::new(leading_value));
+        while !self.peek_is(")")? {
+            let value = self.pop_value()?;
+            values.push(Box::new(value));
+        }
+        self.pop_or_error(")", "tuple value end")?;
+        Ok(Value::Tuple(values))
+    }
+
+    fn parse_block_member(&mut self) -> Result<BlockMember, String> {
+        let attr_name = self.pop_identifier_or_error("attribute name")?;
+        log::info!("attr_name: {:?}", attr_name);
+        if self.try_pop(":")? {
+            let value = self.pop_value()?;
+            self.pop_or_error(";", "attribute value end")?;
+            Ok(BlockMember::BlockAttr(BlockAttr { attr_name, value }))
+        } else {
+            log::info!(
+                "no colon implies block- or tuple-like attribute; rest: {:?}",
+                self.peek_line()
+            );
+            self.pop_or_error("(", "block-like attribute start")?;
+            let leading_value = self.pop_value()?;
+            if self.try_pop(",")? {
+                // Tuple-like attribute.
+                let value = self.pop_tuple_rest(leading_value)?;
+                self.pop_or_error(";", "tuple-like attribute value end")?;
+                Ok(BlockMember::BlockAttr(BlockAttr { attr_name, value }))
+            } else {
+                self.pop_or_error(")", "block-like attribute end")?;
+                let Value::Identifier(name) = leading_value else {
+                    return Err(format!(
+                        "Expected identifier in block-looking block member; got {:?}; rest: {:?}",
+                        leading_value,
+                        self.peek_line()
+                    ));
+                };
+                let block = self.parse_block_with_type_and_name(attr_name, name)?;
+                Ok(BlockMember::SubBlock(Box::new(block)))
+            }
+        }
+    }
+
+    fn parse_block_with_type_and_name(
+        &mut self,
+        block_type: String,
+        name: String,
+    ) -> Result<Block, String> {
+        self.pop_or_error("{", "block body start")?;
+        let mut members = Vec::new();
+        while !self.peek_is("}")? {
+            let member = self.parse_block_member()?;
+            members.push(member);
+        }
+        self.pop_or_error("}", "block body end")?;
+        Ok(Block {
+            block_type,
+            name,
+            members,
         })
     }
 
-    fn parse_cell(&mut self) -> Result<LibertyCell, String> {
-        self.pop_or_error("cell")?;
-        self.skip_whitespace();
-        self.pop_or_error("(")?;
-        self.skip_whitespace();
-        let name = self.pop_identifier_or_error()?;
-        self.skip_whitespace();
-        self.pop_or_error(")")?;
-        self.skip_whitespace();
-        self.pop_or_error("{")?;
-        self.pop_or_error("area")?;
-        self.pop_or_error(":")?;
-        let area_value: f64 = self.pop_number()?;
-        self.pop_or_error(";")?;
-        let mut pins = Vec::new();
-        while !self.peek_is("}") {
-            if self.peek_is("pin") {
-                pins.push(self.parse_pin()?);
-            } else {
-                return Err(format!("Unexpected token; rest: {}", self.peek_line()));
-            }
-        }
-        Ok(LibertyCell {
-            name,
-            area: area_value,
-            pins,
-        })
+    fn parse_block_with_type(&mut self, block_type: String) -> Result<Block, String> {
+        self.pop_or_error("(", "block name start")?;
+        let name = self.pop_identifier_or_error("block name")?;
+        self.pop_or_error(")", "block name end")?;
+        self.parse_block_with_type_and_name(block_type, name)
     }
 
-    pub fn parse(&mut self) -> Result<LibertyLibrary, String> {
-        self.pop_or_error("library")?;
-        self.skip_whitespace();
-        self.pop_or_error("(")?;
-        self.skip_whitespace();
-        let name = self.pop_identifier_or_error()?;
-        self.skip_whitespace();
-        self.pop_or_error(")")?;
-        self.skip_whitespace();
-        self.pop_or_error("{")?;
-        self.skip_whitespace();
-        let mut cells = Vec::new();
-        while !self.peek_is("}") {
-            if self.peek_is("cell") {
-                cells.push(self.parse_cell()?);
-            } else {
-                return Err(format!("Unexpected token; rest: {}", self.peek_line()));
-            }
-        }
+    fn parse_block(&mut self) -> Result<Block, String> {
+        let block_type = self.pop_identifier_or_error("block type")?;
+        self.parse_block_with_type(block_type)
+    }
 
-        self.pop_or_error("}")?;
-        Ok(LibertyLibrary {
-            name,
-            lu_table_templates: HashMap::new(),
-            cells,
-        })
+    pub fn parse(&mut self) -> Result<Block, String> {
+        self.parse_block()
     }
 }
 
@@ -260,6 +287,7 @@ mod tests {
 
     #[test]
     fn test_parse_fake_liberty_file() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let text = r#"
         library (my_library) {
             cell (my_and) {
@@ -272,30 +300,68 @@ mod tests {
                 pin (A) {
                     direction: input;
                     capacitance: 0.1;
+                    rise_capacitance_range (0.1, 0.2);
                 }
                 pin (B) {
                     direction: input;
                     capacitance: 0.2;
+                    rise_capacitance_range (0.2, 0.3);
                 }
             }
         }
         "#;
         let mut parser = LibertyParser::new(text);
         let library = parser.parse().unwrap();
+        assert_eq!(library.block_type, "library");
         assert_eq!(library.name, "my_library");
-        assert_eq!(library.cells.len(), 1);
-        assert_eq!(library.cells[0].name, "my_and");
-        assert_eq!(library.cells[0].area, 1.0);
-        assert_eq!(library.cells[0].pins.len(), 3);
-        assert_eq!(library.cells[0].pins[0].name, "Y");
-        assert_eq!(library.cells[0].pins[0].direction, PinDirection::Output);
-        assert_eq!(
-            library.cells[0].pins[0].function,
-            Some("(A * B)".to_string())
-        );
-        assert_eq!(library.cells[0].pins[1].name, "A");
-        assert_eq!(library.cells[0].pins[1].direction, PinDirection::Input);
-        assert_eq!(library.cells[0].pins[2].name, "B");
-        assert_eq!(library.cells[0].pins[2].direction, PinDirection::Input);
+        assert_eq!(library.members.len(), 1);
+        let cell = match &library.members[0] {
+            BlockMember::SubBlock(sub_block) => sub_block,
+            _ => panic!("Expected sub_block"),
+        };
+        assert_eq!(cell.block_type, "cell");
+        assert_eq!(cell.name, "my_and");
+        assert_eq!(cell.members.len(), 4);
+        let area = match &cell.members[0] {
+            BlockMember::BlockAttr(block_attr) => block_attr,
+            _ => panic!("Expected block_attr"),
+        };
+        assert_eq!(area.attr_name, "area");
+        assert_eq!(area.value, Value::Number(1.0));
+        let pin_y = match &cell.members[1] {
+            BlockMember::SubBlock(sub_block) => sub_block,
+            _ => panic!("Expected sub_block"),
+        };
+        assert_eq!(pin_y.block_type, "pin");
+        assert_eq!(pin_y.name, "Y");
+        assert_eq!(pin_y.members.len(), 3);
+        let direction = match &pin_y.members[0] {
+            BlockMember::BlockAttr(block_attr) => block_attr,
+            _ => panic!("Expected block_attr"),
+        };
+        assert_eq!(direction.attr_name, "direction");
+        assert_eq!(direction.value, Value::Identifier("output".to_string()));
+        let function = match &pin_y.members[1] {
+            BlockMember::BlockAttr(block_attr) => block_attr,
+            _ => panic!("Expected block_attr"),
+        };
+        assert_eq!(function.attr_name, "function");
+        assert_eq!(function.value, Value::String("(A * B)".to_string()));
+        let max_capacitance = match &pin_y.members[2] {
+            BlockMember::BlockAttr(block_attr) => block_attr,
+            _ => panic!("Expected block_attr"),
+        };
+        assert_eq!(max_capacitance.attr_name, "max_capacitance");
+        assert_eq!(max_capacitance.value, Value::Number(12.34));
+    }
+
+    #[test]
+    fn test_parse_real_liberty_file() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let path = "/home/cdleary/src/asap7/asap7sc7p5t_SIMPLE_RVT_SS_nldm_211120.lib";
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut parser = LibertyParser::new(&text);
+        let library = parser.parse().unwrap();
+        println!("{:?}", library);
     }
 }
