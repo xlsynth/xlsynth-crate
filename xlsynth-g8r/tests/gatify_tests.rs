@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::Path;
-use test_case::test_case;
+use test_case::{test_case, test_matrix};
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::ir2gate::{gatify, GatifyOptions};
 use xlsynth_g8r::ir_parser;
@@ -434,3 +434,20 @@ fn do_encode(x: bits[{input_bits}]) -> bits[{output_bits}] {{
         fold,
     );
 });
+
+#[test_matrix(
+    4..8,
+    1..=4,
+    [false, true]
+)]
+fn test_decode_ir_to_gates(input_bits: u32, output_bits: u32, fold: bool) {
+    do_test_ir_conversion(
+        &format!(
+            "package sample
+fn do_decode(x: bits[{input_bits}]) -> bits[{output_bits}] {{
+    ret result: bits[{output_bits}] = decode(x, width={output_bits}, id=2)
+}}"
+        ),
+        fold,
+    );
+}
