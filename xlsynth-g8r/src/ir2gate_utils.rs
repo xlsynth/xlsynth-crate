@@ -273,7 +273,7 @@ pub fn gatify_one_hot_select(
 }
 
 pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool) -> AigBitVector {
-    let mut gates = vec![gb.get_false()]; // We're going to replace this based on whether no bits are set.
+    let mut gates = vec![]; // We're going to replace this based on whether no bits are set.
     let mut no_prior_bit = gb.get_true();
     for i in 0..bits.get_bit_count() {
         let this_input_bit = if lsb_prio {
@@ -286,7 +286,10 @@ pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool)
         let not_this_input_bit = gb.add_not(*this_input_bit);
         no_prior_bit = gb.add_and_binary(no_prior_bit, not_this_input_bit);
     }
-    gates[0] = no_prior_bit;
+    if !lsb_prio {
+        gates.reverse();
+    }
+    gates.push(no_prior_bit);
     AigBitVector::from_lsb_is_index_0(&gates)
 }
 
