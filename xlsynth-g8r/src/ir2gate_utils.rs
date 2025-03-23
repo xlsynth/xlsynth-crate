@@ -306,7 +306,11 @@ pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool)
 
 #[cfg(test)]
 mod tests {
-    use crate::{check_equivalence, gate::AigBitVector};
+    use crate::{
+        check_equivalence,
+        gate::AigBitVector,
+        ir2gate::{gatify_ule_via_adder, gatify_ule_via_bit_tests},
+    };
 
     use super::*;
 
@@ -355,10 +359,39 @@ mod tests {
     #[test_case(4, &[1, 1, 2]; "4-bit 3-partition")]
     #[test_case(8, &[2, 3, 3]; "8-bit 3-partition")]
     #[test_case(8, &[4, 4]; "8-bit 2-partition")]
-    fn test_gateify_add_carry_select(bits: usize, carry_select_partitions: &[usize]) {
+    fn test_gatify_add_carry_select(bits: usize, carry_select_partitions: &[usize]) {
         let ripple = make_ripple_carry(bits);
         let carry = make_carry_select(bits, carry_select_partitions);
         check_equivalence::validate_same_gate_fn(&ripple, &carry)
             .expect("carry select and ripple carry should be equivalent");
+    }
+
+    #[test_case(1)]
+    #[test_case(2)]
+    #[test_case(3)]
+    #[test_case(4)]
+    #[test_case(5)]
+    #[test_case(6)]
+    #[test_case(7)]
+    #[test_case(8)]
+    fn test_gatify_ule(bits: usize) {
+        let via_adder = {
+            let mut builder = GateBuilder::new("ule_via_adder".to_string(), false);
+            let lhs = builder.add_input("lhs".to_string(), bits);
+            let rhs = builder.add_input("rhs".to_string(), bits);
+            let result = gatify_ule_via_adder(&mut builder, 3, &lhs, &rhs);
+            builder.add_output("results".to_string(), result.into());
+            builder.build()
+        };
+        let via_bit_tests = {
+            let mut builder = GateBuilder::new("ule_via_bit_tests".to_string(), false);
+            let lhs = builder.add_input("lhs".to_string(), bits);
+            let rhs = builder.add_input("rhs".to_string(), bits);
+            let result = gatify_ule_via_bit_tests(&mut builder, 3, &lhs, &rhs);
+            builder.add_output("results".to_string(), result.into());
+            builder.build()
+        };
+        check_equivalence::validate_same_gate_fn(&via_adder, &via_bit_tests)
+            .expect("ule via adder and ule via bit tests should be equivalent");
     }
 }

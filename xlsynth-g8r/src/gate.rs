@@ -143,6 +143,15 @@ impl AigBitVector {
         }
     }
 
+    pub fn get_msbs(&self, bit_count: usize) -> Self {
+        let mut operands = Vec::with_capacity(bit_count);
+        for bit in self.iter_msb_to_lsb().take(bit_count) {
+            operands.push(*bit);
+        }
+        operands.reverse();
+        Self { operands }
+    }
+
     pub fn get_lsb_slice(&self, start: usize, bit_width: usize) -> Self {
         AigBitVector {
             operands: self
@@ -201,6 +210,10 @@ impl AigBitVector {
             self.operands.len()
         );
         &self.operands[self.operands.len() - index - 1]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.operands.is_empty()
     }
 }
 
@@ -1294,5 +1307,16 @@ mod tests {
         };
         check_equivalence::validate_same_gate_fn(&gate_fn_tree, &gate_fn_linear)
             .expect("tree and linear reduce should be equivalent");
+    }
+
+    #[test]
+    fn test_get_msbs() {
+        let mut builder = GateBuilder::new("test_get_msbs".to_string(), false);
+        let input = builder.add_input("input".to_string(), 4);
+        let msb_slice = input.get_msbs(3);
+        assert_eq!(msb_slice.get_bit_count(), 3);
+        assert_eq!(msb_slice.get_lsb(0), input.get_lsb(1));
+        assert_eq!(msb_slice.get_lsb(1), input.get_lsb(2));
+        assert_eq!(msb_slice.get_lsb(2), input.get_lsb(3));
     }
 }
