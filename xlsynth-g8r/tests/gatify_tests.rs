@@ -6,7 +6,7 @@ use test_case::{test_case, test_matrix};
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gate::GateBuilder;
 use xlsynth_g8r::get_summary_stats::{get_summary_stats, SummaryStats};
-use xlsynth_g8r::ir2gate::{gatify, gatify_ule, GatifyOptions};
+use xlsynth_g8r::ir2gate::{gatify, gatify_ule_via_bit_tests, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
 use xlsynth_g8r::xls_ir::ir_parser;
 
@@ -534,7 +534,8 @@ fn test_gatify_ule() {
     let stats = gather_stats_for_widths(&[1, 2, 3, 4, 5, 6, 7, 8], |builder, bit_count| {
         let arg1 = builder.add_input("arg1".to_string(), bit_count);
         let arg2 = builder.add_input("arg2".to_string(), bit_count);
-        let result = gatify_ule(&mut *builder, 2, &arg1, &arg2);
+        const TEXT_ID: usize = 3;
+        let result = gatify_ule_via_bit_tests(&mut *builder, TEXT_ID, &arg1, &arg2);
         builder.add_output("result".to_string(), result.into());
     });
     let mut sorted_stats = stats.iter().collect::<Vec<_>>();
@@ -550,13 +551,13 @@ fn test_gatify_ule() {
     #[rustfmt::skip]
     let want = &[
         (1, SummaryStats { live_nodes: 7, deepest_path: 4 }),
-        (2, SummaryStats { live_nodes: 18, deepest_path: 6 }),
-        (3, SummaryStats { live_nodes: 29, deepest_path: 9 }),
-        (4, SummaryStats { live_nodes: 40, deepest_path: 12 }),
-        (5, SummaryStats { live_nodes: 51, deepest_path: 15 }),
-        (6, SummaryStats { live_nodes: 62, deepest_path: 18 }),
-        (7, SummaryStats { live_nodes: 73, deepest_path: 21 }),
-        (8, SummaryStats { live_nodes: 84, deepest_path: 24 }),
+        (2, SummaryStats { live_nodes: 16, deepest_path: 6 }),
+        (3, SummaryStats { live_nodes: 26, deepest_path: 8 }),
+        (4, SummaryStats { live_nodes: 37, deepest_path: 9 }),
+        (5, SummaryStats { live_nodes: 49, deepest_path: 10 }),
+        (6, SummaryStats { live_nodes: 62, deepest_path: 11 }),
+        (7, SummaryStats { live_nodes: 76, deepest_path: 11 }),
+        (8, SummaryStats { live_nodes: 91, deepest_path: 11 }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();

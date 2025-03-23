@@ -166,7 +166,8 @@ fn gatify_zero_ext(new_bit_count: usize, arg_bits: &AigBitVector) -> AigBitVecto
     AigBitVector::concat(zeros, arg_bits.clone())
 }
 
-fn gatify_ugt(
+#[allow(dead_code)]
+fn gatify_ugt_via_adder(
     gb: &mut GateBuilder,
     text_id: usize,
     a_bits: &AigBitVector,
@@ -188,7 +189,8 @@ fn gatify_ugt(
     gb.add_and_binary(sub_result_is_positive, sub_result_is_nonzero)
 }
 
-fn gatify_uge(
+#[allow(dead_code)]
+fn gatify_uge_via_adder(
     gb: &mut GateBuilder,
     text_id: usize,
     a_bits: &AigBitVector,
@@ -206,7 +208,8 @@ fn gatify_uge(
     carry_out
 }
 
-fn gatify_ult(
+#[allow(dead_code)]
+fn gatify_ult_via_adder(
     gb: &mut GateBuilder,
     text_id: usize,
     a_bits: &AigBitVector,
@@ -223,7 +226,7 @@ fn gatify_ult(
     gb.add_not(c_out)
 }
 
-pub fn gatify_ule(
+pub fn gatify_ule_via_adder(
     gb: &mut GateBuilder,
     text_id: usize,
     a_bits: &AigBitVector,
@@ -242,6 +245,139 @@ pub fn gatify_ule(
     let is_lt = gb.add_not(c_out);
     let is_eq = gb.add_eq_vec(&a_bits, &b_bits, ReductionKind::Tree);
     gb.add_or_binary(is_lt, is_eq)
+}
+
+/// This is the generalization of unsigned comparisons via bit tests.
+///
+/// The basic premise is that all comparisons care about:
+/// * Whether prior bits are all the same
+/// * Then do some test on the next bit in that scenario, given the two
+///   operands.
+/// * Those all get or'd together to form the final result.
+/// * And maybe the final result also wants to know if the whole vector was
+///   equal.
+pub fn gatify_ucmp_via_bit_tests<F>(
+    gb: &mut GateBuilder,
+    _text_id: usize,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    or_eq: bool,
+    handle_bit: &F,
+) -> AigOperand
+where
+    F: Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
+{
+    assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
+    let input_bit_count = lhs_bits.get_bit_count();
+    let eq_bits = gb.add_xnor_vec(lhs_bits, rhs_bits);
+    let mut bit_tests = Vec::new();
+    for msb_i in 0..input_bit_count {
+        let eq_bits_slice = eq_bits.get_msbs(msb_i);
+        let prior_bits_equal = if eq_bits_slice.is_empty() {
+            assert_eq!(msb_i, 0);
+            gb.get_true()
+        } else {
+            gb.add_and_reduce(&eq_bits_slice, ReductionKind::Tree)
+        };
+        let lhs_bit = lhs_bits.get_msb(msb_i);
+        let rhs_bit = rhs_bits.get_msb(msb_i);
+        let this_bit_test = handle_bit(gb, *lhs_bit, *rhs_bit);
+        let bit = gb.add_and_binary(this_bit_test, prior_bits_equal);
+        bit_tests.push(bit);
+    }
+    let result = gb.add_or_nary(&bit_tests, ReductionKind::Tree);
+    if or_eq {
+        let eq_bits = gb.add_and_reduce(&eq_bits, ReductionKind::Tree);
+        gb.add_or_binary(result, eq_bits)
+    } else {
+        result
+    }
+}
+
+pub fn gatify_ult_via_bit_tests(
+    gb: &mut GateBuilder,
+    _text_id: usize,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+) -> AigOperand {
+    gatify_ucmp_via_bit_tests(
+        gb,
+        _text_id,
+        lhs_bits,
+        rhs_bits,
+        false,
+        &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+            let lhs_bit_unset = gb.add_not(lhs_bit);
+            let rhs_bit_set = rhs_bit;
+            let rhs_larger_this_bit = gb.add_and_binary(lhs_bit_unset, rhs_bit_set);
+            rhs_larger_this_bit
+        },
+    )
+}
+
+/// This lowers a unsigned `lhs <= rhs` operator by testing bits in sequence (in
+/// lieu of using an adder like `gatify_ule_via_adder` above).
+pub fn gatify_ule_via_bit_tests(
+    gb: &mut GateBuilder,
+    _text_id: usize,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+) -> AigOperand {
+    gatify_ucmp_via_bit_tests(
+        gb,
+        _text_id,
+        lhs_bits,
+        rhs_bits,
+        true,
+        &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+            let lhs_bit_unset = gb.add_not(lhs_bit);
+            let rhs_bit_set = rhs_bit;
+            let rhs_larger_this_bit = gb.add_and_binary(lhs_bit_unset, rhs_bit_set);
+            rhs_larger_this_bit
+        },
+    )
+}
+
+pub fn gatify_ugt_via_bit_tests(
+    gb: &mut GateBuilder,
+    _text_id: usize,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+) -> AigOperand {
+    gatify_ucmp_via_bit_tests(
+        gb,
+        _text_id,
+        lhs_bits,
+        rhs_bits,
+        false,
+        &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+            let lhs_bit_set = lhs_bit;
+            let rhs_bit_unset = gb.add_not(rhs_bit);
+            let lhs_larger_this_bit = gb.add_and_binary(lhs_bit_set, rhs_bit_unset);
+            lhs_larger_this_bit
+        },
+    )
+}
+
+pub fn gatify_uge_via_bit_tests(
+    gb: &mut GateBuilder,
+    _text_id: usize,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+) -> AigOperand {
+    gatify_ucmp_via_bit_tests(
+        gb,
+        _text_id,
+        lhs_bits,
+        rhs_bits,
+        true,
+        &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+            let lhs_bit_set = lhs_bit;
+            let rhs_bit_unset = gb.add_not(rhs_bit);
+            let lhs_larger_this_bit = gb.add_and_binary(lhs_bit_set, rhs_bit_unset);
+            lhs_larger_this_bit
+        },
+    )
 }
 
 fn gatify_sign_ext(
@@ -595,31 +731,31 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
             ir::NodePayload::Binop(ir::Binop::Ult, a, b) => {
                 let a_bits = env.get_bit_vector(*a).expect("ult lhs should be present");
                 let b_bits = env.get_bit_vector(*b).expect("ult rhs should be present");
-                let gate = gatify_ult(g8_builder, node.text_id, &a_bits, &b_bits);
+                let gate: AigOperand =
+                    gatify_ult_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
                 g8_builder.add_tag(gate.node, format!("ult_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
             ir::NodePayload::Binop(ir::Binop::Ugt, a, b) => {
                 let a_bits = env.get_bit_vector(*a).expect("ugt lhs should be present");
                 let b_bits = env.get_bit_vector(*b).expect("ugt rhs should be present");
-                let gate: AigOperand = gatify_ugt(g8_builder, node.text_id, &a_bits, &b_bits);
+                let gate: AigOperand =
+                    gatify_ugt_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
                 g8_builder.add_tag(gate.node, format!("ugt_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
             ir::NodePayload::Binop(ir::Binop::Uge, a, b) => {
                 let a_bits = env.get_bit_vector(*a).expect("uge lhs should be present");
                 let b_bits = env.get_bit_vector(*b).expect("uge rhs should be present");
-                let gate: AigOperand = gatify_uge(g8_builder, node.text_id, &a_bits, &b_bits);
+                let gate: AigOperand =
+                    gatify_uge_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
                 g8_builder.add_tag(gate.node, format!("uge_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
             ir::NodePayload::Binop(ir::Binop::Ule, a, b) => {
-                // a <= b when:
-                // * the subtraction gives indication of negative
-                // * the subtraction gives back zero
                 let a_bits = env.get_bit_vector(*a).expect("ule lhs should be present");
                 let b_bits = env.get_bit_vector(*b).expect("ule rhs should be present");
-                let gate = gatify_ule(g8_builder, node.text_id, &a_bits, &b_bits);
+                let gate = gatify_ule_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
                 g8_builder.add_tag(gate.node, format!("ule_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
