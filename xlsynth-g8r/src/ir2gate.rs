@@ -223,7 +223,7 @@ fn gatify_ult(
     gb.add_not(c_out)
 }
 
-fn gatify_ule(
+pub fn gatify_ule(
     gb: &mut GateBuilder,
     text_id: usize,
     a_bits: &AigBitVector,
