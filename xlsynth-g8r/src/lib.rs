@@ -13,7 +13,6 @@ pub mod gate2ir;
 mod gate_sim;
 pub mod ir2gate;
 mod ir2gate_utils;
-mod ir_node_env;
 pub mod liberty;
 pub mod process_ir_path;
 pub mod use_count;

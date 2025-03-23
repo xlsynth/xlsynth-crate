@@ -4,5 +4,6 @@
 //! representing, querying/manipulating, etc.
 
 pub mod ir;
+pub mod ir_node_env;
 pub mod ir_parser;
 pub mod ir_utils;
