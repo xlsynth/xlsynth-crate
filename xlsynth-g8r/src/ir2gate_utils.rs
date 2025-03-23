@@ -6,7 +6,7 @@
 //! * gatify_add_ripple_carry: instantiates a ripple-carry adder
 //! * gatify_barrel_shifter: instantiates a barrel shifter (logarithmic stages)
 
-use crate::gate::{self, AigBitVector, AigOperand, GateBuilder};
+use crate::gate::{self, AigBitVector, AigOperand, GateBuilder, ReductionKind};
 
 /// Emits a carry-select adder for the given inputs.
 ///
@@ -96,11 +96,11 @@ pub fn gatify_add_ripple_carry(
         // cout = (a & b) | (b & c_in) | (a & c_in)
         let lhs_i = lhs.get_lsb(i);
         let rhs_i = rhs.get_lsb(i);
-        let sum = g8_builder.add_xor_nary(&[*lhs_i, *rhs_i, c_in]);
+        let sum = g8_builder.add_xor_nary(&[*lhs_i, *rhs_i, c_in], ReductionKind::Linear);
         let c_out_0 = g8_builder.add_and_binary(*lhs_i, *rhs_i);
         let c_out_1 = g8_builder.add_and_binary(*rhs_i, c_in);
         let c_out_2 = g8_builder.add_and_binary(*lhs_i, c_in);
-        let cout = g8_builder.add_or_nary(&[c_out_0, c_out_1, c_out_2]);
+        let cout = g8_builder.add_or_nary(&[c_out_0, c_out_1, c_out_2], ReductionKind::Linear);
         if let Some(tag_prefix) = tag_prefix {
             g8_builder.add_tag(
                 cout.node,
@@ -230,7 +230,7 @@ pub fn gatify_barrel_shifter(
             msbs.get_bit_count() != 0,
             "since amount can be oversize high bits should be non-empty"
         );
-        let overlarge = gb.add_nez(&msbs);
+        let overlarge = gb.add_nez(&msbs, ReductionKind::Tree);
         let normal = gatify_barrel_shifter_internal(arg_gates, &lsbs, direction, tag_prefix, gb);
         let zero = AigBitVector::zeros(arg_gates.get_bit_count());
         gb.add_mux2_vec(&overlarge, &zero, &normal)
@@ -265,30 +265,41 @@ pub fn gatify_one_hot_select(
         let case = cases[i].clone();
         let selector_bit = selector_bits.get_lsb(i);
         let replicated = gb.replicate(*selector_bit, case_bit_count);
-        masked.push(gb.add_and_vec_nary(&[replicated, case]));
+        masked.push(gb.add_and_vec(&replicated, &case));
     }
     // Or-reduce the cases bitwise.
-    let result = gb.add_or_vec_nary(&masked);
+    let result = gb.add_or_vec_nary(&masked, ReductionKind::Tree);
     result
 }
 
 pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool) -> AigBitVector {
     let mut gates = Vec::new();
-    let mut no_prior_bit = gb.get_true();
+
+    // Implementation note: instead of chaining all the "no prior bit" computations
+    // linearly through, we do a tree reduction for each bit.
+
+    let mut prior_bits_inverted = Vec::new();
+
     for i in 0..bits.get_bit_count() {
         let this_input_bit = if lsb_prio {
             bits.get_lsb(i)
         } else {
             bits.get_msb(i)
         };
+        let no_prior_bit = if prior_bits_inverted.is_empty() {
+            gb.get_true()
+        } else {
+            gb.add_and_nary(&prior_bits_inverted, ReductionKind::Tree)
+        };
         let this_output_bit = gb.add_and_binary(*this_input_bit, no_prior_bit);
         gates.push(this_output_bit);
-        let not_this_input_bit = gb.add_not(*this_input_bit);
-        no_prior_bit = gb.add_and_binary(no_prior_bit, not_this_input_bit);
+
+        prior_bits_inverted.push(gb.add_not(*this_input_bit));
     }
     if !lsb_prio {
         gates.reverse();
     }
+    let no_prior_bit = gb.add_and_nary(&prior_bits_inverted, ReductionKind::Tree);
     gates.push(no_prior_bit);
     AigBitVector::from_lsb_is_index_0(&gates)
 }
@@ -386,15 +397,16 @@ mod tests {
         let want = &[
             (1, SummaryStats { live_nodes: 1, deepest_path: 1 }),
             (2, SummaryStats { live_nodes: 4, deepest_path: 2 }),
-            (3, SummaryStats { live_nodes: 7, deepest_path: 3 }),
-            (4, SummaryStats { live_nodes: 10, deepest_path: 4 }),
-            (5, SummaryStats { live_nodes: 13, deepest_path: 5 }),
-            (6, SummaryStats { live_nodes: 16, deepest_path: 6 }),
-            (7, SummaryStats { live_nodes: 19, deepest_path: 7 }),
-            (8, SummaryStats { live_nodes: 22, deepest_path: 8 }),
+            (3, SummaryStats { live_nodes: 8, deepest_path: 3 }),
+            (4, SummaryStats { live_nodes: 13, deepest_path: 4 }),
+            (5, SummaryStats { live_nodes: 19, deepest_path: 4 }),
+            (6, SummaryStats { live_nodes: 26, deepest_path: 5 }),
+            (7, SummaryStats { live_nodes: 34, deepest_path: 5 }),
+            (8, SummaryStats { live_nodes: 43, deepest_path: 5 }),
         ];
         for &(bits, ref expected) in want {
-            assert_eq!(stats[&bits], *expected);
+            let got = stats.get(&bits).unwrap();
+            assert_eq!(got, expected, "for width {}", bits);
         }
     }
 }
