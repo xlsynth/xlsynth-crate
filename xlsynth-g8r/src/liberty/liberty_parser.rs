@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::BufReader;
+use std::io::Read;
+use std::iter::Iterator;
+
+use super::ascii_stream::AsciiStream;
+
 #[derive(Debug, PartialEq)]
-enum Value {
+pub enum Value {
     String(String),
     Number(f64),
     Identifier(String),
@@ -9,300 +15,156 @@ enum Value {
 }
 
 #[derive(Debug, PartialEq)]
-struct BlockAttr {
-    attr_name: String,
-    value: Value,
+pub struct BlockAttr {
+    pub attr_name: String,
+    pub value: Value,
 }
 
 #[derive(Debug, PartialEq)]
-enum BlockMember {
+pub enum BlockMember {
     BlockAttr(BlockAttr),
     SubBlock(Box<Block>),
 }
 
 #[derive(Debug, PartialEq)]
-struct Block {
-    block_type: String,
-    // Note: blocks can be unnamed; e.g. `leakage_power() { ... }`
+pub struct Block {
+    pub block_type: String,
+    // Note: blocks can have no qualifiers; e.g. `leakage_power() { ... }`
     // In that case, it has a `when` attribute that indicates the boolean-valued situation when the
     // information is applicable.
-    name: Option<String>,
-    members: Vec<BlockMember>,
+    //
+    // Many blocks in practice have a single qualifier that is an identifier, like `cell(BLAH) {
+    // ... }`.
+    pub qualifiers: Vec<Value>,
+    pub members: Vec<BlockMember>,
 }
 
-struct LibertyParser {
-    chars: Vec<char>,
-    pos: usize,
+// LibertyParser owns an AsciiStream (instead of managing byte operations
+// itself).
+pub struct LibertyParser<I: Iterator<Item = u8>> {
+    stream: AsciiStream<I>,
 }
 
-impl LibertyParser {
-    pub fn new(text: &str) -> Self {
+impl<I: Iterator<Item = u8>> LibertyParser<I> {
+    pub fn new_from_iter(iter: I) -> Self {
         Self {
-            chars: text.chars().collect(),
-            pos: 0,
+            stream: AsciiStream::new(iter),
         }
-    }
-
-    fn skip_whitespace(&mut self) {
-        while self.pos < self.chars.len() && self.chars[self.pos].is_whitespace() {
-            self.pos += 1;
-        }
-    }
-
-    fn skip_comment(&mut self) -> Result<(), String> {
-        if self.peek_is_noskip("/*") {
-            self.pos += 2;
-            while !self.peek_is_noskip("*/") {
-                self.pos += 1;
-                if self.pos >= self.chars.len() {
-                    return Err("Unterminated comment".to_string());
-                }
-            }
-            self.pos += 2;
-            Ok(())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn skip_line_continuation(&mut self) {
-        if self.peek_is_noskip("\\") {
-            self.pos += 1;
-        }
-    }
-
-    fn skip_whitespace_and_comments(&mut self) -> Result<(), String> {
-        loop {
-            let start_pos = self.pos;
-            self.skip_whitespace();
-            self.skip_comment()?;
-            self.skip_line_continuation();
-            if self.pos == start_pos {
-                return Ok(());
-            }
-        }
-    }
-
-    /// Note: skips whitespace before attempting to pop the value, as whitespace
-    /// insensitivity is the most common case in liberty file reading.
-    fn pop_or_error(&mut self, expected: &str, context: &str) -> Result<(), String> {
-        if self.peek_is(expected)? {
-            self.pos += expected.len();
-            Ok(())
-        } else {
-            Err(format!(
-                "Expected: {:?} at {}, rest: {:?}",
-                expected,
-                context,
-                self.peek_line()
-            ))
-        }
-    }
-
-    fn peek_is_noskip(&mut self, expected: &str) -> bool {
-        for (i, c) in expected.chars().enumerate() {
-            if self.chars[self.pos + i] != c {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn peek_is(&mut self, expected: &str) -> Result<bool, String> {
-        self.skip_whitespace_and_comments()?;
-        Ok(self.peek_is_noskip(expected))
-    }
-
-    fn try_pop(&mut self, expected: &str) -> Result<bool, String> {
-        if self.peek_is(expected)? {
-            self.pos += expected.len();
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn peek_line(&mut self) -> String {
-        let mut line = String::new();
-        let mut pos = self.pos;
-        while pos < self.chars.len() && self.chars[pos] != '\n' {
-            line.push(self.chars[pos]);
-            pos += 1;
-        }
-        line
-    }
-
-    fn pop_identifier_or_error(&mut self, context: &str) -> Result<String, String> {
-        self.skip_whitespace_and_comments()?;
-        let mut chars = String::new();
-        while self.pos < self.chars.len() {
-            let c = self.chars[self.pos];
-            if c.is_alphanumeric() || c == '_' {
-                chars.push(c);
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        if chars.is_empty() {
-            Err(format!(
-                "Expected identifier in {}; rest: {:?}",
-                context,
-                self.peek_line()
-            ))
-        } else {
-            Ok(chars)
-        }
-    }
-
-    fn pop_number(&mut self) -> Result<f64, String> {
-        self.skip_whitespace_and_comments()?;
-        let mut chars = String::new();
-        let mut saw_dot = false;
-        while self.pos < self.chars.len() {
-            let c = self.chars[self.pos];
-            if c.is_digit(10) {
-                chars.push(c);
-                self.pos += 1;
-            } else if c == '.' {
-                if saw_dot {
-                    return Err("Multiple dots in number".to_string());
-                }
-                saw_dot = true;
-                chars.push(c);
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        Ok(chars.parse::<f64>().unwrap())
-    }
-
-    fn pop_string(&mut self) -> Result<String, String> {
-        self.skip_whitespace_and_comments()?;
-        self.pop_or_error("\"", "string value start")?;
-        let mut chars = String::new();
-        while self.pos < self.chars.len() {
-            let c = self.chars[self.pos];
-            if c == '"' {
-                self.pos += 1;
-                break;
-            } else {
-                chars.push(c);
-                self.pos += 1;
-            }
-        }
-        Ok(chars)
-    }
-
-    fn peek_is_numeric(&mut self) -> Result<bool, String> {
-        self.skip_whitespace_and_comments()?;
-        Ok(self.chars[self.pos].is_digit(10))
     }
 
     fn pop_value(&mut self, context: &str) -> Result<Value, String> {
-        if self.peek_is("\"")? {
-            Ok(Value::String(self.pop_string()?))
-        } else if self.peek_is_numeric()? {
-            Ok(Value::Number(self.pop_number()?))
+        if self.stream.peek_is(b"\"")? {
+            Ok(Value::String(self.stream.pop_string()?))
+        } else if self.stream.peek_is_numeric()? || self.stream.peek_is(b"-")? {
+            Ok(Value::Number(self.stream.pop_number()?))
         } else {
-            Ok(Value::Identifier(self.pop_identifier_or_error(context)?))
+            Ok(Value::Identifier(
+                self.stream.pop_identifier_or_error(context)?,
+            ))
         }
-    }
-
-    fn pop_tuple_rest(&mut self, leading_value: Value) -> Result<Value, String> {
-        log::info!(
-            "pop_tuple_rest; leading_value: {:?} rest: {:?}",
-            leading_value,
-            self.peek_line()
-        );
-        let mut values = Vec::new();
-        values.push(Box::new(leading_value));
-        while !self.peek_is(")")? {
-            self.pop_or_error(",", "tuple value separator")?;
-            let value = self.pop_value("tuple value")?;
-            values.push(Box::new(value));
-        }
-        self.pop_or_error(")", "tuple value end")?;
-        Ok(Value::Tuple(values))
     }
 
     fn parse_block_member(&mut self) -> Result<BlockMember, String> {
-        let attr_name = self.pop_identifier_or_error("attribute name")?;
+        let attr_name = self.stream.pop_identifier_or_error("attribute name")?;
         log::info!("attr_name: {:?}", attr_name);
-        if self.try_pop(":")? {
+        if self.stream.try_pop(b":")? {
             let value = self.pop_value("attribute value")?;
-            self.pop_or_error(";", "attribute value end")?;
+            self.stream.pop_semi_or_newline("attribute value end")?;
             Ok(BlockMember::BlockAttr(BlockAttr { attr_name, value }))
         } else {
             log::info!(
                 "no colon implies block- or tuple-like attribute; name: {:?} rest: {:?}",
                 attr_name,
-                self.peek_line()
+                self.stream.peek_line()
             );
-
-            self.pop_or_error("(", "block-like attribute start")?;
-            if self.try_pop(")")? {
-                // Unnamed block attribute.
-                let sub_block = self.parse_block_with_type_and_name(attr_name, None)?;
-                return Ok(BlockMember::SubBlock(Box::new(sub_block)));
-            }
-
-            let leading_value = self.pop_value("block-like attribute leading value")?;
-            if self.peek_is(",")? {
-                // Tuple-like attribute.
-                let value = self.pop_tuple_rest(leading_value)?;
-                self.pop_or_error(";", "tuple-like attribute value end")?;
-                Ok(BlockMember::BlockAttr(BlockAttr { attr_name, value }))
-            } else {
-                self.pop_or_error(")", "block-like attribute end")?;
-                if self.try_pop(";")? {
-                    return Ok(BlockMember::BlockAttr(BlockAttr {
-                        attr_name,
-                        value: leading_value,
-                    }));
+            self.stream
+                .pop_or_error(b"(", "block-like attribute start")?;
+            let mut qualifiers = Vec::new();
+            while !self.stream.peek_is(b")")? {
+                let value = self.pop_value("block-like attribute qualifier")?;
+                qualifiers.push(value);
+                if !self.stream.try_pop(b",")? {
+                    break;
                 }
-                let Value::Identifier(name) = leading_value else {
-                    return Err(format!(
-                        "Expected identifier in block-looking block member; got {:?}; rest: {:?}",
-                        leading_value,
-                        self.peek_line()
-                    ));
-                };
-                let block = self.parse_block_with_type_and_name(attr_name, Some(name))?;
-                Ok(BlockMember::SubBlock(Box::new(block)))
+            }
+            self.stream.pop_or_error(b")", "block-like attribute end")?;
+
+            // There are a few cases we're interested in:
+            // * We see a `{` on this line, in which case we want to start parsing a
+            //   sub-block.
+            // * We see a `;` on this line, in which case we're done parsing this member.
+            // * We see nothing else meaningful (just whitespace and comments) until `\n`
+            //   (EOL), in which case we do automatic semicolon insertion and consider this
+            //   member done.
+            let next: Option<u8> = self.stream.peek_char_or_eol()?;
+            match next {
+                None => Err(format!(
+                    "Unexpected end of file parsing block member @ {}",
+                    self.stream.human_pos()
+                )),
+                Some(b'{') => {
+                    let block = self.parse_block_with_type_and_qualifiers(attr_name, qualifiers)?;
+                    Ok(BlockMember::SubBlock(Box::new(block)))
+                }
+                Some(b';') => {
+                    assert!(self.stream.try_pop(b";")?);
+                    Ok(BlockMember::BlockAttr(BlockAttr {
+                        attr_name,
+                        value: Value::Tuple(qualifiers.into_iter().map(Box::new).collect()),
+                    }))
+                }
+                Some(b'\n') => {
+                    // Automatic semicolon insertion.
+                    assert!(self.stream.try_consume(1));
+                    Ok(BlockMember::BlockAttr(BlockAttr {
+                        attr_name,
+                        value: Value::Tuple(qualifiers.into_iter().map(Box::new).collect()),
+                    }))
+                }
+                Some(c) => Err(format!(
+                    "Unexpected character: {:?} @ {}",
+                    c as char,
+                    self.stream.human_pos()
+                )),
             }
         }
     }
 
-    fn parse_block_with_type_and_name(
+    fn parse_block_with_type_and_qualifiers(
         &mut self,
         block_type: String,
-        name: Option<String>,
+        qualifiers: Vec<Value>,
     ) -> Result<Block, String> {
-        self.pop_or_error("{", "block body start")?;
+        self.stream.pop_or_error(b"{", "block body start")?;
         let mut members = Vec::new();
-        while !self.peek_is("}")? {
+        while !self.stream.peek_is(b"}")? {
             let member = self.parse_block_member()?;
             members.push(member);
         }
-        self.pop_or_error("}", "block body end")?;
+        self.stream.pop_or_error(b"}", "block body end")?;
         Ok(Block {
             block_type,
-            name,
+            qualifiers,
             members,
         })
     }
 
     fn parse_block_with_type(&mut self, block_type: String) -> Result<Block, String> {
-        self.pop_or_error("(", "block name start")?;
-        let name = self.pop_identifier_or_error("block name")?;
-        self.pop_or_error(")", "block name end")?;
-        self.parse_block_with_type_and_name(block_type, Some(name))
+        self.stream.pop_or_error(b"(", "block name start")?;
+        let mut qualifiers = Vec::new();
+        while !self.stream.peek_is(b")")? {
+            let value = self.pop_value("block qualifier")?;
+            qualifiers.push(value);
+            if !self.stream.try_pop(b",")? {
+                break;
+            }
+        }
+        self.stream.pop_or_error(b")", "block name end")?;
+        self.parse_block_with_type_and_qualifiers(block_type, qualifiers)
     }
 
     fn parse_block(&mut self) -> Result<Block, String> {
-        let block_type = self.pop_identifier_or_error("block type")?;
+        let block_type = self.stream.pop_identifier_or_error("block type")?;
         self.parse_block_with_type(block_type)
     }
 
@@ -311,14 +173,38 @@ impl LibertyParser {
     }
 }
 
+pub struct CharReader<R: Read> {
+    iter: std::io::Bytes<BufReader<R>>,
+}
+
+impl<R: Read> CharReader<R> {
+    pub fn new(reader: R) -> Self {
+        let buf_reader = BufReader::new(reader);
+        Self {
+            iter: buf_reader.bytes(),
+        }
+    }
+}
+
+impl<R: Read> Iterator for CharReader<R> {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+        self.iter.next().and_then(|res| res.ok())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use flate2::Compression;
+    use flate2::{read::GzDecoder, write::GzEncoder};
+    use std::io::Write;
+
     use super::*;
 
     #[test]
     fn test_parse_fake_liberty_file() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let text = r#"
+        let text = br#"
         library (my_library) {
             cell (my_and) {
                 area: 1.0;
@@ -346,17 +232,23 @@ mod tests {
             }
         }
         "#;
-        let mut parser = LibertyParser::new(text);
+        let mut parser = LibertyParser::new_from_iter(text.bytes().map(|b| b.unwrap()));
         let library = parser.parse().unwrap();
         assert_eq!(library.block_type, "library");
-        assert_eq!(library.name, Some("my_library".to_string()));
+        assert_eq!(
+            library.qualifiers,
+            vec![Value::Identifier("my_library".to_string())]
+        );
         assert_eq!(library.members.len(), 1);
         let cell = match &library.members[0] {
             BlockMember::SubBlock(sub_block) => sub_block,
             _ => panic!("Expected sub_block"),
         };
         assert_eq!(cell.block_type, "cell");
-        assert_eq!(cell.name, Some("my_and".to_string()));
+        assert_eq!(
+            cell.qualifiers,
+            vec![Value::Identifier("my_and".to_string())]
+        );
         assert_eq!(cell.members.len(), 4);
         let area = match &cell.members[0] {
             BlockMember::BlockAttr(block_attr) => block_attr,
@@ -369,7 +261,7 @@ mod tests {
             _ => panic!("Expected sub_block"),
         };
         assert_eq!(pin_y.block_type, "pin");
-        assert_eq!(pin_y.name, Some("Y".to_string()));
+        assert_eq!(pin_y.qualifiers, vec![Value::Identifier("Y".to_string())]);
         assert_eq!(pin_y.members.len(), 3);
         let direction = match &pin_y.members[0] {
             BlockMember::BlockAttr(block_attr) => block_attr,
@@ -389,5 +281,133 @@ mod tests {
         };
         assert_eq!(max_capacitance.attr_name, "max_capacitance");
         assert_eq!(max_capacitance.value, Value::Number(12.34));
+    }
+
+    #[test]
+    fn test_parse_whitespace_terminated_attributes() {
+        let text = br#"
+        library (my_library) {
+            cell (my_cell) {
+                area: 1.0
+                goodness : high ;
+            }
+        }
+        "#;
+        let mut parser = LibertyParser::new_from_iter(text.bytes().map(|b| b.unwrap()));
+        let library = parser.parse().unwrap();
+        assert_eq!(library.block_type, "library");
+        assert_eq!(
+            library.qualifiers,
+            vec![Value::Identifier("my_library".to_string())]
+        );
+        assert_eq!(library.members.len(), 1);
+    }
+
+    #[test]
+    fn test_block_with_string_name_instead_of_identifier() {
+        let text = br#"
+        my_thing("stuff goes here") {
+            my_attribute: "wow";
+        }
+        "#;
+        let mut parser = LibertyParser::new_from_iter(text.bytes().map(|b| b.unwrap()));
+        let library = parser.parse().unwrap();
+        assert_eq!(library.block_type, "my_thing");
+        assert_eq!(
+            library.qualifiers,
+            vec![Value::String("stuff goes here".to_string())]
+        );
+        assert_eq!(library.members.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_number_value_scientific_notation() {
+        let text = br#"
+        some_block(my_name) {
+            some_attribute: 1.0e-12;
+        }
+        "#;
+        let mut parser = LibertyParser::new_from_iter(text.bytes().map(|b| b.unwrap()));
+        let library = parser.parse().unwrap();
+        assert_eq!(library.block_type, "some_block");
+        assert_eq!(
+            library.qualifiers,
+            vec![Value::Identifier("my_name".to_string())]
+        );
+        assert_eq!(library.members.len(), 1);
+        let some_attribute = match &library.members[0] {
+            BlockMember::BlockAttr(block_attr) => block_attr,
+            _ => panic!("Expected block_attr"),
+        };
+        assert_eq!(some_attribute.attr_name, "some_attribute");
+        assert_eq!(some_attribute.value, Value::Number(1.0e-12));
+    }
+
+    // This test compresses some sample text into gzipped form and then shows it
+    // streaming into the parser.
+    #[test]
+    fn test_parse_gzipped_file() {
+        let text = br#"
+        library (my_library) {
+            cell (my_and) {
+                area: 1.0;
+            }
+        }
+        "#;
+        // gzip the text
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(text).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        // Now we make a char streamer that reads from the gzipped data.
+        let streamer = GzDecoder::new(compressed.as_slice());
+        let char_reader = CharReader::new(streamer);
+        let mut parser = LibertyParser::new_from_iter(char_reader);
+        let library = parser.parse().unwrap();
+        assert_eq!(library.block_type, "library");
+        assert_eq!(
+            library.qualifiers,
+            vec![Value::Identifier("my_library".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_block_with_multiple_qualifiers_nested() {
+        let text = br#"
+        outer_block(outer_qualifier,multiple_qualifiers) {
+            my_block(stuff,here) {
+                my_attribute: 42.0;
+            }
+        }
+        "#;
+        let mut parser = LibertyParser::new_from_iter(text.bytes().map(|b| b.unwrap()));
+        let block = parser.parse().unwrap();
+        assert_eq!(block.block_type, "outer_block");
+        assert_eq!(
+            block.qualifiers,
+            vec![
+                Value::Identifier("outer_qualifier".to_string()),
+                Value::Identifier("multiple_qualifiers".to_string())
+            ]
+        );
+        assert_eq!(block.members.len(), 1);
+        let my_block = match &block.members[0] {
+            BlockMember::SubBlock(sub_block) => sub_block,
+            _ => panic!("Expected sub_block"),
+        };
+        assert_eq!(my_block.block_type, "my_block");
+        assert_eq!(
+            my_block.qualifiers,
+            vec![
+                Value::Identifier("stuff".to_string()),
+                Value::Identifier("here".to_string())
+            ]
+        );
+        let my_attribute = match &my_block.members[0] {
+            BlockMember::BlockAttr(block_attr) => block_attr,
+            _ => panic!("Expected block_attr"),
+        };
+        assert_eq!(my_attribute.attr_name, "my_attribute");
+        assert_eq!(my_attribute.value, Value::Number(42.0));
     }
 }
