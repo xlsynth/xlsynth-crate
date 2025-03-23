@@ -6,7 +6,7 @@ use std::collections::{hash_map::OccupiedError, HashMap};
 
 use xlsynth::{ir_value::IrFormatPreference, IrValue};
 
-use crate::ir_utils::operands;
+use crate::xls_ir::ir_utils::operands;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayTypeData {
@@ -909,7 +909,7 @@ impl std::fmt::Display for Package {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir_parser;
+    use crate::xls_ir::ir_parser;
 
     use pretty_assertions::assert_eq;
 

@@ -4,7 +4,7 @@ use std::{collections::HashSet, iter::zip};
 
 use xlsynth::IrBits;
 
-use crate::{aig_simplify, ir};
+use crate::{aig_simplify, xls_ir::ir};
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct AigRef {
