@@ -424,6 +424,12 @@ impl GateFn {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReductionKind {
+    Linear,
+    Tree,
+}
+
 /// Helper for getting the post-order of the nodes in the AIG.
 ///
 /// If operand is already seen, immediately returns.
@@ -587,7 +593,11 @@ impl GateBuilder {
         self.add_and_binary(lhs_n, rhs_n)
     }
 
-    pub fn add_and_nary(&mut self, args: &[AigOperand]) -> AigOperand {
+    pub fn add_and_nary(
+        &mut self,
+        args: &[AigOperand],
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
         if args.len() == 2 {
             return self.add_and_binary(args[0], args[1]);
         }
@@ -607,17 +617,22 @@ impl GateBuilder {
                 }
             }
         }
-        // Do a tree reduction of ands across the args.
-        self.tree_reduce(args, &GateBuilder::add_and_binary)
+        // Do a reduction of ands across the args.
+        self.reduce(args, &GateBuilder::add_and_binary, reduction_kind)
     }
 
-    pub fn add_and_reduce(&mut self, bit_vector: &AigBitVector) -> AigOperand {
+    pub fn add_and_reduce(
+        &mut self,
+        bit_vector: &AigBitVector,
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
         self.add_and_nary(
             bit_vector
                 .iter_lsb_to_msb()
                 .cloned()
                 .collect::<Vec<AigOperand>>()
                 .as_slice(),
+            reduction_kind,
         )
     }
 
@@ -630,7 +645,11 @@ impl GateBuilder {
     //  add_and_vec_nary(&[a, b, c]) produces:
     //
     //  a_2 & b_2 & c_2 :: a_1 & b_1 & c_1 :: a_0 & b_0 & c_0
-    pub fn add_and_vec_nary(&mut self, args: &[AigBitVector]) -> AigBitVector {
+    pub fn add_and_vec_nary(
+        &mut self,
+        args: &[AigBitVector],
+        reduction_kind: ReductionKind,
+    ) -> AigBitVector {
         // Assert all args are the same bit count.
         for arg in args {
             assert_eq!(arg.get_bit_count(), args[0].get_bit_count());
@@ -639,7 +658,7 @@ impl GateBuilder {
         for i in 0..args[0].get_bit_count() {
             let bit_i_gates: Vec<AigOperand> =
                 args.iter().map(|arg| arg.get_lsb(i)).cloned().collect();
-            operands.push(self.add_and_nary(&bit_i_gates));
+            operands.push(self.add_and_nary(&bit_i_gates, reduction_kind));
         }
         AigBitVector::from_lsb_is_index_0(&operands)
     }
@@ -686,7 +705,7 @@ impl GateBuilder {
     }
 
     pub fn add_xnor(&mut self, a: AigOperand, b: AigOperand) -> AigOperand {
-        let xor_gate_ref = self.add_xor_nary(&[a, b]);
+        let xor_gate_ref = self.add_xor_binary(a, b);
         self.add_not(xor_gate_ref)
     }
 
@@ -732,9 +751,12 @@ impl GateBuilder {
         self.add_not(outer_and)
     }
 
-    pub fn add_xor_nary(&mut self, args: &[AigOperand]) -> AigOperand {
-        //self.tree_reduce(args, GateBuilder::add_xor_binary)
-        self.tree_reduce(args, &GateBuilder::add_xor_binary)
+    pub fn add_xor_nary(
+        &mut self,
+        args: &[AigOperand],
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
+        self.reduce(args, &GateBuilder::add_xor_binary, reduction_kind)
     }
 
     pub fn linear_reduce<F>(&mut self, args: &[AigOperand], f: &F) -> AigOperand
@@ -773,6 +795,21 @@ impl GateBuilder {
         let first_half = self.tree_reduce(halves.0, f);
         let second_half = self.tree_reduce(halves.1, f);
         f(self, first_half, second_half)
+    }
+
+    pub fn reduce<F>(
+        &mut self,
+        args: &[AigOperand],
+        f: &F,
+        reduction_kind: ReductionKind,
+    ) -> AigOperand
+    where
+        F: Fn(&mut Self, AigOperand, AigOperand) -> AigOperand,
+    {
+        match reduction_kind {
+            ReductionKind::Linear => self.linear_reduce(args, f),
+            ReductionKind::Tree => self.tree_reduce(args, f),
+        }
     }
 
     pub fn add_not_vec(&mut self, args: &AigBitVector) -> AigBitVector {
@@ -817,7 +854,11 @@ impl GateBuilder {
 
     // Performs an `or` across all the gates given in `args` to produce a single bit
     // output.
-    pub fn add_or_nary(&mut self, args: &[AigOperand]) -> AigOperand {
+    pub fn add_or_nary(
+        &mut self,
+        args: &[AigOperand],
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
         if self.fold {
             if args.iter().any(|arg| self.is_known_true(*arg)) {
                 return self.get_true();
@@ -835,14 +876,14 @@ impl GateBuilder {
                 return nonzero[0];
             }
             if nonzero.len() < args.len() {
-                return self.add_or_nary(&nonzero);
+                return self.add_or_nary(&nonzero, reduction_kind);
             }
         }
         if let &[lhs, rhs] = args {
             return self.add_or_binary(lhs, rhs);
         }
-        // Do a tree reduction of ors across the args.
-        self.tree_reduce(args, &GateBuilder::add_or_binary)
+        // Do a reduction of ors across the args.
+        self.reduce(args, &GateBuilder::add_or_binary, reduction_kind)
     }
 
     pub fn add_or_vec(&mut self, a: &AigBitVector, b: &AigBitVector) -> AigBitVector {
@@ -853,38 +894,59 @@ impl GateBuilder {
         AigBitVector::from_lsb_is_index_0(&results)
     }
 
-    pub fn add_or_reduce(&mut self, bit_vector: &AigBitVector) -> AigOperand {
+    pub fn add_or_reduce(
+        &mut self,
+        bit_vector: &AigBitVector,
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
         self.add_or_nary(
             bit_vector
                 .iter_lsb_to_msb()
                 .cloned()
                 .collect::<Vec<AigOperand>>()
                 .as_slice(),
+            reduction_kind,
         )
     }
 
     /// Returns a bit that indicates if any of the bits in `bit_vector` are
     /// non-zero.
-    pub fn add_nez(&mut self, bit_vector: &AigBitVector) -> AigOperand {
+    pub fn add_nez(
+        &mut self,
+        bit_vector: &AigBitVector,
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
         assert!(
             bit_vector.get_bit_count() > 0,
             "attempted to determine if empty bit-vector was != 0"
         );
-        self.add_or_reduce(bit_vector)
+        self.add_or_reduce(bit_vector, reduction_kind)
     }
 
     /// Returns a bit that indicates if all the bits in `bit_vector` are zero.
-    pub fn add_ez(&mut self, bit_vector: &AigBitVector) -> AigOperand {
-        let or_reduced = self.add_or_reduce(bit_vector);
+    pub fn add_ez(
+        &mut self,
+        bit_vector: &AigBitVector,
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
+        let or_reduced = self.add_or_reduce(bit_vector, reduction_kind);
         self.add_not(or_reduced)
     }
 
-    pub fn add_ez_slice(&mut self, slice: &[AigOperand]) -> AigOperand {
-        let or_reduced = self.add_or_nary(slice);
+    pub fn add_ez_slice(
+        &mut self,
+        slice: &[AigOperand],
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
+        let or_reduced = self.add_or_nary(slice, reduction_kind);
         self.add_not(or_reduced)
     }
 
-    pub fn add_or_vec_nary(&mut self, args: &[AigBitVector]) -> AigBitVector {
+    pub fn add_or_vec_nary(
+        &mut self,
+        args: &[AigBitVector],
+        reduction_kind: ReductionKind,
+    ) -> AigBitVector {
         let bit_count = args[0].get_bit_count();
         // Assert all vectors are the same length -- we're going to or-reduce the bit
         // positions.
@@ -900,17 +962,27 @@ impl GateBuilder {
                 .cloned()
                 .collect::<Vec<AigOperand>>();
             // Perform an `or` across those bits.
-            operands.push(self.add_or_nary(bit_i_gates.as_slice()));
+            operands.push(self.add_or_nary(bit_i_gates.as_slice(), reduction_kind));
         }
         AigBitVector::from_lsb_is_index_0(&operands)
     }
 
+    // Bitwise xor between two bit vectors that must be the same bit count.
     pub fn add_xor_vec(&mut self, a: &AigBitVector, b: &AigBitVector) -> AigBitVector {
         assert_eq!(a.get_bit_count(), b.get_bit_count());
-        self.add_xor_vec_nary(&[a.clone(), b.clone()])
+        AigBitVector::from_lsb_is_index_0(
+            zip(a.iter_lsb_to_msb(), b.iter_lsb_to_msb())
+                .map(|(a, b)| self.add_xor_binary(*a, *b))
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )
     }
 
-    pub fn add_xor_vec_nary(&mut self, args: &[AigBitVector]) -> AigBitVector {
+    pub fn add_xor_vec_nary(
+        &mut self,
+        args: &[AigBitVector],
+        reduction_kind: ReductionKind,
+    ) -> AigBitVector {
         // Assert all vectors are the same length -- we're going to xor-reduce the bit
         // positions.
         for arg in args {
@@ -923,18 +995,23 @@ impl GateBuilder {
                 .map(|arg| arg.get_lsb(i))
                 .cloned()
                 .collect::<Vec<AigOperand>>();
-            gates.push(self.add_xor_nary(&bit_i_gates));
+            gates.push(self.add_xor_nary(&bit_i_gates, reduction_kind));
         }
         AigBitVector::from_lsb_is_index_0(&gates)
     }
 
-    pub fn add_xor_reduce(&mut self, bit_vector: &AigBitVector) -> AigOperand {
+    pub fn add_xor_reduce(
+        &mut self,
+        bit_vector: &AigBitVector,
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
         self.add_xor_nary(
             bit_vector
                 .iter_lsb_to_msb()
                 .cloned()
                 .collect::<Vec<AigOperand>>()
                 .as_slice(),
+            reduction_kind,
         )
     }
 
@@ -959,9 +1036,9 @@ impl GateBuilder {
             }
         }
         let not_selector = self.add_not(selector);
-        let selector_off_result = self.add_and_nary(&[not_selector, on_false]);
-        let selector_on_result = self.add_and_nary(&[selector, on_true]);
-        self.add_or_nary(&[selector_off_result, selector_on_result])
+        let selector_off_result = self.add_and_binary(not_selector, on_false);
+        let selector_on_result = self.add_and_binary(selector, on_true);
+        self.add_or_binary(selector_off_result, selector_on_result)
     }
 
     pub fn add_mux2_vec(
@@ -984,18 +1061,29 @@ impl GateBuilder {
     }
 
     // Returns whether the two bit-vectors are equal (eq) as a single bit value.
-    pub fn add_eq_vec(&mut self, a: &AigBitVector, b: &AigBitVector) -> AigOperand {
+    pub fn add_eq_vec(
+        &mut self,
+        a: &AigBitVector,
+        b: &AigBitVector,
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
         assert_eq!(a.get_bit_count(), b.get_bit_count());
         let xnors = self.add_xnor_vec(a, b);
-        self.add_and_reduce(&xnors)
+        self.add_and_reduce(&xnors, reduction_kind)
     }
 
     // Returns whether the two bit-vectors are not equal (ne) as a single bit value.
-    pub fn add_ne_vec(&mut self, a: &AigBitVector, b: &AigBitVector) -> AigOperand {
+    pub fn add_ne_vec(
+        &mut self,
+        a: &AigBitVector,
+        b: &AigBitVector,
+        reduction_kind: ReductionKind,
+    ) -> AigOperand {
         assert_eq!(a.get_bit_count(), b.get_bit_count());
         let xors = self.add_xor_vec(a, b);
         assert_eq!(xors.get_bit_count(), a.get_bit_count());
-        self.add_or_reduce(&xors) // or-reduce to see if any bit was different
+        self.add_or_reduce(&xors, reduction_kind) // or-reduce to see if any bit
+                                                  // was different
     }
 }
 

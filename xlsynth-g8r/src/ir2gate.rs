@@ -4,7 +4,7 @@
 //! `gatify`.
 
 use crate::check_equivalence;
-use crate::gate::{AigBitVector, AigOperand, GateBuilder, GateFn};
+use crate::gate::{AigBitVector, AigOperand, GateBuilder, GateFn, ReductionKind};
 use crate::xls_ir::ir;
 use crate::xls_ir::ir::StartAndLimit;
 use crate::xls_ir::ir_utils;
@@ -98,7 +98,7 @@ fn gatify_priority_sel(
         let masked = gb.add_and_vec(&mask, &default_bits);
         masked_cases.push(masked);
     }
-    gb.add_or_vec_nary(&masked_cases)
+    gb.add_or_vec_nary(&masked_cases, ReductionKind::Tree)
 }
 
 fn gatify_array_index(
@@ -109,7 +109,7 @@ fn gatify_array_index(
 ) -> AigBitVector {
     let array_element_count = array_ty.element_count;
     let index_decoded = gatify_decode(gb, array_element_count, index_bits);
-    let oob = gb.add_ez(&index_decoded);
+    let oob = gb.add_ez(&index_decoded, ReductionKind::Tree);
     let one_hot_selector = AigBitVector::concat(oob.into(), index_decoded);
 
     // An array index selection is effectively a one hot selection of the elements
@@ -142,7 +142,7 @@ fn gatify_sel(
     if let Some(default_bits) = default_bits {
         // This is the scenario where the select has an OOB case.
         ohs_cases.push(default_bits.clone());
-        let oob = gb.add_ez(&index_decoded);
+        let oob = gb.add_ez(&index_decoded, ReductionKind::Tree);
         let one_hot_selector = AigBitVector::concat(oob.into(), index_decoded);
         gatify_one_hot_select(gb, &one_hot_selector, &ohs_cases)
     } else {
@@ -181,7 +181,7 @@ fn gatify_ugt(
         Some(&format!("ugt_{}", text_id)),
         gb,
     );
-    let sub_result_is_zero = gb.add_ez(&sub_result);
+    let sub_result_is_zero = gb.add_ez(&sub_result, ReductionKind::Tree);
     let sub_result_is_nonzero = gb.add_not(sub_result_is_zero);
     // The carry_out represents that `a >= b`.
     let sub_result_is_positive = carry_out;
@@ -240,7 +240,7 @@ fn gatify_ule(
     // Note: there's a choice here of whether to test after subtraction or equality
     // before subtraction.
     let is_lt = gb.add_not(c_out);
-    let is_eq = gb.add_eq_vec(&a_bits, &b_bits);
+    let is_eq = gb.add_eq_vec(&a_bits, &b_bits, ReductionKind::Tree);
     gb.add_or_binary(is_lt, is_eq)
 }
 
@@ -286,7 +286,7 @@ fn gatify_decode_naive(
     for i in 0..output_width {
         let literal_bits =
             gb.add_literal(&xlsynth::IrBits::make_ubits(input_bit_count, i as u64).unwrap());
-        let is_selected = gb.add_eq_vec(&input_bits, &literal_bits);
+        let is_selected = gb.add_eq_vec(&input_bits, &literal_bits, ReductionKind::Tree);
         bits.push(is_selected);
     }
     AigBitVector::from_lsb_is_index_0(&bits)
@@ -309,7 +309,7 @@ fn gatify_encode_naive(
         to_or_reduce.push(masked);
     }
     let to_or_reduce_slices: Vec<AigBitVector> = to_or_reduce.iter().map(|v| v.clone()).collect();
-    let or_reduced = gb.add_or_vec_nary(&to_or_reduce_slices);
+    let or_reduced = gb.add_or_vec_nary(&to_or_reduce_slices, ReductionKind::Tree);
     assert_eq!(or_reduced.get_bit_count(), output_bit_count);
     or_reduced
 }
@@ -337,7 +337,7 @@ fn gatify_encode(
         encoded_output[j] = if or_candidates.is_empty() {
             gb.get_false()
         } else {
-            gb.add_or_nary(&or_candidates)
+            gb.add_or_nary(&or_candidates, ReductionKind::Tree)
         };
     }
     AigBitVector::from_lsb_is_index_0(&encoded_output)
@@ -365,7 +365,7 @@ fn gatify_decode(
             }
         }
         // AND the terms together to generate the one-hot output.
-        let out = gb.add_and_nary(&terms);
+        let out = gb.add_and_nary(&terms, ReductionKind::Tree);
         outputs.push(out);
     }
     AigBitVector::from_lsb_is_index_0(&outputs)
@@ -549,7 +549,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let arg_gates = env
                     .get_bit_vector(*arg)
                     .expect("unop arg should be present");
-                let gate: AigOperand = g8_builder.add_or_reduce(&arg_gates);
+                let gate: AigOperand = g8_builder.add_or_reduce(&arg_gates, ReductionKind::Tree);
                 g8_builder.add_tag(gate.node, format!("or_reduce_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
@@ -557,7 +557,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let arg_gates = env
                     .get_bit_vector(*arg)
                     .expect("unop arg should be present");
-                let gate: AigOperand = g8_builder.add_and_reduce(&arg_gates);
+                let gate: AigOperand = g8_builder.add_and_reduce(&arg_gates, ReductionKind::Tree);
                 g8_builder.add_tag(gate.node, format!("and_reduce_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
@@ -565,7 +565,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let arg_gates = env
                     .get_bit_vector(*arg)
                     .expect("unop arg should be present");
-                let gate: AigOperand = g8_builder.add_xor_reduce(&arg_gates);
+                let gate: AigOperand = g8_builder.add_xor_reduce(&arg_gates, ReductionKind::Tree);
                 g8_builder.add_tag(gate.node, format!("xor_reduce_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
@@ -575,7 +575,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let a_bits = env.get_bit_vector(*a).expect("eq lhs should be present");
                 let b_bits = env.get_bit_vector(*b).expect("eq rhs should be present");
                 assert_eq!(a_bits.get_bit_count(), b_bits.get_bit_count());
-                let gate: AigOperand = g8_builder.add_eq_vec(&a_bits, &b_bits);
+                let gate: AigOperand = g8_builder.add_eq_vec(&a_bits, &b_bits, ReductionKind::Tree);
                 g8_builder.add_tag(gate.node, format!("eq_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
@@ -587,7 +587,8 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                     a_gate_refs.get_bit_count(),
                     b_gate_refs.get_bit_count()
                 );
-                let gate: AigOperand = g8_builder.add_ne_vec(&a_gate_refs, &b_gate_refs);
+                let gate: AigOperand =
+                    g8_builder.add_ne_vec(&a_gate_refs, &b_gate_refs, ReductionKind::Tree);
                 g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
@@ -629,7 +630,8 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                     .iter()
                     .map(|arg| env.get_bit_vector(*arg).expect("and arg should be present"))
                     .collect();
-                let gates: AigBitVector = g8_builder.add_and_vec_nary(arg_gates.as_slice());
+                let gates: AigBitVector =
+                    g8_builder.add_and_vec_nary(arg_gates.as_slice(), ReductionKind::Tree);
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
             ir::NodePayload::Nary(ir::NaryOp::Nor, args) => {
@@ -637,7 +639,8 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                     .iter()
                     .map(|arg| env.get_bit_vector(*arg).expect("nor arg should be present"))
                     .collect();
-                let gates: AigBitVector = g8_builder.add_or_vec_nary(&arg_gates);
+                let gates: AigBitVector =
+                    g8_builder.add_or_vec_nary(&arg_gates, ReductionKind::Tree);
                 let gates = g8_builder.add_not_vec(&gates);
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
@@ -646,7 +649,8 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                     .iter()
                     .map(|arg| env.get_bit_vector(*arg).expect("or arg should be present"))
                     .collect();
-                let gates: AigBitVector = g8_builder.add_or_vec_nary(&arg_gates);
+                let gates: AigBitVector =
+                    g8_builder.add_or_vec_nary(&arg_gates, ReductionKind::Tree);
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
             ir::NodePayload::Nary(ir::NaryOp::Xor, args) => {
@@ -654,7 +658,8 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                     .iter()
                     .map(|arg| env.get_bit_vector(*arg).expect("xor arg should be present"))
                     .collect();
-                let gates: AigBitVector = g8_builder.add_xor_vec_nary(&arg_gates);
+                let gates: AigBitVector =
+                    g8_builder.add_xor_vec_nary(&arg_gates, ReductionKind::Tree);
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
             ir::NodePayload::Nary(ir::NaryOp::Nand, args) => {
@@ -665,7 +670,8 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                             .expect("nand arg should be present")
                     })
                     .collect();
-                let gates: AigBitVector = g8_builder.add_and_vec_nary(&arg_gates);
+                let gates: AigBitVector =
+                    g8_builder.add_and_vec_nary(&arg_gates, ReductionKind::Tree);
                 let gates = g8_builder.add_not_vec(&gates);
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
