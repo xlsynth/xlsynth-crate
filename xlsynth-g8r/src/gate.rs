@@ -4,7 +4,7 @@ use std::{collections::HashSet, iter::zip};
 
 use xlsynth::IrBits;
 
-use crate::{aig_simplify, ir};
+use crate::{aig_simplify, xls_ir::ir};
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct AigRef {
@@ -751,25 +751,6 @@ impl GateBuilder {
             accum = f(self, accum, args[i]);
         }
         accum
-    }
-
-    pub fn tree_reduce_something_off(
-        &mut self,
-        args: &[AigOperand],
-        f: impl Fn(&mut Self, AigOperand, AigOperand) -> AigOperand,
-    ) -> AigOperand {
-        let mut current: Vec<AigOperand> = args.to_vec();
-        while current.len() > 1 {
-            let mut new_current = Vec::new();
-            for i in 0..current.len() / 2 {
-                let lhs = current[2 * i];
-                let rhs = current[2 * i + 1];
-                new_current.push(f(self, lhs, rhs));
-            }
-            current = new_current;
-        }
-        assert_eq!(current.len(), 1);
-        current[0]
     }
 
     pub fn add_not_vec(&mut self, args: &AigBitVector) -> AigBitVector {

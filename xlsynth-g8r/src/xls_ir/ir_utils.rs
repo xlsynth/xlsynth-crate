@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir::{Fn, NodePayload, NodeRef};
+//! Utility functions for working with / on XLS IR.
+
+use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 
 /// Returns the list of operands for the provided node.
 pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {

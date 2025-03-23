@@ -5,9 +5,9 @@
 
 use crate::check_equivalence;
 use crate::gate::{AigBitVector, AigOperand, GateBuilder, GateFn};
-use crate::ir;
-use crate::ir::StartAndLimit;
-use crate::ir_utils;
+use crate::xls_ir::ir;
+use crate::xls_ir::ir::StartAndLimit;
+use crate::xls_ir::ir_utils;
 use std::collections::HashMap;
 
 use crate::ir2gate_utils::{

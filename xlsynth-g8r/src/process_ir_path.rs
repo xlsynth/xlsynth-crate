@@ -9,10 +9,10 @@ use crate::check_equivalence;
 use crate::emit_netlist;
 use crate::find_structures;
 use crate::gate;
-use crate::ir;
 use crate::ir2gate;
-use crate::ir_parser;
 use crate::use_count::get_id_to_use_count;
+use crate::xls_ir::ir;
+use crate::xls_ir::ir_parser;
 
 /// Returns a mapping that shows {depth: count} where the count is in number of
 /// gates.

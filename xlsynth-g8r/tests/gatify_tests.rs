@@ -4,7 +4,7 @@ use std::path::Path;
 use test_case::{test_case, test_matrix};
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::ir2gate::{gatify, GatifyOptions};
-use xlsynth_g8r::ir_parser;
+use xlsynth_g8r::xls_ir::ir_parser;
 
 fn do_test_ir_conversion(ir_package_text: &str, fold: bool) {
     // Now we'll parse the IR and turn it into a gate function.

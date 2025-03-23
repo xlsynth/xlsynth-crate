@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{gate, gate2ir, ir};
+use crate::{gate, gate2ir, xls_ir::ir};
 
 pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), String> {
     log::info!("check_equivalence; orig_package:\n{}", orig_package);
@@ -105,7 +105,7 @@ pub fn validate_same_gate_fn(lhs: &gate::GateFn, rhs: &gate::GateFn) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use crate::{gate::AigBitVector, ir_parser};
+    use crate::{gate::AigBitVector, xls_ir::ir_parser};
 
     use super::*;
 

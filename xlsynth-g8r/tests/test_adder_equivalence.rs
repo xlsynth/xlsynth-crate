@@ -7,7 +7,7 @@ use test_case::test_case;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gate2ir;
 use xlsynth_g8r::ir2gate;
-use xlsynth_g8r::ir_parser;
+use xlsynth_g8r::xls_ir::ir_parser;
 
 #[test_case(1)]
 fn test_n_bit_adder(n: usize) {

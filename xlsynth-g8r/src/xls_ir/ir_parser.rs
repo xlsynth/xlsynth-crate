@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir::{self, operator_to_nary_op, ArrayTypeData, FileTable};
-use crate::ir_node_env::{IrNodeEnv, NameOrId};
+//! Parser for XLS IR (just functions for the time being).
+
+use crate::xls_ir::ir::{self, operator_to_nary_op, ArrayTypeData, FileTable};
+use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
 
 #[derive(Debug)]
 pub struct ParseError {
