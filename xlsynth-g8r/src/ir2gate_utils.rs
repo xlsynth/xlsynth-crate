@@ -379,61 +379,19 @@ mod tests {
             let one_hot = gatify_one_hot(&mut *builder, &arg, true);
             builder.add_output("result".to_string(), one_hot);
         });
-        assert_eq!(
-            stats[&1],
-            SummaryStats {
-                live_nodes: 1,
-                deepest_path: 1,
-            }
-        );
-        assert_eq!(
-            stats[&2],
-            SummaryStats {
-                live_nodes: 4,
-                deepest_path: 2,
-            }
-        );
-        assert_eq!(
-            stats[&3],
-            SummaryStats {
-                live_nodes: 7,
-                deepest_path: 3,
-            }
-        );
-        assert_eq!(
-            stats[&4],
-            SummaryStats {
-                live_nodes: 10,
-                deepest_path: 4,
-            }
-        );
-        assert_eq!(
-            stats[&5],
-            SummaryStats {
-                live_nodes: 13,
-                deepest_path: 5,
-            }
-        );
-        assert_eq!(
-            stats[&6],
-            SummaryStats {
-                live_nodes: 16,
-                deepest_path: 6,
-            }
-        );
-        assert_eq!(
-            stats[&7],
-            SummaryStats {
-                live_nodes: 19,
-                deepest_path: 7,
-            }
-        );
-        assert_eq!(
-            stats[&8],
-            SummaryStats {
-                live_nodes: 22,
-                deepest_path: 8,
-            }
-        );
+        #[rustfmt::skip]
+        let want = &[
+            (1, SummaryStats { live_nodes: 1, deepest_path: 1 }),
+            (2, SummaryStats { live_nodes: 4, deepest_path: 2 }),
+            (3, SummaryStats { live_nodes: 7, deepest_path: 3 }),
+            (4, SummaryStats { live_nodes: 10, deepest_path: 4 }),
+            (5, SummaryStats { live_nodes: 13, deepest_path: 5 }),
+            (6, SummaryStats { live_nodes: 16, deepest_path: 6 }),
+            (7, SummaryStats { live_nodes: 19, deepest_path: 7 }),
+            (8, SummaryStats { live_nodes: 22, deepest_path: 8 }),
+        ];
+        for &(bits, ref expected) in want {
+            assert_eq!(stats[&bits], *expected);
+        }
     }
 }
