@@ -366,6 +366,8 @@ mod tests {
             let mut builder = gate::GateBuilder::new(format!("op_{}_bits", width), true);
             builder_fn(&mut builder, *width);
             let gate_fn = builder.build();
+            log::info!("gate_fn for width {}", width);
+            log::info!("{}", gate_fn.to_string());
             let stat = get_summary_stats(&gate_fn);
             stats.insert(*width, stat);
         }
@@ -374,6 +376,7 @@ mod tests {
 
     #[test]
     fn test_gatify_one_hot() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let stats = gather_stats_for_widths(&[1, 2, 3, 4, 5, 6, 7, 8], |builder, bit_count| {
             let arg = builder.add_input("arg".to_string(), bit_count);
             let one_hot = gatify_one_hot(&mut *builder, &arg, true);
