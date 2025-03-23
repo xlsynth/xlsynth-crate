@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::gate;
 use crate::use_count::get_id_to_use_count;
 use serde::Serialize;
