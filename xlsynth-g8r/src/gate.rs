@@ -753,25 +753,6 @@ impl GateBuilder {
         accum
     }
 
-    pub fn tree_reduce_something_off(
-        &mut self,
-        args: &[AigOperand],
-        f: impl Fn(&mut Self, AigOperand, AigOperand) -> AigOperand,
-    ) -> AigOperand {
-        let mut current: Vec<AigOperand> = args.to_vec();
-        while current.len() > 1 {
-            let mut new_current = Vec::new();
-            for i in 0..current.len() / 2 {
-                let lhs = current[2 * i];
-                let rhs = current[2 * i + 1];
-                new_current.push(f(self, lhs, rhs));
-            }
-            current = new_current;
-        }
-        assert_eq!(current.len(), 1);
-        current[0]
-    }
-
     pub fn add_not_vec(&mut self, args: &AigBitVector) -> AigBitVector {
         AigBitVector::from_lsb_is_index_0(
             &args
