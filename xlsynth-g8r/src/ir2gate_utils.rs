@@ -295,7 +295,13 @@ pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool)
 
 #[cfg(test)]
 mod tests {
-    use crate::{check_equivalence, gate::AigBitVector};
+    use std::collections::HashMap;
+
+    use crate::{
+        check_equivalence,
+        gate::AigBitVector,
+        get_summary_stats::{get_summary_stats, SummaryStats},
+    };
 
     use super::*;
 
@@ -349,5 +355,85 @@ mod tests {
         let carry = make_carry_select(bits, carry_select_partitions);
         check_equivalence::validate_same_gate_fn(&ripple, &carry)
             .expect("carry select and ripple carry should be equivalent");
+    }
+
+    fn gather_stats_for_widths(
+        widths: &[usize],
+        builder_fn: impl Fn(&mut GateBuilder, usize) -> (),
+    ) -> HashMap<usize, SummaryStats> {
+        let mut stats = HashMap::new();
+        for width in widths {
+            let mut builder = gate::GateBuilder::new(format!("op_{}_bits", width), true);
+            builder_fn(&mut builder, *width);
+            let gate_fn = builder.build();
+            let stat = get_summary_stats(&gate_fn);
+            stats.insert(*width, stat);
+        }
+        stats
+    }
+
+    #[test]
+    fn test_gatify_one_hot() {
+        let stats = gather_stats_for_widths(&[1, 2, 3, 4, 5, 6, 7, 8], |builder, bit_count| {
+            let arg = builder.add_input("arg".to_string(), bit_count);
+            let one_hot = gatify_one_hot(&mut *builder, &arg, true);
+            builder.add_output("result".to_string(), one_hot);
+        });
+        assert_eq!(
+            stats[&1],
+            SummaryStats {
+                live_nodes: 1,
+                deepest_path: 1,
+            }
+        );
+        assert_eq!(
+            stats[&2],
+            SummaryStats {
+                live_nodes: 4,
+                deepest_path: 2,
+            }
+        );
+        assert_eq!(
+            stats[&3],
+            SummaryStats {
+                live_nodes: 7,
+                deepest_path: 3,
+            }
+        );
+        assert_eq!(
+            stats[&4],
+            SummaryStats {
+                live_nodes: 10,
+                deepest_path: 4,
+            }
+        );
+        assert_eq!(
+            stats[&5],
+            SummaryStats {
+                live_nodes: 13,
+                deepest_path: 5,
+            }
+        );
+        assert_eq!(
+            stats[&6],
+            SummaryStats {
+                live_nodes: 16,
+                deepest_path: 6,
+            }
+        );
+        assert_eq!(
+            stats[&7],
+            SummaryStats {
+                live_nodes: 19,
+                deepest_path: 7,
+            }
+        );
+        assert_eq!(
+            stats[&8],
+            SummaryStats {
+                live_nodes: 22,
+                deepest_path: 8,
+            }
+        );
     }
 }

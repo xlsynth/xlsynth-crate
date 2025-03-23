@@ -11,6 +11,7 @@ pub mod find_structures;
 pub mod gate;
 pub mod gate2ir;
 mod gate_sim;
+mod get_summary_stats;
 pub mod ir2gate;
 mod ir2gate_utils;
 pub mod liberty;
