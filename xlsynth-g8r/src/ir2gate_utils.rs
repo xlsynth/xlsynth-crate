@@ -274,21 +274,32 @@ pub fn gatify_one_hot_select(
 
 pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool) -> AigBitVector {
     let mut gates = Vec::new();
-    let mut no_prior_bit = gb.get_true();
+
+    // Implementation note: instead of chaining all the "no prior bit" computations
+    // linearly through, we do a tree reduction for each bit.
+
+    let mut prior_bits_inverted = Vec::new();
+
     for i in 0..bits.get_bit_count() {
         let this_input_bit = if lsb_prio {
             bits.get_lsb(i)
         } else {
             bits.get_msb(i)
         };
+        let no_prior_bit = if prior_bits_inverted.is_empty() {
+            gb.get_true()
+        } else {
+            gb.add_and_nary(&prior_bits_inverted)
+        };
         let this_output_bit = gb.add_and_binary(*this_input_bit, no_prior_bit);
         gates.push(this_output_bit);
-        let not_this_input_bit = gb.add_not(*this_input_bit);
-        no_prior_bit = gb.add_and_binary(no_prior_bit, not_this_input_bit);
+
+        prior_bits_inverted.push(gb.add_not(*this_input_bit));
     }
     if !lsb_prio {
         gates.reverse();
     }
+    let no_prior_bit = gb.add_and_nary(&prior_bits_inverted);
     gates.push(no_prior_bit);
     AigBitVector::from_lsb_is_index_0(&gates)
 }
@@ -386,15 +397,16 @@ mod tests {
         let want = &[
             (1, SummaryStats { live_nodes: 1, deepest_path: 1 }),
             (2, SummaryStats { live_nodes: 4, deepest_path: 2 }),
-            (3, SummaryStats { live_nodes: 7, deepest_path: 3 }),
-            (4, SummaryStats { live_nodes: 10, deepest_path: 4 }),
-            (5, SummaryStats { live_nodes: 13, deepest_path: 5 }),
-            (6, SummaryStats { live_nodes: 16, deepest_path: 6 }),
-            (7, SummaryStats { live_nodes: 19, deepest_path: 7 }),
-            (8, SummaryStats { live_nodes: 22, deepest_path: 8 }),
+            (3, SummaryStats { live_nodes: 8, deepest_path: 3 }),
+            (4, SummaryStats { live_nodes: 13, deepest_path: 4 }),
+            (5, SummaryStats { live_nodes: 19, deepest_path: 4 }),
+            (6, SummaryStats { live_nodes: 26, deepest_path: 5 }),
+            (7, SummaryStats { live_nodes: 34, deepest_path: 5 }),
+            (8, SummaryStats { live_nodes: 43, deepest_path: 5 }),
         ];
         for &(bits, ref expected) in want {
-            assert_eq!(stats[&bits], *expected);
+            let got = stats.get(&bits).unwrap();
+            assert_eq!(got, expected, "for width {}", bits);
         }
     }
 }

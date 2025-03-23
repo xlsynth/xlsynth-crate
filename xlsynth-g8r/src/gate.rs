@@ -608,8 +608,7 @@ impl GateBuilder {
             }
         }
         // Do a tree reduction of ands across the args.
-        //self.tree_reduce(args, GateBuilder::add_and_binary)
-        self.linear_reduce(args, GateBuilder::add_and_binary)
+        self.tree_reduce(args, &GateBuilder::add_and_binary)
     }
 
     pub fn add_and_reduce(&mut self, bit_vector: &AigBitVector) -> AigOperand {
@@ -621,6 +620,7 @@ impl GateBuilder {
                 .as_slice(),
         )
     }
+
     // Ands together bit i across all the args. That is, given:
     //
     //  a_2 :: a_1 :: a_0
@@ -734,14 +734,13 @@ impl GateBuilder {
 
     pub fn add_xor_nary(&mut self, args: &[AigOperand]) -> AigOperand {
         //self.tree_reduce(args, GateBuilder::add_xor_binary)
-        self.linear_reduce(args, GateBuilder::add_xor_binary)
+        self.tree_reduce(args, &GateBuilder::add_xor_binary)
     }
 
-    pub fn linear_reduce(
-        &mut self,
-        args: &[AigOperand],
-        f: impl Fn(&mut Self, AigOperand, AigOperand) -> AigOperand,
-    ) -> AigOperand {
+    pub fn linear_reduce<F>(&mut self, args: &[AigOperand], f: &F) -> AigOperand
+    where
+        F: Fn(&mut Self, AigOperand, AigOperand) -> AigOperand,
+    {
         assert!(
             args.len() > 0,
             "attempted to reduce an empty list of operands"
@@ -751,6 +750,29 @@ impl GateBuilder {
             accum = f(self, accum, args[i]);
         }
         accum
+    }
+
+    pub fn tree_reduce<F>(&mut self, args: &[AigOperand], f: &F) -> AigOperand
+    where
+        F: Fn(&mut Self, AigOperand, AigOperand) -> AigOperand,
+    {
+        assert!(
+            args.len() > 0,
+            "attempted to reduce an empty list of operands"
+        );
+        if args.len() == 1 {
+            return args[0];
+        }
+        let halves = args.split_at(args.len() / 2);
+        log::info!(
+            "tree_reduce; orig: {} lhs: {} rhs: {}",
+            args.len(),
+            halves.0.len(),
+            halves.1.len()
+        );
+        let first_half = self.tree_reduce(halves.0, f);
+        let second_half = self.tree_reduce(halves.1, f);
+        f(self, first_half, second_half)
     }
 
     pub fn add_not_vec(&mut self, args: &AigBitVector) -> AigBitVector {
@@ -820,8 +842,7 @@ impl GateBuilder {
             return self.add_or_binary(lhs, rhs);
         }
         // Do a tree reduction of ors across the args.
-        //self.tree_reduce(args, GateBuilder::add_or_binary)
-        self.linear_reduce(args, GateBuilder::add_or_binary)
+        self.tree_reduce(args, &GateBuilder::add_or_binary)
     }
 
     pub fn add_or_vec(&mut self, a: &AigBitVector, b: &AigBitVector) -> AigBitVector {
@@ -980,9 +1001,12 @@ impl GateBuilder {
 
 #[cfg(test)]
 mod tests {
+    use crate::check_equivalence;
+
     use super::*;
 
     use pretty_assertions::assert_eq;
+    use test_case::test_case;
 
     #[test]
     fn test_simple_and_to_string() {
@@ -1114,5 +1138,73 @@ mod tests {
         assert_eq!(topo.len(), 2);
         assert_eq!(topo[0], not_a);
         assert_eq!(topo[1], and_gate);
+    }
+
+    #[test]
+    fn test_tree_reduce_and_3_wide() {
+        let mut builder = GateBuilder::new("test_tree_reduce".to_string(), false);
+        let input = builder.add_input("input".to_string(), 3);
+        let input_bits_vec: Vec<AigOperand> = input.iter_lsb_to_msb().map(|bit| *bit).collect();
+        let result = builder.tree_reduce(&input_bits_vec, &GateBuilder::add_and_binary);
+        builder.add_output("o".to_string(), AigBitVector::from_bit(result));
+        let gate_fn = builder.build();
+        assert_eq!(
+            gate_fn.to_string(),
+            "fn test_tree_reduce(input: bits[3] = [%1, %2, %3]) -> (o: bits[1] = [%5]) {
+  %4 = and(input[1], input[2])
+  %5 = and(input[0], %4)
+  o[0] = %5
+}"
+        );
+    }
+
+    #[test]
+    fn test_tree_reduce_and_4_wide() {
+        let mut builder = GateBuilder::new("test_tree_reduce".to_string(), false);
+        let input = builder.add_input("input".to_string(), 4);
+        let input_bits_vec: Vec<AigOperand> = input.iter_lsb_to_msb().map(|bit| *bit).collect();
+        let result = builder.tree_reduce(&input_bits_vec, &GateBuilder::add_and_binary);
+        builder.add_output("o".to_string(), AigBitVector::from_bit(result));
+        let gate_fn = builder.build();
+        assert_eq!(
+            gate_fn.to_string(),
+            "fn test_tree_reduce(input: bits[4] = [%1, %2, %3, %4]) -> (o: bits[1] = [%7]) {
+  %5 = and(input[0], input[1])
+  %6 = and(input[2], input[3])
+  %7 = and(%5, %6)
+  o[0] = %7
+}"
+        );
+    }
+
+    #[test_case(1)]
+    #[test_case(2)]
+    #[test_case(3)]
+    #[test_case(4)]
+    #[test_case(5)]
+    #[test_case(6)]
+    #[test_case(7)]
+    #[test_case(8)]
+    fn test_tree_reduce_eq_linear_reduce(bits: usize) {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let gate_fn_tree = {
+            let mut builder = GateBuilder::new("tree_reduce".to_string(), false);
+            let input = builder.add_input("input".to_string(), bits);
+            let input_bits_vec: Vec<AigOperand> = input.iter_lsb_to_msb().map(|bit| *bit).collect();
+            let result_tree = builder.tree_reduce(&input_bits_vec, &GateBuilder::add_and_binary);
+            builder.add_output("o".to_string(), AigBitVector::from_bit(result_tree));
+            builder.build()
+        };
+        let gate_fn_linear = {
+            let mut builder = GateBuilder::new("linear_reduce".to_string(), false);
+            let input = builder.add_input("input".to_string(), bits);
+            let input_bits_vec: Vec<AigOperand> = input.iter_lsb_to_msb().map(|bit| *bit).collect();
+            let result_linear =
+                builder.linear_reduce(&input_bits_vec, &GateBuilder::add_and_binary);
+            builder.add_output("o".to_string(), AigBitVector::from_bit(result_linear));
+            builder.build()
+        };
+        check_equivalence::validate_same_gate_fn(&gate_fn_tree, &gate_fn_linear)
+            .expect("tree and linear reduce should be equivalent");
     }
 }
