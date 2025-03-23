@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::path::Path;
 use test_case::{test_case, test_matrix};
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::ir2gate::{gatify, GatifyOptions};
+use xlsynth_g8r::gate::GateBuilder;
+use xlsynth_g8r::get_summary_stats::{get_summary_stats, SummaryStats};
+use xlsynth_g8r::ir2gate::{gatify, gatify_ule, GatifyOptions};
+use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
 use xlsynth_g8r::xls_ir::ir_parser;
 
 fn do_test_ir_conversion(ir_package_text: &str, fold: bool) {
@@ -472,4 +476,98 @@ fn do_decode(x: bits[{input_bits}]) -> bits[{output_bits}] {{
         ),
         fold,
     );
+}
+
+fn gather_stats_for_widths(
+    widths: &[usize],
+    builder_fn: impl Fn(&mut GateBuilder, usize) -> (),
+) -> HashMap<usize, SummaryStats> {
+    let mut stats = HashMap::new();
+    for width in widths {
+        let mut builder = GateBuilder::new(format!("op_{}_bits", width), true);
+        builder_fn(&mut builder, *width);
+        let gate_fn = builder.build();
+        log::info!("gate_fn for width {}", width);
+        log::info!("{}", gate_fn.to_string());
+        let stat = get_summary_stats(&gate_fn);
+        stats.insert(*width, stat);
+    }
+    stats
+}
+
+#[test]
+fn test_gatify_one_hot() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let stats = gather_stats_for_widths(&[1, 2, 3, 4, 5, 6, 7, 8], |builder, bit_count| {
+        let arg = builder.add_input("arg".to_string(), bit_count);
+        let one_hot = gatify_one_hot(&mut *builder, &arg, true);
+        builder.add_output("result".to_string(), one_hot);
+    });
+    #[rustfmt::skip]
+    let want = &[
+        (1, SummaryStats { live_nodes: 1, deepest_path: 1 }),
+        (2, SummaryStats { live_nodes: 4, deepest_path: 2 }),
+        (3, SummaryStats { live_nodes: 8, deepest_path: 3 }),
+        (4, SummaryStats { live_nodes: 13, deepest_path: 4 }),
+        (5, SummaryStats { live_nodes: 19, deepest_path: 4 }),
+        (6, SummaryStats { live_nodes: 26, deepest_path: 5 }),
+        (7, SummaryStats { live_nodes: 34, deepest_path: 5 }),
+        (8, SummaryStats { live_nodes: 43, deepest_path: 5 }),
+    ];
+    for &(bits, ref expected) in want {
+        let got = stats.get(&bits).unwrap();
+        assert_eq!(got, expected, "for width {}", bits);
+    }
+    // Validate that "want" has full coverage of the keys in "stats".
+    for key in stats.keys() {
+        assert!(
+            want.iter().any(|&(bits, _)| bits == *key),
+            "missing width {}",
+            key
+        );
+    }
+}
+
+#[test]
+fn test_gatify_ule() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let stats = gather_stats_for_widths(&[1, 2, 3, 4, 5, 6, 7, 8], |builder, bit_count| {
+        let arg1 = builder.add_input("arg1".to_string(), bit_count);
+        let arg2 = builder.add_input("arg2".to_string(), bit_count);
+        let result = gatify_ule(&mut *builder, 2, &arg1, &arg2);
+        builder.add_output("result".to_string(), result.into());
+    });
+    let mut sorted_stats = stats.iter().collect::<Vec<_>>();
+    sorted_stats.sort_by_key(|(bits, _)| *bits);
+    for (bits, stat) in sorted_stats {
+        log::info!(
+            "({}, SummaryStats {{ live_nodes: {}, deepest_path: {} }})",
+            bits,
+            stat.live_nodes,
+            stat.deepest_path
+        );
+    }
+    #[rustfmt::skip]
+    let want = &[
+        (1, SummaryStats { live_nodes: 7, deepest_path: 4 }),
+        (2, SummaryStats { live_nodes: 18, deepest_path: 6 }),
+        (3, SummaryStats { live_nodes: 29, deepest_path: 9 }),
+        (4, SummaryStats { live_nodes: 40, deepest_path: 12 }),
+        (5, SummaryStats { live_nodes: 51, deepest_path: 15 }),
+        (6, SummaryStats { live_nodes: 62, deepest_path: 18 }),
+        (7, SummaryStats { live_nodes: 73, deepest_path: 21 }),
+        (8, SummaryStats { live_nodes: 84, deepest_path: 24 }),
+    ];
+    for &(bits, ref expected) in want {
+        let got = stats.get(&bits).unwrap();
+        assert_eq!(got, expected, "for width {}", bits);
+    }
+    // Validate that "want" has full coverage of the keys in "stats".
+    for key in stats.keys() {
+        assert!(
+            want.iter().any(|&(bits, _)| bits == *key),
+            "missing width {}",
+            key
+        );
+    }
 }
