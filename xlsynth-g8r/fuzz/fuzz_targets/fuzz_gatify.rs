@@ -165,6 +165,8 @@ fn generate_ir_fn(
     ops: Vec<FuzzOp>,
     package: &mut xlsynth::IrPackage,
 ) -> Result<IrFunction, XlsynthError> {
+    assert!(input_bits > 0, "input_bits must be greater than 0");
+
     let mut fn_builder = FnBuilder::new(package, "fuzz_test", true);
 
     // Add a single input parameter
@@ -172,12 +174,13 @@ fn generate_ir_fn(
     let input_node = fn_builder.param("input", &input_type);
 
     // Track all available nodes that can be used as operands
-    let mut available_nodes = vec![input_node];
+    let mut available_nodes: Vec<BValue> = vec![input_node];
 
     // Process each operation
     for op in ops {
         match op {
             FuzzOp::Literal { bits, value } => {
+                assert!(bits > 0, "literal op has no bits");
                 let ir_value = xlsynth::IrValue::make_ubits(bits as usize, value as u64)?;
                 let node = fn_builder.literal(&ir_value, None);
                 available_nodes.push(node);
@@ -236,6 +239,7 @@ fn generate_ir_fn(
                 operand,
                 new_bit_count,
             } => {
+                assert!(new_bit_count > 0, "zero extend has new bit count of 0");
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
                 let node = fn_builder.zero_extend(operand, new_bit_count as u64, None);
                 available_nodes.push(node);
@@ -244,6 +248,7 @@ fn generate_ir_fn(
                 operand,
                 new_bit_count,
             } => {
+                assert!(new_bit_count > 0, "sign extend has new bit count of 0");
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
                 let node = fn_builder.sign_extend(operand, new_bit_count as u64, None);
                 available_nodes.push(node);
@@ -253,6 +258,7 @@ fn generate_ir_fn(
                 start,
                 width,
             } => {
+                assert!(width > 0, "bit slice has no width");
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
                 let node = fn_builder.bit_slice(operand, start as u64, width as u64, None);
                 available_nodes.push(node);
@@ -300,6 +306,7 @@ fn generate_ir_fn(
                 available_nodes.push(node);
             }
             FuzzOp::Decode { arg, width } => {
+                assert!(width > 0, "decode has width of 0");
                 let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
                 let node = fn_builder.decode(arg, Some(width as u64), None);
                 available_nodes.push(node);

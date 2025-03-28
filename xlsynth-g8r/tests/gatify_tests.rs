@@ -368,6 +368,16 @@ bit_count_test_cases!(test_shra_dslx_to_gates, |input_bits: u32,
     );
 });
 
+bit_count_test_cases!(test_shra_by_u32_dslx_to_gates, |input_bits: u32,
+                                                       fold: bool|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        fold,
+        "fn do_shra_by_u32(x: sN[N], amount: u32) -> sN[N] { x >> amount }",
+    );
+});
+
 bit_count_test_cases!(test_shrl_to_gates, |input_bits: u32, fold: bool| -> () {
     do_test_dslx_conversion(
         input_bits,

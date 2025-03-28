@@ -427,6 +427,12 @@ pub fn gatify_ugt_via_bit_tests(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
 ) -> AigOperand {
+    assert!(
+        lhs_bits.get_bit_count() > 0 && rhs_bits.get_bit_count() > 0,
+        "cannot compare 0-bit operands; lhs_bits: {:?} rhs_bits: {:?}",
+        lhs_bits,
+        rhs_bits
+    );
     gatify_ucmp_via_bit_tests(
         gb,
         _text_id,
@@ -675,6 +681,126 @@ fn gatify_decode(
         outputs.push(out);
     }
     AigBitVector::from_lsb_is_index_0(&outputs)
+}
+
+fn gatify_shra(
+    gb: &mut GateBuilder,
+    arg_bits: &AigBitVector,
+    amount_bits: &AigBitVector,
+    text_id: usize,
+) -> AigBitVector {
+    let input_bit_count = arg_bits.get_bit_count();
+
+    // The shift amount is given in its own bit width
+    let shift_amount_width = amount_bits.get_bit_count();
+
+    // Compute the required number of bits for a valid shift amount
+    let required_shift_bits = if input_bit_count > 1 {
+        (input_bit_count as f64).log2().ceil() as usize
+    } else {
+        1
+    };
+
+    // Get the MSB (sign bit) of the input
+    let msb = arg_bits.get_msb(0);
+
+    // First perform a logical right shift
+    let logical_shift = gatify_barrel_shifter(
+        &arg_bits,
+        &amount_bits,
+        Direction::Right,
+        &format!("shra_logical_{}", text_id),
+        gb,
+    );
+
+    if shift_amount_width <= required_shift_bits {
+        // The shift amount is narrow enough; use the full amount_bits
+        let decode_len = 1 << shift_amount_width;
+        let decoded_amount = gatify_decode(gb, decode_len, &amount_bits);
+        let mut result_bits = Vec::with_capacity(input_bit_count);
+        for j in 0..input_bit_count {
+            let start_n = if input_bit_count > j {
+                input_bit_count - j
+            } else {
+                0
+            };
+            let mut cond_terms = Vec::new();
+            for n in start_n..decode_len {
+                cond_terms.push(decoded_amount.get_lsb(n).clone());
+            }
+            let condition = if cond_terms.is_empty() {
+                gb.get_false()
+            } else if cond_terms.len() == 1 {
+                cond_terms[0]
+            } else {
+                gb.add_or_nary(&cond_terms, ReductionKind::Tree)
+            };
+            let res_bit = gb.add_mux2(condition, *msb, *logical_shift.get_lsb(j));
+            result_bits.push(res_bit);
+        }
+        return AigBitVector::from_lsb_is_index_0(&result_bits);
+    } else {
+        // The shift amount is wider than needed; avoid a massive decoder.
+        let effective_shift_width = required_shift_bits;
+        let effective_decode_len = 1 << effective_shift_width;
+
+        // Extract the lower bits of amount_bits (effective shift amount)
+        let mut effective_amount_bits_vec = Vec::with_capacity(effective_shift_width);
+        for n in 0..effective_shift_width {
+            effective_amount_bits_vec.push(amount_bits.get_lsb(n).clone());
+        }
+        let effective_amount_bits = AigBitVector::from_lsb_is_index_0(&effective_amount_bits_vec);
+
+        // Compute out-of-bound condition from the higher bits
+        let mut high_amt_terms = Vec::new();
+        for n in effective_shift_width..shift_amount_width {
+            high_amt_terms.push(amount_bits.get_lsb(n).clone());
+        }
+        let out_of_bounds = if high_amt_terms.len() == 1 {
+            high_amt_terms[0].clone()
+        } else {
+            gb.add_or_nary(&high_amt_terms, ReductionKind::Tree)
+        };
+
+        let decoded_amount = gatify_decode(gb, effective_decode_len, &effective_amount_bits);
+        let mut in_bound_result_bits = Vec::with_capacity(input_bit_count);
+        for j in 0..input_bit_count {
+            let start_n = if input_bit_count > j {
+                input_bit_count - j
+            } else {
+                0
+            };
+            let mut cond_terms = Vec::new();
+            for n in start_n..effective_decode_len {
+                cond_terms.push(decoded_amount.get_lsb(n).clone());
+            }
+            let condition = if cond_terms.is_empty() {
+                gb.get_false()
+            } else if cond_terms.len() == 1 {
+                cond_terms[0]
+            } else {
+                gb.add_or_nary(&cond_terms, ReductionKind::Tree)
+            };
+            let in_bound_bit = gb.add_mux2(condition, *msb, *logical_shift.get_lsb(j));
+            in_bound_result_bits.push(in_bound_bit);
+        }
+        let in_bound_result = AigBitVector::from_lsb_is_index_0(&in_bound_result_bits);
+
+        // Create mask: replicate msb over the entire bit vector
+        let mask = AigBitVector::from_lsb_is_index_0(&vec![*msb; input_bit_count]);
+
+        // Final result: if out_of_bounds then select mask, else use in_bound_result
+        let mut final_result_bits = Vec::with_capacity(input_bit_count);
+        for j in 0..input_bit_count {
+            let final_bit = gb.add_mux2(
+                out_of_bounds,
+                mask.get_lsb(j).clone(),
+                in_bound_result.get_lsb(j).clone(),
+            );
+            final_result_bits.push(final_bit);
+        }
+        return AigBitVector::from_lsb_is_index_0(&final_result_bits);
+    }
 }
 
 /// Converts the contents of the given IR function to our "g8" representation
@@ -1220,51 +1346,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                     .get_bit_vector(*amount)
                     .expect("shra amount should be present");
 
-                let input_bit_count = arg_gates.get_bit_count();
-                // The shift amount is given in its own bit width; decode the full range.
-                let shift_amount_width = amount_gates.get_bit_count();
-                let decode_len = 1 << shift_amount_width;
-
-                // Get the MSB (sign bit) of the input
-                let msb = arg_gates.get_msb(0);
-
-                // First perform a logical right shift
-                let logical_shift = gatify_barrel_shifter(
-                    &arg_gates,
-                    &amount_gates,
-                    Direction::Right,
-                    &format!("shra_logical_{}", node.text_id),
-                    g8_builder,
-                );
-
-                // Decode the shift amount into a one-hot vector of length decode_len
-                let decoded_amount = gatify_decode(g8_builder, decode_len, &amount_gates);
-
-                // For each bit position j of the output, decide if it should be replaced with
-                // the sign bit. The rule: output bit j is set to the sign bit
-                // if shift amount n >= W - j.
-                let mut result_bits = Vec::with_capacity(input_bit_count);
-                for j in 0..input_bit_count {
-                    let start_n = if input_bit_count > j {
-                        input_bit_count - j
-                    } else {
-                        0
-                    };
-                    let mut cond_terms = Vec::new();
-                    for n in start_n..decode_len {
-                        cond_terms.push(decoded_amount.get_lsb(n).clone());
-                    }
-                    let condition = if cond_terms.len() == 1 {
-                        cond_terms[0]
-                    } else {
-                        g8_builder.add_or_nary(&cond_terms, ReductionKind::Tree)
-                    };
-                    // If condition is true, choose msb; else choose the logical shift bit
-                    let res_bit = g8_builder.add_mux2(condition, *msb, *logical_shift.get_lsb(j));
-                    result_bits.push(res_bit);
-                }
-
-                let result = AigBitVector::from_lsb_is_index_0(&result_bits);
+                let result = gatify_shra(g8_builder, &arg_gates, &amount_gates, node.text_id);
                 env.add(node_ref, GateOrVec::BitVector(result));
             }
             ir::NodePayload::Binop(ir::Binop::Shll, arg, amount) => {
