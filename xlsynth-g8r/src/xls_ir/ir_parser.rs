@@ -5,6 +5,13 @@
 use crate::xls_ir::ir::{self, operator_to_nary_op, ArrayTypeData, FileTable};
 use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
 
+pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
+    let file_content = std::fs::read_to_string(path)
+        .map_err(|e| ParseError::new(format!("failed to read file: {}", e)))?;
+    let mut parser = Parser::new(&file_content);
+    parser.parse_package()
+}
+
 #[derive(Debug)]
 pub struct ParseError {
     msg: String,
