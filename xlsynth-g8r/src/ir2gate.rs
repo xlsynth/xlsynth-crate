@@ -204,6 +204,17 @@ fn gatify_umul(
     output_bit_count: usize,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
+    let lhs_bit_count = lhs_bits.get_bit_count();
+    let rhs_bit_count = rhs_bits.get_bit_count();
+
+    if lhs_bit_count == 0 || rhs_bit_count == 0 {
+        assert_eq!(
+            output_bit_count, 0,
+            "output_bit_count must be 0 if lhs_bits or rhs_bits have no bits"
+        );
+        return AigBitVector::zeros(0);
+    }
+
     let mut partial_products = Vec::new();
 
     // For each bit in the multiplier (rhs), generate a scaled partial product
