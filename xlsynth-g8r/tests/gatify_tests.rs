@@ -10,13 +10,25 @@ use xlsynth_g8r::ir2gate::{gatify, gatify_ule_via_bit_tests, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
 use xlsynth_g8r::xls_ir::ir_parser;
 
-fn do_test_ir_conversion(ir_package_text: &str, fold: bool) {
+/// Proves that the gate-mapped version fo the top function in `ir_package_text`
+/// is equivalent to the IR version.
+///
+/// Returns the summary stats for the gate function that is created in case the
+/// user is also interested in the statistics for it.
+fn do_test_ir_conversion_with_top(
+    ir_package_text: &str,
+    fold: bool,
+    top_name: Option<&str>,
+) -> SummaryStats {
     // Now we'll parse the IR and turn it into a gate function.
     let mut parser = ir_parser::Parser::new(&ir_package_text);
     let ir_package = parser.parse_package().unwrap();
-    let ir_top = ir_package.get_top().unwrap();
+    let ir_fn = match top_name {
+        Some(name) => ir_package.get_fn(name).unwrap(),
+        None => ir_package.get_top().unwrap(),
+    };
     let gate_fn = gatify(
-        &ir_top,
+        &ir_fn,
         GatifyOptions {
             fold,
             check_equivalence: false,
@@ -33,8 +45,16 @@ fn do_test_ir_conversion(ir_package_text: &str, fold: bool) {
     assert_eq!(gate_outputs, ir_outputs);
     */
 
-    check_equivalence::validate_same_fn(&ir_top, &gate_fn)
+    check_equivalence::validate_same_fn(&ir_fn, &gate_fn)
         .expect("should validate IR to gate function equivalence");
+
+    get_summary_stats(&gate_fn)
+}
+
+/// Wrapper around `do_test_ir_conversion_with_top` that assumes the top
+/// function should be used.
+fn do_test_ir_conversion(ir_package_text: &str, fold: bool) -> SummaryStats {
+    do_test_ir_conversion_with_top(ir_package_text, fold, None)
 }
 
 #[test_case(1, false; "bit_count=1, fold=false")]
@@ -338,6 +358,16 @@ bit_count_test_cases!(test_shrl_by_u32_to_gates, |input_bits: u32,
     );
 });
 
+bit_count_test_cases!(test_shra_dslx_to_gates, |input_bits: u32,
+                                                fold: bool|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        fold,
+        "fn do_shra_by_u32(x: sN[N], amount: uN[N]) -> sN[N] { x >> amount }",
+    );
+});
+
 bit_count_test_cases!(test_shrl_to_gates, |input_bits: u32, fold: bool| -> () {
     do_test_dslx_conversion(
         input_bits,
@@ -445,6 +475,46 @@ bit_count_test_cases!(test_uge_ir_to_gates, |input_bits: u32, fold: bool| -> () 
     );
 });
 
+bit_count_test_cases!(test_sgt_dslx_to_gates, |input_bits: u32,
+                                               fold: bool|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        fold,
+        "fn do_sgt(x: sN[N], y: sN[N]) -> bool { x > y }",
+    );
+});
+
+bit_count_test_cases!(test_slt_dslx_to_gates, |input_bits: u32,
+                                               fold: bool|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        fold,
+        "fn do_slt(x: sN[N], y: sN[N]) -> bool { x < y }",
+    );
+});
+
+bit_count_test_cases!(test_sge_dslx_to_gates, |input_bits: u32,
+                                               fold: bool|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        fold,
+        "fn do_sge(x: sN[N], y: sN[N]) -> bool { x >= y }",
+    );
+});
+
+bit_count_test_cases!(test_sle_dslx_to_gates, |input_bits: u32,
+                                               fold: bool|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        fold,
+        "fn do_sle(x: sN[N], y: sN[N]) -> bool { x <= y }",
+    );
+});
+
 bit_count_test_cases!(test_encode_ir_to_gates, |input_bits: u32,
                                                 fold: bool|
  -> () {
@@ -472,6 +542,24 @@ fn test_decode_ir_to_gates(input_bits: u32, output_bits: u32, fold: bool) {
             "package sample
 fn do_decode(x: bits[{input_bits}]) -> bits[{output_bits}] {{
     ret result: bits[{output_bits}] = decode(x, width={output_bits}, id=2)
+}}"
+        ),
+        fold,
+    );
+}
+
+#[test_matrix(
+    1..3,
+    1..3,
+    1..7,
+    [false, true]
+)]
+fn test_umul_ir_to_gates(lhs_bits: u32, rhs_bits: u32, output_bits: u32, fold: bool) {
+    do_test_ir_conversion(
+        &format!(
+            "package sample
+fn do_umul(lhs: bits[{lhs_bits}], rhs: bits[{rhs_bits}]) -> bits[{output_bits}] {{
+    ret result: bits[{output_bits}] = umul(lhs, rhs, id=3)
 }}"
         ),
         fold,
@@ -570,5 +658,32 @@ fn test_gatify_ule() {
             "missing width {}",
             key
         );
+    }
+}
+
+/// Tests that we can convert the bf16 multiplier in the DSLX standard library.
+#[test_case(false)]
+#[test_case(true)]
+fn test_gatify_bf16_mul(fold: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dslx = "import bfloat16;
+fn bf16_mul(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
+    bfloat16::mul(x, y)
+}";
+    let fake_path = Path::new("test.x");
+    let ir =
+        xlsynth::convert_dslx_to_ir_text(dslx, fake_path, &xlsynth::DslxConvertOptions::default())
+            .unwrap();
+    log::info!("Unoptimized IR:\n{}", ir.ir);
+    let ir_top = "__test__bf16_mul";
+    let xlsynth_ir_package = xlsynth::IrPackage::parse_ir(&ir.ir, Some(ir_top)).unwrap();
+    let optimized_ir_package = xlsynth::optimize_ir(&xlsynth_ir_package, ir_top).unwrap();
+    let optimized_ir_text = optimized_ir_package.to_string();
+    log::info!("Optimized IR:\n{}", optimized_ir_text);
+
+    let stats = do_test_ir_conversion(&optimized_ir_text, fold);
+    if fold {
+        assert_eq!(stats.live_nodes, 1178);
+        assert_eq!(stats.deepest_path, 109);
     }
 }

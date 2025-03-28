@@ -113,6 +113,7 @@ pub enum Binop {
 
     Shll,
     Shrl,
+    Shra,
 
     ArrayConcat,
     Smulp,
@@ -137,8 +138,11 @@ pub enum Binop {
 
 pub fn operator_to_binop(operator: &str) -> Option<Binop> {
     match operator {
+        // Shifts
         "shll" => Some(Binop::Shll),
         "shrl" => Some(Binop::Shrl),
+        "shra" => Some(Binop::Shra),
+
         "add" => Some(Binop::Add),
         "array_concat" => Some(Binop::ArrayConcat),
         "smulp" => Some(Binop::Smulp),
@@ -171,6 +175,7 @@ pub fn binop_to_operator(binop: Binop) -> &'static str {
         Binop::Add => "add",
         Binop::Shll => "shll",
         Binop::Shrl => "shrl",
+        Binop::Shra => "shra",
         Binop::ArrayConcat => "array_concat",
         Binop::Smulp => "smulp",
         Binop::Umulp => "umulp",
@@ -870,6 +875,10 @@ impl Package {
             Some(name) => self.fns.iter_mut().find(|f| f.name == *name),
             None => self.fns.first_mut(),
         }
+    }
+
+    pub fn get_fn(&self, name: &str) -> Option<&Fn> {
+        self.fns.iter().find(|f| f.name == name)
     }
 }
 

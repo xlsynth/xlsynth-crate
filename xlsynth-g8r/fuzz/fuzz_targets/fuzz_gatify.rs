@@ -5,7 +5,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
 use xlsynth_g8r::ir2gate::gatify;
-use xlsynth_g8r::ir_parser;
+use xlsynth_g8r::xls_ir::ir_parser;
 
 #[derive(Debug, Arbitrary)]
 enum FuzzUnop {
@@ -40,6 +40,10 @@ enum FuzzBinop {
     Ule,
     Ult,
     Uge,
+    Sge,
+    Sgt,
+    Slt,
+    Sle,
 
     // shifts
     Shrl,
@@ -105,6 +109,11 @@ enum FuzzOp {
         arg: FuzzOperand,
         width: u8,
     },
+    UMul {
+        lhs: FuzzOperand,
+        rhs: FuzzOperand,
+    },
+    
 }
 
 // Generate a random IR function with only AND/NOT operations
@@ -166,6 +175,10 @@ fn generate_ir_fn(
                     FuzzBinop::Ult => fn_builder.ult(operand1, operand2, None),
                     FuzzBinop::Uge => fn_builder.uge(operand1, operand2, None),
                     FuzzBinop::Ule => fn_builder.ule(operand1, operand2, None),
+                    FuzzBinop::Sgt => fn_builder.sgt(operand1, operand2, None),
+                    FuzzBinop::Sge => fn_builder.sge(operand1, operand2, None),
+                    FuzzBinop::Slt => fn_builder.slt(operand1, operand2, None),
+                    FuzzBinop::Sle => fn_builder.sle(operand1, operand2, None),
 
                     // shifts
                     FuzzBinop::Shrl => fn_builder.shrl(operand1, operand2, None),
@@ -259,9 +272,14 @@ fn generate_ir_fn(
                 let node = fn_builder.one_hot_select(selector, cases.as_slice(), None);
                 available_nodes.push(node);
             }
+            FuzzOp::UMul { lhs, rhs } => {
+                let lhs = &available_nodes[(lhs.index as usize) % available_nodes.len()];
+                let rhs = &available_nodes[(rhs.index as usize) % available_nodes.len()];
+                let node = fn_builder.umul(lhs, rhs, None);
+                available_nodes.push(node);
+            }
         }
     }
-
     // Set the last node as the return value
     fn_builder.build_with_return_value(available_nodes.last().unwrap())
 }
@@ -283,7 +301,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
 
         for _ in 0..num_ops {
             // Randomly decide which kind of operation to generate
-            let op_type = u.int_in_range(0..=10)?;
+            let op_type = u.int_in_range(0..=11)?;
             match op_type {
                 0 => {
                     // Literal op: nothing to sample, just generate a literal byte value.
@@ -393,6 +411,12 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                         array: FuzzOperand { index },
                         index: FuzzOperand { index },
                     });
+                }
+                11 => {
+                    // UMul op: sample two valid indices.
+                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    ops.push(FuzzOp::UMul { lhs: FuzzOperand { index: idx1 }, rhs: FuzzOperand { index: idx2 } });
                 }
                 _ => unreachable!(),
             }
