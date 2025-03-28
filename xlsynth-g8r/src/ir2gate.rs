@@ -683,6 +683,7 @@ fn gatify_decode(
     AigBitVector::from_lsb_is_index_0(&outputs)
 }
 
+// Refactored gatify_shra function
 fn gatify_shra(
     gb: &mut GateBuilder,
     arg_bits: &AigBitVector,
@@ -713,11 +714,16 @@ fn gatify_shra(
         gb,
     );
 
-    if shift_amount_width <= required_shift_bits {
-        // The shift amount is narrow enough; use the full amount_bits
-        let decode_len = 1 << shift_amount_width;
-        let decoded_amount = gatify_decode(gb, decode_len, &amount_bits);
-        let mut result_bits = Vec::with_capacity(input_bit_count);
+    // Computes the conditional mux bits used in both narrow and wide cases.
+    fn compute_shifted_bits(
+        gb: &mut GateBuilder,
+        msb: &AigOperand,
+        logical_shift: &AigBitVector,
+        input_bit_count: usize,
+        decode_len: usize,
+        decoded_amount: &AigBitVector,
+    ) -> Vec<AigOperand> {
+        let mut bits = Vec::with_capacity(input_bit_count);
         for j in 0..input_bit_count {
             let start_n = if input_bit_count > j {
                 input_bit_count - j
@@ -736,71 +742,86 @@ fn gatify_shra(
                 gb.add_or_nary(&cond_terms, ReductionKind::Tree)
             };
             let res_bit = gb.add_mux2(condition, *msb, *logical_shift.get_lsb(j));
-            result_bits.push(res_bit);
+            bits.push(res_bit);
         }
+        bits
+    }
+
+    if shift_amount_width <= required_shift_bits {
+        // Narrow case: use the full amount_bits
+        let decode_len = 1 << shift_amount_width;
+        let decoded_amount = gatify_decode(gb, decode_len, &amount_bits);
+        let result_bits = compute_shifted_bits(
+            gb,
+            msb,
+            &logical_shift,
+            input_bit_count,
+            decode_len,
+            &decoded_amount,
+        );
         return AigBitVector::from_lsb_is_index_0(&result_bits);
-    } else {
-        // The shift amount is wider than needed; avoid a massive decoder.
-        let effective_shift_width = required_shift_bits;
-        let effective_decode_len = 1 << effective_shift_width;
+    }
 
-        // Extract the lower bits of amount_bits (effective shift amount)
-        let mut effective_amount_bits_vec = Vec::with_capacity(effective_shift_width);
-        for n in 0..effective_shift_width {
-            effective_amount_bits_vec.push(amount_bits.get_lsb(n).clone());
-        }
-        let effective_amount_bits = AigBitVector::from_lsb_is_index_0(&effective_amount_bits_vec);
-
-        // Compute out-of-bound condition from the higher bits
-        let mut high_amt_terms = Vec::new();
-        for n in effective_shift_width..shift_amount_width {
-            high_amt_terms.push(amount_bits.get_lsb(n).clone());
-        }
-        let out_of_bounds = if high_amt_terms.len() == 1 {
-            high_amt_terms[0].clone()
-        } else {
-            gb.add_or_nary(&high_amt_terms, ReductionKind::Tree)
-        };
-
-        let decoded_amount = gatify_decode(gb, effective_decode_len, &effective_amount_bits);
-        let mut in_bound_result_bits = Vec::with_capacity(input_bit_count);
-        for j in 0..input_bit_count {
-            let start_n = if input_bit_count > j {
-                input_bit_count - j
-            } else {
-                0
-            };
-            let mut cond_terms = Vec::new();
-            for n in start_n..effective_decode_len {
-                cond_terms.push(decoded_amount.get_lsb(n).clone());
-            }
-            let condition = if cond_terms.is_empty() {
-                gb.get_false()
-            } else if cond_terms.len() == 1 {
-                cond_terms[0]
-            } else {
-                gb.add_or_nary(&cond_terms, ReductionKind::Tree)
-            };
-            let in_bound_bit = gb.add_mux2(condition, *msb, *logical_shift.get_lsb(j));
-            in_bound_result_bits.push(in_bound_bit);
-        }
-        let in_bound_result = AigBitVector::from_lsb_is_index_0(&in_bound_result_bits);
-
-        // Create mask: replicate msb over the entire bit vector
-        let mask = AigBitVector::from_lsb_is_index_0(&vec![*msb; input_bit_count]);
-
-        // Final result: if out_of_bounds then select mask, else use in_bound_result
-        let mut final_result_bits = Vec::with_capacity(input_bit_count);
+    // Applies the out-of-bounds mux on each bit
+    fn apply_out_of_bounds_mux(
+        gb: &mut GateBuilder,
+        input_bit_count: usize,
+        out_of_bounds: &AigOperand,
+        mask: &AigBitVector,
+        in_bound_result: &AigBitVector,
+    ) -> Vec<AigOperand> {
+        let mut bits = Vec::with_capacity(input_bit_count);
         for j in 0..input_bit_count {
             let final_bit = gb.add_mux2(
-                out_of_bounds,
-                mask.get_lsb(j).clone(),
-                in_bound_result.get_lsb(j).clone(),
+                out_of_bounds.clone(),
+                *mask.get_lsb(j),
+                *in_bound_result.get_lsb(j),
             );
-            final_result_bits.push(final_bit);
+            bits.push(final_bit);
         }
-        return AigBitVector::from_lsb_is_index_0(&final_result_bits);
+        bits
     }
+
+    // Wide case: use only the lower effective bits
+    let effective_shift_width = required_shift_bits;
+    let effective_decode_len = 1 << effective_shift_width;
+
+    // Extract the lower bits of amount_bits (effective shift amount)
+    let mut effective_amount_bits_vec = Vec::with_capacity(effective_shift_width);
+    for n in 0..effective_shift_width {
+        effective_amount_bits_vec.push(amount_bits.get_lsb(n).clone());
+    }
+    let effective_amount_bits = AigBitVector::from_lsb_is_index_0(&effective_amount_bits_vec);
+
+    // Compute out-of-bound condition from the higher bits
+    let mut high_amt_terms = Vec::new();
+    for n in effective_shift_width..shift_amount_width {
+        high_amt_terms.push(amount_bits.get_lsb(n).clone());
+    }
+    let out_of_bounds = if high_amt_terms.len() == 1 {
+        high_amt_terms[0].clone()
+    } else {
+        gb.add_or_nary(&high_amt_terms, ReductionKind::Tree)
+    };
+
+    let decoded_amount = gatify_decode(gb, effective_decode_len, &effective_amount_bits);
+    let in_bound_bits = compute_shifted_bits(
+        gb,
+        msb,
+        &logical_shift,
+        input_bit_count,
+        effective_decode_len,
+        &decoded_amount,
+    );
+    let in_bound_result = AigBitVector::from_lsb_is_index_0(&in_bound_bits);
+
+    // Create mask: replicate msb over the entire bit vector
+    let mask = AigBitVector::from_lsb_is_index_0(&vec![*msb; input_bit_count]);
+
+    // Final result: if out_of_bounds then select mask, else use in_bound_result
+    let final_bits =
+        apply_out_of_bounds_mux(gb, input_bit_count, &out_of_bounds, &mask, &in_bound_result);
+    AigBitVector::from_lsb_is_index_0(&final_bits)
 }
 
 /// Converts the contents of the given IR function to our "g8" representation
