@@ -71,6 +71,8 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Download xlsynth binaries
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           pip3 install requests
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
@@ -139,6 +141,8 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Download xlsynth binaries
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           pip3 install requests
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
@@ -265,6 +269,8 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Download xlsynth binaries
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           dnf install -y python3 python3-pip
           python3 -V  # Print the python3 version.
@@ -353,6 +359,8 @@ jobs:
           sudo apt-get install -y valgrind
 
       - name: Download xlsynth binaries
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           pip3 install requests termcolor
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
@@ -388,6 +396,8 @@ jobs:
           override: true
 
       - name: Pre-download artifacts using download_release.py
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           # Note we download rocky8 version just because they have the fewest/oldest system
           # requirements.
