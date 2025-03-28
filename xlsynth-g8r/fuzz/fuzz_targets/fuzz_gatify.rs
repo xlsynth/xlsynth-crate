@@ -113,7 +113,10 @@ enum FuzzOp {
         lhs: FuzzOperand,
         rhs: FuzzOperand,
     },
-    
+    SMul {
+        lhs: FuzzOperand,
+        rhs: FuzzOperand,
+    },
 }
 
 // Generate a random IR function with only AND/NOT operations
@@ -278,6 +281,12 @@ fn generate_ir_fn(
                 let node = fn_builder.umul(lhs, rhs, None);
                 available_nodes.push(node);
             }
+            FuzzOp::SMul { lhs, rhs } => {
+                let lhs = &available_nodes[(lhs.index as usize) % available_nodes.len()];
+                let rhs = &available_nodes[(rhs.index as usize) % available_nodes.len()];
+                let node = fn_builder.smul(lhs, rhs, None);
+                available_nodes.push(node);
+            }
         }
     }
     // Set the last node as the return value
@@ -301,7 +310,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
 
         for _ in 0..num_ops {
             // Randomly decide which kind of operation to generate
-            let op_type = u.int_in_range(0..=11)?;
+            let op_type = u.int_in_range(0..=12)?;
             match op_type {
                 0 => {
                     // Literal op: nothing to sample, just generate a literal byte value.
@@ -416,7 +425,19 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     // UMul op: sample two valid indices.
                     let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
                     let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    ops.push(FuzzOp::UMul { lhs: FuzzOperand { index: idx1 }, rhs: FuzzOperand { index: idx2 } });
+                    ops.push(FuzzOp::UMul {
+                        lhs: FuzzOperand { index: idx1 },
+                        rhs: FuzzOperand { index: idx2 },
+                    });
+                }
+                12 => {
+                    // SMul op: sample two valid indices.
+                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    ops.push(FuzzOp::SMul {
+                        lhs: FuzzOperand { index: idx1 },
+                        rhs: FuzzOperand { index: idx2 },
+                    });
                 }
                 _ => unreachable!(),
             }

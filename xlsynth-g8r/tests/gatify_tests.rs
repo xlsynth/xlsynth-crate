@@ -566,6 +566,24 @@ fn do_umul(lhs: bits[{lhs_bits}], rhs: bits[{rhs_bits}]) -> bits[{output_bits}] 
     );
 }
 
+#[test_matrix(
+    1..3,
+    1..3,
+    1..7,
+    [false, true]
+)]
+fn test_smul_ir_to_gates(lhs_bits: u32, rhs_bits: u32, output_bits: u32, fold: bool) {
+    do_test_ir_conversion(
+        &format!(
+            "package sample
+fn do_smul(lhs: bits[{lhs_bits}], rhs: bits[{rhs_bits}]) -> bits[{output_bits}] {{
+    ret result: bits[{output_bits}] = smul(lhs, rhs, id=3)
+}}",
+        ),
+        fold,
+    );
+}
+
 fn gather_stats_for_widths(
     widths: &[usize],
     builder_fn: impl Fn(&mut GateBuilder, usize) -> (),

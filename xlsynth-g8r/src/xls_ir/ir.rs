@@ -127,13 +127,19 @@ pub enum Binop {
     Ult,
     Ule,
 
+    // signed comparisons
     Sgt,
     Sge,
     Slt,
     Sle,
+
     Umul,
-    Gate,
+    Smul,
+
     Sdiv,
+    Udiv,
+
+    Gate,
 }
 
 pub fn operator_to_binop(operator: &str) -> Option<Binop> {
@@ -143,10 +149,10 @@ pub fn operator_to_binop(operator: &str) -> Option<Binop> {
         "shrl" => Some(Binop::Shrl),
         "shra" => Some(Binop::Shra),
 
-        "add" => Some(Binop::Add),
         "array_concat" => Some(Binop::ArrayConcat),
         "smulp" => Some(Binop::Smulp),
         "umulp" => Some(Binop::Umulp),
+
         "eq" => Some(Binop::Eq),
         "ne" => Some(Binop::Ne),
         // signed comparisons
@@ -160,9 +166,12 @@ pub fn operator_to_binop(operator: &str) -> Option<Binop> {
         "ult" => Some(Binop::Ult),
         "ule" => Some(Binop::Ule),
         // arithmetic
+        "add" => Some(Binop::Add),
         "sub" => Some(Binop::Sub),
         "umul" => Some(Binop::Umul),
+        "smul" => Some(Binop::Smul),
         "sdiv" => Some(Binop::Sdiv),
+        "udiv" => Some(Binop::Udiv),
 
         // "special" operations
         "gate" => Some(Binop::Gate),
@@ -191,8 +200,10 @@ pub fn binop_to_operator(binop: Binop) -> &'static str {
         Binop::Sle => "sle",
         Binop::Sub => "sub",
         Binop::Umul => "umul",
+        Binop::Smul => "smul",
         Binop::Gate => "gate",
         Binop::Sdiv => "sdiv",
+        Binop::Udiv => "udiv",
     }
 }
 

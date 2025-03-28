@@ -62,6 +62,12 @@ impl GateEnv {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Signedness {
+    Unsigned,
+    Signed,
+}
+
 fn gatify_priority_sel(
     gb: &mut GateBuilder,
     output_bit_count: usize,
@@ -152,55 +158,30 @@ fn gatify_sel(
     }
 }
 
-fn gatify_umul(
+fn gatify_mul(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
     output_bit_count: usize,
+    signedness: Signedness,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
-    let mut partial_products = Vec::new();
-
-    // For each bit of the multiplier (rhs)
-    for (i, rhs_bit) in rhs_bits.iter_lsb_to_msb().enumerate() {
-        let mut row = Vec::new();
-
-        // Create partial products for this row by ANDing with each bit of lhs
-        for lhs_bit in lhs_bits.iter_lsb_to_msb() {
-            let partial_product = gb.add_and_binary(*lhs_bit, *rhs_bit);
-            row.push(partial_product);
+    match signedness {
+        Signedness::Unsigned => gatify_umul(lhs_bits, rhs_bits, output_bit_count, gb),
+        Signedness::Signed => {
+            // Pre-sign-extend operands to the final output width.
+            let lhs_ext = if lhs_bits.get_bit_count() < output_bit_count {
+                gatify_sign_ext(gb, 0, output_bit_count, lhs_bits)
+            } else {
+                lhs_bits.clone()
+            };
+            let rhs_ext = if rhs_bits.get_bit_count() < output_bit_count {
+                gatify_sign_ext(gb, 0, output_bit_count, rhs_bits)
+            } else {
+                rhs_bits.clone()
+            };
+            gatify_umul(&lhs_ext, &rhs_ext, output_bit_count, gb)
         }
-
-        // Pad with zeros to match output width
-        while row.len() < output_bit_count {
-            row.push(gb.get_false());
-        }
-
-        // Shift the row left by i positions
-        let mut shifted_row = vec![gb.get_false(); i];
-        shifted_row.extend(row);
-
-        // Truncate to output width if needed
-        while shifted_row.len() > output_bit_count {
-            shifted_row.pop();
-        }
-
-        partial_products.push(AigBitVector::from_lsb_is_index_0(&shifted_row));
     }
-
-    // Sum up all partial products using ripple carry adders
-    let mut result = partial_products[0].clone();
-    for i in 1..partial_products.len() {
-        let (_, sum) = gatify_add_ripple_carry(
-            &result,
-            &partial_products[i],
-            gb.get_false(),
-            Some(&format!("umul_add_{}", i)),
-            gb,
-        );
-        result = sum;
-    }
-
-    result
 }
 
 fn gatify_concat(args: &[AigBitVector]) -> AigBitVector {
@@ -215,6 +196,46 @@ fn gatify_zero_ext(new_bit_count: usize, arg_bits: &AigBitVector) -> AigBitVecto
     let zero_count = new_bit_count - arg_bits.get_bit_count();
     let zeros = AigBitVector::zeros(zero_count);
     AigBitVector::concat(zeros, arg_bits.clone())
+}
+
+fn gatify_umul(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    output_bit_count: usize,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    let mut partial_products = Vec::new();
+
+    // For each bit in the multiplier (rhs), generate a scaled partial product
+    for (i, rhs_bit) in rhs_bits.iter_lsb_to_msb().enumerate() {
+        let mut row = Vec::new();
+        for lhs_bit in lhs_bits.iter_lsb_to_msb() {
+            let pp = gb.add_and_binary(*lhs_bit, *rhs_bit);
+            row.push(pp);
+        }
+
+        // Shift the partial product left by i positions (prepend i false bits)
+        let mut shifted = vec![gb.get_false(); i];
+        shifted.extend(row);
+
+        // Ensure the partial product has the correct width
+        while shifted.len() < output_bit_count {
+            shifted.push(gb.get_false());
+        }
+        while shifted.len() > output_bit_count {
+            shifted.pop();
+        }
+
+        partial_products.push(AigBitVector::from_lsb_is_index_0(&shifted));
+    }
+
+    // Sum all partial products using ripple-carry addition
+    let mut result = partial_products[0].clone();
+    for pp in partial_products.iter().skip(1) {
+        let (_carry, sum) = gatify_add_ripple_carry(&result, pp, gb.get_false(), None, gb);
+        result = sum;
+    }
+    result
 }
 
 #[allow(dead_code)]
@@ -1264,15 +1285,23 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 }
                 env.add(node_ref, GateOrVec::BitVector(bit_vector));
             }
-            ir::NodePayload::Binop(ir::Binop::Umul, lhs, rhs) => {
+            ir::NodePayload::Binop(ir::Binop::Umul | ir::Binop::Smul, lhs, rhs) => {
                 let output_bit_count = node.ty.bit_count();
-                let lhs_bits = env
-                    .get_bit_vector(*lhs)
-                    .expect("umul lhs should be present");
-                let rhs_bits = env
-                    .get_bit_vector(*rhs)
-                    .expect("umul rhs should be present");
-                let gates = gatify_umul(&lhs_bits, &rhs_bits, output_bit_count, g8_builder);
+                let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
+                let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
+                let signedness =
+                    if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smul, ..)) {
+                        Signedness::Signed
+                    } else {
+                        Signedness::Unsigned
+                    };
+                let gates = gatify_mul(
+                    &lhs_bits,
+                    &rhs_bits,
+                    output_bit_count,
+                    signedness,
+                    g8_builder,
+                );
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
             ir::NodePayload::Assert { .. }
