@@ -62,6 +62,12 @@ impl GateEnv {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Signedness {
+    Unsigned,
+    Signed,
+}
+
 fn gatify_priority_sel(
     gb: &mut GateBuilder,
     output_bit_count: usize,
@@ -152,6 +158,32 @@ fn gatify_sel(
     }
 }
 
+fn gatify_mul(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    output_bit_count: usize,
+    signedness: Signedness,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    match signedness {
+        Signedness::Unsigned => gatify_umul(lhs_bits, rhs_bits, output_bit_count, gb),
+        Signedness::Signed => {
+            // Pre-sign-extend operands to the final output width.
+            let lhs_ext = if lhs_bits.get_bit_count() < output_bit_count {
+                gatify_sign_ext(gb, 0, output_bit_count, lhs_bits)
+            } else {
+                lhs_bits.clone()
+            };
+            let rhs_ext = if rhs_bits.get_bit_count() < output_bit_count {
+                gatify_sign_ext(gb, 0, output_bit_count, rhs_bits)
+            } else {
+                rhs_bits.clone()
+            };
+            gatify_umul(&lhs_ext, &rhs_ext, output_bit_count, gb)
+        }
+    }
+}
+
 fn gatify_concat(args: &[AigBitVector]) -> AigBitVector {
     let mut bits = Vec::new();
     for arg in args.iter().rev() {
@@ -164,6 +196,57 @@ fn gatify_zero_ext(new_bit_count: usize, arg_bits: &AigBitVector) -> AigBitVecto
     let zero_count = new_bit_count - arg_bits.get_bit_count();
     let zeros = AigBitVector::zeros(zero_count);
     AigBitVector::concat(zeros, arg_bits.clone())
+}
+
+fn gatify_umul(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    output_bit_count: usize,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    let lhs_bit_count = lhs_bits.get_bit_count();
+    let rhs_bit_count = rhs_bits.get_bit_count();
+
+    if lhs_bit_count == 0 || rhs_bit_count == 0 {
+        assert_eq!(
+            output_bit_count, 0,
+            "output_bit_count must be 0 if lhs_bits or rhs_bits have no bits"
+        );
+        return AigBitVector::zeros(0);
+    }
+
+    let mut partial_products = Vec::new();
+
+    // For each bit in the multiplier (rhs), generate a scaled partial product
+    for (i, rhs_bit) in rhs_bits.iter_lsb_to_msb().enumerate() {
+        let mut row = Vec::new();
+        for lhs_bit in lhs_bits.iter_lsb_to_msb() {
+            let pp = gb.add_and_binary(*lhs_bit, *rhs_bit);
+            row.push(pp);
+        }
+
+        // Shift the partial product left by i positions (prepend i false bits)
+        let mut shifted = vec![gb.get_false(); i];
+        shifted.extend(row);
+
+        // Ensure the partial product has the correct width
+        while shifted.len() < output_bit_count {
+            shifted.push(gb.get_false());
+        }
+        while shifted.len() > output_bit_count {
+            shifted.pop();
+        }
+
+        partial_products.push(AigBitVector::from_lsb_is_index_0(&shifted));
+    }
+
+    // Sum all partial products using ripple-carry addition
+    let mut result = partial_products[0].clone();
+    for pp in partial_products.iter().skip(1) {
+        let (_carry, sum) = gatify_add_ripple_carry(&result, pp, gb.get_false(), None, gb);
+        result = sum;
+    }
+    result
 }
 
 #[allow(dead_code)]
@@ -344,6 +427,12 @@ pub fn gatify_ugt_via_bit_tests(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
 ) -> AigOperand {
+    assert!(
+        lhs_bits.get_bit_count() > 0 && rhs_bits.get_bit_count() > 0,
+        "cannot compare 0-bit operands; lhs_bits: {:?} rhs_bits: {:?}",
+        lhs_bits,
+        rhs_bits
+    );
     gatify_ucmp_via_bit_tests(
         gb,
         _text_id,
@@ -378,6 +467,93 @@ pub fn gatify_uge_via_bit_tests(
             lhs_larger_this_bit
         },
     )
+}
+
+pub enum CmpKind {
+    Lt,
+    Gt,
+}
+
+pub fn gatify_scmp(
+    gb: &mut GateBuilder,
+    text_id: usize,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    cmp_kind: CmpKind,
+    or_eq: bool,
+) -> AigOperand {
+    let bit_count = lhs_bits.get_bit_count();
+    if bit_count == 1 {
+        // Special-case 1-bit: In two's complement, 0 represents 0 and 1 represents -1.
+        // Thus, for a 1-bit comparison:
+        //   a < b is true if a = 1 and b = 0.
+        //   a > b is true if a = 0 and b = 1.
+        let a = *lhs_bits.get_lsb(0);
+        let b = *rhs_bits.get_lsb(0);
+        match cmp_kind {
+            CmpKind::Lt => {
+                let b_complement = gb.add_not(b);
+                let slt = gb.add_and_binary(a, b_complement);
+                if or_eq {
+                    let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+                    gb.add_or_binary(slt, eq)
+                } else {
+                    slt
+                }
+            }
+            CmpKind::Gt => {
+                let a_complement = gb.add_not(a);
+                let sgt = gb.add_and_binary(a_complement, b);
+                if or_eq {
+                    let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+                    gb.add_or_binary(sgt, eq)
+                } else {
+                    sgt
+                }
+            }
+        }
+    } else {
+        // For multi-bit signed comparisons, compute diff = a - b = a + (not b) + 1.
+        let b_complement = gb.add_not_vec(rhs_bits);
+        let (_carry, diff) = gatify_add_ripple_carry(
+            lhs_bits,
+            &b_complement,
+            gb.get_true(),
+            Some(&format!("scmp_{}", text_id)),
+            gb,
+        );
+        let a_msb = lhs_bits.get_msb(0);
+        let b_msb = rhs_bits.get_msb(0);
+        let diff_msb = diff.get_msb(0);
+
+        // Compute sign_diff = a_msb XOR b_msb.
+        let sign_diff = gb.add_xor_binary(*a_msb, *b_msb);
+        // When the signs differ, a < b if a_msb is 1.
+        // When the signs are the same, a < b if diff's msb is 1.
+        let term1 = gb.add_and_binary(sign_diff, *a_msb);
+        let not_sign_diff = gb.add_not(sign_diff);
+        let term2 = gb.add_and_binary(not_sign_diff, *diff_msb);
+        let lt = gb.add_or_binary(term1, term2);
+        let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+        match cmp_kind {
+            CmpKind::Lt => {
+                if or_eq {
+                    gb.add_or_binary(lt, eq)
+                } else {
+                    lt
+                }
+            }
+            CmpKind::Gt => {
+                let lt_or_eq = gb.add_or_binary(lt, eq);
+                let gt = gb.add_not(lt_or_eq);
+                if or_eq {
+                    gb.add_or_binary(gt, eq)
+                } else {
+                    gt
+                }
+            }
+        }
+    }
 }
 
 fn gatify_sign_ext(
@@ -507,6 +683,147 @@ fn gatify_decode(
     AigBitVector::from_lsb_is_index_0(&outputs)
 }
 
+// Refactored gatify_shra function
+fn gatify_shra(
+    gb: &mut GateBuilder,
+    arg_bits: &AigBitVector,
+    amount_bits: &AigBitVector,
+    text_id: usize,
+) -> AigBitVector {
+    let input_bit_count = arg_bits.get_bit_count();
+
+    // The shift amount is given in its own bit width
+    let shift_amount_width = amount_bits.get_bit_count();
+
+    // Compute the required number of bits for a valid shift amount
+    let required_shift_bits = if input_bit_count > 1 {
+        (input_bit_count as f64).log2().ceil() as usize
+    } else {
+        1
+    };
+
+    // Get the MSB (sign bit) of the input
+    let msb = arg_bits.get_msb(0);
+
+    // First perform a logical right shift
+    let logical_shift = gatify_barrel_shifter(
+        &arg_bits,
+        &amount_bits,
+        Direction::Right,
+        &format!("shra_logical_{}", text_id),
+        gb,
+    );
+
+    // Computes the conditional mux bits used in both narrow and wide cases.
+    fn compute_shifted_bits(
+        gb: &mut GateBuilder,
+        msb: &AigOperand,
+        logical_shift: &AigBitVector,
+        input_bit_count: usize,
+        decode_len: usize,
+        decoded_amount: &AigBitVector,
+    ) -> Vec<AigOperand> {
+        let mut bits = Vec::with_capacity(input_bit_count);
+        for j in 0..input_bit_count {
+            let start_n = if input_bit_count > j {
+                input_bit_count - j
+            } else {
+                0
+            };
+            let mut cond_terms = Vec::new();
+            for n in start_n..decode_len {
+                cond_terms.push(decoded_amount.get_lsb(n).clone());
+            }
+            let condition = if cond_terms.is_empty() {
+                gb.get_false()
+            } else if cond_terms.len() == 1 {
+                cond_terms[0]
+            } else {
+                gb.add_or_nary(&cond_terms, ReductionKind::Tree)
+            };
+            let res_bit = gb.add_mux2(condition, *msb, *logical_shift.get_lsb(j));
+            bits.push(res_bit);
+        }
+        bits
+    }
+
+    if shift_amount_width <= required_shift_bits {
+        // Narrow case: use the full amount_bits
+        let decode_len = 1 << shift_amount_width;
+        let decoded_amount = gatify_decode(gb, decode_len, &amount_bits);
+        let result_bits = compute_shifted_bits(
+            gb,
+            msb,
+            &logical_shift,
+            input_bit_count,
+            decode_len,
+            &decoded_amount,
+        );
+        return AigBitVector::from_lsb_is_index_0(&result_bits);
+    }
+
+    // Applies the out-of-bounds mux on each bit
+    fn apply_out_of_bounds_mux(
+        gb: &mut GateBuilder,
+        input_bit_count: usize,
+        out_of_bounds: &AigOperand,
+        mask: &AigBitVector,
+        in_bound_result: &AigBitVector,
+    ) -> Vec<AigOperand> {
+        let mut bits = Vec::with_capacity(input_bit_count);
+        for j in 0..input_bit_count {
+            let final_bit = gb.add_mux2(
+                out_of_bounds.clone(),
+                *mask.get_lsb(j),
+                *in_bound_result.get_lsb(j),
+            );
+            bits.push(final_bit);
+        }
+        bits
+    }
+
+    // Wide case: use only the lower effective bits
+    let effective_shift_width = required_shift_bits;
+    let effective_decode_len = 1 << effective_shift_width;
+
+    // Extract the lower bits of amount_bits (effective shift amount)
+    let mut effective_amount_bits_vec = Vec::with_capacity(effective_shift_width);
+    for n in 0..effective_shift_width {
+        effective_amount_bits_vec.push(amount_bits.get_lsb(n).clone());
+    }
+    let effective_amount_bits = AigBitVector::from_lsb_is_index_0(&effective_amount_bits_vec);
+
+    // Compute out-of-bound condition from the higher bits
+    let mut high_amt_terms = Vec::new();
+    for n in effective_shift_width..shift_amount_width {
+        high_amt_terms.push(amount_bits.get_lsb(n).clone());
+    }
+    let out_of_bounds = if high_amt_terms.len() == 1 {
+        high_amt_terms[0].clone()
+    } else {
+        gb.add_or_nary(&high_amt_terms, ReductionKind::Tree)
+    };
+
+    let decoded_amount = gatify_decode(gb, effective_decode_len, &effective_amount_bits);
+    let in_bound_bits = compute_shifted_bits(
+        gb,
+        msb,
+        &logical_shift,
+        input_bit_count,
+        effective_decode_len,
+        &decoded_amount,
+    );
+    let in_bound_result = AigBitVector::from_lsb_is_index_0(&in_bound_bits);
+
+    // Create mask: replicate msb over the entire bit vector
+    let mask = AigBitVector::from_lsb_is_index_0(&vec![*msb; input_bit_count]);
+
+    // Final result: if out_of_bounds then select mask, else use in_bound_result
+    let final_bits =
+        apply_out_of_bounds_mux(gb, input_bit_count, &out_of_bounds, &mask, &in_bound_result);
+    AigBitVector::from_lsb_is_index_0(&final_bits)
+}
+
 /// Converts the contents of the given IR function to our "g8" representation
 /// which has gates and vectors of gates.
 fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) {
@@ -609,7 +926,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let cases: Vec<AigBitVector> = cases
                     .iter()
                     .map(|c| env.get_bit_vector(*c).expect("case should be present"))
-                    .collect();
+                    .collect::<Vec<AigBitVector>>();
                 let default_bits =
                     default.map(|d| env.get_bit_vector(d).expect("default should be present"));
 
@@ -757,6 +1074,64 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let b_bits = env.get_bit_vector(*b).expect("ule rhs should be present");
                 let gate = gatify_ule_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
                 g8_builder.add_tag(gate.node, format!("ule_{}", node.text_id));
+                env.add(node_ref, GateOrVec::Gate(gate));
+            }
+
+            // signed comparisons
+            ir::NodePayload::Binop(ir::Binop::Sgt, a, b) => {
+                let a_bits = env.get_bit_vector(*a).expect("sgt lhs should be present");
+                let b_bits = env.get_bit_vector(*b).expect("sgt rhs should be present");
+                let gate = gatify_scmp(
+                    g8_builder,
+                    node.text_id,
+                    &a_bits,
+                    &b_bits,
+                    CmpKind::Gt,
+                    false,
+                );
+                g8_builder.add_tag(gate.node, format!("sgt_{}", node.text_id));
+                env.add(node_ref, GateOrVec::Gate(gate));
+            }
+            ir::NodePayload::Binop(ir::Binop::Sge, a, b) => {
+                let a_bits = env.get_bit_vector(*a).expect("sge lhs should be present");
+                let b_bits = env.get_bit_vector(*b).expect("sge rhs should be present");
+                let gate = gatify_scmp(
+                    g8_builder,
+                    node.text_id,
+                    &a_bits,
+                    &b_bits,
+                    CmpKind::Gt,
+                    true,
+                );
+                g8_builder.add_tag(gate.node, format!("sge_{}", node.text_id));
+                env.add(node_ref, GateOrVec::Gate(gate));
+            }
+            ir::NodePayload::Binop(ir::Binop::Slt, a, b) => {
+                let a_bits = env.get_bit_vector(*a).expect("slt lhs should be present");
+                let b_bits = env.get_bit_vector(*b).expect("slt rhs should be present");
+                let gate = gatify_scmp(
+                    g8_builder,
+                    node.text_id,
+                    &a_bits,
+                    &b_bits,
+                    CmpKind::Lt,
+                    false,
+                );
+                g8_builder.add_tag(gate.node, format!("slt_{}", node.text_id));
+                env.add(node_ref, GateOrVec::Gate(gate));
+            }
+            ir::NodePayload::Binop(ir::Binop::Sle, a, b) => {
+                let a_bits = env.get_bit_vector(*a).expect("sle lhs should be present");
+                let b_bits = env.get_bit_vector(*b).expect("sle rhs should be present");
+                let gate = gatify_scmp(
+                    g8_builder,
+                    node.text_id,
+                    &a_bits,
+                    &b_bits,
+                    CmpKind::Lt,
+                    true,
+                );
+                g8_builder.add_tag(gate.node, format!("sle_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
             }
 
@@ -984,6 +1359,17 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 );
                 env.add(node_ref, GateOrVec::BitVector(result_gates));
             }
+            ir::NodePayload::Binop(ir::Binop::Shra, arg, amount) => {
+                let arg_gates = env
+                    .get_bit_vector(*arg)
+                    .expect("shra arg should be present");
+                let amount_gates = env
+                    .get_bit_vector(*amount)
+                    .expect("shra amount should be present");
+
+                let result = gatify_shra(g8_builder, &arg_gates, &amount_gates, node.text_id);
+                env.add(node_ref, GateOrVec::BitVector(result));
+            }
             ir::NodePayload::Binop(ir::Binop::Shll, arg, amount) => {
                 let arg_gates = env
                     .get_bit_vector(*arg)
@@ -1012,6 +1398,25 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                     );
                 }
                 env.add(node_ref, GateOrVec::BitVector(bit_vector));
+            }
+            ir::NodePayload::Binop(ir::Binop::Umul | ir::Binop::Smul, lhs, rhs) => {
+                let output_bit_count = node.ty.bit_count();
+                let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
+                let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
+                let signedness =
+                    if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smul, ..)) {
+                        Signedness::Signed
+                    } else {
+                        Signedness::Unsigned
+                    };
+                let gates = gatify_mul(
+                    &lhs_bits,
+                    &rhs_bits,
+                    output_bit_count,
+                    signedness,
+                    g8_builder,
+                );
+                env.add(node_ref, GateOrVec::BitVector(gates));
             }
             ir::NodePayload::Assert { .. }
             | ir::NodePayload::AfterAll(..)

@@ -113,6 +113,7 @@ pub enum Binop {
 
     Shll,
     Shrl,
+    Shra,
 
     ArrayConcat,
     Smulp,
@@ -126,23 +127,32 @@ pub enum Binop {
     Ult,
     Ule,
 
+    // signed comparisons
     Sgt,
     Sge,
     Slt,
     Sle,
+
     Umul,
-    Gate,
+    Smul,
+
     Sdiv,
+    Udiv,
+
+    Gate,
 }
 
 pub fn operator_to_binop(operator: &str) -> Option<Binop> {
     match operator {
+        // Shifts
         "shll" => Some(Binop::Shll),
         "shrl" => Some(Binop::Shrl),
-        "add" => Some(Binop::Add),
+        "shra" => Some(Binop::Shra),
+
         "array_concat" => Some(Binop::ArrayConcat),
         "smulp" => Some(Binop::Smulp),
         "umulp" => Some(Binop::Umulp),
+
         "eq" => Some(Binop::Eq),
         "ne" => Some(Binop::Ne),
         // signed comparisons
@@ -156,9 +166,12 @@ pub fn operator_to_binop(operator: &str) -> Option<Binop> {
         "ult" => Some(Binop::Ult),
         "ule" => Some(Binop::Ule),
         // arithmetic
+        "add" => Some(Binop::Add),
         "sub" => Some(Binop::Sub),
         "umul" => Some(Binop::Umul),
+        "smul" => Some(Binop::Smul),
         "sdiv" => Some(Binop::Sdiv),
+        "udiv" => Some(Binop::Udiv),
 
         // "special" operations
         "gate" => Some(Binop::Gate),
@@ -171,6 +184,7 @@ pub fn binop_to_operator(binop: Binop) -> &'static str {
         Binop::Add => "add",
         Binop::Shll => "shll",
         Binop::Shrl => "shrl",
+        Binop::Shra => "shra",
         Binop::ArrayConcat => "array_concat",
         Binop::Smulp => "smulp",
         Binop::Umulp => "umulp",
@@ -186,8 +200,10 @@ pub fn binop_to_operator(binop: Binop) -> &'static str {
         Binop::Sle => "sle",
         Binop::Sub => "sub",
         Binop::Umul => "umul",
+        Binop::Smul => "smul",
         Binop::Gate => "gate",
         Binop::Sdiv => "sdiv",
+        Binop::Udiv => "udiv",
     }
 }
 
@@ -870,6 +886,10 @@ impl Package {
             Some(name) => self.fns.iter_mut().find(|f| f.name == *name),
             None => self.fns.first_mut(),
         }
+    }
+
+    pub fn get_fn(&self, name: &str) -> Option<&Fn> {
+        self.fns.iter().find(|f| f.name == name)
     }
 }
 

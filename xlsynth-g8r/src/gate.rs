@@ -872,6 +872,14 @@ impl GateBuilder {
         args: &[AigOperand],
         reduction_kind: ReductionKind,
     ) -> AigOperand {
+        assert!(
+            args.len() > 0,
+            "add_or_nary; attempted to reduce an empty list of operands; reduction_kind: {:?}",
+            reduction_kind
+        );
+        if args.len() == 1 {
+            return args[0];
+        }
         if self.fold {
             if args.iter().any(|arg| self.is_known_true(*arg)) {
                 return self.get_true();

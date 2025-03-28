@@ -122,6 +122,13 @@
    ...
 }
 {
+   dslx_sized_type_keywords
+   Memcheck:Leak
+   ...
+   fun:_ZN3xls4dslx28GetSizedTypeKeywordsMetadataEv
+   ...
+}
+{
    dslx_scanner_keywords
    Memcheck:Leak
    match-leak-kinds: possible

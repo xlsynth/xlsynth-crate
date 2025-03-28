@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate;
+use crate::gate::{self, AigNode};
 use crate::use_count::get_id_to_use_count;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -11,8 +11,9 @@ pub struct SummaryStats {
     pub deepest_path: usize,
 }
 
-/// Returns a mapping that shows {depth: count} where the count is in number of
-/// gates.
+/// Returns:
+/// * a mapping that shows {depth: count} where the count is in number of gates.
+/// * the deepest path in the gate DAG
 pub fn get_gate_depth(
     gate_fn: &gate::GateFn,
     live_nodes: &[gate::AigRef],
@@ -26,14 +27,14 @@ pub fn get_gate_depth(
     for (gate_id, gate) in gate_fn.gates.iter().enumerate() {
         let gate_ref = gate::AigRef { id: gate_id };
         match gate {
-            &gate::AigNode::Input { .. } => {
+            &AigNode::Input { .. } => {
                 continue;
             }
-            &gate::AigNode::Literal(_) => {
+            &AigNode::Literal(_) => {
                 assert!(gate_ref.id < 2);
                 depths.insert(gate_ref, 0);
             }
-            &gate::AigNode::And2 { a, b, .. } => {
+            &AigNode::And2 { a, b, .. } => {
                 depths.insert(
                     gate_ref,
                     1 + std::cmp::max(depths.get(&a.node).unwrap(), depths.get(&b.node).unwrap()),
@@ -57,6 +58,11 @@ pub fn get_gate_depth(
         }
     }
 
+    if deepest_primary_output.is_none() {
+        // If there are no outputs for this function, its summary stats are trivial.
+        return (HashMap::new(), vec![]);
+    }
+
     log::info!("Deepest primary output: {:?}", deepest_primary_output);
 
     let mut deepest_path = vec![];
@@ -66,8 +72,8 @@ pub fn get_gate_depth(
     while let Some(gate_ref) = current_gate_ref {
         deepest_path.push(gate_ref);
         // Get whichever arg of this gate has the largest depth.
-        let gate: &gate::AigNode = &gate_fn.gates[gate_ref.id];
-        if let gate::AigNode::Input { .. } = gate {
+        let gate: &AigNode = &gate_fn.gates[gate_ref.id];
+        if matches!(gate, AigNode::Input { .. } | AigNode::Literal { .. }) {
             break;
         }
         let args: Vec<gate::AigRef> = gate.get_args();

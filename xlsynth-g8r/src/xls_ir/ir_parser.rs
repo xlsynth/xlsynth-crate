@@ -884,9 +884,9 @@ impl Parser {
                 self.maybe_drop_pos_attribute()?;
                 (ir::NodePayload::Literal(value), maybe_id.unwrap())
             }
-            "shll" | "shrl" | "add" | "sub" | "array_concat" | "smulp" | "umulp" | "umul"
-            | "sdiv" | "eq" | "ne" | "ugt" | "ult" | "uge" | "ule" | "sgt" | "slt" | "sge"
-            | "sle" | "gate" => {
+            "shll" | "shrl" | "shra" | "add" | "sub" | "array_concat" | "smulp" | "umulp"
+            | "umul" | "smul" | "sdiv" | "eq" | "ne" | "ugt" | "ult" | "uge" | "ule" | "sgt"
+            | "slt" | "sge" | "sle" | "gate" => {
                 let binop = ir::operator_to_binop(operator.as_str())
                     .expect(format!("operator {:?} should be known binop", operator).as_str());
                 let lhs = self.parse_node_ref(&node_env)?;
