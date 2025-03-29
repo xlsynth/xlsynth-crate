@@ -109,7 +109,6 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         _ => false,
     };
 
-    // Stub function for DSLX to IR conversion
     dslx2ir(
         input_path,
         top,

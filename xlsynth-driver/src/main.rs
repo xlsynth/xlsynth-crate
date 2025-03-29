@@ -42,6 +42,7 @@ mod ir2delayinfo;
 mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
+mod ir_ged;
 mod irequiv;
 mod toolchain_config;
 mod tools;
@@ -307,6 +308,33 @@ fn main() {
                 .add_ir_top_arg(false),
         )
         .subcommand(
+            clap::Command::new("ir-ged")
+                .about("Tells the Graph Edit Distance between two IR functions")
+                .arg(
+                    Arg::new("lhs_ir_file")
+                        .help("The left-hand side IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("rhs_ir_file")
+                        .help("The right-hand side IR file")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("lhs_ir_top")
+                        .long("lhs_ir_top")
+                        .help("The top-level entry point for the left-hand side IR"),
+                )
+                .arg(
+                    Arg::new("rhs_ir_top")
+                        .long("rhs_ir_top")
+                        .help("The top-level entry point for the right-hand side IR"),
+                )
+                .add_bool_arg("json", "Output in JSON format"),
+        )
+        .subcommand(
             clap::Command::new("ir2gates")
                 .about("Converts IR to gates")
                 .arg(
@@ -365,6 +393,8 @@ fn main() {
         ir2delayinfo::handle_ir2delayinfo(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("irequiv") {
         irequiv::handle_irequiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir-ged") {
+        ir_ged::handle_ir_ged(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
         ir2gates::handle_ir2gates(matches, &config);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
