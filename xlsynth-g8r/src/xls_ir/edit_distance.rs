@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Computes a graph edit distance between two XLS IR functions.
 
 use crate::xls_ir::ir::{binop_to_operator, nary_op_to_operator, unop_to_operator};
