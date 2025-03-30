@@ -310,6 +310,7 @@ pub enum NodePayload {
     ArrayIndex {
         array: NodeRef,
         indices: Vec<NodeRef>,
+        assumed_in_bounds: bool,
     },
     DynamicBitSlice {
         arg: NodeRef,
@@ -541,14 +542,19 @@ impl NodePayload {
                     .collect::<Vec<String>>()
                     .join(", ")
             ),
-            NodePayload::ArrayIndex { array, indices } => format!(
-                "array_index({}, indices=[{}])",
+            NodePayload::ArrayIndex {
+                array,
+                indices,
+                assumed_in_bounds,
+            } => format!(
+                "array_index({}, indices=[{}], assumed_in_bounds={})",
                 get_name(*array),
                 indices
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                assumed_in_bounds
             ),
             NodePayload::DynamicBitSlice { arg, start, width } => format!(
                 "dynamic_bit_slice({}, {}, {})",

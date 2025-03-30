@@ -594,6 +594,20 @@ fn do_smul(lhs: bits[{lhs_bits}], rhs: bits[{rhs_bits}]) -> bits[{output_bits}] 
     );
 }
 
+#[test_case(1, 2, false)]
+#[test_case(1, 2, true)]
+fn test_array_index_in_bounds_ir_to_gates(element_bits: u32, input_elements: u32, fold: bool) {
+    do_test_ir_conversion(
+        &format!(
+            "package sample
+fn do_array_index_in_bounds(arr: bits[{element_bits}][{input_elements}], index: bits[1]) -> bits[{element_bits}] {{
+    ret result: bits[{element_bits}] = array_index(arr, indices=[index], assumed_in_bounds=true, id=3)
+}}",
+        ),
+        fold,
+    );
+}
+
 fn gather_stats_for_widths(
     widths: &[usize],
     builder_fn: impl Fn(&mut GateBuilder, usize) -> (),

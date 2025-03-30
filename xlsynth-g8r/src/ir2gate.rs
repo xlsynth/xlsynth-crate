@@ -112,7 +112,20 @@ fn gatify_array_index(
     array_ty: &ir::ArrayTypeData,
     array_bits: &AigBitVector,
     index_bits: &AigBitVector,
+    assumed_in_bounds: bool,
 ) -> AigBitVector {
+    let element_bit_count = array_ty.element_type.bit_count();
+
+    if assumed_in_bounds {
+        let index_decoded = gatify_decode(gb, array_ty.element_count, index_bits);
+        let mut cases = Vec::new();
+        for i in (0..array_ty.element_count).rev() {
+            let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
+            cases.push(case_bits);
+        }
+        return gatify_one_hot_select(gb, &index_decoded, &cases);
+    }
+
     let array_element_count = array_ty.element_count;
     let index_decoded = gatify_decode(gb, array_element_count, index_bits);
     let oob = gb.add_ez(&index_decoded, ReductionKind::Tree);
@@ -120,7 +133,6 @@ fn gatify_array_index(
 
     // An array index selection is effectively a one hot selection of the elements
     // into a single element result.
-    let element_bit_count = array_ty.element_type.bit_count();
     let mut cases = Vec::new();
     for i in (0..array_element_count).rev() {
         let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
@@ -861,7 +873,11 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let entry = env.get_bit_vector(param_ir_node_ref).unwrap();
                 env.add(node_ref, GateOrVec::BitVector(entry));
             }
-            ir::NodePayload::ArrayIndex { array, indices } => {
+            ir::NodePayload::ArrayIndex {
+                array,
+                indices,
+                assumed_in_bounds,
+            } => {
                 if indices.len() != 1 {
                     todo!();
                 }
@@ -872,7 +888,13 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 };
                 let array_bits = env.get_bit_vector(*array).unwrap();
                 let index_bits = env.get_bit_vector(index).unwrap();
-                let result = gatify_array_index(g8_builder, array_ty, &array_bits, &index_bits);
+                let result = gatify_array_index(
+                    g8_builder,
+                    array_ty,
+                    &array_bits,
+                    &index_bits,
+                    *assumed_in_bounds,
+                );
                 env.add(node_ref, GateOrVec::BitVector(result));
             }
             ir::NodePayload::TupleIndex { tuple, index } => {
