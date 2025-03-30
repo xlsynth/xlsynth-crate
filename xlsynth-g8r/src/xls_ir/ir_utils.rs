@@ -33,7 +33,11 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             deps.extend(indices.iter().cloned());
             deps
         }
-        ArrayIndex { array, indices } => {
+        ArrayIndex {
+            array,
+            indices,
+            assumed_in_bounds: _,
+        } => {
             let mut deps = vec![*array];
             deps.extend(indices.iter().cloned());
             deps

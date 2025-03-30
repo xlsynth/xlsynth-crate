@@ -40,13 +40,14 @@ pub struct Options {
     pub emit_netlist: bool,
 }
 
+/// Command line entry point (e.g. it exits the process on error).
 pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryStats {
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
     let mut parser = ir_parser::Parser::new(&file_content);
     let ir_package = parser.parse_package().unwrap_or_else(|err| {
-        eprintln!("Error parsing package: {:?}", err);
+        eprintln!("Error encountered parsing XLS IR package: {:?}", err);
         std::process::exit(1);
     });
 
