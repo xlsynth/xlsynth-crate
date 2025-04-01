@@ -42,16 +42,17 @@ mod ir2delayinfo;
 mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
+mod ir_equiv;
 mod ir_ged;
-mod irequiv;
+mod report_cli_error;
 mod toolchain_config;
 mod tools;
 
 use crate::toolchain_config::ToolchainConfig;
 use clap;
 use clap::{Arg, ArgAction};
+use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
-use std::process;
 
 #[derive(Deserialize)]
 struct XlsynthToolchain {
@@ -291,7 +292,7 @@ fn main() {
                 ),
         )
         .subcommand(
-            clap::Command::new("irequiv")
+            clap::Command::new("ir-equiv")
                 .about("Checks if two IRs are equivalent")
                 .arg(
                     Arg::new("lhs_ir_file")
@@ -367,6 +368,19 @@ fn main() {
 
     let toml_value: Option<toml::Value> = toml_path.map(|path| {
         // If we got a toolchain toml file, read/parse it.
+        if !std::path::Path::new(&path).exists() {
+            report_cli_error_and_exit(
+                "toolchain toml file does not exist",
+                None,
+                vec![
+                    ("path", &path),
+                    (
+                        "working directory",
+                        &std::env::current_dir().unwrap().display().to_string(),
+                    ),
+                ],
+            );
+        }
         let toml_str =
             std::fs::read_to_string(path).expect("read toolchain toml file should succeed");
         toml::from_str(&toml_str).expect("parse toolchain toml file should succeed")
@@ -391,8 +405,8 @@ fn main() {
         dslx2sv_types::handle_dslx2sv_types(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2delayinfo") {
         ir2delayinfo::handle_ir2delayinfo(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("irequiv") {
-        irequiv::handle_irequiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir-equiv") {
+        ir_equiv::handle_ir_equiv(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-ged") {
         ir_ged::handle_ir_ged(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
@@ -400,7 +414,6 @@ fn main() {
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {
-        eprintln!("No valid subcommand provided.");
-        process::exit(1);
+        report_cli_error_and_exit("No valid subcommand provided.", None, vec![]);
     }
 }

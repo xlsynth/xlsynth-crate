@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Tests for invoking the xlsynth-driver CLI and its subcommands as a
+//! subprocess.
+
 use std::process::Command;
 
 use serde_json::Value;
@@ -567,7 +570,7 @@ fn my_main(x: bits[32]) -> bits[32] {
     let output = Command::new(command_path)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
-        .arg("irequiv")
+        .arg("ir-equiv")
         .arg(lhs_path.to_str().unwrap())
         .arg(rhs_path.to_str().unwrap())
         .arg("--top")
@@ -615,7 +618,7 @@ fn my_main(x: bits[32]) -> bits[32] {
     let output = Command::new(command_path)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
-        .arg("irequiv")
+        .arg("ir-equiv")
         .arg(lhs_path.to_str().unwrap())
         .arg(rhs_path.to_str().unwrap())
         .arg("--top")
@@ -625,8 +628,13 @@ fn my_main(x: bits[32]) -> bits[32] {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("retcode: {}", output.status);
     log::info!("stdout: {}", stdout);
     log::info!("stderr: {}", stderr);
+
+    // Check that the error code is non-zero.
+    assert!(!output.status.success());
+    assert!(stdout.is_empty());
     assert!(stderr.contains("NOT equivalent; results differ for input"));
 }
 
