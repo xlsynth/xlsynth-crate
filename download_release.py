@@ -133,7 +133,7 @@ def main():
     parser.add_option("-p", "--platform", dest="platform", help="Target platform (e.g., ubuntu2004, ubuntu2204, rocky8, arm64, x64)")
     parser.add_option("-d", "--dso", dest="dso", help="Download the DSO library", action="store_true", default=False)
     parser.add_option("--binaries", dest="binaries", help="Binaries to download, comma separated",
-                      default="dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main")
+                      default="dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main")
     parser.add_option('--max_attempts', dest='max_attempts', help='Maximum number of attempts to download', type='int', default=10)
 
     (options, args) = parser.parse_args()
