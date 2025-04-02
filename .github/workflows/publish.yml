@@ -112,11 +112,14 @@ jobs:
 
       - name: Bump version numbers
         if: success()
-        run: python bump_version_numbers.py bump
+        run: |
+          cargo clean
+          python bump_version_numbers.py bump
+          cargo generate-lockfile
+
       - name: Commit bumped version numbers
         if: success()
         run: |
-          cargo clean
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"
           git add $(find . -type f -name "Cargo.toml")

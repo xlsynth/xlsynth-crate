@@ -23,12 +23,25 @@ fn ir_equiv(
             }
             Err(output) => {
                 // Note: the details of the counterexample come on stdout, not stderr.
+                let mut message = String::from_utf8_lossy(&output.stdout);
+                if message.is_empty() {
+                    // Try for stderr if stdout was empty, e.g. in case of other kinds of errors.
+                    message = String::from_utf8_lossy(&output.stderr);
+                }
                 report_cli_error_and_exit(
-                    &format!("failure: {}", String::from_utf8_lossy(&output.stdout)),
+                    &format!("failure: {}", message),
                     Some(SUBCOMMAND),
                     vec![
                         ("lhs_ir_file", lhs.to_str().unwrap()),
                         ("rhs_ir_file", rhs.to_str().unwrap()),
+                        (
+                            "stdout",
+                            &format!("{:?}", String::from_utf8_lossy(&output.stdout)),
+                        ),
+                        (
+                            "stderr",
+                            &format!("{:?}", String::from_utf8_lossy(&output.stderr)),
+                        ),
                     ],
                 );
             }
