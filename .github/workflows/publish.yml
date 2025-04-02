@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: Publish to crates.io
+permissions:
+  contents: write
 
 on:
   push:
