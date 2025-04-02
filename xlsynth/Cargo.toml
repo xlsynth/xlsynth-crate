@@ -13,7 +13,7 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 readme = "../README.md"
 
 [dependencies]
-xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.107"}
+xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.108"}
 cargo_metadata = "0.18"
 log = "0.4"
 

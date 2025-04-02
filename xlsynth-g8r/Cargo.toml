@@ -10,7 +10,7 @@ documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.0.107" }
+xlsynth = { path = "../xlsynth", version = "0.0.108" }
 env_logger = "0.11"
 log = "0.4"
 clap = { version = "4.5.21", features = ["derive"] }
