@@ -74,7 +74,7 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          pip3 install requests
+          pip3 install -r requirements.txt
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
       - name: Download Slang
@@ -144,7 +144,7 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          pip3 install requests
+          pip3 install -r requirements.txt
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
       - name: Install protobuf compiler
@@ -216,7 +216,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           python3 -V  # Print the python3 version.
-          pip3 install --break-system-packages requests
+          pip3 install --break-system-packages -r requirements.txt
           python3 download_release.py -p arm64 -o xlsynth_tools
 
       - name: Install protobuf compiler
@@ -274,7 +274,7 @@ jobs:
         run: |
           dnf install -y python3 python3-pip
           python3 -V  # Print the python3 version.
-          pip3 install requests
+          pip3 install -r requirements.txt
           python3 download_release.py -p rocky8 -o xlsynth_tools
 
       - name: Install protobuf compiler
@@ -362,7 +362,7 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          pip3 install requests termcolor
+          pip3 install -r requirements.txt
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
       - name: Download Slang
