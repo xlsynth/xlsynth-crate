@@ -22,8 +22,15 @@ fn ir_equiv(
                 println!("success: {}", stdout);
             }
             Err(output) => {
-                eprintln!("failure: {}", String::from_utf8_lossy(&output.stdout));
-                std::process::exit(1);
+                // Note: the details of the counterexample come on stdout, not stderr.
+                report_cli_error_and_exit(
+                    &format!("failure: {}", String::from_utf8_lossy(&output.stdout)),
+                    Some(SUBCOMMAND),
+                    vec![
+                        ("lhs_ir_file", lhs.to_str().unwrap()),
+                        ("rhs_ir_file", rhs.to_str().unwrap()),
+                    ],
+                );
             }
         }
     } else {

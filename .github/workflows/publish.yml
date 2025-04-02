@@ -5,102 +5,126 @@ name: Publish to crates.io
 on:
   push:
     tags:
-      - 'v*' # This will trigger the workflow on version tags like v1.0.0, v0.1.0, etc.
+      - "v*" # This will trigger the workflow on version tags like v1.0.0, v0.1.0, etc.
 
 jobs:
   publish:
     runs-on: macos-latest
 
     steps:
-    - name: Check out code
-      uses: actions/checkout@v3
+      - name: Check out code
+        uses: actions/checkout@v3
 
-    - name: Validate version matches
-      run: |
-        # GITHUB_REF will be something like "refs/tags/v0.0.57"
-        # We'll strip off the "refs/tags/" part, leaving "v0.0.57".
-        VERSION="${GITHUB_REF#refs/tags/}"
-        
-        # Now invoke the Python script, passing the version.
-        python check_version_is.py "$VERSION"
+      - name: Check version numbers
+        run: python bump_version_numbers.py check
 
-    - name: Download xlsynth binaries
-      env:
-        GH_PAT: ${{ secrets.GH_PAT }}
-      run: |
-        python3 -V  # Print the python3 version.
-        pip3 install --break-system-packages requests
-        python3 download_release.py -p arm64 -o xlsynth_tools
+      - name: Verify commit privileges
+        run: |
+          repo=${{ github.repository }}
+          token=${{ secrets.GITHUB_TOKEN }}
+          response=$(curl -s -H "Authorization: token ${token}" https://api.github.com/repos/${repo})
+          if [ "$(echo "$response" | jq -r '.permissions.push')" != "true" ]; then
+            echo "Token does not have push privileges" && exit 1
+          fi
 
-    - name: Install protobuf compiler
-      run: |
-        wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
-        unzip protoc-29.1-osx-aarch_64.zip -d protoc
-        sudo mv protoc/bin/protoc /usr/local/bin/protoc
-        sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
-        sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
-        # Emit the protobuf compiler version number.
-        protoc --version
+      - name: Validate version matches
+        run: |
+          # GITHUB_REF will be something like "refs/tags/v0.0.57"
+          # We'll strip off the "refs/tags/" part, leaving "v0.0.57".
+          VERSION="${GITHUB_REF#refs/tags/}"
 
-    - name: Set up Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
+          # Now invoke the Python script, passing the version.
+          python check_version_is.py "$VERSION"
 
-    - name: Cache Cargo registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-registry-
+      - name: Download xlsynth binaries
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          python3 -V  # Print the python3 version.
+          pip3 install --break-system-packages requests
+          python3 download_release.py -p arm64 -o xlsynth_tools
 
-    - name: Cache Cargo index
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-index-
+      - name: Install protobuf compiler
+        run: |
+          wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
+          unzip protoc-29.1-osx-aarch_64.zip -d protoc
+          sudo mv protoc/bin/protoc /usr/local/bin/protoc
+          sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
+          sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
+          # Emit the protobuf compiler version number.
+          protoc --version
 
-    - name: Build and test
-      run: |
-        export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-        cargo test --workspace
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
 
-    - name: Publish xlsynth-sys to crates.io
-      env:
-        CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-      run: |
-        cd xlsynth-sys
-        cargo publish --token $CARGO_REGISTRY_TOKEN
+      - name: Cache Cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
 
-    - name: Wait for crates.io to update
-      run: sleep 20
+      - name: Cache Cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
 
-    - name: Publish xlsynth
-      env:
-        CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-      run: |
-        cd xlsynth
-        cargo publish --token $CARGO_REGISTRY_TOKEN
+      - name: Build and test
+        run: |
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
+          cargo test --workspace
 
-    - name: Wait for crates.io to update
-      run: sleep 20
+      - name: Publish xlsynth-sys to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cd xlsynth-sys
+          cargo publish --token $CARGO_REGISTRY_TOKEN
 
-    - name: Publish xlsynth-g8r
-      env:
-        CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-      run: |
-        cd xlsynth-g8r
-        cargo publish --token $CARGO_REGISTRY_TOKEN
+      - name: Wait for crates.io to update
+        run: sleep 20
 
-    - name: Wait for crates.io to update
-      run: sleep 20
+      - name: Publish xlsynth
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cd xlsynth
+          cargo publish --token $CARGO_REGISTRY_TOKEN
 
-    - name: Publish xlsynth-driver
-      env:
-        CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-      run: |
-        cd xlsynth-driver
-        cargo publish --token $CARGO_REGISTRY_TOKEN
+      - name: Wait for crates.io to update
+        run: sleep 20
+
+      - name: Publish xlsynth-g8r
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cd xlsynth-g8r
+          cargo publish --token $CARGO_REGISTRY_TOKEN
+
+      - name: Wait for crates.io to update
+        run: sleep 20
+
+      - name: Publish xlsynth-driver
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cd xlsynth-driver
+          cargo publish --token $CARGO_REGISTRY_TOKEN
+
+      - name: Bump version numbers
+        if: success()
+        run: python bump_version_numbers.py bump
+      - name: Commit bumped version numbers
+        if: success()
+        run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          git add $(find . -type f -name "Cargo.toml")
+          git commit -m "Bump version numbers after publish"
+          git push

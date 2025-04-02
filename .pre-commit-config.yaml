@@ -5,7 +5,7 @@ repos:
     rev: v5.0.0
     hooks:
       - id: no-commit-to-branch
-        args: ['--branch', 'main']
+        args: ["--branch", "main"]
   - repo: local
     hooks:
       - id: rustfmt
@@ -23,7 +23,14 @@ repos:
         additional_dependencies: ["mypy"]
         pass_filenames: false
 
+      - id: bump_version_check
+        name: bump version check
+        description: Verify that version bump in Cargo.toml files is consistent (simulation mode).
+        entry: python bump_version_numbers.py check
+        language: system
+        pass_filenames: false
+
   - repo: https://github.com/executablebooks/mdformat
-    rev: 0.7.17  # Use a version that supports Python 3.8
+    rev: 0.7.17 # Use a version that supports Python 3.8
     hooks:
-    - id: mdformat
+      - id: mdformat
