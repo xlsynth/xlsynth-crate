@@ -49,7 +49,7 @@ jobs:
   # 2) Build/test on Ubuntu 22.04 and 24.04
   # -----------------------------------------------------------
   build-and-test-ubuntu:
-    needs: [lint-check-ubuntu]  # Ensure lint checks pass first
+    needs: [lint-check-ubuntu] # Ensure lint checks pass first
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -290,9 +290,9 @@ jobs:
 
       - name: Set up dependencies
         run: |
-          yum install -y gcc openssl-devel libffi-devel make curl
-          yum install -y protobuf-compiler
-          yum install -y llvm-toolset
+          dnf install -y gcc openssl-devel libffi-devel make curl --nobest
+          dnf install -y protobuf-compiler
+          dnf install -y llvm-toolset
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env
