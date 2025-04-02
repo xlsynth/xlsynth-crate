@@ -738,7 +738,13 @@ fn my_main(x: bits[32]) -> bits[32] {
     // Check that the error code is non-zero.
     assert!(!output.status.success());
     assert!(stdout.is_empty());
-    assert!(stderr.contains("NOT equivalent; results differ for input"));
+    assert!(
+        stderr.contains(
+            "xlsynth-driver: ir-equiv: failure: Verified NOT equivalent; results differ for input"
+        ),
+        "stderr: {:?}",
+        stderr
+    );
 }
 
 #[test]

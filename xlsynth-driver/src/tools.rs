@@ -166,6 +166,8 @@ pub fn run_check_ir_equivalence_main(
 
     if !output.status.success() {
         log::info!("IR equivalence check failed with status: {}", output.status);
+        log::info!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        log::info!("stderr: {}", String::from_utf8_lossy(&output.stderr));
         return Err(output);
     }
 

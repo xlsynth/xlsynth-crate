@@ -12,7 +12,7 @@ pub fn report_cli_error_and_exit(
     } else {
         String::new()
     };
-    eprintln!("xlsynth-driver: {}{}", message.red().bold(), subcommand_str);
+    eprintln!("xlsynth-driver: {}{}", subcommand_str, message.red().bold());
     for (key, value) in details {
         eprintln!("  {}: {}", key, value);
     }
