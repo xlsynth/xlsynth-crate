@@ -9,7 +9,14 @@ import time
 from optparse import OptionParser
 
 GITHUB_API_URL = "https://api.github.com/repos/xlsynth/xlsynth/releases"
-SUPPORTED_PLATFORMS = ["ubuntu2004", "ubuntu2204", "rocky8", "arm64", "x64"]
+# TODO(cdleary): add releases that cover the intersections of architecture and OS
+SUPPORTED_PLATFORMS = {
+    "ubuntu2004": ".so",
+    "ubuntu2204": ".so",
+    "rocky8": ".so",
+    "arm64": ".dylib",  # implicitly MacOS
+    "x64": ".so",
+}
 
 def get_headers():
     """
@@ -123,10 +130,10 @@ def main():
     parser = OptionParser()
     parser.add_option("-v", "--version", dest="version", help="Specify release version (e.g., v0.0.0)")
     parser.add_option("-o", "--output", dest="output_dir", help="Output directory for artifacts")
-    parser.add_option("-p", "--platform", dest="platform", help="Target platform (e.g., ubuntu2004, rocky8)")
+    parser.add_option("-p", "--platform", dest="platform", help="Target platform (e.g., ubuntu2004, ubuntu2204, rocky8, arm64, x64)")
     parser.add_option("-d", "--dso", dest="dso", help="Download the DSO library", action="store_true", default=False)
     parser.add_option("--binaries", dest="binaries", help="Binaries to download, comma separated",
-                      default="dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main")
+                      default="dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main")
     parser.add_option('--max_attempts', dest='max_attempts', help='Maximum number of attempts to download', type='int', default=10)
 
     (options, args) = parser.parse_args()
@@ -138,7 +145,7 @@ def main():
         parser.error("output directory argument and -p/--platform flag are required.")
 
     if options.platform not in SUPPORTED_PLATFORMS:
-        parser.error(f"Unsupported platform '{options.platform}'. Supported platforms: {', '.join(SUPPORTED_PLATFORMS)}")
+        parser.error(f"Unsupported platform '{options.platform}'. Supported platforms: {', '.join(SUPPORTED_PLATFORMS.keys())}")
 
     version = options.version if options.version else get_latest_release(options.max_attempts)
     base_url = f"https://github.com/xlsynth/xlsynth/releases/download/{version}"
@@ -150,7 +157,8 @@ def main():
     ]
 
     if options.dso:
-        artifacts.append((f"libxls-{options.platform}.so", False))
+        # lib suffix (.so, .dylib, etc.) depends on the platform
+        artifacts.append((f"libxls-{options.platform}{SUPPORTED_PLATFORMS[options.platform]}", False))
 
     os.makedirs(options.output_dir, exist_ok=True)
 
