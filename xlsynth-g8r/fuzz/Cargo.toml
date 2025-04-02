@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-g8r-fuzz"
-version = "0.0.0"
+version = "0.0.108"
 publish = false
 edition = "2021"
 
