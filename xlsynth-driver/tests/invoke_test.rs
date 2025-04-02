@@ -407,6 +407,109 @@ disable_warnings = ["unused_definition", "empty_range_literal"]
     assert!(!stdout.contains("is not used in function"));
 }
 
+#[test]
+fn test_dslx2pipeline_with_reset_signal() {
+    let _ = env_logger::try_init();
+    log::info!("test_dslx2pipeline_with_reset_signal");
+
+    let dslx = "fn main(x: u32) -> u32 {
+        x + u32:1
+    }";
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let output = Command::new(command_path)
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--flop_inputs=true")
+        .arg("--flop_outputs=true")
+        .arg("--input_valid_signal=input_valid")
+        .arg("--output_valid_signal=output_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=true")
+        .arg("--reset_asynchronous=false")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
+    test_helpers::assert_valid_sv(&stdout);
+
+    assert_eq!(
+        stdout,
+        "module __my_module__main(
+  input wire clk,
+  input wire rst,
+  input wire input_valid,
+  input wire [31:0] x,
+  output wire output_valid,
+  output wire [31:0] out
+);
+  // ===== Pipe stage 0:
+  wire p0_load_en_comb;
+  assign p0_load_en_comb = input_valid | ~rst;
+
+  // Registers for pipe stage 0:
+  reg p0_valid;
+  reg [31:0] p0_x;
+  always @ (posedge clk) begin
+    p0_x <= p0_load_en_comb ? x : p0_x;
+  end
+  always @ (posedge clk) begin
+    if (!rst) begin
+      p0_valid <= 1'h0;
+    end else begin
+      p0_valid <= input_valid;
+    end
+  end
+
+  // ===== Pipe stage 1:
+  wire [31:0] p1_add_9_comb;
+  wire p1_load_en_comb;
+  assign p1_add_9_comb = p0_x + 32'h0000_0001;
+  assign p1_load_en_comb = p0_valid | ~rst;
+
+  // Registers for pipe stage 1:
+  reg p1_valid;
+  reg [31:0] p1_add_9;
+  always @ (posedge clk) begin
+    p1_add_9 <= p1_load_en_comb ? p1_add_9_comb : p1_add_9;
+  end
+  always @ (posedge clk) begin
+    if (!rst) begin
+      p1_valid <= 1'h0;
+    end else begin
+      p1_valid <= p0_valid;
+    end
+  end
+  assign output_valid = p1_valid;
+  assign out = p1_add_9;
+endmodule
+
+"
+    );
+}
+
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]
 fn test_ir2opt_subcommand(use_tool_path: bool) {

@@ -184,6 +184,14 @@ impl AppExt for clap::Command {
                 "use_system_verilog",
                 "Whether to emit System Verilog instead of Verilog",
             )
+            .arg(
+                Arg::new("reset")
+                    .long("reset")
+                    .value_name("RESET")
+                    .help("Reset signal name"),
+            )
+            .add_bool_arg("reset_asynchronous", "Reset is asynchronous")
+            .add_bool_arg("reset_active_low", "Reset is active low")
     }
 
     fn add_ir_top_arg(self, required: bool) -> Self {
