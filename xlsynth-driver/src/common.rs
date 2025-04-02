@@ -56,6 +56,13 @@ pub fn extract_codegen_flags(matches: &ArgMatches) -> CodegenFlags {
         separate_lines: matches
             .get_one::<String>("separate_lines")
             .map(|s| s == "true"),
+        reset: matches.get_one::<String>("reset").map(|s| s.to_string()),
+        reset_active_low: matches
+            .get_one::<String>("reset_active_low")
+            .map(|s| s == "true"),
+        reset_asynchronous: matches
+            .get_one::<String>("reset_asynchronous")
+            .map(|s| s == "true"),
     };
     result
 }
@@ -91,6 +98,15 @@ pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
     if let Some(separate_lines) = codegen_flags.separate_lines {
         pieces.push(format!("separate_lines: {separate_lines}"));
     }
+    if let Some(reset) = &codegen_flags.reset {
+        pieces.push(format!("reset: \"{reset}\""));
+    }
+    if let Some(reset_active_low) = codegen_flags.reset_active_low {
+        pieces.push(format!("reset_active_low: {reset_active_low}"));
+    }
+    if let Some(reset_asynchronous) = codegen_flags.reset_asynchronous {
+        pieces.push(format!("reset_asynchronous: {reset_asynchronous}"));
+    }
     pieces.join("\n")
 }
 
@@ -105,6 +121,9 @@ pub struct CodegenFlags {
     module_name: Option<String>,
     array_index_bounds_checking: Option<bool>,
     separate_lines: Option<bool>,
+    reset: Option<String>,
+    reset_active_low: Option<bool>,
+    reset_asynchronous: Option<bool>,
 }
 
 /// Adds the given code-generation flags to the command in command-line-arg
@@ -141,5 +160,14 @@ pub fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
     }
     if let Some(separate_lines) = codegen_flags.separate_lines {
         command.arg(format!("--separate_lines={separate_lines}"));
+    }
+    if let Some(reset) = &codegen_flags.reset {
+        command.arg(format!("--reset={reset}"));
+    }
+    if let Some(reset_active_low) = codegen_flags.reset_active_low {
+        command.arg(format!("--reset_active_low={reset_active_low}"));
+    }
+    if let Some(reset_asynchronous) = codegen_flags.reset_asynchronous {
+        command.arg(format!("--reset_asynchronous={reset_asynchronous}"));
     }
 }
