@@ -7,12 +7,15 @@ use std::path::{Path, PathBuf};
 
 fn check_spdx_identifier(file_path: &Path) -> bool {
     let filename = file_path.file_name().unwrap().to_str().unwrap();
-    let comment_prefix =
-        if filename.ends_with(".yml") || filename.ends_with(".yaml") || filename.ends_with(".py") {
-            "#"
-        } else {
-            "//"
-        };
+    let comment_prefix = if filename.ends_with(".yml")
+        || filename.ends_with(".yaml")
+        || filename.ends_with(".py")
+        || filename == "requirements.txt"
+    {
+        "#"
+    } else {
+        "//"
+    };
     let expect_shebang = filename.ends_with(".py");
     let expected_spdx_identifier = format!("{comment_prefix} SPDX-License-Identifier: Apache-2.0");
 
