@@ -23,7 +23,7 @@ jobs:
           repo=${{ github.repository }}
           token=${{ secrets.GITHUB_TOKEN }}
           response=$(curl -s -H "Authorization: token ${token}" https://api.github.com/repos/${repo})
-          if ! echo "$response" | grep -Eq '"push":\s*true'; then
+          if [ "$(echo "$response" | jq -r '.permissions.push')" != "true" ]; then
             echo "Token does not have push privileges" && exit 1
           fi
 
