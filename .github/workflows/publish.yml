@@ -121,4 +121,4 @@ jobs:
           git config user.email "xlsynth-github-actions@xlsynth.org"
           git add $(find . -type f -name "Cargo.toml")
           git commit -m "Bump version numbers after successful publish"
-          git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:${GITHUB_REF}
+          git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
