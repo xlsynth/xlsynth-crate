@@ -64,8 +64,8 @@ fn high_integrity_download(
 
     let filename = out_path.file_name().unwrap();
     let checksum_path = tmp_dir.join(format!("{}.sha256", filename.to_str().unwrap()));
-    println!(
-        "cargo:info=downloading checksum from {} to {}",
+    eprintln!(
+        "downloading checksum from {} to {}",
         checksum_url,
         checksum_path.display()
     );
@@ -74,16 +74,16 @@ fn high_integrity_download(
 
     let want_checksum_str = std::fs::read_to_string(&checksum_path)?;
     let want_checksum_str = want_checksum_str.split_whitespace().next().unwrap();
-    println!(
-        "cargo:info=want checksum for {} to be {}",
+    eprintln!(
+        "want checksum for {} to be {}",
         filename.to_str().unwrap(),
         want_checksum_str
     );
 
     // Download the URL with the file itself to the temp directory.
     let tmp_out_path = tmp_dir.join(filename);
-    println!(
-        "cargo:info=downloading file from {} to {}",
+    eprintln!(
+        "downloading file from {} to {}",
         url,
         tmp_out_path.display()
     );
@@ -98,8 +98,8 @@ fn high_integrity_download(
         .into());
     }
 
-    println!(
-        "cargo:info=downloaded file to {}; verifying checksum...",
+    eprintln!(
+        "downloaded file to {}; verifying checksum...",
         tmp_out_path.display()
     );
     let sha256 = sha2::Sha256::digest(std::fs::read(&tmp_out_path)?);
@@ -117,8 +117,8 @@ fn high_integrity_download(
 
     // Checksum matches expectation, now we can move the file to its target
     // destination.
-    println!(
-        "cargo:info=checksums match; copying file from {} to {}",
+    eprintln!(
+        "checksums match; copying file from {} to {}",
         tmp_out_path.display(),
         out_path.display()
     );
@@ -192,7 +192,7 @@ fn is_rocky() -> bool {
 
     // Check if the file exists
     if !os_release_path.exists() {
-        println!("cargo:info=OS release path does not exist");
+        eprintln!("OS release path does not exist");
         return false;
     }
 
@@ -209,9 +209,9 @@ fn is_rocky() -> bool {
                 }
             }
         }
-        println!("cargo:info=Did not find rocky ID line in OS release data");
+        eprintln!("Did not find rocky ID line in OS release data");
     } else {
-        println!("cargo:info=Could not open OS release data file");
+        eprintln!("Could not open OS release data file");
     }
 
     // Return false if `ID="rocky"` is not found
@@ -258,15 +258,12 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
 
     // Check if the DSO has already been downloaded
     if dso_path.exists() {
-        println!(
-            "cargo:info=DSO already downloaded to: {}",
-            dso_path.display()
-        );
+        eprintln!("DSO already downloaded to: {}", dso_path.display());
         return dso_info;
     }
 
-    println!(
-        "cargo:info=Downloading DSO from: {} to {}",
+    eprintln!(
+        "Downloading DSO from: {} to {}",
         dso_url,
         dso_path.display()
     );
@@ -277,7 +274,7 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
 
     if cfg!(target_os = "macos") {
         let dso_filename = dso_info.get_dso_filename();
-        println!("cargo:info=Fixing DSO id: to {}", dso_filename);
+        eprintln!("Fixing DSO id: to {}", dso_filename);
         // Fix the DSO id so it can be found via the rpath.
         let status = Command::new("install_name_tool")
             .arg("-id")
@@ -298,8 +295,8 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
     let stdlib_path =
         PathBuf::from(&out_dir).join(format!("dslx_stdlib_{}", RELEASE_LIB_VERSION_TAG));
     if stdlib_path.exists() {
-        println!(
-            "cargo:info=DSLX stdlib path already downloaded to: {}",
+        eprintln!(
+            "DSLX stdlib path already downloaded to: {}",
             stdlib_path.display()
         );
         return stdlib_path;
@@ -328,7 +325,7 @@ fn main() {
     }
 
     if std::env::var("XLS_DSO_PATH").is_ok() && std::env::var("DSLX_STDLIB_PATH").is_ok() {
-        println!("cargo:info=Using XLS_DSO_PATH and DSLX_STDLIB_PATH environment variables");
+        eprintln!("Using XLS_DSO_PATH and DSLX_STDLIB_PATH environment variables");
         let dso_path_string = std::env::var("XLS_DSO_PATH").unwrap();
         let dso_path = PathBuf::from(&dso_path_string);
         let dso_dir = dso_path.parent().unwrap();
@@ -396,8 +393,8 @@ fn main() {
         );
         std::fs::remove_file(&dso_dest).ok();
 
-        println!(
-            "cargo:info=Symlinking DSO from workspace; src: {} dst symlink: {}",
+        eprintln!(
+            "Symlinking DSO from workspace; src: {} dst symlink: {}",
             dso_path.display(),
             dso_dest.display()
         );
@@ -405,8 +402,8 @@ fn main() {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&dso_path, &dso_dest).unwrap();
 
-        println!(
-            "cargo:info=Using DSO from workspace; src: {} dst symlink: {}",
+        eprintln!(
+            "Using DSO from workspace; src: {} dst symlink: {}",
             dso_path.display(),
             dso_dest.display()
         );
