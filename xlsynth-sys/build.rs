@@ -317,6 +317,8 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
 }
 
 fn main() {
+    eprintln!("DANK Hello from build.rs stderr!");
+
     // Detect if building on docs.rs
     if std::env::var("DOCS_RS").is_ok() {
         println!("cargo:warning=Skipping dynamic library download on docs.rs");
