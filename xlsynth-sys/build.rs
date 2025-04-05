@@ -353,10 +353,8 @@ fn main() {
         return;
     }
 
-    let url_base = format!(
-        "https://github.com/xlsynth/xlsynth/releases/download/{}/",
-        RELEASE_LIB_VERSION_TAG
-    );
+    let url_base =
+        format!("https://github.com/xlsynth/xlsynth/releases/download/dank-experiment/",);
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
     // Ensure the out directory exists.
