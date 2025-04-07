@@ -897,6 +897,20 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 );
                 env.add(node_ref, GateOrVec::BitVector(result));
             }
+            ir::NodePayload::Array(members) => {
+                // Similar to Tuple: flatten all members into a bit vector.
+                // Arrays are conceptually homogeneous, but in bit flattening, we just
+                // concatenate all elements.
+                let mut lsb_to_msb = Vec::new();
+                for member in members.iter().rev() {
+                    let member_bits = env
+                        .get_bit_vector(*member)
+                        .expect("array element should be present");
+                    lsb_to_msb.extend(member_bits.iter_lsb_to_msb().cloned());
+                }
+                let bit_vector = AigBitVector::from_lsb_is_index_0(&lsb_to_msb);
+                env.add(node_ref, GateOrVec::BitVector(bit_vector));
+            }
             ir::NodePayload::TupleIndex { tuple, index } => {
                 // We have to figure out what bit range the index indicates from the original
                 // tuple's flat bits.

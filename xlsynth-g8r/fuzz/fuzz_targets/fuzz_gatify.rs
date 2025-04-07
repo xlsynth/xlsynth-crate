@@ -101,6 +101,9 @@ enum FuzzOp {
         cases: Vec<FuzzOperand>,
         default: FuzzOperand,
     },
+    Array {
+        elements: Vec<FuzzOperand>,
+    },
     ArrayIndex {
         array: FuzzOperand,
         index: FuzzOperand,
@@ -119,7 +122,8 @@ enum FuzzOp {
     },
 }
 
-/// Flattened opcode-only version of FuzzOp so we can ensure we select among all available ops when making an arbitrary op.
+/// Flattened opcode-only version of FuzzOp so we can ensure we select among all
+/// available ops when making an arbitrary op.
 #[derive(Debug, Clone, Arbitrary)]
 enum FuzzOpFlat {
     Literal,
@@ -132,6 +136,7 @@ enum FuzzOpFlat {
     Sel,
     PrioritySel,
     ArrayIndex,
+    Array,
     Decode,
     OneHotSel,
     UMul,
@@ -152,6 +157,7 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
         FuzzOp::Sel { .. } => FuzzOpFlat::Sel,
         FuzzOp::PrioritySel { .. } => FuzzOpFlat::PrioritySel,
         FuzzOp::ArrayIndex { .. } => FuzzOpFlat::ArrayIndex,
+        FuzzOp::Array { .. } => FuzzOpFlat::Array,
         FuzzOp::Decode { .. } => FuzzOpFlat::Decode,
         FuzzOp::OneHotSel { .. } => FuzzOpFlat::OneHotSel,
         FuzzOp::UMul { .. } => FuzzOpFlat::UMul,
@@ -303,6 +309,25 @@ fn generate_ir_fn(
                 let array = &available_nodes[(array.index as usize) % available_nodes.len()];
                 let index = &available_nodes[(index.index as usize) % available_nodes.len()];
                 let node = fn_builder.array_index(array, index, None);
+                available_nodes.push(node);
+            }
+            FuzzOp::Array { elements } => {
+                let elements: Vec<BValue> = elements
+                    .iter()
+                    .map(|idx| {
+                        available_nodes[(idx.index as usize) % available_nodes.len()].clone()
+                    })
+                    .collect::<Vec<_>>();
+                let element_type: Option<IrType> = fn_builder.get_type(&elements[0]);
+                if element_type.is_none() {
+                    return Err(XlsynthError(
+                        "no type available for array element BValue".to_string(),
+                    ));
+                }
+                let element_type_ref: &IrType = element_type.as_ref().unwrap();
+                let elements: &[BValue] = elements.as_slice();
+                let elements_refs = elements.iter().map(|e: &BValue| e).collect::<Vec<_>>();
+                let node = fn_builder.array(element_type_ref, &elements_refs, None);
                 available_nodes.push(node);
             }
             FuzzOp::Decode { arg, width } => {
@@ -467,6 +492,17 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                         array: FuzzOperand { index },
                         index: FuzzOperand { index },
                     });
+                }
+                FuzzOpFlat::Array => {
+                    // Array op: pick up to 8 elements to put in an array.
+                    let num_elements = u.int_in_range(1..=8)?;
+                    let mut elements: Vec<FuzzOperand> = Vec::with_capacity(num_elements as usize);
+                    for _ in 0..num_elements {
+                        elements.push(FuzzOperand {
+                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as u8,
+                        });
+                    }
+                    ops.push(FuzzOp::Array { elements });
                 }
                 FuzzOpFlat::UMul => {
                     // UMul op: sample two valid indices.
