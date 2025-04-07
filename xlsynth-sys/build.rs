@@ -231,7 +231,8 @@ fn get_dso_info() -> DsoInfo {
         ("macos", "x86_64") => "x64",
         ("macos", "aarch64") => "arm64",
         ("linux", "x86_64") => {
-            if is_rocky() {
+            if true {
+                // if is_rocky() {
                 "rocky8"
             } else {
                 "ubuntu2004"
