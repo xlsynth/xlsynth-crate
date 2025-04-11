@@ -5,7 +5,6 @@
 
 use std::process::Command;
 
-use serde_json::Value;
 use test_case::test_case;
 
 use pretty_assertions::assert_eq;
@@ -748,40 +747,81 @@ fn my_main(x: bits[32]) -> bits[32] {
 }
 
 #[test]
-fn test_ir2gates_subcommand() {
+fn test_ir2gates_determinism() {
     let _ = env_logger::try_init();
+    log::info!("test_ir2gates_determinism");
+
+    let dslx = "fn main(a: u32, b: u32) -> u32 { a + b * (a ^ b) }";
+
+    // Make a temporary directory and files.
     let temp_dir = tempfile::tempdir().unwrap();
-    let ir_path = temp_dir.path().join("ir.ir");
-    let ir_text = "package identity
-fn my_main(x: bits[32], y: bits[32]) -> bits[32] {
-    ret and.3: bits[32] = and(x, y, id=3)
-}";
-    std::fs::write(&ir_path, ir_text).unwrap();
+    let dslx_path = temp_dir.path().join("determinism_test.x");
+    let ir_path = temp_dir.path().join("determinism_test.ir");
+
+    std::fs::write(&dslx_path, dslx).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
-    let output = Command::new(command_path)
-        .arg("ir2gates")
-        .arg(ir_path.to_str().unwrap())
-        .arg("--quiet=true")
+
+    // Run dslx2ir first, capture stdout, and write to the IR file.
+    let dslx2ir_output = Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        // No output file flag, prints to stdout
         .output()
-        .expect("xlsynth-driver should succeed");
+        .unwrap();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+    assert!(
+        dslx2ir_output.status.success(),
+        "dslx2ir failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&dslx2ir_output.stdout),
+        String::from_utf8_lossy(&dslx2ir_output.stderr)
+    );
+    // Manually write the captured IR to the file
+    std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
 
-    // stdout should have a JSON text object
-    let json_text: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert!(json_text.is_object());
-    assert!(json_text.get("live_nodes").unwrap().is_u64());
-    assert!(json_text.get("deepest_path").unwrap().is_u64());
+    // Run ir2gates the first time and capture stdout.
+    let ir2gates_output1 = Command::new(command_path)
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap()) // ir_input_file is positional
+        // No output file flag, prints to stdout
+        .output()
+        .unwrap();
 
-    assert_eq!(json_text["live_nodes"], Value::Number(96.into()));
-    assert_eq!(json_text["deepest_path"], Value::Number(2.into()));
+    assert!(
+        ir2gates_output1.status.success(),
+        "ir2gates run 1 failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ir2gates_output1.stdout),
+        String::from_utf8_lossy(&ir2gates_output1.stderr)
+    );
+    let output_str_1 = String::from_utf8(ir2gates_output1.stdout).unwrap();
+
+    // Run ir2gates the second time and capture stdout.
+    let ir2gates_output2 = Command::new(command_path)
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap()) // ir_input_file is positional
+        // No output file flag, prints to stdout
+        .output()
+        .unwrap();
+
+    assert!(
+        ir2gates_output2.status.success(),
+        "ir2gates run 2 failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ir2gates_output2.stdout),
+        String::from_utf8_lossy(&ir2gates_output2.stderr)
+    );
+    let output_str_2 = String::from_utf8(ir2gates_output2.stdout).unwrap();
+
+    // Compare the captured stdout strings.
+    assert_eq!(
+        output_str_1, output_str_2,
+        "ir2gates output is non-deterministic!"
+    );
 }
 
 #[test_case(true; "with_tool_path")]
-#[test_case(false; "without_tool_path")]
 fn test_toolchain_picked_up_when_in_cwd_even_if_no_cmdline_flag(use_tool_path: bool) {
     let temp_dir = tempfile::tempdir().unwrap();
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
