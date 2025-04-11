@@ -27,7 +27,9 @@ fn print_op_freqs(ir_top: &ir::Fn) {
     let op_freqs = collect_op_frequencies(&ir_top);
     println!("Op frequencies:");
     let mut op_freqs_vec: Vec<_> = op_freqs.iter().collect();
-    op_freqs_vec.sort_by(|(_, a), (_, b)| b.cmp(a));
+    op_freqs_vec.sort_by(|(op_a, count_a), (op_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| op_a.cmp(op_b))
+    });
     for (op, freq) in op_freqs_vec.iter() {
         println!("  {:4} :: {}", freq, op);
     }
@@ -156,7 +158,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
         .iter()
         .map(|(s, c)| (s.clone(), *c))
         .collect::<Vec<_>>();
-    sorted_structures.sort_by(|(_s1, c1), (_s2, c2)| c2.cmp(c1));
+    sorted_structures.sort_by(|(s1, c1), (s2, c2)| c2.cmp(c1).then_with(|| s1.cmp(s2)));
     println!("== Structures:");
     for (structure, count) in sorted_structures[0..min(20, sorted_structures.len())].iter() {
         println!("{:3} :: {}", count, structure);
