@@ -92,7 +92,7 @@ library resides; e.g.
 
 ```shell
 $ export DEV_XLS_DSO_WORKSPACE=$HOME/proj/xlsynth/
-$ ls $DEV_XLS_DSO_WORKSPACE/bazel-bin/xls/public/libxls.so
+$ ls $DEV_XLS_DSO_WORKSPACE/bazel-bin/xls/public/libxls.* | egrep '(.dylib|.so)$'
 /home/cdleary/proj/xlsynth//bazel-bin/xls/public/libxls.so
 $ cargo clean  # Make sure we pick up the new env var.
 $ cargo test -vv |& grep -i "DSO from workspace"
@@ -103,12 +103,6 @@ Where in `~/proj/xlsynth/` (the root of the xlsynth workspace) we build the DSO 
 
 ```shell
 bazel build -c opt //xls/public:libxls.so
-```
-
-Note that on OS X you additionally will have to set:
-
-```shell
-export DYLD_LIBRARY_PATH=$HOME/proj/xlsynth/bazel-bin/xls/public/:$DYLD_LIBRARY_PATH
 ```
 
 ### Pre-Commit

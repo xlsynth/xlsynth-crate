@@ -380,9 +380,20 @@ fn main() {
             "bazel-bin/xls/public/libxls.so"
         };
         let dso_path = PathBuf::from(workspace).join(DSO_RELPATH);
-        let dso_info = DsoInfo {
-            extension: "so",
-            lib_suffix: "ubuntu2004",
+        let dso_info = if cfg!(target_os = "macos") {
+            DsoInfo {
+                extension: "dylib",
+                lib_suffix: if cfg!(target_arch = "x86_64") {
+                    "x64"
+                } else {
+                    "arm64"
+                },
+            }
+        } else {
+            DsoInfo {
+                extension: "so",
+                lib_suffix: "ubuntu2004",
+            }
         };
         let dso_filename = dso_info.get_dso_filename();
         let dso_dest = PathBuf::from(&out_dir).join(&dso_filename);
@@ -402,6 +413,20 @@ fn main() {
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&dso_path, &dso_dest).unwrap();
+
+        // Fix the DSO id so it can be found via the rpath (macOS only).
+        if cfg!(target_os = "macos") {
+            let dso_filename = dso_info.get_dso_filename();
+            let status = Command::new("install_name_tool")
+                .arg("-id")
+                .arg(format!("@rpath/{}", &dso_filename))
+                .arg(&dso_dest)
+                .status()
+                .expect("fixing DSO id should succeed");
+            if !status.success() {
+                panic!("Fixing DSO id failed with status: {:?}", status);
+            }
+        }
 
         println!(
             "cargo:info=Using DSO from workspace; src: {} dst symlink: {}",
