@@ -92,13 +92,15 @@ pub fn emit_netlist(name: &str, gate_fn: &gate::GateFn) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::gate_builder::GateBuilder;
+
     use super::*;
 
     use pretty_assertions::assert_eq;
 
     #[test]
     fn test_emit_inverter() {
-        let mut g8_builder = gate::GateBuilder::new("my_inverter".to_string(), false);
+        let mut g8_builder = GateBuilder::new("my_inverter".to_string(), false);
         let i_ref = g8_builder.add_input("i".to_string(), 1);
         assert_eq!(i_ref.get_bit_count(), 1);
         let gate_ref = g8_builder.add_not(*i_ref.get_lsb(0));
@@ -122,7 +124,7 @@ endmodule
 
     #[test]
     fn test_emit_and_gate() {
-        let mut g8_builder = gate::GateBuilder::new("my_and_gate".to_string(), false);
+        let mut g8_builder = GateBuilder::new("my_and_gate".to_string(), false);
         let i_ref = g8_builder.add_input("i".to_string(), 1);
         let j_ref = g8_builder.add_input("j".to_string(), 1);
         let gate_ref = g8_builder.add_and_binary(*i_ref.get_lsb(0), *j_ref.get_lsb(0));

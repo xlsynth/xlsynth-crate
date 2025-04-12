@@ -18,3 +18,4 @@ pub mod liberty;
 pub mod process_ir_path;
 pub mod use_count;
 pub mod xls_ir;
+pub mod gate_builder;

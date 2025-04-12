@@ -94,7 +94,7 @@ fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimResul
 
 #[cfg(test)]
 mod tests {
-    use crate::gate::GateBuilder;
+    use crate::gate_builder::GateBuilder;
 
     use super::*;
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateBuilder};
+use crate::gate::{AigNode, AigOperand, AigRef};
+use crate::gate_builder::GateBuilder;
 
 // Extracts the operands for an effective "or" pattern, i.e.
 // a | b => ~((~a) & (~b))

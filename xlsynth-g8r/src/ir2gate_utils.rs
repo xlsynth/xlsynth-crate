@@ -6,8 +6,8 @@
 //! * gatify_add_ripple_carry: instantiates a ripple-carry adder
 //! * gatify_barrel_shifter: instantiates a barrel shifter (logarithmic stages)
 
-use crate::gate::{self, AigBitVector, AigOperand, GateBuilder, ReductionKind};
-
+use crate::gate::{self, AigBitVector, AigOperand, ReductionKind};
+use crate::gate_builder::GateBuilder;
 /// Emits a carry-select adder for the given inputs.
 ///
 /// A carry-select adder specializes groups of bits on whether the carry-in to
@@ -20,7 +20,7 @@ pub fn gatify_add_carry_select(
     group_partitions: &[usize],
     mut c_in: gate::AigOperand,
     tag_prefix: &str,
-    g8_builder: &mut gate::GateBuilder,
+    g8_builder: &mut GateBuilder,
 ) -> (gate::AigOperand, gate::AigBitVector) {
     assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
     assert_eq!(group_partitions.iter().sum::<usize>(), lhs.get_bit_count());
@@ -74,7 +74,7 @@ pub fn gatify_add_ripple_carry(
     rhs: &AigBitVector,
     mut c_in: gate::AigOperand,
     tag_prefix: Option<&str>,
-    g8_builder: &mut gate::GateBuilder,
+    g8_builder: &mut GateBuilder,
 ) -> (gate::AigOperand, AigBitVector) {
     assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
     let mut gates = Vec::new();
@@ -317,7 +317,7 @@ mod tests {
     use test_case::test_case;
 
     fn make_ripple_carry(bits: usize) -> gate::GateFn {
-        let mut ripple_builder = gate::GateBuilder::new("ripple_carry".to_string(), false);
+        let mut ripple_builder = GateBuilder::new("ripple_carry".to_string(), false);
         let lhs = ripple_builder.add_input("lhs".to_string(), bits);
         let rhs = ripple_builder.add_input("rhs".to_string(), bits);
         let c_in = ripple_builder
@@ -332,7 +332,7 @@ mod tests {
     }
 
     fn make_carry_select(bits: usize, partitions: &[usize]) -> gate::GateFn {
-        let mut carry_select_builder = gate::GateBuilder::new("carry_select".to_string(), false);
+        let mut carry_select_builder = GateBuilder::new("carry_select".to_string(), false);
         let lhs = carry_select_builder.add_input("lhs".to_string(), bits);
         let rhs = carry_select_builder.add_input("rhs".to_string(), bits);
         let c_in = carry_select_builder

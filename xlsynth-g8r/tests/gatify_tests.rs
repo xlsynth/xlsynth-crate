@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use test_case::{test_case, test_matrix};
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::gate::GateBuilder;
+use xlsynth_g8r::gate_builder::GateBuilder;
 use xlsynth_g8r::get_summary_stats::{get_summary_stats, SummaryStats};
 use xlsynth_g8r::ir2gate::{gatify, gatify_ule_via_bit_tests, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::gatify_one_hot;

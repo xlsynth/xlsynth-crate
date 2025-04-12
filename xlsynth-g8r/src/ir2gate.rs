@@ -4,7 +4,8 @@
 //! `gatify`.
 
 use crate::check_equivalence;
-use crate::gate::{AigBitVector, AigOperand, GateBuilder, GateFn, ReductionKind};
+use crate::gate::{AigBitVector, AigOperand, GateFn, ReductionKind};
+use crate::gate_builder::GateBuilder;
 use crate::xls_ir::ir;
 use crate::xls_ir::ir::StartAndLimit;
 use crate::xls_ir::ir_utils;

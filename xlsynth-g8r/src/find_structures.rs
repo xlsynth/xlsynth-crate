@@ -73,8 +73,8 @@ pub fn find_structures(f: &GateFn) -> HashMap<String, usize> {
 
 #[cfg(test)]
 mod tests {
-    use crate::gate::{AigBitVector, GateBuilder};
-
+    use crate::gate::AigBitVector;
+    use crate::gate_builder::GateBuilder;
     use super::*;
 
     #[test]

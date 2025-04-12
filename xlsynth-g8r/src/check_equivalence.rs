@@ -105,7 +105,7 @@ pub fn validate_same_gate_fn(lhs: &gate::GateFn, rhs: &gate::GateFn) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use crate::{gate::AigBitVector, xls_ir::ir_parser};
+    use crate::{gate::AigBitVector, gate_builder::GateBuilder, xls_ir::ir_parser};
 
     use super::*;
 
@@ -121,7 +121,7 @@ top fn my_xor(a: bits[1], b: bits[1]) -> bits[1] {
         let ir_top = ir_package.get_top().unwrap();
 
         // Now we make a simple one bit gate fn.
-        let mut gate_builder = gate::GateBuilder::new("my_xor".to_string(), true);
+        let mut gate_builder = GateBuilder::new("my_xor".to_string(), true);
         let a = gate_builder
             .add_input("a".to_string(), 1)
             .get_lsb(0)
