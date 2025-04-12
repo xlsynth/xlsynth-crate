@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `GateBuilder` is a builder for a `GateFn` -- it builds up the underlying (AIG) data structure as operations are added.
-//! 
-//! It tracks `Input` and `Output` nodes which are bundles of "primary input" / "primary output" values.
-//! 
-//! It can be created with "folding" (opportunistic simplification) on or off -- "off" is generally useful for testing there are no issues in the simplification logic.
-//! 
+//! The `GateBuilder` is a builder for a `GateFn` -- it builds up the underlying
+//! (AIG) data structure as operations are added.
+//!
+//! It tracks `Input` and `Output` nodes which are bundles of "primary input" /
+//! "primary output" values.
+//!
+//! It can be created with "folding" (opportunistic simplification) on or off --
+//! "off" is generally useful for testing there are no issues in the
+//! simplification logic.
+//!
 //! Basic example usage:
 //! ```
 //! use xlsynth_g8r::gate_builder::GateBuilder;
 //! use xlsynth_g8r::gate::{GateFn, AigBitVector, AigOperand};
-//! 
+//!
 //! let mut builder = GateBuilder::new("my_and_gate".to_string(), false);
 //! let a: AigBitVector = builder.add_input("a".to_string(), 1);
 //! let a0: &AigOperand = a.get_lsb(0);
@@ -25,7 +29,10 @@ use std::iter::zip;
 
 use xlsynth::IrBits;
 
-use crate::{aig_simplify, gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, ReductionKind}};
+use crate::{
+    aig_simplify,
+    gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, ReductionKind},
+};
 
 pub struct GateBuilder {
     pub name: String,
@@ -662,7 +669,6 @@ impl GateBuilder {
                                                   // was different
     }
 }
-
 
 #[cfg(test)]
 mod tests {
