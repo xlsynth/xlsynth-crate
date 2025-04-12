@@ -10,6 +10,7 @@ mod emit_netlist;
 pub mod find_structures;
 pub mod gate;
 pub mod gate2ir;
+pub mod gate_builder;
 mod gate_sim;
 pub mod get_summary_stats;
 pub mod ir2gate;
