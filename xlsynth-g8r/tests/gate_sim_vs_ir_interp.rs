@@ -7,77 +7,10 @@
 
 use half::bf16;
 use rand::Rng;
-use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::gate_sim;
-use xlsynth_g8r::test_utils::load_bf16_mul_sample;
-
-const BF16_EXPONENT_BITS: usize = 8;
-const BF16_EXPONENT_MASK: usize = (1 << BF16_EXPONENT_BITS) - 1;
-const BF16_FRACTION_BITS: usize = 7;
-const BF16_FRACTION_MASK: usize = (1 << BF16_FRACTION_BITS) - 1;
-const BF16_TOTAL_BITS: usize = 16;
-
-fn make_bf16(value: bf16) -> IrValue {
-    let bits = value.to_bits();
-    let sign_val = (bits >> (BF16_EXPONENT_BITS + BF16_FRACTION_BITS)) & 1;
-    let exponent_val = (bits >> BF16_FRACTION_BITS) & (BF16_EXPONENT_MASK as u16);
-    let fraction_val = bits & (BF16_FRACTION_MASK as u16);
-
-    let sign = IrValue::bool(sign_val == 1);
-    let exponent = IrValue::make_ubits(BF16_EXPONENT_BITS as usize, exponent_val as u64).unwrap();
-    let fraction = IrValue::make_ubits(BF16_FRACTION_BITS as usize, fraction_val as u64).unwrap();
-    IrValue::make_tuple(&[sign, exponent, fraction])
-}
-
-// Convert a structured BF16 IrValue (sign, exponent, fraction) into a flat
-// IrBits.
-fn ir_value_bf16_to_flat_ir_bits(value: &IrValue) -> IrBits {
-    let tuple_elements = value.get_elements().unwrap();
-    let sign = tuple_elements[0].to_bool().unwrap();
-    let exponent = tuple_elements[1].to_u64().unwrap();
-    let fraction = tuple_elements[2].to_u64().unwrap();
-
-    let mut bits: u16 = 0;
-    if sign {
-        bits |= 1 << (BF16_EXPONENT_BITS + BF16_FRACTION_BITS);
-    }
-    bits |= (exponent as u16) << BF16_FRACTION_BITS;
-    bits |= fraction as u16;
-
-    IrBits::make_ubits(BF16_TOTAL_BITS as usize, bits as u64).unwrap()
-}
-
-// Convert flat IrBits into a structured BF16 IrValue (sign, exponent,
-// fraction).
-fn flat_ir_bits_to_ir_value_bf16(bits_value: &IrBits) -> IrValue {
-    assert_eq!(bits_value.get_bit_count(), BF16_TOTAL_BITS as usize);
-    let temp_value = IrValue::from_bits(bits_value);
-    let bits = temp_value.to_u64().unwrap() as u16;
-
-    let sign_bit = (bits >> (BF16_EXPONENT_BITS + BF16_FRACTION_BITS)) & 1;
-    let exponent_bits = (bits >> BF16_FRACTION_BITS) & (BF16_EXPONENT_MASK as u16);
-    let fraction_bits = bits & (BF16_FRACTION_MASK as u16);
-
-    let sign = IrValue::bool(sign_bit == 1);
-    let exponent = IrValue::make_ubits(BF16_EXPONENT_BITS as usize, exponent_bits as u64).unwrap();
-    let fraction = IrValue::make_ubits(BF16_FRACTION_BITS as usize, fraction_bits as u64).unwrap();
-
-    IrValue::make_tuple(&[sign, exponent, fraction])
-}
-
-#[test]
-fn test_make_bf16_one() {
-    let one = bf16::from_f32(1.0);
-    let ir_value = make_bf16(one);
-    assert_eq!(
-        ir_value,
-        IrValue::make_tuple(&[
-            IrValue::bool(false),                                  // sign
-            IrValue::make_ubits(BF16_EXPONENT_BITS, 127).unwrap(), // biased exponent
-            IrValue::make_ubits(BF16_FRACTION_BITS, 0).unwrap(),   // fraction
-        ])
-    );
-}
+use xlsynth_g8r::test_utils::{
+    flat_ir_bits_to_ir_value_bf16, ir_value_bf16_to_flat_ir_bits, load_bf16_mul_sample, make_bf16,
+};
 
 #[test]
 fn test_bf16_mul_zero_zero() {
