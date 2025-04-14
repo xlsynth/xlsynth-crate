@@ -36,15 +36,6 @@ fn do_test_ir_conversion_with_top(
     )
     .unwrap();
 
-    /*
-    // Push the zero value through the gate function and check it matches.
-    let input_zero = todo!();
-    let gate_outputs = gate_sim::eval(&gatify_output.gate_fn, input_zero);
-
-    let ir_outputs = ir_top.interpret(&[input_zero]);
-    assert_eq!(gate_outputs, ir_outputs);
-    */
-
     check_equivalence::validate_same_fn(&ir_fn, &gatify_output.gate_fn)
         .expect("should validate IR to gate function equivalence");
 
