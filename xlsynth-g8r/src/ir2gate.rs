@@ -1492,7 +1492,17 @@ pub struct GatifyOptions {
     pub check_equivalence: bool,
 }
 
-pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GateFn, String> {
+// Type alias for the lowering map
+pub type IrToGateMap = HashMap<ir::NodeRef, AigBitVector>;
+
+/// Holds the output of the `gatify` process.
+#[derive(Debug)]
+pub struct GatifyOutput {
+    pub gate_fn: GateFn,
+    pub lowering_map: IrToGateMap,
+}
+
+pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
     let mut g8_builder = GateBuilder::new(f.name.clone(), options.fold);
     let mut env = GateEnv::new();
     gatify_internal(f, &mut g8_builder, &mut env);
@@ -1502,11 +1512,98 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GateFn, String> {
         gate_fn.to_string()
     );
 
-    // If we're told we should do so, we check equivalance between the original IR
+    // Convert the internal GateEnv map to the public IrToGateMap
+    let mut lowering_map: IrToGateMap = HashMap::new();
+    for (node_ref, gate_or_vec) in env.ir_to_g8.into_iter() {
+        let bit_vector = match gate_or_vec {
+            GateOrVec::BitVector(bv) => bv,
+            GateOrVec::Gate(gate_ref) => AigBitVector::from_bit(gate_ref),
+        };
+        lowering_map.insert(node_ref, bit_vector);
+    }
+
+    // If we're told we should do so, we check equivalence between the original IR
     // function and the gate function that we converted it to.
     if options.check_equivalence {
         log::info!("checking equivalence of IR function and gate function...");
         check_equivalence::validate_same_fn(f, &gate_fn)?;
     }
-    Ok(gate_fn)
+    // Construct and return the GatifyOutput struct
+    Ok(GatifyOutput {
+        gate_fn,
+        lowering_map,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::xls_ir::ir;
+    use crate::{ir2gate::gatify, ir2gate::GatifyOptions, xls_ir::ir_parser};
+
+    #[test]
+    fn test_lowering_map_not_add() {
+        let ir_text = "package sample
+fn f(a: bits[8], b: bits[8]) -> bits[8] {
+  not.3: bits[8] = not(a, id=3)
+  ret add.4: bits[8] = add(not.3, b, id=4)
+}
+";
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_package().unwrap();
+        let ir_fn = ir_package.get_top().unwrap();
+
+        let gatify_output = gatify(
+            &ir_fn,
+            GatifyOptions {
+                fold: true,               // Folding shouldn't affect this test
+                check_equivalence: false, // Not needed for this map check
+            },
+        )
+        .unwrap();
+
+        let lowering_map = gatify_output.lowering_map;
+
+        // Find the 'Not' node and its input parameter reference within the IR function.
+        let mut not_node_ref: Option<ir::NodeRef> = None;
+        let mut param_ref: Option<ir::NodeRef> = None;
+
+        for (i, node) in ir_fn.nodes.iter().enumerate() {
+            if let ir::NodePayload::Unop(ir::Unop::Not, operand) = &node.payload {
+                not_node_ref = Some(ir::NodeRef { index: i });
+                param_ref = Some(*operand);
+                break; // Assuming only one 'Not' operation in this simple test
+                       // case
+            }
+        }
+
+        let not_ref = not_node_ref.expect("Could not find 'Not' node in IR function");
+        let param_ref = param_ref.expect("Could not find input parameter for 'Not' node");
+
+        // Retrieve AIG vectors from the map using the identified node references
+        let param_vec = lowering_map
+            .get(&param_ref)
+            .expect("Lowering for parameter node not found");
+        let not_vec = lowering_map
+            .get(&not_ref)
+            .expect("Lowering for 'Not' node not found");
+
+        assert_eq!(param_vec.get_bit_count(), 8, "Param should be 8 bits");
+        assert_eq!(not_vec.get_bit_count(), 8, "Node 'not' should be 8 bits");
+
+        // Verify that each bit in not_vec is the negation of the corresponding bit in
+        // param_vec
+        for i in 0..8 {
+            let param_op = param_vec.get_lsb(i);
+            let not_op = not_vec.get_lsb(i);
+
+            // The not operation should ideally result in operands pointing to the same
+            // underlying node but with opposite negation flags.
+            assert_eq!(param_op.node, not_op.node, "Bit {} nodes should match", i);
+            assert_ne!(
+                param_op.negated, not_op.negated,
+                "Bit {} negation flags should differ",
+                i
+            );
+        }
+    }
 }

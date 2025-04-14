@@ -26,6 +26,8 @@ libfuzzer-sys = "0.4"
 pretty_assertions = "1.4.1"
 regex = "1.5"
 cargo_metadata = "0.19.2"
+half = "2.6"
+rand = "0.8"
 
 [lib]
 name = "xlsynth_g8r"

@@ -22,7 +22,7 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
     let orig_package = parser.parse_package().unwrap();
     let orig_package_ir_text = orig_package.to_string();
     let orig_ir_fn = orig_package.get_top().unwrap();
-    let gate_fn = ir2gate::gatify(
+    let gatify_output = ir2gate::gatify(
         &orig_ir_fn,
         ir2gate::GatifyOptions {
             fold: true,
@@ -33,7 +33,8 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
 
     // Now we convert the gate_fn back to IR and check their equivalence.
     let gate_package =
-        gate2ir::gate_fn_to_xlsynth_ir(&gate_fn, "adder", &orig_ir_fn.get_type()).unwrap();
+        gate2ir::gate_fn_to_xlsynth_ir(&gatify_output.gate_fn, "adder", &orig_ir_fn.get_type())
+            .unwrap();
     let gate_package_ir_text = gate_package.to_string();
 
     let result = check_equivalence::check_equivalence(&orig_package_ir_text, &gate_package_ir_text);

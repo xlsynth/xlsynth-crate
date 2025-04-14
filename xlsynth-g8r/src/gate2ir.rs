@@ -295,7 +295,7 @@ top fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let mut parser = ir_parser::Parser::new(input_ir_text);
         let ir_package = parser.parse_package().unwrap();
         let ir_top = ir_package.get_top().unwrap();
-        let gate_fn = gatify(
+        let gatify_output = gatify(
             &ir_top,
             GatifyOptions {
                 fold: true,
@@ -303,7 +303,8 @@ top fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
             },
         )
         .unwrap();
-        let package = gate_fn_to_xlsynth_ir(&gate_fn, "sample", &ir_top.get_type()).unwrap();
+        let package =
+            gate_fn_to_xlsynth_ir(&gatify_output.gate_fn, "sample", &ir_top.get_type()).unwrap();
         assert_eq!(package.to_string(), input_ir_text);
     }
 
@@ -318,7 +319,7 @@ top fn do_not(a: bits[1] id=1) -> bits[1] {
         let mut parser = ir_parser::Parser::new(input_ir_text);
         let ir_package = parser.parse_package().unwrap();
         let ir_top = ir_package.get_top().unwrap();
-        let gate_fn = gatify(
+        let gatify_output = gatify(
             &ir_top,
             GatifyOptions {
                 fold: true,
@@ -326,7 +327,8 @@ top fn do_not(a: bits[1] id=1) -> bits[1] {
             },
         )
         .unwrap();
-        let package = gate_fn_to_xlsynth_ir(&gate_fn, "sample", &ir_top.get_type()).unwrap();
+        let package =
+            gate_fn_to_xlsynth_ir(&gatify_output.gate_fn, "sample", &ir_top.get_type()).unwrap();
         assert_eq!(package.to_string(), input_ir_text);
     }
 
@@ -343,7 +345,7 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let mut parser = ir_parser::Parser::new(input_ir_text);
         let ir_package = parser.parse_package().unwrap();
         let ir_top = ir_package.get_top().unwrap();
-        let gate_fn = gatify(
+        let gatify_output = gatify(
             &ir_top,
             GatifyOptions {
                 fold: true,
@@ -351,7 +353,8 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
             },
         )
         .unwrap();
-        let package = gate_fn_to_xlsynth_ir(&gate_fn, "sample", &ir_top.get_type()).unwrap();
+        let package =
+            gate_fn_to_xlsynth_ir(&gatify_output.gate_fn, "sample", &ir_top.get_type()).unwrap();
         let gate_fn_as_xls_ir = package.to_string();
         log::info!("gate_fn_as_xls_ir:\n{}", gate_fn_as_xls_ir);
         assert_eq!(gate_fn_as_xls_ir, input_ir_text);

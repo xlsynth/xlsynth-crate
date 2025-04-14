@@ -271,6 +271,7 @@ impl Output {
     }
 }
 
+#[derive(Debug)]
 pub struct GateFn {
     pub name: String,
     pub inputs: Vec<Input>,

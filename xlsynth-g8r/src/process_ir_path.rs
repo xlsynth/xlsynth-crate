@@ -67,36 +67,38 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
         print_op_freqs(&ir_top);
     }
 
-    let gate_fn = ir2gate::gatify(
+    // Gatify the IR function
+    let gatify_output = ir2gate::gatify(
         &ir_top,
         ir2gate::GatifyOptions {
             fold: options.fold,
-            // We check equivalence below if it was requested by the caller.
-            check_equivalence: false,
+            check_equivalence: false, // Check is done below if requested
         },
     )
     .unwrap();
+    let gate_fn = &gatify_output.gate_fn; // Extract GateFn reference
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
 
+    // Pass the extracted gate_fn reference to subsequent functions
     if options.check_equivalence {
         println!("== Checking equivalence...");
         let start = std::time::Instant::now();
-        let eq = check_equivalence::validate_same_fn(&ir_top, &gate_fn);
+        let eq = check_equivalence::validate_same_fn(&ir_top, gate_fn);
         let duration = start.elapsed();
         println!("Equivalence check took {:?}.", duration);
         println!("Equivalence: {:?}", eq);
     }
 
     if options.emit_netlist {
-        let netlist = emit_netlist::emit_netlist(&ir_top.name, &gate_fn);
+        let netlist = emit_netlist::emit_netlist(&ir_top.name, gate_fn);
         println!("{}", netlist);
     }
 
-    let id_to_use_count: HashMap<gate::AigRef, usize> = get_id_to_use_count(&gate_fn);
+    let id_to_use_count: HashMap<gate::AigRef, usize> = get_id_to_use_count(gate_fn);
     let live_nodes: Vec<gate::AigRef> = id_to_use_count.keys().cloned().collect();
 
-    let (depth_to_count, deepest_path) = get_gate_depth(&gate_fn, &live_nodes);
+    let (depth_to_count, deepest_path) = get_gate_depth(gate_fn, &live_nodes);
 
     let summary_stats = SummaryStats {
         live_nodes: live_nodes.len(),
@@ -109,6 +111,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
 
     println!("== Deepest path ({}):", deepest_path.len());
     for gate_ref in deepest_path.iter() {
+        // Access gates via the gate_fn reference
         let gate: &gate::AigNode = &gate_fn.gates[gate_ref.id];
         println!(
             "  {:4} :: {:?} :: uses: {}",
@@ -153,7 +156,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
 
     println!("== Live node count: {}", live_nodes.len());
 
-    let structure_to_count = find_structures::find_structures(&gate_fn);
+    let structure_to_count = find_structures::find_structures(gate_fn);
     let mut sorted_structures = structure_to_count
         .iter()
         .map(|(s, c)| (s.clone(), *c))

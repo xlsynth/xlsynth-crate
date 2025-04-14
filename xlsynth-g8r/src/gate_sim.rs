@@ -8,9 +8,23 @@ use xlsynth::IrBits;
 
 use crate::gate::{AigNode, AigOperand, GateFn};
 
-/// Creates an IrBits value from a slice where index 0 of the slice is the
-/// least significant bit.
-fn ir_bits_from_lsb_is_0(bits: &[bool]) -> IrBits {
+/// Converts a `&[bool]` slice into an IR `Bits` value.
+///
+/// ```
+/// use xlsynth::ir_value::IrFormatPreference;
+/// use xlsynth::IrBits;
+/// use xlsynth_g8r::gate_sim::ir_bits_from_lsb_is_0;
+///
+/// let bools = vec![true, false, true, false]; // LSB is bools[0]
+/// let ir_bits: IrBits = ir_bits_from_lsb_is_0(&bools);
+/// assert_eq!(ir_bits.to_string_fmt(IrFormatPreference::Binary, false), "0b101");
+/// assert_eq!(ir_bits.get_bit_count(), 4);
+/// assert_eq!(ir_bits.get_bit(0).unwrap(), true); // LSB
+/// assert_eq!(ir_bits.get_bit(1).unwrap(), false);
+/// assert_eq!(ir_bits.get_bit(2).unwrap(), true);
+/// assert_eq!(ir_bits.get_bit(3).unwrap(), false); // MSB
+/// ```
+pub fn ir_bits_from_lsb_is_0(bits: &[bool]) -> IrBits {
     assert!(bits.len() <= 64);
     let mut u64_value = 0;
     for (i, bit) in bits.iter().enumerate() {
@@ -21,13 +35,12 @@ fn ir_bits_from_lsb_is_0(bits: &[bool]) -> IrBits {
     IrBits::make_ubits(bits.len(), u64_value).unwrap()
 }
 
-#[derive(Debug)]
-struct GateSimResult {
-    outputs: Vec<IrBits>,
-    tagged_values: HashMap<String, bool>,
+pub struct GateSimResult {
+    pub outputs: Vec<IrBits>,
+    pub tagged_values: HashMap<String, bool>,
 }
 
-fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimResult {
+pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimResult {
     assert_eq!(inputs.len(), gate_fn.inputs.len());
 
     let mut env: HashMap<AigOperand, bool> = HashMap::new();
@@ -41,40 +54,66 @@ fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimResul
         }
     }
 
-    for operand in gate_fn.post_order(true).into_iter().rev() {
-        let value_no_negate: bool = match gate_fn.get(operand.node) {
+    // Traverse the AIG nodes in post-order. Post-order traversal ensures that
+    // when we visit a node, its children (inputs) have already been visited
+    // and their values computed and stored in the environment.
+    for operand in gate_fn.post_order(true) {
+        // Calculate the final boolean value for this specific operand
+        let final_value: bool = match gate_fn.get(operand.node) {
             AigNode::Input { .. } => {
+                // Get the base value seeded for the non-negated input operand
+                let base_operand = AigOperand {
+                    node: operand.node,
+                    negated: false,
+                };
+                let base_value = *env.get(&base_operand).expect(&format!(
+                    "Input base value should be seeded: {:?}",
+                    base_operand
+                ));
+                // Apply negation only if this operand requires it
                 if operand.negated {
-                    let non_negated = AigOperand {
-                        node: operand.node,
-                        negated: false,
-                    };
-                    !env.get(&non_negated).unwrap()
+                    !base_value
                 } else {
-                    *env.get(&operand).unwrap()
+                    base_value
                 }
             }
-            AigNode::Literal(value) => *value,
+            AigNode::Literal(value) => {
+                // Apply negation if the operand using the literal is negated
+                if operand.negated {
+                    !*value
+                } else {
+                    *value
+                }
+            }
             AigNode::And2 { a, b, tags } => {
-                let a_value = env.get(a).unwrap();
-                let b_value = env.get(b).unwrap();
-                let result = *a_value && *b_value;
+                // Get the final values already computed for the input operands
+                let a_value = *env.get(a).expect(&format!(
+                    "Input operand 'a' value not found for AND node: {:?}",
+                    a
+                ));
+                let b_value = *env.get(b).expect(&format!(
+                    "Input operand 'b' value not found for AND node: {:?}",
+                    b
+                ));
+                // Compute the AND result
+                let and_result = a_value && b_value;
                 if let Some(tags) = tags
                     && collect_tags
                 {
                     for tag in tags.iter() {
-                        tagged_values.insert(tag.clone(), result);
+                        tagged_values.insert(tag.clone(), and_result);
                     }
                 }
-                result
+                // Apply negation if the operand using the AND result is negated
+                if operand.negated {
+                    !and_result
+                } else {
+                    and_result
+                }
             }
         };
-        let value = if operand.negated {
-            !value_no_negate
-        } else {
-            value_no_negate
-        };
-        env.insert(operand, value);
+        // Store the correctly computed final value for this operand
+        env.insert(operand, final_value);
     }
 
     let mut outputs: Vec<IrBits> = Vec::new();
@@ -114,5 +153,75 @@ mod tests {
         ];
         let result = eval(&gate_fn, &inputs, false);
         assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b0001).unwrap()]);
+    }
+
+    #[test]
+    fn test_simple_bitwise_not() {
+        let mut gb = GateBuilder::new("simple_bitwise_not".to_string(), true);
+        let input_a = gb.add_input("a".to_string(), 4);
+        let not_node = gb.add_not_vec(&input_a);
+        gb.add_output("out".to_string(), not_node);
+        let gate_fn = gb.build();
+
+        // Test NOT(0b1010) -> 0b0101
+        let inputs = vec![IrBits::make_ubits(4, 0b1010).unwrap()];
+        let result = eval(&gate_fn, &inputs, false);
+        assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b0101).unwrap()]);
+    }
+
+    #[test]
+    fn test_simple_bitwise_nand() {
+        let mut gb = GateBuilder::new("simple_bitwise_nand".to_string(), true);
+        let input_a = gb.add_input("a".to_string(), 4);
+        let input_b = gb.add_input("b".to_string(), 4);
+        // NAND is NOT(AND(a, b))
+        let and_node = gb.add_and_vec(&input_a, &input_b);
+        let nand_node = gb.add_not_vec(&and_node);
+        gb.add_output("out".to_string(), nand_node);
+        let gate_fn = gb.build();
+
+        // Test NAND(0b0011, 0b0101) -> NOT(0b0001) -> 0b1110
+        let inputs = vec![
+            IrBits::make_ubits(4, 0b0011).unwrap(),
+            IrBits::make_ubits(4, 0b0101).unwrap(),
+        ];
+        let result = eval(&gate_fn, &inputs, false);
+        assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b1110).unwrap()]);
+    }
+
+    #[test]
+    fn test_simple_bitwise_or() {
+        let mut gb = GateBuilder::new("simple_bitwise_or".to_string(), true);
+        let input_a = gb.add_input("a".to_string(), 4);
+        let input_b = gb.add_input("b".to_string(), 4);
+        let or_node = gb.add_or_vec(&input_a, &input_b);
+        gb.add_output("out".to_string(), or_node);
+        let gate_fn = gb.build();
+
+        // Test OR(0b0011, 0b0101) -> 0b0111
+        let inputs = vec![
+            IrBits::make_ubits(4, 0b0011).unwrap(),
+            IrBits::make_ubits(4, 0b0101).unwrap(),
+        ];
+        let result = eval(&gate_fn, &inputs, false);
+        assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b0111).unwrap()]);
+    }
+
+    #[test]
+    fn test_simple_bitwise_xor() {
+        let mut gb = GateBuilder::new("simple_bitwise_xor".to_string(), true);
+        let input_a = gb.add_input("a".to_string(), 4);
+        let input_b = gb.add_input("b".to_string(), 4);
+        let xor_node = gb.add_xor_vec(&input_a, &input_b);
+        gb.add_output("out".to_string(), xor_node);
+        let gate_fn = gb.build();
+
+        // Test XOR(0b0011, 0b0101) -> 0b0110
+        let inputs = vec![
+            IrBits::make_ubits(4, 0b0011).unwrap(),
+            IrBits::make_ubits(4, 0b0101).unwrap(),
+        ];
+        let result = eval(&gate_fn, &inputs, false);
+        assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b0110).unwrap()]);
     }
 }
