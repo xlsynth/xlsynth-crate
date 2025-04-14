@@ -130,6 +130,16 @@ impl IrBits {
     }
 }
 
+impl Clone for IrBits {
+    fn clone(&self) -> Self {
+        // TODO(cdleary): 2025-04-14 Right now we don't have a direct clone API for
+        // IrBits. Adding one would make this more efficient.
+        let value = IrValue::from_bits(self);
+        let clone = value.clone();
+        clone.to_bits().unwrap()
+    }
+}
+
 impl Drop for IrBits {
     fn drop(&mut self) {
         unsafe { xlsynth_sys::xls_bits_free(self.ptr) }
