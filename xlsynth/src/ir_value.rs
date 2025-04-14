@@ -38,6 +38,7 @@ impl IrBits {
         xls_bits_to_debug_str(self.ptr)
     }
 
+    /// Note: index 0 is the least significant bit (LSb).
     pub fn get_bit(&self, index: usize) -> Result<bool, XlsynthError> {
         if self.get_bit_count() <= index {
             return Err(XlsynthError(format!(
