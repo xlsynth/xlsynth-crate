@@ -59,13 +59,16 @@ jobs:
     steps:
       - name: Install libc++ from llvm-18
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg lsb-release software-properties-common
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          # Install prerequisites for llvm.sh and libc++ installation
+          apt-get install -y --no-install-recommends wget gnupg lsb-release software-properties-common
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          ./llvm.sh 18
+          # Install libc++ itself
+          apt-get install -y --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Check out code
         uses: actions/checkout@v2
@@ -147,13 +150,16 @@ jobs:
 
       - name: Install libc++ from llvm-18
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y wget gnupg lsb-release software-properties-common
+          # Install prerequisites for llvm.sh and libc++ installation
+          apt-get install -y --no-install-recommends wget gnupg lsb-release software-properties-common
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           ./llvm.sh 18
-          apt-get install -y libc++-18-dev libc++abi-18-dev
+          # Install libc++ itself
+          apt-get install -y --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -336,13 +342,16 @@ jobs:
 
       - name: Install libc++ from llvm-18
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg lsb-release software-properties-common
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          # Install prerequisites for llvm.sh and libc++ installation
+          apt-get install -y --no-install-recommends wget gnupg lsb-release software-properties-common
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          ./llvm.sh 18
+          # Install libc++ itself
+          apt-get install -y --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Install valgrind
         run: |
