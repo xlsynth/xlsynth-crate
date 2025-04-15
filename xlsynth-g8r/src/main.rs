@@ -12,6 +12,12 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     fold: bool,
 
+    /// Whether to hash the AIG nodes.
+    #[arg(long, default_value = "true")]
+    #[arg(long, default_value_t = true)]
+    #[arg(action = clap::ArgAction::Set)]
+    hash: bool,
+
     /// Whether to check equivalence between the IR and the gate function.
     #[arg(long, default_value = "true")]
     #[arg(long, default_value_t = true)]
@@ -34,6 +40,7 @@ fn main() {
     let options = Options {
         check_equivalence: args.check_equivalence,
         fold: args.fold,
+        hash: args.hash,
         emit_netlist: args.emit_netlist,
         quiet: args.emit_netlist,
     };

@@ -8,6 +8,7 @@
 
 use crate::gate::{self, AigBitVector, AigOperand, ReductionKind};
 use crate::gate_builder::GateBuilder;
+
 /// Emits a carry-select adder for the given inputs.
 ///
 /// A carry-select adder specializes groups of bits on whether the carry-in to
@@ -309,6 +310,7 @@ mod tests {
     use crate::{
         check_equivalence,
         gate::AigBitVector,
+        gate_builder::GateBuilderOptions,
         ir2gate::{gatify_ule_via_adder, gatify_ule_via_bit_tests},
     };
 
@@ -317,7 +319,13 @@ mod tests {
     use test_case::test_case;
 
     fn make_ripple_carry(bits: usize) -> gate::GateFn {
-        let mut ripple_builder = GateBuilder::new("ripple_carry".to_string(), false);
+        let mut ripple_builder = GateBuilder::new(
+            "ripple_carry".to_string(),
+            GateBuilderOptions {
+                fold: false,
+                hash: false,
+            },
+        );
         let lhs = ripple_builder.add_input("lhs".to_string(), bits);
         let rhs = ripple_builder.add_input("rhs".to_string(), bits);
         let c_in = ripple_builder
@@ -332,7 +340,13 @@ mod tests {
     }
 
     fn make_carry_select(bits: usize, partitions: &[usize]) -> gate::GateFn {
-        let mut carry_select_builder = GateBuilder::new("carry_select".to_string(), false);
+        let mut carry_select_builder = GateBuilder::new(
+            "carry_select".to_string(),
+            GateBuilderOptions {
+                fold: false,
+                hash: false,
+            },
+        );
         let lhs = carry_select_builder.add_input("lhs".to_string(), bits);
         let rhs = carry_select_builder.add_input("rhs".to_string(), bits);
         let c_in = carry_select_builder
@@ -376,7 +390,13 @@ mod tests {
     #[test_case(8)]
     fn test_gatify_ule(bits: usize) {
         let via_adder = {
-            let mut builder = GateBuilder::new("ule_via_adder".to_string(), false);
+            let mut builder = GateBuilder::new(
+                "ule_via_adder".to_string(),
+                GateBuilderOptions {
+                    fold: false,
+                    hash: false,
+                },
+            );
             let lhs = builder.add_input("lhs".to_string(), bits);
             let rhs = builder.add_input("rhs".to_string(), bits);
             let result = gatify_ule_via_adder(&mut builder, 3, &lhs, &rhs);
@@ -384,7 +404,13 @@ mod tests {
             builder.build()
         };
         let via_bit_tests = {
-            let mut builder = GateBuilder::new("ule_via_bit_tests".to_string(), false);
+            let mut builder = GateBuilder::new(
+                "ule_via_bit_tests".to_string(),
+                GateBuilderOptions {
+                    fold: false,
+                    hash: false,
+                },
+            );
             let lhs = builder.add_input("lhs".to_string(), bits);
             let rhs = builder.add_input("rhs".to_string(), bits);
             let result = gatify_ule_via_bit_tests(&mut builder, 3, &lhs, &rhs);

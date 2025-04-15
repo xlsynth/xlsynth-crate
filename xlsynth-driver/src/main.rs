@@ -352,7 +352,9 @@ fn main() {
                         .required(true)
                         .index(1),
                 )
-                .add_bool_arg("quiet", "Quiet mode"),
+                .add_bool_arg("quiet", "Quiet mode")
+                .add_bool_arg("fold", "Fold the gate representation")
+                .add_bool_arg("hash", "Hash the gate representation"),
         )
         .get_matches();
 

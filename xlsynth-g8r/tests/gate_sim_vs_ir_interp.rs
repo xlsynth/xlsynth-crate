@@ -90,13 +90,16 @@ fn test_bf16_mul_random() {
 #[test]
 fn test_bf16_mul_g8r_stats() {
     let _ = env_logger::builder().is_test(true).try_init();
+    log::info!("loading bf16 mul sample");
     let loaded_sample = load_bf16_mul_sample();
     let gate_fn = &loaded_sample.gate_fn;
 
+    log::info!("getting id to use count");
     let id_to_use_count: HashMap<AigRef, usize> = get_id_to_use_count(gate_fn);
     let live_node_count = id_to_use_count.len();
-    assert_eq!(live_node_count, 1178, "Expected live node count");
+    assert_eq!(live_node_count, 1172, "Expected live node count");
 
+    log::info!("getting gate depth");
     let live_nodes: Vec<AigRef> = id_to_use_count.keys().cloned().collect();
     let (depth_map, _deepest_path_nodes) = get_gate_depth(gate_fn, &live_nodes);
     let max_depth = depth_map.keys().max().copied().unwrap_or(0);

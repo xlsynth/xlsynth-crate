@@ -580,6 +580,7 @@ fuzz_target!(|sample: FuzzSample| {
         &parsed_fn,
         xlsynth_g8r::ir2gate::GatifyOptions {
             fold: false,
+            hash: false,
             check_equivalence: true,
         },
     );
@@ -591,9 +592,11 @@ fuzz_target!(|sample: FuzzSample| {
         &parsed_fn,
         xlsynth_g8r::ir2gate::GatifyOptions {
             fold: true,
+            hash: true,
             check_equivalence: true,
         },
     );
 
     // If we got here the equivalence checks passed.
+    // Note: because of transitivity we know that also the unopt version is equivalent to the opt version.
 });

@@ -4,6 +4,7 @@
 #![feature(let_chains)]
 #![feature(custom_test_frameworks)]
 
+pub mod aig_hasher;
 mod aig_simplify;
 pub mod check_equivalence;
 mod emit_netlist;

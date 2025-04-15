@@ -5,7 +5,7 @@
 
 use crate::check_equivalence;
 use crate::gate::{AigBitVector, AigOperand, GateFn, ReductionKind};
-use crate::gate_builder::GateBuilder;
+use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::xls_ir::ir;
 use crate::xls_ir::ir::StartAndLimit;
 use crate::xls_ir::ir_utils;
@@ -1489,6 +1489,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
 
 pub struct GatifyOptions {
     pub fold: bool,
+    pub hash: bool,
     pub check_equivalence: bool,
 }
 
@@ -1503,7 +1504,13 @@ pub struct GatifyOutput {
 }
 
 pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
-    let mut g8_builder = GateBuilder::new(f.name.clone(), options.fold);
+    let mut g8_builder = GateBuilder::new(
+        f.name.clone(),
+        GateBuilderOptions {
+            fold: options.fold,
+            hash: options.hash,
+        },
+    );
     let mut env = GateEnv::new();
     gatify_internal(f, &mut g8_builder, &mut env);
     let gate_fn = g8_builder.build();
@@ -1557,6 +1564,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
             GatifyOptions {
                 fold: true,               // Folding shouldn't affect this test
                 check_equivalence: false, // Not needed for this map check
+                hash: true,
             },
         )
         .unwrap();
