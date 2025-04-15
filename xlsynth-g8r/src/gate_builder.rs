@@ -949,39 +949,71 @@ mod tests {
 
         let a_vec = builder.add_input("a".to_string(), 1);
         let b_vec = builder.add_input("b".to_string(), 1);
-        let a = a_vec.get_lsb(0);
-        let b = b_vec.get_lsb(0);
+        let a = *a_vec.get_lsb(0);
+        let b = *b_vec.get_lsb(0);
+        let not_a = builder.add_not(a);
+        let not_b = builder.add_not(b);
 
-        let ab = builder.add_and_binary(*a, *b);
-        let ba = builder.add_and_binary(*b, *a);
-
-        // With hashing enabled, the AigRef (node id) should be the same.
-        assert_eq!(
-            ab.node.id, ba.node.id,
-            "Expected AND(a, b) and AND(b, a) to have the same AigRef due to hashing"
-        );
-        // The operands themselves might differ in negation if folding were involved,
-        // but the underlying node reference should be identical here.
+        // Case 1: AND(a, b) vs AND(b, a)
+        let ab = builder.add_and_binary(a, b);
+        let ba = builder.add_and_binary(b, a);
+        assert_eq!(ab.node.id, ba.node.id, "AND(a, b) vs AND(b, a)");
         assert_eq!(ab, ba);
 
+        // Case 2: AND(a, !b) vs AND(!b, a)
+        let a_notb = builder.add_and_binary(a, not_b);
+        let notb_a = builder.add_and_binary(not_b, a);
+        assert_eq!(a_notb.node.id, notb_a.node.id, "AND(a, !b) vs AND(!b, a)");
+        assert_eq!(a_notb, notb_a);
+
+        // Case 3: AND(!a, b) vs AND(b, !a)
+        let nota_b = builder.add_and_binary(not_a, b);
+        let b_nota = builder.add_and_binary(b, not_a);
+        assert_eq!(nota_b.node.id, b_nota.node.id, "AND(!a, b) vs AND(b, !a)");
+        assert_eq!(nota_b, b_nota);
+
+        // Case 4: AND(!a, !b) vs AND(!b, !a)
+        let nota_notb = builder.add_and_binary(not_a, not_b);
+        let notb_nota = builder.add_and_binary(not_b, not_a);
+        assert_eq!(
+            nota_notb.node.id, notb_nota.node.id,
+            "AND(!a, !b) vs AND(!b, !a)"
+        );
+        assert_eq!(nota_notb, notb_nota);
+
         // Let's also build the GateFn and check the number of AND gates.
-        // Should be 1 literal (false), 2 inputs, 1 AND gate.
+        // Should be 1 literal (false), 2 inputs, and *4* distinct AND gates
+        // (ab/ba, a_notb/notb_a, nota_b/b_nota, nota_notb/notb_nota).
         builder.add_output("ab".to_string(), ab.into());
-        builder.add_output("ba".to_string(), ba.into());
+        builder.add_output("a_notb".to_string(), a_notb.into());
+        builder.add_output("nota_b".to_string(), nota_b.into());
+        builder.add_output("nota_notb".to_string(), nota_notb.into());
         let gate_fn = builder.build();
 
-        // Expected gates: Literal(false), Input(a), Input(b), And2(a, b)
+        // Expected gates: Literal(false), Input(a), Input(b), And(a,b), And(a,!b),
+        // And(!a,b), And(!a,!b)
         let stats: SummaryStats = get_summary_stats(&gate_fn);
-        assert_eq!(stats.live_nodes, 3);
+        assert_eq!(stats.live_nodes, 6);
         assert_eq!(stats.deepest_path, 2);
 
-        assert_eq!(
-            gate_fn.to_string(),
-            "fn test_simple_and_dedupe(a: bits[1] = [%1], b: bits[1] = [%2]) -> (ab: bits[1] = [%3], ba: bits[1] = [%3]) {
-  %3 = and(a[0], b[0])
-  ab[0] = %3
-  ba[0] = %3
-}"
+        // Note: The specific node IDs (%3, %4, %5, %6) might vary depending on hash
+        // implementation details, but the key is that the deduplicated outputs
+        // refer to the same underlying AND gate IDs.
+        let expected_str = format!(
+            "fn test_simple_and_dedupe(a: bits[1] = [%1], b: bits[1] = [%2]) -> (ab: bits[1] = [%{}], a_notb: bits[1] = [%{}], nota_b: bits[1] = [%{}], nota_notb: bits[1] = [%{}]) {{
+  %{} = and(a[0], b[0])
+  %{} = and(a[0], not(b[0]))
+  %{} = and(not(a[0]), b[0])
+  %{} = and(not(a[0]), not(b[0]))
+  ab[0] = %{}
+  a_notb[0] = %{}
+  nota_b[0] = %{}
+  nota_notb[0] = %{}
+}}",
+            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id,
+            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id,
+            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id
         );
+        assert_eq!(gate_fn.to_string(), expected_str);
     }
 }

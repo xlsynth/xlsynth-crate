@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Benchmarks for gatifying the bfloat16 multiply function with various options
+//! enabled.
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use xlsynth_g8r::{gate_builder::GateBuilderOptions, ir2gate, test_utils::load_bf16_mul_sample};
 
