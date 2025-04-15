@@ -60,7 +60,7 @@ jobs:
       - name: Install libc++ from llvm-18
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget gnupg lsb-release
+          sudo apt-get install -y wget gnupg lsb-release software-properties-common
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -148,7 +148,7 @@ jobs:
       - name: Install libc++ from llvm-18
         run: |
           apt-get update
-          apt-get install -y wget gnupg lsb-release
+          apt-get install -y wget gnupg lsb-release software-properties-common
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -337,7 +337,7 @@ jobs:
       - name: Install libc++ from llvm-18
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget gnupg lsb-release
+          sudo apt-get install -y wget gnupg lsb-release software-properties-common
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
