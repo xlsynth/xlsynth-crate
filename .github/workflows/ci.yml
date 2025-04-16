@@ -43,6 +43,10 @@ jobs:
           python3 -m pip install --upgrade pip
           pip3 install pre-commit
           # Configure git for pre-commit install
+          echo "Configuring git safe directory and user..."
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
           echo "--- Running Git Diagnostics ---"
           echo "Current directory:"
           pwd
@@ -53,9 +57,6 @@ jobs:
           echo "Git top level:"
           git rev-parse --show-toplevel
           echo "--- End Git Diagnostics ---"
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
           pre-commit install
 
       - name: Run pre-commit (which can include your rustfmt checks, etc.)
@@ -163,6 +164,10 @@ jobs:
           python3 -m pip install --upgrade pip
           pip3 install pre-commit
           # Configure git for pre-commit install
+          echo "Configuring git safe directory and user..."
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
           echo "--- Running Git Diagnostics ---"
           echo "Current directory:"
           pwd
@@ -173,9 +178,6 @@ jobs:
           echo "Git top level:"
           git rev-parse --show-toplevel
           echo "--- End Git Diagnostics ---"
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
           pre-commit install
 
       - name: Run pre-commit checks
