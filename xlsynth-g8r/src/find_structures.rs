@@ -75,12 +75,12 @@ pub fn find_structures(f: &GateFn) -> HashMap<String, usize> {
 mod tests {
     use super::*;
     use crate::gate::AigBitVector;
-    use crate::gate_builder::GateBuilder;
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     #[test]
     fn test_simple_two_ands() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let mut builder = GateBuilder::new("test_fn".to_string(), false);
+        let mut builder = GateBuilder::new("test_fn".to_string(), GateBuilderOptions::no_opt());
         let inputs = builder.add_input("in".to_string(), 3);
         let inputs0 = inputs.get_lsb(0);
         let inputs1 = inputs.get_lsb(1);

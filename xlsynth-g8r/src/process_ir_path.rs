@@ -38,6 +38,7 @@ fn print_op_freqs(ir_top: &ir::Fn) {
 pub struct Options {
     pub check_equivalence: bool,
     pub fold: bool,
+    pub hash: bool,
     pub quiet: bool,
     pub emit_netlist: bool,
 }
@@ -72,6 +73,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
         &ir_top,
         ir2gate::GatifyOptions {
             fold: options.fold,
+            hash: options.hash,
             check_equivalence: false, // Check is done below if requested
         },
     )

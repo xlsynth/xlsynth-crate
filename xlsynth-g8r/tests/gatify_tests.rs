@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use test_case::{test_case, test_matrix};
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::gate_builder::GateBuilder;
+use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::get_summary_stats::{get_summary_stats, SummaryStats};
 use xlsynth_g8r::ir2gate::{gatify, gatify_ule_via_bit_tests, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
@@ -18,6 +18,7 @@ use xlsynth_g8r::xls_ir::ir_parser;
 fn do_test_ir_conversion_with_top(
     ir_package_text: &str,
     fold: bool,
+    hash: bool,
     top_name: Option<&str>,
 ) -> SummaryStats {
     // Now we'll parse the IR and turn it into a gate function.
@@ -32,6 +33,7 @@ fn do_test_ir_conversion_with_top(
         GatifyOptions {
             fold,
             check_equivalence: false,
+            hash,
         },
     )
     .unwrap();
@@ -44,8 +46,10 @@ fn do_test_ir_conversion_with_top(
 
 /// Wrapper around `do_test_ir_conversion_with_top` that assumes the top
 /// function should be used.
-fn do_test_ir_conversion(ir_package_text: &str, fold: bool) -> SummaryStats {
-    do_test_ir_conversion_with_top(ir_package_text, fold, None)
+///
+/// `opt` specifies whether to use the optimizing `GateBuilderOptions` or not.
+fn do_test_ir_conversion(ir_package_text: &str, opt: bool) -> SummaryStats {
+    do_test_ir_conversion_with_top(ir_package_text, opt, opt, None)
 }
 
 #[test_case(1, false; "bit_count=1, fold=false")]
@@ -615,7 +619,7 @@ fn gather_stats_for_widths(
 ) -> HashMap<usize, SummaryStats> {
     let mut stats = HashMap::new();
     for width in widths {
-        let mut builder = GateBuilder::new(format!("op_{}_bits", width), true);
+        let mut builder = GateBuilder::new(format!("op_{}_bits", width), GateBuilderOptions::opt());
         builder_fn(&mut builder, *width);
         let gate_fn = builder.build();
         log::info!("gate_fn for width {}", width);
@@ -639,11 +643,11 @@ fn test_gatify_one_hot() {
         (1, SummaryStats { live_nodes: 1, deepest_path: 1 }),
         (2, SummaryStats { live_nodes: 4, deepest_path: 2 }),
         (3, SummaryStats { live_nodes: 8, deepest_path: 3 }),
-        (4, SummaryStats { live_nodes: 13, deepest_path: 4 }),
-        (5, SummaryStats { live_nodes: 19, deepest_path: 4 }),
-        (6, SummaryStats { live_nodes: 26, deepest_path: 5 }),
-        (7, SummaryStats { live_nodes: 34, deepest_path: 5 }),
-        (8, SummaryStats { live_nodes: 43, deepest_path: 5 }),
+        (4, SummaryStats { live_nodes: 12, deepest_path: 4 }),
+        (5, SummaryStats { live_nodes: 17, deepest_path: 4 }),
+        (6, SummaryStats { live_nodes: 22, deepest_path: 5 }),
+        (7, SummaryStats { live_nodes: 27, deepest_path: 5 }),
+        (8, SummaryStats { live_nodes: 32, deepest_path: 5 }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();
@@ -681,14 +685,14 @@ fn test_gatify_ule() {
     }
     #[rustfmt::skip]
     let want = &[
-        (1, SummaryStats { live_nodes: 7, deepest_path: 4 }),
-        (2, SummaryStats { live_nodes: 16, deepest_path: 6 }),
-        (3, SummaryStats { live_nodes: 26, deepest_path: 8 }),
-        (4, SummaryStats { live_nodes: 37, deepest_path: 9 }),
-        (5, SummaryStats { live_nodes: 49, deepest_path: 10 }),
-        (6, SummaryStats { live_nodes: 62, deepest_path: 11 }),
-        (7, SummaryStats { live_nodes: 76, deepest_path: 11 }),
-        (8, SummaryStats { live_nodes: 91, deepest_path: 11 }),
+        (1, SummaryStats { live_nodes: 6, deepest_path: 4 }),
+        (2, SummaryStats { live_nodes: 14, deepest_path: 6 }),
+        (3, SummaryStats { live_nodes: 22, deepest_path: 8 }),
+        (4, SummaryStats { live_nodes: 31, deepest_path: 9 }),
+        (5, SummaryStats { live_nodes: 40, deepest_path: 10 }),
+        (6, SummaryStats { live_nodes: 49, deepest_path: 11 }),
+        (7, SummaryStats { live_nodes: 59, deepest_path: 11 }),
+        (8, SummaryStats { live_nodes: 69, deepest_path: 11 }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();
@@ -726,7 +730,7 @@ fn bf16_mul(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
 
     let stats = do_test_ir_conversion(&optimized_ir_text, fold);
     if fold {
-        assert_eq!(stats.live_nodes, 1178);
+        assert_eq!(stats.live_nodes, 1172);
         assert_eq!(stats.deepest_path, 109);
     }
 }

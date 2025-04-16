@@ -27,6 +27,7 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
         ir2gate::GatifyOptions {
             fold: true,
             check_equivalence: true,
+            hash: true,
         },
     )
     .unwrap();

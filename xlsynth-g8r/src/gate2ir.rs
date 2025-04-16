@@ -300,6 +300,7 @@ top fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
             GatifyOptions {
                 fold: true,
                 check_equivalence: true,
+                hash: true,
             },
         )
         .unwrap();
@@ -324,6 +325,7 @@ top fn do_not(a: bits[1] id=1) -> bits[1] {
             GatifyOptions {
                 fold: true,
                 check_equivalence: true,
+                hash: true,
             },
         )
         .unwrap();
@@ -350,6 +352,7 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
             GatifyOptions {
                 fold: true,
                 check_equivalence: true,
+                hash: true,
             },
         )
         .unwrap();

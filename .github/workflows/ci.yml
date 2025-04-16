@@ -32,14 +32,37 @@ jobs:
 
       - name: Set up Python + pre-commit
         run: |
-          python -m pip install --upgrade pip
-          pip install pre-commit
+          cd ${GITHUB_WORKSPACE}
+          echo "Initializing git repository as a workaround for pre-commit"
+          if [ ! -d ".git" ]; then
+            echo ".git directory not found, initializing..."
+            git init
+          else
+            echo ".git directory found, skipping init."
+          fi
+          python3 -m pip install --upgrade pip
+          pip3 install pre-commit
+          # Configure git for pre-commit install
+          echo "Configuring git safe directory and user..."
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          echo "--- Running Git Diagnostics ---"
+          echo "Current directory:"
+          pwd
+          echo "Listing contents (including .git):"
+          ls -la
+          echo "Git status:"
+          git status
+          echo "Git top level:"
+          git rev-parse --show-toplevel
+          echo "--- End Git Diagnostics ---"
+          pre-commit install
 
       - name: Run pre-commit (which can include your rustfmt checks, etc.)
         env:
           SKIP: no-commit-to-branch
         run: |
-          pre-commit install
           pre-commit run --all-files
 
       - name: Run version check test
@@ -116,56 +139,82 @@ jobs:
   # -----------------------------------------------------------
   build-and-test-ubuntu-2004-no-slang:
     needs: [lint-check-ubuntu]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
 
     steps:
-      - name: Verify non-root user
-        run: |
-          if [ "$(id -u)" -eq 0 ]; then
-            echo "Script is running as root, which is not allowed."
-            exit 1
-          else
-            echo "Running as non-root user: $(whoami)"
-          fi
-
-      - name: Verify sudoers for current user
-        run: |
-          if sudo -l &> /dev/null; then
-            echo "User has sudo privileges."
-          else
-            echo "User does not have sudo privileges."
-            exit 1
-          fi
-
       - name: Check out code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
+      - name: Install dependencies for Python scripts and downloads
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-pip wget unzip git sudo build-essential pkg-config libssl-dev
+          pip3 install -r requirements.txt
+
+      - name: Set up Python + pre-commit
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          echo "Initializing git repository as a workaround for pre-commit"
+          if [ ! -d ".git" ]; then
+            echo ".git directory not found, initializing..."
+            git init
+          else
+            echo ".git directory found, skipping init."
+          fi
+          python3 -m pip install --upgrade pip
+          pip3 install pre-commit
+          # Configure git for pre-commit install
+          echo "Configuring git safe directory and user..."
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          echo "--- Running Git Diagnostics ---"
+          echo "Current directory:"
+          pwd
+          echo "Listing contents (including .git):"
+          ls -la
+          echo "Git status:"
+          git status
+          echo "Git top level:"
+          git rev-parse --show-toplevel
+          echo "--- End Git Diagnostics ---"
+          pre-commit install
+
+      - name: Run pre-commit checks
+        env:
+          SKIP: no-commit-to-branch
+        run: |
+          # Git config done in setup step
+          pre-commit run --all-files
 
       - name: Download xlsynth binaries
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          pip3 install -r requirements.txt
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
       - name: Install protobuf compiler
         run: |
           wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
           unzip protoc-29.1-linux-x86_64.zip -d protoc
-          sudo mv protoc/bin/protoc /usr/local/bin/protoc
-          sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
-          sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
-          # Emit the protobuf compiler version number.
+          mv protoc/bin/protoc /usr/local/bin/protoc
+          mv protoc /tmp/
+          mv protoc-*.zip /tmp/
           protoc --version
 
       - name: Install libc++ from llvm-18
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          # Install prerequisites for llvm.sh and libc++ installation
+          apt-get install -y --no-install-recommends wget gnupg lsb-release software-properties-common
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          ./llvm.sh 18
+          # Install libc++ itself
+          apt-get install -y --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -178,18 +227,6 @@ jobs:
         run: |
           rustfmt --version
           cargo --version
-
-      - name: Set up Python + pre-commit
-        run: |
-          python -m pip install --upgrade pip
-          pip install pre-commit
-
-      - name: Run pre-commit
-        env:
-          SKIP: no-commit-to-branch
-        run: |
-          pre-commit install
-          pre-commit run --all-files
 
       - name: Build crate
         run: cargo build --workspace -vv

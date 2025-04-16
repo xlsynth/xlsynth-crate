@@ -31,6 +31,14 @@ impl AigOperand {
             Some(self.node)
         }
     }
+
+    pub fn to_formula_string(&self, nodes: &[AigNode]) -> String {
+        if self.negated {
+            format!("not({})", nodes[self.node.id].to_formula_string(nodes))
+        } else {
+            nodes[self.node.id].to_formula_string(nodes)
+        }
+    }
 }
 
 impl From<AigRef> for AigOperand {
@@ -67,6 +75,18 @@ pub enum AigNode {
 }
 
 impl AigNode {
+    pub fn to_formula_string(&self, nodes: &[AigNode]) -> String {
+        match self {
+            AigNode::Input { name, lsb_index } => format!("{}[{}]", name, lsb_index),
+            AigNode::Literal(value) => format!("{}", value),
+            AigNode::And2 { a, b, .. } => format!(
+                "and({},{})",
+                a.to_formula_string(nodes),
+                b.to_formula_string(nodes)
+            ),
+        }
+    }
+
     pub fn get_operands(&self) -> Vec<AigOperand> {
         match self {
             AigNode::Input { .. } => vec![],

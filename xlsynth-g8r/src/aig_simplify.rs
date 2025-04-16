@@ -82,6 +82,8 @@ pub fn operand_simplify(aig_ref: AigRef, g8_builder: &mut GateBuilder) -> Option
 
 #[cfg(test)]
 mod tests {
+    use crate::gate_builder::GateBuilderOptions;
+
     use super::*;
 
     /// Tests that we simplify:
@@ -89,7 +91,7 @@ mod tests {
     #[test]
     fn test_aig_simplify_a_or_b_and_b() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let mut g8_builder = GateBuilder::new("test".to_string(), false);
+        let mut g8_builder = GateBuilder::new("test".to_string(), GateBuilderOptions::no_opt());
         let a = g8_builder.add_input("a".to_string(), 1);
         let b = g8_builder.add_input("b".to_string(), 1);
         let a0 = a.get_lsb(0);

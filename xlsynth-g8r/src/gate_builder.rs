@@ -12,10 +12,10 @@
 //!
 //! Basic example usage:
 //! ```
-//! use xlsynth_g8r::gate_builder::GateBuilder;
+//! use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 //! use xlsynth_g8r::gate::{GateFn, AigBitVector, AigOperand};
 //!
-//! let mut builder = GateBuilder::new("my_and_gate".to_string(), false);
+//! let mut builder = GateBuilder::new("my_and_gate".to_string(), GateBuilderOptions::opt());
 //! let a: AigBitVector = builder.add_input("a".to_string(), 1);
 //! let a0: &AigOperand = a.get_lsb(0);
 //! let b: AigBitVector = builder.add_input("b".to_string(), 1);
@@ -30,6 +30,7 @@ use std::iter::zip;
 use xlsynth::IrBits;
 
 use crate::{
+    aig_hasher::AigHasher,
     aig_simplify,
     gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, ReductionKind},
 };
@@ -39,17 +40,47 @@ pub struct GateBuilder {
     pub gates: Vec<AigNode>,
     pub inputs: Vec<Input>,
     pub outputs: Vec<Output>,
+    pub options: GateBuilderOptions,
+    pub hasher: Option<AigHasher>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GateBuilderOptions {
     pub fold: bool,
+    pub hash: bool,
+}
+
+impl GateBuilderOptions {
+    /// Returns a default "optimizing" `GateBuilderOptions` with folding and
+    /// hashing enabled.
+    pub fn opt() -> Self {
+        Self {
+            fold: true,
+            hash: true,
+        }
+    }
+
+    pub fn no_opt() -> Self {
+        Self {
+            fold: false,
+            hash: false,
+        }
+    }
 }
 
 impl GateBuilder {
-    pub fn new(name: String, fold: bool) -> Self {
+    pub fn new(name: String, options: GateBuilderOptions) -> Self {
         Self {
             name,
             gates: vec![AigNode::Literal(false)],
             inputs: Vec::new(),
             outputs: Vec::new(),
-            fold,
+            options,
+            hasher: if options.hash {
+                Some(AigHasher::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -125,7 +156,7 @@ impl GateBuilder {
     }
 
     pub fn add_and_binary(&mut self, lhs: AigOperand, rhs: AigOperand) -> AigOperand {
-        if self.fold {
+        if self.options.fold {
             // If either side is known false, the result is false.
             if self.is_known_false(lhs) || self.is_known_false(rhs) {
                 return self.get_false();
@@ -151,9 +182,15 @@ impl GateBuilder {
             id: self.gates.len(),
         };
         self.gates.push(gate);
-        if self.fold {
+        if self.options.fold {
             if let Some(simplified) = aig_simplify::operand_simplify(gate_ref, self) {
                 return simplified;
+            }
+        }
+        if let Some(hasher) = &mut self.hasher {
+            let existing = hasher.feed_ref(&gate_ref, &self.gates);
+            if let Some(existing) = existing {
+                return existing.into();
             }
         }
         AigOperand {
@@ -176,7 +213,7 @@ impl GateBuilder {
         if args.len() == 2 {
             return self.add_and_binary(args[0], args[1]);
         }
-        if self.fold {
+        if self.options.fold {
             if args.iter().any(|arg| self.is_known_false(*arg)) {
                 return self.get_false();
             }
@@ -259,7 +296,7 @@ impl GateBuilder {
     }
 
     pub fn add_not(&mut self, arg: AigOperand) -> AigOperand {
-        if self.fold {
+        if self.options.fold {
             if self.is_known_false(arg) {
                 return self.get_true();
             }
@@ -285,7 +322,7 @@ impl GateBuilder {
     }
 
     pub fn add_xor_binary(&mut self, lhs: AigOperand, rhs: AigOperand) -> AigOperand {
-        if self.fold {
+        if self.options.fold {
             // both sides known
             if self.is_known_true(lhs) && self.is_known_true(rhs) {
                 return self.get_false();
@@ -361,7 +398,7 @@ impl GateBuilder {
             return args[0];
         }
         let halves = args.split_at(args.len() / 2);
-        log::info!(
+        log::trace!(
             "tree_reduce; orig: {} lhs: {} rhs: {}",
             args.len(),
             halves.0.len(),
@@ -407,7 +444,7 @@ impl GateBuilder {
     }
 
     pub fn add_or_binary(&mut self, lhs: AigOperand, rhs: AigOperand) -> AigOperand {
-        if self.fold {
+        if self.options.fold {
             if self.is_known_true(lhs) || self.is_known_true(rhs) {
                 return self.get_true();
             }
@@ -442,7 +479,7 @@ impl GateBuilder {
         if args.len() == 1 {
             return args[0];
         }
-        if self.fold {
+        if self.options.fold {
             if args.iter().any(|arg| self.is_known_true(*arg)) {
                 return self.get_true();
             }
@@ -604,7 +641,7 @@ impl GateBuilder {
         on_true: AigOperand,
         on_false: AigOperand,
     ) -> AigOperand {
-        if self.fold {
+        if self.options.fold {
             if self.is_known_false(selector) {
                 return on_false;
             }
@@ -672,7 +709,10 @@ impl GateBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::check_equivalence;
+    use crate::{
+        check_equivalence,
+        get_summary_stats::{get_summary_stats, SummaryStats},
+    };
 
     use super::*;
 
@@ -681,7 +721,7 @@ mod tests {
 
     #[test]
     fn test_simple_and_to_string() {
-        let mut builder = GateBuilder::new("my_and".to_string(), false);
+        let mut builder = GateBuilder::new("my_and".to_string(), GateBuilderOptions::no_opt());
         let a = builder.add_input("a".to_string(), 1);
         let b = builder.add_input("b".to_string(), 1);
         let a0 = a.get_lsb(0);
@@ -700,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_one_bit_mux_vec() {
-        let mut builder = GateBuilder::new("my_mux".to_string(), false);
+        let mut builder = GateBuilder::new("my_mux".to_string(), GateBuilderOptions::no_opt());
         let selector = builder.add_input("selector".to_string(), 1);
         let on_true = builder.add_input("on_true".to_string(), 1);
         let on_false = builder.add_input("on_false".to_string(), 1);
@@ -731,7 +771,7 @@ mod tests {
     #[test]
     fn test_topo_simple_diamond() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let mut builder = GateBuilder::new("my_diamond".to_string(), false);
+        let mut builder = GateBuilder::new("my_diamond".to_string(), GateBuilderOptions::no_opt());
         let a = builder.add_input("a".to_string(), 1);
         let a0 = a.get_lsb(0);
         let b = builder.add_input("b".to_string(), 1);
@@ -778,7 +818,8 @@ mod tests {
     #[test]
     fn test_topo_with_negated_input() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let mut builder = GateBuilder::new("test_negated".to_string(), false);
+        let mut builder =
+            GateBuilder::new("test_negated".to_string(), GateBuilderOptions::no_opt());
 
         // Create a single input 'a'
         let a = builder.add_input("a".to_string(), 1);
@@ -813,7 +854,8 @@ mod tests {
 
     #[test]
     fn test_tree_reduce_and_3_wide() {
-        let mut builder = GateBuilder::new("test_tree_reduce".to_string(), false);
+        let mut builder =
+            GateBuilder::new("test_tree_reduce".to_string(), GateBuilderOptions::no_opt());
         let input = builder.add_input("input".to_string(), 3);
         let input_bits_vec: Vec<AigOperand> = input.iter_lsb_to_msb().map(|bit| *bit).collect();
         let result = builder.tree_reduce(&input_bits_vec, &GateBuilder::add_and_binary);
@@ -831,7 +873,8 @@ mod tests {
 
     #[test]
     fn test_tree_reduce_and_4_wide() {
-        let mut builder = GateBuilder::new("test_tree_reduce".to_string(), false);
+        let mut builder =
+            GateBuilder::new("test_tree_reduce".to_string(), GateBuilderOptions::no_opt());
         let input = builder.add_input("input".to_string(), 4);
         let input_bits_vec: Vec<AigOperand> = input.iter_lsb_to_msb().map(|bit| *bit).collect();
         let result = builder.tree_reduce(&input_bits_vec, &GateBuilder::add_and_binary);
@@ -859,7 +902,8 @@ mod tests {
     fn test_tree_reduce_eq_linear_reduce(bits: usize) {
         let _ = env_logger::builder().is_test(true).try_init();
         let gate_fn_tree = {
-            let mut builder = GateBuilder::new("tree_reduce".to_string(), false);
+            let mut builder =
+                GateBuilder::new("tree_reduce".to_string(), GateBuilderOptions::no_opt());
             let input = builder.add_input("input".to_string(), bits);
             let input_bits_vec: Vec<AigOperand> = input.iter_lsb_to_msb().map(|bit| *bit).collect();
             let result_tree = builder.tree_reduce(&input_bits_vec, &GateBuilder::add_and_binary);
@@ -867,7 +911,8 @@ mod tests {
             builder.build()
         };
         let gate_fn_linear = {
-            let mut builder = GateBuilder::new("linear_reduce".to_string(), false);
+            let mut builder =
+                GateBuilder::new("linear_reduce".to_string(), GateBuilderOptions::no_opt());
             let input = builder.add_input("input".to_string(), bits);
             let input_bits_vec: Vec<AigOperand> = input.iter_lsb_to_msb().map(|bit| *bit).collect();
             let result_linear =
@@ -881,12 +926,94 @@ mod tests {
 
     #[test]
     fn test_get_msbs() {
-        let mut builder = GateBuilder::new("test_get_msbs".to_string(), false);
+        let mut builder =
+            GateBuilder::new("test_get_msbs".to_string(), GateBuilderOptions::no_opt());
         let input = builder.add_input("input".to_string(), 4);
         let msb_slice = input.get_msbs(3);
         assert_eq!(msb_slice.get_bit_count(), 3);
         assert_eq!(msb_slice.get_lsb(0), input.get_lsb(1));
         assert_eq!(msb_slice.get_lsb(1), input.get_lsb(2));
         assert_eq!(msb_slice.get_lsb(2), input.get_lsb(3));
+    }
+
+    #[test]
+    fn test_simple_and_dedupe() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut builder = GateBuilder::new(
+            "test_simple_and_dedupe".to_string(),
+            GateBuilderOptions {
+                fold: false, // Keep folding off to isolate hashing effect
+                hash: true,
+            },
+        );
+
+        let a_vec = builder.add_input("a".to_string(), 1);
+        let b_vec = builder.add_input("b".to_string(), 1);
+        let a = *a_vec.get_lsb(0);
+        let b = *b_vec.get_lsb(0);
+        let not_a = builder.add_not(a);
+        let not_b = builder.add_not(b);
+
+        // Case 1: AND(a, b) vs AND(b, a)
+        let ab = builder.add_and_binary(a, b);
+        let ba = builder.add_and_binary(b, a);
+        assert_eq!(ab.node.id, ba.node.id, "AND(a, b) vs AND(b, a)");
+        assert_eq!(ab, ba);
+
+        // Case 2: AND(a, !b) vs AND(!b, a)
+        let a_notb = builder.add_and_binary(a, not_b);
+        let notb_a = builder.add_and_binary(not_b, a);
+        assert_eq!(a_notb.node.id, notb_a.node.id, "AND(a, !b) vs AND(!b, a)");
+        assert_eq!(a_notb, notb_a);
+
+        // Case 3: AND(!a, b) vs AND(b, !a)
+        let nota_b = builder.add_and_binary(not_a, b);
+        let b_nota = builder.add_and_binary(b, not_a);
+        assert_eq!(nota_b.node.id, b_nota.node.id, "AND(!a, b) vs AND(b, !a)");
+        assert_eq!(nota_b, b_nota);
+
+        // Case 4: AND(!a, !b) vs AND(!b, !a)
+        let nota_notb = builder.add_and_binary(not_a, not_b);
+        let notb_nota = builder.add_and_binary(not_b, not_a);
+        assert_eq!(
+            nota_notb.node.id, notb_nota.node.id,
+            "AND(!a, !b) vs AND(!b, !a)"
+        );
+        assert_eq!(nota_notb, notb_nota);
+
+        // Let's also build the GateFn and check the number of AND gates.
+        // Should be 1 literal (false), 2 inputs, and *4* distinct AND gates
+        // (ab/ba, a_notb/notb_a, nota_b/b_nota, nota_notb/notb_nota).
+        builder.add_output("ab".to_string(), ab.into());
+        builder.add_output("a_notb".to_string(), a_notb.into());
+        builder.add_output("nota_b".to_string(), nota_b.into());
+        builder.add_output("nota_notb".to_string(), nota_notb.into());
+        let gate_fn = builder.build();
+
+        // Expected gates: Literal(false), Input(a), Input(b), And(a,b), And(a,!b),
+        // And(!a,b), And(!a,!b)
+        let stats: SummaryStats = get_summary_stats(&gate_fn);
+        assert_eq!(stats.live_nodes, 6);
+        assert_eq!(stats.deepest_path, 2);
+
+        // Note: The specific node IDs (%3, %4, %5, %6) might vary depending on hash
+        // implementation details, but the key is that the deduplicated outputs
+        // refer to the same underlying AND gate IDs.
+        let expected_str = format!(
+            "fn test_simple_and_dedupe(a: bits[1] = [%1], b: bits[1] = [%2]) -> (ab: bits[1] = [%{}], a_notb: bits[1] = [%{}], nota_b: bits[1] = [%{}], nota_notb: bits[1] = [%{}]) {{
+  %{} = and(a[0], b[0])
+  %{} = and(a[0], not(b[0]))
+  %{} = and(not(a[0]), b[0])
+  %{} = and(not(a[0]), not(b[0]))
+  ab[0] = %{}
+  a_notb[0] = %{}
+  nota_b[0] = %{}
+  nota_notb[0] = %{}
+}}",
+            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id,
+            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id,
+            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id
+        );
+        assert_eq!(gate_fn.to_string(), expected_str);
     }
 }

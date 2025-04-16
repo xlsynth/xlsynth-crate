@@ -5,12 +5,17 @@
 //!
 //! This is useful for ensuring the gate simulation is correct.
 
+use std::collections::HashMap;
+
 use half::bf16;
 use rand::Rng;
+use xlsynth_g8r::gate::AigRef;
 use xlsynth_g8r::gate_sim;
+use xlsynth_g8r::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::test_utils::{
     flat_ir_bits_to_ir_value_bf16, ir_value_bf16_to_flat_ir_bits, load_bf16_mul_sample, make_bf16,
 };
+use xlsynth_g8r::use_count::get_id_to_use_count;
 
 #[test]
 fn test_bf16_mul_zero_zero() {
@@ -80,4 +85,24 @@ fn test_bf16_mul_random() {
             i, f0_bits, f1_bits, f0_bf16, f1_bf16
         );
     }
+}
+
+#[test]
+fn test_bf16_mul_g8r_stats() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    log::info!("loading bf16 mul sample");
+    let loaded_sample = load_bf16_mul_sample();
+    let gate_fn = &loaded_sample.gate_fn;
+
+    log::info!("getting id to use count");
+    let id_to_use_count: HashMap<AigRef, usize> = get_id_to_use_count(gate_fn);
+    let live_node_count = id_to_use_count.len();
+    assert_eq!(live_node_count, 1172, "Expected live node count");
+
+    log::info!("getting gate depth");
+    let live_nodes: Vec<AigRef> = id_to_use_count.keys().cloned().collect();
+    let (depth_map, _deepest_path_nodes) = get_gate_depth(gate_fn, &live_nodes);
+    let max_depth = depth_map.keys().max().copied().unwrap_or(0);
+
+    assert_eq!(max_depth, 108, "Expected a reasonable max depth");
 }

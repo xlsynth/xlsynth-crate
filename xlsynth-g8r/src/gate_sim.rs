@@ -133,13 +133,13 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimR
 
 #[cfg(test)]
 mod tests {
-    use crate::gate_builder::GateBuilder;
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     use super::*;
 
     #[test]
     fn test_simple_bitwise_and() {
-        let mut gb = GateBuilder::new("simple_bitwise_and".to_string(), true);
+        let mut gb = GateBuilder::new("simple_bitwise_and".to_string(), GateBuilderOptions::opt());
         let input_a = gb.add_input("a".to_string(), 4);
         let input_b = gb.add_input("b".to_string(), 4);
         let and_node = gb.add_and_vec(&input_a, &input_b);
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn test_simple_bitwise_not() {
-        let mut gb = GateBuilder::new("simple_bitwise_not".to_string(), true);
+        let mut gb = GateBuilder::new("simple_bitwise_not".to_string(), GateBuilderOptions::opt());
         let input_a = gb.add_input("a".to_string(), 4);
         let not_node = gb.add_not_vec(&input_a);
         gb.add_output("out".to_string(), not_node);
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_simple_bitwise_nand() {
-        let mut gb = GateBuilder::new("simple_bitwise_nand".to_string(), true);
+        let mut gb = GateBuilder::new("simple_bitwise_nand".to_string(), GateBuilderOptions::opt());
         let input_a = gb.add_input("a".to_string(), 4);
         let input_b = gb.add_input("b".to_string(), 4);
         // NAND is NOT(AND(a, b))
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_simple_bitwise_or() {
-        let mut gb = GateBuilder::new("simple_bitwise_or".to_string(), true);
+        let mut gb = GateBuilder::new("simple_bitwise_or".to_string(), GateBuilderOptions::opt());
         let input_a = gb.add_input("a".to_string(), 4);
         let input_b = gb.add_input("b".to_string(), 4);
         let or_node = gb.add_or_vec(&input_a, &input_b);
@@ -209,7 +209,13 @@ mod tests {
 
     #[test]
     fn test_simple_bitwise_xor() {
-        let mut gb = GateBuilder::new("simple_bitwise_xor".to_string(), true);
+        let mut gb = GateBuilder::new(
+            "simple_bitwise_xor".to_string(),
+            GateBuilderOptions {
+                fold: true,
+                hash: false,
+            },
+        );
         let input_a = gb.add_input("a".to_string(), 4);
         let input_b = gb.add_input("b".to_string(), 4);
         let xor_node = gb.add_xor_vec(&input_a, &input_b);

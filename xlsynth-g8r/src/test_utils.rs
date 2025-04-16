@@ -2,6 +2,7 @@
 
 use crate::gate::GateFn;
 use crate::ir2gate;
+use crate::xls_ir::ir::Package as CrateIrPackage;
 use crate::xls_ir::ir_parser;
 use half::bf16;
 use std::path::Path;
@@ -17,7 +18,9 @@ pub const BF16_TOTAL_BITS: usize = 16;
 pub struct LoadedSample {
     pub ir_package: IrPackage,
     pub ir_fn: IrFunction,
+    pub g8r_pkg: CrateIrPackage,
     pub gate_fn: GateFn,
+    pub mangled_fn_name: String,
 }
 
 // BF16 Helper Functions
@@ -95,6 +98,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
         &g8r_ir_fn,
         ir2gate::GatifyOptions {
             fold: true,
+            hash: true,
             check_equivalence: false,
         },
     )
@@ -107,7 +111,9 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
     LoadedSample {
         ir_package: opt_ir,
         ir_fn,
+        g8r_pkg: g8r_ir_package,
         gate_fn,
+        mangled_fn_name: mangled_name,
     }
 }
 
