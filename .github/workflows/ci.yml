@@ -34,12 +34,17 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip3 install pre-commit
+          # Configure git for pre-commit install
+          # Git should be installed from the dependencies step
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          pre-commit install
 
       - name: Run pre-commit (which can include your rustfmt checks, etc.)
         env:
           SKIP: no-commit-to-branch
         run: |
-          pre-commit install
           pre-commit run --all-files
 
       - name: Run version check test
@@ -134,19 +139,18 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip3 install pre-commit
+          # Configure git for pre-commit install
+          # Git should be installed from the dependencies step
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
           pre-commit install
 
       - name: Run pre-commit checks
         env:
           SKIP: no-commit-to-branch
         run: |
-          # Need git for pre-commit hooks
-          apt-get update && apt-get install -y git
-          # Mark the workspace as safe for git commands in the container
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          # Configure git user, needed by some hooks
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
+          # Git config done in setup step
           pre-commit run --all-files
 
       - name: Download xlsynth binaries
@@ -188,13 +192,6 @@ jobs:
         run: |
           rustfmt --version
           cargo --version
-
-      - name: Run pre-commit checks
-        env:
-          SKIP: no-commit-to-branch
-        run: |
-          # Dependencies (git, python, pre-commit) and git config are set up earlier
-          pre-commit run --all-files
 
       - name: Build crate
         run: cargo build --workspace -vv
