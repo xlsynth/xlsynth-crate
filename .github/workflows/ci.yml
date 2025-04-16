@@ -32,12 +32,22 @@ jobs:
 
       - name: Set up Python + pre-commit
         run: |
+          cd ${GITHUB_WORKSPACE}
           # Ensure git is available in this specific step's context
           apt-get update && apt-get install -y --no-install-recommends git
           python3 -m pip install --upgrade pip
           pip3 install pre-commit
           # Configure git for pre-commit install
-          # Git should be installed from the dependencies step
+          echo "--- Running Git Diagnostics ---"
+          echo "Current directory:"
+          pwd
+          echo "Listing contents (including .git):"
+          ls -la
+          echo "Git status:"
+          git status
+          echo "Git top level:"
+          git rev-parse --show-toplevel
+          echo "--- End Git Diagnostics ---"
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
@@ -139,12 +149,22 @@ jobs:
 
       - name: Set up Python + pre-commit
         run: |
+          cd ${GITHUB_WORKSPACE}
           # Ensure git is available in this specific step's context
           apt-get update && apt-get install -y --no-install-recommends git
           python3 -m pip install --upgrade pip
           pip3 install pre-commit
           # Configure git for pre-commit install
-          # Git should be installed from the dependencies step
+          echo "--- Running Git Diagnostics ---"
+          echo "Current directory:"
+          pwd
+          echo "Listing contents (including .git):"
+          ls -la
+          echo "Git status:"
+          git status
+          echo "Git top level:"
+          git rev-parse --show-toplevel
+          echo "--- End Git Diagnostics ---"
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
