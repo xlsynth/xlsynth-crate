@@ -33,8 +33,13 @@ jobs:
       - name: Set up Python + pre-commit
         run: |
           cd ${GITHUB_WORKSPACE}
-          # Ensure git is available in this specific step's context
-          apt-get update && apt-get install -y --no-install-recommends git
+          echo "Initializing git repository as a workaround for pre-commit"
+          if [ ! -d ".git" ]; then
+            echo ".git directory not found, initializing..."
+            git init
+          else
+            echo ".git directory found, skipping init."
+          fi
           python3 -m pip install --upgrade pip
           pip3 install pre-commit
           # Configure git for pre-commit install
@@ -138,9 +143,7 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v4
 
       - name: Install dependencies for Python scripts and downloads
         run: |
@@ -150,8 +153,13 @@ jobs:
       - name: Set up Python + pre-commit
         run: |
           cd ${GITHUB_WORKSPACE}
-          # Ensure git is available in this specific step's context
-          apt-get update && apt-get install -y --no-install-recommends git
+          echo "Initializing git repository as a workaround for pre-commit"
+          if [ ! -d ".git" ]; then
+            echo ".git directory not found, initializing..."
+            git init
+          else
+            echo ".git directory found, skipping init."
+          fi
           python3 -m pip install --upgrade pip
           pip3 install pre-commit
           # Configure git for pre-commit install
