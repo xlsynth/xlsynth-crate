@@ -10,6 +10,12 @@ use xlsynth_g8r::ir2gate::{gatify, gatify_ule_via_bit_tests, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
 use xlsynth_g8r::xls_ir::ir_parser;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opt {
+    Yes,
+    No,
+}
+
 /// Proves that the gate-mapped version fo the top function in `ir_package_text`
 /// is equivalent to the IR version.
 ///
@@ -17,8 +23,7 @@ use xlsynth_g8r::xls_ir::ir_parser;
 /// user is also interested in the statistics for it.
 fn do_test_ir_conversion_with_top(
     ir_package_text: &str,
-    fold: bool,
-    hash: bool,
+    opt: Opt,
     top_name: Option<&str>,
 ) -> SummaryStats {
     // Now we'll parse the IR and turn it into a gate function.
@@ -31,9 +36,9 @@ fn do_test_ir_conversion_with_top(
     let gatify_output = gatify(
         &ir_fn,
         GatifyOptions {
-            fold,
+            fold: opt == Opt::Yes,
             check_equivalence: false,
-            hash,
+            hash: opt == Opt::Yes,
         },
     )
     .unwrap();
@@ -48,15 +53,15 @@ fn do_test_ir_conversion_with_top(
 /// function should be used.
 ///
 /// `opt` specifies whether to use the optimizing `GateBuilderOptions` or not.
-fn do_test_ir_conversion(ir_package_text: &str, opt: bool) -> SummaryStats {
-    do_test_ir_conversion_with_top(ir_package_text, opt, opt, None)
+fn do_test_ir_conversion(ir_package_text: &str, opt: Opt) -> SummaryStats {
+    do_test_ir_conversion_with_top(ir_package_text, opt, None)
 }
 
-#[test_case(1, false; "bit_count=1, fold=false")]
-#[test_case(1, true; "bit_count=1, fold=true")]
-#[test_case(2, false; "bit_count=2, fold=false")]
-#[test_case(2, true; "bit_count=2, fold=true")]
-fn test_prio_sel_ir_binary(bit_count: u32, fold: bool) {
+#[test_case(1, Opt::No; "bit_count=1, fold=false")]
+#[test_case(1, Opt::Yes; "bit_count=1, fold=true")]
+#[test_case(2, Opt::No; "bit_count=2, fold=false")]
+#[test_case(2, Opt::Yes; "bit_count=2, fold=true")]
+fn test_prio_sel_ir_binary(bit_count: u32, opt: Opt) {
     let ir_text_tmpl = "package sample
 fn do_prio_sel(sel: bits[2], a: bits[$BIT_COUNT], b: bits[$BIT_COUNT], default: bits[$BIT_COUNT]) -> bits[$BIT_COUNT] {
     ret result: bits[$BIT_COUNT] = priority_sel(sel, cases=[a, b], default=default, id=5)
@@ -64,7 +69,7 @@ fn do_prio_sel(sel: bits[2], a: bits[$BIT_COUNT], b: bits[$BIT_COUNT], default: 
 ";
     let ir_text = ir_text_tmpl.replace("$BIT_COUNT", &bit_count.to_string());
 
-    do_test_ir_conversion(&ir_text, fold);
+    do_test_ir_conversion(&ir_text, opt);
 }
 
 #[test]
@@ -75,10 +80,10 @@ fn do_tuple_index(t: (bits[1], bits[1])) -> bits[1] {
     ret result: bits[1] = tuple_index(t, index=0, id=2)
 }
 ";
-    do_test_ir_conversion(&ir_text, false);
+    do_test_ir_conversion(&ir_text, Opt::No);
 }
 
-fn do_test_dslx_conversion(input_bits: u32, fold: bool, dslx_text: &str) {
+fn do_test_dslx_conversion(input_bits: u32, opt: Opt, dslx_text: &str) {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let module = format!("const N: u32 = u32:{};\n{}", input_bits, dslx_text);
@@ -89,50 +94,42 @@ fn do_test_dslx_conversion(input_bits: u32, fold: bool, dslx_text: &str) {
     let ir_text = ir_package.to_string();
     log::info!("IR: {}", ir_text);
 
-    do_test_ir_conversion(&ir_text, fold);
+    do_test_ir_conversion(&ir_text, opt);
 }
 
 macro_rules! bit_count_test_cases {
     ($test_name:ident, $lambda:expr) => {
-        #[test_case(1, false; "bit_count=1, fold=false")]
-        #[test_case(2, false; "bit_count=2, fold=false")]
-        #[test_case(3, false; "bit_count=3, fold=false")]
-        #[test_case(4, false; "bit_count=4, fold=false")]
-        #[test_case(5, false; "bit_count=5, fold=false")]
-        #[test_case(6, false; "bit_count=6, fold=false")]
-        #[test_case(7, false; "bit_count=7, fold=false")]
-        #[test_case(8, false; "bit_count=8, fold=false")]
-        #[test_case(1, true; "bit_count=1, fold=true")]
-        #[test_case(2, true; "bit_count=2, fold=true")]
-        #[test_case(3, true; "bit_count=3, fold=true")]
-        #[test_case(4, true; "bit_count=4, fold=true")]
-        #[test_case(5, true; "bit_count=5, fold=true")]
-        #[test_case(6, true; "bit_count=6, fold=true")]
-        #[test_case(7, true; "bit_count=7, fold=true")]
-        #[test_case(8, true; "bit_count=8, fold=true")]
-        fn $test_name(input_bits: u32, fold: bool) {
+        #[test_case(1, Opt::No; "bit_count=1, fold=false")]
+        #[test_case(2, Opt::No; "bit_count=2, fold=false")]
+        #[test_case(3, Opt::No; "bit_count=3, fold=false")]
+        #[test_case(4, Opt::No; "bit_count=4, fold=false")]
+        #[test_case(1, Opt::Yes; "bit_count=1, fold=true")]
+        #[test_case(2, Opt::Yes; "bit_count=2, fold=true")]
+        #[test_case(3, Opt::Yes; "bit_count=3, fold=true")]
+        #[test_case(4, Opt::Yes; "bit_count=4, fold=true")]
+        fn $test_name(input_bits: u32, opt: Opt) {
             let _ = env_logger::builder().is_test(true).try_init();
-            $lambda(input_bits, fold)
+            $lambda(input_bits, opt)
         }
     };
 }
 
 bit_count_test_cases!(test_or_zero_ir_to_gates, |input_bits: u32,
-                                                 fold: bool|
+                                                 opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_or_zero(x: uN[N]) -> uN[N] { x | zero!<uN[N]>() }",
     );
 });
 
 bit_count_test_cases!(test_and_ones_ir_to_gates, |input_bits: u32,
-                                                  fold: bool|
+                                                  opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_and_ones(x: uN[N]) -> uN[N] { x & all_ones!<uN[N]>() }",
     );
 });
@@ -144,84 +141,82 @@ bit_count_test_cases!(test_identity_ir_to_gates, |input_bits: u32| -> () {
 });
 */
 
-bit_count_test_cases!(test_and_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_and_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_and(x: uN[N], y: uN[N]) -> uN[N] { x & y }",
     );
 });
 
-bit_count_test_cases!(test_or_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_or_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_or(x: uN[N], y: uN[N]) -> uN[N] { x | y }",
     );
 });
 
-bit_count_test_cases!(test_xor_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_xor_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_xor(x: uN[N], y: uN[N]) -> uN[N] { x ^ y }",
     );
 });
 
 bit_count_test_cases!(test_ne_all_zeros_all_ones_to_gates, |input_bits: u32,
-                                                            fold: bool|
+                                                            opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_ne_all_zeros_all_ones() -> bool { zero!<uN[N]>() != all_ones!<uN[N]>() }",
     );
 });
 
-bit_count_test_cases!(test_add_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_add_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_add(x: uN[N], y: uN[N]) -> uN[N] { x + y }",
     );
 });
 
-bit_count_test_cases!(test_sign_ext_to_gates, |input_bits: u32,
-                                               fold: bool|
- -> () {
+bit_count_test_cases!(test_sign_ext_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "const NP1: u32 = N + u32:1;
         fn do_sign_ext(x: uN[N]) -> uN[NP1] { x as sN[NP1] as uN[NP1] }",
     );
 });
 
 bit_count_test_cases!(test_or_reduce_ir_to_gates, |input_bits: u32,
-                                                   fold: bool|
+                                                   opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_or_reduce(x: uN[N]) -> bool { or_reduce(x) }",
     );
 });
 
-bit_count_test_cases!(test_decode_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_decode_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "const TPN: u32 = u32:1 << N;
         fn do_decode(x: uN[N]) -> uN[TPN] { decode<uN[TPN]>(x) }",
     );
 });
 
 bit_count_test_cases!(test_priority_sel_match_ir_to_gates, |input_bits: u32,
-                                                            fold: bool|
+                                                            opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         r#"fn do_priority_sel(s: bool, x: uN[N], y: uN[N]) -> uN[N] {
     match s {
         false => x,
@@ -231,89 +226,87 @@ bit_count_test_cases!(test_priority_sel_match_ir_to_gates, |input_bits: u32,
     );
 });
 
-bit_count_test_cases!(test_neg_ir_to_gates, |input_bits: u32, fold: bool| -> () {
-    do_test_dslx_conversion(input_bits, fold, "fn do_neg(x: uN[N]) -> uN[N] { -x }");
+bit_count_test_cases!(test_neg_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
+    do_test_dslx_conversion(input_bits, opt, "fn do_neg(x: uN[N]) -> uN[N] { -x }");
 });
 
-bit_count_test_cases!(test_not_ir_to_gates, |input_bits: u32, fold: bool| -> () {
-    do_test_dslx_conversion(input_bits, fold, "fn do_not(x: uN[N]) -> uN[N] { !x }");
+bit_count_test_cases!(test_not_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
+    do_test_dslx_conversion(input_bits, opt, "fn do_not(x: uN[N]) -> uN[N] { !x }");
 });
 
-bit_count_test_cases!(test_concat_ir_to_gates, |input_bits: u32,
-                                                fold: bool|
- -> () {
+bit_count_test_cases!(test_concat_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "const NT2: u32 = N * u32:2;
         fn do_concat(x: uN[N], y: uN[N]) -> uN[NT2] { x ++ y }",
     );
 });
 
-bit_count_test_cases!(test_sub_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_sub_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_sub(x: uN[N], y: uN[N]) -> uN[N] { x - y }",
     );
 });
 
-bit_count_test_cases!(test_nand_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_nand_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     let ir_tmpl = "package sample
 fn do_nand(x: bits[$BIT_COUNT], y: bits[$BIT_COUNT]) -> bits[$BIT_COUNT] {
   ret nand.3: bits[$BIT_COUNT] = nand(x, y, id=3)
 }";
     let ir_text = ir_tmpl.replace("$BIT_COUNT", &input_bits.to_string());
-    do_test_ir_conversion(&ir_text, fold);
+    do_test_ir_conversion(&ir_text, opt);
 });
 
 bit_count_test_cases!(test_encode_dslx_to_gates, |input_bits: u32,
-                                                  fold: bool|
+                                                  opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_encode(x: uN[N]) -> u32 { encode(x) as u32 }",
     );
 });
 
 bit_count_test_cases!(test_tuple_index_to_gates, |input_bits: u32,
-                                                  fold: bool|
+                                                  opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_tuple_index(t: (u2, uN[N], u2)) -> u2 { t.0 + t.2 }",
     );
 });
 
 bit_count_test_cases!(test_array_index_to_gates, |input_bits: u32,
-                                                  fold: bool|
+                                                  opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_array_index(a: uN[N][N], index: u32) -> uN[N] { a[index] }",
     );
 });
 
 bit_count_test_cases!(test_dslx_array_to_gates, |input_bits: u32,
-                                                 fold: bool|
+                                                 opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_array(x: uN[N], y: uN[N], z: uN[N]) -> uN[N][3] { [x, y, z] }",
     );
 });
 
 // Emits a priority select via the DSLX builtin.
 bit_count_test_cases!(test_priority_sel_builtin_to_gates, |input_bits: u32,
-                                                           fold: bool|
+                                                           opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_priority_sel_builtin(s: uN[N], cases: uN[N][N], default_value: uN[N]) -> uN[N] {
             priority_sel(s, cases, default_value)
         }",
@@ -321,22 +314,22 @@ bit_count_test_cases!(test_priority_sel_builtin_to_gates, |input_bits: u32,
 });
 
 bit_count_test_cases!(test_one_hot_lsb_prio_dslx_to_gates, |input_bits: u32,
-                                                            fold: bool|
+                                                            opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "const NP1: u32 = N + u32:1;
         fn do_one_hot(x: uN[N]) -> uN[NP1] { one_hot(x, true) }",
     );
 });
 
 bit_count_test_cases!(test_one_hot_msb_prio_dslx_to_gates, |input_bits: u32,
-                                                            fold: bool|
+                                                            opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "const NP1: u32 = N + u32:1;
         fn do_one_hot(x: uN[N]) -> uN[NP1] { one_hot(x, false) }",
     );
@@ -344,195 +337,181 @@ bit_count_test_cases!(test_one_hot_msb_prio_dslx_to_gates, |input_bits: u32,
 
 // Emits a one-hot-select via the DSLX builtin.
 bit_count_test_cases!(test_one_hot_select_builtin_to_gates, |input_bits: u32,
-                                                             fold: bool|
+                                                             opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_one_hot_select_builtin(s: uN[N], cases: uN[N][N]) -> uN[N] { one_hot_sel(s, cases) }",
     );
 });
 
 bit_count_test_cases!(test_shrl_by_u32_to_gates, |input_bits: u32,
-                                                  fold: bool|
+                                                  opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_shrl_by_u32(x: uN[N], amount: u32) -> uN[N] { x >> amount }",
     );
 });
 
-bit_count_test_cases!(test_shra_dslx_to_gates, |input_bits: u32,
-                                                fold: bool|
- -> () {
+bit_count_test_cases!(test_shra_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_shra_by_u32(x: sN[N], amount: uN[N]) -> sN[N] { x >> amount }",
     );
 });
 
 bit_count_test_cases!(test_shra_by_u32_dslx_to_gates, |input_bits: u32,
-                                                       fold: bool|
+                                                       opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_shra_by_u32(x: sN[N], amount: u32) -> sN[N] { x >> amount }",
     );
 });
 
-bit_count_test_cases!(test_shrl_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_shrl_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_shrl(x: uN[N], amount: uN[N]) -> uN[N] { x >> amount }",
     );
 });
 
-bit_count_test_cases!(test_shll_dslx_to_gates, |input_bits: u32,
-                                                fold: bool|
- -> () {
+bit_count_test_cases!(test_shll_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_shll(x: uN[N], amount: u32) -> uN[N] { x << amount }",
     );
 });
 
 bit_count_test_cases!(test_sel_cond_dslx_to_gates, |input_bits: u32,
-                                                    fold: bool|
+                                                    opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_sel_cond(s: bool, on_true: uN[N], on_false: uN[N]) -> uN[N] { if s { on_true } else { on_false } }",
     );
 });
 
 bit_count_test_cases!(test_width_slice_static_start_to_gates, |input_bits: u32,
-                                                               fold: bool|
+                                                               opt: Opt|
  -> () {
     let ir_tmpl = "package sample
 fn f(x: bits[32]) -> bits[$BIT_COUNT] {
     ret result.2: bits[$BIT_COUNT] = bit_slice(x, start=1, width=$BIT_COUNT, id=2)
 }";
     let ir_text = ir_tmpl.replace("$BIT_COUNT", &input_bits.to_string());
-    do_test_ir_conversion(&ir_text, fold);
+    do_test_ir_conversion(&ir_text, opt);
 });
 
 // -- comparisons
 
-bit_count_test_cases!(test_eq_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_eq_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_eq(x: uN[N], y: uN[N]) -> bool { x == y }",
     );
 });
 
-bit_count_test_cases!(test_ne_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_ne_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_ne_all_ones(x: uN[N]) -> bool { x != all_ones!<uN[N]>() }",
     );
 });
 
-bit_count_test_cases!(test_eqz_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_eqz_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_eqz(x: uN[N]) -> bool { x == zero!<uN[N]>() }",
     );
 });
 
 bit_count_test_cases!(test_eq_all_zeros_all_ones_to_gates, |input_bits: u32,
-                                                            fold: bool|
+                                                            opt: Opt|
  -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_eq_all_zeros_all_ones() -> bool { zero!<uN[N]>() == all_ones!<uN[N]>() }",
     );
 });
 
-bit_count_test_cases!(test_ugt_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_ugt_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_ugt(x: uN[N], y: uN[N]) -> bool { x > y }",
     );
 });
 
-bit_count_test_cases!(test_ult_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_ult_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_ult(x: uN[N], y: uN[N]) -> bool { x < y }",
     );
 });
 
-bit_count_test_cases!(test_ule_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_ule_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_ule(x: uN[N], y: uN[N]) -> bool { x <= y }",
     );
 });
 
-bit_count_test_cases!(test_uge_ir_to_gates, |input_bits: u32, fold: bool| -> () {
+bit_count_test_cases!(test_uge_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_uge(x: uN[N], y: uN[N]) -> bool { x >= y }",
     );
 });
 
-bit_count_test_cases!(test_sgt_dslx_to_gates, |input_bits: u32,
-                                               fold: bool|
- -> () {
+bit_count_test_cases!(test_sgt_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_sgt(x: sN[N], y: sN[N]) -> bool { x > y }",
     );
 });
 
-bit_count_test_cases!(test_slt_dslx_to_gates, |input_bits: u32,
-                                               fold: bool|
- -> () {
+bit_count_test_cases!(test_slt_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_slt(x: sN[N], y: sN[N]) -> bool { x < y }",
     );
 });
 
-bit_count_test_cases!(test_sge_dslx_to_gates, |input_bits: u32,
-                                               fold: bool|
- -> () {
+bit_count_test_cases!(test_sge_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_sge(x: sN[N], y: sN[N]) -> bool { x >= y }",
     );
 });
 
-bit_count_test_cases!(test_sle_dslx_to_gates, |input_bits: u32,
-                                               fold: bool|
- -> () {
+bit_count_test_cases!(test_sle_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
-        fold,
+        opt,
         "fn do_sle(x: sN[N], y: sN[N]) -> bool { x <= y }",
     );
 });
 
-bit_count_test_cases!(test_encode_ir_to_gates, |input_bits: u32,
-                                                fold: bool|
- -> () {
+bit_count_test_cases!(test_encode_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     let output_bits = (input_bits as f32).log2().ceil() as u32;
     log::info!("input_bits: {}, output_bits: {}", input_bits, output_bits);
     do_test_ir_conversion(
@@ -542,16 +521,16 @@ fn do_encode(x: bits[{input_bits}]) -> bits[{output_bits}] {{
     ret result: bits[{output_bits}] = encode(x, id=2)
 }}"
         ),
-        fold,
+        opt,
     );
 });
 
 #[test_matrix(
     4..8,
     1..=4,
-    [false, true]
+    [Opt::Yes, Opt::No]
 )]
-fn test_decode_ir_to_gates(input_bits: u32, output_bits: u32, fold: bool) {
+fn test_decode_ir_to_gates(input_bits: u32, output_bits: u32, opt: Opt) {
     do_test_ir_conversion(
         &format!(
             "package sample
@@ -559,7 +538,7 @@ fn do_decode(x: bits[{input_bits}]) -> bits[{output_bits}] {{
     ret result: bits[{output_bits}] = decode(x, width={output_bits}, id=2)
 }}"
         ),
-        fold,
+        opt,
     );
 }
 
@@ -567,9 +546,9 @@ fn do_decode(x: bits[{input_bits}]) -> bits[{output_bits}] {{
     1..3,
     1..3,
     1..7,
-    [false, true]
+    [Opt::Yes, Opt::No]
 )]
-fn test_umul_ir_to_gates(lhs_bits: u32, rhs_bits: u32, output_bits: u32, fold: bool) {
+fn test_umul_ir_to_gates(lhs_bits: u32, rhs_bits: u32, output_bits: u32, opt: Opt) {
     do_test_ir_conversion(
         &format!(
             "package sample
@@ -577,7 +556,7 @@ fn do_umul(lhs: bits[{lhs_bits}], rhs: bits[{rhs_bits}]) -> bits[{output_bits}] 
     ret result: bits[{output_bits}] = umul(lhs, rhs, id=3)
 }}"
         ),
-        fold,
+        opt,
     );
 }
 
@@ -585,9 +564,9 @@ fn do_umul(lhs: bits[{lhs_bits}], rhs: bits[{rhs_bits}]) -> bits[{output_bits}] 
     1..3,
     1..3,
     1..7,
-    [false, true]
+    [Opt::Yes, Opt::No]
 )]
-fn test_smul_ir_to_gates(lhs_bits: u32, rhs_bits: u32, output_bits: u32, fold: bool) {
+fn test_smul_ir_to_gates(lhs_bits: u32, rhs_bits: u32, output_bits: u32, opt: Opt) {
     do_test_ir_conversion(
         &format!(
             "package sample
@@ -595,13 +574,13 @@ fn do_smul(lhs: bits[{lhs_bits}], rhs: bits[{rhs_bits}]) -> bits[{output_bits}] 
     ret result: bits[{output_bits}] = smul(lhs, rhs, id=3)
 }}",
         ),
-        fold,
+        opt,
     );
 }
 
-#[test_case(1, 2, false)]
-#[test_case(1, 2, true)]
-fn test_array_index_in_bounds_ir_to_gates(element_bits: u32, input_elements: u32, fold: bool) {
+#[test_case(1, 2, Opt::Yes)]
+#[test_case(1, 2, Opt::No)]
+fn test_array_index_in_bounds_ir_to_gates(element_bits: u32, input_elements: u32, opt: Opt) {
     do_test_ir_conversion(
         &format!(
             "package sample
@@ -609,7 +588,7 @@ fn do_array_index_in_bounds(arr: bits[{element_bits}][{input_elements}], index: 
     ret result: bits[{element_bits}] = array_index(arr, indices=[index], assumed_in_bounds=true, id=3)
 }}",
         ),
-        fold,
+        opt,
     );
 }
 
@@ -709,9 +688,9 @@ fn test_gatify_ule() {
 }
 
 /// Tests that we can convert the bf16 multiplier in the DSLX standard library.
-#[test_case(false)]
-#[test_case(true)]
-fn test_gatify_bf16_mul(fold: bool) {
+#[test_case(Opt::Yes)]
+#[test_case(Opt::No)]
+fn test_gatify_bf16_mul(opt: Opt) {
     let _ = env_logger::builder().is_test(true).try_init();
     let dslx = "import bfloat16;
 fn bf16_mul(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
@@ -728,9 +707,36 @@ fn bf16_mul(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
     let optimized_ir_text = optimized_ir_package.to_string();
     log::info!("Optimized IR:\n{}", optimized_ir_text);
 
-    let stats = do_test_ir_conversion(&optimized_ir_text, fold);
-    if fold {
+    let stats = do_test_ir_conversion(&optimized_ir_text, opt);
+    if opt == Opt::Yes {
         assert_eq!(stats.live_nodes, 1172);
         assert_eq!(stats.deepest_path, 109);
+    }
+}
+
+/// Tests that we can convert the bf16 adder in the DSLX standard library.
+#[test_case(Opt::Yes)]
+#[test_case(Opt::No)]
+fn test_gatify_bf16_add(opt: Opt) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dslx = "import bfloat16;
+fn bf16_add(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
+    bfloat16::add(x, y)
+}";
+    let fake_path = Path::new("test.x");
+    let ir =
+        xlsynth::convert_dslx_to_ir_text(dslx, fake_path, &xlsynth::DslxConvertOptions::default())
+            .unwrap();
+    log::info!("Unoptimized IR:\n{}", ir.ir);
+    let ir_top = "__test__bf16_add";
+    let xlsynth_ir_package = xlsynth::IrPackage::parse_ir(&ir.ir, Some(ir_top)).unwrap();
+    let optimized_ir_package = xlsynth::optimize_ir(&xlsynth_ir_package, ir_top).unwrap();
+    let optimized_ir_text = optimized_ir_package.to_string();
+    log::info!("Optimized IR:\n{}", optimized_ir_text);
+
+    let stats = do_test_ir_conversion(&optimized_ir_text, opt);
+    if opt == Opt::Yes {
+        assert_eq!(stats.live_nodes, 1303);
+        assert_eq!(stats.deepest_path, 130);
     }
 }
