@@ -32,8 +32,8 @@ jobs:
 
       - name: Set up Python + pre-commit
         run: |
-          python -m pip install --upgrade pip
-          pip install pre-commit
+          python3 -m pip install --upgrade pip
+          pip3 install pre-commit
 
       - name: Run pre-commit (which can include your rustfmt checks, etc.)
         env:
@@ -122,17 +122,37 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
 
       - name: Install dependencies for Python scripts and downloads
         run: |
           apt-get update
           apt-get install -y --no-install-recommends python3 python3-pip wget unzip git sudo
 
+      - name: Set up Python + pre-commit
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install pre-commit
+          pre-commit install
+
+      - name: Run pre-commit checks
+        env:
+          SKIP: no-commit-to-branch
+        run: |
+          # Need git for pre-commit hooks
+          apt-get update && apt-get install -y git
+          # Mark the workspace as safe for git commands in the container
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          # Configure git user, needed by some hooks
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          pre-commit run --all-files
+
       - name: Download xlsynth binaries
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          pip3 install -r requirements.txt
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools
 
       - name: Install protobuf compiler
@@ -142,7 +162,6 @@ jobs:
           mv protoc/bin/protoc /usr/local/bin/protoc
           mv protoc /tmp/
           mv protoc-*.zip /tmp/
-          # Emit the protobuf compiler version number.
           protoc --version
 
       - name: Install libc++ from llvm-18
@@ -170,23 +189,11 @@ jobs:
           rustfmt --version
           cargo --version
 
-      - name: Set up Python + pre-commit
-        run: |
-          python3 -m pip install --upgrade pip
-          pip3 install pre-commit
-
-      - name: Run pre-commit
+      - name: Run pre-commit checks
         env:
           SKIP: no-commit-to-branch
         run: |
-          # Need git for pre-commit hooks
-          apt-get update && apt-get install -y git
-          # Mark the workspace as safe for git commands in the container
-          git config --global --add safe.directory /github/workspace
-          # Configure git user, needed by some hooks
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
-          pre-commit install
+          # Dependencies (git, python, pre-commit) and git config are set up earlier
           pre-commit run --all-files
 
       - name: Build crate
