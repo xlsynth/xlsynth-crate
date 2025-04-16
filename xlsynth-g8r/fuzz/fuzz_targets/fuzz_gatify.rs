@@ -7,7 +7,7 @@ use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
 use xlsynth_g8r::ir2gate::gatify;
 use xlsynth_g8r::xls_ir::ir_parser;
 
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Arbitrary, Clone)]
 enum FuzzUnop {
     // bitwise not (one's complement negation)
     Not,
@@ -24,7 +24,7 @@ enum FuzzUnop {
     Encode,
 }
 
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Arbitrary, Clone)]
 enum FuzzBinop {
     // bitwise
     And,
@@ -62,7 +62,7 @@ struct FuzzOperand {
     index: u8,
 }
 
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Arbitrary, Clone)]
 enum FuzzOp {
     Literal {
         bits: u8,
@@ -120,6 +120,11 @@ enum FuzzOp {
         lhs: FuzzOperand,
         rhs: FuzzOperand,
     },
+    DynamicBitSlice {
+        arg: FuzzOperand,
+        start: FuzzOperand,
+        width: u8,
+    },
 }
 
 /// Flattened opcode-only version of FuzzOp so we can ensure we select among all
@@ -141,6 +146,7 @@ enum FuzzOpFlat {
     OneHotSel,
     UMul,
     SMul,
+    DynamicBitSlice,
 }
 
 /// This function helps assure we have a FuzzOpFlat for each FuzzOp.
@@ -162,6 +168,7 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
         FuzzOp::OneHotSel { .. } => FuzzOpFlat::OneHotSel,
         FuzzOp::UMul { .. } => FuzzOpFlat::UMul,
         FuzzOp::SMul { .. } => FuzzOpFlat::SMul,
+        FuzzOp::DynamicBitSlice { .. } => FuzzOpFlat::DynamicBitSlice,
     }
 }
 
@@ -184,6 +191,9 @@ fn generate_ir_fn(
 
     // Process each operation
     for op in ops {
+        if let Err(e) = fn_builder.last_value() {
+            return Err(e);
+        }
         match op {
             FuzzOp::Literal { bits, value } => {
                 assert!(bits > 0, "literal op has no bits");
@@ -359,13 +369,19 @@ fn generate_ir_fn(
                 let node = fn_builder.smul(lhs, rhs, None);
                 available_nodes.push(node);
             }
+            FuzzOp::DynamicBitSlice { arg, start, width } => {
+                let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
+                let start = &available_nodes[(start.index as usize) % available_nodes.len()];
+                let node = fn_builder.dynamic_bit_slice(arg, start, width as u64, None);
+                available_nodes.push(node);
+            }
         }
     }
     // Set the last node as the return value
     fn_builder.build_with_return_value(available_nodes.last().unwrap())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FuzzSample {
     input_bits: u8,
     ops: Vec<FuzzOp>,
@@ -537,6 +553,17 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                         selector: FuzzOperand { index },
                         cases,
                         default: FuzzOperand { index: default },
+                    });
+                }
+                FuzzOpFlat::DynamicBitSlice => {
+                    // DynamicBitSlice op: sample an index from [0, available_nodes)
+                    let arg = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let start = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let width = u.int_in_range(1..=8)?;
+                    ops.push(FuzzOp::DynamicBitSlice {
+                        arg: FuzzOperand { index: arg },
+                        start: FuzzOperand { index: start },
+                        width,
                     });
                 }
             }

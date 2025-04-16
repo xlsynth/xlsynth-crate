@@ -557,10 +557,11 @@ impl NodePayload {
                 assumed_in_bounds
             ),
             NodePayload::DynamicBitSlice { arg, start, width } => format!(
-                "dynamic_bit_slice({}, {}, {})",
+                "dynamic_bit_slice({}, {}, width={}, id={})",
                 get_name(*arg),
                 get_name(*start),
-                width
+                width,
+                id
             ),
             NodePayload::BitSlice { arg, start, width } => {
                 format!(

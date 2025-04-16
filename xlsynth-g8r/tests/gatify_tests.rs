@@ -356,6 +356,14 @@ bit_count_test_cases!(test_shrl_by_u32_to_gates, |input_bits: u32,
     );
 });
 
+bit_count_test_cases!(test_dynamic_bit_slice, |input_bits: u32, opt: Opt| -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        opt,
+        "fn do_dynamic_bit_slice(x: uN[N], i: uN[N]) -> uN[N] { x[i +: uN[N]] }",
+    );
+});
+
 bit_count_test_cases!(test_shra_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,

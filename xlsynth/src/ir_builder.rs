@@ -333,6 +333,26 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
+    pub fn dynamic_bit_slice(
+        &mut self,
+        value: &BValue,
+        start: &BValue,
+        width: u64,
+        name: Option<&str>,
+    ) -> BValue {
+        let fn_builder_guard = self.fn_builder.write().unwrap();
+        let value_guard: RwLockReadGuard<BValuePtr> = value.ptr.read().unwrap();
+        let start_guard: RwLockReadGuard<BValuePtr> = start.ptr.read().unwrap();
+        let bvalue_ptr = lib_support::xls_function_builder_add_dynamic_bit_slice(
+            fn_builder_guard,
+            value_guard,
+            start_guard,
+            width,
+            name,
+        );
+        BValue { ptr: bvalue_ptr }
+    }
+
     pub fn bit_slice(
         &mut self,
         value: &BValue,
