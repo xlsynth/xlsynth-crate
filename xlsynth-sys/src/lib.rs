@@ -1051,6 +1051,13 @@ extern "C" {
         assumed_in_bounds: bool,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_dynamic_bit_slice(
+        builder: *mut CIrBuilderBase,
+        value: *mut CIrBValue,
+        start: *mut CIrBValue,
+        width: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_bit_slice(
         builder: *mut CIrBuilderBase,
         value: *mut CIrBValue,

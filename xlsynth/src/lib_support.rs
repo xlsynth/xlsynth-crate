@@ -312,6 +312,29 @@ pub(crate) fn xls_function_builder_add_parameter(
     Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
 }
 
+pub(crate) fn xls_function_builder_add_dynamic_bit_slice(
+    builder: RwLockWriteGuard<IrFnBuilderPtr>,
+    value: RwLockReadGuard<BValuePtr>,
+    start: RwLockReadGuard<BValuePtr>,
+    width: u64,
+    name: Option<&str>,
+) -> Arc<RwLock<BValuePtr>> {
+    let name_cstr = name.map(|s| CString::new(s).unwrap());
+    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
+    let width_i64 = width as i64;
+    let bvalue_raw = unsafe {
+        xlsynth_sys::xls_builder_base_add_dynamic_bit_slice(
+            builder_base,
+            value.ptr,
+            start.ptr,
+            width_i64,
+            name_ptr,
+        )
+    };
+    Arc::new(RwLock::new(BValuePtr { ptr: bvalue_raw }))
+}
+
 pub(crate) fn xls_function_builder_add_bit_slice(
     builder: RwLockWriteGuard<IrFnBuilderPtr>,
     value: RwLockReadGuard<BValuePtr>,

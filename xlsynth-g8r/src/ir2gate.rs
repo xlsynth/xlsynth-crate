@@ -1461,6 +1461,25 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
             | ir::NodePayload::Nil => {
                 // No incarnation in gates.
             }
+            ir::NodePayload::DynamicBitSlice { arg, start, width } => {
+                let arg_bits = env
+                    .get_bit_vector(*arg)
+                    .expect("DynamicBitSlice arg should be present");
+                let start_bits = env
+                    .get_bit_vector(*start)
+                    .expect("DynamicBitSlice start should be present");
+                let shifted_bits = gatify_barrel_shifter(
+                    &arg_bits,
+                    &start_bits,
+                    Direction::Right,
+                    &format!("dynamic_bit_slice_shift_{}", node.text_id),
+                    g8_builder,
+                );
+                // After shifting right by 'start', the desired bits are the LSBs.
+                let result_bits = shifted_bits.get_lsb_slice(0, *width);
+                assert_eq!(result_bits.get_bit_count(), *width);
+                env.add(node_ref, GateOrVec::BitVector(result_bits));
+            }
             _ => {
                 todo!("Unsupported node payload {:?}", payload);
             }

@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.116"
+version = "0.0.117"
 dependencies = [
  "cargo_metadata",
  "log",
@@ -2042,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-g8r"
-version = "0.0.116"
+version = "0.0.117"
 dependencies = [
  "blake3",
  "clap",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-g8r-fuzz"
-version = "0.0.116"
+version = "0.0.117"
 dependencies = [
  "arbitrary",
  "env_logger",
@@ -2071,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.116"
+version = "0.0.117"
 dependencies = [
  "flate2",
  "libc",

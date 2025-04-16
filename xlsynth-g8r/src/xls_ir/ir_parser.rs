@@ -562,9 +562,9 @@ impl Parser {
                 )
             }
             "dynamic_bit_slice" => {
-                let arg = self.parse_node_ref(&node_env)?;
+                let arg_node = self.parse_node_ref(node_env)?;
                 self.drop_or_error(",")?;
-                let start = self.parse_node_ref(&node_env)?;
+                let start_node = self.parse_node_ref(node_env)?;
                 self.drop_or_error(",")?;
                 let width = self.parse_usize_attribute("width")?;
                 if self.peek_is(",") {
@@ -580,7 +580,11 @@ impl Parser {
                 }
                 self.maybe_drop_pos_attribute()?;
                 (
-                    ir::NodePayload::DynamicBitSlice { arg, start, width },
+                    ir::NodePayload::DynamicBitSlice {
+                        arg: arg_node,
+                        start: start_node,
+                        width,
+                    },
                     maybe_id.unwrap(),
                 )
             }
@@ -1573,5 +1577,36 @@ top fn main(t: token id=1) -> token {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_dynamic_bit_slice() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = " dynamic_bit_slice.1: bits[14] = dynamic_bit_slice(x, y, width=14, id=1)";
+        let mut parser = Parser::new(input);
+        let mut node_env = IrNodeEnv::new();
+        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert!(matches!(
+            node.payload,
+            ir::NodePayload::DynamicBitSlice { width: 14, .. }
+        ));
+        println!("{:?}", node);
+    }
+
+    #[test]
+    fn test_binary_and_with_pos_attr() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = "my_name: bits[1] = and(x, y, id=3, pos=[(0,0,13), (0,0,14)])";
+        let mut parser = Parser::new(input);
+        let mut node_env = IrNodeEnv::new();
+        let x_node_ref = ir::NodeRef { index: 1 };
+        let y_node_ref = ir::NodeRef { index: 2 };
+        node_env.add(Some("x".to_string()), 1, x_node_ref);
+        node_env.add(Some("y".to_string()), 2, y_node_ref);
+        let node = parser.parse_node(&mut node_env).unwrap();
+        let want = ir::NodePayload::Nary(ir::NaryOp::And, vec![x_node_ref, y_node_ref]);
+        assert_eq!(node.payload, want);
     }
 }
