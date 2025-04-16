@@ -117,6 +117,51 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
     }
 }
 
+pub fn load_bf16_add_sample() -> LoadedSample {
+    let dslx_text = "import bfloat16;\n\nfn add_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {\n        bfloat16::add(x, y)\n}";
+    let fake_path = Path::new("test_utils.x");
+    let ir_result = xlsynth::convert_dslx_to_ir(
+        dslx_text,
+        fake_path,
+        &xlsynth::DslxConvertOptions::default(),
+    )
+    .unwrap();
+    let fn_name = "add_bf16_bf16";
+    let module_name = "test_utils";
+    let mangled_name = mangle_dslx_name(module_name, fn_name).unwrap();
+
+    let opt_ir = xlsynth::optimize_ir(&ir_result.ir, &mangled_name).unwrap();
+    let ir_text = opt_ir.to_string();
+
+    // Parse with xlsynth-g8r's parser to get its internal IR representation
+    let mut parser = ir_parser::Parser::new(&ir_text);
+    let g8r_ir_package = parser.parse_package().unwrap();
+    let g8r_ir_fn = g8r_ir_package.get_fn(&mangled_name).unwrap();
+
+    // Convert the internal IR function to a GateFn
+    let gatify_output = ir2gate::gatify(
+        &g8r_ir_fn,
+        ir2gate::GatifyOptions {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+        },
+    )
+    .unwrap();
+    let gate_fn = gatify_output.gate_fn;
+
+    // Get the final IrFunction from the optimized package
+    let ir_fn = opt_ir.get_function(&mangled_name).unwrap();
+
+    LoadedSample {
+        ir_package: opt_ir,
+        ir_fn,
+        g8r_pkg: g8r_ir_package,
+        gate_fn,
+        mangled_fn_name: mangled_name,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
