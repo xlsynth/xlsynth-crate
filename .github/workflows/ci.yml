@@ -176,7 +176,11 @@ jobs:
         env:
           SKIP: no-commit-to-branch
         run: |
+          # Need git for pre-commit hooks
           apt-get update && apt-get install -y git
+          # Mark the workspace as safe for git commands in the container
+          git config --global --add safe.directory /github/workspace
+          # Configure git user, needed by some hooks
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
           pre-commit install
