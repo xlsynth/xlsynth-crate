@@ -59,7 +59,7 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
         None
     };
     let mut all_values = if collect == Collect::All {
-        Some(BitVec::zeros(gate_fn.gates.len()))
+        Some(BitVec::repeat(false, gate_fn.gates.len()))
     } else {
         None
     };
@@ -119,7 +119,8 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
                     && collect == Collect::Tagged
                 {
                     for tag in tags.iter() {
-                        tagged_values.insert(tag.clone(), and_result);
+                        let map: &mut HashMap<String, bool> = tagged_values.as_mut().unwrap();
+                        map.insert(tag.clone(), and_result);
                     }
                 }
                 // Apply negation if the operand using the AND result is negated
@@ -130,8 +131,8 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
                 }
             }
         };
-        if let Some(all_values) = all_values {
-            all_values[operand.node.id()] = final_value;
+        if let Some(ref mut all_values) = all_values {
+            all_values.set(operand.node.id, final_value);
         }
         // Store the correctly computed final value for this operand
         env.insert(operand, final_value);
@@ -173,7 +174,7 @@ mod tests {
             IrBits::make_ubits(4, 0b0011).unwrap(),
             IrBits::make_ubits(4, 0b0101).unwrap(),
         ];
-        let result = eval(&gate_fn, &inputs, false);
+        let result = eval(&gate_fn, &inputs, Collect::None);
         assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b0001).unwrap()]);
     }
 
@@ -187,7 +188,7 @@ mod tests {
 
         // Test NOT(0b1010) -> 0b0101
         let inputs = vec![IrBits::make_ubits(4, 0b1010).unwrap()];
-        let result = eval(&gate_fn, &inputs, false);
+        let result = eval(&gate_fn, &inputs, Collect::None);
         assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b0101).unwrap()]);
     }
 
@@ -207,7 +208,7 @@ mod tests {
             IrBits::make_ubits(4, 0b0011).unwrap(),
             IrBits::make_ubits(4, 0b0101).unwrap(),
         ];
-        let result = eval(&gate_fn, &inputs, false);
+        let result = eval(&gate_fn, &inputs, Collect::None);
         assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b1110).unwrap()]);
     }
 
@@ -225,7 +226,7 @@ mod tests {
             IrBits::make_ubits(4, 0b0011).unwrap(),
             IrBits::make_ubits(4, 0b0101).unwrap(),
         ];
-        let result = eval(&gate_fn, &inputs, false);
+        let result = eval(&gate_fn, &inputs, Collect::None);
         assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b0111).unwrap()]);
     }
 
@@ -249,7 +250,7 @@ mod tests {
             IrBits::make_ubits(4, 0b0011).unwrap(),
             IrBits::make_ubits(4, 0b0101).unwrap(),
         ];
-        let result = eval(&gate_fn, &inputs, false);
+        let result = eval(&gate_fn, &inputs, Collect::None);
         assert_eq!(result.outputs, vec![IrBits::make_ubits(4, 0b0110).unwrap()]);
     }
 }

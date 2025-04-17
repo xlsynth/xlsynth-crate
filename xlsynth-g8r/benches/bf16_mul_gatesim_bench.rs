@@ -2,7 +2,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use xlsynth::IrBits;
-use xlsynth_g8r::gate_sim;
+use xlsynth_g8r::gate_sim::{self, Collect};
 use xlsynth_g8r::test_utils::{load_bf16_mul_sample, BF16_TOTAL_BITS};
 
 /// Benchmarks the gate simulation of bf16 multiplication using fixed zero
@@ -31,7 +31,11 @@ fn bf16_mul_gatesim_benchmark(c: &mut Criterion) {
     group.bench_function(BenchmarkId::from_parameter(num_samples), |b| {
         b.iter(|| {
             // Call eval once per iteration with the prepared constant input
-            black_box(gate_sim::eval(&gate_fn, &prepared_eval_input, false));
+            black_box(gate_sim::eval(
+                &gate_fn,
+                &prepared_eval_input,
+                Collect::None,
+            ));
         });
     });
 

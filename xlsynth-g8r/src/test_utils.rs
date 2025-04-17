@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::GateFn;
+use crate::gate::{AigOperand, GateFn};
+use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::ir2gate;
 use crate::xls_ir::ir::Package as CrateIrPackage;
 use crate::xls_ir::ir_parser;
@@ -159,6 +160,56 @@ pub fn load_bf16_add_sample() -> LoadedSample {
         g8r_pkg: g8r_ir_package,
         gate_fn,
         mangled_fn_name: mangled_name,
+    }
+}
+
+pub struct TestGraph {
+    pub g: GateFn,
+    pub i0: AigOperand,
+    pub i1: AigOperand,
+    pub i2: AigOperand,
+    pub i3: AigOperand,
+    pub a: AigOperand,
+    pub b: AigOperand,
+    pub c: AigOperand,
+    pub o: AigOperand,
+}
+
+/// Creates a common graph structure for testing cone extraction.
+/// Graph:
+/// i0 --\
+///       AND(a) --\
+/// i1 --|          \
+///       AND(b) -- AND(o) [output]
+/// i2 --|
+///       AND(c) [output]
+/// i3 --/
+pub fn setup_simple_graph() -> TestGraph {
+    let mut gb = GateBuilder::new("g".to_string(), GateBuilderOptions::no_opt());
+    let i0: AigOperand = gb.add_input("i0".to_string(), 1).try_into().unwrap();
+    let i1: AigOperand = gb.add_input("i1".to_string(), 1).try_into().unwrap();
+    let i2: AigOperand = gb.add_input("i2".to_string(), 1).try_into().unwrap();
+    let i3: AigOperand = gb.add_input("i3".to_string(), 1).try_into().unwrap();
+
+    let a = gb.add_and_binary(i0, i1);
+    let b = gb.add_and_binary(i1, i2);
+    let c = gb.add_and_binary(i2, i3);
+
+    let o = gb.add_and_binary(a, b);
+    gb.add_output("o".to_string(), o.into());
+    gb.add_output("c".to_string(), c.into()); // Add c as an output too
+
+    let g = gb.build();
+    TestGraph {
+        g,
+        i0,
+        i1,
+        i2,
+        i3,
+        a,
+        b,
+        c,
+        o,
     }
 }
 

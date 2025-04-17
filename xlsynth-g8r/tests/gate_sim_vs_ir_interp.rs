@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use half::bf16;
 use rand::Rng;
 use xlsynth_g8r::gate::AigRef;
-use xlsynth_g8r::gate_sim;
+use xlsynth_g8r::gate_sim::{self, Collect};
 use xlsynth_g8r::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::test_utils::{
     flat_ir_bits_to_ir_value_bf16, ir_value_bf16_to_flat_ir_bits, load_bf16_mul_sample, make_bf16,
@@ -31,7 +31,8 @@ fn test_bf16_mul_zero_zero() {
 
     let gate_arg0_bits = ir_value_bf16_to_flat_ir_bits(&arg0);
     let gate_arg1_bits = ir_value_bf16_to_flat_ir_bits(&arg1);
-    let gate_result_sim = gate_sim::eval(&gate_fn, &[gate_arg0_bits, gate_arg1_bits], false);
+    let gate_result_sim =
+        gate_sim::eval(&gate_fn, &[gate_arg0_bits, gate_arg1_bits], Collect::None);
 
     // GateFn outputs are flattened. The mul_bf16 returns a single BF16 tuple.
     assert_eq!(gate_result_sim.outputs.len(), 1);
@@ -73,7 +74,8 @@ fn test_bf16_mul_random() {
 
         let gate_arg0_bits = ir_value_bf16_to_flat_ir_bits(&arg0);
         let gate_arg1_bits = ir_value_bf16_to_flat_ir_bits(&arg1);
-        let gate_result_sim = gate_sim::eval(&gate_fn, &[gate_arg0_bits, gate_arg1_bits], false);
+        let gate_result_sim =
+            gate_sim::eval(&gate_fn, &[gate_arg0_bits, gate_arg1_bits], Collect::None);
 
         assert_eq!(gate_result_sim.outputs.len(), 1);
         let gate_result_bits = &gate_result_sim.outputs[0];
