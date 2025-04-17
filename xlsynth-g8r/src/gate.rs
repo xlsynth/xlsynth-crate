@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::xls_ir::ir;
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct AigRef {
     pub id: usize,
 }
@@ -553,60 +553,8 @@ fn extract_cone(start_nodes: &[AigRef], gates: &[AigNode]) -> (Vec<AigRef>, Hash
 #[cfg(test)]
 mod tests {
     use super::extract_cone;
-    use crate::gate::AigOperand;
-    use crate::gate::GateFn;
-    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::test_utils::setup_simple_graph;
     use std::collections::HashSet;
-
-    struct TestGraph {
-        g: GateFn,
-        i0: AigOperand,
-        i1: AigOperand,
-        i2: AigOperand,
-        i3: AigOperand,
-        a: AigOperand,
-        b: AigOperand,
-        c: AigOperand,
-        o: AigOperand,
-    }
-
-    /// Creates a common graph structure for testing cone extraction.
-    /// Graph:
-    /// i0 --\
-    ///       AND(a) --\
-    /// i1 --|          \
-    ///       AND(b) -- AND(o) [output]
-    /// i2 --|
-    ///       AND(c) [output]
-    /// i3 --/
-    fn setup_simple_graph() -> TestGraph {
-        let mut gb = GateBuilder::new("g".to_string(), GateBuilderOptions::no_opt());
-        let i0: AigOperand = gb.add_input("i0".to_string(), 1).try_into().unwrap();
-        let i1: AigOperand = gb.add_input("i1".to_string(), 1).try_into().unwrap();
-        let i2: AigOperand = gb.add_input("i2".to_string(), 1).try_into().unwrap();
-        let i3: AigOperand = gb.add_input("i3".to_string(), 1).try_into().unwrap();
-
-        let a = gb.add_and_binary(i0, i1);
-        let b = gb.add_and_binary(i1, i2);
-        let c = gb.add_and_binary(i2, i3);
-
-        let o = gb.add_and_binary(a, b);
-        gb.add_output("o".to_string(), o.into());
-        gb.add_output("c".to_string(), c.into()); // Add c as an output too
-
-        let g = gb.build();
-        TestGraph {
-            g,
-            i0,
-            i1,
-            i2,
-            i3,
-            a,
-            b,
-            c,
-            o,
-        }
-    }
 
     /// Tests extracting a single cone.
     #[test]
