@@ -4,6 +4,7 @@
 
 use std::{collections::HashMap, iter::zip};
 
+use bitvec::vec::BitVec;
 use xlsynth::IrBits;
 
 use crate::gate::{AigNode, AigOperand, GateFn};
@@ -37,14 +38,31 @@ pub fn ir_bits_from_lsb_is_0(bits: &[bool]) -> IrBits {
 
 pub struct GateSimResult {
     pub outputs: Vec<IrBits>,
-    pub tagged_values: HashMap<String, bool>,
+    pub tagged_values: Option<HashMap<String, bool>>,
+    pub all_values: Option<BitVec>,
 }
 
-pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimResult {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Collect {
+    None,
+    Tagged,
+    All,
+}
+
+pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimResult {
     assert_eq!(inputs.len(), gate_fn.inputs.len());
 
     let mut env: HashMap<AigOperand, bool> = HashMap::new();
-    let mut tagged_values = HashMap::new();
+    let mut tagged_values = if collect == Collect::Tagged {
+        Some(HashMap::new())
+    } else {
+        None
+    };
+    let mut all_values = if collect == Collect::All {
+        Some(BitVec::zeros(gate_fn.gates.len()))
+    } else {
+        None
+    };
 
     // Seed the env with the input operands.
     for (input, gate_fn_input) in zip(inputs, gate_fn.inputs.iter()) {
@@ -98,7 +116,7 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimR
                 // Compute the AND result
                 let and_result = a_value && b_value;
                 if let Some(tags) = tags
-                    && collect_tags
+                    && collect == Collect::Tagged
                 {
                     for tag in tags.iter() {
                         tagged_values.insert(tag.clone(), and_result);
@@ -112,6 +130,9 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimR
                 }
             }
         };
+        if let Some(all_values) = all_values {
+            all_values[operand.node.id()] = final_value;
+        }
         // Store the correctly computed final value for this operand
         env.insert(operand, final_value);
     }
@@ -128,6 +149,7 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect_tags: bool) -> GateSimR
     GateSimResult {
         outputs,
         tagged_values,
+        all_values,
     }
 }
 
