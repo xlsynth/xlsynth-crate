@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "sample-usage"
-version = "0.0.117"
+version = "0.0.118"
 dependencies = [
  "cargo_metadata 0.18.1",
  "env_logger",
@@ -2422,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "test-helpers"
-version = "0.0.117"
+version = "0.0.118"
 dependencies = [
  "cargo_metadata 0.18.1",
  "curl",
@@ -3107,7 +3107,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.117"
+version = "0.0.118"
 dependencies = [
  "cargo_metadata 0.18.1",
  "criterion 0.3.6",
@@ -3121,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-driver"
-version = "0.0.117"
+version = "0.0.118"
 dependencies = [
  "clap 4.5.35",
  "colored",
@@ -3141,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-estimator"
-version = "0.0.117"
+version = "0.0.118"
 dependencies = [
  "env_logger",
  "log",
@@ -3155,7 +3155,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-g8r"
-version = "0.0.117"
+version = "0.0.118"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -3180,7 +3180,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.117"
+version = "0.0.118"
 dependencies = [
  "flate2",
  "libc",
