@@ -660,6 +660,12 @@ def main() -> None:
         default="",
         help="Filter to run only the given executable substring",
     )
+    parser.add_option(
+        "--release",
+        action="store_true",
+        default=False,
+        help="Compile tests in release mode (slower build, faster tests)",
+    )
     (opts, args) = parser.parse_args()
 
     # Check if XLSYNTH_TOOLS environment variable is set.
@@ -676,23 +682,24 @@ def main() -> None:
     else:
         termcolor.cprint(f"Using XLSYNTH_TOOLS path: {xlsynth_tools_path}", "green")
 
-    # Compile all tests in the workspace IN RELEASE MODE with UNSTABLE OPTIONS.
+    # Determine build mode
+    build_mode = "release" if opts.release else "debug (fast build)"
     termcolor.cprint(
-        "Compiling tests in release mode with unstable options...", "yellow"
+        f"Compiling tests in {build_mode} mode with unstable options...", "yellow"
     )
     cargo_command = [
         "cargo",
         "test",
         "--no-run",
         "--workspace",
-        "--release",
-        "--",
-        "-Z",
-        "unstable-options",
     ]
+    if opts.release:
+        cargo_command.append("--release")
+
+    # Add unstable options flag (passed to test binary compiler)
+    cargo_command.extend(["--", "-Z", "unstable-options"])
     # Note: passing flags after '--' to cargo test passes them to the test binary compiler *invocation*
     # We might just need the -Z flag when RUNNING the binary. Let's keep this for now.
-    # Alternative might be just `cargo +nightly test ...` without the `-- -Z ...`
 
     p: subprocess.CompletedProcess[bytes] = subprocess.run(
         cargo_command, check=True, stderr=subprocess.PIPE, env=os.environ
@@ -701,9 +708,12 @@ def main() -> None:
 
     test_binaries: List[str] = []
 
+    # Adjust executable path based on build mode
+    target_dir = "target/release/deps" if opts.release else "target/debug/deps"
+
     for line in output.splitlines():
-        # Check for "target/release/deps/" without the leading slash
-        if "Executable" in line and "(" in line and "target/release/deps/" in line:
+        # Check for the correct target directory
+        if "Executable" in line and "(" in line and target_dir in line:
             if opts.filter_to_run and opts.filter_to_run not in line:
                 continue
             if "spdx" in line or any(
