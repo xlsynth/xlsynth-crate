@@ -45,7 +45,7 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
         "all_filtered_ok": True,
     },
     "gatify_tests": {
-        "shard_test_cases": True,
+        "shard_test_cases": False,
         "filter_out": [
             # Exclude tests known to be very slow under valgrind (>100s)
             "test_gatify_bf16_mul::opt_yes_expects",
