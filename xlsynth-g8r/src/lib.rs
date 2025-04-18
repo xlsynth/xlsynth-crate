@@ -6,6 +6,7 @@
 
 pub mod aig_hasher;
 mod aig_simplify;
+pub mod bulk_replace;
 pub mod check_equivalence;
 mod emit_netlist;
 pub mod find_structures;

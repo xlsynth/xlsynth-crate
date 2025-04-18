@@ -118,6 +118,46 @@ impl AigNode {
             _ => {}
         }
     }
+
+    /// Attempts to add multiple tags to the node.
+    /// Tags can only be added to `AigNode::And2` nodes.
+    ///
+    /// # Arguments
+    /// * `tags_to_add`: A slice of strings representing the tags to add.
+    ///
+    /// # Returns
+    /// * `true` if the tags were successfully added (i.e., the node was an
+    ///   `And2`).
+    /// * `false` otherwise.
+    pub fn try_add_tags(&mut self, tags_to_add: &[String]) -> bool {
+        match self {
+            AigNode::And2 { tags, .. } => {
+                if tags_to_add.is_empty() {
+                    // No tags to add
+                    return true; // Considered success, as no action was needed
+                }
+                if let Some(existing_tags) = tags {
+                    existing_tags.extend_from_slice(tags_to_add);
+                } else {
+                    // If no tags exist yet, create a new Vec
+                    *tags = Some(tags_to_add.to_vec());
+                }
+                true // Indicate success
+            }
+            _ => false, // Not an And2 node, cannot add tags
+        }
+    }
+
+    /// Returns a slice of the tags associated with the node, if any.
+    /// Only `AigNode::And2` can have tags.
+    pub fn get_tags(&self) -> Option<&[String]> {
+        match self {
+            AigNode::And2 {
+                tags: Some(tags), ..
+            } => Some(tags.as_slice()),
+            _ => None, // Not an And2 or has no tags
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

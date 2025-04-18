@@ -223,6 +223,7 @@ pub struct TestGraphWithRedundancies {
     pub g: GateFn,
     pub i0: AigOperand,
     pub i1: AigOperand,
+    pub i2: AigOperand,
     pub inner0: AigOperand,
     pub inner1: AigOperand,
     pub outer0: AigOperand,
@@ -230,7 +231,7 @@ pub struct TestGraphWithRedundancies {
 }
 
 pub fn setup_graph_with_redundancies() -> TestGraphWithRedundancies {
-    let mut gb = GateBuilder::new("g".to_string(), GateBuilderOptions::no_opt());
+    let mut gb = GateBuilder::new("redundant_graph".to_string(), GateBuilderOptions::no_opt());
     let i0 = gb.add_input("i0".to_string(), 1).try_into().unwrap();
     let i1 = gb.add_input("i1".to_string(), 1).try_into().unwrap();
     let i2 = gb.add_input("i2".to_string(), 1).try_into().unwrap();
@@ -246,10 +247,60 @@ pub fn setup_graph_with_redundancies() -> TestGraphWithRedundancies {
         g,
         i0,
         i1,
+        i2,
         inner0,
         inner1,
         outer0,
         outer1,
+    }
+}
+
+pub struct TestGraphWithMoreRedundancies {
+    pub g: GateFn,
+    pub i0: AigOperand,
+    pub i1: AigOperand,
+    pub i2: AigOperand,
+    pub inner0: AigOperand,
+    pub inner1: AigOperand,
+    pub inner2: AigOperand,
+    pub outer0: AigOperand,
+    pub outer1: AigOperand,
+    pub outer2: AigOperand,
+}
+
+pub fn setup_graph_with_more_redundancies() -> TestGraphWithMoreRedundancies {
+    let mut gb = GateBuilder::new(
+        "more_redundant_graph".to_string(),
+        GateBuilderOptions::no_opt(),
+    );
+    let i0 = gb.add_input("i0".to_string(), 1).try_into().unwrap();
+    let i1 = gb.add_input("i1".to_string(), 1).try_into().unwrap();
+    let i2 = gb.add_input("i2".to_string(), 1).try_into().unwrap();
+
+    let inner0 = gb.add_and_binary(i0, i1);
+    let inner1 = gb.add_and_binary(i0, i1);
+    let inner2 = gb.add_and_binary(i0, i1);
+
+    let outer0 = gb.add_and_binary(inner0, i2);
+    let outer1 = gb.add_and_binary(inner1, i2);
+    let outer2 = gb.add_and_binary(inner2, i2);
+
+    gb.add_output("o0".to_string(), outer0.into());
+    gb.add_output("o1".to_string(), outer1.into());
+    gb.add_output("o2".to_string(), outer2.into());
+
+    let g = gb.build();
+    TestGraphWithMoreRedundancies {
+        g,
+        i0,
+        i1,
+        i2,
+        inner0,
+        inner1,
+        inner2,
+        outer0,
+        outer1,
+        outer2,
     }
 }
 
@@ -294,6 +345,68 @@ pub fn setup_partially_equiv_graph() -> TestPartiallyEquivGraph {
         a,
         b,
         c,
+    }
+}
+
+pub struct TestGraphForNonEquivReplace {
+    pub g: GateFn,
+    pub i0: AigOperand,   // Represents A
+    pub i1: AigOperand,   // Represents B
+    pub i2: AigOperand,   // Represents C
+    pub a_op: AigOperand, // Operand for A (same as i0)
+    pub b_op: AigOperand, // Operand for B (same as i1)
+    pub c_op: AigOperand, // Operand for C (same as i2)
+    pub o_op: AigOperand, // Operand for O = AND(A, B)
+}
+
+pub fn setup_graph_for_nonequiv_replace() -> TestGraphForNonEquivReplace {
+    let mut gb = GateBuilder::new("nonequiv_replace".to_string(), GateBuilderOptions::no_opt());
+    let i0 = gb.add_input("i0".to_string(), 1).try_into().unwrap(); // A (%1)
+    let i1 = gb.add_input("i1".to_string(), 1).try_into().unwrap(); // B (%2)
+    let i2 = gb.add_input("i2".to_string(), 1).try_into().unwrap(); // C (%3)
+    let o = gb.add_and_binary(i0, i1); // O = AND(A, B) (%4)
+    gb.add_output("o".to_string(), o.into());
+
+    let g = gb.build();
+    TestGraphForNonEquivReplace {
+        g,
+        i0,
+        i1,
+        i2,
+        a_op: i0,
+        b_op: i1,
+        c_op: i2,
+        o_op: o,
+    }
+}
+
+pub struct TestGraphForLivenessCheck {
+    pub g: GateFn,
+    pub a_in: AigOperand,  // Input A
+    pub b_in: AigOperand,  // Input B
+    pub c_in: AigOperand,  // Input C
+    pub o1_op: AigOperand, // O1 = AND(A, B)
+    pub o2_op: AigOperand, // O2 = AND(B, C)
+}
+
+pub fn setup_graph_for_liveness_check() -> TestGraphForLivenessCheck {
+    let mut gb = GateBuilder::new("liveness_check".to_string(), GateBuilderOptions::no_opt());
+    let a_in = gb.add_input("a_in".to_string(), 1).try_into().unwrap(); // %1
+    let b_in = gb.add_input("b_in".to_string(), 1).try_into().unwrap(); // %2
+    let c_in = gb.add_input("c_in".to_string(), 1).try_into().unwrap(); // %3
+    let o1 = gb.add_and_binary(a_in, b_in); // %4
+    let o2 = gb.add_and_binary(b_in, c_in); // %5
+    gb.add_output("o1".to_string(), o1.into());
+    gb.add_output("o2".to_string(), o2.into());
+
+    let g = gb.build();
+    TestGraphForLivenessCheck {
+        g,
+        a_in,
+        b_in,
+        c_in,
+        o1_op: o1,
+        o2_op: o2,
     }
 }
 
