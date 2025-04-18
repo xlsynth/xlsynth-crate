@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use bitvec::vec::BitVec;
+use xlsynth::{IrBits, IrValue};
 
 use crate::xls_ir::ir;
 
@@ -311,7 +314,36 @@ pub struct GateFn {
     pub gates: Vec<AigNode>,
 }
 
+fn ir_bits_from_bitvec(bv: BitVec) -> IrBits {
+    let mut bv_str: String = format!("bits[{}]:0b", bv.len());
+    for b in bv {
+        bv_str.push(if b { '1' } else { '0' });
+    }
+    IrValue::parse_typed(&bv_str).unwrap().to_bits().unwrap()
+}
+
 impl GateFn {
+    pub fn map_to_inputs(&self, map: HashMap<AigRef, bool>) -> Vec<IrBits> {
+        let mut bitvecs: Vec<BitVec> = self
+            .inputs
+            .iter()
+            .map(|i| BitVec::repeat(false, i.get_bit_count()))
+            .collect();
+        for (input_num, input) in self.inputs.iter().enumerate() {
+            for bit_index in 0..input.get_bit_count() {
+                let aig_ref = input.bit_vector.get_lsb(bit_index).non_negated().unwrap();
+                let bit_value = map
+                    .get(&aig_ref)
+                    .expect("all input gates should be present");
+                bitvecs[input_num].set(bit_index, *bit_value);
+            }
+        }
+        bitvecs
+            .into_iter()
+            .map(|bv| ir_bits_from_bitvec(bv))
+            .collect()
+    }
+
     pub fn get_flat_type(&self) -> ir::FunctionType {
         let params = self
             .inputs
@@ -510,8 +542,7 @@ fn post_order(
 ///   topological ordering, as that can often be more useful than getting the
 ///   set and the caller needing to reconstruct the ordering).
 /// * the set of primary inputs feeding the cones.
-#[allow(dead_code)]
-fn extract_cone(start_nodes: &[AigRef], gates: &[AigNode]) -> (Vec<AigRef>, HashSet<AigRef>) {
+pub fn extract_cone(start_nodes: &[AigRef], gates: &[AigNode]) -> (Vec<AigRef>, HashSet<AigRef>) {
     let mut cone_gates_set = HashSet::new();
     let mut cone_gates = Vec::new();
     let mut cone_inputs = HashSet::new();

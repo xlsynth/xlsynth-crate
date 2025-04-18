@@ -84,7 +84,7 @@ pub fn propose_equiv(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::setup_simple_graph;
+    use crate::test_utils::{setup_graph_with_redundancies, setup_simple_graph};
     use rand::SeedableRng;
 
     #[test]
@@ -105,6 +105,26 @@ mod tests {
                 &vec![graph.b.node],
                 &vec![graph.c.node],
                 &vec![graph.o.node],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_propose_equiv_graph_with_redundancies() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let graph = setup_graph_with_redundancies();
+        let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
+        let equiv_classes = propose_equiv(&graph.g, 4096, &mut seeded_rng);
+        log::info!("equiv_classes: {:?}", equiv_classes);
+        assert_eq!(equiv_classes.len(), 2);
+        let mut values = equiv_classes.values().collect::<Vec<_>>();
+        // Sort them so we can do stable tests.
+        values.sort();
+        assert_eq!(
+            *values,
+            vec![
+                &vec![graph.inner0.node, graph.inner1.node],
+                &vec![graph.outer0.node, graph.outer1.node],
             ]
         );
     }

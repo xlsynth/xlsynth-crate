@@ -8,13 +8,8 @@ use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::get_summary_stats::{get_summary_stats, SummaryStats};
 use xlsynth_g8r::ir2gate::{gatify, gatify_ule_via_bit_tests, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
+use xlsynth_g8r::test_utils::Opt;
 use xlsynth_g8r::xls_ir::ir_parser;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Opt {
-    Yes,
-    No,
-}
 
 /// Proves that the gate-mapped version fo the top function in `ir_package_text`
 /// is equivalent to the IR version.

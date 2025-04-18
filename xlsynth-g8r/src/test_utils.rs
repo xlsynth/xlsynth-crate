@@ -69,7 +69,13 @@ pub fn flat_ir_bits_to_ir_value_bf16(bits_value: &IrBits) -> IrValue {
     IrValue::make_tuple(&[sign, exponent, fraction])
 }
 
-pub fn load_bf16_mul_sample() -> LoadedSample {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opt {
+    Yes,
+    No,
+}
+
+pub fn load_bf16_mul_sample(opt: Opt) -> LoadedSample {
     let dslx_text = "import bfloat16;
 
 fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
@@ -98,8 +104,8 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
     let gatify_output = ir2gate::gatify(
         &g8r_ir_fn,
         ir2gate::GatifyOptions {
-            fold: true,
-            hash: true,
+            fold: if opt == Opt::Yes { true } else { false },
+            hash: if opt == Opt::Yes { true } else { false },
             check_equivalence: false,
         },
     )
@@ -210,6 +216,40 @@ pub fn setup_simple_graph() -> TestGraph {
         b,
         c,
         o,
+    }
+}
+
+pub struct TestGraphWithRedundancies {
+    pub g: GateFn,
+    pub i0: AigOperand,
+    pub i1: AigOperand,
+    pub inner0: AigOperand,
+    pub inner1: AigOperand,
+    pub outer0: AigOperand,
+    pub outer1: AigOperand,
+}
+
+pub fn setup_graph_with_redundancies() -> TestGraphWithRedundancies {
+    let mut gb = GateBuilder::new("g".to_string(), GateBuilderOptions::no_opt());
+    let i0 = gb.add_input("i0".to_string(), 1).try_into().unwrap();
+    let i1 = gb.add_input("i1".to_string(), 1).try_into().unwrap();
+    let i2 = gb.add_input("i2".to_string(), 1).try_into().unwrap();
+    let inner0 = gb.add_and_binary(i0, i1);
+    let inner1 = gb.add_and_binary(i0, i1);
+    let outer0 = gb.add_and_binary(inner0, i2);
+    let outer1 = gb.add_and_binary(inner1, i2);
+    gb.add_output("o0".to_string(), outer0.into());
+    gb.add_output("o1".to_string(), outer1.into());
+
+    let g = gb.build();
+    TestGraphWithRedundancies {
+        g,
+        i0,
+        i1,
+        inner0,
+        inner1,
+        outer0,
+        outer1,
     }
 }
 

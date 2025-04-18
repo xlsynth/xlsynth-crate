@@ -42,6 +42,8 @@ fn test_bf16_mul_zero_zero() {
     assert_eq!(ir_result, gate_result);
 }
 
+/// Pushes concrete random input vectors through both the IR function and the
+/// g8r mapped version and checks they are equivalent.
 #[test]
 fn test_bf16_mul_random() {
     let _ = env_logger::builder().is_test(true).try_init();
