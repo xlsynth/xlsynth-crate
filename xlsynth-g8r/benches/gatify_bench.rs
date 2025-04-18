@@ -7,11 +7,11 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use xlsynth_g8r::{
     gate_builder::GateBuilderOptions,
     ir2gate,
-    test_utils::{load_bf16_add_sample, load_bf16_mul_sample},
+    test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
 };
 
 fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
-    let sample = load_bf16_mul_sample();
+    let sample = load_bf16_mul_sample(Opt::Yes);
     let ir_fn = sample.g8r_pkg.get_fn(&sample.mangled_fn_name).unwrap();
 
     let mut group = c.benchmark_group("gatify_bf16_mul");
@@ -65,7 +65,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
 }
 
 fn gatify_bf16_add_benchmark(c: &mut Criterion) {
-    let sample = load_bf16_add_sample();
+    let sample = load_bf16_add_sample(Opt::Yes);
     let ir_fn = sample.g8r_pkg.get_fn(&sample.mangled_fn_name).unwrap();
 
     let mut group = c.benchmark_group("gatify_bf16_add");

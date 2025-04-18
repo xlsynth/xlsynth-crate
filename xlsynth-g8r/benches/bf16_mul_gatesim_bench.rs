@@ -3,12 +3,12 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use xlsynth::IrBits;
 use xlsynth_g8r::gate_sim::{self, Collect};
-use xlsynth_g8r::test_utils::{load_bf16_mul_sample, BF16_TOTAL_BITS};
+use xlsynth_g8r::test_utils::{load_bf16_mul_sample, Opt, BF16_TOTAL_BITS};
 
 /// Benchmarks the gate simulation of bf16 multiplication using fixed zero
 /// inputs.
 fn bf16_mul_gatesim_benchmark(c: &mut Criterion) {
-    let loaded_sample = load_bf16_mul_sample();
+    let loaded_sample = load_bf16_mul_sample(Opt::Yes);
     let gate_fn = loaded_sample.gate_fn;
 
     // Using fixed inputs helps reduce benchmark variance.

@@ -14,13 +14,14 @@ use xlsynth_g8r::gate_sim::{self, Collect};
 use xlsynth_g8r::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::test_utils::{
     flat_ir_bits_to_ir_value_bf16, ir_value_bf16_to_flat_ir_bits, load_bf16_mul_sample, make_bf16,
+    Opt,
 };
 use xlsynth_g8r::use_count::get_id_to_use_count;
 
 #[test]
 fn test_bf16_mul_zero_zero() {
     let _ = env_logger::builder().is_test(true).try_init();
-    let loaded_sample = load_bf16_mul_sample();
+    let loaded_sample = load_bf16_mul_sample(Opt::Yes);
     let ir_fn = loaded_sample.ir_fn;
     let gate_fn = loaded_sample.gate_fn;
 
@@ -47,7 +48,7 @@ fn test_bf16_mul_zero_zero() {
 #[test]
 fn test_bf16_mul_random() {
     let _ = env_logger::builder().is_test(true).try_init();
-    let loaded_sample = load_bf16_mul_sample();
+    let loaded_sample = load_bf16_mul_sample(Opt::Yes);
     let ir_fn = loaded_sample.ir_fn;
     let gate_fn = loaded_sample.gate_fn;
 
@@ -95,7 +96,7 @@ fn test_bf16_mul_random() {
 fn test_bf16_mul_g8r_stats() {
     let _ = env_logger::builder().is_test(true).try_init();
     log::info!("loading bf16 mul sample");
-    let loaded_sample = load_bf16_mul_sample();
+    let loaded_sample = load_bf16_mul_sample(Opt::Yes);
     let gate_fn = &loaded_sample.gate_fn;
 
     log::info!("getting id to use count");
