@@ -69,7 +69,13 @@ pub fn flat_ir_bits_to_ir_value_bf16(bits_value: &IrBits) -> IrValue {
     IrValue::make_tuple(&[sign, exponent, fraction])
 }
 
-pub fn load_bf16_mul_sample() -> LoadedSample {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opt {
+    Yes,
+    No,
+}
+
+pub fn load_bf16_mul_sample(opt: Opt) -> LoadedSample {
     let dslx_text = "import bfloat16;
 
 fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
@@ -98,8 +104,8 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
     let gatify_output = ir2gate::gatify(
         &g8r_ir_fn,
         ir2gate::GatifyOptions {
-            fold: true,
-            hash: true,
+            fold: if opt == Opt::Yes { true } else { false },
+            hash: if opt == Opt::Yes { true } else { false },
             check_equivalence: false,
         },
     )
@@ -118,7 +124,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
     }
 }
 
-pub fn load_bf16_add_sample() -> LoadedSample {
+pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
     let dslx_text = "import bfloat16;\n\nfn add_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {\n        bfloat16::add(x, y)\n}";
     let fake_path = Path::new("test_utils.x");
     let ir_result = xlsynth::convert_dslx_to_ir(
@@ -143,8 +149,8 @@ pub fn load_bf16_add_sample() -> LoadedSample {
     let gatify_output = ir2gate::gatify(
         &g8r_ir_fn,
         ir2gate::GatifyOptions {
-            fold: true,
-            hash: true,
+            fold: if opt == Opt::Yes { true } else { false },
+            hash: if opt == Opt::Yes { true } else { false },
             check_equivalence: false,
         },
     )
@@ -210,6 +216,84 @@ pub fn setup_simple_graph() -> TestGraph {
         b,
         c,
         o,
+    }
+}
+
+pub struct TestGraphWithRedundancies {
+    pub g: GateFn,
+    pub i0: AigOperand,
+    pub i1: AigOperand,
+    pub inner0: AigOperand,
+    pub inner1: AigOperand,
+    pub outer0: AigOperand,
+    pub outer1: AigOperand,
+}
+
+pub fn setup_graph_with_redundancies() -> TestGraphWithRedundancies {
+    let mut gb = GateBuilder::new("g".to_string(), GateBuilderOptions::no_opt());
+    let i0 = gb.add_input("i0".to_string(), 1).try_into().unwrap();
+    let i1 = gb.add_input("i1".to_string(), 1).try_into().unwrap();
+    let i2 = gb.add_input("i2".to_string(), 1).try_into().unwrap();
+    let inner0 = gb.add_and_binary(i0, i1);
+    let inner1 = gb.add_and_binary(i0, i1);
+    let outer0 = gb.add_and_binary(inner0, i2);
+    let outer1 = gb.add_and_binary(inner1, i2);
+    gb.add_output("o0".to_string(), outer0.into());
+    gb.add_output("o1".to_string(), outer1.into());
+
+    let g = gb.build();
+    TestGraphWithRedundancies {
+        g,
+        i0,
+        i1,
+        inner0,
+        inner1,
+        outer0,
+        outer1,
+    }
+}
+
+pub struct TestPartiallyEquivGraph {
+    pub g: GateFn,
+    pub i0: AigOperand,
+    pub i1: AigOperand,
+    pub i2: AigOperand,
+    pub a: AigOperand,
+    pub b: AigOperand,
+    pub c: AigOperand,
+}
+
+/// Creates a graph where 'a' and 'b' are equivalent, but 'c' is not.
+/// Graph:
+/// i0 --\\ AND(a) [output]
+/// i1 --/
+/// i0 --\\ AND(b) [output]
+/// i1 --/
+/// i0 --\\ AND(c) [output]
+/// i2 --/
+pub fn setup_partially_equiv_graph() -> TestPartiallyEquivGraph {
+    let mut gb = GateBuilder::new("partial_equiv".to_string(), GateBuilderOptions::no_opt());
+    let i0 = gb.add_input("i0".to_string(), 1).try_into().unwrap();
+    let i1 = gb.add_input("i1".to_string(), 1).try_into().unwrap();
+    let i2 = gb.add_input("i2".to_string(), 1).try_into().unwrap();
+
+    let a = gb.add_and_binary(i0, i1);
+    let b = gb.add_and_binary(i0, i1); // Identical to 'a'
+    let c = gb.add_and_binary(i0, i2); // Different from 'a' and 'b'
+
+    gb.add_output("a".to_string(), a.into());
+    gb.add_output("b".to_string(), b.into());
+    gb.add_output("c".to_string(), c.into());
+
+    let g = gb.build();
+    TestPartiallyEquivGraph {
+        g,
+        i0,
+        i1,
+        i2,
+        a,
+        b,
+        c,
     }
 }
 

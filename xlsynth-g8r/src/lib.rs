@@ -21,4 +21,5 @@ pub mod process_ir_path;
 pub mod propose_equiv;
 pub mod test_utils;
 pub mod use_count;
+pub mod validate_equiv;
 pub mod xls_ir;
