@@ -10,6 +10,7 @@ pub mod bulk_replace;
 pub mod check_equivalence;
 mod emit_netlist;
 pub mod find_structures;
+pub mod fraig;
 pub mod gate;
 pub mod gate2ir;
 pub mod gate_builder;

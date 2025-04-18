@@ -7,12 +7,13 @@ use clap::ArgMatches;
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_g8r::process_ir_path;
 
-fn ir2gates(input_file: &std::path::Path, quiet: bool, fold: bool, hash: bool) {
+fn ir2gates(input_file: &std::path::Path, quiet: bool, fold: bool, hash: bool, fraig: bool) {
     log::info!("ir2gates");
     let options = process_ir_path::Options {
         check_equivalence: false,
         fold,
         hash,
+        fraig,
         quiet,
         emit_netlist: false,
     };
@@ -40,7 +41,12 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("false") => false,
         _ => true, // default for hashing is true
     };
+    let fraig = match matches.get_one::<String>("fraig").map(|s| s.as_str()) {
+        Some("true") => true,
+        Some("false") => false,
+        _ => true, // default for fraig is true
+    };
     let input_path = std::path::Path::new(input_file);
 
-    ir2gates(input_path, quiet, fold, hash);
+    ir2gates(input_path, quiet, fold, hash, fraig);
 }

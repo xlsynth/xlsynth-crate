@@ -354,7 +354,8 @@ fn main() {
                 )
                 .add_bool_arg("quiet", "Quiet mode")
                 .add_bool_arg("fold", "Fold the gate representation")
-                .add_bool_arg("hash", "Hash the gate representation"),
+                .add_bool_arg("hash", "Hash the gate representation")
+                .add_bool_arg("fraig", "Run fraig optimization"),
         )
         .get_matches();
 

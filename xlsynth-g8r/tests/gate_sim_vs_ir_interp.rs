@@ -106,8 +106,8 @@ fn test_bf16_mul_g8r_stats() {
 
     log::info!("getting gate depth");
     let live_nodes: Vec<AigRef> = id_to_use_count.keys().cloned().collect();
-    let (depth_map, _deepest_path_nodes) = get_gate_depth(gate_fn, &live_nodes);
-    let max_depth = depth_map.keys().max().copied().unwrap_or(0);
+    let depth_stats = get_gate_depth(gate_fn, &live_nodes);
+    let max_depth = depth_stats.deepest_path.len();
 
-    assert_eq!(max_depth, 108, "Expected a reasonable max depth");
+    assert_eq!(max_depth, 109, "Expected a reasonable max depth");
 }

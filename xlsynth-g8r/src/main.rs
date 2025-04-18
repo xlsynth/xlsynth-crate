@@ -18,6 +18,12 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     hash: bool,
 
+    /// Whether to run "fraiging" optimization.
+    #[arg(long, default_value = "true")]
+    #[arg(long, default_value_t = true)]
+    #[arg(action = clap::ArgAction::Set)]
+    fraig: bool,
+
     /// Whether to check equivalence between the IR and the gate function.
     #[arg(long, default_value = "true")]
     #[arg(long, default_value_t = true)]
@@ -41,6 +47,7 @@ fn main() {
         check_equivalence: args.check_equivalence,
         fold: args.fold,
         hash: args.hash,
+        fraig: args.fraig,
         emit_netlist: args.emit_netlist,
         quiet: args.emit_netlist,
     };
