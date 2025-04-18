@@ -4,8 +4,23 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+        exclude: '.*\.golden\.sv$' # Exclude files ending in .golden.sv (Python regex)
+      - id: trailing-whitespace
       - id: no-commit-to-branch
         args: ["--branch", "main"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version. Stick to the latest version of ruff.
+    rev: v0.5.5
+    hooks:
+      - id: ruff
+        name: ruff check
+        args: [--fix] # Automatically fix lint issues
+      - id: ruff-format
+        name: ruff format
+
   - repo: local
     hooks:
       - id: rustfmt
@@ -17,10 +32,10 @@ repos:
 
       - id: mypy
         name: mypy
-        description: Run mypy on gen_version_compat.py
-        entry: mypy gen_version_compat.py
+        description: Run mypy type checking on Python scripts
+        entry: mypy gen_version_compat.py run_valgrind_on_tests.py
         language: python
-        additional_dependencies: ["mypy"]
+        additional_dependencies: ["mypy", "types-termcolor"]
         pass_filenames: false
 
       - id: bump_version_check

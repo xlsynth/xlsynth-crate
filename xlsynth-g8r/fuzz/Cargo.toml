@@ -25,4 +25,4 @@ members = ["."]
 name = "fuzz_gatify"
 path = "fuzz_targets/fuzz_gatify.rs"
 test = false
-doc = false 
+doc = false

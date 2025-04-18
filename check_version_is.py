@@ -15,7 +15,7 @@ print(f"Argument version: {arg_version!r}")
 
 # If you expect the script to always receive e.g. "v0.0.57",
 # you can strip the leading 'v' here:
-tag_version = arg_version.lstrip('v')
+tag_version = arg_version.lstrip("v")
 print(f"Tag version:       {tag_version!r}")
 
 # Read the version from xlsynth-sys/Cargo.toml
@@ -28,7 +28,9 @@ print(f"Cargo.toml: {cargo_toml!r}")
 # Use a regex to extract the version from a line like: version = "0.0.57"
 match = re.search(r'^version\s*=\s*"([^"]+)"', cargo_toml, re.MULTILINE)
 if not match:
-    print("Error: Could not find a valid `version = \"...\"` line in xlsynth-sys/Cargo.toml.")
+    print(
+        'Error: Could not find a valid `version = "..."` line in xlsynth-sys/Cargo.toml.'
+    )
     sys.exit(1)
 
 cargo_version = match.group(1)
