@@ -225,7 +225,7 @@ pub fn validate_equiv(
         if known_equiv.len() > 1 {
             validation_result
                 .proven_equiv_sets
-                .push(equiv_class.to_vec())
+                .push(known_equiv.to_vec());
         }
     }
 
@@ -239,9 +239,12 @@ mod tests {
     use rand::SeedableRng;
 
     use crate::{
-        gate::AigRef,
+        gate::{AigRef, GateFn},
         propose_equiv::propose_equiv,
-        test_utils::{load_bf16_mul_sample, setup_graph_with_redundancies, Opt},
+        test_utils::{
+            load_bf16_add_sample, load_bf16_mul_sample, setup_graph_with_redundancies,
+            setup_partially_equiv_graph, Opt,
+        },
     };
 
     use super::validate_equiv;
@@ -259,27 +262,24 @@ mod tests {
         assert_eq!(validation_result.proven_equiv_sets.len(), 2);
     }
 
-    #[test]
-    fn test_validate_equiv_bf16_mul() {
-        let setup = load_bf16_mul_sample(Opt::Yes);
+    fn do_propose_and_validate(gate_fn: &GateFn, input_sample_count: usize) -> (usize, usize) {
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
         let propose_start = Instant::now();
-        let equiv_classes = propose_equiv(&setup.gate_fn, 256, &mut seeded_rng);
+        let proposed_equiv_classes = propose_equiv(&gate_fn, input_sample_count, &mut seeded_rng);
         let propose_end = Instant::now();
         let propose_duration = propose_end - propose_start;
         eprintln!(
             "Proposed {} equiv classes in {:?}",
-            equiv_classes.len(),
+            proposed_equiv_classes.len(),
             propose_duration
         );
-        assert_eq!(equiv_classes.len(), 1036);
 
-        let classes: Vec<&[AigRef]> = equiv_classes
+        let classes: Vec<&[AigRef]> = proposed_equiv_classes
             .values()
             .map(|nodes| nodes.as_slice())
             .collect();
         let validate_start = Instant::now();
-        let validation_result = validate_equiv(&setup.gate_fn, &classes).unwrap();
+        let validation_result = validate_equiv(&gate_fn, &classes).unwrap();
         let validate_end = Instant::now();
         let validate_duration = validate_end - validate_start;
         eprintln!(
@@ -288,6 +288,67 @@ mod tests {
             validation_result.cex_inputs.len(),
             validate_duration
         );
-        assert_eq!(validation_result.proven_equiv_sets.len(), 19);
+
+        (
+            proposed_equiv_classes.len(),
+            validation_result.proven_equiv_sets.len(),
+        )
+    }
+
+    #[test]
+    fn test_validate_equiv_bf16_mul() {
+        let setup = load_bf16_mul_sample(Opt::No);
+        let (proposed_equiv_classes_len, proven_equiv_sets_len) =
+            do_propose_and_validate(&setup.gate_fn, 256);
+        assert_eq!(proposed_equiv_classes_len, 1136);
+        assert_eq!(proven_equiv_sets_len, 52);
+    }
+
+    #[test]
+    fn test_validate_equiv_bf16_add() {
+        let setup = load_bf16_add_sample(Opt::No);
+        let (proposed_equiv_classes_len, proven_equiv_sets_len) =
+            do_propose_and_validate(&setup.gate_fn, 256);
+        assert_eq!(proposed_equiv_classes_len, 852);
+        assert_eq!(proven_equiv_sets_len, 86);
+    }
+
+    #[test]
+    fn test_validate_partial_equivalence() {
+        let setup = setup_partially_equiv_graph();
+
+        // Propose a class where a and b are equivalent, but c is not.
+        let proposed_class = &[setup.a.node, setup.b.node, setup.c.node];
+
+        let validation_result = validate_equiv(&setup.g, &[proposed_class]).unwrap();
+
+        // Expect one proven set containing only a and b.
+        assert_eq!(
+            validation_result.proven_equiv_sets.len(),
+            1,
+            "Should find exactly one proven set"
+        );
+        assert_eq!(
+            validation_result.proven_equiv_sets[0].len(),
+            2,
+            "Proven set should contain 2 elements (a, b)"
+        );
+
+        // Sort for consistent comparison
+        let mut proven_set = validation_result.proven_equiv_sets[0].clone();
+        proven_set.sort_unstable_by_key(|r| r.id);
+        let mut expected_proven = vec![setup.a.node, setup.b.node];
+        expected_proven.sort_unstable_by_key(|r| r.id);
+        assert_eq!(
+            proven_set, expected_proven,
+            "Proven set should contain nodes a and b"
+        );
+
+        // Expect one counterexample (for c vs a/b).
+        assert_eq!(
+            validation_result.cex_inputs.len(),
+            1,
+            "Should find exactly one counterexample"
+        );
     }
 }
