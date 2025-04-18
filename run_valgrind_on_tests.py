@@ -16,8 +16,9 @@ import termcolor
 # Type alias for test duration dictionary
 TestDurations = DefaultDict[str, float]
 
-# Type alias for the result of run_single_test_binary
-WorkerResult = Union[TestDurations, Exception]
+# Type alias for the result of run_single_test_binary or run_single_test_case
+# Success is Tuple[TestDurations, parsed_count, expected_count]
+WorkerResult = Union[Tuple[TestDurations, int, int], Exception]
 
 
 class TestBinaryConfig(TypedDict, total=False):
@@ -45,7 +46,6 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
         "all_filtered_ok": True,
     },
     "gatify_tests": {
-        "shard_test_cases": False,
         "filter_out": [
             # Exclude tests known to be very slow under valgrind (>100s)
             "test_gatify_bf16_mul::opt_yes_expects",
@@ -135,17 +135,43 @@ def _sanity_check_test_executable(exe: str) -> None:
         raise PermissionError(f"Executable not runnable: {exe}")
 
 
+def _insert_test_filter(command: List[str], test_filters: List[str]) -> None:
+    """Inserts the test filter strings into the command list immediately after the executable path.
+
+    Raises ValueError if the executable path cannot be determined (heuristically).
+    """
+    exe_index = -1
+    for i, arg in enumerate(command):
+        # Heuristic: Find the first arg that is likely the executable path
+        if (
+            i > 0
+            and not arg.startswith("-")
+            and os.path.isabs(arg)
+            and os.path.isfile(arg)
+        ):
+            exe_index = i
+            break
+
+    if exe_index == -1:
+        raise ValueError(
+            f"Could not reliably determine executable path index in command to insert test filter: {command}"
+        )
+
+    # Insert each test filter string individually after the executable path
+    command[exe_index + 1 : exe_index + 1] = test_filters  # Splice the list in
+
+
 def run_subset_of_tests(
     exe: str,
     cwd: str,
     filter_out: List[str],
     suppression_path: str,
     all_filtered_ok: bool = False,
-) -> TestDurations:
+) -> Tuple[TestDurations, int, int]:
     """
     Runs a subset of tests from the given test executable, filtering out tests that contain any of the substrings specified in filter_out.
     The binary is run from the provided cwd.
-    Returns a dictionary of test durations.
+    Returns a tuple: (dictionary of test durations, count of tests run, count of expected tests).
     """
     # Get the list of tests from the executable.
     output: str = subprocess.check_output([exe, "--test", "--list"], cwd=cwd).decode(
@@ -177,51 +203,70 @@ def run_subset_of_tests(
     else:
         termcolor.cprint("  No tests to skip", "green")
 
+    expected_count = len(to_run)
     if not to_run:
         termcolor.cprint("No tests to run", "red")
         if all_filtered_ok:
             termcolor.cprint("All filtered tests are ok for this binary", "green")
-            return defaultdict(float)
+            # Return success with 0 parsed, 0 expected
+            return defaultdict(float), 0, 0
         else:
             raise ValueError(
                 f"No tests to run for binary {exe} with filter_out {filter_out}"
             )
 
-    test_str: str = " ".join(to_run)
-    return run_valgrind(exe, cwd, suppression_path, test_str)
+    # Pass the list of tests directly to run_valgrind
+    durations, parsed_count = run_valgrind(
+        exe, cwd, suppression_path, test_filters=to_run
+    )
+    # Return the result along with the expected count
+    return durations, parsed_count, expected_count
 
 
 def run_valgrind(
     exe: str,
     cwd: str,
     suppression_path: str,
-    test_str: Optional[str] = None,
+    test_filters: Optional[List[str]] = None,
     expect_tests: bool = True,
-) -> TestDurations:
+) -> Tuple[TestDurations, int]:
     """Runs valgrind with JSON test output and parses durations.
-    Returns a dictionary containing test durations.
-    """
-    _sanity_check_test_executable(exe)  # Call the helper function
 
+    Args:
+        exe: The executable path.
+        cwd: The working directory to run the executable in.
+        suppression_path: The path to the valgrind suppression file.
+        test_filters: An optional list of specific test names to run.
+        expect_tests: Whether test events are expected in the output.
+
+    Returns tuple: (dict of test durations, count of tests parsed).
+    """
+    _sanity_check_test_executable(exe)
     test_durations: TestDurations = defaultdict(float)
 
+    # Base command
     valgrind_command: List[str] = [
         "valgrind",
         "--error-exitcode=1",
         f"--suppressions={suppression_path}",
         "--leak-check=full",
         exe,
-        "-Z",
-        "unstable-options",
-        "--report-time",
-        "--format",
-        "json",
     ]
-    if test_str:
-        # Add specific tests to run if provided
-        # Insert test_str *after* --format json
-        json_index = valgrind_command.index("json")
-        valgrind_command.insert(json_index + 1, test_str)
+
+    if test_filters:
+        # Insert test filter strings right after the executable
+        _insert_test_filter(valgrind_command, test_filters)
+
+    # Append test harness options AFTER the filter strings (if present)
+    valgrind_command.extend(
+        [
+            "-Z",
+            "unstable-options",
+            "--report-time",
+            "--format",
+            "json",
+        ]
+    )
 
     start_time: float = time.time()
     try:
@@ -256,7 +301,7 @@ def run_valgrind(
         raise
     end_time: float = time.time()
 
-    parsed_specific_test: bool = False
+    parsed_specific_test_count: int = 0
     json_parsing_errors: int = 0
     suite_exec_time: Optional[float] = None  # Store suite exec_time if found
 
@@ -279,7 +324,7 @@ def run_valgrind(
                         test_name: str = f"{os.path.basename(exe)}::{name}"
                         duration: float = float(exec_time)
                         test_durations[test_name] = duration
-                        parsed_specific_test = True
+                        parsed_specific_test_count += 1
                     except (ValueError, TypeError) as conversion_err:
                         json_parsing_errors += 1
                         termcolor.cprint(
@@ -317,7 +362,7 @@ def run_valgrind(
             )
 
     # Fallback logic: Record total time only if no individual tests passed.
-    if not parsed_specific_test:
+    if parsed_specific_test_count == 0:
         fallback_name: str = f"{os.path.basename(exe)}::execution"
         # Prefer suite exec_time if available, otherwise use wall clock time
         fallback_duration = (
@@ -349,7 +394,7 @@ def run_valgrind(
                 file=sys.stderr,
             )
 
-    return test_durations
+    return test_durations, parsed_specific_test_count
 
 
 def print_test_durations(test_durations: TestDurations) -> None:
@@ -381,16 +426,17 @@ def print_test_durations(test_durations: TestDurations) -> None:
 def run_single_test_case(
     exe: str, test_name: str, cwd: str, suppression_path: str
 ) -> WorkerResult:
-    """Runs valgrind for a single test case."""
+    """Runs valgrind for a single test case. Returns tuple (durations, parsed_count, expected_count) or Exception."""
     basename = os.path.basename(exe)
     termcolor.cprint(f"Starting test: {test_name} in {basename}", "blue")
+    expected_count = 1  # Always expect 1 test when running a single case
     try:
-        # Run valgrind for the specific test case. expect_tests is True here.
-        result = run_valgrind(
-            exe, cwd, suppression_path, test_str=test_name, expect_tests=True
+        durations, parsed_count = run_valgrind(
+            exe, cwd, suppression_path, test_filters=[test_name], expect_tests=True
         )
         termcolor.cprint(f"Finished test: {test_name} in {basename}", "green")
-        return result
+        # Return durations, parsed count, and expected count (1)
+        return durations, parsed_count, expected_count
     except (subprocess.CalledProcessError, ValueError, subprocess.TimeoutExpired) as e:
         # Error likely already printed by run_valgrind
         termcolor.cprint(f"Failed test:   {test_name} in {basename}", "red")
@@ -443,26 +489,31 @@ def run_single_test_binary(
             )
         else:
             # No specific config found, run valgrind directly
-            # Check if binary has tests before running valgrind
-            expect_tests = False
+            # Check if binary has tests before running valgrind and count them
+            expected_count = 0
             try:
                 list_output = subprocess.check_output(
                     [exe, "--test", "--list"], cwd=cwd, stderr=subprocess.PIPE
                 ).decode("utf-8")
                 for list_line in list_output.splitlines():
                     if list_line.strip().endswith(": test"):
-                        expect_tests = True
-                        break
+                        expected_count += 1
             except (subprocess.CalledProcessError, FileNotFoundError) as list_err:
                 termcolor.cprint(
                     f"Warning: Failed to list tests for {basename}: {list_err}",
                     "yellow",
                     file=sys.stderr,
                 )
-                expect_tests = True
+                # We failed to list, assume tests are expected, but expected count is unknown (use -1?)
+                # Let's stick with 0 for now, run_valgrind's warning will trigger if needed.
+                expected_count = 0
 
             # Pass expect_tests flag to run_valgrind
-            result = run_valgrind(exe, cwd, suppression_path, expect_tests=expect_tests)
+            durations, parsed_count = run_valgrind(
+                exe, cwd, suppression_path, expect_tests=(expected_count > 0)
+            )
+            # Assign the result tuple including the calculated expected count
+            result = (durations, parsed_count, expected_count)
 
         termcolor.cprint(f"Finished: {basename}", "green")
         return result
@@ -561,47 +612,15 @@ def submit_valgrind_tasks(
 def process_completed_task(
     future: concurrent.futures.Future[WorkerResult],
     task_name: str,
-    combined_test_durations: TestDurations,
-    failed_binaries: List[str],
-    failed_tests: List[str],
+    task_results: Dict[str, WorkerResult],
 ) -> None:
-    """Processes the result of a completed future, updating result collections."""
+    """Processes the result of a completed future, storing the raw result."""
     try:
         result: WorkerResult = future.result()
-
-        if isinstance(result, Exception):
-            termcolor.cprint(f"Task '{task_name}' failed (returned exception).", "red")
-            if "::" in task_name:  # It was a single test case
-                if task_name not in failed_tests:
-                    failed_tests.append(task_name)
-            else:  # It was a whole binary
-                if task_name not in failed_binaries:
-                    failed_binaries.append(task_name)
-        elif isinstance(result, defaultdict):
-            termcolor.cprint(f"Task '{task_name}' completed.", "green")
-            for test_name, duration in result.items():
-                combined_test_durations[test_name] = duration
-        else:
-            termcolor.cprint(
-                f"Error: Worker for '{task_name}' returned unexpected type: {type(result)}",
-                "red",
-                file=sys.stderr,
-            )
-            if "::" in task_name:
-                if task_name not in failed_tests:
-                    failed_tests.append(task_name)
-            else:
-                if task_name not in failed_binaries:
-                    failed_binaries.append(task_name)
-
+        task_results[task_name] = result
     except Exception as e:
-        termcolor.cprint(f"Task '{task_name}' failed with exception: {e}", "red")
-        if "::" in task_name:
-            if task_name not in failed_tests:
-                failed_tests.append(task_name)
-        else:
-            if task_name not in failed_binaries:
-                failed_binaries.append(task_name)
+        termcolor.cprint(f"Task '{task_name}' future raised exception: {e}", "red")
+        task_results[task_name] = e  # Store the exception from the future itself
 
 
 def main() -> None:
@@ -728,9 +747,8 @@ def main() -> None:
         "yellow",
     )
 
-    combined_test_durations: TestDurations = defaultdict(float)
-    failed_binaries: List[str] = []
-    failed_tests: List[str] = []
+    # Dictionary to store results: task_name -> (TestDurations, count) or Exception
+    task_results: Dict[str, WorkerResult] = {}
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
         all_futures_map: Dict[concurrent.futures.Future[WorkerResult], str] = {}
@@ -746,13 +764,87 @@ def main() -> None:
             process_completed_task(
                 future,
                 task_name,
-                combined_test_durations,
-                failed_binaries,
-                failed_tests,
+                task_results,
             )
 
-    # Print final summary
+    combined_test_durations: TestDurations = defaultdict(float)
+    failed_binaries: List[str] = []
+    failed_tests: List[str] = []
+    parsed_counts: Dict[str, int] = {}
+    task_statuses: Dict[str, Tuple[str, str]] = {}
+
+    # Sort tasks by name for consistent summary output
+    sorted_task_names = sorted(task_results.keys())
+
+    for task_name in sorted_task_names:
+        result = task_results[task_name]
+        is_single_test = "::" in task_name
+
+        if isinstance(result, Exception):
+            status = "Failed (Exception)"
+            termcolor.cprint(
+                f"Task '{task_name}' failed: {result}", "red", file=sys.stderr
+            )
+            if is_single_test:
+                if task_name not in failed_tests:
+                    failed_tests.append(task_name)
+            else:
+                if task_name not in failed_binaries:
+                    failed_binaries.append(task_name)
+        elif (
+            isinstance(result, tuple)
+            and len(result) == 3
+            and isinstance(result[0], defaultdict)
+        ):
+            durations, parsed_count, expected_count = result
+            # Determine status and color based on parsed vs expected
+            if expected_count > 0:
+                status = f"Success (Parsed {parsed_count}/{expected_count} tests)"
+                color = "yellow" if parsed_count != expected_count else "green"
+            else:
+                status = "Success (No tests expected/found)"
+                color = "green"
+                # Sanity check: if no tests expected, parsed should be 0
+                if parsed_count != 0:
+                    termcolor.cprint(
+                        f"Warning: Task '{task_name}' expected 0 tests but parsed {parsed_count}!",
+                        "yellow",
+                        file=sys.stderr,
+                    )
+                    color = "yellow"  # Mark as yellow due to inconsistency
+                    status = f"Success (Parsed {parsed_count}/{expected_count} tests - unexpected!)"  # Update status
+
+            parsed_counts[task_name] = parsed_count  # Store parsed count anyway
+            task_statuses[task_name] = (status, color)  # Store status and color
+
+            for test_name, duration in durations.items():
+                combined_test_durations[test_name] = duration
+        else:
+            status = "Failed (Unexpected Result Type)"
+            termcolor.cprint(
+                f"Error: Worker for '{task_name}' returned unexpected type: {type(result)}",
+                "red",
+                file=sys.stderr,
+            )
+            if is_single_test:
+                if task_name not in failed_tests:
+                    failed_tests.append(task_name)
+            else:
+                if task_name not in failed_binaries:
+                    failed_binaries.append(task_name)
+
+        task_statuses[task_name] = task_statuses[task_name]
+
     print_test_durations(combined_test_durations)
+
+    termcolor.cprint("\nTask Summary:", "yellow")
+    termcolor.cprint("=" * 80, "yellow")
+    max_name_len = (
+        max(len(name) for name in task_statuses.keys()) if task_statuses else 0
+    )
+    for task_name in sorted_task_names:
+        status, color = task_statuses[task_name]
+        termcolor.cprint(f"{task_name:<{max_name_len}} : {status}", color)
 
     script_end_time = time.time()
     total_duration = script_end_time - script_start_time
