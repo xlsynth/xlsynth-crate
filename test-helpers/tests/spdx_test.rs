@@ -70,6 +70,7 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
                     && entry.file_name() != "__pycache__"
                     && entry.file_name() != ".pytest_cache"
                     && entry.file_name() != ".mypy_cache"
+                    && entry.file_name() != ".ruff_cache"
                 {
                     println!("Adding to directory worklist: {:?}", path);
                     dir_worklist.push(path.clone());

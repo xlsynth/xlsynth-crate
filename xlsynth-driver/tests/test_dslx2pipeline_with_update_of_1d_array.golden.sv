@@ -26,3 +26,4 @@ module __my_module__main(
   assign p1_array_update_16_comb[3] = p0_x[3];
   assign out = {p1_array_update_16_comb[3], p1_array_update_16_comb[2], p1_array_update_16_comb[1], p1_array_update_16_comb[0]};
 endmodule
+
