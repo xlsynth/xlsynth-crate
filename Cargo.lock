@@ -3317,6 +3317,7 @@ dependencies = [
  "lazy_static",
  "log",
  "pretty_assertions",
+ "regex",
  "test-helpers",
  "xlsynth-sys",
 ]
