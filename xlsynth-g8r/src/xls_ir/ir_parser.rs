@@ -234,16 +234,6 @@ impl Parser {
         }
     }
 
-    fn parse_array_type(&mut self, element_ty: ir::Type) -> Result<ir::Type, ParseError> {
-        self.drop_or_error("[")?;
-        let count = self.pop_number_usize_or_error()?;
-        self.drop_or_error("]")?;
-        Ok(ir::Type::Array(ArrayTypeData {
-            element_type: Box::new(element_ty),
-            element_count: count,
-        }))
-    }
-
     pub fn parse_type(&mut self) -> Result<ir::Type, ParseError> {
         self.drop_whitespace();
         let ty: ir::Type = if self.try_drop("(") {
@@ -261,12 +251,13 @@ impl Parser {
             self.drop_or_error("[")?;
             let count = self.pop_number_usize_or_error()?;
             self.drop_or_error("]")?;
-            let ty = ir::Type::Bits(count);
-            if self.peek_is("[") {
-                self.parse_array_type(ty)?
-            } else {
-                ty
+            let mut ty = ir::Type::Bits(count);
+            while self.try_drop("[") {
+                let count = self.pop_number_usize_or_error()?;
+                self.drop_or_error("]")?;
+                ty = ir::Type::new_array(ty, count);
             }
+            ty
         } else if self.try_drop("token") {
             ir::Type::Token
         } else {
@@ -446,7 +437,7 @@ impl Parser {
                 self.drop_or_error_with_ctx("[", "start of array literal")?;
                 let mut values = Vec::new();
                 while !self.try_drop("]") {
-                    let value = self.pop_bits_value_or_error(element_type)?;
+                    let value: xlsynth::IrValue = self.parse_value_with_ty(element_type)?;
                     values.push(value);
                     if !self.try_drop(",") {
                         self.drop_or_error("]")?;
@@ -1405,6 +1396,18 @@ fn bar(x: bits[8] id=3) -> bits[8] {
         let mut parser = Parser::new(input);
         let ty = parser.parse_type().unwrap();
         println!("{:?}", ty);
+    }
+
+    #[test]
+    fn test_parse_multidim_array_type() {
+        let input = "bits[32][4][5][6]";
+        let mut parser = Parser::new(input);
+        let ty = parser.parse_type().unwrap();
+        let element_type = ir::Type::Bits(32);
+        let element_type = ir::Type::new_array(element_type, 4);
+        let element_type = ir::Type::new_array(element_type, 5);
+        let element_type = ir::Type::new_array(element_type, 6);
+        assert_eq!(ty, element_type);
     }
 
     #[test]

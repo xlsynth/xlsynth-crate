@@ -309,12 +309,9 @@ impl IrValue {
         format: IrFormatPreference,
     ) -> Result<String, XlsynthError> {
         let s = self.to_string_fmt(format)?;
-        if s.starts_with("bits[") {
-            let parts: Vec<&str> = s.split(':').collect();
-            Ok(parts[1].to_string())
-        } else {
-            Ok(s)
-        }
+        // Use a regex for now to strip out all `bits[N]:` prefixes.
+        let re = regex::Regex::new(r"bits\[[0-9]+\]:").unwrap();
+        Ok(re.replace_all(&s, "").to_string())
     }
 
     pub fn to_bool(&self) -> Result<bool, XlsynthError> {

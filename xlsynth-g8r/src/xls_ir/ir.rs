@@ -30,6 +30,13 @@ pub struct StartAndLimit {
 }
 
 impl Type {
+    pub fn new_array(element_type: Type, element_count: usize) -> Self {
+        Type::Array(ArrayTypeData {
+            element_type: Box::new(element_type),
+            element_count,
+        })
+    }
+
     pub fn nil() -> Self {
         Type::Tuple(vec![])
     }
@@ -944,6 +951,16 @@ mod tests {
     fn test_round_trip_and_gate_ir() {
         let ir_text = "fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
   ret and.3: bits[1] = and(a, b, id=3)
+}";
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+        assert_eq!(ir_fn.to_string(), ir_text);
+    }
+
+    #[test]
+    fn test_round_trip_multidim_array_ir() {
+        let ir_text = "fn f() -> bits[32][2][3][1] {
+  ret literal.1: bits[32][2][3][1] = literal(value=[[[0, 1], [2, 3], [4, 5]]], id=1)
 }";
         let mut parser = ir_parser::Parser::new(ir_text);
         let ir_fn = parser.parse_fn().unwrap();

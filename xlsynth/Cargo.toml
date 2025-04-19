@@ -16,6 +16,7 @@ readme = "../README.md"
 xlsynth-sys = {path = "../xlsynth-sys", version = "0.0.119"}
 cargo_metadata = "0.18"
 log = "0.4"
+regex = "1.11.1"
 
 [dev-dependencies]
 env_logger = "0.11"
