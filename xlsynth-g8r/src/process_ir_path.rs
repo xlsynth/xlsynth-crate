@@ -3,9 +3,14 @@
 use std::cmp::min;
 use std::collections::HashMap;
 
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+
 use crate::check_equivalence;
 use crate::emit_netlist;
 use crate::find_structures;
+use crate::fraig;
+use crate::fraig::IterationBounds;
 use crate::gate;
 use crate::get_summary_stats::get_gate_depth;
 use crate::get_summary_stats::SummaryStats;
@@ -39,6 +44,7 @@ pub struct Options {
     pub check_equivalence: bool,
     pub fold: bool,
     pub hash: bool,
+    pub fraig: bool,
     pub quiet: bool,
     pub emit_netlist: bool,
 }
@@ -78,7 +84,21 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
         },
     )
     .unwrap();
-    let gate_fn = &gatify_output.gate_fn; // Extract GateFn reference
+    let mut gate_fn = gatify_output.gate_fn;
+    if options.fraig {
+        let mut rng = StdRng::seed_from_u64(0);
+        let fraig_result: Result<_, _> =
+            fraig::fraig_optimize(&gate_fn, 256, IterationBounds::ToConvergence, &mut rng);
+        if !fraig_result.is_ok() {
+            eprintln!("Fraig optimization failed");
+            std::process::exit(1);
+        }
+        let (optimized_fn, did_converge) = fraig_result.unwrap();
+        if !options.quiet {
+            println!("Fraig convergence: {:?}", did_converge);
+        }
+        gate_fn = optimized_fn;
+    }
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
 
@@ -86,33 +106,33 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
     if options.check_equivalence {
         println!("== Checking equivalence...");
         let start = std::time::Instant::now();
-        let eq = check_equivalence::validate_same_fn(&ir_top, gate_fn);
+        let eq = check_equivalence::validate_same_fn(&ir_top, &gate_fn);
         let duration = start.elapsed();
         println!("Equivalence check took {:?}.", duration);
         println!("Equivalence: {:?}", eq);
     }
 
     if options.emit_netlist {
-        let netlist = emit_netlist::emit_netlist(&ir_top.name, gate_fn);
+        let netlist = emit_netlist::emit_netlist(&ir_top.name, &gate_fn);
         println!("{}", netlist);
     }
 
-    let id_to_use_count: HashMap<gate::AigRef, usize> = get_id_to_use_count(gate_fn);
+    let id_to_use_count: HashMap<gate::AigRef, usize> = get_id_to_use_count(&gate_fn);
     let live_nodes: Vec<gate::AigRef> = id_to_use_count.keys().cloned().collect();
 
-    let (depth_to_count, deepest_path) = get_gate_depth(gate_fn, &live_nodes);
+    let depth_stats = get_gate_depth(&gate_fn, &live_nodes);
 
     let summary_stats = SummaryStats {
         live_nodes: live_nodes.len(),
-        deepest_path: deepest_path.len(),
+        deepest_path: depth_stats.deepest_path.len(),
     };
 
     if options.quiet {
         return summary_stats;
     }
 
-    println!("== Deepest path ({}):", deepest_path.len());
-    for gate_ref in deepest_path.iter() {
+    println!("== Deepest path ({}):", depth_stats.deepest_path.len());
+    for gate_ref in depth_stats.deepest_path.iter() {
         // Access gates via the gate_fn reference
         let gate: &gate::AigNode = &gate_fn.gates[gate_ref.id];
         println!(
@@ -128,7 +148,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
     let mut bucketed_counts: HashMap<usize, usize> = HashMap::new();
 
     // Group the depths into buckets.
-    for (depth, count) in depth_to_count {
+    for (depth, count) in depth_stats.depth_to_count {
         let bucket = (depth / bucket_width) * bucket_width;
         *bucketed_counts.entry(bucket).or_insert(0) += count;
     }
@@ -158,7 +178,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
 
     println!("== Live node count: {}", live_nodes.len());
 
-    let structure_to_count = find_structures::find_structures(gate_fn);
+    let structure_to_count = find_structures::find_structures(&gate_fn);
     let mut sorted_structures = structure_to_count
         .iter()
         .map(|(s, c)| (s.clone(), *c))

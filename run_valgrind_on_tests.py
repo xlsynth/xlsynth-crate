@@ -77,6 +77,28 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
         "filter_out": [
             "validate_equiv::tests::test_validate_equiv_bf16_mul",
             "validate_equiv::tests::test_validate_equiv_bf16_add",
+            # Added based on >100s runtime
+            "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_5_expects",
+            "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_2_expects",
+            "bulk_replace::tests::test_replace_redundant_node_equivalence",
+            "gate2ir::tests::test_gate_fn_to_ir_nand",
+            "bulk_replace::tests::test_replace_multiple_redundant_nodes",
+            "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_4_expects",
+            "gate2ir::tests::test_gate_fn_to_ir_one_and_gate",
+            "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_1_expects",
+            "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_7_expects",
+            "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_3_expects",
+            "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_8_expects",
+            "fraig::tests::test_fraig_optimize_bf16_add",
+            "ir2gate_utils::tests::test_gatify_add_carry_select::_3_bit_2_partition",
+            "gate2ir::tests::test_gate_fn_to_ir_inverter",
+            "ir2gate_utils::tests::test_gatify_add_carry_select::_4_bit_3_partition",
+            "ir2gate_utils::tests::test_gatify_add_carry_select::_2_bit_2_partition",
+            "ir2gate_utils::tests::test_gatify_add_carry_select::_1_bit_1_partition",
+            "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_6_expects",
+            "ir2gate_utils::tests::test_gatify_add_carry_select::_8_bit_2_partition",
+            "ir2gate_utils::tests::test_gatify_add_carry_select::_4_bit_2_partition",
+            "fraig::tests::test_fraig_optimize_bf16_mul",
         ]
     },
 }

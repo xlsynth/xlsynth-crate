@@ -186,6 +186,7 @@ impl TryInto<AigOperand> for AigBitVector {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Split {
     pub msbs: AigBitVector,
     pub lsbs: AigBitVector,
@@ -346,7 +347,7 @@ impl Output {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GateFn {
     pub name: String,
     pub inputs: Vec<Input>,

@@ -11,13 +11,18 @@ pub struct SummaryStats {
     pub deepest_path: usize,
 }
 
+// Add structured return type for gate depth info.
+#[derive(Debug)]
+pub struct GateDepthStats {
+    pub depth_to_count: HashMap<usize, usize>,
+    pub deepest_path: Vec<gate::AigRef>,
+    pub ref_to_depth: HashMap<gate::AigRef, usize>,
+}
+
 /// Returns:
 /// * a mapping that shows {depth: count} where the count is in number of gates.
 /// * the deepest path in the gate DAG
-pub fn get_gate_depth(
-    gate_fn: &gate::GateFn,
-    live_nodes: &[gate::AigRef],
-) -> (HashMap<usize, usize>, Vec<gate::AigRef>) {
+pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> GateDepthStats {
     let mut depths: HashMap<gate::AigRef, usize> = HashMap::new();
     for input in gate_fn.inputs.iter() {
         for operand in input.bit_vector.iter_lsb_to_msb() {
@@ -60,7 +65,11 @@ pub fn get_gate_depth(
 
     if deepest_primary_output.is_none() {
         // If there are no outputs for this function, its summary stats are trivial.
-        return (HashMap::new(), vec![]);
+        return GateDepthStats {
+            depth_to_count: HashMap::new(),
+            deepest_path: vec![],
+            ref_to_depth: depths,
+        };
     }
 
     log::info!("Deepest primary output: {:?}", deepest_primary_output);
@@ -95,7 +104,11 @@ pub fn get_gate_depth(
             *depth_to_count.entry(*depth).or_insert(0) += 1;
         }
     }
-    (depth_to_count, deepest_path)
+    GateDepthStats {
+        depth_to_count,
+        deepest_path,
+        ref_to_depth: depths,
+    }
 }
 
 #[allow(dead_code)]
@@ -103,11 +116,11 @@ pub fn get_summary_stats(gate_fn: &gate::GateFn) -> SummaryStats {
     let id_to_use_count: HashMap<gate::AigRef, usize> = get_id_to_use_count(&gate_fn);
     let live_nodes: Vec<gate::AigRef> = id_to_use_count.keys().cloned().collect();
 
-    let (_depth_to_count, deepest_path) = get_gate_depth(&gate_fn, &live_nodes);
+    let stats = get_gate_depth(&gate_fn, &live_nodes);
 
     let summary_stats = SummaryStats {
         live_nodes: live_nodes.len(),
-        deepest_path: deepest_path.len(),
+        deepest_path: stats.deepest_path.len(),
     };
     summary_stats
 }

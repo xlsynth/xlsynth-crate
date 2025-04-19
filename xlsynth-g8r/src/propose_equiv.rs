@@ -8,7 +8,7 @@ use bitvec::vec::BitVec;
 use xlsynth::IrBits;
 
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -33,6 +33,7 @@ pub fn propose_equiv(
     gate_fn: &GateFn,
     input_sample_count: usize,
     rng: &mut impl Rng,
+    counterexamples: &HashSet<Vec<IrBits>>,
 ) -> HashMap<u64, Vec<AigRef>> {
     // samples x gate values -- would be nicer to have a BitMatrix
     let gate_count = gate_fn.gates.len();
@@ -43,6 +44,12 @@ pub fn propose_equiv(
     for _ in 0..input_sample_count {
         let inputs: Vec<IrBits> = gen_random_inputs(gate_fn, rng);
         let result: GateSimResult = gate_sim::eval(gate_fn, &inputs, Collect::All);
+        history.push(result.all_values.unwrap());
+    }
+
+    // Now do it for all explicitly-provided counterexamples.
+    for counterexample in counterexamples {
+        let result: GateSimResult = gate_sim::eval(gate_fn, counterexample, Collect::All);
         history.push(result.all_values.unwrap());
     }
 
@@ -92,7 +99,8 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let graph = setup_simple_graph();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let equiv_classes = propose_equiv(&graph.g, 4096, &mut seeded_rng);
+        let counterexamples = HashSet::new();
+        let equiv_classes = propose_equiv(&graph.g, 4096, &mut seeded_rng, &counterexamples);
         assert_eq!(equiv_classes.len(), 4);
         log::info!("equiv_classes: {:?}", equiv_classes);
         let mut values = equiv_classes.values().collect::<Vec<_>>();
@@ -114,7 +122,8 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let graph = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let equiv_classes = propose_equiv(&graph.g, 4096, &mut seeded_rng);
+        let counterexamples = HashSet::new();
+        let equiv_classes = propose_equiv(&graph.g, 4096, &mut seeded_rng, &counterexamples);
         log::info!("equiv_classes: {:?}", equiv_classes);
         assert_eq!(equiv_classes.len(), 2);
         let mut values = equiv_classes.values().collect::<Vec<_>>();

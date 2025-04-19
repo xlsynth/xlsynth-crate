@@ -30,6 +30,14 @@ pub enum ValidationError {
     SolverError(varisat::solver::SolverError),
 }
 
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
 // Tseitin clauses for: output_lit <=> lit_a AND lit_b
 // The Tseitsin clauses are a way of encoding the result of the AND gate in
 // terms of a fresh literal, which in our case is the `output_literal`.
@@ -234,6 +242,7 @@ pub fn validate_equiv(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::time::Instant;
 
     use rand::SeedableRng;
@@ -253,7 +262,8 @@ mod tests {
     fn test_validate_equiv_graph_with_redundancies() {
         let setup = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let equiv_classes = propose_equiv(&setup.g, 16, &mut seeded_rng);
+        let counterexamples = HashSet::new();
+        let equiv_classes = propose_equiv(&setup.g, 16, &mut seeded_rng, &counterexamples);
         let classes: Vec<&[AigRef]> = equiv_classes
             .values()
             .map(|nodes| nodes.as_slice())
@@ -265,7 +275,13 @@ mod tests {
     fn do_propose_and_validate(gate_fn: &GateFn, input_sample_count: usize) -> (usize, usize) {
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
         let propose_start = Instant::now();
-        let proposed_equiv_classes = propose_equiv(&gate_fn, input_sample_count, &mut seeded_rng);
+        let counterexamples = HashSet::new();
+        let proposed_equiv_classes = propose_equiv(
+            &gate_fn,
+            input_sample_count,
+            &mut seeded_rng,
+            &counterexamples,
+        );
         let propose_end = Instant::now();
         let propose_duration = propose_end - propose_start;
         eprintln!(

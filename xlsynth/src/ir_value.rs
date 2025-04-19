@@ -496,6 +496,16 @@ impl<const BIT_COUNT: usize> IrSBits<BIT_COUNT> {
     }
 }
 
+impl std::cmp::Eq for IrBits {}
+
+impl std::hash::Hash for IrBits {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Since IrBits has a pointer field, we need to hash the actual bits
+        // We can use the debug string representation as a stable hash
+        self.to_debug_str().hash(state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
