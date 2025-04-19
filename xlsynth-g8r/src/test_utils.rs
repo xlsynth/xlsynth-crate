@@ -181,15 +181,17 @@ pub struct TestGraph {
     pub o: AigOperand,
 }
 
-/// Creates a common graph structure for testing cone extraction.
-/// Graph:
-/// i0 --\
-///       AND(a) --\
-/// i1 --|          \
-///       AND(b) -- AND(o) [output]
-/// i2 --|
-///       AND(c) [output]
-/// i3 --/
+/// Creates a common graph structure for testing e.g. cone extraction.
+/// There are no redundancies in this graph.
+/// ```text
+/// fn g(i0, i1, i2, i3) -> (o, c) {
+///     a = i0 & i1
+///     b = i1 & i2
+///     c = i2 & i3
+///     o = a & b
+///     return (o, c)
+/// }
+/// ```
 pub fn setup_simple_graph() -> TestGraph {
     let mut gb = GateBuilder::new("g".to_string(), GateBuilderOptions::no_opt());
     let i0: AigOperand = gb.add_input("i0".to_string(), 1).try_into().unwrap();
@@ -407,6 +409,30 @@ pub fn setup_graph_for_liveness_check() -> TestGraphForLivenessCheck {
         c_in,
         o1_op: o1,
         o2_op: o2,
+    }
+}
+
+pub struct TestGraphForConstantReplace {
+    pub g: GateFn,
+    pub const_true: AigOperand,
+    pub const_false: AigOperand,
+    pub and_true_true: AigOperand, // And2(true, true) node
+}
+
+pub fn setup_graph_for_constant_replace() -> TestGraphForConstantReplace {
+    let mut gb = GateBuilder::new("constant_replace".to_string(), GateBuilderOptions::no_opt());
+    let const_true = gb.get_true();
+    let const_false = gb.get_false();
+    let and_true_true = gb.add_and_binary(const_true, const_true);
+    gb.add_output("out".to_string(), and_true_true.into());
+
+    let g = gb.build();
+
+    TestGraphForConstantReplace {
+        g,
+        const_true,
+        const_false,
+        and_true_true,
     }
 }
 

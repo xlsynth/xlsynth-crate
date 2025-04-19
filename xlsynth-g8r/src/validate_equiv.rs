@@ -12,12 +12,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::gate::{extract_cone, AigNode, AigRef, GateFn};
+use crate::propose_equiv::EquivNode;
 use xlsynth::IrBits;
 
 pub struct ValidationResult {
     /// Sets that were proven equivalent, i.e. any value in set i can be
     /// substituted for any other value in set i.
-    pub proven_equiv_sets: Vec<Vec<AigRef>>,
+    pub proven_equiv_sets: Vec<Vec<EquivNode>>,
 
     /// Input values that showed counterexamples in the equivalence sets, so
     /// that these can be used as concrete stimulus for distinguishing proposals
@@ -123,15 +124,34 @@ fn build_sat_clauses(
 fn add_miters(
     solver: &mut impl varisat::ExtendFormula,
     aig_ref_to_lit: &HashMap<AigRef, varisat::Lit>,
-    known_equiv: &[AigRef],
-    candidate: AigRef,
+    known_equiv: &[EquivNode],
+    candidate: EquivNode,
 ) -> Vec<varisat::Lit> {
     let mut miters: Vec<varisat::Lit> = Vec::with_capacity(known_equiv.len());
-    for lhs in known_equiv {
+    for lhs_node in known_equiv {
         let xor_miter = solver.new_lit();
-        let a = aig_ref_to_lit[lhs];
-        let b = aig_ref_to_lit[&candidate];
-        add_tseitsin_xor(solver, a, b, xor_miter);
+
+        // Get SAT literals for the underlying AIG nodes
+        let a_lit = aig_ref_to_lit[&lhs_node.aig_ref()];
+        let b_lit = aig_ref_to_lit[&candidate.aig_ref()];
+
+        // Check if the relationship is inverted (Normal vs Inverted)
+        match (lhs_node, candidate) {
+            (EquivNode::Normal(_), EquivNode::Normal(_))
+            | (EquivNode::Inverted(_), EquivNode::Inverted(_)) => {
+                // Same type: Check for equivalence (a XOR b == 0)
+                // Miter output is true if they are different.
+                add_tseitsin_xor(solver, a_lit, b_lit, xor_miter);
+            }
+            (EquivNode::Normal(_), EquivNode::Inverted(_))
+            | (EquivNode::Inverted(_), EquivNode::Normal(_)) => {
+                // Different type: Check for inverse equivalence (a XNOR b == 0, or a XOR !b ==
+                // 0) Miter output is true if they are different (i.e., not
+                // inverses). We compute a XOR (NOT b) for the miter.
+                add_tseitsin_xor(solver, a_lit, !b_lit, xor_miter);
+            }
+        }
+
         miters.push(xor_miter);
     }
     miters
@@ -139,43 +159,53 @@ fn add_miters(
 
 fn solver_model_to_cex(
     model: &[varisat::Lit],
-    cone_inputs: &HashSet<AigRef>,
+    all_inputs: &HashSet<AigRef>,
     aig_ref_to_lit: &HashMap<AigRef, varisat::Lit>,
     gate_fn: &GateFn,
 ) -> Vec<IrBits> {
     let model_set: HashSet<varisat::Lit> = model.iter().cloned().collect();
 
-    // We could really collect this as a tristate value and then flatten it with
-    // some X policy, but to keep it simple we just emit zero.
     let mut inputs_map: HashMap<AigRef, bool> = HashMap::new();
-    for input_aig_ref in cone_inputs.iter() {
-        let input_lit: varisat::Lit = aig_ref_to_lit[&input_aig_ref];
-        let not_input_lit: varisat::Lit = !input_lit;
-        if model_set.contains(&input_lit) {
-            inputs_map.insert(*input_aig_ref, true);
-        } else if model_set.contains(&not_input_lit) {
-            inputs_map.insert(*input_aig_ref, false);
+    for input_aig_ref in all_inputs {
+        if let Some(input_lit) = aig_ref_to_lit.get(input_aig_ref) {
+            // Input was part of the cone, check model
+            if model_set.contains(input_lit) {
+                inputs_map.insert(*input_aig_ref, true);
+            } else {
+                // Default to false if not explicitly true in the model
+                inputs_map.insert(*input_aig_ref, false);
+            }
         } else {
+            // Input was NOT part of the cone, default to false
             inputs_map.insert(*input_aig_ref, false);
         }
     }
+
+    // Now map_to_inputs should receive a map covering all expected inputs
     let cex = gate_fn.map_to_inputs(inputs_map);
     cex
 }
 
 pub fn validate_equiv(
     gate_fn: &GateFn,
-    equiv_classes: &[&[AigRef]],
+    equiv_classes: &[&[EquivNode]],
 ) -> Result<ValidationResult, ValidationError> {
     // Extract the combined cone for all of the references we're trying to determine
     // equivalence for.
     let mut frontier: Vec<AigRef> = vec![];
     for equiv_class in equiv_classes {
-        for aig_ref in equiv_class.iter() {
-            frontier.push(*aig_ref);
+        for equiv_node in equiv_class.iter() {
+            frontier.push(equiv_node.aig_ref());
         }
     }
 
+    // Collect all primary input refs
+    let all_primary_inputs: HashSet<AigRef> = gate_fn
+        .inputs
+        .iter()
+        .flat_map(|input_vec| input_vec.bit_vector.iter_lsb_to_msb())
+        .map(|op| op.node)
+        .collect();
     let (cone_gates, cone_inputs) = extract_cone(&frontier, &gate_fn.gates);
 
     let mut solver = varisat::Solver::new();
@@ -216,9 +246,10 @@ pub fn validate_equiv(
                         model.is_some(),
                         "counterexample found, should be able to extract model"
                     );
+                    let model_unwrapped = model.unwrap();
                     let cex = solver_model_to_cex(
-                        &model.unwrap(),
-                        &cone_inputs,
+                        &model_unwrapped,
+                        &all_primary_inputs,
                         &aig_ref_to_lit,
                         gate_fn,
                     );
@@ -248,8 +279,8 @@ mod tests {
     use rand::SeedableRng;
 
     use crate::{
-        gate::{AigRef, GateFn},
-        propose_equiv::propose_equiv,
+        gate::GateFn,
+        propose_equiv::{propose_equiv, EquivNode},
         test_utils::{
             load_bf16_add_sample, load_bf16_mul_sample, setup_graph_with_redundancies,
             setup_partially_equiv_graph, Opt,
@@ -264,12 +295,13 @@ mod tests {
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
         let counterexamples = HashSet::new();
         let equiv_classes = propose_equiv(&setup.g, 16, &mut seeded_rng, &counterexamples);
-        let classes: Vec<&[AigRef]> = equiv_classes
+        let classes: Vec<&[EquivNode]> = equiv_classes
             .values()
             .map(|nodes| nodes.as_slice())
             .collect();
         let validation_result = validate_equiv(&setup.g, &classes).unwrap();
-        assert_eq!(validation_result.proven_equiv_sets.len(), 2);
+        // There are 2 redundancies and they have inverted pairs.
+        assert_eq!(validation_result.proven_equiv_sets.len(), 4);
     }
 
     fn do_propose_and_validate(gate_fn: &GateFn, input_sample_count: usize) -> (usize, usize) {
@@ -290,7 +322,7 @@ mod tests {
             propose_duration
         );
 
-        let classes: Vec<&[AigRef]> = proposed_equiv_classes
+        let classes: Vec<&[EquivNode]> = proposed_equiv_classes
             .values()
             .map(|nodes| nodes.as_slice())
             .collect();
@@ -316,8 +348,8 @@ mod tests {
         let setup = load_bf16_mul_sample(Opt::No);
         let (proposed_equiv_classes_len, proven_equiv_sets_len) =
             do_propose_and_validate(&setup.gate_fn, 256);
-        assert_eq!(proposed_equiv_classes_len, 1136);
-        assert_eq!(proven_equiv_sets_len, 52);
+        assert_eq!(proposed_equiv_classes_len, 372);
+        assert_eq!(proven_equiv_sets_len, 87);
     }
 
     #[test]
@@ -325,8 +357,8 @@ mod tests {
         let setup = load_bf16_add_sample(Opt::No);
         let (proposed_equiv_classes_len, proven_equiv_sets_len) =
             do_propose_and_validate(&setup.gate_fn, 256);
-        assert_eq!(proposed_equiv_classes_len, 852);
-        assert_eq!(proven_equiv_sets_len, 86);
+        assert_eq!(proposed_equiv_classes_len, 432);
+        assert_eq!(proven_equiv_sets_len, 138);
     }
 
     #[test]
@@ -334,7 +366,11 @@ mod tests {
         let setup = setup_partially_equiv_graph();
 
         // Propose a class where a and b are equivalent, but c is not.
-        let proposed_class = &[setup.a.node, setup.b.node, setup.c.node];
+        let proposed_class = &[
+            EquivNode::Normal(setup.a.node),
+            EquivNode::Normal(setup.b.node),
+            EquivNode::Normal(setup.c.node),
+        ];
 
         let validation_result = validate_equiv(&setup.g, &[proposed_class]).unwrap();
 
@@ -352,9 +388,12 @@ mod tests {
 
         // Sort for consistent comparison
         let mut proven_set = validation_result.proven_equiv_sets[0].clone();
-        proven_set.sort_unstable_by_key(|r| r.id);
-        let mut expected_proven = vec![setup.a.node, setup.b.node];
-        expected_proven.sort_unstable_by_key(|r| r.id);
+        proven_set.sort_unstable();
+        let mut expected_proven = vec![
+            EquivNode::Normal(setup.a.node),
+            EquivNode::Normal(setup.b.node),
+        ];
+        expected_proven.sort_unstable();
         assert_eq!(
             proven_set, expected_proven,
             "Proven set should contain nodes a and b"

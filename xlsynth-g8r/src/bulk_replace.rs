@@ -39,10 +39,40 @@ use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 ///   in the new graph.
 pub fn bulk_replace(
     orig_fn: &GateFn,
-    substitutions: &HashMap<AigRef, AigRef>,
+    substitutions: &HashMap<AigRef, AigOperand>,
     options: GateBuilderOptions,
     verify: bool,
 ) -> (GateFn, HashMap<AigRef, AigOperand>) {
+    #[cfg(debug_assertions)]
+    {
+        use std::collections::HashSet;
+        // Precondition check 1: Ensure no substitution chains (A->B, B->C)
+        for substitute_op in substitutions.values() {
+            debug_assert!(
+                !substitutions.contains_key(&substitute_op.node),
+                "Substitution chain detected: {:?} is a target and also a key in the substitution map. Chains are not supported.",
+                substitute_op.node
+            );
+        }
+
+        // Precondition check 2: Ensure no input nodes are being substituted
+        let input_node_refs: HashSet<AigRef> = orig_fn
+            .inputs
+            .iter()
+            .flat_map(|input_vec| {
+                (0..input_vec.get_bit_count()).map(move |i| input_vec.bit_vector.get_lsb(i).node)
+            })
+            .collect();
+
+        for orig_ref in substitutions.keys() {
+            debug_assert!(
+                !input_node_refs.contains(orig_ref),
+                "Attempting to substitute an input node {:?}, which is not allowed.",
+                orig_ref
+            );
+        }
+    }
+
     let mut new_builder = GateBuilder::new(orig_fn.name.clone(), options);
     let mut orig_to_new_map: HashMap<AigRef, AigOperand> = HashMap::new();
 
@@ -166,7 +196,7 @@ fn verify_io_signature(orig_fn: &GateFn, replaced_fn: &GateFn) {
 fn process_operand(
     orig_operand: AigOperand,
     orig_fn: &GateFn,
-    substitutions: &HashMap<AigRef, AigRef>,
+    substitutions: &HashMap<AigRef, AigOperand>,
     new_builder: &mut GateBuilder,
     orig_to_new_map: &mut HashMap<AigRef, AigOperand>,
 ) -> AigOperand {
@@ -194,61 +224,72 @@ fn process_operand(
 fn process_node(
     orig_ref: AigRef,
     orig_fn: &GateFn,
-    substitutions: &HashMap<AigRef, AigRef>,
+    substitutions: &HashMap<AigRef, AigOperand>,
     new_builder: &mut GateBuilder,
     orig_to_new_map: &mut HashMap<AigRef, AigOperand>,
 ) -> AigOperand {
-    // Check for substitution
-    if let Some(substitute_ref) = substitutions.get(&orig_ref) {
-        // We need to map the original node (orig_ref) to whatever the
-        // substitute_ref eventually maps to in the new graph.
-        // Process the substitute node recursively to get its final operand.
-        let final_substitute_op = process_node(
-            *substitute_ref, // Start processing from the node we substitute *with*
-            orig_fn,
-            substitutions,
-            new_builder,
-            orig_to_new_map,
-        );
+    // Check for substitution before checking memoization
+    if let Some(substitute_op) = substitutions.get(&orig_ref) {
+        // Check if the substitute is a constant
+        let substitute_node_type = &orig_fn.gates[substitute_op.node.id];
+        let final_op = if let AigNode::Literal(value) = substitute_node_type {
+            // Handle constant substitution directly
+            let base_const_op = if *value {
+                new_builder.get_true()
+            } else {
+                new_builder.get_false()
+            };
+            // Apply negation based on the substitution operand
+            if substitute_op.negated {
+                base_const_op.negate()
+            } else {
+                base_const_op
+            }
+        } else {
+            // Substitute is not a constant, process it recursively
+            let final_substitute_base_op = process_node(
+                substitute_op.node,
+                orig_fn,
+                substitutions,
+                new_builder,
+                orig_to_new_map,
+            );
+            if substitute_op.negated {
+                new_builder.add_not(final_substitute_base_op)
+            } else {
+                final_substitute_base_op
+            }
+        };
 
-        // Memoize the result for the *original* node, mapping it to the *substitute's*
-        // result. This ensures that any future encounter of orig_ref uses the
-        // substituted value. Use simple insert to ensure substitution mapping
-        // takes precedence over any pre-mapping.
-        orig_to_new_map.insert(orig_ref, final_substitute_op);
-
-        return final_substitute_op; // Return the operand of the node we
-                                    // substituted *with*
+        orig_to_new_map.insert(orig_ref, final_op);
+        return final_op;
     }
-
-    // Check memoization -- maybe we already processed this node
+    // Memoization check (for nodes already processed)
     if let Some(existing_new_op) = orig_to_new_map.get(&orig_ref) {
         return *existing_new_op;
     }
 
     // Node is not substituted and not memoized, process it normally based on its
-    // type
+    // type. Inputs should have been caught by the memoization check above.
     let orig_node = &orig_fn.gates[orig_ref.id];
 
     let new_operand = match orig_node {
-        // Constants and Inputs should have been pre-mapped (and not substituted, handled above)
-        AigNode::Literal(false) => *orig_to_new_map
-            .entry(orig_ref)
-            .or_insert_with(|| new_builder.get_false()),
-        AigNode::Literal(true) => *orig_to_new_map
-            .entry(orig_ref)
-            .or_insert_with(|| new_builder.get_true()),
-        AigNode::Input { .. } => *orig_to_new_map
-            .get(&orig_ref)
-            .expect("Input not pre-mapped or substituted"),
+        // We should not reach Literal/Input here if memoization check is correct
+        AigNode::Literal(_) => panic!(
+            "Literal node {:?} reached processing logic unexpectedly",
+            orig_ref
+        ),
+        AigNode::Input { .. } => panic!(
+            "Input node {:?} reached processing logic unexpectedly.",
+            orig_ref
+        ),
 
-        // Process AND nodes
         AigNode::And2 { a, b, .. } => {
             // Tags handled post-build
             // Recursively process operands
             let new_a = process_operand(*a, orig_fn, substitutions, new_builder, orig_to_new_map);
             let new_b = process_operand(*b, orig_fn, substitutions, new_builder, orig_to_new_map);
-            // Create the new AND gate
+            // Create the new `and` gate
             new_builder.add_and_binary(new_a, new_b)
         }
     };
@@ -266,9 +307,9 @@ mod tests {
         gate_builder::GateBuilderOptions,
         get_summary_stats::{get_summary_stats, SummaryStats},
         test_utils::{
-            setup_graph_for_liveness_check, setup_graph_for_nonequiv_replace,
-            setup_graph_with_more_redundancies, setup_graph_with_redundancies,
-        }, // Added new setup fns
+            setup_graph_for_constant_replace, setup_graph_with_more_redundancies,
+            setup_graph_with_redundancies,
+        },
     };
     use std::collections::HashMap;
 
@@ -281,8 +322,8 @@ mod tests {
         // Substitution: Replace redundant node 'inner1' (%5) with 'inner0' (%4)
         let node_to_replace = test_data.inner1.node;
         let substitute_node = test_data.inner0.node;
-        let mut substitutions = HashMap::new();
-        substitutions.insert(node_to_replace, substitute_node);
+        let mut substitutions: HashMap<AigRef, AigOperand> = HashMap::new();
+        substitutions.insert(node_to_replace, AigOperand::from(substitute_node));
 
         log::info!(
             "Original function with redundancies:\n{}",
@@ -316,9 +357,15 @@ mod tests {
         let original_fn = &test_data.g;
 
         // Substitution: Replace both redundant inner nodes (inner1, inner2) with inner0
-        let mut substitutions = HashMap::new();
-        substitutions.insert(test_data.inner1.node, test_data.inner0.node);
-        substitutions.insert(test_data.inner2.node, test_data.inner0.node);
+        let mut substitutions: HashMap<AigRef, AigOperand> = HashMap::new();
+        substitutions.insert(
+            test_data.inner1.node,
+            AigOperand::from(test_data.inner0.node),
+        );
+        substitutions.insert(
+            test_data.inner2.node,
+            AigOperand::from(test_data.inner0.node),
+        );
 
         log::info!(
             "Original function with more redundancies:\n{}",
@@ -348,127 +395,49 @@ mod tests {
     }
 
     #[test]
-    fn test_replace_with_nonequivalent_node() {
+    fn test_replace_node_with_constant() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let test_data = setup_graph_for_nonequiv_replace();
+        let test_data = setup_graph_for_constant_replace();
         let original_fn = &test_data.g;
 
-        // Substitution: Replace B (%1) with C (%2)
-        let mut substitutions = HashMap::new();
-        substitutions.insert(test_data.b_op.node, test_data.c_op.node);
+        // Replace the And2(true, true) node with the constant true
+        let node_to_replace = test_data.and_true_true.node;
+        let substitute_operand = test_data.const_true;
+
+        let mut substitutions: HashMap<AigRef, AigOperand> = HashMap::new();
+        substitutions.insert(node_to_replace, substitute_operand);
 
         log::info!(
-            "Original function for non-equiv replace:\n{}",
+            "Original function (const replace test):\n{}",
             original_fn.to_string()
         );
 
         let options = GateBuilderOptions::no_opt();
-        let (replaced_fn, map) = bulk_replace(original_fn, &substitutions, options, true);
+        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options, true);
 
         log::info!(
-            "Replaced function (non-equiv):\n{}",
+            "Replaced function (const replace test):\n{}",
             replaced_fn.to_string()
         );
 
-        // Check the structure of the output node 'o'
-        // It should now be AND(new_A, new_C)
+        check_equivalence::validate_same_gate_fn(original_fn, &replaced_fn)
+            .expect("Replacing AND(true, true) with true should preserve equivalence");
+
         assert_eq!(replaced_fn.outputs.len(), 1);
-        let final_o_op = replaced_fn.outputs[0].bit_vector.get_lsb(0);
+        let final_out_op = replaced_fn.outputs[0].bit_vector.get_lsb(0);
 
-        let new_a_op = map.get(&test_data.a_op.node).unwrap();
-        let new_c_op = map.get(&test_data.c_op.node).unwrap();
+        // Check if the final output operand points to a Literal node
+        let final_out_node = &replaced_fn.gates[final_out_op.node.id];
+        let is_const = matches!(final_out_node, AigNode::Literal(_));
+        assert!(is_const, "Output should be a constant after replacement");
 
-        // Check the gate pointed to by the output 'o'
-        match replaced_fn.gates.get(final_o_op.node.id) {
-            Some(AigNode::And2 { a, b, .. }) => {
-                // Verify operands match the expected new operands for A and C
-                assert!(
-                    (a == new_a_op && b == new_c_op) || (a == new_c_op && b == new_a_op),
-                    "output AND gate operands mismatch; expected ({:?}, {:?}), got ({:?}, {:?})",
-                    new_a_op,
-                    new_c_op,
-                    a,
-                    b
-                );
-                // Verify negation is correct (should be false for output O)
-                assert!(
-                    !final_o_op.negated,
-                    "output operand O should not be negated"
-                );
-            }
-            _ => panic!("output node O is not an And2 as expected."),
+        // Get the literal value and apply operand negation
+        if let AigNode::Literal(literal_value) = final_out_node {
+            let effective_value = *literal_value ^ final_out_op.negated;
+            assert!(effective_value, "Output constant should be True");
+        } else {
+            // Should not happen due to the is_const assertion above
+            panic!("Output node was not a Literal as expected");
         }
-        // Note: We don't check equivalence here as the function's logic is
-        // changed.
-    }
-
-    #[test]
-    fn test_replace_disconnects_nodes() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let test_data = setup_graph_for_liveness_check();
-        let original_fn = &test_data.g;
-
-        // Substitution: Replace B (%1) with A (%0)
-        let mut substitutions = HashMap::new();
-        substitutions.insert(test_data.b_in.node, test_data.a_in.node);
-
-        log::info!(
-            "Original function for liveness check:\n{}",
-            original_fn.to_string()
-        );
-
-        // Run bulk_replace *without* optimization
-        let options = GateBuilderOptions::no_opt();
-        let (replaced_fn, map) = bulk_replace(original_fn, &substitutions, options, true);
-
-        log::info!("Replaced function (liveness):\n{}", replaced_fn.to_string());
-
-        // Verification: Check structure and liveness
-        let original_stats: SummaryStats = get_summary_stats(original_fn);
-        let replaced_stats: SummaryStats = get_summary_stats(&replaced_fn);
-
-        assert_eq!(
-            original_stats.live_nodes, 5,
-            "original graph should have 5 live nodes (A, B, C, O1, O2)"
-        );
-        assert_eq!(
-            replaced_stats.live_nodes, 4,
-            "expected 4 live nodes after substitution (A, C, new O1, new O2)"
-        );
-
-        // Check structure of outputs
-        let new_a_op = map.get(&test_data.a_in.node).unwrap();
-        let new_c_op = map.get(&test_data.c_in.node).unwrap();
-
-        // Check O1 structure -> AND(A, A)
-        let final_o1_op = replaced_fn.outputs[0].bit_vector.get_lsb(0);
-        match replaced_fn.gates.get(final_o1_op.node.id) {
-            Some(AigNode::And2 { a, b, .. }) => {
-                assert!(a == new_a_op && b == new_a_op, "O1 should be AND(A, A)");
-            }
-            _ => panic!("output node O1 is not an And2 as expected."),
-        }
-
-        // Check O2 structure -> AND(A, C)
-        let final_o2_op = replaced_fn.outputs[1].bit_vector.get_lsb(0);
-        match replaced_fn.gates.get(final_o2_op.node.id) {
-            Some(AigNode::And2 { a, b, .. }) => {
-                assert!(
-                    (a == new_a_op && b == new_c_op) || (a == new_c_op && b == new_a_op),
-                    "O2 should be AND(A, C)"
-                );
-            }
-            _ => panic!("output node O2 is not an And2 as expected."),
-        }
-
-        // Explicitly check that original B node is not mapped to a live node (or mapped
-        // to A)
-        let maybe_new_b_op = map.get(&test_data.b_in.node);
-        assert!(maybe_new_b_op.is_some(), "original B should be in the map");
-        assert_eq!(
-            maybe_new_b_op.unwrap(),
-            new_a_op,
-            "original B should map to new A"
-        );
     }
 }
