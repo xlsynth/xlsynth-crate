@@ -575,6 +575,10 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
 }
 
 fuzz_target!(|sample: FuzzSample| {
+    // Check for necessary environment variables first.
+    let _ = std::env::var("XLSYNTH_TOOLS")
+        .expect("XLSYNTH_TOOLS environment variable must be set for fuzzing.");
+
     // Skip empty operation lists or empty input bits
     if sample.ops.is_empty() || sample.input_bits == 0 {
         return;
