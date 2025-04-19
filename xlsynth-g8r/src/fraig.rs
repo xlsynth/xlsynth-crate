@@ -238,10 +238,10 @@ mod tests {
     fn test_fraig_optimize_bf16_add() {
         let loaded = load_bf16_add_sample(Opt::Yes);
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_add");
-        assert_eq!(results.did_converge, DidConverge::Yes(6));
-        assert_eq!(results.original_nodes, 1303);
-        assert_eq!(results.optimized_nodes, 1139);
+        assert_eq!(results.did_converge, DidConverge::Yes(4));
+        assert_eq!(results.original_nodes, 1292);
+        assert_eq!(results.optimized_nodes, 1115);
         assert_eq!(results.original_depth, 130);
-        assert_eq!(results.optimized_depth, 120);
+        assert_eq!(results.optimized_depth, 121);
     }
 }

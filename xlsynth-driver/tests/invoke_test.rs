@@ -221,14 +221,22 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    println!("{}", stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     test_helpers::assert_valid_sv(&stdout);
 
     let golden_path =
         std::path::Path::new("tests/test_dslx2pipeline_with_update_of_1d_array.golden.sv");
-    let golden_sv = std::fs::read_to_string(golden_path).unwrap();
-    assert_eq!(stdout, golden_sv);
+
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
+        println!("INFO: Updating golden file: {}", golden_path.display());
+        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
+    } else {
+        let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
+        assert_eq!(
+            stdout, golden_sv,
+            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
 }
 
 // To get the redundant match arm to flag a warning we have to enable a
@@ -448,65 +456,25 @@ fn test_dslx2pipeline_with_reset_signal() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
     log::info!("stdout: {}", stdout);
     log::info!("stderr: {}", stderr);
     test_helpers::assert_valid_sv(&stdout);
 
-    assert_eq!(
-        stdout,
-        "module __my_module__main(
-  input wire clk,
-  input wire rst,
-  input wire input_valid,
-  input wire [31:0] x,
-  output wire output_valid,
-  output wire [31:0] out
-);
-  // ===== Pipe stage 0:
-  wire p0_load_en_comb;
-  assign p0_load_en_comb = input_valid | ~rst;
+    // Define the path for the new golden file
+    let golden_path = std::path::Path::new("tests/test_dslx2pipeline_with_reset_signal.golden.sv");
 
-  // Registers for pipe stage 0:
-  reg p0_valid;
-  reg [31:0] p0_x;
-  always @ (posedge clk) begin
-    p0_x <= p0_load_en_comb ? x : p0_x;
-  end
-  always @ (posedge clk) begin
-    if (!rst) begin
-      p0_valid <= 1'h0;
-    end else begin
-      p0_valid <= input_valid;
-    end
-  end
-
-  // ===== Pipe stage 1:
-  wire [31:0] p1_add_9_comb;
-  wire p1_load_en_comb;
-  assign p1_add_9_comb = p0_x + 32'h0000_0001;
-  assign p1_load_en_comb = p0_valid | ~rst;
-
-  // Registers for pipe stage 1:
-  reg p1_valid;
-  reg [31:0] p1_add_9;
-  always @ (posedge clk) begin
-    p1_add_9 <= p1_load_en_comb ? p1_add_9_comb : p1_add_9;
-  end
-  always @ (posedge clk) begin
-    if (!rst) begin
-      p1_valid <= 1'h0;
-    end else begin
-      p1_valid <= p0_valid;
-    end
-  end
-  assign output_valid = p1_valid;
-  assign out = p1_add_9;
-endmodule
-
-"
-    );
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
+        println!("INFO: Updating golden file: {}", golden_path.display());
+        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
+    } else {
+        let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
+        assert_eq!(
+            stdout, golden_sv,
+            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
 }
 
 #[test_case(true; "with_tool_path")]

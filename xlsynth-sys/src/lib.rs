@@ -413,6 +413,7 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_type_get_flat_bit_count(t: *const CIrType) -> i64;
     pub fn xls_package_get_type_for_value(
         package: *const CIrPackage,
         value: *const CIrValue,

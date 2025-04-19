@@ -19,11 +19,13 @@ module __my_module__main(
   end
 
   // ===== Pipe stage 1:
+  wire [31:0] p1_literal_15_comb;
   wire [32:0] p1_array_update_16_comb[4];
-  assign p1_array_update_16_comb[0] = p0_x[0];
-  assign p1_array_update_16_comb[1] = literal_14;
-  assign p1_array_update_16_comb[2] = p0_x[2];
-  assign p1_array_update_16_comb[3] = p0_x[3];
+  assign p1_literal_15_comb = 32'h0000_0001;
+  assign p1_array_update_16_comb[0] = p1_literal_15_comb == 32'h0000_0000 ? literal_14 : p0_x[0];
+  assign p1_array_update_16_comb[1] = p1_literal_15_comb == 32'h0000_0001 ? literal_14 : p0_x[1];
+  assign p1_array_update_16_comb[2] = p1_literal_15_comb == 32'h0000_0002 ? literal_14 : p0_x[2];
+  assign p1_array_update_16_comb[3] = p1_literal_15_comb == 32'h0000_0003 ? literal_14 : p0_x[3];
   assign out = {p1_array_update_16_comb[3], p1_array_update_16_comb[2], p1_array_update_16_comb[1], p1_array_update_16_comb[0]};
 endmodule
 

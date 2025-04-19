@@ -212,15 +212,25 @@ fn generate_ir_fn(
                     FuzzUnop::XorReduce => fn_builder.xor_reduce(operand, None),
                     FuzzUnop::Reverse => fn_builder.rev(operand, None),
                     FuzzUnop::Identity => fn_builder.identity(operand, None),
-                    FuzzUnop::Encode => fn_builder.encode(operand, None),
+                    FuzzUnop::Encode => {
+                        let bits_type: IrType = fn_builder.get_type(operand).unwrap();
+                        let bit_count: u64 = bits_type.get_flat_bit_count();
+                        // For one bit input, encode gives back a zero-bit result.
+                        if bit_count <= 1 {
+                            return Err(XlsynthError(
+                                "encode needs more than 1 bit input operand".to_string(),
+                            ));
+                        }
+                        fn_builder.encode(operand, None)
+                    }
                 };
                 available_nodes.push(node);
             }
             FuzzOp::Binop(binop, idx1, idx2) => {
                 let idx1 = (idx1 as usize) % available_nodes.len();
                 let idx2 = (idx2 as usize) % available_nodes.len();
-                let operand1 = &available_nodes[idx1];
-                let operand2 = &available_nodes[idx2];
+                let operand1: &BValue = &available_nodes[idx1];
+                let operand2: &BValue = &available_nodes[idx2];
                 let node = match binop {
                     FuzzBinop::Add => fn_builder.add(operand1, operand2, None),
                     FuzzBinop::Sub => fn_builder.sub(operand1, operand2, None),
@@ -370,6 +380,7 @@ fn generate_ir_fn(
                 available_nodes.push(node);
             }
             FuzzOp::DynamicBitSlice { arg, start, width } => {
+                assert!(width > 0, "dynamic bit slice has no width");
                 let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
                 let start = &available_nodes[(start.index as usize) % available_nodes.len()];
                 let node = fn_builder.dynamic_bit_slice(arg, start, width as u64, None);
@@ -575,6 +586,10 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
 }
 
 fuzz_target!(|sample: FuzzSample| {
+    // Check for necessary environment variables first.
+    let _ = std::env::var("XLSYNTH_TOOLS")
+        .expect("XLSYNTH_TOOLS environment variable must be set for fuzzing.");
+
     // Skip empty operation lists or empty input bits
     if sample.ops.is_empty() || sample.input_bits == 0 {
         return;
