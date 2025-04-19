@@ -22,9 +22,9 @@ use std::{
 use xlsynth::IrBits;
 
 use crate::{
-    bulk_replace::bulk_replace, gate::AigRef, gate::GateFn, gate_builder::GateBuilderOptions,
-    get_summary_stats::get_gate_depth, propose_equiv::propose_equiv,
-    validate_equiv::validate_equiv,
+    bulk_replace::bulk_replace, gate::AigOperand, gate::AigRef, gate::GateFn,
+    gate_builder::GateBuilderOptions, get_summary_stats::get_gate_depth,
+    propose_equiv::propose_equiv, propose_equiv::EquivNode, validate_equiv::validate_equiv,
 };
 
 pub enum IterationBounds {
@@ -63,16 +63,25 @@ pub fn fraig_optimize(
             }
         }
         let equiv_classes = propose_equiv(&current_fn, input_sample_count, rng, &counterexamples);
-        let mut equiv_classes_vec: Vec<&[AigRef]> =
+
+        let mut equiv_classes_vec: Vec<&[EquivNode]> =
             equiv_classes.values().map(|v| v.as_slice()).collect();
 
         // Sort the slices deterministically to ensure validate_equiv gets them in a
-        // stable order. We sort by the minimum node ID within each equivalence
-        // class slice.
-        equiv_classes_vec
-            .sort_unstable_by_key(|slice| slice.iter().map(|aig_ref| aig_ref.id).min().unwrap());
+        // stable order. We sort by the canonical representative node within each class
+        // slice.
+        equiv_classes_vec.sort_unstable_by_key(|slice| {
+            // Find the representative node (first after sorting the slice)
+            // Cloning is necessary as sort needs mutable access
+            let mut sorted_slice = slice.to_vec();
+            sorted_slice.sort_unstable();
+            // The key is (is_inverted, node_id) of the representative
+            let rep_node = sorted_slice[0];
+            (rep_node.is_inverted(), rep_node.aig_ref().id)
+        });
 
         let validation_result = validate_equiv(&current_fn, &equiv_classes_vec)?;
+
         if validation_result.proven_equiv_sets.is_empty() {
             // Converged -- no proven equivalences found.
             return Ok((current_fn, DidConverge::Yes(iteration_count)));
@@ -89,21 +98,39 @@ pub fn fraig_optimize(
             .collect();
         let stats = get_gate_depth(&current_fn, &live_nodes);
 
-        // Mapping from (higher-depth) nodes to the (lower-depth) nodes we want to
-        // replace them with.
-        let mut replacements: HashMap<AigRef, AigRef> = HashMap::new();
+        // Mapping from nodes to be replaced to the (potentially negated) operand
+        // that should replace them.
+        let mut replacements: HashMap<AigRef, AigOperand> = HashMap::new();
         for proven_equiv_set in validation_result.proven_equiv_sets {
             // Determine the minimum-depth node in the proven_equiv_set, using node ID as
             // tiebreaker
             let min_depth_node = proven_equiv_set
                 .iter()
-                .min_by_key(|node| (stats.ref_to_depth[node], node.id))
+                .min_by_key(|equiv_node| {
+                    let node_ref = equiv_node.aig_ref();
+                    let is_inverted = equiv_node.is_inverted();
+                    (stats.ref_to_depth[&node_ref], is_inverted, node_ref.id)
+                })
                 .unwrap();
-            for node in proven_equiv_set.iter() {
-                if node == min_depth_node {
+            for equiv_node in proven_equiv_set.iter() {
+                if equiv_node == min_depth_node {
                     continue;
                 }
-                replacements.insert(node.clone(), *min_depth_node);
+                // Determine if the substitution needs negation
+                let representative_op = match (equiv_node, min_depth_node) {
+                    // Same polarity: substitute directly
+                    (EquivNode::Normal(_), EquivNode::Normal(rep_ref))
+                    | (EquivNode::Inverted(_), EquivNode::Inverted(rep_ref)) => {
+                        AigOperand::from(*rep_ref)
+                    }
+                    // Different polarity: substitute with negation
+                    (EquivNode::Normal(_), EquivNode::Inverted(rep_ref))
+                    | (EquivNode::Inverted(_), EquivNode::Normal(rep_ref)) => {
+                        AigOperand::from(*rep_ref).negate()
+                    }
+                };
+
+                replacements.insert(equiv_node.aig_ref(), representative_op);
             }
         }
 
@@ -112,6 +139,7 @@ pub fn fraig_optimize(
         let (new_fn, _) =
             bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt(), false);
         current_fn = new_fn;
+
         iteration_count += 1;
     }
     Ok((current_fn, DidConverge::No))
@@ -124,6 +152,7 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng};
 
     use crate::{
+        check_equivalence,
         get_summary_stats::get_summary_stats,
         test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
     };
@@ -144,6 +173,7 @@ mod tests {
         input_sample_count: usize,
         name: &str,
     ) -> OptimizationResults {
+        let _ = env_logger::builder().is_test(true).try_init();
         let start = Instant::now();
         let mut rng = StdRng::seed_from_u64(0);
         let (optimized_fn, did_converge) = fraig_optimize(
@@ -178,6 +208,12 @@ mod tests {
         );
         eprintln!("{}: took {:?}", name, elapsed);
 
+        let check_equiv_start = Instant::now();
+        check_equivalence::validate_same_gate_fn(&gate_fn, &optimized_fn)
+            .expect("fraig optimization should preserve equivalence");
+        let check_equiv_elapsed = check_equiv_start.elapsed();
+        eprintln!("{}: check_equiv took {:?}", name, check_equiv_elapsed);
+
         OptimizationResults {
             did_converge,
             original_nodes: orig.live_nodes,
@@ -193,7 +229,7 @@ mod tests {
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_mul");
         assert_eq!(results.did_converge, DidConverge::Yes(1));
         assert_eq!(results.original_nodes, 1172);
-        assert_eq!(results.optimized_nodes, 1151);
+        assert_eq!(results.optimized_nodes, 1147);
         assert_eq!(results.original_depth, 109);
         assert_eq!(results.optimized_depth, 105);
     }
@@ -202,10 +238,10 @@ mod tests {
     fn test_fraig_optimize_bf16_add() {
         let loaded = load_bf16_add_sample(Opt::Yes);
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_add");
-        assert_eq!(results.did_converge, DidConverge::Yes(4));
+        assert_eq!(results.did_converge, DidConverge::Yes(6));
         assert_eq!(results.original_nodes, 1303);
-        assert_eq!(results.optimized_nodes, 1167);
+        assert_eq!(results.optimized_nodes, 1139);
         assert_eq!(results.original_depth, 130);
-        assert_eq!(results.optimized_depth, 123);
+        assert_eq!(results.optimized_depth, 120);
     }
 }

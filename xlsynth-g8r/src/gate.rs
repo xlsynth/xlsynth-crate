@@ -364,6 +364,8 @@ fn ir_bits_from_bitvec(bv: BitVec) -> IrBits {
 }
 
 impl GateFn {
+    /// Collapses a sparse mapping of AigRefs to boolean values into a vector of
+    /// IrBits that can be fed to gate / IR simulation as input stimulus.
     pub fn map_to_inputs(&self, map: HashMap<AigRef, bool>) -> Vec<IrBits> {
         let mut bitvecs: Vec<BitVec> = self
             .inputs
@@ -373,9 +375,10 @@ impl GateFn {
         for (input_num, input) in self.inputs.iter().enumerate() {
             for bit_index in 0..input.get_bit_count() {
                 let aig_ref = input.bit_vector.get_lsb(bit_index).non_negated().unwrap();
-                let bit_value = map
-                    .get(&aig_ref)
-                    .expect("all input gates should be present");
+                let bit_value = map.get(&aig_ref).expect(&format!(
+                    "all input gates should be present in provided sparse map; missing: {:?}",
+                    aig_ref
+                ));
                 bitvecs[input_num].set(bit_index, *bit_value);
             }
         }

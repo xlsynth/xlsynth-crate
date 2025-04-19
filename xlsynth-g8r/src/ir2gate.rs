@@ -1072,7 +1072,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
             ir::NodePayload::Binop(ir::Binop::Ne, a, b) => {
                 let a_gate_refs = env.get_bit_vector(*a).expect("ne lhs should be present");
                 let b_gate_refs = env.get_bit_vector(*b).expect("ne rhs should be present");
-                log::info!(
+                log::debug!(
                     "ne lhs bits[{}] rhs bits[{}]",
                     a_gate_refs.get_bit_count(),
                     b_gate_refs.get_bit_count()
@@ -1366,7 +1366,7 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 env.add(node_ref, GateOrVec::BitVector(bits));
             }
             ir::NodePayload::Encode { arg } => {
-                log::info!("gatifying encode; ty: {}", node.ty);
+                log::debug!("gatifying encode; ty: {}", node.ty);
                 let arg_bits = env
                     .get_bit_vector(*arg)
                     .expect("encode arg should be present");
@@ -1533,7 +1533,7 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String
     let mut env = GateEnv::new();
     gatify_internal(f, &mut g8_builder, &mut env);
     let gate_fn = g8_builder.build();
-    log::info!(
+    log::debug!(
         "converted IR function to gate function:\n{}",
         gate_fn.to_string()
     );

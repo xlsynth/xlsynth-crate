@@ -198,7 +198,7 @@ pub fn gate_fn_to_xlsynth_ir(
     function_type: &ir::FunctionType,
 ) -> Result<xlsynth::IrPackage, XlsynthError> {
     assert_eq!(gate_fn.inputs.len(), function_type.param_types.len());
-    log::info!(
+    log::debug!(
         "Converting gate function `{}` to IR:\n{}",
         gate_fn.name,
         gate_fn.to_string()
@@ -359,7 +359,7 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let package =
             gate_fn_to_xlsynth_ir(&gatify_output.gate_fn, "sample", &ir_top.get_type()).unwrap();
         let gate_fn_as_xls_ir = package.to_string();
-        log::info!("gate_fn_as_xls_ir:\n{}", gate_fn_as_xls_ir);
+        log::debug!("gate_fn_as_xls_ir:\n{}", gate_fn_as_xls_ir);
         assert_eq!(gate_fn_as_xls_ir, input_ir_text);
     }
 }

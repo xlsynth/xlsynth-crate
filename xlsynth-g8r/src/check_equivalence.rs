@@ -3,8 +3,8 @@
 use crate::{gate, gate2ir, xls_ir::ir};
 
 pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), String> {
-    log::info!("check_equivalence; orig_package:\n{}", orig_package);
-    log::info!("check_equivalence; gate_package:\n{}", gate_package);
+    log::debug!("check_equivalence; orig_package:\n{}", orig_package);
+    log::debug!("check_equivalence; gate_package:\n{}", gate_package);
     let tempdir = tempfile::tempdir().unwrap();
     let temp_path = tempdir.into_path(); // This prevents auto-deletion
     let orig_path = temp_path.join("orig.ir");
