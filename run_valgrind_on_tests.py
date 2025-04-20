@@ -189,6 +189,7 @@ def run_subset_of_tests(
     filter_out: List[str],
     suppression_path: str,
     all_filtered_ok: bool = False,
+    demangle: bool = True,
 ) -> Tuple[TestDurations, int, int]:
     """
     Runs a subset of tests from the given test executable, filtering out tests that contain any of the substrings specified in filter_out.
@@ -239,7 +240,7 @@ def run_subset_of_tests(
 
     # Pass the list of tests directly to run_valgrind
     durations, parsed_count = run_valgrind(
-        exe, cwd, suppression_path, test_filters=to_run
+        exe, cwd, suppression_path, test_filters=to_run, demangle=demangle
     )
     # Return the result along with the expected count
     return durations, parsed_count, expected_count
@@ -251,6 +252,7 @@ def run_valgrind(
     suppression_path: str,
     test_filters: Optional[List[str]] = None,
     expect_tests: bool = True,
+    demangle: bool = True,
 ) -> Tuple[TestDurations, int]:
     """Runs valgrind with JSON test output and parses durations.
 
@@ -260,6 +262,7 @@ def run_valgrind(
         suppression_path: The path to the valgrind suppression file.
         test_filters: An optional list of specific test names to run.
         expect_tests: Whether test events are expected in the output.
+        demangle: Whether to pass --demangle=no to valgrind.
 
     Returns tuple: (dict of test durations, count of tests parsed).
     """
@@ -272,8 +275,13 @@ def run_valgrind(
         "--error-exitcode=1",
         f"--suppressions={suppression_path}",
         "--leak-check=full",
+        # --demangle=no is added conditionally below
         exe,
     ]
+
+    # Conditionally add demangle flag
+    if not demangle:
+        valgrind_command.insert(-1, "--demangle=no")  # Insert before exe path
 
     if test_filters:
         # Insert test filter strings right after the executable
@@ -446,7 +454,7 @@ def print_test_durations(test_durations: TestDurations) -> None:
 
 
 def run_single_test_case(
-    exe: str, test_name: str, cwd: str, suppression_path: str
+    exe: str, test_name: str, cwd: str, suppression_path: str, demangle: bool = True
 ) -> WorkerResult:
     """Runs valgrind for a single test case. Returns tuple (durations, parsed_count, expected_count) or Exception."""
     basename = os.path.basename(exe)
@@ -454,7 +462,12 @@ def run_single_test_case(
     expected_count = 1  # Always expect 1 test when running a single case
     try:
         durations, parsed_count = run_valgrind(
-            exe, cwd, suppression_path, test_filters=[test_name], expect_tests=True
+            exe,
+            cwd,
+            suppression_path,
+            test_filters=[test_name],
+            expect_tests=True,
+            demangle=demangle,
         )
         termcolor.cprint(f"Finished test: {test_name} in {basename}", "green")
         # Return durations, parsed count, and expected count (1)
@@ -466,7 +479,10 @@ def run_single_test_case(
 
 
 def run_single_test_binary(
-    exe: str, target_to_cwd: Dict[str, str], script_cwd: str
+    exe: str,
+    target_to_cwd: Dict[str, str],
+    script_cwd: str,
+    demangle: bool = True,
 ) -> WorkerResult:
     """Determines how to run valgrind for a single binary and executes it."""
     basename: str = os.path.basename(exe)
@@ -508,6 +524,7 @@ def run_single_test_binary(
                 config.get("filter_out", []),  # Get filter_out list or default to empty
                 suppression_path,
                 config.get("all_filtered_ok", False),  # Get flag or default to False
+                demangle=demangle,
             )
         else:
             # No specific config found, run valgrind directly
@@ -532,7 +549,11 @@ def run_single_test_binary(
 
             # Pass expect_tests flag to run_valgrind
             durations, parsed_count = run_valgrind(
-                exe, cwd, suppression_path, expect_tests=(expected_count > 0)
+                exe,
+                cwd,
+                suppression_path,
+                expect_tests=(expected_count > 0),
+                demangle=demangle,
             )
             # Assign the result tuple including the calculated expected count
             result = (durations, parsed_count, expected_count)
@@ -550,6 +571,7 @@ def submit_valgrind_tasks(
     exe_path: str,
     target_to_cwd: Dict[str, str],
     script_cwd: str,
+    demangle: bool = True,
 ) -> Dict[concurrent.futures.Future[WorkerResult], str]:
     """Lists tests, applies filters, and submits tasks for a single binary.
 
@@ -605,7 +627,12 @@ def submit_valgrind_tasks(
             )
             for test_case in individual_tests_to_run:
                 future = executor.submit(
-                    run_single_test_case, exe_path, test_case, cwd, suppression_path
+                    run_single_test_case,
+                    exe_path,
+                    test_case,
+                    cwd,
+                    suppression_path,
+                    demangle=demangle,
                 )
                 task_name = f"{basename}::{test_case}"
                 tasks[future] = task_name
@@ -618,13 +645,21 @@ def submit_valgrind_tasks(
             )
             # Fallback: submit the whole binary
             future = executor.submit(
-                run_single_test_binary, exe_path, target_to_cwd, script_cwd
+                run_single_test_binary,
+                exe_path,
+                target_to_cwd,
+                script_cwd,
+                demangle=demangle,
             )
             tasks[future] = basename
     else:
         # No sharding: submit task for the whole binary
         future = executor.submit(
-            run_single_test_binary, exe_path, target_to_cwd, script_cwd
+            run_single_test_binary,
+            exe_path,
+            target_to_cwd,
+            script_cwd,
+            demangle=demangle,
         )
         tasks[future] = basename
 
@@ -687,6 +722,12 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Compile tests in release mode (slower build, faster tests)",
+    )
+    parser.add_option(
+        "--no-demangle",
+        action="store_true",
+        default=False,
+        help="Pass --demangle=no to valgrind to disable symbol demangling.",
     )
     (opts, args) = parser.parse_args()
 
@@ -786,7 +827,11 @@ def main() -> None:
         all_futures_map: Dict[concurrent.futures.Future[WorkerResult], str] = {}
         for exe_path in test_binaries:
             submitted_tasks = submit_valgrind_tasks(
-                executor, exe_path, target_to_cwd, script_cwd
+                executor,
+                exe_path,
+                target_to_cwd,
+                script_cwd,
+                demangle=(not opts.no_demangle),
             )
             all_futures_map.update(submitted_tasks)
 
@@ -814,6 +859,7 @@ def main() -> None:
 
         if isinstance(result, Exception):
             status = "Failed (Exception)"
+            color = "red"
             termcolor.cprint(
                 f"Task '{task_name}' failed: {result}", "red", file=sys.stderr
             )
@@ -823,6 +869,9 @@ def main() -> None:
             else:
                 if task_name not in failed_binaries:
                     failed_binaries.append(task_name)
+            # Assign failure status
+            task_statuses[task_name] = (status, color)
+
         elif (
             isinstance(result, tuple)
             and len(result) == 3
@@ -853,6 +902,7 @@ def main() -> None:
                 combined_test_durations[test_name] = duration
         else:
             status = "Failed (Unexpected Result Type)"
+            color = "red"
             termcolor.cprint(
                 f"Error: Worker for '{task_name}' returned unexpected type: {type(result)}",
                 "red",
@@ -864,8 +914,8 @@ def main() -> None:
             else:
                 if task_name not in failed_binaries:
                     failed_binaries.append(task_name)
-
-        task_statuses[task_name] = task_statuses[task_name]
+            # Assign failure status
+            task_statuses[task_name] = (status, color)
 
     print_test_durations(combined_test_durations)
 
