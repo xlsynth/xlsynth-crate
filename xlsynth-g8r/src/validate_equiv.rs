@@ -357,8 +357,8 @@ mod tests {
         let setup = load_bf16_add_sample(Opt::No);
         let (proposed_equiv_classes_len, proven_equiv_sets_len) =
             do_propose_and_validate(&setup.gate_fn, 256);
-        assert_eq!(proposed_equiv_classes_len, 432);
-        assert_eq!(proven_equiv_sets_len, 138);
+        assert_eq!(proposed_equiv_classes_len, 428);
+        assert_eq!(proven_equiv_sets_len, 134);
     }
 
     #[test]

@@ -164,6 +164,12 @@ impl std::fmt::Display for IrType {
     }
 }
 
+impl IrType {
+    pub fn get_flat_bit_count(&self) -> u64 {
+        lib_support::xls_type_get_flat_bit_count(self.ptr)
+    }
+}
+
 pub struct IrFunctionType {
     pub(crate) ptr: *mut xlsynth_sys::CIrFunctionType,
 }

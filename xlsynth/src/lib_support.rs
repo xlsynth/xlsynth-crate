@@ -451,6 +451,12 @@ pub(crate) fn xls_type_to_string(t: *const CIrType) -> Result<String, XlsynthErr
     Ok(unsafe { c_str_to_rust(c_str_out) })
 }
 
+pub(crate) fn xls_type_get_flat_bit_count(t: *const CIrType) -> u64 {
+    let bit_count = unsafe { xlsynth_sys::xls_type_get_flat_bit_count(t) };
+    assert!(bit_count >= 0, "bit count must be non-negative");
+    bit_count as u64
+}
+
 pub(crate) fn xls_package_set_top_by_name(
     package: *mut CIrPackage,
     name: &str,

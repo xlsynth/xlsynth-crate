@@ -495,6 +495,15 @@ pub fn gatify_scmp(
     cmp_kind: CmpKind,
     or_eq: bool,
 ) -> AigOperand {
+    assert_eq!(
+        lhs_bits.get_bit_count(),
+        rhs_bits.get_bit_count(),
+        "scmp requires equal-width bit vectors"
+    );
+    assert!(
+        lhs_bits.get_bit_count() > 0,
+        "scmp requires non-zero-width bit vectors"
+    );
     let bit_count = lhs_bits.get_bit_count();
     if bit_count == 1 {
         // Special-case 1-bit: In two's complement, 0 represents 0 and 1 represents -1.

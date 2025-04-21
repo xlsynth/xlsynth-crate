@@ -248,6 +248,9 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v2
 
+      - name: Note Xcode version
+        run: xcodebuild -version
+
       - name: Download xlsynth binaries
         env:
           GH_PAT: ${{ secrets.GH_PAT }}

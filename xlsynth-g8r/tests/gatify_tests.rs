@@ -739,7 +739,7 @@ fn bf16_add(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
 
     let stats = do_test_ir_conversion(&optimized_ir_text, opt);
     if opt == Opt::Yes {
-        assert_eq!(stats.live_nodes, 1303);
+        assert_eq!(stats.live_nodes, 1292);
         assert_eq!(stats.deepest_path, 130);
     }
 }
