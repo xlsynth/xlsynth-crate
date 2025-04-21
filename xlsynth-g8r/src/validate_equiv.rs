@@ -358,7 +358,7 @@ mod tests {
         let (proposed_equiv_classes_len, proven_equiv_sets_len) =
             do_propose_and_validate(&setup.gate_fn, 256);
         assert_eq!(proposed_equiv_classes_len, 428);
-        assert_eq!(proven_equiv_sets_len, 134);
+        assert_eq!(proven_equiv_sets_len, 140);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bitvec::vec::BitVec;
 use xlsynth::{IrBits, IrValue};
@@ -500,18 +500,16 @@ impl GateFn {
         &self.gates[aig_ref.id]
     }
 
-    // In post-order a node comes after all of its dependencies, i.e. return values
-    // are last.
+    /// Worklist-based postorder traversal from all outputs, returns
+    /// Vec<AigOperand> (with negation).
     pub fn post_order(&self, discard_inputs: bool) -> Vec<AigOperand> {
-        let mut seen = HashSet::new();
-        let mut order = Vec::new();
+        let mut starts = Vec::new();
         for output in &self.outputs {
             for bit in output.bit_vector.iter_lsb_to_msb() {
-                post_order(bit, self, discard_inputs, &mut seen, &mut order);
+                starts.push(*bit);
             }
         }
-
-        order
+        post_order_operands(&starts, &self.gates, discard_inputs)
     }
 
     pub fn get_signature(&self) -> String {
@@ -536,47 +534,117 @@ impl GateFn {
     }
 }
 
+/// Returns a postorder traversal of the AIG nodes reachable from aig_ref (dedup
+/// by node).
+pub fn postorder_for_aig_ref(
+    aig_ref: &AigRef,
+    nodes: &[AigNode],
+    cache: &HashMap<AigRef, impl Sized>,
+) -> Vec<AigRef> {
+    let mut worklist = VecDeque::new();
+    let mut visited = HashSet::new();
+    let mut postorder = Vec::new();
+    worklist.push_back(*aig_ref);
+    while let Some(current) = worklist.pop_back() {
+        if cache.contains_key(&current) || visited.contains(&current) {
+            continue;
+        }
+        let node = &nodes[current.id];
+        let mut all_deps_visited = true;
+        for dep in node.get_operands() {
+            if !cache.contains_key(&dep.node) && !visited.contains(&dep.node) {
+                worklist.push_back(current); // Revisit after dependencies
+                worklist.push_back(dep.node);
+                all_deps_visited = false;
+                break;
+            }
+        }
+        if all_deps_visited {
+            visited.insert(current);
+            postorder.push(current);
+        }
+    }
+    postorder
+}
+
+/// Returns a postorder traversal of the AIG operands reachable from a set of
+/// outputs (dedup by operand).
+pub fn post_order_operands(
+    starts: &[AigOperand],
+    nodes: &[AigNode],
+    discard_inputs: bool,
+) -> Vec<AigOperand> {
+    let mut worklist = VecDeque::new();
+    let mut visited = HashSet::new();
+    let mut postorder = Vec::new();
+    for &start in starts {
+        worklist.push_back(start);
+    }
+    while let Some(current) = worklist.pop_back() {
+        if visited.contains(&current) {
+            continue;
+        }
+        let node = &nodes[current.node.id];
+        let mut all_deps_visited = true;
+        for dep in node.get_operands() {
+            if !visited.contains(&dep) {
+                worklist.push_back(current); // Revisit after dependencies
+                worklist.push_back(dep);
+                all_deps_visited = false;
+                break;
+            }
+        }
+        if all_deps_visited {
+            let should_push = match node {
+                AigNode::Input { .. } => current.negated || !discard_inputs,
+                _ => true,
+            };
+            if should_push {
+                postorder.push(current);
+            }
+            visited.insert(current);
+        }
+    }
+    postorder
+}
+
+/// Postorder traversal that deduplicates only by AigRef (node id), ignoring
+/// operand negation.
+pub fn postorder_for_aig_ref_node_only(
+    aig_ref: &AigRef,
+    nodes: &[AigNode],
+    cache: &std::collections::HashMap<AigRef, impl Sized>,
+) -> Vec<AigRef> {
+    let mut worklist = VecDeque::new();
+    let mut visited = HashSet::new();
+    let mut postorder = Vec::new();
+    worklist.push_back(*aig_ref);
+    while let Some(current) = worklist.pop_back() {
+        if cache.contains_key(&current) || visited.contains(&current) {
+            continue;
+        }
+        let node = &nodes[current.id];
+        let mut all_deps_visited = true;
+        for dep in node.get_operands() {
+            if !cache.contains_key(&dep.node) && !visited.contains(&dep.node) {
+                worklist.push_back(current); // Revisit after dependencies
+                worklist.push_back(dep.node);
+                all_deps_visited = false;
+                break;
+            }
+        }
+        if all_deps_visited {
+            visited.insert(current);
+            postorder.push(current);
+        }
+    }
+    postorder
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReductionKind {
     Linear,
     Tree,
-}
-
-/// Helper for getting the post-order of the nodes in the AIG.
-///
-/// If operand is already seen, immediately returns.
-/// Otherwise, does any required traversal on operands and then adds the operand
-/// to the order.
-///
-/// Note that this is a recursive implementation for simplicity though a
-/// worklist oriented algorithm will scale better in the future.
-fn post_order(
-    operand: &AigOperand,
-    f: &GateFn,
-    discard_inputs: bool,
-    seen: &mut HashSet<AigOperand>,
-    order: &mut Vec<AigOperand>,
-) {
-    if !seen.insert(*operand) {
-        return;
-    }
-    let gate = f.get(operand.node);
-    match gate {
-        AigNode::Input { .. } => {
-            let should_push = operand.negated || !discard_inputs;
-            if should_push {
-                order.push(*operand);
-            }
-        }
-        AigNode::Literal(_) => {
-            order.push(*operand);
-        }
-        AigNode::And2 { a, b, .. } => {
-            post_order(a, f, discard_inputs, seen, order);
-            post_order(b, f, discard_inputs, seen, order);
-            order.push(*operand);
-        }
-    }
 }
 
 /// Extracts the combined transitive fan-in cone for a set of nodes.

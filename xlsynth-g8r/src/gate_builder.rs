@@ -999,21 +999,16 @@ mod tests {
         // Note: The specific node IDs (%3, %4, %5, %6) might vary depending on hash
         // implementation details, but the key is that the deduplicated outputs
         // refer to the same underlying AND gate IDs.
-        let expected_str = format!(
-            "fn test_simple_and_dedupe(a: bits[1] = [%1], b: bits[1] = [%2]) -> (ab: bits[1] = [%{}], a_notb: bits[1] = [%{}], nota_b: bits[1] = [%{}], nota_notb: bits[1] = [%{}]) {{
-  %{} = and(a[0], b[0])
-  %{} = and(a[0], not(b[0]))
-  %{} = and(not(a[0]), b[0])
-  %{} = and(not(a[0]), not(b[0]))
-  ab[0] = %{}
-  a_notb[0] = %{}
-  nota_b[0] = %{}
-  nota_notb[0] = %{}
-}}",
-            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id,
-            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id,
-            ab.node.id, a_notb.node.id, nota_b.node.id, nota_notb.node.id
-        );
+        let expected_str = "fn test_simple_and_dedupe(a: bits[1] = [%1], b: bits[1] = [%2]) -> (ab: bits[1] = [%3], a_notb: bits[1] = [%5], nota_b: bits[1] = [%7], nota_notb: bits[1] = [%9]) {
+  %9 = and(not(a[0]), not(b[0]))
+  %7 = and(not(a[0]), b[0])
+  %5 = and(a[0], not(b[0]))
+  %3 = and(a[0], b[0])
+  ab[0] = %3
+  a_notb[0] = %5
+  nota_b[0] = %7
+  nota_notb[0] = %9
+}";
         assert_eq!(gate_fn.to_string(), expected_str);
     }
 }

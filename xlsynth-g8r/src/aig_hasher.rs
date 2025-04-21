@@ -3,7 +3,7 @@
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
-use crate::gate::{AigNode, AigRef};
+use crate::gate::{postorder_for_aig_ref_node_only, AigNode, AigOperand, AigRef};
 
 /// Holds the "latest/best" depth and AigRef for a given hash.
 struct HashData {
@@ -22,6 +22,7 @@ impl HashData {
     }
 }
 
+#[derive(Clone)]
 struct DepthAndHash {
     pub depth: usize,
     pub hash: blake3::Hash,
@@ -45,63 +46,46 @@ impl AigHasher {
         }
     }
 
-    fn get_depth_no_memo(&mut self, aig_ref: &AigRef, nodes: &[AigNode]) -> usize {
-        if let Some(depth_and_hash) = self.ref_to_depth_and_hash.get(aig_ref) {
-            return depth_and_hash.depth;
-        }
-        let node = &nodes[aig_ref.id];
-        let result = match node {
+    fn compute_node_depth(node: &AigNode, get_depth: impl Fn(&AigOperand) -> usize) -> usize {
+        match node {
             AigNode::Input { .. } => 0,
             AigNode::Literal(..) => 0,
             AigNode::And2 { a, b, .. } => {
-                let a_depth = self.get_depth(&a.node, nodes);
-                let b_depth = self.get_depth(&b.node, nodes);
-                let result_depth = std::cmp::max(a_depth, b_depth) + 1;
-                result_depth
+                let a_depth = get_depth(a);
+                let b_depth = get_depth(b);
+                std::cmp::max(a_depth, b_depth) + 1
             }
-        };
-        result
+        }
     }
 
-    fn get_hash_no_memo(&mut self, aig_ref: &AigRef, nodes: &[AigNode]) -> blake3::Hash {
-        let mut hasher = blake3::Hasher::new();
-        let node = &nodes[aig_ref.id];
-
+    fn compute_node_hash(
+        node: &AigNode,
+        get_hash: impl Fn(&AigOperand) -> blake3::Hash,
+    ) -> blake3::Hash {
         static FALSE_HASH: Lazy<blake3::Hash> = Lazy::new(|| {
             let mut hasher = blake3::Hasher::new();
-            // Use a type identifier for Literal False
             hasher.update(&[2]);
             hasher.update(&[0]);
             hasher.finalize()
         });
         static TRUE_HASH: Lazy<blake3::Hash> = Lazy::new(|| {
             let mut hasher = blake3::Hasher::new();
-            // Use a type identifier for Literal True
-            // Note: Changed from [3] to [2] to keep Literal type identifier consistent
             hasher.update(&[2]);
             hasher.update(&[1]);
             hasher.finalize()
         });
-
-        // Hash based on node type and canonicalized inputs for commutativity
+        let mut hasher = blake3::Hasher::new();
         match node {
             AigNode::And2 { a, b, .. } => {
-                // Use a type identifier for And2
                 hasher.update(&[0]);
-
-                // Recursively get hashes for operands, including negation
-                // Use the memoized get_hash to avoid recomputation and cycles
-                let mut hash_a_bytes = self.get_hash(&a.node, nodes).as_bytes().to_vec();
+                let mut hash_a_bytes = get_hash(a).as_bytes().to_vec();
                 if a.negated {
                     hash_a_bytes[0] ^= 1;
-                } // Simple way to incorporate negation
-
-                let mut hash_b_bytes = self.get_hash(&b.node, nodes).as_bytes().to_vec();
+                }
+                let mut hash_b_bytes = get_hash(b).as_bytes().to_vec();
                 if b.negated {
                     hash_b_bytes[0] ^= 1;
-                } // Simple way to incorporate negation
-
-                // Sort operand hashes for canonical representation
+                }
                 if hash_a_bytes <= hash_b_bytes {
                     hasher.update(&hash_a_bytes);
                     hasher.update(&hash_b_bytes);
@@ -111,22 +95,14 @@ impl AigHasher {
                 }
             }
             AigNode::Input { name, lsb_index } => {
-                // Use a type identifier for Input
                 hasher.update(&[1]);
                 hasher.update(name.as_bytes());
-                // lsb_index is usize, not Option<usize>
                 hasher.update(&lsb_index.to_le_bytes());
             }
             AigNode::Literal(val) => {
-                // Return precomputed hashes for literals
-                if *val {
-                    return *TRUE_HASH;
-                } else {
-                    return *FALSE_HASH;
-                }
+                return if *val { *TRUE_HASH } else { *FALSE_HASH };
             }
         }
-
         hasher.finalize()
     }
 
@@ -144,11 +120,19 @@ impl AigHasher {
         if let Some(depth_and_hash) = self.ref_to_depth_and_hash.get(aig_ref) {
             return (depth_and_hash.depth, depth_and_hash.hash);
         }
-        let depth = self.get_depth_no_memo(aig_ref, nodes);
-        let hash = self.get_hash_no_memo(aig_ref, nodes);
-        self.ref_to_depth_and_hash
-            .insert(*aig_ref, DepthAndHash { depth, hash });
-        (depth, hash)
+        let postorder =
+            postorder_for_aig_ref_node_only(aig_ref, nodes, &self.ref_to_depth_and_hash);
+        for current in postorder {
+            let node = &nodes[current.id];
+            let get_depth = |op: &AigOperand| self.ref_to_depth_and_hash[&op.node].depth;
+            let get_hash = |op: &AigOperand| self.ref_to_depth_and_hash[&op.node].hash;
+            let depth = Self::compute_node_depth(node, get_depth);
+            let hash = Self::compute_node_hash(node, get_hash);
+            self.ref_to_depth_and_hash
+                .insert(current, DepthAndHash { depth, hash });
+        }
+        let result = self.ref_to_depth_and_hash[aig_ref].clone();
+        (result.depth, result.hash)
     }
 
     pub fn get_depth(&mut self, aig_ref: &AigRef, nodes: &[AigNode]) -> usize {
@@ -183,5 +167,69 @@ impl AigHasher {
         }
         hash_data.add(*aig_ref, depth);
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gate::{AigNode, AigOperand, AigRef};
+    use crate::test_utils::{setup_graph_with_redundancies, setup_simple_graph};
+
+    #[test]
+    fn stack_overflow_on_deep_and_tree() {
+        // Construct a deep left-leaning AND tree
+        let depth = 200_000; // Should be deep enough to overflow most stacks
+        let mut nodes = Vec::with_capacity(depth + 1);
+        // Start with a single input node
+        nodes.push(AigNode::Input {
+            name: "a".to_string(),
+            lsb_index: 0,
+        });
+        for i in 1..=depth {
+            let left = AigOperand {
+                node: AigRef { id: i - 1 },
+                negated: false,
+            };
+            let right = AigOperand {
+                node: AigRef { id: 0 },
+                negated: false,
+            };
+            nodes.push(AigNode::And2 {
+                a: left,
+                b: right,
+                tags: None,
+            });
+        }
+        let mut hasher = AigHasher::new();
+        // This used to cause a stack overflow before the worklist-based implementation.
+        let _ = hasher.get_depth_and_hash(&AigRef { id: depth }, &nodes);
+    }
+
+    #[test]
+    fn test_simple_graph_depth_and_hash() {
+        let tg = setup_simple_graph();
+        let mut hasher = AigHasher::new();
+        // Check depth and hash for output node 'o'
+        let (depth, hash) = hasher.get_depth_and_hash(&tg.o.node, &tg.g.gates);
+        assert_eq!(depth, 2, "Depth of output node 'o' should be 2");
+        // Check that repeated calls are consistent
+        let (depth2, hash2) = hasher.get_depth_and_hash(&tg.o.node, &tg.g.gates);
+        assert_eq!(depth, depth2);
+        assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn test_graph_with_redundancies() {
+        let tg = setup_graph_with_redundancies();
+        let mut hasher = AigHasher::new();
+        // Both outer0 and outer1 should have the same depth and hash
+        let (depth0, hash0) = hasher.get_depth_and_hash(&tg.outer0.node, &tg.g.gates);
+        let (depth1, hash1) = hasher.get_depth_and_hash(&tg.outer1.node, &tg.g.gates);
+        assert_eq!(
+            depth0, depth1,
+            "Depths should be equal for redundant outputs"
+        );
+        assert_eq!(hash0, hash1, "Hashes should be equal for redundant outputs");
     }
 }

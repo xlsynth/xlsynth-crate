@@ -174,6 +174,7 @@ mod tests {
         name: &str,
     ) -> OptimizationResults {
         let _ = env_logger::builder().is_test(true).try_init();
+        log::info!("do_fraig_and_report: {}", name);
         let start = Instant::now();
         let mut rng = StdRng::seed_from_u64(0);
         let (optimized_fn, did_converge) = fraig_optimize(
@@ -238,10 +239,10 @@ mod tests {
     fn test_fraig_optimize_bf16_add() {
         let loaded = load_bf16_add_sample(Opt::Yes);
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_add");
-        assert_eq!(results.did_converge, DidConverge::Yes(4));
+        assert_eq!(results.did_converge, DidConverge::Yes(3));
         assert_eq!(results.original_nodes, 1292);
-        assert_eq!(results.optimized_nodes, 1115);
+        assert_eq!(results.optimized_nodes, 1125);
         assert_eq!(results.original_depth, 130);
-        assert_eq!(results.optimized_depth, 121);
+        assert_eq!(results.optimized_depth, 124);
     }
 }
