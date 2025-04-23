@@ -32,8 +32,14 @@ use xlsynth::IrBits;
 use crate::{
     aig_hasher::AigHasher,
     aig_simplify,
-    gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, ReductionKind},
+    gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReductionKind {
+    Linear,
+    Tree,
+}
 
 pub struct GateBuilder {
     pub name: String,
@@ -314,6 +320,23 @@ impl GateBuilder {
             node: arg.node,
             negated: !arg.negated,
         }
+    }
+
+    /// Debug helper: checks that the given AigRef is in-bounds for this
+    /// builder.
+    pub fn validate_ref(&self, aig_ref: AigRef) {
+        let count = self.gates.len();
+        assert!(
+            aig_ref.id < count,
+            "AigRef out of bounds: {:?} (gates.len() = {})",
+            aig_ref,
+            count
+        );
+    }
+
+    /// Debug helper: checks that the given AigOperand's node is in-bounds.
+    pub fn validate_operand(&self, operand: AigOperand) {
+        self.validate_ref(operand.node);
     }
 
     pub fn add_xnor(&mut self, a: AigOperand, b: AigOperand) -> AigOperand {
@@ -705,6 +728,16 @@ impl GateBuilder {
         self.add_or_reduce(&xors, reduction_kind) // or-reduce to see if any bit
                                                   // was different
     }
+
+    /// Returns true if the given AigRef is in-bounds for this builder.
+    pub fn is_valid_ref(&self, aig_ref: AigRef) -> bool {
+        aig_ref.id < self.gates.len()
+    }
+
+    /// Returns true if the given AigOperand's node is in-bounds.
+    pub fn is_valid_operand(&self, operand: AigOperand) -> bool {
+        self.is_valid_ref(operand.node)
+    }
 }
 
 #[cfg(test)]
@@ -794,7 +827,7 @@ mod tests {
         builder.add_output("o".to_string(), AigBitVector::from_bit(e_and_ab_or_cd));
         let gate_fn = builder.build();
 
-        let topo = gate_fn.post_order(true);
+        let topo = gate_fn.post_order_operands(true);
 
         log::info!("gate_fn:\n{}", gate_fn.to_string());
         log::info!("topo: {:?}", topo);
@@ -844,7 +877,7 @@ mod tests {
         );
 
         // Get the topological order
-        let topo = gate_fn.post_order(true);
+        let topo = gate_fn.post_order_operands(true);
 
         log::info!("topo: {:?}", topo);
         assert_eq!(topo.len(), 2);

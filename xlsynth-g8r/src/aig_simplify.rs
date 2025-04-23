@@ -54,7 +54,6 @@ fn extract_and_nn_pattern(
 /// Simplifies the case that goes: (a | b) & b => b
 pub fn operand_simplify(aig_ref: AigRef, g8_builder: &mut GateBuilder) -> Option<AigOperand> {
     let gate = &g8_builder.gates[aig_ref.id];
-    log::debug!("simplifying {:?}", gate);
     match gate {
         AigNode::And2 { a, b, .. } => {
             if let Some((or_lhs, or_rhs)) = extract_or_pattern(*a, g8_builder) {

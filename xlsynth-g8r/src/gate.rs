@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
 use bitvec::vec::BitVec;
 use xlsynth::{IrBits, IrValue};
 
+use crate::topo::post_order_operands;
 use crate::xls_ir::ir;
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -34,14 +35,6 @@ impl AigOperand {
             Some(self.node)
         }
     }
-
-    pub fn to_formula_string(&self, nodes: &[AigNode]) -> String {
-        if self.negated {
-            format!("not({})", nodes[self.node.id].to_formula_string(nodes))
-        } else {
-            nodes[self.node.id].to_formula_string(nodes)
-        }
-    }
 }
 
 impl From<AigRef> for AigOperand {
@@ -62,7 +55,7 @@ impl From<&AigRef> for AigOperand {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AigNode {
     Input {
         name: String,
@@ -78,18 +71,6 @@ pub enum AigNode {
 }
 
 impl AigNode {
-    pub fn to_formula_string(&self, nodes: &[AigNode]) -> String {
-        match self {
-            AigNode::Input { name, lsb_index } => format!("{}[{}]", name, lsb_index),
-            AigNode::Literal(value) => format!("{}", value),
-            AigNode::And2 { a, b, .. } => format!(
-                "and({},{})",
-                a.to_formula_string(nodes),
-                b.to_formula_string(nodes)
-            ),
-        }
-    }
-
     pub fn get_operands(&self) -> Vec<AigOperand> {
         match self {
             AigNode::Input { .. } => vec![],
@@ -414,6 +395,7 @@ impl GateFn {
     /// the node emission process, which means we need a sweep over the
     /// outputs to negate those explicitly.
     pub fn to_string(&self) -> String {
+        self.check_invariants_with_debug_assert();
         let mut s = String::new();
         let input_str = self
             .inputs
@@ -441,9 +423,9 @@ impl GateFn {
             "fn {}({input_str}) -> {output_str} {{\n",
             self.name
         ));
-        for operand in self.post_order(true) {
-            let this_node_id = operand.node.id;
-            let this_node = self.get(operand.node);
+        for operand in self.post_order_operands(true) {
+            let aig_ref = operand.node;
+            let this_node = self.get(aig_ref);
             match this_node {
                 AigNode::And2 { a, b, tags } => {
                     let a_node_str = get_node_str(a.node.id);
@@ -464,14 +446,14 @@ impl GateFn {
                     };
                     s.push_str(&format!(
                         "  %{} = and({}, {}{})\n",
-                        this_node_id, a_str, b_str, tags_str
+                        aig_ref.id, a_str, b_str, tags_str
                     ));
                 }
                 AigNode::Input { .. } => {
                     continue;
                 }
                 AigNode::Literal(value) => {
-                    s.push_str(&format!("  %{} = literal({})\n", this_node_id, value));
+                    s.push_str(&format!("  %{} = literal({})\n", aig_ref.id, value));
                 }
             }
         }
@@ -500,16 +482,25 @@ impl GateFn {
         &self.gates[aig_ref.id]
     }
 
-    /// Worklist-based postorder traversal from all outputs, returns
-    /// Vec<AigOperand> (with negation).
-    pub fn post_order(&self, discard_inputs: bool) -> Vec<AigOperand> {
-        let mut starts = Vec::new();
+    fn output_operands(&self) -> Vec<AigOperand> {
+        let mut result = Vec::new();
         for output in &self.outputs {
             for bit in output.bit_vector.iter_lsb_to_msb() {
-                starts.push(*bit);
+                result.push(*bit);
             }
         }
+        result
+    }
+
+    /// Worklist-based postorder traversal from all outputs, returns
+    /// Vec<AigOperand> (with negation).
+    pub fn post_order_operands(&self, discard_inputs: bool) -> Vec<AigOperand> {
+        let starts = self.output_operands();
         post_order_operands(&starts, &self.gates, discard_inputs)
+    }
+
+    pub fn post_order_refs(&self) -> Vec<AigRef> {
+        crate::topo::topo_sort_refs(&self.gates)
     }
 
     pub fn get_signature(&self) -> String {
@@ -532,210 +523,76 @@ impl GateFn {
         };
         format!("fn {}({}) -> {}", self.name, params_str, outputs_str)
     }
-}
 
-/// Returns a postorder traversal of the AIG nodes reachable from aig_ref (dedup
-/// by node).
-pub fn postorder_for_aig_ref(
-    aig_ref: &AigRef,
-    nodes: &[AigNode],
-    cache: &HashMap<AigRef, impl Sized>,
-) -> Vec<AigRef> {
-    let mut worklist = VecDeque::new();
-    let mut visited = HashSet::new();
-    let mut postorder = Vec::new();
-    worklist.push_back(*aig_ref);
-    while let Some(current) = worklist.pop_back() {
-        if cache.contains_key(&current) || visited.contains(&current) {
-            continue;
+    /// Checks internal invariants of the GateFn, panicking if any are violated.
+    /// - All AigRef indices in inputs, outputs, and gates must be in-bounds for
+    ///   self.gates.
+    pub fn check_invariants_with_debug_assert(&self) {
+        // If we're not in debug-assert build just return.
+        if !cfg!(debug_assertions) {
+            return;
         }
-        let node = &nodes[current.id];
-        let mut all_deps_visited = true;
-        for dep in node.get_operands() {
-            if !cache.contains_key(&dep.node) && !visited.contains(&dep.node) {
-                worklist.push_back(current); // Revisit after dependencies
-                worklist.push_back(dep.node);
-                all_deps_visited = false;
-                break;
+
+        let gate_count = self.gates.len();
+        // Check all input bit vectors
+        for input in &self.inputs {
+            for bit in input.bit_vector.iter_lsb_to_msb() {
+                assert!(
+                    bit.node.id < gate_count,
+                    "Input AigRef out of bounds: {:?} (gates.len() = {})",
+                    bit.node,
+                    gate_count
+                );
             }
         }
-        if all_deps_visited {
-            visited.insert(current);
-            postorder.push(current);
-        }
-    }
-    postorder
-}
-
-/// Returns a postorder traversal of the AIG operands reachable from a set of
-/// outputs (dedup by operand).
-pub fn post_order_operands(
-    starts: &[AigOperand],
-    nodes: &[AigNode],
-    discard_inputs: bool,
-) -> Vec<AigOperand> {
-    let mut worklist = VecDeque::new();
-    let mut visited = HashSet::new();
-    let mut postorder = Vec::new();
-    for &start in starts {
-        worklist.push_back(start);
-    }
-    while let Some(current) = worklist.pop_back() {
-        if visited.contains(&current) {
-            continue;
-        }
-        let node = &nodes[current.node.id];
-        let mut all_deps_visited = true;
-        for dep in node.get_operands() {
-            if !visited.contains(&dep) {
-                worklist.push_back(current); // Revisit after dependencies
-                worklist.push_back(dep);
-                all_deps_visited = false;
-                break;
+        // Check all output bit vectors
+        for output in &self.outputs {
+            for bit in output.bit_vector.iter_lsb_to_msb() {
+                assert!(
+                    bit.node.id < gate_count,
+                    "Output AigRef out of bounds: {:?} (gates.len() = {})",
+                    bit.node,
+                    gate_count
+                );
             }
         }
-        if all_deps_visited {
-            let should_push = match node {
-                AigNode::Input { .. } => current.negated || !discard_inputs,
-                _ => true,
-            };
-            if should_push {
-                postorder.push(current);
-            }
-            visited.insert(current);
-        }
-    }
-    postorder
-}
-
-/// Postorder traversal that deduplicates only by AigRef (node id), ignoring
-/// operand negation.
-pub fn postorder_for_aig_ref_node_only(
-    aig_ref: &AigRef,
-    nodes: &[AigNode],
-    cache: &std::collections::HashMap<AigRef, impl Sized>,
-) -> Vec<AigRef> {
-    let mut worklist = VecDeque::new();
-    let mut visited = HashSet::new();
-    let mut postorder = Vec::new();
-    worklist.push_back(*aig_ref);
-    while let Some(current) = worklist.pop_back() {
-        if cache.contains_key(&current) || visited.contains(&current) {
-            continue;
-        }
-        let node = &nodes[current.id];
-        let mut all_deps_visited = true;
-        for dep in node.get_operands() {
-            if !cache.contains_key(&dep.node) && !visited.contains(&dep.node) {
-                worklist.push_back(current); // Revisit after dependencies
-                worklist.push_back(dep.node);
-                all_deps_visited = false;
-                break;
-            }
-        }
-        if all_deps_visited {
-            visited.insert(current);
-            postorder.push(current);
-        }
-    }
-    postorder
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReductionKind {
-    Linear,
-    Tree,
-}
-
-/// Extracts the combined transitive fan-in cone for a set of nodes.
-///
-/// Returns:
-/// * the set of all gates within the cones (this is given in a deterministic
-///   topological ordering, as that can often be more useful than getting the
-///   set and the caller needing to reconstruct the ordering).
-/// * the set of primary inputs feeding the cones.
-pub fn extract_cone(start_nodes: &[AigRef], gates: &[AigNode]) -> (Vec<AigRef>, HashSet<AigRef>) {
-    let mut cone_gates_set = HashSet::new();
-    let mut cone_gates = Vec::new();
-    let mut cone_inputs = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut worklist: Vec<AigRef> = start_nodes.to_vec();
-
-    let mut add_cone_gate = |aig_ref: AigRef| {
-        if cone_gates_set.insert(aig_ref) {
-            cone_gates.push(aig_ref);
-        }
-    };
-
-    while let Some(current_ref) = worklist.pop() {
-        if !visited.insert(current_ref) {
-            // Already visited or WIP
-            continue;
-        }
-
-        let node = &gates[current_ref.id];
-
-        match node {
-            AigNode::Input { .. } => {
-                cone_inputs.insert(current_ref);
-            }
-            AigNode::Literal(_) => {
-                add_cone_gate(current_ref);
-            }
-            AigNode::And2 { a, b, .. } => {
-                add_cone_gate(current_ref);
-                worklist.push(a.node);
-                worklist.push(b.node);
+        // Check all gate operands
+        for (i, node) in self.gates.iter().enumerate() {
+            match node {
+                AigNode::And2 { a, b, .. } => {
+                    assert!(
+                        a.node.id < gate_count,
+                        "Gate %{}: 'a' operand AigRef out of bounds: {:?} (gates.len() = {})",
+                        i,
+                        a.node,
+                        gate_count
+                    );
+                    assert!(
+                        b.node.id < gate_count,
+                        "Gate %{}: 'b' operand AigRef out of bounds: {:?} (gates.len() = {})",
+                        i,
+                        b.node,
+                        gate_count
+                    );
+                }
+                AigNode::Input { .. } | AigNode::Literal(_) => {}
             }
         }
     }
 
-    (cone_gates, cone_inputs)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::extract_cone;
-    use crate::test_utils::setup_simple_graph;
-    use std::collections::HashSet;
-
-    /// Tests extracting a single cone.
-    #[test]
-    fn test_extract_single_cone() {
-        let test_data = setup_simple_graph();
-        let (cone_gates, cone_inputs) = extract_cone(&[test_data.o.node], &test_data.g.gates);
-        // The order depends on the DFS traversal (LIFO worklist)
-        assert_eq!(
-            cone_gates,
-            vec![test_data.o.node, test_data.b.node, test_data.a.node]
-        );
-        assert_eq!(
-            cone_inputs,
-            HashSet::from([test_data.i0.node, test_data.i1.node, test_data.i2.node])
+    /// Checks that the given AigRef is in-bounds for this GateFn.
+    pub fn validate_ref(&self, aig_ref: AigRef) {
+        let gate_count = self.gates.len();
+        assert!(
+            aig_ref.id < gate_count,
+            "AigRef out of bounds: {:?} (gates.len() = {})",
+            aig_ref,
+            gate_count
         );
     }
 
-    /// Tests extracting the union of two overlapping cones.
-    #[test]
-    fn test_extract_overlapping_cones() {
-        let test_data = setup_simple_graph();
-        let start_nodes = vec![test_data.o.node, test_data.c.node];
-        let (cone_gates, cone_inputs) = extract_cone(&start_nodes, &test_data.g.gates);
-
-        let expected_gates = vec![
-            test_data.c.node,
-            test_data.o.node,
-            test_data.b.node,
-            test_data.a.node,
-        ];
-        assert_eq!(cone_gates, expected_gates);
-
-        let expected_inputs = HashSet::from([
-            test_data.i0.node,
-            test_data.i1.node,
-            test_data.i2.node,
-            test_data.i3.node,
-        ]);
-        assert_eq!(cone_inputs, expected_inputs);
+    /// Checks that the given AigOperand's node is in-bounds for this GateFn.
+    pub fn validate_operand(&self, operand: AigOperand) {
+        self.validate_ref(operand.node);
     }
 }

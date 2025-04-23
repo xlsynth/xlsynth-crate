@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
+use crate::dce::dce;
 use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::topo::post_order_operands;
 
 /// Replaces specified AIG nodes in a `GateFn` with other nodes and rebuilds the
 /// function.
@@ -41,12 +44,10 @@ pub fn bulk_replace(
     orig_fn: &GateFn,
     substitutions: &HashMap<AigRef, AigOperand>,
     options: GateBuilderOptions,
-    verify: bool,
 ) -> (GateFn, HashMap<AigRef, AigOperand>) {
     #[cfg(debug_assertions)]
     {
-        use std::collections::HashSet;
-        // Precondition check 1: Ensure no substitution chains (A->B, B->C)
+        // Ensure no substitution chains (A->B, B->C)
         for substitute_op in substitutions.values() {
             debug_assert!(
                 !substitutions.contains_key(&substitute_op.node),
@@ -55,7 +56,7 @@ pub fn bulk_replace(
             );
         }
 
-        // Precondition check 2: Ensure no input nodes are being substituted
+        // Ensure no input nodes are being substituted
         let input_node_refs: HashSet<AigRef> = orig_fn
             .inputs
             .iter()
@@ -73,76 +74,23 @@ pub fn bulk_replace(
         }
     }
 
-    let mut new_builder = GateBuilder::new(orig_fn.name.clone(), options);
-    let mut orig_to_new_map: HashMap<AigRef, AigOperand> = HashMap::new();
+    let (substituted_fn, orig_to_new_map) = bulk_substitute(orig_fn, substitutions, options);
 
-    // Pre-process inputs
-    for orig_input in &orig_fn.inputs {
-        let new_input_vec =
-            new_builder.add_input(orig_input.name.clone(), orig_input.get_bit_count());
-        for i in 0..orig_input.get_bit_count() {
-            // Inputs in orig_fn are always non-negated operands
-            let orig_input_op = orig_input.bit_vector.get_lsb(i);
-            let new_input_op = new_input_vec.get_lsb(i);
-            orig_to_new_map.insert(orig_input_op.node, *new_input_op);
-        }
-    }
+    substituted_fn.check_invariants_with_debug_assert();
+    let dce_fn = dce(&substituted_fn);
+    dce_fn.check_invariants_with_debug_assert();
 
-    // Process outputs (triggers recursive processing of dependencies)
-    for orig_output in &orig_fn.outputs {
-        let mut new_output_bits: Vec<AigOperand> = Vec::new();
-        for orig_bit_operand in orig_output.bit_vector.iter_lsb_to_msb() {
-            let final_new_op = process_operand(
-                *orig_bit_operand,
-                orig_fn,
-                substitutions,
-                &mut new_builder,
-                &mut orig_to_new_map,
-            );
-            new_output_bits.push(final_new_op);
-        }
-        let new_output_vec = AigBitVector::from_lsb_is_index_0(&new_output_bits);
-        new_builder.add_output(orig_output.name.clone(), new_output_vec);
-    }
+    verify_io_signature_with_debug_assert(orig_fn, &dce_fn);
 
-    let replaced_fn = new_builder.build();
-
-    if verify {
-        verify_io_signature(orig_fn, &replaced_fn);
-    }
-
-    // Apply migrated tags using the final mapping
-    let mut final_fn = replaced_fn; // Get mutable ownership
-    for (orig_id, orig_node) in orig_fn.gates.iter().enumerate() {
-        // Get tags from original node, if any
-        if let Some(tags_to_migrate) = orig_node.get_tags() {
-            if tags_to_migrate.is_empty() {
-                continue; // No tags to actually migrate
-            }
-
-            let orig_ref = AigRef { id: orig_id };
-            // Find the corresponding node in the new graph
-            if let Some(final_new_op) = orig_to_new_map.get(&orig_ref) {
-                let target_node_ref = final_new_op.node;
-                assert!(
-                    target_node_ref.id < final_fn.gates.len(),
-                    "Mapped target node {:?} for original {:?} does not exist in final graph (len={})",
-                    target_node_ref, orig_ref, final_fn.gates.len()
-                );
-                let target_gate = &mut final_fn.gates[target_node_ref.id];
-                // Attempt to add the tags
-                let _ = target_gate.try_add_tags(tags_to_migrate);
-            }
-        }
-    }
-
-    // Return the final function and the mapping
-    (final_fn, orig_to_new_map)
+    (dce_fn, orig_to_new_map)
 }
 
 /// Verifies that the input/output signature (name, bit count) is preserved
 /// between the original and replaced GateFn.
-fn verify_io_signature(orig_fn: &GateFn, replaced_fn: &GateFn) {
+fn verify_io_signature_with_debug_assert(orig_fn: &GateFn, replaced_fn: &GateFn) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     assert_eq!(
         orig_fn.inputs.len(),
         replaced_fn.inputs.len(),
@@ -191,112 +139,182 @@ fn verify_io_signature(orig_fn: &GateFn, replaced_fn: &GateFn) {
     }
 }
 
-/// Recursively processes an `AigOperand` from the original graph, returning the
-/// corresponding `AigOperand` in the new graph. Handles negation.
-fn process_operand(
-    orig_operand: AigOperand,
+/// Worklist-based bulk substitute: applies substitutions and builds a new
+/// GateFn.
+pub fn bulk_substitute(
     orig_fn: &GateFn,
     substitutions: &HashMap<AigRef, AigOperand>,
-    new_builder: &mut GateBuilder,
-    orig_to_new_map: &mut HashMap<AigRef, AigOperand>,
-) -> AigOperand {
-    // Process the underlying node reference
-    let new_base_operand = process_node(
-        orig_operand.node,
-        orig_fn,
-        substitutions,
-        new_builder,
-        orig_to_new_map,
+    options: GateBuilderOptions,
+) -> (GateFn, HashMap<AigRef, AigOperand>) {
+    log::debug!(
+        "bulk_substitute on {} with {} substitutions",
+        orig_fn.name,
+        substitutions.len()
     );
+    let mut new_builder = GateBuilder::new(orig_fn.name.clone(), options);
+    let mut orig_to_new_map: HashMap<AigRef, AigOperand> = HashMap::new();
 
-    // Apply negation if necessary
-    if orig_operand.negated {
-        new_builder.add_not(new_base_operand)
-    } else {
-        new_base_operand
-    }
-}
-
-/// Recursively processes an `AigRef` (node) from the original graph, returning
-/// the corresponding non-negated `AigOperand` for the node in the new graph.
-/// Handles substitutions and tag migration. Uses memoization
-/// (`orig_to_new_map`).
-fn process_node(
-    orig_ref: AigRef,
-    orig_fn: &GateFn,
-    substitutions: &HashMap<AigRef, AigOperand>,
-    new_builder: &mut GateBuilder,
-    orig_to_new_map: &mut HashMap<AigRef, AigOperand>,
-) -> AigOperand {
-    // Check for substitution before checking memoization
-    if let Some(substitute_op) = substitutions.get(&orig_ref) {
-        // Check if the substitute is a constant
-        let substitute_node_type = &orig_fn.gates[substitute_op.node.id];
-        let final_op = if let AigNode::Literal(value) = substitute_node_type {
-            // Handle constant substitution directly
-            let base_const_op = if *value {
-                new_builder.get_true()
-            } else {
-                new_builder.get_false()
-            };
-            // Apply negation based on the substitution operand
-            if substitute_op.negated {
-                base_const_op.negate()
-            } else {
-                base_const_op
-            }
-        } else {
-            // Substitute is not a constant, process it recursively
-            let final_substitute_base_op = process_node(
-                substitute_op.node,
-                orig_fn,
-                substitutions,
-                new_builder,
-                orig_to_new_map,
+    // Pre-process inputs
+    for orig_input in &orig_fn.inputs {
+        let new_input_vec =
+            new_builder.add_input(orig_input.name.clone(), orig_input.get_bit_count());
+        for i in 0..orig_input.get_bit_count() {
+            let orig_input_op = orig_input.bit_vector.get_lsb(i);
+            let new_input_op = new_input_vec.get_lsb(i);
+            debug_assert!(
+                new_builder.is_valid_ref(orig_input_op.node),
+                "Input orig_input_op out of bounds: {:?}",
+                orig_input_op
             );
-            if substitute_op.negated {
-                new_builder.add_not(final_substitute_base_op)
+            debug_assert!(
+                new_builder.is_valid_ref(new_input_op.node),
+                "Input new_input_op out of bounds: {:?}",
+                new_input_op
+            );
+            orig_to_new_map.insert(orig_input_op.node, *new_input_op);
+        }
+    }
+
+    // Collect all output operands
+    let mut output_operands = Vec::new();
+    for orig_output in &orig_fn.outputs {
+        for bit in orig_output.bit_vector.iter_lsb_to_msb() {
+            output_operands.push(*bit);
+        }
+    }
+
+    // Worklist-based traversal from outputs (post-order: children before parents)
+    let postorder = post_order_operands(&output_operands, &orig_fn.gates, false);
+
+    let mut processing = HashSet::new(); // For cycle detection
+    let mut worklist: Vec<AigRef> = postorder.iter().map(|op| op.node).collect();
+
+    while let Some(orig_ref) = worklist.pop() {
+        if orig_to_new_map.contains_key(&orig_ref) {
+            continue;
+        }
+        if processing.contains(&orig_ref) {
+            panic!("Cycle detected in substitution map at {:?}", orig_ref);
+        }
+        processing.insert(orig_ref);
+        // Substitution
+        if let Some(subst_op) = substitutions.get(&orig_ref) {
+            if !orig_to_new_map.contains_key(&subst_op.node) {
+                // Dependency not processed yet, process it first
+                worklist.push(orig_ref); // Re-process current node after dependency
+                worklist.push(subst_op.node);
+                processing.remove(&orig_ref);
+                continue;
+            }
+            // If the substitute is a constant, use get_true/get_false
+            let subst_node = &orig_fn.gates[subst_op.node.id];
+            let final_op = if let AigNode::Literal(value) = subst_node {
+                let base_const_op = if *value {
+                    new_builder.get_true()
+                } else {
+                    new_builder.get_false()
+                };
+                if subst_op.negated {
+                    base_const_op.negate()
+                } else {
+                    base_const_op
+                }
             } else {
-                final_substitute_base_op
+                let mapped = orig_to_new_map.get(&subst_op.node).copied();
+                if let Some(mapped_op) = mapped {
+                    if subst_op.negated {
+                        new_builder.add_not(mapped_op)
+                    } else {
+                        mapped_op
+                    }
+                } else {
+                    unreachable!("Substitute node should have been mapped by worklist logic");
+                }
+            };
+            orig_to_new_map.insert(orig_ref, final_op);
+            processing.remove(&orig_ref);
+            continue;
+        }
+        // Otherwise, build the node in the new graph
+        let orig_node = &orig_fn.gates[orig_ref.id];
+        let new_op = match orig_node {
+            AigNode::Input { .. } => {
+                // Inputs already handled
+                processing.remove(&orig_ref);
+                continue;
+            }
+            AigNode::Literal(value) => {
+                if *value {
+                    new_builder.get_true()
+                } else {
+                    new_builder.get_false()
+                }
+            }
+            AigNode::And2 { a, b, .. } => {
+                if !orig_to_new_map.contains_key(&a.node) {
+                    worklist.push(orig_ref);
+                    worklist.push(a.node);
+                    processing.remove(&orig_ref);
+                    continue;
+                }
+                if !orig_to_new_map.contains_key(&b.node) {
+                    worklist.push(orig_ref);
+                    worklist.push(b.node);
+                    processing.remove(&orig_ref);
+                    continue;
+                }
+                let new_a = orig_to_new_map[&a.node];
+                let new_a = if a.negated {
+                    new_builder.add_not(new_a)
+                } else {
+                    new_a
+                };
+                let new_b = orig_to_new_map[&b.node];
+                let new_b = if b.negated {
+                    new_builder.add_not(new_b)
+                } else {
+                    new_b
+                };
+                // Prevent self-loop: do not allow a node to depend on itself
+                let next_id = new_builder.gates.len();
+                debug_assert!(
+                    new_a.node.id != next_id,
+                    "bulk_substitute would create self-loop in 'a' operand for node {}",
+                    next_id
+                );
+                debug_assert!(
+                    new_b.node.id != next_id,
+                    "bulk_substitute would create self-loop in 'b' operand for node {}",
+                    next_id
+                );
+                new_builder.add_and_binary(new_a, new_b)
             }
         };
-
-        orig_to_new_map.insert(orig_ref, final_op);
-        return final_op;
-    }
-    // Memoization check (for nodes already processed)
-    if let Some(existing_new_op) = orig_to_new_map.get(&orig_ref) {
-        return *existing_new_op;
+        orig_to_new_map.insert(orig_ref, new_op);
+        processing.remove(&orig_ref);
     }
 
-    // Node is not substituted and not memoized, process it normally based on its
-    // type. Inputs should have been caught by the memoization check above.
-    let orig_node = &orig_fn.gates[orig_ref.id];
-
-    let new_operand = match orig_node {
-        // We should not reach Literal/Input here if memoization check is correct
-        AigNode::Literal(_) => panic!(
-            "Literal node {:?} reached processing logic unexpectedly",
-            orig_ref
-        ),
-        AigNode::Input { .. } => panic!(
-            "Input node {:?} reached processing logic unexpectedly.",
-            orig_ref
-        ),
-
-        AigNode::And2 { a, b, .. } => {
-            // Tags handled post-build
-            // Recursively process operands
-            let new_a = process_operand(*a, orig_fn, substitutions, new_builder, orig_to_new_map);
-            let new_b = process_operand(*b, orig_fn, substitutions, new_builder, orig_to_new_map);
-            // Create the new `and` gate
-            new_builder.add_and_binary(new_a, new_b)
+    // Build outputs
+    for orig_output in &orig_fn.outputs {
+        let mut new_output_bits = Vec::new();
+        for bit in orig_output.bit_vector.iter_lsb_to_msb() {
+            let mapped = orig_to_new_map[&bit.node];
+            let mapped = if bit.negated {
+                new_builder.add_not(mapped)
+            } else {
+                mapped
+            };
+            new_output_bits.push(mapped);
         }
-    };
+        let new_output_vec = AigBitVector::from_lsb_is_index_0(&new_output_bits);
+        new_builder.add_output(orig_output.name.clone(), new_output_vec);
+    }
 
-    // Memoize the result for the original node before returning
-    orig_to_new_map.insert(orig_ref, new_operand);
-    new_operand
+    let replaced_fn = new_builder.build();
+
+    replaced_fn.check_invariants_with_debug_assert();
+    crate::topo::debug_assert_no_cycles(&replaced_fn.gates, "bulk_substitute");
+    (replaced_fn, orig_to_new_map)
 }
 
 #[cfg(test)]
@@ -308,7 +326,7 @@ mod tests {
         get_summary_stats::{get_summary_stats, SummaryStats},
         test_utils::{
             setup_graph_for_constant_replace, setup_graph_with_more_redundancies,
-            setup_graph_with_redundancies,
+            setup_graph_with_redundancies, setup_invalid_graph_with_cycle,
         },
     };
     use std::collections::HashMap;
@@ -331,7 +349,7 @@ mod tests {
         );
 
         let options = GateBuilderOptions::no_opt(); // Keep no_opt() as requested
-        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options, true);
+        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options);
 
         log::info!("Replaced function:\n{}", replaced_fn.to_string());
 
@@ -373,7 +391,7 @@ mod tests {
         );
 
         let options = GateBuilderOptions::no_opt(); // Keep no_opt() as requested
-        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options, true);
+        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options);
 
         log::info!(
             "Replaced function (multiple subs):\n{}",
@@ -413,7 +431,7 @@ mod tests {
         );
 
         let options = GateBuilderOptions::no_opt();
-        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options, true);
+        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options);
 
         log::info!(
             "Replaced function (const replace test):\n{}",
@@ -439,5 +457,28 @@ mod tests {
             // Should not happen due to the is_const assertion above
             panic!("Output node was not a Literal as expected");
         }
+    }
+
+    #[test]
+    fn test_cycle_in_substitution_map_panics() {
+        if !cfg!(debug_assertions) {
+            eprintln!(
+                "skipping test_cycle_in_substitution_map_panics: debug_assertions not enabled"
+            );
+            return;
+        }
+        let test_graph = setup_invalid_graph_with_cycle();
+        let orig_fn = &test_graph.g;
+        let mut substitutions = HashMap::new();
+        substitutions.insert(test_graph.a.node, test_graph.b);
+        substitutions.insert(test_graph.b.node, test_graph.a);
+        let options = GateBuilderOptions::no_opt();
+        let result = std::panic::catch_unwind(|| {
+            let _ = bulk_replace(orig_fn, &substitutions, options);
+        });
+        assert!(
+            result.is_err(),
+            "bulk_replace should panic on cycle in substitution map"
+        );
     }
 }

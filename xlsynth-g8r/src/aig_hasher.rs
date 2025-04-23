@@ -3,7 +3,8 @@
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
-use crate::gate::{postorder_for_aig_ref_node_only, AigNode, AigOperand, AigRef};
+use crate::gate::{AigNode, AigOperand, AigRef};
+use crate::topo::postorder_for_aig_refs_node_only;
 
 /// Holds the "latest/best" depth and AigRef for a given hash.
 struct HashData {
@@ -121,7 +122,7 @@ impl AigHasher {
             return (depth_and_hash.depth, depth_and_hash.hash);
         }
         let postorder =
-            postorder_for_aig_ref_node_only(aig_ref, nodes, &self.ref_to_depth_and_hash);
+            postorder_for_aig_refs_node_only(&[*aig_ref], nodes, &self.ref_to_depth_and_hash);
         for current in postorder {
             let node = &nodes[current.id];
             let get_depth = |op: &AigOperand| self.ref_to_depth_and_hash[&op.node].depth;
