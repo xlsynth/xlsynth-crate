@@ -50,7 +50,6 @@ pub fn post_order_operands(
         worklist.push_back(start);
     }
     while let Some(current) = worklist.pop_back() {
-        log::debug!("post_order_operands; processing: {:?}", current);
         if visited.contains(&current) {
             continue;
         }

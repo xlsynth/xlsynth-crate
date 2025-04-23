@@ -117,12 +117,14 @@ pub fn dce(orig_fn: &GateFn) -> GateFn {
                 .cloned()
                 .filter(|&id| !matches!(result.gates[id], crate::gate::AigNode::Input { .. }))
                 .collect();
-            log::debug!(
+            // Do some trace logging before our assertion so we can easily get some more
+            // context if it ever fails.
+            log::trace!(
                 "[DCE debug] Unreachable non-input node IDs: {:?}",
                 unreachable_non_inputs
             );
             for id in &unreachable_non_inputs {
-                log::debug!("[DCE debug] Node {}: {:?}", id, result.gates[*id]);
+                log::trace!("[DCE debug] Node {}: {:?}", id, result.gates[*id]);
             }
             assert_eq!(
                 unreachable_non_inputs.len(),
