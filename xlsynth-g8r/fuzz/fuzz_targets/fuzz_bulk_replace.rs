@@ -14,11 +14,39 @@ use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::gate_sim::{eval, Collect};
 
 #[derive(Debug, Clone, Arbitrary)]
-struct FuzzAndOp {
-    lhs: u16,
-    rhs: u16,
-    lhs_neg: bool,
-    rhs_neg: bool,
+enum FuzzGateOp {
+    And {
+        lhs: u16,
+        rhs: u16,
+        lhs_neg: bool,
+        rhs_neg: bool,
+    },
+    Or {
+        lhs: u16,
+        rhs: u16,
+        lhs_neg: bool,
+        rhs_neg: bool,
+    },
+    Xor {
+        lhs: u16,
+        rhs: u16,
+        lhs_neg: bool,
+        rhs_neg: bool,
+    },
+    Xnor {
+        lhs: u16,
+        rhs: u16,
+        lhs_neg: bool,
+        rhs_neg: bool,
+    },
+    Mux2 {
+        sel: u16,
+        on_true: u16,
+        on_false: u16,
+        sel_neg: bool,
+        t_neg: bool,
+        f_neg: bool,
+    },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -31,20 +59,23 @@ struct FuzzRedundantPair {
 struct FuzzGateGraph {
     num_inputs: u8,
     input_width: u8,
-    num_ands: u8,
+    num_ops: u8,
     num_outputs: u8,
-    and_ops: Vec<FuzzAndOp>,                 // richer ANDs
-    constants: Vec<bool>,                    // true/false constants
+    ops: Vec<FuzzGateOp>,                    // various gate operations
+    constants: Vec<bool>,                    // true/false constants to add
     redundant_pairs: Vec<FuzzRedundantPair>, // pairs of ANDs that should be identical
     chain_depth: u8,                         // for deep chains
     fanout_node: Option<u16>,                // node to use for high fanout
+    use_opt: bool,                           // whether to use optimizing builder options
 }
 
-fn build_gate_graph(sample: &FuzzGateGraph) -> GateFn {
-    let mut builder = GateBuilder::new(
-        "fuzz_bulk_replace".to_string(),
-        GateBuilderOptions::no_opt(),
-    );
+fn build_gate_graph(sample: &FuzzGateGraph) -> (GateFn, GateBuilderOptions) {
+    let opts = if sample.use_opt {
+        GateBuilderOptions::opt()
+    } else {
+        GateBuilderOptions::no_opt()
+    };
+    let mut builder = GateBuilder::new("fuzz_bulk_replace".to_string(), opts);
     let mut nodes = Vec::new();
     // Add inputs
     for i in 0..sample.num_inputs {
@@ -66,7 +97,7 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> GateFn {
     }
     // Defensive: If no nodes, skip AND and output generation
     if nodes.is_empty() {
-        return builder.build();
+        return (builder.build(), opts);
     }
     // Add deep AND chain if requested
     if sample.chain_depth > 0 && !nodes.is_empty() {
@@ -76,31 +107,111 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> GateFn {
         }
         nodes.push(chain);
     }
-    // Add ANDs with richer options
-    for op in sample.and_ops.iter().take(sample.num_ands as usize) {
+    // Add a variety of gate operations
+    for op in sample.ops.iter().take(sample.num_ops as usize) {
         if nodes.is_empty() {
             break;
         }
-        let lhs = nodes
-            .get((op.lhs as usize) % nodes.len())
-            .copied()
-            .unwrap_or_else(|| builder.get_false());
-        let rhs = nodes
-            .get((op.rhs as usize) % nodes.len())
-            .copied()
-            .unwrap_or_else(|| builder.get_false());
-        let lhs = if op.lhs_neg {
-            builder.add_not(lhs)
-        } else {
-            lhs
+        let new_node = match op {
+            FuzzGateOp::And {
+                lhs,
+                rhs,
+                lhs_neg,
+                rhs_neg,
+            } => {
+                let a = nodes
+                    .get((*lhs as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let b = nodes
+                    .get((*rhs as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let a = if *lhs_neg { builder.add_not(a) } else { a };
+                let b = if *rhs_neg { builder.add_not(b) } else { b };
+                builder.add_and_binary(a, b)
+            }
+            FuzzGateOp::Or {
+                lhs,
+                rhs,
+                lhs_neg,
+                rhs_neg,
+            } => {
+                let a = nodes
+                    .get((*lhs as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let b = nodes
+                    .get((*rhs as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let a = if *lhs_neg { builder.add_not(a) } else { a };
+                let b = if *rhs_neg { builder.add_not(b) } else { b };
+                builder.add_or_binary(a, b)
+            }
+            FuzzGateOp::Xor {
+                lhs,
+                rhs,
+                lhs_neg,
+                rhs_neg,
+            } => {
+                let a = nodes
+                    .get((*lhs as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let b = nodes
+                    .get((*rhs as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let a = if *lhs_neg { builder.add_not(a) } else { a };
+                let b = if *rhs_neg { builder.add_not(b) } else { b };
+                builder.add_xor_binary(a, b)
+            }
+            FuzzGateOp::Xnor {
+                lhs,
+                rhs,
+                lhs_neg,
+                rhs_neg,
+            } => {
+                let a = nodes
+                    .get((*lhs as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let b = nodes
+                    .get((*rhs as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let a = if *lhs_neg { builder.add_not(a) } else { a };
+                let b = if *rhs_neg { builder.add_not(b) } else { b };
+                builder.add_xnor(a, b)
+            }
+            FuzzGateOp::Mux2 {
+                sel,
+                on_true,
+                on_false,
+                sel_neg,
+                t_neg,
+                f_neg,
+            } => {
+                let s = nodes
+                    .get((*sel as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let t = nodes
+                    .get((*on_true as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let f = nodes
+                    .get((*on_false as usize) % nodes.len())
+                    .copied()
+                    .unwrap_or_else(|| builder.get_false());
+                let s = if *sel_neg { builder.add_not(s) } else { s };
+                let t = if *t_neg { builder.add_not(t) } else { t };
+                let f = if *f_neg { builder.add_not(f) } else { f };
+                builder.add_mux2(s, t, f)
+            }
         };
-        let rhs = if op.rhs_neg {
-            builder.add_not(rhs)
-        } else {
-            rhs
-        };
-        let and = builder.add_and_binary(lhs, rhs);
-        nodes.push(and);
+        nodes.push(new_node);
     }
     // Add redundant AND pairs
     for pair in &sample.redundant_pairs {
@@ -135,14 +246,14 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> GateFn {
     }
     // Defensive: If no nodes, skip output generation
     if nodes.is_empty() {
-        return builder.build();
+        return (builder.build(), opts);
     }
     // Add outputs
     let max_outputs = nodes.len().min(sample.num_outputs as usize);
     for i in 0..max_outputs {
         builder.add_output(format!("out{}", i), AigBitVector::from_bit(nodes[i]));
     }
-    builder.build()
+    (builder.build(), opts)
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -157,7 +268,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
         panic!("XLSYNTH_TOOLS environment variable must be set for equivalence checking in this fuzz target");
     }
     let _ = env_logger::builder().is_test(true).try_init();
-    let gate_fn = build_gate_graph(&data.0);
+    let (gate_fn, opts) = build_gate_graph(&data.0);
     let mut subs_map = HashMap::new();
     let node_count = gate_fn.gates.len();
     // Collect all input node IDs
@@ -208,7 +319,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
         return;
     }
     // Run bulk_replace
-    let (new_fn, _map) = bulk_replace(&gate_fn, &subs_map, GateBuilderOptions::no_opt());
+    let (new_fn, _map) = bulk_replace(&gate_fn, &subs_map, opts);
     // Check invariants and for cycles
     new_fn.check_invariants_with_debug_assert();
     let _dce_fn = dce(&new_fn);
@@ -231,7 +342,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
 
     // 2. Idempotence: running bulk_replace again should yield the same result
     //    (structurally)
-    let (new_fn2, _map2) = bulk_replace(&new_fn, &subs_map, GateBuilderOptions::no_opt());
+    let (new_fn2, _map2) = bulk_replace(&new_fn, &subs_map, opts);
     assert_eq!(
         new_fn.outputs.len(),
         new_fn2.outputs.len(),
@@ -246,8 +357,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
     }
 
     // 3. No-op substitution: empty map should be a no-op (modulo DCE renumbering)
-    let (noop_fn, _noop_map) =
-        bulk_replace(&gate_fn, &HashMap::new(), GateBuilderOptions::no_opt());
+    let (noop_fn, _noop_map) = bulk_replace(&gate_fn, &HashMap::new(), opts);
     assert_eq!(
         gate_fn.outputs.len(),
         noop_fn.outputs.len(),
