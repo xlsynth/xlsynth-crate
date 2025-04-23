@@ -4,7 +4,7 @@
 //! `gatify`.
 
 use crate::check_equivalence;
-use crate::gate::{AigBitVector, AigOperand, GateFn, ReductionKind};
+use crate::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::xls_ir::ir;
 use crate::xls_ir::ir::StartAndLimit;
@@ -15,6 +15,8 @@ use crate::ir2gate_utils::{
     gatify_add_ripple_carry, gatify_barrel_shifter, gatify_one_hot, gatify_one_hot_select,
     Direction,
 };
+
+use crate::gate_builder::ReductionKind;
 
 #[derive(Debug)]
 enum GateOrVec {

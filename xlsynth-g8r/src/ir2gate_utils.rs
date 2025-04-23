@@ -6,8 +6,9 @@
 //! * gatify_add_ripple_carry: instantiates a ripple-carry adder
 //! * gatify_barrel_shifter: instantiates a barrel shifter (logarithmic stages)
 
-use crate::gate::{self, AigBitVector, AigOperand, ReductionKind};
+use crate::gate::{self, AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
+use crate::gate_builder::ReductionKind;
 
 /// Emits a carry-select adder for the given inputs.
 ///

@@ -212,12 +212,9 @@ pub fn gate_fn_to_xlsynth_ir(
         add_param_for_gate_fn_input(&mut fb, &mut node_env, &mut package, input, param_type)?;
     }
 
-    log::debug!("RPO: {:?}", gate_fn.post_order(true));
-    for aig_operand in gate_fn.post_order(true) {
-        log::debug!("Processing {:?}", aig_operand);
+    for aig_operand in gate_fn.post_order_operands(true) {
         let aig_ref = aig_operand.node;
         let aig_node: &AigNode = gate_fn.get(aig_ref);
-        log::debug!(" aig_node: {:?}", aig_node);
         match (aig_operand.negated, aig_node) {
             (true, AigNode::Input { .. }) => {
                 // First we retrieve the non-inverted (positive) input.

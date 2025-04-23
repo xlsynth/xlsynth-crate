@@ -52,6 +52,11 @@ pub fn fraig_optimize(
     let mut current_fn = f.clone();
     let mut counterexamples: HashSet<Vec<IrBits>> = HashSet::new();
     loop {
+        log::debug!(
+            "fraig_optimize; iteration: {} counterexamples: {}",
+            iteration_count,
+            counterexamples.len()
+        );
         match iteration_bounds {
             IterationBounds::MaxIterations(max_iterations) => {
                 if iteration_count >= max_iterations {
@@ -136,8 +141,7 @@ pub fn fraig_optimize(
 
         // We get the updated function by bulk replacing nodes with their lower-depth
         // equivalents here.
-        let (new_fn, _) =
-            bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt(), false);
+        let (new_fn, _) = bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt());
         current_fn = new_fn;
 
         iteration_count += 1;

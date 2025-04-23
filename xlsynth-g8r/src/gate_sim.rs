@@ -75,7 +75,7 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
     // Traverse the AIG nodes in post-order. Post-order traversal ensures that
     // when we visit a node, its children (inputs) have already been visited
     // and their values computed and stored in the environment.
-    for operand in gate_fn.post_order(true) {
+    for operand in gate_fn.post_order_operands(true) {
         // Calculate the final boolean value for this specific operand
         let final_value: bool = match gate_fn.get(operand.node) {
             AigNode::Input { .. } => {

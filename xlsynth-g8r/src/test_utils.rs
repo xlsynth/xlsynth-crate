@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigOperand, GateFn};
+use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::ir2gate;
 use crate::xls_ir::ir::Package as CrateIrPackage;
@@ -436,6 +436,98 @@ pub fn setup_graph_for_constant_replace() -> TestGraphForConstantReplace {
     }
 }
 
+/// Struct for the invalid cycle test graph (two AND nodes referencing each
+/// other)
+pub struct TestInvalidGraphWithCycle {
+    pub g: GateFn,
+    pub a: AigOperand, // AND node 2
+    pub b: AigOperand, // AND node 3
+}
+
+/// Sets up a minimal invalid GateFn with a cycle between two AND nodes.
+///
+/// Node IDs:
+///   0: Input a
+///   1: Input b
+///   2: And2(a, b)
+///   3: And2(2, 3) (cycle)
+///
+/// Returns TestInvalidGraphWithCycle with references to the AND nodes.
+pub fn setup_invalid_graph_with_cycle() -> TestInvalidGraphWithCycle {
+    let gates = vec![
+        AigNode::Input {
+            name: "a".to_string(),
+            lsb_index: 0,
+        }, // id 0
+        AigNode::Input {
+            name: "b".to_string(),
+            lsb_index: 0,
+        }, // id 1
+        AigNode::And2 {
+            a: AigOperand {
+                node: AigRef { id: 0 },
+                negated: false,
+            },
+            b: AigOperand {
+                node: AigRef { id: 1 },
+                negated: false,
+            },
+            tags: None,
+        }, // id 2
+        AigNode::And2 {
+            a: AigOperand {
+                node: AigRef { id: 2 },
+                negated: false,
+            },
+            b: AigOperand {
+                node: AigRef { id: 3 },
+                negated: false,
+            },
+            tags: None,
+        }, // id 3 (cycle)
+    ];
+    let inputs = vec![
+        Input {
+            name: "a".to_string(),
+            bit_vector: AigBitVector::from_lsb_is_index_0(&[AigOperand {
+                node: AigRef { id: 0 },
+                negated: false,
+            }]),
+        },
+        Input {
+            name: "b".to_string(),
+            bit_vector: AigBitVector::from_lsb_is_index_0(&[AigOperand {
+                node: AigRef { id: 1 },
+                negated: false,
+            }]),
+        },
+    ];
+    let outputs = vec![Output {
+        name: "out".to_string(),
+        bit_vector: AigBitVector::from_lsb_is_index_0(&[AigOperand {
+            node: AigRef { id: 3 },
+            negated: false,
+        }]),
+    }];
+    let g = GateFn {
+        name: "cycle_test".to_string(),
+        inputs,
+        outputs,
+        gates,
+    };
+    TestInvalidGraphWithCycle {
+        g,
+        a: AigOperand {
+            node: AigRef { id: 2 },
+            negated: false,
+        },
+        b: AigOperand {
+            node: AigRef { id: 3 },
+            negated: false,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +543,22 @@ mod tests {
                 IrValue::make_ubits(BF16_EXPONENT_BITS, 127).unwrap(), // biased exponent
                 IrValue::make_ubits(BF16_FRACTION_BITS, 0).unwrap(),   // fraction
             ])
+        );
+    }
+
+    #[test]
+    fn test_invalid_graph_with_cycle_fails_validation() {
+        if !cfg!(debug_assertions) {
+            eprintln!("skipping test_invalid_graph_with_cycle_fails_validation: debug_assertions not enabled");
+            return;
+        }
+        let test_graph = setup_invalid_graph_with_cycle();
+        let result = std::panic::catch_unwind(|| {
+            test_graph.g.check_invariants_with_debug_assert();
+        });
+        assert!(
+            result.is_err(),
+            "Invalid graph with cycle should fail validation"
         );
     }
 }

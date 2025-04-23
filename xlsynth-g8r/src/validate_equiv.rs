@@ -11,8 +11,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::gate::{extract_cone, AigNode, AigRef, GateFn};
+use crate::gate::{AigNode, AigRef, GateFn};
 use crate::propose_equiv::EquivNode;
+use crate::topo::extract_cone;
 use xlsynth::IrBits;
 
 pub struct ValidationResult {
