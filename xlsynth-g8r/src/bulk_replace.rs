@@ -71,6 +71,10 @@ pub fn bulk_replace(
                 "Attempting to substitute an input node {:?}, which is not allowed.",
                 orig_ref
             );
+            debug_assert!(
+                orig_ref.id != 0,
+                "Attempting to substitute the constant literal node 0, which is not allowed."
+            );
         }
     }
 

@@ -2289,7 +2289,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.120"
+version = "0.0.122"
 dependencies = [
  "cargo_metadata",
  "log",
@@ -2299,7 +2299,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-g8r"
-version = "0.0.120"
+version = "0.0.122"
 dependencies = [
  "bitvec",
  "blake3",
@@ -2319,19 +2319,20 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-g8r-fuzz"
-version = "0.0.120"
+version = "0.0.122"
 dependencies = [
  "arbitrary",
  "env_logger",
  "libfuzzer-sys",
  "log",
+ "rand",
  "xlsynth",
  "xlsynth-g8r",
 ]
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.120"
+version = "0.0.122"
 dependencies = [
  "flate2",
  "libc",

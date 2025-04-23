@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Worklist-based DCE: removes unreachable nodes from a GateFn.
 pub fn dce(orig_fn: &GateFn) -> GateFn {
-    let mut reachable = std::collections::HashSet::new();
+    let mut reachable = HashSet::new();
     let mut worklist = Vec::new();
     for output in &orig_fn.outputs {
         for bit in output.bit_vector.iter_lsb_to_msb() {
             worklist.push(*bit);
         }
     }
+    for input in &orig_fn.inputs {
+        for bit in input.bit_vector.iter_lsb_to_msb() {
+            reachable.insert(bit.node);
+        }
+    }
+
     while let Some(current) = worklist.pop() {
         if !reachable.insert(current.node) {
             continue;
