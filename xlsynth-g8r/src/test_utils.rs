@@ -554,7 +554,10 @@ mod tests {
         }
         let test_graph = setup_invalid_graph_with_cycle();
         let result = std::panic::catch_unwind(|| {
-            test_graph.g.check_invariants_with_debug_assert();
+            crate::topo::debug_assert_no_cycles(
+                &test_graph.g.gates,
+                "test_invalid_graph_with_cycle_fails_validation",
+            );
         });
         assert!(
             result.is_err(),
