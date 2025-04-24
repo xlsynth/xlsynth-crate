@@ -2,7 +2,7 @@
 
 //! Parser for XLS IR (just functions for the time being).
 
-use crate::xls_ir::ir::{self, operator_to_nary_op, ArrayTypeData, FileTable, ParamId};
+use crate::xls_ir::ir::{self, operator_to_nary_op, ArrayTypeData, FileTable};
 use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
@@ -294,7 +294,7 @@ impl Parser {
         } else {
             default_id
         };
-        let id = ParamId(raw_id);
+        let id = ir::ParamId::new(raw_id);
         log::debug!("parse_param; name: {:?}; ty: {:?}; id: {:?}", name, ty, id);
         Ok(ir::Param { name, ty, id })
     }
@@ -1112,7 +1112,7 @@ impl Parser {
                 let _name = self.pop_identifier_or_error("param name")?;
                 self.drop_or_error(",")?;
                 let raw_id = self.parse_id_attribute()?;
-                let pid = ParamId(raw_id);
+                let pid = ir::ParamId::new(raw_id);
                 (ir::NodePayload::GetParam(pid), raw_id)
             }
             _ => {
@@ -1146,14 +1146,9 @@ impl Parser {
         node_env: &mut IrNodeEnv,
         nodes: &mut Vec<ir::Node>,
     ) {
-        assert!(
-            param.id.0 > 0,
-            "param id should be greater than zero: {:?}",
-            param
-        );
         assert!(!nodes.is_empty(), "nodes should not be empty");
         let node = ir::Node {
-            text_id: param.id.0,
+            text_id: param.id.get_wrapped_id(),
             name: Some(param.name.clone()),
             ty: param.ty.clone(),
             payload: ir::NodePayload::GetParam(param.id),
@@ -1274,7 +1269,6 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir::ParamId;
 
     #[test]
     fn test_parse_simple_fn() {
@@ -1674,9 +1668,10 @@ top fn main(t: token id=1) -> token {
         let mut parser = Parser::new(input);
         let f = parser.parse_fn().unwrap();
         let ret_node = f.get_node(f.ret_node_ref.unwrap());
-        assert!(matches!(
-            ret_node.payload,
-            crate::xls_ir::ir::NodePayload::GetParam(ParamId(29))
-        ));
+        if let crate::xls_ir::ir::NodePayload::GetParam(pid) = &ret_node.payload {
+            assert_eq!(pid.get_wrapped_id(), 29);
+        } else {
+            panic!("Expected GetParam node payload");
+        }
     }
 }

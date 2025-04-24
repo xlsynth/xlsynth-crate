@@ -14,7 +14,20 @@ use crate::xls_ir::ir_utils::operands;
 /// dense parameter space for a function signature (i.e., the Nth parameter),
 /// not a node id in the IR graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ParamId(pub usize);
+pub struct ParamId(usize);
+
+impl ParamId {
+    /// Constructs a new ParamId, asserting that the id is greater than zero.
+    pub fn new(id: usize) -> Self {
+        assert!(id > 0, "ParamId must be greater than zero, got {}", id);
+        ParamId(id)
+    }
+
+    /// Returns the wrapped id value.
+    pub fn get_wrapped_id(&self) -> usize {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayTypeData {
@@ -842,7 +855,7 @@ impl std::fmt::Display for Fn {
         let params_str = self
             .params
             .iter()
-            .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.0))
+            .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.get_wrapped_id()))
             .collect::<Vec<String>>()
             .join(", ");
         let return_type_str = self.ret_ty.to_string();
