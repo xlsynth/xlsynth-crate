@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use rand::prelude::IteratorRandom;
 use rand::Rng;
 use std::collections::HashMap;
-use xlsynth_g8r::bulk_replace::bulk_replace;
+use xlsynth_g8r::bulk_replace::{bulk_replace, SubstitutionMap};
 use xlsynth_g8r::dce::dce;
 use xlsynth_g8r::fuzz_utils;
 use xlsynth_g8r::gate::{AigBitVector, AigOperand, AigRef, GateFn};
@@ -416,7 +416,14 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
     }
     // Defensive: ensure postorder traversal completes and is not too large
     let _postorder = gate_fn.post_order_operands(false);
-    let (new_fn, _map) = bulk_replace(&gate_fn, &subs_map, opts);
+    let substitutions = {
+        let mut s = SubstitutionMap::new();
+        for (k, v) in subs_map.into_iter() {
+            s.add(k, v);
+        }
+        s
+    };
+    let (new_fn, _map) = bulk_replace(&gate_fn, &substitutions, opts);
     // Assert that substitution does not increase node count
     assert!(
         new_fn.gates.len() <= gate_fn.gates.len(),
@@ -446,7 +453,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
 
     // 2. Idempotence: running bulk_replace again should yield the same result
     //    (structurally)
-    let (new_fn2, _map2) = bulk_replace(&new_fn, &subs_map, opts);
+    let (new_fn2, _map2) = bulk_replace(&new_fn, &substitutions, opts);
     assert_eq!(
         new_fn.outputs.len(),
         new_fn2.outputs.len(),
