@@ -49,6 +49,10 @@ impl IrNodeEnv {
             NameOrId::Name(name) => self.name_to_node.get(name.as_str()),
         }
     }
+
+    pub fn keys(&self) -> Vec<&String> {
+        self.name_to_node.keys().collect::<Vec<&String>>()
+    }
 }
 
 #[cfg(test)]
