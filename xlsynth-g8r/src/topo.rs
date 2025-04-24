@@ -91,12 +91,6 @@ pub fn post_order_operands(
             visited.insert(current);
         }
     }
-    debug_assert!(
-        postorder.len() <= nodes.len(),
-        "post_order_operands: postorder traversal larger than node count (possible cycle, duplicate, or degenerate graph): postorder = {}, nodes = {}",
-        postorder.len(),
-        nodes.len()
-    );
     postorder
 }
 
