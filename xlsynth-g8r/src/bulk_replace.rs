@@ -179,19 +179,16 @@ pub fn bulk_substitute(
         }
     }
 
-    // Collect all output operands
-    let mut output_operands = Vec::new();
-    for orig_output in &orig_fn.outputs {
-        for bit in orig_output.bit_vector.iter_lsb_to_msb() {
-            output_operands.push(*bit);
-        }
-    }
-
-    // Worklist-based traversal from outputs (post-order: children before parents)
-    let postorder = post_order_operands(&output_operands, &orig_fn.gates, false);
+    // Get post-order refs directly from GateFn method
+    let mut postorder_refs = orig_fn.post_order_refs();
+    // Reverse the order because the loop below uses pop(), expecting reverse
+    // topological order
+    postorder_refs.reverse();
 
     let mut processing = HashSet::new(); // For cycle detection
-    let mut worklist: Vec<AigRef> = postorder.iter().map(|op| op.node).collect();
+
+    // Initialize worklist directly from the reversed post-order refs
+    let mut worklist = postorder_refs;
 
     while let Some(orig_ref) = worklist.pop() {
         if orig_to_new_map.contains_key(&orig_ref) {
