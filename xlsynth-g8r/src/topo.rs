@@ -46,7 +46,7 @@ pub fn post_order_operands(
     // Assert starts is not empty (degenerate case)
     debug_assert!(
         !starts.is_empty(),
-        "post_order_operands: starts is empty (no outputs or degenerate graph)"
+        "post_order_operands: starts is empty (no outputs in graph?)"
     );
     let mut worklist = VecDeque::new();
     let mut visited = HashSet::new();
