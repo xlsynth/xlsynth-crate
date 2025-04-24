@@ -6,7 +6,6 @@ use std::collections::HashSet;
 use crate::dce::dce;
 use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-use crate::topo::post_order_operands;
 
 /// Strongly-typed wrapper for substitutions to prevent chaining.
 #[derive(Debug, Clone)]

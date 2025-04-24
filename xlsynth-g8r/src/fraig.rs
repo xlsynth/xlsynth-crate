@@ -36,9 +36,6 @@ pub enum DidConverge {
     No,
 }
 
-// TODO(cdleary): 2025-04-18 Enable the solver context for verisat to be reused
-// across fraig iterations -- we can probably use a single graph as an arena
-// instead of rebuilding it each time to help preserve all clause info.
 pub fn fraig_optimize(
     f: &GateFn,
     input_sample_count: usize,
@@ -155,7 +152,8 @@ pub fn fraig_optimize(
 mod tests {
     use std::time::Instant;
 
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
 
     use crate::{
         check_equivalence,
@@ -164,6 +162,8 @@ mod tests {
     };
 
     use super::*;
+
+    const FRAIG_SEED: u64 = 0;
 
     #[derive(Debug)]
     pub struct OptimizationResults {
@@ -182,7 +182,7 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         log::info!("do_fraig_and_report: {}", name);
         let start = Instant::now();
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(FRAIG_SEED);
         let (optimized_fn, did_converge) = fraig_optimize(
             gate_fn,
             input_sample_count,
@@ -234,7 +234,7 @@ mod tests {
     fn test_fraig_optimize_bf16_mul() {
         let loaded = load_bf16_mul_sample(Opt::Yes);
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_mul");
-        assert_eq!(results.did_converge, DidConverge::Yes(1));
+        assert_eq!(results.did_converge, DidConverge::Yes(2));
         assert_eq!(results.original_nodes, 1172);
         assert_eq!(results.optimized_nodes, 1147);
         assert_eq!(results.original_depth, 109);
@@ -247,8 +247,8 @@ mod tests {
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_add");
         assert_eq!(results.did_converge, DidConverge::Yes(4));
         assert_eq!(results.original_nodes, 1292);
-        assert_eq!(results.optimized_nodes, 1122);
+        assert_eq!(results.optimized_nodes, 1125);
         assert_eq!(results.original_depth, 130);
-        assert_eq!(results.optimized_depth, 123);
+        assert_eq!(results.optimized_depth, 122);
     }
 }

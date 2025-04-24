@@ -3,8 +3,8 @@
 use std::cmp::min;
 use std::collections::HashMap;
 
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::check_equivalence;
 use crate::emit_netlist;
@@ -86,7 +86,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
     .unwrap();
     let mut gate_fn = gatify_output.gate_fn;
     if options.fraig {
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
         let fraig_result: Result<_, _> =
             fraig::fraig_optimize(&gate_fn, 256, IterationBounds::ToConvergence, &mut rng);
         if !fraig_result.is_ok() {
