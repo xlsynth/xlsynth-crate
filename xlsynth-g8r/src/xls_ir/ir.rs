@@ -8,6 +8,14 @@ use xlsynth::{ir_value::IrFormatPreference, IrValue};
 
 use crate::xls_ir::ir_utils::operands;
 
+/// Strongly-typed wrapper for parameter IDs.
+///
+/// Note: This is *not* a general node id. This is an ordinal referring to the
+/// dense parameter space for a function signature (i.e., the Nth parameter),
+/// not a node id in the IR graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParamId(pub usize);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayTypeData {
     pub element_type: Box<Type>,
@@ -288,10 +296,10 @@ pub struct NodeRef {
     pub index: usize,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NodePayload {
     Nil,
-    GetParam(usize),
+    GetParam(ParamId),
     Tuple(Vec<NodeRef>),
     Array(Vec<NodeRef>),
     TupleIndex {
@@ -775,7 +783,7 @@ impl Node {
 pub struct Param {
     pub name: String,
     pub ty: Type,
-    pub id: usize,
+    pub id: ParamId,
 }
 
 #[derive(Debug, PartialEq)]
@@ -834,7 +842,7 @@ impl std::fmt::Display for Fn {
         let params_str = self
             .params
             .iter()
-            .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id))
+            .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.0))
             .collect::<Vec<String>>()
             .join(", ");
         let return_type_str = self.ret_ty.to_string();

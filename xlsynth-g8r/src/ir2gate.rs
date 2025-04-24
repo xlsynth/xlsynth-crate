@@ -6,8 +6,7 @@
 use crate::check_equivalence;
 use crate::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-use crate::xls_ir::ir;
-use crate::xls_ir::ir::StartAndLimit;
+use crate::xls_ir::ir::{self, ParamId, StartAndLimit};
 use crate::xls_ir::ir_utils;
 use std::collections::HashMap;
 
@@ -854,15 +853,18 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
     log::info!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
 
+    // Precompute a map from parameter text_id to its NodeRef in f.nodes.
+    let mut param_id_to_node_ref: HashMap<ParamId, ir::NodeRef> = HashMap::new();
+
     // First we place all the inputs into the G8 structure and environment.
     for (i, param) in f.params.iter().enumerate() {
+        let param_ref = ir::NodeRef { index: i + 1 };
         assert!(f.nodes[i + 1].payload == ir::NodePayload::GetParam(param.id));
         log::debug!("Gatifying param {:?}", param);
         let gate_ref_vec = g8_builder.add_input(param.name.clone(), param.ty.bit_count());
-        env.add(
-            ir::NodeRef { index: i + 1 },
-            GateOrVec::BitVector(gate_ref_vec),
-        );
+        env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
+        // Map ParamId to its NodeRef
+        param_id_to_node_ref.insert(param.id, param_ref);
     }
 
     for node_ref in ir_utils::get_topological(f) {
@@ -875,14 +877,15 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
             payload
         );
         match payload {
-            ir::NodePayload::GetParam(param_index) => {
+            ir::NodePayload::GetParam(param_id) => {
                 if env.contains(node_ref) {
-                    continue; // Handled above.
+                    continue; // Already inserted above.
                 }
-                let param_ir_node_ref = ir::NodeRef {
-                    index: *param_index,
-                };
-                let entry = env.get_bit_vector(param_ir_node_ref).unwrap();
+                // Look up the original parameter node_ref by its ParamId
+                let pr = param_id_to_node_ref
+                    .get(param_id)
+                    .expect("ParamId not found in mapping");
+                let entry = env.get_bit_vector(*pr).unwrap();
                 env.add(node_ref, GateOrVec::BitVector(entry));
             }
             ir::NodePayload::ArrayIndex {
