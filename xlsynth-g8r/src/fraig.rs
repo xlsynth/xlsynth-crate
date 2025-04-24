@@ -106,7 +106,7 @@ pub fn fraig_optimize(
         // that should replace them.
         let mut replacements = SubstitutionMap::new();
         for proven_equiv_set in validation_result.proven_equiv_sets {
-            log::info!("fraig_optimize: proven_equiv_set: {:?}", proven_equiv_set);
+            log::debug!("fraig_optimize: proven_equiv_set: {:?}", proven_equiv_set);
             // Determine the minimum-depth node in the proven_equiv_set, using node ID as
             // tiebreaker
             let min_depth_node = proven_equiv_set
