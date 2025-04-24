@@ -528,6 +528,34 @@ pub fn setup_invalid_graph_with_cycle() -> TestInvalidGraphWithCycle {
     }
 }
 
+/// Padded graph with two AND nodes at equal depth and opposite polarity.
+pub struct TestGraphPaddedEqualDepthOppositePolarity {
+    pub g: GateFn,
+    pub n1: AigOperand,
+    pub n2: AigOperand,
+}
+
+pub fn setup_padded_graph_with_equal_depth_opposite_polarity(
+) -> TestGraphPaddedEqualDepthOppositePolarity {
+    let mut gb = GateBuilder::new(
+        "padded_equal_depth_opposite_polarity".to_string(),
+        GateBuilderOptions::no_opt(),
+    );
+    let a = gb.add_input("a".to_string(), 1).try_into().unwrap();
+    let b = gb.add_input("b".to_string(), 1).try_into().unwrap();
+    let t = gb.add_and_binary(a, b); // depth 1
+    let n1 = gb.add_and_binary(t, t); // depth 2, n1 = a & b
+    let not_t = t.negate();
+    let n2 = gb.add_and_binary(not_t, not_t); // depth 2, n2 = !(a & b)
+    gb.add_output("n1".to_string(), n1.into());
+    gb.add_output("n2".to_string(), n2.into());
+    TestGraphPaddedEqualDepthOppositePolarity {
+        g: gb.build(),
+        n1,
+        n2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

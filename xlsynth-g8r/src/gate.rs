@@ -500,7 +500,15 @@ impl GateFn {
     }
 
     pub fn post_order_refs(&self) -> Vec<AigRef> {
-        crate::topo::topo_sort_refs(&self.gates)
+        let output_operands = self.output_operands();
+        if output_operands.is_empty() {
+            // If there are no output operands, the post-order list is empty.
+            return Vec::new();
+        }
+        post_order_operands(&output_operands, &self.gates, true)
+            .iter()
+            .map(|op| op.node)
+            .collect()
     }
 
     pub fn get_signature(&self) -> String {

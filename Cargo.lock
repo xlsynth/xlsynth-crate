@@ -1961,6 +1961,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_xoshiro"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa"
+dependencies = [
+ "rand_core",
+]
+
+[[package]]
 name = "rawpointer"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2189,7 +2198,7 @@ dependencies = [
 
 [[package]]
 name = "sample-usage"
-version = "0.0.121"
+version = "0.0.122"
 dependencies = [
  "cargo_metadata 0.18.1",
  "env_logger",
@@ -2522,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "test-helpers"
-version = "0.0.121"
+version = "0.0.122"
 dependencies = [
  "cargo_metadata 0.18.1",
  "curl",
@@ -3309,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth"
-version = "0.0.121"
+version = "0.0.122"
 dependencies = [
  "cargo_metadata 0.18.1",
  "criterion 0.3.6",
@@ -3324,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-driver"
-version = "0.0.121"
+version = "0.0.122"
 dependencies = [
  "clap 4.5.35",
  "colored",
@@ -3344,7 +3353,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-estimator"
-version = "0.0.121"
+version = "0.0.122"
 dependencies = [
  "env_logger",
  "log",
@@ -3358,8 +3367,9 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-g8r"
-version = "0.0.121"
+version = "0.0.122"
 dependencies = [
+ "anyhow",
  "arbitrary",
  "bitvec",
  "blake3",
@@ -3374,6 +3384,7 @@ dependencies = [
  "once_cell",
  "pretty_assertions",
  "rand",
+ "rand_xoshiro",
  "regex",
  "serde",
  "serde_json",
@@ -3385,7 +3396,7 @@ dependencies = [
 
 [[package]]
 name = "xlsynth-sys"
-version = "0.0.121"
+version = "0.0.122"
 dependencies = [
  "flate2",
  "libc",

@@ -12,6 +12,7 @@ pub mod dce;
 mod emit_netlist;
 pub mod find_structures;
 pub mod fraig;
+pub mod fuzz_utils;
 pub mod gate;
 pub mod gate2ir;
 pub mod gate_builder;

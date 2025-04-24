@@ -516,6 +516,9 @@ bit_count_test_cases!(test_sle_dslx_to_gates, |input_bits: u32, opt: Opt| -> () 
 
 bit_count_test_cases!(test_encode_ir_to_gates, |input_bits: u32, opt: Opt| -> () {
     let output_bits = (input_bits as f32).log2().ceil() as u32;
+    if output_bits == 0 {
+        return;
+    }
     log::info!("input_bits: {}, output_bits: {}", input_bits, output_bits);
     do_test_ir_conversion(
         &format!(

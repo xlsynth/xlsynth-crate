@@ -91,6 +91,10 @@ impl GateBuilder {
     }
 
     pub fn build(self) -> GateFn {
+        debug_assert!(
+            !self.outputs.is_empty(),
+            "GateBuilder::build: graph must have at least one output (degenerate/empty graph)"
+        );
         GateFn {
             name: self.name,
             inputs: self.inputs,
@@ -154,6 +158,15 @@ impl GateBuilder {
     }
 
     pub fn add_output(&mut self, name: String, bit_vector: AigBitVector) {
+        // Debug assertion: all node indices in bit_vector must be in range
+        for bit in bit_vector.iter_lsb_to_msb() {
+            debug_assert!(
+                bit.node.id < self.gates.len(),
+                "add_output: Output node index out of bounds: {} (gates.len() = {})",
+                bit.node.id,
+                self.gates.len()
+            );
+        }
         self.outputs.push(Output { name, bit_vector });
     }
 
@@ -187,6 +200,11 @@ impl GateBuilder {
         let gate_ref = AigRef {
             id: self.gates.len(),
         };
+        debug_assert!(
+            self.gates.capacity() < 1024 * 1024,
+            "gates capacity grew unexpectedly large: {}",
+            self.gates.capacity()
+        );
         self.gates.push(gate);
         if self.options.fold {
             if let Some(simplified) = aig_simplify::operand_simplify(gate_ref, self) {

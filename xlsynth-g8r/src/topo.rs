@@ -43,20 +43,43 @@ pub fn post_order_operands(
     nodes: &[AigNode],
     discard_inputs: bool,
 ) -> Vec<AigOperand> {
+    // Assert starts is not empty (degenerate case)
+    debug_assert!(
+        !starts.is_empty(),
+        "post_order_operands: starts is empty (no outputs in graph?)"
+    );
     let mut worklist = VecDeque::new();
     let mut visited = HashSet::new();
     let mut postorder = Vec::new();
     for &start in starts {
+        debug_assert!(
+            start.node.id < nodes.len(),
+            "post_order_operands: start operand node index out of bounds: {} (nodes.len() = {})",
+            start.node.id,
+            nodes.len()
+        );
         worklist.push_back(start);
     }
     while let Some(current) = worklist.pop_back() {
         if visited.contains(&current) {
             continue;
         }
+        debug_assert!(
+            current.node.id < nodes.len(),
+            "post_order_operands: operand node index out of bounds: {} (nodes.len() = {})",
+            current.node.id,
+            nodes.len()
+        );
         let node = &nodes[current.node.id];
         let mut all_deps_visited = true;
         for dep in node.get_operands() {
             if !visited.contains(&dep) {
+                debug_assert!(
+                    dep.node.id < nodes.len(),
+                    "post_order_operands: dependency operand node index out of bounds: {:?} (nodes.len() = {})",
+                    dep.node.id,
+                    nodes.len()
+                );
                 worklist.push_back(current); // Revisit after dependencies
                 worklist.push_back(dep);
                 all_deps_visited = false;

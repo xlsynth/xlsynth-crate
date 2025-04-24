@@ -13,6 +13,7 @@ arbitrary = { version = "1.3", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 xlsynth = { path = "../../xlsynth", version = "0.0.122" }
+rand = "0.8"
 
 [dependencies.xlsynth-g8r]
 path = ".."
@@ -24,5 +25,11 @@ members = ["."]
 [[bin]]
 name = "fuzz_gatify"
 path = "fuzz_targets/fuzz_gatify.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bulk_replace"
+path = "fuzz_targets/fuzz_bulk_replace.rs"
 test = false
 doc = false

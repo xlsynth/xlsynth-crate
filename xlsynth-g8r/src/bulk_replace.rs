@@ -6,7 +6,61 @@ use std::collections::HashSet;
 use crate::dce::dce;
 use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-use crate::topo::post_order_operands;
+
+/// Strongly-typed wrapper for substitutions to prevent chaining.
+#[derive(Debug, Clone)]
+pub struct SubstitutionMap {
+    map: HashMap<AigRef, AigOperand>,
+}
+
+impl SubstitutionMap {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    /// Adds a substitution, asserting that the value is not also a key (no
+    /// chaining).
+    pub fn add(&mut self, key: AigRef, value: AigOperand) {
+        assert!(
+            !self.map.contains_key(&value.node),
+            "Substitution chain detected: value {:?} is also a key.",
+            value.node
+        );
+        assert!(
+            value.node != key,
+            "Substitution with self detected: {:?} -> {:?}",
+            key,
+            value
+        );
+        self.map.insert(key, value);
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &AigRef> {
+        self.map.keys()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &AigOperand> {
+        self.map.values()
+    }
+
+    pub fn get(&self, key: &AigRef) -> Option<&AigOperand> {
+        self.map.get(key)
+    }
+
+    pub fn contains_key(&self, key: &AigRef) -> bool {
+        self.map.contains_key(key)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&AigRef, &AigOperand)> {
+        self.map.iter()
+    }
+}
 
 /// Replaces specified AIG nodes in a `GateFn` with other nodes and rebuilds the
 /// function.
@@ -42,9 +96,15 @@ use crate::topo::post_order_operands;
 ///   in the new graph.
 pub fn bulk_replace(
     orig_fn: &GateFn,
-    substitutions: &HashMap<AigRef, AigOperand>,
+    substitutions: &SubstitutionMap,
     options: GateBuilderOptions,
 ) -> (GateFn, HashMap<AigRef, AigOperand>) {
+    log::info!(
+        "bulk_replace: fn {:?} with {} substitutions",
+        orig_fn.name,
+        substitutions.len()
+    );
+
     #[cfg(debug_assertions)]
     {
         // Ensure no substitution chains (A->B, B->C)
@@ -71,17 +131,23 @@ pub fn bulk_replace(
                 "Attempting to substitute an input node {:?}, which is not allowed.",
                 orig_ref
             );
+            debug_assert!(
+                orig_ref.id != 0,
+                "Attempting to substitute the constant literal node 0, which is not allowed."
+            );
         }
     }
 
     let (substituted_fn, orig_to_new_map) = bulk_substitute(orig_fn, substitutions, options);
 
+    log::info!("bulk_replace; running dce on substituted fn");
     substituted_fn.check_invariants_with_debug_assert();
     let dce_fn = dce(&substituted_fn);
     dce_fn.check_invariants_with_debug_assert();
 
     verify_io_signature_with_debug_assert(orig_fn, &dce_fn);
 
+    log::info!("bulk_replace: done");
     (dce_fn, orig_to_new_map)
 }
 
@@ -143,10 +209,10 @@ fn verify_io_signature_with_debug_assert(orig_fn: &GateFn, replaced_fn: &GateFn)
 /// GateFn.
 pub fn bulk_substitute(
     orig_fn: &GateFn,
-    substitutions: &HashMap<AigRef, AigOperand>,
+    substitutions: &SubstitutionMap,
     options: GateBuilderOptions,
 ) -> (GateFn, HashMap<AigRef, AigOperand>) {
-    log::debug!(
+    log::info!(
         "bulk_substitute on {} with {} substitutions",
         orig_fn.name,
         substitutions.len()
@@ -175,19 +241,16 @@ pub fn bulk_substitute(
         }
     }
 
-    // Collect all output operands
-    let mut output_operands = Vec::new();
-    for orig_output in &orig_fn.outputs {
-        for bit in orig_output.bit_vector.iter_lsb_to_msb() {
-            output_operands.push(*bit);
-        }
-    }
-
-    // Worklist-based traversal from outputs (post-order: children before parents)
-    let postorder = post_order_operands(&output_operands, &orig_fn.gates, false);
+    // Get post-order refs directly from GateFn method
+    let mut postorder_refs = orig_fn.post_order_refs();
+    // Reverse the order because the loop below uses pop(), expecting reverse
+    // topological order
+    postorder_refs.reverse();
 
     let mut processing = HashSet::new(); // For cycle detection
-    let mut worklist: Vec<AigRef> = postorder.iter().map(|op| op.node).collect();
+
+    // Initialize worklist directly from the reversed post-order refs
+    let mut worklist = postorder_refs;
 
     while let Some(orig_ref) = worklist.pop() {
         if orig_to_new_map.contains_key(&orig_ref) {
@@ -236,6 +299,12 @@ pub fn bulk_substitute(
             continue;
         }
         // Otherwise, build the node in the new graph
+        debug_assert!(
+            orig_ref.id < orig_fn.gates.len(),
+            "AigRef out of bounds: {:?} (gates.len() = {})",
+            orig_ref,
+            orig_fn.gates.len()
+        );
         let orig_node = &orig_fn.gates[orig_ref.id];
         let new_op = match orig_node {
             AigNode::Input { .. } => {
@@ -329,7 +398,6 @@ mod tests {
             setup_graph_with_redundancies, setup_invalid_graph_with_cycle,
         },
     };
-    use std::collections::HashMap;
 
     #[test]
     fn test_replace_redundant_node_equivalence() {
@@ -340,8 +408,8 @@ mod tests {
         // Substitution: Replace redundant node 'inner1' (%5) with 'inner0' (%4)
         let node_to_replace = test_data.inner1.node;
         let substitute_node = test_data.inner0.node;
-        let mut substitutions: HashMap<AigRef, AigOperand> = HashMap::new();
-        substitutions.insert(node_to_replace, AigOperand::from(substitute_node));
+        let mut substitutions = SubstitutionMap::new();
+        substitutions.add(node_to_replace, AigOperand::from(substitute_node));
 
         log::info!(
             "Original function with redundancies:\n{}",
@@ -353,34 +421,27 @@ mod tests {
 
         log::info!("Replaced function:\n{}", replaced_fn.to_string());
 
-        // Equivalence Check should still pass even without optimization
         check_equivalence::validate_same_gate_fn(original_fn, &replaced_fn)
             .expect("original and replaced functions should be equivalent");
 
-        // Check node count reduction
         let stats: SummaryStats = get_summary_stats(&replaced_fn);
         let original_stats: SummaryStats = get_summary_stats(original_fn);
         assert_eq!(original_stats.live_nodes, 7);
-        assert_eq!(stats.live_nodes, 6); // Adjusted expected count for no_opt()
-
-        // Remove check for output node ID equality, as it won't hold without
-        // optimization
+        assert_eq!(stats.live_nodes, 6);
     }
 
     #[test]
     fn test_replace_multiple_redundant_nodes() {
         let _ = env_logger::builder().is_test(true).try_init();
-        // Use the setup with three redundant paths
         let test_data = setup_graph_with_more_redundancies();
         let original_fn = &test_data.g;
 
-        // Substitution: Replace both redundant inner nodes (inner1, inner2) with inner0
-        let mut substitutions: HashMap<AigRef, AigOperand> = HashMap::new();
-        substitutions.insert(
+        let mut substitutions = SubstitutionMap::new();
+        substitutions.add(
             test_data.inner1.node,
             AigOperand::from(test_data.inner0.node),
         );
-        substitutions.insert(
+        substitutions.add(
             test_data.inner2.node,
             AigOperand::from(test_data.inner0.node),
         );
@@ -390,7 +451,7 @@ mod tests {
             original_fn.to_string()
         );
 
-        let options = GateBuilderOptions::no_opt(); // Keep no_opt() as requested
+        let options = GateBuilderOptions::no_opt();
         let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options);
 
         log::info!(
@@ -398,18 +459,14 @@ mod tests {
             replaced_fn.to_string()
         );
 
-        // Equivalence Check should still pass
         check_equivalence::validate_same_gate_fn(original_fn, &replaced_fn).expect(
             "original and replaced functions should be equivalent after multiple substitutions",
         );
 
-        // Check node count reduction
         let stats: SummaryStats = get_summary_stats(&replaced_fn);
         let original_stats: SummaryStats = get_summary_stats(original_fn);
         assert_eq!(original_stats.live_nodes, 9);
-        assert_eq!(stats.live_nodes, 7); // Adjusted expected count for no_opt()
-
-        // Remove checks for output node ID equality
+        assert_eq!(stats.live_nodes, 7);
     }
 
     #[test]
@@ -418,12 +475,11 @@ mod tests {
         let test_data = setup_graph_for_constant_replace();
         let original_fn = &test_data.g;
 
-        // Replace the And2(true, true) node with the constant true
         let node_to_replace = test_data.and_true_true.node;
         let substitute_operand = test_data.const_true;
 
-        let mut substitutions: HashMap<AigRef, AigOperand> = HashMap::new();
-        substitutions.insert(node_to_replace, substitute_operand);
+        let mut substitutions = SubstitutionMap::new();
+        substitutions.add(node_to_replace, substitute_operand);
 
         log::info!(
             "Original function (const replace test):\n{}",
@@ -444,41 +500,29 @@ mod tests {
         assert_eq!(replaced_fn.outputs.len(), 1);
         let final_out_op = replaced_fn.outputs[0].bit_vector.get_lsb(0);
 
-        // Check if the final output operand points to a Literal node
         let final_out_node = &replaced_fn.gates[final_out_op.node.id];
         let is_const = matches!(final_out_node, AigNode::Literal(_));
         assert!(is_const, "Output should be a constant after replacement");
 
-        // Get the literal value and apply operand negation
         if let AigNode::Literal(literal_value) = final_out_node {
             let effective_value = *literal_value ^ final_out_op.negated;
             assert!(effective_value, "Output constant should be True");
         } else {
-            // Should not happen due to the is_const assertion above
             panic!("Output node was not a Literal as expected");
         }
     }
 
     #[test]
     fn test_cycle_in_substitution_map_panics() {
-        if !cfg!(debug_assertions) {
-            eprintln!(
-                "skipping test_cycle_in_substitution_map_panics: debug_assertions not enabled"
-            );
-            return;
-        }
         let test_graph = setup_invalid_graph_with_cycle();
-        let orig_fn = &test_graph.g;
-        let mut substitutions = HashMap::new();
-        substitutions.insert(test_graph.a.node, test_graph.b);
-        substitutions.insert(test_graph.b.node, test_graph.a);
-        let options = GateBuilderOptions::no_opt();
         let result = std::panic::catch_unwind(|| {
-            let _ = bulk_replace(orig_fn, &substitutions, options);
+            let mut substitutions = SubstitutionMap::new();
+            substitutions.add(test_graph.a.node, test_graph.b);
+            substitutions.add(test_graph.b.node, test_graph.a);
         });
         assert!(
             result.is_err(),
-            "bulk_replace should panic on cycle in substitution map"
+            "SubstitutionMap::add should panic on cycle in substitution map"
         );
     }
 }
