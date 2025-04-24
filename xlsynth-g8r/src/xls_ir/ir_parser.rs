@@ -106,7 +106,7 @@ impl Parser {
         }
     }
 
-    fn pop_identifier_or_error(&mut self) -> Result<String, ParseError> {
+    fn pop_identifier_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
         log::debug!("pop_identifier_or_error");
         self.drop_whitespace();
         let mut identifier = String::new();
@@ -115,7 +115,8 @@ impl Parser {
                 let is_valid_start = c.is_alphabetic() || c == '_';
                 if !is_valid_start {
                     return Err(ParseError::new(format!(
-                        "expected identifier, got {:?}; rest_of_line: {:?}",
+                        "in {} expected identifier, got {:?}; rest_of_line: {:?}",
+                        ctx,
                         c,
                         self.rest_of_line()
                     )));
@@ -149,7 +150,7 @@ impl Parser {
         Ok(string)
     }
 
-    fn pop_number_string_or_error(&mut self) -> Result<String, ParseError> {
+    fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
         self.drop_whitespace();
         let mut number = String::new();
         while let Some(c) = self.peekc() {
@@ -162,7 +163,8 @@ impl Parser {
         }
         if number.is_empty() {
             Err(ParseError::new(format!(
-                "expected number; rest_of_line: {:?}",
+                "expected number in {}; rest_of_line: {:?}",
+                ctx,
                 self.rest_of_line()
             )))
         } else {
@@ -170,14 +172,18 @@ impl Parser {
         }
     }
 
-    fn pop_number_usize_or_error(&mut self) -> Result<usize, ParseError> {
-        let number = self.pop_number_string_or_error()?;
+    fn pop_number_usize_or_error(&mut self, ctx: &str) -> Result<usize, ParseError> {
+        let number = self.pop_number_string_or_error(ctx)?;
         Ok(number.parse::<usize>().unwrap())
     }
 
-    fn pop_bits_value_or_error(&mut self, ty: &ir::Type) -> Result<xlsynth::IrValue, ParseError> {
+    fn pop_bits_value_or_error(
+        &mut self,
+        ty: &ir::Type,
+        ctx: &str,
+    ) -> Result<xlsynth::IrValue, ParseError> {
         log::debug!("pop_bits_value_or_error");
-        let value = self.pop_number_string_or_error()?;
+        let value = self.pop_number_string_or_error(ctx)?;
         log::debug!("pop_bits_value_or_error; value: {:?}", value);
         Ok(xlsynth::IrValue::parse_typed(&format!("{}:{}", ty, value)).unwrap())
     }
@@ -249,11 +255,11 @@ impl Parser {
             ir::Type::Tuple(members)
         } else if self.try_drop("bits") {
             self.drop_or_error("[")?;
-            let count = self.pop_number_usize_or_error()?;
+            let count = self.pop_number_usize_or_error("bit count")?;
             self.drop_or_error("]")?;
             let mut ty = ir::Type::Bits(count);
             while self.try_drop("[") {
-                let count = self.pop_number_usize_or_error()?;
+                let count = self.pop_number_usize_or_error("array type size")?;
                 self.drop_or_error("]")?;
                 ty = ir::Type::new_array(ty, count);
             }
@@ -267,7 +273,7 @@ impl Parser {
             )));
         };
         if self.try_drop("[") {
-            let count = self.pop_number_usize_or_error()?;
+            let count = self.pop_number_usize_or_error("array type size")?;
             self.drop_or_error("]")?;
             Ok(ir::Type::Array(ArrayTypeData {
                 element_type: Box::new(ty),
@@ -279,7 +285,7 @@ impl Parser {
     }
 
     fn parse_param(&mut self, default_id: usize) -> Result<ir::Param, ParseError> {
-        let name = self.pop_identifier_or_error()?;
+        let name = self.pop_identifier_or_error("parameter")?;
         self.drop_or_error(":")?;
         let ty = self.parse_type()?;
         self.drop_whitespace();
@@ -309,32 +315,38 @@ impl Parser {
         Ok(params)
     }
 
-    fn pop_node_name_or_error(&mut self) -> Result<NameOrId, ParseError> {
+    fn pop_node_name_or_error(&mut self, ctx: &str) -> Result<NameOrId, ParseError> {
         log::debug!(
             "pop_node_name_or_error; rest_of_line: {:?}",
             self.rest_of_line()
         );
-        let name: String = self.pop_identifier_or_error()?;
+        let name: String = self.pop_identifier_or_error(ctx)?;
         log::debug!("pop_node_name_or_error; name: {:?}", name);
         if self.try_drop(".") {
-            let id = self.pop_number_usize_or_error()?;
+            let id = self.pop_number_usize_or_error(ctx)?;
             Ok(NameOrId::Id(id))
         } else {
             Ok(NameOrId::Name(name))
         }
     }
 
-    fn parse_node_ref(&mut self, node_env: &IrNodeEnv) -> Result<ir::NodeRef, ParseError> {
+    fn parse_node_ref(
+        &mut self,
+        node_env: &IrNodeEnv,
+        ctx: &str,
+    ) -> Result<ir::NodeRef, ParseError> {
         log::debug!("parse_node_ref; rest_of_line: {:?}", self.rest_of_line());
-        let name_or_id = self.pop_node_name_or_error()?;
+        let name_or_id = self.pop_node_name_or_error(ctx)?;
         log::debug!("parse_node_ref; name_or_id: {:?}", name_or_id);
         let maybe_node_ref = node_env.name_id_to_ref(&name_or_id);
         match maybe_node_ref {
             Some(node_ref) => Ok(*node_ref),
             None => Err(ParseError::new(format!(
-                "could not resolve node name_or_id: {:?}; rest_of_line: {:?}",
+                "could not resolve node name_or_id in {}: {:?}; rest_of_line: {:?}; available: {:?}",
+                ctx,
                 name_or_id,
-                self.rest_of_line()
+                self.rest_of_line(),
+                node_env.keys(),
             ))),
         }
     }
@@ -342,14 +354,14 @@ impl Parser {
     fn parse_file_number(&mut self, file_table: &mut FileTable) -> Result<(), ParseError> {
         log::debug!("parse_file_number");
         self.drop_or_error("file_number")?;
-        let id = self.pop_number_usize_or_error()?;
+        let id = self.pop_number_usize_or_error("file_number")?;
         let path = self.pop_string_or_error()?;
         file_table.add(id, path)
     }
 
     fn parse_id_attribute(&mut self) -> Result<usize, ParseError> {
         self.drop_or_error("id=")?;
-        let id = self.pop_number_usize_or_error()?;
+        let id = self.pop_number_usize_or_error("id attribute")?;
         Ok(id)
     }
 
@@ -364,13 +376,14 @@ impl Parser {
         &mut self,
         attr_name: &str,
         node_env: &IrNodeEnv,
+        ctx: &str,
     ) -> Result<Vec<ir::NodeRef>, ParseError> {
         self.drop_or_error(attr_name)?;
         self.drop_or_error("=")?;
         self.drop_or_error("[")?;
         let mut indices = Vec::new();
         while !self.try_drop("]") {
-            let index = self.parse_node_ref(&node_env)?;
+            let index = self.parse_node_ref(&node_env, ctx)?;
             indices.push(index);
             if !self.try_drop(",") {
                 self.drop_or_error("]")?;
@@ -391,11 +404,11 @@ impl Parser {
         self.drop_or_error("[")?;
         while !self.try_drop("]") {
             self.drop_or_error("(")?;
-            let fileno = self.pop_number_usize_or_error()?;
+            let fileno = self.pop_number_usize_or_error("pos fileno")?;
             self.drop_or_error(",")?;
-            let lineno = self.pop_number_usize_or_error()?;
+            let lineno = self.pop_number_usize_or_error("pos lineno")?;
             self.drop_or_error(",")?;
-            let colno = self.pop_number_usize_or_error()?;
+            let colno = self.pop_number_usize_or_error("pos colno")?;
             self.drop_or_error(")")?;
             pos_attr.push((fileno, lineno, colno));
             if !self.try_drop(",") {
@@ -409,13 +422,13 @@ impl Parser {
     fn parse_usize_attribute(&mut self, attr_name: &str) -> Result<usize, ParseError> {
         self.drop_or_error(attr_name)?;
         self.drop_or_error("=")?;
-        self.pop_number_usize_or_error()
+        self.pop_number_usize_or_error(&format!("usize attribute: {}", attr_name))
     }
 
     fn parse_bool_attribute(&mut self, attr_name: &str) -> Result<bool, ParseError> {
         self.drop_or_error(attr_name)?;
         self.drop_or_error("=")?;
-        let value = self.pop_identifier_or_error()?;
+        let value = self.pop_identifier_or_error(&format!("bool attribute: {}", attr_name))?;
         if value == "true" {
             Ok(true)
         } else if value == "false" {
@@ -430,14 +443,18 @@ impl Parser {
         }
     }
 
-    fn parse_value_with_ty(&mut self, ty: &ir::Type) -> Result<xlsynth::IrValue, ParseError> {
+    fn parse_value_with_ty(
+        &mut self,
+        ty: &ir::Type,
+        ctx: &str,
+    ) -> Result<xlsynth::IrValue, ParseError> {
         match ty {
-            ir::Type::Bits(_width) => self.pop_bits_value_or_error(&ty),
+            ir::Type::Bits(_width) => self.pop_bits_value_or_error(&ty, ctx),
             ir::Type::Array(ArrayTypeData { element_type, .. }) => {
                 self.drop_or_error_with_ctx("[", "start of array literal")?;
                 let mut values = Vec::new();
                 while !self.try_drop("]") {
-                    let value: xlsynth::IrValue = self.parse_value_with_ty(element_type)?;
+                    let value: xlsynth::IrValue = self.parse_value_with_ty(element_type, ctx)?;
                     values.push(value);
                     if !self.try_drop(",") {
                         self.drop_or_error("]")?;
@@ -453,7 +470,7 @@ impl Parser {
                     if i > 0 {
                         self.drop_or_error(",")?;
                     }
-                    let element = self.parse_value_with_ty(element_ty)?;
+                    let element = self.parse_value_with_ty(element_ty, ctx)?;
                     values.push(element);
                 }
                 self.drop_or_error(")")?;
@@ -473,6 +490,7 @@ impl Parser {
         &mut self,
         node_env: &IrNodeEnv,
         maybe_id: &mut Option<usize>,
+        ctx: &str,
     ) -> Result<Vec<ir::NodeRef>, ParseError> {
         let mut members = Vec::new();
         loop {
@@ -483,7 +501,7 @@ impl Parser {
             if self.peek_is(")") {
                 break;
             }
-            let member = self.parse_node_ref(&node_env)?;
+            let member = self.parse_node_ref(&node_env, &format!("variadic op {:?} arg", ctx))?;
             members.push(member);
             if !self.try_drop(",") {
                 break;
@@ -504,7 +522,7 @@ impl Parser {
 
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
         log::debug!("parse_node");
-        let name_or_id = self.pop_node_name_or_error()?;
+        let name_or_id = self.pop_node_name_or_error("node name")?;
         let mut maybe_id = match name_or_id {
             NameOrId::Id(id) => Some(id),
             NameOrId::Name(_) => None,
@@ -513,24 +531,28 @@ impl Parser {
         self.drop_or_error(":")?;
         let node_ty = self.parse_type()?;
         self.drop_or_error("=")?;
-        let operator = self.pop_identifier_or_error()?;
+        let operator = self.pop_identifier_or_error("node operator")?;
         self.drop_or_error("(")?;
 
         let (payload, id) = match operator.as_str() {
             "tuple" => {
-                let members = self.parse_variadic_op(&node_env, &mut maybe_id)?;
+                let members = self.parse_variadic_op(&node_env, &mut maybe_id, "tuple")?;
                 (ir::NodePayload::Tuple(members), maybe_id.unwrap())
             }
             "array" => {
-                let members = self.parse_variadic_op(&node_env, &mut maybe_id)?;
+                let members = self.parse_variadic_op(&node_env, &mut maybe_id, "array")?;
                 (ir::NodePayload::Array(members), maybe_id.unwrap())
             }
             "array_update" => {
-                let array = self.parse_node_ref(&node_env)?;
+                let array = self.parse_node_ref(&node_env, "array_update array")?;
                 self.drop_or_error(",")?;
-                let value = self.parse_node_ref(&node_env)?;
+                let value = self.parse_node_ref(&node_env, "array_update value")?;
                 self.drop_or_error(",")?;
-                let indices = self.parse_node_ref_array_attribute("indices", &node_env)?;
+                let indices = self.parse_node_ref_array_attribute(
+                    "indices",
+                    &node_env,
+                    "array_update indices",
+                )?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -553,9 +575,9 @@ impl Parser {
                 )
             }
             "dynamic_bit_slice" => {
-                let arg_node = self.parse_node_ref(node_env)?;
+                let arg_node = self.parse_node_ref(&node_env, "dynamic_bit_slice arg")?;
                 self.drop_or_error(",")?;
-                let start_node = self.parse_node_ref(node_env)?;
+                let start_node = self.parse_node_ref(&node_env, "dynamic_bit_slice start")?;
                 self.drop_or_error(",")?;
                 let width = self.parse_usize_attribute("width")?;
                 if self.peek_is(",") {
@@ -580,9 +602,13 @@ impl Parser {
                 )
             }
             "array_index" => {
-                let array = self.parse_node_ref(&node_env)?;
+                let array = self.parse_node_ref(&node_env, "array_index array")?;
                 self.drop_or_error(",")?;
-                let indices = self.parse_node_ref_array_attribute("indices", &node_env)?;
+                let indices = self.parse_node_ref_array_attribute(
+                    "indices",
+                    &node_env,
+                    "array_index indices",
+                )?;
                 let assumed_in_bounds = if self.peek_is(", assumed_in_bounds=") {
                     self.dropc()?;
                     self.parse_bool_attribute("assumed_in_bounds")?
@@ -611,7 +637,7 @@ impl Parser {
                 )
             }
             "tuple_index" => {
-                let tuple = self.parse_node_ref(&node_env)?;
+                let tuple = self.parse_node_ref(&node_env, "tuple_index tuple")?;
                 self.drop_or_error(",")?;
                 let index = self.parse_usize_attribute("index")?;
                 if self.peek_is(",") {
@@ -632,7 +658,7 @@ impl Parser {
                 )
             }
             "sign_ext" => {
-                let arg = self.parse_node_ref(&node_env)?;
+                let arg = self.parse_node_ref(&node_env, "sign_ext arg")?;
                 self.drop_or_error(",")?;
                 let new_bit_count = self.parse_usize_attribute("new_bit_count")?;
                 if self.peek_is(",") {
@@ -653,7 +679,7 @@ impl Parser {
                 )
             }
             "zero_ext" => {
-                let arg = self.parse_node_ref(&node_env)?;
+                let arg = self.parse_node_ref(&node_env, "zero_ext arg")?;
                 self.drop_or_error(",")?;
                 let new_bit_count = self.parse_usize_attribute("new_bit_count")?;
                 if self.peek_is(",") {
@@ -673,7 +699,7 @@ impl Parser {
                 )
             }
             "bit_slice" => {
-                let arg = self.parse_node_ref(&node_env)?;
+                let arg = self.parse_node_ref(&node_env, "bit_slice arg")?;
                 self.drop_or_error(",")?;
                 let start = self.parse_usize_attribute("start")?;
                 self.drop_or_error(",")?;
@@ -696,11 +722,12 @@ impl Parser {
                 )
             }
             "bit_slice_update" => {
-                let arg = self.parse_node_ref(&node_env)?;
+                let arg = self.parse_node_ref(&node_env, "bit_slice_update arg")?;
                 self.drop_or_error(",")?;
-                let start = self.parse_node_ref(&node_env)?;
+                let start = self.parse_node_ref(&node_env, "bit_slice_update start")?;
                 self.drop_or_error(",")?;
-                let update_value = self.parse_node_ref(&node_env)?;
+                let update_value =
+                    self.parse_node_ref(&node_env, "bit_slice_update update_value")?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -723,9 +750,9 @@ impl Parser {
                 )
             }
             "assert" => {
-                let token = self.parse_node_ref(&node_env)?;
+                let token = self.parse_node_ref(&node_env, "assert token")?;
                 self.drop_or_error(",")?;
-                let activate = self.parse_node_ref(&node_env)?;
+                let activate = self.parse_node_ref(&node_env, "assert activate")?;
                 self.drop_or_error(",")?;
                 let message = self.parse_string_attribute("message")?;
                 self.drop_or_error(",")?;
@@ -753,7 +780,7 @@ impl Parser {
                 )
             }
             "cover" => {
-                let predicate = self.parse_node_ref(&node_env)?;
+                let predicate = self.parse_node_ref(&node_env, "cover predicate")?;
                 self.drop_or_error(",")?;
                 let label = self.parse_string_attribute("label")?;
                 if self.peek_is(",") {
@@ -773,13 +800,17 @@ impl Parser {
                 )
             }
             "trace" => {
-                let token = self.parse_node_ref(&node_env)?;
+                let token = self.parse_node_ref(&node_env, "trace token")?;
                 self.drop_or_error(",")?;
-                let activated = self.parse_node_ref(&node_env)?;
+                let activated = self.parse_node_ref(&node_env, "trace activated")?;
                 self.drop_or_error(",")?;
                 let format = self.parse_string_attribute("format")?;
                 self.drop_or_error(",")?;
-                let operands = self.parse_node_ref_array_attribute("data_operands", &node_env)?;
+                let operands = self.parse_node_ref_array_attribute(
+                    "data_operands",
+                    &node_env,
+                    "trace data_operands",
+                )?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -811,7 +842,7 @@ impl Parser {
                     if self.peek_is(")") || self.peek_is("id=") {
                         break;
                     }
-                    let operand = self.parse_node_ref(&node_env)?;
+                    let operand = self.parse_node_ref(&node_env, "after_all operand")?;
                     operands.push(operand);
                     if !self.try_drop(",") {
                         break;
@@ -837,14 +868,14 @@ impl Parser {
                     if self.peek_is(")") || self.peek_is("to_apply=") {
                         break;
                     }
-                    let operand = self.parse_node_ref(&node_env)?;
+                    let operand = self.parse_node_ref(&node_env, "invoke arg")?;
                     operands.push(operand);
                     if !self.try_drop(",") {
                         break;
                     }
                 }
                 self.drop_or_error("to_apply=")?;
-                let to_apply = self.pop_identifier_or_error()?;
+                let to_apply = self.pop_identifier_or_error("invoke to_apply")?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -863,14 +894,16 @@ impl Parser {
                 )
             }
             "concat" => {
-                let operands = self.parse_variadic_op(&node_env, &mut maybe_id)?;
+                let operands =
+                    self.parse_variadic_op(&node_env, &mut maybe_id, operator.as_str())?;
                 (
                     ir::NodePayload::Nary(ir::NaryOp::Concat, operands),
                     maybe_id.unwrap(),
                 )
             }
             "and" | "nor" | "or" | "xor" | "nand" => {
-                let operands = self.parse_variadic_op(&node_env, &mut maybe_id)?;
+                let operands =
+                    self.parse_variadic_op(&node_env, &mut maybe_id, operator.as_str())?;
                 (
                     ir::NodePayload::Nary(
                         operator_to_nary_op(operator.as_str()).unwrap(),
@@ -881,7 +914,7 @@ impl Parser {
             }
             "literal" => {
                 self.drop_or_error("value=")?;
-                let value = self.parse_value_with_ty(&node_ty)?;
+                let value = self.parse_value_with_ty(&node_ty, "literal value")?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -901,9 +934,9 @@ impl Parser {
             | "slt" | "sge" | "sle" | "gate" => {
                 let binop = ir::operator_to_binop(operator.as_str())
                     .expect(format!("operator {:?} should be known binop", operator).as_str());
-                let lhs = self.parse_node_ref(&node_env)?;
+                let lhs = self.parse_node_ref(&node_env, "binop lhs")?;
                 self.drop_or_error(",")?;
-                let rhs = self.parse_node_ref(&node_env)?;
+                let rhs = self.parse_node_ref(&node_env, "binop rhs")?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -919,7 +952,7 @@ impl Parser {
                 (ir::NodePayload::Binop(binop, lhs, rhs), maybe_id.unwrap())
             }
             "not" | "neg" | "identity" | "reverse" | "or_reduce" | "and_reduce" | "xor_reduce" => {
-                let operand = self.parse_node_ref(&node_env)?;
+                let operand = self.parse_node_ref(&node_env, "unop operand")?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -936,7 +969,7 @@ impl Parser {
                 (ir::NodePayload::Unop(unop, operand), maybe_id.unwrap())
             }
             "decode" => {
-                let arg = self.parse_node_ref(&node_env)?;
+                let arg = self.parse_node_ref(&node_env, "decode arg")?;
                 self.drop_or_error(",")?;
                 let width = self.parse_usize_attribute("width")?;
                 if self.peek_is(",") {
@@ -954,7 +987,7 @@ impl Parser {
                 (ir::NodePayload::Decode { arg, width }, maybe_id.unwrap())
             }
             "encode" => {
-                let arg = self.parse_node_ref(&node_env)?;
+                let arg = self.parse_node_ref(&node_env, "encode arg")?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -970,7 +1003,7 @@ impl Parser {
                 (ir::NodePayload::Encode { arg }, maybe_id.unwrap())
             }
             "one_hot" => {
-                let arg = self.parse_node_ref(&node_env)?;
+                let arg = self.parse_node_ref(&node_env, "one_hot arg")?;
                 self.drop_or_error(",")?;
                 let lsb_prio = self.parse_bool_attribute("lsb_prio")?;
                 if self.peek_is(",") {
@@ -988,12 +1021,12 @@ impl Parser {
                 (ir::NodePayload::OneHot { arg, lsb_prio }, maybe_id.unwrap())
             }
             "sel" => {
-                let selector = self.parse_node_ref(&node_env)?;
+                let selector = self.parse_node_ref(&node_env, "sel selector")?;
                 self.drop_or_error(",")?;
-                let cases = self.parse_node_ref_array_attribute("cases", &node_env)?;
+                let cases = self.parse_node_ref_array_attribute("cases", &node_env, "sel cases")?;
                 let mut default = None;
                 if self.try_drop(", default=") {
-                    default = Some(self.parse_node_ref(&node_env)?);
+                    default = Some(self.parse_node_ref(&node_env, "sel default node ref")?);
                 }
                 self.drop_whitespace();
                 if self.peek_is(", id=") {
@@ -1019,14 +1052,15 @@ impl Parser {
                 )
             }
             "priority_sel" => {
-                let selector = self.parse_node_ref(&node_env)?;
+                let selector = self.parse_node_ref(&node_env, "priority_sel selector")?;
                 self.drop_or_error(",")?;
-                let cases = self.parse_node_ref_array_attribute("cases", &node_env)?;
+                let cases =
+                    self.parse_node_ref_array_attribute("cases", &node_env, "priority_sel cases")?;
                 self.drop_or_error(",")?;
                 self.drop_whitespace();
                 let default = if self.peek_is("default=") {
                     self.drop_or_error("default=")?;
-                    Some(self.parse_node_ref(&node_env)?)
+                    Some(self.parse_node_ref(&node_env, "priority_sel default")?)
                 } else {
                     None
                 };
@@ -1052,9 +1086,10 @@ impl Parser {
                 )
             }
             "one_hot_sel" => {
-                let selector = self.parse_node_ref(&node_env)?;
+                let selector = self.parse_node_ref(&node_env, "one_hot_sel selector")?;
                 self.drop_or_error(",")?;
-                let cases = self.parse_node_ref_array_attribute("cases", &node_env)?;
+                let cases =
+                    self.parse_node_ref_array_attribute("cases", &node_env, "one_hot_sel cases")?;
                 if self.try_drop(",") {
                     let id_attr = self.parse_id_attribute()?;
                     maybe_id = Some(id_attr);
@@ -1073,7 +1108,7 @@ impl Parser {
             }
             "param" => {
                 self.drop_or_error("name=")?;
-                let _name = self.pop_identifier_or_error()?;
+                let _name = self.pop_identifier_or_error("param name")?;
                 self.drop_or_error(",")?;
                 let id = self.parse_id_attribute()?;
                 (ir::NodePayload::GetParam(id), id)
@@ -1129,7 +1164,7 @@ impl Parser {
     pub fn parse_fn(&mut self) -> Result<ir::Fn, ParseError> {
         log::debug!("parse_fn");
         self.drop_or_error("fn")?;
-        let fn_name = self.pop_identifier_or_error()?;
+        let fn_name = self.pop_identifier_or_error("fn name")?;
 
         // Parse the parameter text -- these are of the form `name: type id=n`
         let params = self.parse_params()?;
@@ -1155,7 +1190,7 @@ impl Parser {
 
         let mut ret_node_ref: Option<ir::NodeRef> = None;
         while !self.try_drop("}") {
-            let is_ret = self.try_drop("ret");
+            let is_ret = self.try_drop("ret ");
             let node = self.parse_node(&mut node_env)?;
             let node_ref = ir::NodeRef { index: nodes.len() };
             node_env.add(node.name.clone(), node.text_id, node_ref);
@@ -1192,7 +1227,7 @@ impl Parser {
         let mut top_name: Option<String> = None;
 
         self.drop_or_error("package")?;
-        let package_name = self.pop_identifier_or_error()?;
+        let package_name = self.pop_identifier_or_error("package name")?;
         log::debug!("package_name: {}", package_name);
 
         let mut file_table = FileTable::new();
@@ -1611,5 +1646,24 @@ top fn main(t: token id=1) -> token {
         let node = parser.parse_node(&mut node_env).unwrap();
         let want = ir::NodePayload::Nary(ir::NaryOp::And, vec![x_node_ref, y_node_ref]);
         assert_eq!(node.payload, want);
+    }
+
+    #[test]
+    fn test_node_name_starts_with_ret() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = "  retained_is_odd: bits[1] = bit_slice(x, start=12, width=1, id=905, pos=[(1,327,31), (1,353,27), (1,371,25), (2,12,51)])";
+        let mut parser = Parser::new(input);
+        let mut node_env = IrNodeEnv::new();
+        let x_node_ref = ir::NodeRef { index: 1 };
+        node_env.add(Some("x".to_string()), 1, x_node_ref);
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert_eq!(
+            node.payload,
+            ir::NodePayload::BitSlice {
+                arg: x_node_ref,
+                start: 12,
+                width: 1,
+            }
+        );
     }
 }

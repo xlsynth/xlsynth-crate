@@ -131,8 +131,10 @@ pub fn fraig_optimize(
                     let node_ref = equiv_node.aig_ref();
                     let is_inverted = equiv_node.is_inverted();
                     (stats.ref_to_depth[&node_ref], is_inverted, node_ref.id)
-                })
-                .unwrap();
+                });
+            let Some(min_depth_node) = min_depth_node else {
+                continue;
+            };
             for equiv_node in proven_equiv_set.iter() {
                 // if this is the "minimum depth" one in the equivalence class, we don't replace
                 // it with anything

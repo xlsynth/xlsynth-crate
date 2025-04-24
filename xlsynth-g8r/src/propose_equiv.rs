@@ -2,6 +2,7 @@
 
 //! Functionality for proposing equivalence classes via concrete simulation.
 
+use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate::{AigNode, AigRef, GateFn};
 use crate::gate_sim::{self, Collect, GateSimResult};
 use bitvec::vec::BitVec;
@@ -54,17 +55,11 @@ impl Ord for EquivNode {
     }
 }
 
-fn gen_random_input_bits(bit_count: usize, rng: &mut impl Rng) -> IrBits {
-    let value = rng.gen::<u64>();
-    let value_masked = value & ((1 << bit_count) - 1);
-    IrBits::make_ubits(bit_count, value_masked).unwrap()
-}
-
 fn gen_random_inputs(gate_fn: &GateFn, rng: &mut impl Rng) -> Vec<IrBits> {
     gate_fn
         .inputs
         .iter()
-        .map(|input| gen_random_input_bits(input.bit_vector.get_bit_count(), rng))
+        .map(|input| arbitrary_irbits(rng, input.bit_vector.get_bit_count()).unwrap())
         .collect()
 }
 
