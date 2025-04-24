@@ -74,6 +74,12 @@ pub fn post_order_operands(
         let mut all_deps_visited = true;
         for dep in node.get_operands() {
             if !visited.contains(&dep) {
+                debug_assert!(
+                    dep.node.id < nodes.len(),
+                    "post_order_operands: dependency operand node index out of bounds: {:?} (nodes.len() = {})",
+                    dep.node.id,
+                    nodes.len()
+                );
                 worklist.push_back(current); // Revisit after dependencies
                 worklist.push_back(dep);
                 all_deps_visited = false;

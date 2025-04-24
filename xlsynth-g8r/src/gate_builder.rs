@@ -143,6 +143,16 @@ impl GateBuilder {
             let gate_ref = AigRef {
                 id: self.gates.len(),
             };
+            log::debug!(
+                "add_input pre-push: gates.len={}, gates.cap={}",
+                self.gates.len(),
+                self.gates.capacity()
+            );
+            debug_assert!(
+                self.gates.capacity() < 1024 * 1024,
+                "gates capacity grew unexpectedly large: {}",
+                self.gates.capacity()
+            );
             self.gates.push(AigNode::Input {
                 name: name.clone(),
                 lsb_index: lsb_i,
@@ -200,6 +210,16 @@ impl GateBuilder {
         let gate_ref = AigRef {
             id: self.gates.len(),
         };
+        log::debug!(
+            "add_and_binary pre-push: gates.len={}, gates.cap={}",
+            self.gates.len(),
+            self.gates.capacity()
+        );
+        debug_assert!(
+            self.gates.capacity() < 1024 * 1024,
+            "gates capacity grew unexpectedly large: {}",
+            self.gates.capacity()
+        );
         self.gates.push(gate);
         if self.options.fold {
             if let Some(simplified) = aig_simplify::operand_simplify(gate_ref, self) {

@@ -415,7 +415,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
         return;
     }
     // Defensive: ensure postorder traversal completes and is not too large
-    let postorder = gate_fn.post_order_operands(false);
+    let _postorder = gate_fn.post_order_operands(false);
     let (new_fn, _map) = bulk_replace(&gate_fn, &subs_map, opts);
     // Assert that substitution does not increase node count
     assert!(
