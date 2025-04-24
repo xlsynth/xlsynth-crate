@@ -289,11 +289,12 @@ impl Parser {
         self.drop_or_error(":")?;
         let ty = self.parse_type()?;
         self.drop_whitespace();
-        let id: usize = if self.peek_is("id=") {
+        let raw_id: usize = if self.peek_is("id=") {
             self.parse_id_attribute()?
         } else {
             default_id
         };
+        let id = ir::ParamId::new(raw_id);
         log::debug!("parse_param; name: {:?}; ty: {:?}; id: {:?}", name, ty, id);
         Ok(ir::Param { name, ty, id })
     }
@@ -1110,8 +1111,9 @@ impl Parser {
                 self.drop_or_error("name=")?;
                 let _name = self.pop_identifier_or_error("param name")?;
                 self.drop_or_error(",")?;
-                let id = self.parse_id_attribute()?;
-                (ir::NodePayload::GetParam(id), id)
+                let raw_id = self.parse_id_attribute()?;
+                let pid = ir::ParamId::new(raw_id);
+                (ir::NodePayload::GetParam(pid), raw_id)
             }
             _ => {
                 return Err(ParseError::new(format!(
@@ -1144,14 +1146,9 @@ impl Parser {
         node_env: &mut IrNodeEnv,
         nodes: &mut Vec<ir::Node>,
     ) {
-        assert!(
-            param.id > 0,
-            "param id should be greater than zero: {:?}",
-            param
-        );
         assert!(!nodes.is_empty(), "nodes should not be empty");
         let node = ir::Node {
-            text_id: param.id,
+            text_id: param.id.get_wrapped_id(),
             name: Some(param.name.clone()),
             ty: param.ty.clone(),
             payload: ir::NodePayload::GetParam(param.id),
@@ -1202,8 +1199,8 @@ impl Parser {
 
         // If the return type is not the same type as the return node, then we flag a
         // validation error.
-        if ret_node_ref.is_some() {
-            let ret_node = &nodes[ret_node_ref.unwrap().index];
+        if let Some(ret_nr) = ret_node_ref {
+            let ret_node = &nodes[ret_nr.index];
             if ret_node.ty != ret_ty {
                 return Err(ParseError::new(format!(
                     "return type mismatch; expected: {}, got: {} from node: {}",
@@ -1272,8 +1269,6 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    //use pretty_assertions::assert_eq;
 
     #[test]
     fn test_parse_simple_fn() {
@@ -1665,5 +1660,18 @@ top fn main(t: token id=1) -> token {
                 width: 1,
             }
         );
+    }
+
+    #[test]
+    fn test_parse_identity_fn() {
+        let input = "fn __f__f(x: bits[8] id=29) -> bits[8] {\n  ret x: bits[8] = param(name=x, id=29)\n}\n";
+        let mut parser = Parser::new(input);
+        let f = parser.parse_fn().unwrap();
+        let ret_node = f.get_node(f.ret_node_ref.unwrap());
+        if let crate::xls_ir::ir::NodePayload::GetParam(pid) = &ret_node.payload {
+            assert_eq!(pid.get_wrapped_id(), 29);
+        } else {
+            panic!("Expected GetParam node payload");
+        }
     }
 }

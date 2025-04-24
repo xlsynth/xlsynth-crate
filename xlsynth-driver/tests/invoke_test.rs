@@ -861,3 +861,82 @@ dslx_stdlib_path = "{}"
         stdout
     );
 }
+
+#[test]
+fn test_dslx_add_sub_opt_ir2gates_pipeline() {
+    let _ = env_logger::try_init();
+    let dslx = "
+import std;
+const UNUSED = std::popcount(u3:0b111);
+fn f(x: u8) -> u8 { x + x - x }
+#[test] fn test_my_add() { assert_eq(f(u8::MAX), u8::MAX); }
+#[quickcheck] fn quickcheck_my_add(x: u8) -> bool { f(x) == x }
+";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("f.x");
+    let ir_path = temp_dir.path().join("f.opt.ir");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // Step 1: dslx2ir
+    let dslx2ir_output = std::process::Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("f")
+        .output()
+        .unwrap();
+    assert!(
+        dslx2ir_output.status.success(),
+        "dslx2ir failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&dslx2ir_output.stdout),
+        String::from_utf8_lossy(&dslx2ir_output.stderr)
+    );
+    std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
+
+    log::info!(
+        "unoptimized IR:\n{}",
+        String::from_utf8_lossy(&dslx2ir_output.stdout)
+    );
+
+    // Compute the mangled IR top function name as the driver does
+    let module_name = dslx_path.file_stem().unwrap().to_str().unwrap();
+    let dslx_top = "f";
+    let ir_top = format!("__{}__{}", module_name, dslx_top);
+
+    // Step 2: ir2opt
+    let ir2opt_output = std::process::Command::new(command_path)
+        .arg("ir2opt")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg(&ir_top)
+        .output()
+        .unwrap();
+    assert!(
+        ir2opt_output.status.success(),
+        "ir2opt failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ir2opt_output.stdout),
+        String::from_utf8_lossy(&ir2opt_output.stderr)
+    );
+    // Overwrite IR with optimized IR for next step
+    std::fs::write(&ir_path, &ir2opt_output.stdout).unwrap();
+
+    log::info!(
+        "optimized IR:\n{}",
+        String::from_utf8_lossy(&ir2opt_output.stdout)
+    );
+
+    // Step 3: ir2gates (no --top argument)
+    let ir2gates_output = std::process::Command::new(command_path)
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2gates_output.status.success(),
+        "ir2gates failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ir2gates_output.stdout),
+        String::from_utf8_lossy(&ir2gates_output.stderr)
+    );
+}
