@@ -200,11 +200,6 @@ impl GateBuilder {
         let gate_ref = AigRef {
             id: self.gates.len(),
         };
-        log::debug!(
-            "add_and_binary pre-push: gates.len={}, gates.cap={}",
-            self.gates.len(),
-            self.gates.capacity()
-        );
         debug_assert!(
             self.gates.capacity() < 1024 * 1024,
             "gates capacity grew unexpectedly large: {}",
