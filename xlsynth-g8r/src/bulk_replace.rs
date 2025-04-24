@@ -240,6 +240,12 @@ pub fn bulk_substitute(
             continue;
         }
         // Otherwise, build the node in the new graph
+        debug_assert!(
+            orig_ref.id < orig_fn.gates.len(),
+            "AigRef out of bounds: {:?} (gates.len() = {})",
+            orig_ref,
+            orig_fn.gates.len()
+        );
         let orig_node = &orig_fn.gates[orig_ref.id];
         let new_op = match orig_node {
             AigNode::Input { .. } => {
