@@ -106,10 +106,27 @@ pub fn fraig_optimize(
         // that should replace them.
         let mut replacements = SubstitutionMap::new();
         for proven_equiv_set in validation_result.proven_equiv_sets {
+            log::info!("fraig_optimize: proven_equiv_set: {:?}", proven_equiv_set);
             // Determine the minimum-depth node in the proven_equiv_set, using node ID as
             // tiebreaker
             let min_depth_node = proven_equiv_set
                 .iter()
+                .filter(|equiv_node| {
+                    // Any node that is being substituted cannot win as the target in an equivalence
+                    // class.
+                    //
+                    // The main reason this is necessary is because we consider both values and
+                    // their negations, so when two nodes have the same depth we see both:
+                    // - (normal_a, negated_b)
+                    // - (negated_a, normal_b)
+                    //
+                    // And in this case we need to make sure we don't make a chain, so we'll replace
+                    // negated_b with normal_a for the first pair and see that b is already being
+                    // replaced for the second set.
+                    let node_ref = equiv_node.aig_ref();
+                    let is_replaced = replacements.contains_key(&node_ref);
+                    !is_replaced
+                })
                 .min_by_key(|equiv_node| {
                     let node_ref = equiv_node.aig_ref();
                     let is_inverted = equiv_node.is_inverted();
@@ -117,11 +134,13 @@ pub fn fraig_optimize(
                 })
                 .unwrap();
             for equiv_node in proven_equiv_set.iter() {
+                // if this is the "minimum depth" one in the equivalence class, we don't replace
+                // it with anything
                 if equiv_node == min_depth_node {
                     continue;
                 }
-                // Determine if the substitution needs negation
-                let representative_op = match (equiv_node, min_depth_node) {
+                // Determine if the substitution (the min depth node) needs negation
+                let dst_operand = match (equiv_node, min_depth_node) {
                     // Same polarity: substitute directly
                     (EquivNode::Normal(_), EquivNode::Normal(rep_ref))
                     | (EquivNode::Inverted(_), EquivNode::Inverted(rep_ref)) => {
@@ -134,7 +153,12 @@ pub fn fraig_optimize(
                     }
                 };
 
-                replacements.add(equiv_node.aig_ref(), representative_op);
+                log::debug!(
+                    "fraig_optimize: adding substitution: {:?} -> {:?}",
+                    equiv_node.aig_ref(),
+                    dst_operand
+                );
+                replacements.add(equiv_node.aig_ref(), dst_operand);
             }
         }
 
@@ -158,7 +182,10 @@ mod tests {
     use crate::{
         check_equivalence,
         get_summary_stats::get_summary_stats,
-        test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
+        test_utils::{
+            load_bf16_add_sample, load_bf16_mul_sample,
+            setup_padded_graph_with_equal_depth_opposite_polarity, Opt,
+        },
     };
 
     use super::*;
@@ -250,5 +277,36 @@ mod tests {
         assert_eq!(results.optimized_nodes, 1125);
         assert_eq!(results.original_depth, 130);
         assert_eq!(results.optimized_depth, 122);
+    }
+
+    #[test]
+    fn test_equiv_class_with_equal_depth_and_opposite_polarity_canonicalizes() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let test_graph = setup_padded_graph_with_equal_depth_opposite_polarity();
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
+        let (optimized_fn, _did_converge) =
+            fraig_optimize(&test_graph.g, 8, IterationBounds::ToConvergence, &mut rng)
+                .expect("fraig_optimize should not panic");
+
+        // The original graph has 2 inputs, 1 constant literal node (e.g., 'true', which
+        // is node 0), and 2 AND nodes (one for the AND, one for the
+        // AND-with-true used to force a real node for the inverted output).
+        let orig_stats = get_summary_stats(&test_graph.g);
+        assert_eq!(orig_stats.live_nodes, 5);
+
+        // After optimization, DCE removes both the extra AND node and the now-unused
+        // constant literal node. Only the two inputs and the single AND node
+        // remain live, so live_nodes should decrease by 2: from 5 (2 inputs, 1
+        // constant, 2 ANDs) to 3 (2 inputs, 1 AND node).
+        let opt_stats = get_summary_stats(&optimized_fn);
+        assert_eq!(
+            opt_stats.live_nodes,
+            orig_stats.live_nodes - 2,
+            "Should eliminate two nodes"
+        );
+
+        // Outputs should be equivalent
+        check_equivalence::validate_same_gate_fn(&test_graph.g, &optimized_fn)
+            .expect("fraig optimization should preserve equivalence");
     }
 }

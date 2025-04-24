@@ -28,6 +28,12 @@ impl SubstitutionMap {
             "Substitution chain detected: value {:?} is also a key.",
             value.node
         );
+        assert!(
+            value.node != key,
+            "Substitution with self detected: {:?} -> {:?}",
+            key,
+            value
+        );
         self.map.insert(key, value);
     }
 
