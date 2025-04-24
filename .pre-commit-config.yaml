@@ -41,7 +41,7 @@ repos:
       - id: bump_version_check
         name: bump version check
         description: Verify that version bump in Cargo.toml files is consistent (simulation mode).
-        entry: python bump_version_numbers.py check
+        entry: python3 bump_version_numbers.py check
         language: system
         pass_filenames: false
 

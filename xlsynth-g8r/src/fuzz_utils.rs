@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use xlsynth::ir_value::IrBits;
 use xlsynth::xlsynth_error::XlsynthError;
 

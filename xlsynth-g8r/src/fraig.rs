@@ -15,15 +15,12 @@
 //! for now.
 
 use rand::Rng;
-use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
-};
+use std::{collections::HashSet, error::Error};
 use xlsynth::IrBits;
 
 use crate::{
-    bulk_replace::bulk_replace, gate::AigOperand, gate::AigRef, gate::GateFn,
-    gate_builder::GateBuilderOptions, get_summary_stats::get_gate_depth,
+    bulk_replace::bulk_replace, bulk_replace::SubstitutionMap, gate::AigOperand, gate::AigRef,
+    gate::GateFn, gate_builder::GateBuilderOptions, get_summary_stats::get_gate_depth,
     propose_equiv::propose_equiv, propose_equiv::EquivNode, validate_equiv::validate_equiv,
 };
 
@@ -52,7 +49,7 @@ pub fn fraig_optimize(
     let mut current_fn = f.clone();
     let mut counterexamples: HashSet<Vec<IrBits>> = HashSet::new();
     loop {
-        log::debug!(
+        log::info!(
             "fraig_optimize; iteration: {} counterexamples: {}",
             iteration_count,
             counterexamples.len()
@@ -68,6 +65,11 @@ pub fn fraig_optimize(
             }
         }
         let equiv_classes = propose_equiv(&current_fn, input_sample_count, rng, &counterexamples);
+
+        log::info!(
+            "fraig_optimize: propose_equiv proposed {} classes",
+            equiv_classes.len()
+        );
 
         let mut equiv_classes_vec: Vec<&[EquivNode]> =
             equiv_classes.values().map(|v| v.as_slice()).collect();
@@ -105,7 +107,7 @@ pub fn fraig_optimize(
 
         // Mapping from nodes to be replaced to the (potentially negated) operand
         // that should replace them.
-        let mut replacements: HashMap<AigRef, AigOperand> = HashMap::new();
+        let mut replacements = SubstitutionMap::new();
         for proven_equiv_set in validation_result.proven_equiv_sets {
             // Determine the minimum-depth node in the proven_equiv_set, using node ID as
             // tiebreaker
@@ -135,7 +137,7 @@ pub fn fraig_optimize(
                     }
                 };
 
-                replacements.insert(equiv_node.aig_ref(), representative_op);
+                replacements.add(equiv_node.aig_ref(), representative_op);
             }
         }
 
