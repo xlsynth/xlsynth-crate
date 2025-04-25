@@ -847,6 +847,52 @@ fn gatify_shra(
     AigBitVector::from_lsb_is_index_0(&final_bits)
 }
 
+fn flatten_literal_to_bits(
+    literal: &xlsynth::IrValue,
+    ty: &ir::Type,
+    g8_builder: &mut GateBuilder,
+) -> AigBitVector {
+    match ty {
+        ir::Type::Bits(_) => {
+            let bits = literal.to_bits().unwrap();
+            g8_builder.add_literal(&bits)
+        }
+        ir::Type::Array(array_ty) => {
+            let elements = literal.get_elements().unwrap();
+            let mut bit_vectors = Vec::new();
+            // Reverse order to match array flattening in node lowering (LSB = last element)
+            for elem in elements.iter().rev() {
+                let elem_bits = flatten_literal_to_bits(elem, &array_ty.element_type, g8_builder);
+                bit_vectors.push(elem_bits);
+            }
+            // Concatenate all element bit vectors (LSb to MSb order)
+            let mut lsb_to_msb = Vec::new();
+            for bv in bit_vectors {
+                lsb_to_msb.extend(bv.iter_lsb_to_msb().cloned());
+            }
+            AigBitVector::from_lsb_is_index_0(&lsb_to_msb)
+        }
+        ir::Type::Tuple(types) => {
+            let elements = literal.get_elements().unwrap();
+            let mut bit_vectors = Vec::new();
+            // Reverse order to match tuple flattening in node lowering
+            for (elem, elem_ty) in elements.iter().rev().zip(types.iter().rev()) {
+                let elem_bits = flatten_literal_to_bits(elem, elem_ty, g8_builder);
+                bit_vectors.push(elem_bits);
+            }
+            let mut lsb_to_msb = Vec::new();
+            for bv in bit_vectors {
+                lsb_to_msb.extend(bv.iter_lsb_to_msb().cloned());
+            }
+            AigBitVector::from_lsb_is_index_0(&lsb_to_msb)
+        }
+        ir::Type::Token => {
+            // Tokens are zero bits, so return an empty bit vector
+            AigBitVector::zeros(0)
+        }
+    }
+}
+
 /// Converts the contents of the given IR function to our "g8" representation
 /// which has gates and vectors of gates.
 fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) {
@@ -990,16 +1036,8 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
             ir::NodePayload::Literal(literal) => {
-                let literal_bits = match literal.to_bits() {
-                    Ok(bits) => bits,
-                    Err(e) => {
-                        panic!("Literal {:?} is not a bits value: {:?}", literal, e);
-                    }
-                };
-
-                let gate_refs = g8_builder.add_literal(&literal_bits);
-                assert_eq!(gate_refs.get_bit_count(), literal_bits.get_bit_count());
-                env.add(node_ref, GateOrVec::BitVector(gate_refs));
+                let bit_vector = flatten_literal_to_bits(literal, &node.ty, g8_builder);
+                env.add(node_ref, GateOrVec::BitVector(bit_vector));
             }
 
             // -- unary operations
@@ -1579,6 +1617,31 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String
 mod tests {
     use crate::xls_ir::ir;
     use crate::{ir2gate::gatify, ir2gate::GatifyOptions, xls_ir::ir_parser};
+
+    #[test]
+    fn test_gatify_array_literal_flattening() {
+        let ir_text = "fn f() -> bits[8][5] {\n  ret literal.1: bits[8][5] = literal(value=[1, 2, 3, 4, 5], id=1)\n}";
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+
+        let gatify_output = crate::ir2gate::gatify(
+            &ir_fn,
+            crate::ir2gate::GatifyOptions {
+                fold: false,
+                hash: false,
+                check_equivalence: false,
+            },
+        )
+        .unwrap();
+
+        // The output should be a bit vector of 5 * 8 = 40 bits
+        let output_vec = &gatify_output.gate_fn.outputs[0].bit_vector;
+        assert_eq!(
+            output_vec.get_bit_count(),
+            40,
+            "Expected 40 bits for bits[8][5] array literal"
+        );
+    }
 
     #[test]
     fn test_lowering_map_not_add() {
