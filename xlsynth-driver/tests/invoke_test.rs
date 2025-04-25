@@ -995,4 +995,14 @@ fn test_ir2gates_quiet_json_output() {
         json["toggle_transitions"].is_number(),
         "toggle_transitions missing or not a number"
     );
+    // Check expected values for this simple AND circuit
+    assert_eq!(json["toggle_transitions"], 3);
+    assert!(
+        json["toggle_output_toggles"].as_u64().unwrap() > 0,
+        "toggle_output_toggles should be nonzero"
+    );
+    assert!(
+        json["toggle_input_toggles"].as_u64().unwrap() > 0,
+        "toggle_input_toggles should be nonzero"
+    );
 }
