@@ -968,6 +968,8 @@ fn test_ir2gates_quiet_json_output() {
         .arg("ir2gates")
         .arg(ir_path.to_str().unwrap())
         .arg("--quiet=true")
+        .arg("--toggle-sample-count=4")
+        .arg("--toggle-seed=42")
         .output()
         .unwrap();
     assert!(ir2gates_output.status.success());
@@ -976,8 +978,85 @@ fn test_ir2gates_quiet_json_output() {
     // Try to parse as JSON
     let json: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
-    assert_eq!(
-        json.to_string(),
-        r#"{"deepest_path":2,"fanout_histogram":{"1":64},"live_nodes":96}"#
+    // Check standard stats
+    assert_eq!(json["deepest_path"], 2);
+    assert_eq!(json["fanout_histogram"].to_string(), "{\"1\":64}");
+    assert_eq!(json["live_nodes"], 96);
+    // Check toggle stats fields exist and are numbers
+    assert!(
+        json["toggle_output_toggles"].is_number(),
+        "toggle_output_toggles missing or not a number"
+    );
+    assert!(
+        json["toggle_input_toggles"].is_number(),
+        "toggle_input_toggles missing or not a number"
+    );
+    assert!(
+        json["toggle_transitions"].is_number(),
+        "toggle_transitions missing or not a number"
+    );
+    // Check expected values for this simple AND circuit
+    assert_eq!(json["toggle_transitions"], 3);
+    assert!(
+        json["toggle_output_toggles"].as_u64().unwrap() > 0,
+        "toggle_output_toggles should be nonzero"
+    );
+    assert!(
+        json["toggle_input_toggles"].as_u64().unwrap() > 0,
+        "toggle_input_toggles should be nonzero"
+    );
+}
+
+#[test]
+fn test_ir2gates_quiet_json_output_no_toggle() {
+    let dslx = "fn main(a: u32, b: u32) -> u32 { a & b }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("main.x");
+    let ir_path = temp_dir.path().join("main.ir");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // dslx2ir
+    let dslx2ir_output = std::process::Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+    assert!(dslx2ir_output.status.success());
+    std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
+
+    // ir2gates --quiet (no toggle flag)
+    let ir2gates_output = std::process::Command::new(command_path)
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--quiet=true")
+        .output()
+        .unwrap();
+    assert!(ir2gates_output.status.success());
+
+    let stdout = String::from_utf8_lossy(&ir2gates_output.stdout);
+    // Try to parse as JSON
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
+    // Check standard stats
+    assert_eq!(json["deepest_path"], 2);
+    assert_eq!(json["fanout_histogram"].to_string(), "{\"1\":64}");
+    assert_eq!(json["live_nodes"], 96);
+    // Check toggle stats fields exist and are null
+    assert!(
+        json["toggle_output_toggles"].is_null(),
+        "toggle_output_toggles should be null"
+    );
+    assert!(
+        json["toggle_input_toggles"].is_null(),
+        "toggle_input_toggles should be null"
+    );
+    assert!(
+        json["toggle_transitions"].is_null(),
+        "toggle_transitions should be null"
     );
 }

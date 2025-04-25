@@ -21,6 +21,16 @@ pub struct GateDepthStats {
     pub ref_to_depth: HashMap<gate::AigRef, usize>,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct Ir2GatesSummaryStats {
+    pub live_nodes: usize,
+    pub deepest_path: usize,
+    pub fanout_histogram: HashMap<usize, usize>,
+    pub toggle_output_toggles: Option<usize>,
+    pub toggle_input_toggles: Option<usize>,
+    pub toggle_transitions: Option<usize>,
+}
+
 /// Returns:
 /// * a mapping that shows {depth: count} where the count is in number of gates.
 /// * the deepest path in the gate DAG
