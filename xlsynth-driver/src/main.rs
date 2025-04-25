@@ -355,7 +355,23 @@ fn main() {
                 .add_bool_arg("quiet", "Quiet mode")
                 .add_bool_arg("fold", "Fold the gate representation")
                 .add_bool_arg("hash", "Hash the gate representation")
-                .add_bool_arg("fraig", "Run fraig optimization"),
+                .add_bool_arg("fraig", "Run fraig optimization")
+                .arg(
+                    clap::Arg::new("toggle_sample_count")
+                        .long("toggle-sample-count")
+                        .value_name("N")
+                        .help("If > 0, generate N random input samples and print toggle stats.")
+                        .default_value("0")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("toggle_sample_seed")
+                        .long("toggle-seed")
+                        .value_name("SEED")
+                        .help("Seed for random toggle stimulus (default 0)")
+                        .default_value("0")
+                        .action(clap::ArgAction::Set),
+                ),
         )
         .get_matches();
 

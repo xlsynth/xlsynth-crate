@@ -7,7 +7,15 @@ use clap::ArgMatches;
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_g8r::process_ir_path;
 
-fn ir2gates(input_file: &std::path::Path, quiet: bool, fold: bool, hash: bool, fraig: bool) {
+fn ir2gates(
+    input_file: &std::path::Path,
+    quiet: bool,
+    fold: bool,
+    hash: bool,
+    fraig: bool,
+    toggle_sample_count: usize,
+    toggle_sample_seed: u64,
+) {
     log::info!("ir2gates");
     let options = process_ir_path::Options {
         check_equivalence: false,
@@ -16,6 +24,8 @@ fn ir2gates(input_file: &std::path::Path, quiet: bool, fold: bool, hash: bool, f
         fraig,
         quiet,
         emit_netlist: false,
+        toggle_sample_count,
+        toggle_sample_seed,
     };
     let stats = process_ir_path::process_ir_path(input_file, &options);
     if quiet {
@@ -46,7 +56,23 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("false") => false,
         _ => true, // default for fraig is true
     };
+    let toggle_sample_count = matches
+        .get_one::<String>("toggle_sample_count")
+        .map(|s| s.parse::<usize>().unwrap_or(0))
+        .unwrap_or(0);
+    let toggle_sample_seed = matches
+        .get_one::<String>("toggle_sample_seed")
+        .map(|s| s.parse::<u64>().unwrap_or(0))
+        .unwrap_or(0);
     let input_path = std::path::Path::new(input_file);
 
-    ir2gates(input_path, quiet, fold, hash, fraig);
+    ir2gates(
+        input_path,
+        quiet,
+        fold,
+        hash,
+        fraig,
+        toggle_sample_count,
+        toggle_sample_seed,
+    );
 }

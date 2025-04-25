@@ -968,6 +968,8 @@ fn test_ir2gates_quiet_json_output() {
         .arg("ir2gates")
         .arg(ir_path.to_str().unwrap())
         .arg("--quiet=true")
+        .arg("--toggle-sample-count=4")
+        .arg("--toggle-seed=42")
         .output()
         .unwrap();
     assert!(ir2gates_output.status.success());
@@ -976,8 +978,21 @@ fn test_ir2gates_quiet_json_output() {
     // Try to parse as JSON
     let json: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
-    assert_eq!(
-        json.to_string(),
-        r#"{"deepest_path":2,"fanout_histogram":{"1":64},"live_nodes":96}"#
+    // Check standard stats
+    assert_eq!(json["deepest_path"], 2);
+    assert_eq!(json["fanout_histogram"].to_string(), "{\"1\":64}");
+    assert_eq!(json["live_nodes"], 96);
+    // Check toggle stats fields exist and are numbers
+    assert!(
+        json["toggle_output_toggles"].is_number(),
+        "toggle_output_toggles missing or not a number"
+    );
+    assert!(
+        json["toggle_input_toggles"].is_number(),
+        "toggle_input_toggles missing or not a number"
+    );
+    assert!(
+        json["toggle_transitions"].is_number(),
+        "toggle_transitions missing or not a number"
     );
 }

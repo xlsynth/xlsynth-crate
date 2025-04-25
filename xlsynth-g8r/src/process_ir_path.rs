@@ -7,11 +7,13 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::check_equivalence;
+use crate::count_toggles::count_toggles;
 use crate::emit_netlist;
 use crate::fanout::fanout_histogram;
 use crate::find_structures;
 use crate::fraig;
 use crate::fraig::IterationBounds;
+use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate;
 use crate::get_summary_stats::get_gate_depth;
 use crate::get_summary_stats::SummaryStats;
@@ -48,6 +50,10 @@ pub struct Options {
     pub fraig: bool,
     pub quiet: bool,
     pub emit_netlist: bool,
+    /// If > 0, generate this many random input samples and print toggle stats.
+    pub toggle_sample_count: usize,
+    /// Seed for random toggle stimulus (default 0).
+    pub toggle_sample_seed: u64,
 }
 
 /// Command line entry point (e.g. it exits the process on error).
@@ -199,6 +205,36 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
     sorted_hist.sort_by_key(|(fanout, _)| *fanout);
     for (fanout, count) in sorted_hist {
         println!("  {}: {}", fanout, count);
+    }
+
+    // Toggle stats if requested
+    if options.toggle_sample_count > 0 {
+        println!(
+            "== Toggle stats ({} random samples, seed={}):",
+            options.toggle_sample_count, options.toggle_sample_seed
+        );
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(options.toggle_sample_seed);
+        let mut batch_inputs = Vec::with_capacity(options.toggle_sample_count);
+        let input_widths: Vec<usize> = gate_fn
+            .inputs
+            .iter()
+            .map(|input| input.bit_vector.get_bit_count())
+            .collect();
+        for _ in 0..options.toggle_sample_count {
+            let mut input_vec = Vec::with_capacity(input_widths.len());
+            for &width in &input_widths {
+                let bits = arbitrary_irbits(&mut rng, width).expect("random IrBits");
+                input_vec.push(bits);
+            }
+            batch_inputs.push(input_vec);
+        }
+        let (output_toggles, input_toggles) = count_toggles(&gate_fn, &batch_inputs);
+        println!("  Output toggles: {}", output_toggles);
+        println!("  Input toggles:  {}", input_toggles);
+        println!(
+            "  ({} transitions)",
+            options.toggle_sample_count.saturating_sub(1)
+        );
     }
 
     summary_stats

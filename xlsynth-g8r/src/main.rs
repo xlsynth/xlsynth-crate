@@ -35,6 +35,14 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     emit_netlist: bool,
 
+    /// Number of random input samples for toggle stats (0 disables)
+    #[arg(long, default_value_t = 0)]
+    toggle_sample_count: usize,
+
+    /// Seed for random toggle stimulus (default 0)
+    #[arg(long, default_value_t = 0)]
+    toggle_sample_seed: u64,
+
     /// The path to the XLS IR file.
     input: String,
 }
@@ -50,6 +58,8 @@ fn main() {
         fraig: args.fraig,
         emit_netlist: args.emit_netlist,
         quiet: args.emit_netlist,
+        toggle_sample_count: args.toggle_sample_count,
+        toggle_sample_seed: args.toggle_sample_seed,
     };
     let input_path = std::path::Path::new(&args.input);
     process_ir_path(input_path, &options);
