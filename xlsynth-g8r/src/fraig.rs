@@ -166,7 +166,7 @@ pub fn fraig_optimize(
 
         // We get the updated function by bulk replacing nodes with their lower-depth
         // equivalents here.
-        let (new_fn, _) = bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt());
+        let new_fn = bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt());
         current_fn = new_fn;
 
         iteration_count += 1;

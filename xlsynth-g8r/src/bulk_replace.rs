@@ -98,7 +98,7 @@ pub fn bulk_replace(
     orig_fn: &GateFn,
     substitutions: &SubstitutionMap,
     options: GateBuilderOptions,
-) -> (GateFn, HashMap<AigRef, AigOperand>) {
+) -> GateFn {
     log::info!(
         "bulk_replace: fn {:?} with {} substitutions",
         orig_fn.name,
@@ -138,7 +138,7 @@ pub fn bulk_replace(
         }
     }
 
-    let (substituted_fn, orig_to_new_map) = bulk_substitute(orig_fn, substitutions, options);
+    let substituted_fn = bulk_substitute(orig_fn, substitutions, options);
 
     log::info!("bulk_replace; running dce on substituted fn");
     substituted_fn.check_invariants_with_debug_assert();
@@ -148,7 +148,7 @@ pub fn bulk_replace(
     verify_io_signature_with_debug_assert(orig_fn, &dce_fn);
 
     log::info!("bulk_replace: done");
-    (dce_fn, orig_to_new_map)
+    dce_fn
 }
 
 /// Verifies that the input/output signature (name, bit count) is preserved
@@ -211,7 +211,7 @@ pub fn bulk_substitute(
     orig_fn: &GateFn,
     substitutions: &SubstitutionMap,
     options: GateBuilderOptions,
-) -> (GateFn, HashMap<AigRef, AigOperand>) {
+) -> GateFn {
     log::info!(
         "bulk_substitute on {} with {} substitutions",
         orig_fn.name,
@@ -383,7 +383,7 @@ pub fn bulk_substitute(
 
     replaced_fn.check_invariants_with_debug_assert();
     crate::topo::debug_assert_no_cycles(&replaced_fn.gates, "bulk_substitute");
-    (replaced_fn, orig_to_new_map)
+    replaced_fn
 }
 
 #[cfg(test)]
@@ -417,7 +417,7 @@ mod tests {
         );
 
         let options = GateBuilderOptions::no_opt(); // Keep no_opt() as requested
-        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options);
+        let replaced_fn = bulk_replace(original_fn, &substitutions, options);
 
         log::info!("Replaced function:\n{}", replaced_fn.to_string());
 
@@ -452,7 +452,7 @@ mod tests {
         );
 
         let options = GateBuilderOptions::no_opt();
-        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options);
+        let replaced_fn = bulk_replace(original_fn, &substitutions, options);
 
         log::info!(
             "Replaced function (multiple subs):\n{}",
@@ -487,7 +487,7 @@ mod tests {
         );
 
         let options = GateBuilderOptions::no_opt();
-        let (replaced_fn, _) = bulk_replace(original_fn, &substitutions, options);
+        let replaced_fn = bulk_replace(original_fn, &substitutions, options);
 
         log::info!(
             "Replaced function (const replace test):\n{}",

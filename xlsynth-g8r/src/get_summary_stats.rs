@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::fanout::fanout_histogram;
 use crate::gate::{self, AigNode};
 use crate::use_count::get_id_to_use_count;
 use serde::Serialize;
@@ -9,6 +10,7 @@ use std::collections::HashMap;
 pub struct SummaryStats {
     pub live_nodes: usize,
     pub deepest_path: usize,
+    pub fanout_histogram: HashMap<usize, usize>,
 }
 
 // Add structured return type for gate depth info.
@@ -111,16 +113,58 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
     }
 }
 
-#[allow(dead_code)]
 pub fn get_summary_stats(gate_fn: &gate::GateFn) -> SummaryStats {
     let id_to_use_count: HashMap<gate::AigRef, usize> = get_id_to_use_count(&gate_fn);
     let live_nodes: Vec<gate::AigRef> = id_to_use_count.keys().cloned().collect();
 
     let stats = get_gate_depth(&gate_fn, &live_nodes);
 
+    let hist = fanout_histogram(gate_fn);
     let summary_stats = SummaryStats {
         live_nodes: live_nodes.len(),
         deepest_path: stats.deepest_path.len(),
+        fanout_histogram: hist,
     };
     summary_stats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{dce::dce, test_utils::*};
+    use pretty_assertions::assert_eq;
+
+    fn fanout_histogram_to_string(hist: &HashMap<usize, usize>) -> String {
+        let mut sorted_hist = hist.iter().collect::<Vec<_>>();
+        sorted_hist.sort_by_key(|(k, _)| *k);
+        sorted_hist
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, v))
+            .collect::<Vec<String>>()
+            .join(", ")
+    }
+
+    #[test]
+    fn test_get_summary_stats_bf16_mul() {
+        let sample = load_bf16_mul_sample(Opt::Yes);
+        let gate_fn = dce(&sample.gate_fn);
+        let stats = get_summary_stats(&gate_fn);
+        assert_eq!(stats.live_nodes, 1172);
+        assert_eq!(
+            fanout_histogram_to_string(&stats.fanout_histogram),
+            "1: 753, 2: 135, 3: 57, 4: 157, 5: 11, 6: 16, 7: 1, 8: 15, 10: 2, 15: 4, 16: 1, 20: 1, 28: 1, 34: 1"
+        );
+    }
+
+    #[test]
+    fn test_get_summary_stats_bf16_add() {
+        let sample = load_bf16_add_sample(Opt::Yes);
+        let gate_fn = dce(&sample.gate_fn);
+        let stats = get_summary_stats(&gate_fn);
+        assert_eq!(stats.live_nodes, 1292);
+        assert_eq!(
+            fanout_histogram_to_string(&stats.fanout_histogram),
+            "1: 922, 2: 138, 3: 61, 4: 79, 5: 34, 6: 16, 7: 3, 9: 1, 10: 1, 11: 1, 13: 1, 16: 1, 17: 3, 19: 1, 20: 1, 22: 3, 23: 1, 24: 1, 25: 1, 26: 4, 63: 1, 80: 1"
+        );
+    }
 }

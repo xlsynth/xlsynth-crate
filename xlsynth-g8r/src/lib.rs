@@ -10,6 +10,7 @@ pub mod bulk_replace;
 pub mod check_equivalence;
 pub mod dce;
 mod emit_netlist;
+pub mod fanout;
 pub mod find_structures;
 pub mod fraig;
 pub mod fuzz_utils;

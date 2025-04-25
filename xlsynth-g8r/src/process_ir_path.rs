@@ -8,6 +8,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::check_equivalence;
 use crate::emit_netlist;
+use crate::fanout::fanout_histogram;
 use crate::find_structures;
 use crate::fraig;
 use crate::fraig::IterationBounds;
@@ -122,9 +123,12 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
 
     let depth_stats = get_gate_depth(&gate_fn, &live_nodes);
 
+    // Compute fanout histogram and include in summary stats
+    let hist = fanout_histogram(&gate_fn);
     let summary_stats = SummaryStats {
         live_nodes: live_nodes.len(),
         deepest_path: depth_stats.deepest_path.len(),
+        fanout_histogram: hist.clone(),
     };
 
     if options.quiet {
@@ -187,6 +191,14 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> SummaryS
     println!("== Structures:");
     for (structure, count) in sorted_structures[0..min(20, sorted_structures.len())].iter() {
         println!("{:3} :: {}", count, structure);
+    }
+
+    // Print fanout histogram
+    println!("== Fanout histogram:");
+    let mut sorted_hist: Vec<_> = hist.iter().collect();
+    sorted_hist.sort_by_key(|(fanout, _)| *fanout);
+    for (fanout, count) in sorted_hist {
+        println!("  {}: {}", fanout, count);
     }
 
     summary_stats

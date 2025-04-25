@@ -625,14 +625,14 @@ fn test_gatify_one_hot() {
     });
     #[rustfmt::skip]
     let want = &[
-        (1, SummaryStats { live_nodes: 1, deepest_path: 1 }),
-        (2, SummaryStats { live_nodes: 4, deepest_path: 2 }),
-        (3, SummaryStats { live_nodes: 8, deepest_path: 3 }),
-        (4, SummaryStats { live_nodes: 12, deepest_path: 4 }),
-        (5, SummaryStats { live_nodes: 17, deepest_path: 4 }),
-        (6, SummaryStats { live_nodes: 22, deepest_path: 5 }),
-        (7, SummaryStats { live_nodes: 27, deepest_path: 5 }),
-        (8, SummaryStats { live_nodes: 32, deepest_path: 5 }),
+        (1, SummaryStats { live_nodes: 1, deepest_path: 1, fanout_histogram: HashMap::new() }),
+        (2, SummaryStats { live_nodes: 4, deepest_path: 2, fanout_histogram: HashMap::new() }),
+        (3, SummaryStats { live_nodes: 8, deepest_path: 3, fanout_histogram: HashMap::new() }),
+        (4, SummaryStats { live_nodes: 12, deepest_path: 4, fanout_histogram: HashMap::new() }),
+        (5, SummaryStats { live_nodes: 17, deepest_path: 4, fanout_histogram: HashMap::new() }),
+        (6, SummaryStats { live_nodes: 22, deepest_path: 5, fanout_histogram: HashMap::new() }),
+        (7, SummaryStats { live_nodes: 27, deepest_path: 5, fanout_histogram: HashMap::new() }),
+        (8, SummaryStats { live_nodes: 32, deepest_path: 5, fanout_histogram: HashMap::new() }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();
@@ -670,14 +670,14 @@ fn test_gatify_ule() {
     }
     #[rustfmt::skip]
     let want = &[
-        (1, SummaryStats { live_nodes: 6, deepest_path: 4 }),
-        (2, SummaryStats { live_nodes: 14, deepest_path: 6 }),
-        (3, SummaryStats { live_nodes: 22, deepest_path: 8 }),
-        (4, SummaryStats { live_nodes: 31, deepest_path: 9 }),
-        (5, SummaryStats { live_nodes: 40, deepest_path: 10 }),
-        (6, SummaryStats { live_nodes: 49, deepest_path: 11 }),
-        (7, SummaryStats { live_nodes: 59, deepest_path: 11 }),
-        (8, SummaryStats { live_nodes: 69, deepest_path: 11 }),
+        (1, SummaryStats { live_nodes: 6, deepest_path: 4, fanout_histogram: HashMap::new() }),
+        (2, SummaryStats { live_nodes: 14, deepest_path: 6, fanout_histogram: HashMap::new() }),
+        (3, SummaryStats { live_nodes: 22, deepest_path: 8, fanout_histogram: HashMap::new() }),
+        (4, SummaryStats { live_nodes: 31, deepest_path: 9, fanout_histogram: HashMap::new() }),
+        (5, SummaryStats { live_nodes: 40, deepest_path: 10, fanout_histogram: HashMap::new() }),
+        (6, SummaryStats { live_nodes: 49, deepest_path: 11, fanout_histogram: HashMap::new() }),
+        (7, SummaryStats { live_nodes: 59, deepest_path: 11, fanout_histogram: HashMap::new() }),
+        (8, SummaryStats { live_nodes: 69, deepest_path: 11, fanout_histogram: HashMap::new() }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();
