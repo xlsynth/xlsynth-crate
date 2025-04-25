@@ -22,6 +22,7 @@ pub mod gate_sim;
 pub mod get_summary_stats;
 pub mod ir2gate;
 pub mod ir2gate_utils;
+pub mod ir_value_utils;
 pub mod liberty;
 pub mod process_ir_path;
 pub mod propose_equiv;

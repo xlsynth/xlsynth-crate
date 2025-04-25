@@ -144,7 +144,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
             for _ in 0..options.toggle_sample_count {
                 let mut input_vec = Vec::with_capacity(input_widths.len());
                 for &width in &input_widths {
-                    let bits = arbitrary_irbits(&mut rng, width).expect("random IrBits");
+                    let bits = arbitrary_irbits(&mut rng, width);
                     input_vec.push(bits);
                 }
                 batch_inputs.push(input_vec);
