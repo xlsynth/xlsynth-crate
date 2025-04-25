@@ -297,6 +297,16 @@ bit_count_test_cases!(test_dslx_array_to_gates, |input_bits: u32,
     );
 });
 
+bit_count_test_cases!(test_dslx_array_literal_to_gates, |input_bits: u32,
+                                                         opt: Opt|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        opt,
+        "fn do_array_literal() -> uN[N][2] { uN[N][2]:[0, 1] }",
+    );
+});
+
 // Emits a priority select via the DSLX builtin.
 bit_count_test_cases!(test_priority_sel_builtin_to_gates, |input_bits: u32,
                                                            opt: Opt|
