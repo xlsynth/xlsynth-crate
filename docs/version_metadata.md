@@ -1,9 +1,31 @@
 # Version Map
 
-Updated for tags as of: 2025-03-20 13:37:22 -0700
+Updated for tags as of: 2025-04-25 10:32:03 -0700
 
 | xlsynth crate version                               | xlsynth release version                                             |
 | --------------------------------------------------- | ------------------------------------------------------------------- |
+| [0.0.125](https://crates.io/crates/xlsynth/0.0.125) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
+| [0.0.124](https://crates.io/crates/xlsynth/0.0.124) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
+| [0.0.123](https://crates.io/crates/xlsynth/0.0.123) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
+| [0.0.122](https://crates.io/crates/xlsynth/0.0.122) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
+| [0.0.121](https://crates.io/crates/xlsynth/0.0.121) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
+| [0.0.120](https://crates.io/crates/xlsynth/0.0.120) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
+| [0.0.119](https://crates.io/crates/xlsynth/0.0.119) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
+| [0.0.118](https://crates.io/crates/xlsynth/0.0.118) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
+| [0.0.117](https://crates.io/crates/xlsynth/0.0.117) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
+| [0.0.116](https://crates.io/crates/xlsynth/0.0.116) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
+| [0.0.115](https://crates.io/crates/xlsynth/0.0.115) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
+| [0.0.114](https://crates.io/crates/xlsynth/0.0.114) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
+| [0.0.113](https://crates.io/crates/xlsynth/0.0.113) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.112](https://crates.io/crates/xlsynth/0.0.112) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.111](https://crates.io/crates/xlsynth/0.0.111) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.110](https://crates.io/crates/xlsynth/0.0.110) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.107](https://crates.io/crates/xlsynth/0.0.107) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.106](https://crates.io/crates/xlsynth/0.0.106) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.105](https://crates.io/crates/xlsynth/0.0.105) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.104](https://crates.io/crates/xlsynth/0.0.104) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.103](https://crates.io/crates/xlsynth/0.0.103) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
+| [0.0.102](https://crates.io/crates/xlsynth/0.0.102) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
 | [0.0.101](https://crates.io/crates/xlsynth/0.0.101) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
 | [0.0.100](https://crates.io/crates/xlsynth/0.0.100) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
 | [0.0.99](https://crates.io/crates/xlsynth/0.0.99)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
