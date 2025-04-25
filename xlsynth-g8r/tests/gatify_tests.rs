@@ -11,6 +11,8 @@ use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
 use xlsynth_g8r::test_utils::Opt;
 use xlsynth_g8r::xls_ir::ir_parser;
 
+use maplit::hashmap;
+
 /// Proves that the gate-mapped version fo the top function in `ir_package_text`
 /// is equivalent to the IR version.
 ///
@@ -625,14 +627,14 @@ fn test_gatify_one_hot() {
     });
     #[rustfmt::skip]
     let want = &[
-        (1, SummaryStats { live_nodes: 1, deepest_path: 1 }),
-        (2, SummaryStats { live_nodes: 4, deepest_path: 2 }),
-        (3, SummaryStats { live_nodes: 8, deepest_path: 3 }),
-        (4, SummaryStats { live_nodes: 12, deepest_path: 4 }),
-        (5, SummaryStats { live_nodes: 17, deepest_path: 4 }),
-        (6, SummaryStats { live_nodes: 22, deepest_path: 5 }),
-        (7, SummaryStats { live_nodes: 27, deepest_path: 5 }),
-        (8, SummaryStats { live_nodes: 32, deepest_path: 5 }),
+        (1, SummaryStats { live_nodes: 1, deepest_path: 1, fanout_histogram: HashMap::new() }),
+        (2, SummaryStats { live_nodes: 4, deepest_path: 2, fanout_histogram: hashmap!{2 => 1} }),
+        (3, SummaryStats { live_nodes: 8, deepest_path: 3, fanout_histogram: hashmap!{2 => 1, 3 => 1, 1 => 2} }),
+        (4, SummaryStats { live_nodes: 12, deepest_path: 4, fanout_histogram: hashmap!{2 => 2, 1 => 3, 0 => 1, 4 => 1, 3 => 1} }),
+        (5, SummaryStats { live_nodes: 17, deepest_path: 4, fanout_histogram: hashmap!{4 => 1, 5 => 1, 2 => 1, 3 => 2, 1 => 6, 0 => 2} }),
+        (6, SummaryStats { live_nodes: 22, deepest_path: 5, fanout_histogram: hashmap!{1 => 7, 6 => 1, 2 => 3, 4 => 1, 3 => 2, 5 => 1, 0 => 4} }),
+        (7, SummaryStats { live_nodes: 27, deepest_path: 5, fanout_histogram: hashmap!{4 => 1, 3 => 4, 0 => 7, 7 => 1, 1 => 9, 2 => 2, 5 => 1, 6 => 1} }),
+        (8, SummaryStats { live_nodes: 32, deepest_path: 5, fanout_histogram: hashmap!{6 => 1, 3 => 3, 4 => 2, 5 => 1, 7 => 1, 8 => 1, 0 => 11, 1 => 9, 2 => 5} }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();
@@ -670,14 +672,14 @@ fn test_gatify_ule() {
     }
     #[rustfmt::skip]
     let want = &[
-        (1, SummaryStats { live_nodes: 6, deepest_path: 4 }),
-        (2, SummaryStats { live_nodes: 14, deepest_path: 6 }),
-        (3, SummaryStats { live_nodes: 22, deepest_path: 8 }),
-        (4, SummaryStats { live_nodes: 31, deepest_path: 9 }),
-        (5, SummaryStats { live_nodes: 40, deepest_path: 10 }),
-        (6, SummaryStats { live_nodes: 49, deepest_path: 11 }),
-        (7, SummaryStats { live_nodes: 59, deepest_path: 11 }),
-        (8, SummaryStats { live_nodes: 69, deepest_path: 11 }),
+        (1, SummaryStats { live_nodes: 6, deepest_path: 4, fanout_histogram: hashmap!{0 => 1, 1 => 2, 2 => 1, 3 => 2} }),
+        (2, SummaryStats { live_nodes: 14, deepest_path: 6, fanout_histogram: hashmap!{0 => 2, 1 => 6, 2 => 3, 3 => 4} }),
+        (3, SummaryStats { live_nodes: 22, deepest_path: 8, fanout_histogram: hashmap!{0 => 4, 1 => 9, 2 => 5, 3 => 7} }),
+        (4, SummaryStats { live_nodes: 31, deepest_path: 9, fanout_histogram: hashmap!{0 => 6, 1 => 14, 2 => 5, 3 => 10, 4 => 1} }),
+        (5, SummaryStats { live_nodes: 40, deepest_path: 10, fanout_histogram: hashmap!{0 => 9, 1 => 18, 2 => 7, 3 => 11, 4 => 2, 5 => 1} }),
+        (6, SummaryStats { live_nodes: 49, deepest_path: 11, fanout_histogram: hashmap!{0 => 13, 1 => 22, 2 => 8, 3 => 14, 4 => 1, 5 => 2, 6 => 1} }),
+        (7, SummaryStats { live_nodes: 59, deepest_path: 11, fanout_histogram: hashmap!{0 => 17, 1 => 26, 2 => 11, 3 => 16, 4 => 1, 5 => 1, 6 => 2, 7 => 1} }),
+        (8, SummaryStats { live_nodes: 69, deepest_path: 11, fanout_histogram: hashmap!{0 => 22, 1 => 31, 2 => 11, 3 => 20, 4 => 1, 5 => 1, 6 => 1, 7 => 2, 8 => 1} }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();

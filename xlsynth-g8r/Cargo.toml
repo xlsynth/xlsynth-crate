@@ -35,6 +35,7 @@ libfuzzer-sys = "0.4"
 pretty_assertions = "1.4.1"
 regex = "1.10.5"
 test-case = "3.3.1"
+maplit = "1.0.2"
 
 [lib]
 name = "xlsynth_g8r"
