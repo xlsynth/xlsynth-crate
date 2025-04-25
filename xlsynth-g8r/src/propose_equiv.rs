@@ -59,7 +59,7 @@ fn gen_random_inputs(gate_fn: &GateFn, rng: &mut impl Rng) -> Vec<IrBits> {
     gate_fn
         .inputs
         .iter()
-        .map(|input| arbitrary_irbits(rng, input.bit_vector.get_bit_count()).unwrap())
+        .map(|input| arbitrary_irbits(rng, input.bit_vector.get_bit_count()))
         .collect()
 }
 
