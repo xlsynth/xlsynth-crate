@@ -131,7 +131,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     // Compute fanout histogram and include in summary stats
     let hist = fanout_histogram(&gate_fn);
 
-    // Toggle stats if requested
+    // Compute toggle stats if requested
     let (toggle_output_toggles, toggle_input_toggles, toggle_transitions) =
         if options.toggle_sample_count > 0 {
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(options.toggle_sample_seed);
