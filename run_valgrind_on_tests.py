@@ -40,7 +40,14 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
         "filter_out": ["ir_interpret_array_values"],
         "all_filtered_ok": True,
     },
-    "sample_usage": {"filter_out": ["test_validate_fail"]},
+    "sample_usage": {
+        "filter_out": [
+            "test_validate_fail",
+            # Added based on moderate run time (>5s)
+            "tests::test_validate_use",
+            "tests::test_validate_use_popcount",
+        ]
+    },
     "sv_bridge_test": {
         "filter_out": ["test_sv_bridge_structure_zoo"],
         "all_filtered_ok": True,
@@ -62,6 +69,12 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             "test_eqz_ir_to_gates::bit_count_1_fold_true",
             "test_eqz_ir_to_gates::bit_count_4_fold_true",
         ],
+    },
+    "invoke_test": {
+        "filter_out": [
+            # Added based on moderate run time (>20s)
+            "test_ir2gates_determinism",
+        ]
     },
     # Added filter for slow tests (~100s)
     "gate_sim_vs_ir_interp": {
