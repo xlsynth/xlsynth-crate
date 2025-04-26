@@ -313,6 +313,7 @@ def run_valgrind(
         termcolor.cprint(
             f"Timeout expired running valgrind on {os.path.basename(exe)}", "red"
         )
+        termcolor.cprint(f"Command: {' '.join(valgrind_command)}", "red")
         raise subprocess.CalledProcessError(
             999, e.cmd, output=e.stdout, stderr=e.stderr
         ) from e
@@ -321,6 +322,9 @@ def run_valgrind(
             f"Error running valgrind on {os.path.basename(exe)}: {e}",
             "red",
             file=sys.stderr,
+        )
+        termcolor.cprint(
+            f"Command: {' '.join(valgrind_command)}", "red", file=sys.stderr
         )
         if e.stdout:
             termcolor.cprint("--- stdout ---", "red", file=sys.stderr)
@@ -548,21 +552,43 @@ def run_single_test_binary(
                 expected_count = 0
 
             # Pass expect_tests flag to run_valgrind
-            durations, parsed_count = run_valgrind(
-                exe,
-                cwd,
-                suppression_path,
-                expect_tests=(expected_count > 0),
-                demangle=demangle,
-            )
-            # Assign the result tuple including the calculated expected count
-            result = (durations, parsed_count, expected_count)
+            try:
+                durations, parsed_count = run_valgrind(
+                    exe,
+                    cwd,
+                    suppression_path,
+                    expect_tests=(expected_count > 0),
+                    demangle=demangle,
+                )
+                # Assign the result tuple including the calculated expected count
+                result = (durations, parsed_count, expected_count)
+            except Exception:
+                termcolor.cprint(
+                    f"\n[ERROR] Exception while running valgrind on {basename}",
+                    "red",
+                    file=sys.stderr,
+                )
+                termcolor.cprint(f"Command: {exe}", "red", file=sys.stderr)
+                import traceback
+
+                traceback.print_exc()
+                raise
 
         termcolor.cprint(f"Finished: {basename}", "green")
         return result
 
     except (subprocess.CalledProcessError, ValueError, subprocess.TimeoutExpired) as e:
         termcolor.cprint(f"Failed:   {basename}", "red")
+        termcolor.cprint(f"[ERROR] Exception details: {e}", "red", file=sys.stderr)
+        if hasattr(e, "stdout") and e.stdout:
+            termcolor.cprint("--- stdout ---", "red", file=sys.stderr)
+            print(e.stdout, file=sys.stderr)
+        if hasattr(e, "stderr") and e.stderr:
+            termcolor.cprint("--- stderr ---", "red", file=sys.stderr)
+            print(e.stderr, file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
         return e
 
 
