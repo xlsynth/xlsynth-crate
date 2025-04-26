@@ -99,6 +99,22 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             "ir2gate_utils::tests::test_gatify_add_carry_select::_8_bit_2_partition",
             "ir2gate_utils::tests::test_gatify_add_carry_select::_4_bit_2_partition",
             "fraig::tests::test_fraig_optimize_bf16_mul",
+            # Added based on very long runs (>100s)
+            "fraig::tests::test_equiv_class_with_equal_depth_and_opposite_polarity_canonicalizes",
+            "ir2gate_utils::tests::test_gatify_ule::_4_expects",
+            "get_summary_stats::tests::test_get_summary_stats_bf16_mul",
+            "ir2gate_utils::tests::test_gatify_add_carry_select::_8_bit_3_partition",
+            "ir2gate_utils::tests::test_gatify_ule::_6_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_7_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_8_expects",
+            "count_toggles::integration_tests::test_bf16_adder_toggle_counting",
+            "ir2gate_utils::tests::test_gatify_ule::_3_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_1_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_2_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_5_expects",
+            "bulk_replace::tests::test_replace_node_with_constant",
+            "get_summary_stats::tests::test_get_summary_stats_bf16_add",
+            "count_toggles::integration_tests::test_bf16_mul_toggle_counting",
         ]
     },
 }
