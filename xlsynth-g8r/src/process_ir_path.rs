@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::min;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::check_equivalence;
-use crate::count_toggles::count_toggles;
+use crate::count_toggles;
 use crate::emit_netlist;
 use crate::fanout::fanout_histogram;
 use crate::find_structures;
@@ -130,41 +131,39 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
 
     // Compute fanout histogram and include in summary stats
     let hist = fanout_histogram(&gate_fn);
+    let hist_sorted: BTreeMap<usize, usize> = hist.clone().into_iter().collect();
 
     // Compute toggle stats if requested
-    let (toggle_output_toggles, toggle_input_toggles, toggle_transitions) =
-        if options.toggle_sample_count > 0 {
-            let mut rng = Xoshiro256PlusPlus::seed_from_u64(options.toggle_sample_seed);
-            let mut batch_inputs = Vec::with_capacity(options.toggle_sample_count);
-            let input_widths: Vec<usize> = gate_fn
-                .inputs
-                .iter()
-                .map(|input| input.bit_vector.get_bit_count())
-                .collect();
-            for _ in 0..options.toggle_sample_count {
-                let mut input_vec = Vec::with_capacity(input_widths.len());
-                for &width in &input_widths {
-                    let bits = arbitrary_irbits(&mut rng, width);
-                    input_vec.push(bits);
-                }
-                batch_inputs.push(input_vec);
+    let (toggle_stats, toggle_transitions) = if options.toggle_sample_count > 0 {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(options.toggle_sample_seed);
+        let mut batch_inputs = Vec::with_capacity(options.toggle_sample_count);
+        let input_widths: Vec<usize> = gate_fn
+            .inputs
+            .iter()
+            .map(|input| input.bit_vector.get_bit_count())
+            .collect();
+        for _ in 0..options.toggle_sample_count {
+            let mut input_vec = Vec::with_capacity(input_widths.len());
+            for &width in &input_widths {
+                let bits = arbitrary_irbits(&mut rng, width);
+                input_vec.push(bits);
             }
-            let (output_toggles, input_toggles) = count_toggles(&gate_fn, &batch_inputs);
-            (
-                Some(output_toggles),
-                Some(input_toggles),
-                Some(options.toggle_sample_count.saturating_sub(1)),
-            )
-        } else {
-            (None, None, None)
-        };
+            batch_inputs.push(input_vec);
+        }
+        let stats = count_toggles::count_toggles(&gate_fn, &batch_inputs);
+        (
+            Some(stats),
+            Some(options.toggle_sample_count.saturating_sub(1)),
+        )
+    } else {
+        (None, None)
+    };
 
     let summary_stats = Ir2GatesSummaryStats {
         live_nodes: live_nodes.len(),
         deepest_path: depth_stats.deepest_path.len(),
-        fanout_histogram: hist.clone(),
-        toggle_output_toggles,
-        toggle_input_toggles,
+        fanout_histogram: hist_sorted,
+        toggle_stats,
         toggle_transitions,
     };
 
@@ -239,18 +238,11 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     }
 
     // Print toggle stats if present
-    if let (Some(output_toggles), Some(input_toggles), Some(transitions)) = (
-        summary_stats.toggle_output_toggles,
-        summary_stats.toggle_input_toggles,
-        summary_stats.toggle_transitions,
-    ) {
-        println!(
-            "== Toggle stats ({} random samples, seed={}):",
-            options.toggle_sample_count, options.toggle_sample_seed
-        );
-        println!("  Output toggles: {}", output_toggles);
-        println!("  Input toggles:  {}", input_toggles);
-        println!("  ({} transitions)", transitions);
+    if let Some(stats) = toggle_stats {
+        println!("  Gate output toggles: {}", stats.gate_output_toggles);
+        println!("  Gate input toggles: {}", stats.gate_input_toggles);
+        println!("  Primary input toggles: {}", stats.primary_input_toggles);
+        println!("  Primary output toggles: {}", stats.primary_output_toggles);
     }
 
     summary_stats

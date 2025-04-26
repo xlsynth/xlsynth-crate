@@ -751,12 +751,27 @@ fn test_ir2gates_determinism() {
     std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
 
     // Run ir2gates the first time and capture stdout.
-    let ir2gates_output1 = Command::new(command_path)
+    let mut command = std::process::Command::new(command_path);
+    command
         .arg("ir2gates")
-        .arg(ir_path.to_str().unwrap()) // ir_input_file is positional
-        // No output file flag, prints to stdout
-        .output()
-        .unwrap();
+        .arg(ir_path.to_str().unwrap())
+        .arg("--quiet=true")
+        .arg("--toggle-sample-count=4")
+        .arg("--toggle-seed=42");
+    // Pass through RUST_LOG if present
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        command.env("RUST_LOG", rust_log);
+    }
+    let ir2gates_output1 = command.output().unwrap();
+
+    log::debug!(
+        "ir2gates stdout:\n{}",
+        String::from_utf8_lossy(&ir2gates_output1.stdout)
+    );
+    log::debug!(
+        "ir2gates stderr:\n{}",
+        String::from_utf8_lossy(&ir2gates_output1.stderr)
+    );
 
     assert!(
         ir2gates_output1.status.success(),
@@ -767,12 +782,27 @@ fn test_ir2gates_determinism() {
     let output_str_1 = String::from_utf8(ir2gates_output1.stdout).unwrap();
 
     // Run ir2gates the second time and capture stdout.
-    let ir2gates_output2 = Command::new(command_path)
+    let mut command = std::process::Command::new(command_path);
+    command
         .arg("ir2gates")
-        .arg(ir_path.to_str().unwrap()) // ir_input_file is positional
-        // No output file flag, prints to stdout
-        .output()
-        .unwrap();
+        .arg(ir_path.to_str().unwrap())
+        .arg("--quiet=true")
+        .arg("--toggle-sample-count=4")
+        .arg("--toggle-seed=42");
+    // Pass through RUST_LOG if present
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        command.env("RUST_LOG", rust_log);
+    }
+    let ir2gates_output2 = command.output().unwrap();
+
+    log::debug!(
+        "ir2gates stdout:\n{}",
+        String::from_utf8_lossy(&ir2gates_output2.stdout)
+    );
+    log::debug!(
+        "ir2gates stderr:\n{}",
+        String::from_utf8_lossy(&ir2gates_output2.stderr)
+    );
 
     assert!(
         ir2gates_output2.status.success(),
@@ -943,6 +973,7 @@ fn f(x: u8) -> u8 { x + x - x }
 
 #[test]
 fn test_ir2gates_quiet_json_output() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let dslx = "fn main(a: u32, b: u32) -> u32 { a & b }";
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("main.x");
@@ -964,51 +995,64 @@ fn test_ir2gates_quiet_json_output() {
     std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
 
     // ir2gates --quiet
-    let ir2gates_output = std::process::Command::new(command_path)
+    let mut command = std::process::Command::new(command_path);
+    command
         .arg("ir2gates")
         .arg(ir_path.to_str().unwrap())
         .arg("--quiet=true")
-        .arg("--toggle-sample-count=4")
-        .arg("--toggle-seed=42")
-        .output()
-        .unwrap();
+        .arg("--toggle-sample-count=32")
+        .arg("--toggle-seed=42");
+    // Pass through RUST_LOG if present
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        command.env("RUST_LOG", rust_log);
+    }
+    let ir2gates_output = command.output().unwrap();
+
+    log::debug!(
+        "ir2gates stdout:\n{}",
+        String::from_utf8_lossy(&ir2gates_output.stdout)
+    );
+    log::debug!(
+        "ir2gates stderr:\n{}",
+        String::from_utf8_lossy(&ir2gates_output.stderr)
+    );
+
     assert!(ir2gates_output.status.success());
 
     let stdout = String::from_utf8_lossy(&ir2gates_output.stdout);
     // Try to parse as JSON
     let json: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
+    log::info!("json: {}", json);
     // Check standard stats
     assert_eq!(json["deepest_path"], 2);
     assert_eq!(json["fanout_histogram"].to_string(), "{\"1\":64}");
     assert_eq!(json["live_nodes"], 96);
-    // Check toggle stats fields exist and are numbers
-    assert!(
-        json["toggle_output_toggles"].is_number(),
-        "toggle_output_toggles missing or not a number"
-    );
-    assert!(
-        json["toggle_input_toggles"].is_number(),
-        "toggle_input_toggles missing or not a number"
-    );
-    assert!(
-        json["toggle_transitions"].is_number(),
-        "toggle_transitions missing or not a number"
-    );
+
     // Check expected values for this simple AND circuit
-    assert_eq!(json["toggle_transitions"], 3);
-    assert!(
-        json["toggle_output_toggles"].as_u64().unwrap() > 0,
-        "toggle_output_toggles should be nonzero"
+    use std::collections::HashMap;
+    let expected_toggle_stats: HashMap<&str, i32> = [
+        ("gate_output_toggles", 363),
+        ("gate_input_toggles", 980),
+        ("primary_input_toggles", 980),
+        ("primary_output_toggles", 363),
+    ]
+    .iter()
+    .cloned()
+    .collect();
+    // Check that we covered all the keys in the toggle object.
+    assert_eq!(
+        json["toggle_stats"].as_object().unwrap().len(),
+        expected_toggle_stats.len()
     );
-    assert!(
-        json["toggle_input_toggles"].as_u64().unwrap() > 0,
-        "toggle_input_toggles should be nonzero"
-    );
+    for (key, value) in expected_toggle_stats.iter() {
+        assert_eq!(json["toggle_stats"][key].as_i64().unwrap(), *value as i64);
+    }
 }
 
 #[test]
 fn test_ir2gates_quiet_json_output_no_toggle() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let dslx = "fn main(a: u32, b: u32) -> u32 { a & b }";
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("main.x");
@@ -1030,33 +1074,40 @@ fn test_ir2gates_quiet_json_output_no_toggle() {
     std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
 
     // ir2gates --quiet (no toggle flag)
-    let ir2gates_output = std::process::Command::new(command_path)
+    let mut command = std::process::Command::new(command_path);
+    command
         .arg("ir2gates")
         .arg(ir_path.to_str().unwrap())
-        .arg("--quiet=true")
-        .output()
-        .unwrap();
+        .arg("--quiet=true");
+    // Pass through RUST_LOG if present
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        command.env("RUST_LOG", rust_log);
+    }
+    let ir2gates_output = command.output().unwrap();
+
+    log::debug!(
+        "ir2gates stdout:\n{}",
+        String::from_utf8_lossy(&ir2gates_output.stdout)
+    );
+    log::debug!(
+        "ir2gates stderr:\n{}",
+        String::from_utf8_lossy(&ir2gates_output.stderr)
+    );
+
     assert!(ir2gates_output.status.success());
 
     let stdout = String::from_utf8_lossy(&ir2gates_output.stdout);
     // Try to parse as JSON
     let json: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
+    log::info!("json: {}", json);
     // Check standard stats
     assert_eq!(json["deepest_path"], 2);
     assert_eq!(json["fanout_histogram"].to_string(), "{\"1\":64}");
     assert_eq!(json["live_nodes"], 96);
     // Check toggle stats fields exist and are null
     assert!(
-        json["toggle_output_toggles"].is_null(),
-        "toggle_output_toggles should be null"
-    );
-    assert!(
-        json["toggle_input_toggles"].is_null(),
-        "toggle_input_toggles should be null"
-    );
-    assert!(
-        json["toggle_transitions"].is_null(),
-        "toggle_transitions should be null"
+        json["toggle_stats"].is_null(),
+        "toggle_stats should be null"
     );
 }

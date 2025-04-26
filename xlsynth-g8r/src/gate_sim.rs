@@ -20,6 +20,7 @@ pub enum Collect {
     None,
     Tagged,
     All,
+    AllWithInputs,
 }
 
 pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimResult {
@@ -31,7 +32,7 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
     } else {
         None
     };
-    let mut all_values = if collect == Collect::All {
+    let mut all_values = if collect == Collect::All || collect == Collect::AllWithInputs {
         Some(BitVec::repeat(false, gate_fn.gates.len()))
     } else {
         None
@@ -45,10 +46,12 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
         }
     }
 
-    // Traverse the AIG nodes in post-order. Post-order traversal ensures that
-    // when we visit a node, its children (inputs) have already been visited
-    // and their values computed and stored in the environment.
-    for operand in gate_fn.post_order_operands(true) {
+    // Choose whether to discard inputs based on collect mode
+    let discard_inputs = match collect {
+        Collect::AllWithInputs => false,
+        _ => true,
+    };
+    for operand in gate_fn.post_order_operands(discard_inputs) {
         // Calculate the final boolean value for this specific operand
         let final_value: bool = match gate_fn.get(operand.node) {
             AigNode::Input { .. } => {

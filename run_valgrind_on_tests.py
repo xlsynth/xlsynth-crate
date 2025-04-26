@@ -40,7 +40,14 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
         "filter_out": ["ir_interpret_array_values"],
         "all_filtered_ok": True,
     },
-    "sample_usage": {"filter_out": ["test_validate_fail"]},
+    "sample_usage": {
+        "filter_out": [
+            "test_validate_fail",
+            # Added based on moderate run time (>5s)
+            "tests::test_validate_use",
+            "tests::test_validate_use_popcount",
+        ]
+    },
     "sv_bridge_test": {
         "filter_out": ["test_sv_bridge_structure_zoo"],
         "all_filtered_ok": True,
@@ -62,6 +69,12 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             "test_eqz_ir_to_gates::bit_count_1_fold_true",
             "test_eqz_ir_to_gates::bit_count_4_fold_true",
         ],
+    },
+    "invoke_test": {
+        "filter_out": [
+            # Added based on moderate run time (>20s)
+            "test_ir2gates_determinism",
+        ]
     },
     # Added filter for slow tests (~100s)
     "gate_sim_vs_ir_interp": {
@@ -99,6 +112,22 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             "ir2gate_utils::tests::test_gatify_add_carry_select::_8_bit_2_partition",
             "ir2gate_utils::tests::test_gatify_add_carry_select::_4_bit_2_partition",
             "fraig::tests::test_fraig_optimize_bf16_mul",
+            # Added based on very long runs (>100s)
+            "fraig::tests::test_equiv_class_with_equal_depth_and_opposite_polarity_canonicalizes",
+            "ir2gate_utils::tests::test_gatify_ule::_4_expects",
+            "get_summary_stats::tests::test_get_summary_stats_bf16_mul",
+            "ir2gate_utils::tests::test_gatify_add_carry_select::_8_bit_3_partition",
+            "ir2gate_utils::tests::test_gatify_ule::_6_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_7_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_8_expects",
+            "count_toggles::integration_tests::test_bf16_adder_toggle_counting",
+            "ir2gate_utils::tests::test_gatify_ule::_3_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_1_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_2_expects",
+            "ir2gate_utils::tests::test_gatify_ule::_5_expects",
+            "bulk_replace::tests::test_replace_node_with_constant",
+            "get_summary_stats::tests::test_get_summary_stats_bf16_add",
+            "count_toggles::integration_tests::test_bf16_mul_toggle_counting",
         ]
     },
 }
@@ -313,6 +342,7 @@ def run_valgrind(
         termcolor.cprint(
             f"Timeout expired running valgrind on {os.path.basename(exe)}", "red"
         )
+        termcolor.cprint(f"Command: {' '.join(valgrind_command)}", "red")
         raise subprocess.CalledProcessError(
             999, e.cmd, output=e.stdout, stderr=e.stderr
         ) from e
@@ -321,6 +351,9 @@ def run_valgrind(
             f"Error running valgrind on {os.path.basename(exe)}: {e}",
             "red",
             file=sys.stderr,
+        )
+        termcolor.cprint(
+            f"Command: {' '.join(valgrind_command)}", "red", file=sys.stderr
         )
         if e.stdout:
             termcolor.cprint("--- stdout ---", "red", file=sys.stderr)
@@ -548,21 +581,43 @@ def run_single_test_binary(
                 expected_count = 0
 
             # Pass expect_tests flag to run_valgrind
-            durations, parsed_count = run_valgrind(
-                exe,
-                cwd,
-                suppression_path,
-                expect_tests=(expected_count > 0),
-                demangle=demangle,
-            )
-            # Assign the result tuple including the calculated expected count
-            result = (durations, parsed_count, expected_count)
+            try:
+                durations, parsed_count = run_valgrind(
+                    exe,
+                    cwd,
+                    suppression_path,
+                    expect_tests=(expected_count > 0),
+                    demangle=demangle,
+                )
+                # Assign the result tuple including the calculated expected count
+                result = (durations, parsed_count, expected_count)
+            except Exception:
+                termcolor.cprint(
+                    f"\n[ERROR] Exception while running valgrind on {basename}",
+                    "red",
+                    file=sys.stderr,
+                )
+                termcolor.cprint(f"Command: {exe}", "red", file=sys.stderr)
+                import traceback
+
+                traceback.print_exc()
+                raise
 
         termcolor.cprint(f"Finished: {basename}", "green")
         return result
 
     except (subprocess.CalledProcessError, ValueError, subprocess.TimeoutExpired) as e:
         termcolor.cprint(f"Failed:   {basename}", "red")
+        termcolor.cprint(f"[ERROR] Exception details: {e}", "red", file=sys.stderr)
+        if hasattr(e, "stdout") and e.stdout:
+            termcolor.cprint("--- stdout ---", "red", file=sys.stderr)
+            print(e.stdout, file=sys.stderr)
+        if hasattr(e, "stderr") and e.stderr:
+            termcolor.cprint("--- stderr ---", "red", file=sys.stderr)
+            print(e.stderr, file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
         return e
 
 
