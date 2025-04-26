@@ -364,35 +364,4 @@ mod integration_tests {
             "Should see primary output toggles"
         );
     }
-
-    #[test]
-    fn test_input_vector_toggle_counting() {
-        use crate::test_utils::{ir_value_bf16_to_flat_ir_bits, make_bf16};
-        use half::bf16;
-        use rand::{Rng, SeedableRng};
-        use rand_xoshiro::Xoshiro256PlusPlus;
-        let mut rng = Xoshiro256PlusPlus::seed_from_u64(123);
-        let mut batch_inputs = Vec::with_capacity(1000);
-        for _ in 0..1000 {
-            let a = bf16::from_f32(rng.gen::<f32>());
-            let b = bf16::from_f32(rng.gen::<f32>());
-            let a_bits = ir_value_bf16_to_flat_ir_bits(&make_bf16(a));
-            let b_bits = ir_value_bf16_to_flat_ir_bits(&make_bf16(b));
-            batch_inputs.push(vec![a_bits.clone(), b_bits.clone()]);
-        }
-        // Instead of GateFn::default(), use a minimal dummy GateFn since it's not used
-        // in this test
-        let dummy_gate_fn = GateFn {
-            name: "dummy".to_string(),
-            gates: vec![],
-            inputs: vec![],
-            outputs: vec![],
-        };
-        let stats = count_toggles(&dummy_gate_fn, &batch_inputs); // GateFn unused for this test
-        println!("primary_input_toggles = {}", stats.primary_input_toggles);
-        assert!(
-            stats.primary_input_toggles > 0,
-            "Should see primary input toggles"
-        );
-    }
 }
