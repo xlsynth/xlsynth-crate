@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::min;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use rand::SeedableRng;
@@ -130,6 +131,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
 
     // Compute fanout histogram and include in summary stats
     let hist = fanout_histogram(&gate_fn);
+    let hist_sorted: BTreeMap<usize, usize> = hist.clone().into_iter().collect();
 
     // Compute toggle stats if requested
     let (toggle_stats, toggle_transitions) = if options.toggle_sample_count > 0 {
@@ -160,7 +162,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     let summary_stats = Ir2GatesSummaryStats {
         live_nodes: live_nodes.len(),
         deepest_path: depth_stats.deepest_path.len(),
-        fanout_histogram: hist.clone(),
+        fanout_histogram: hist_sorted,
         toggle_stats,
         toggle_transitions,
     };

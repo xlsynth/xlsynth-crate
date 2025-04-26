@@ -5,13 +5,13 @@ use crate::fanout::fanout_histogram;
 use crate::gate::{self, AigNode};
 use crate::use_count::get_id_to_use_count;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct SummaryStats {
     pub live_nodes: usize,
     pub deepest_path: usize,
-    pub fanout_histogram: HashMap<usize, usize>,
+    pub fanout_histogram: BTreeMap<usize, usize>,
 }
 
 // Add structured return type for gate depth info.
@@ -26,7 +26,7 @@ pub struct GateDepthStats {
 pub struct Ir2GatesSummaryStats {
     pub live_nodes: usize,
     pub deepest_path: usize,
-    pub fanout_histogram: HashMap<usize, usize>,
+    pub fanout_histogram: BTreeMap<usize, usize>,
     pub toggle_stats: Option<ToggleStats>,
     pub toggle_transitions: Option<usize>,
 }
@@ -130,10 +130,11 @@ pub fn get_summary_stats(gate_fn: &gate::GateFn) -> SummaryStats {
     let stats = get_gate_depth(&gate_fn, &live_nodes);
 
     let hist = fanout_histogram(gate_fn);
+    let hist_sorted: BTreeMap<usize, usize> = hist.into_iter().collect();
     let summary_stats = SummaryStats {
         live_nodes: live_nodes.len(),
         deepest_path: stats.deepest_path.len(),
-        fanout_histogram: hist,
+        fanout_histogram: hist_sorted,
     };
     summary_stats
 }
@@ -144,7 +145,7 @@ mod tests {
     use crate::{dce::dce, test_utils::*};
     use pretty_assertions::assert_eq;
 
-    fn fanout_histogram_to_string(hist: &HashMap<usize, usize>) -> String {
+    fn fanout_histogram_to_string(hist: &BTreeMap<usize, usize>) -> String {
         let mut sorted_hist = hist.iter().collect::<Vec<_>>();
         sorted_hist.sort_by_key(|(k, _)| *k);
         sorted_hist
