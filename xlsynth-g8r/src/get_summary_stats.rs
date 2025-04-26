@@ -26,8 +26,10 @@ pub struct Ir2GatesSummaryStats {
     pub live_nodes: usize,
     pub deepest_path: usize,
     pub fanout_histogram: HashMap<usize, usize>,
-    pub toggle_output_toggles: Option<usize>,
-    pub toggle_input_toggles: Option<usize>,
+    pub gate_output_toggles: Option<usize>,
+    pub gate_input_toggles: Option<usize>,
+    pub primary_input_toggles: Option<usize>,
+    pub primary_output_toggles: Option<usize>,
     pub toggle_transitions: Option<usize>,
 }
 
