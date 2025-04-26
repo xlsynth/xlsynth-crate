@@ -1028,41 +1028,26 @@ fn test_ir2gates_quiet_json_output() {
     assert_eq!(json["deepest_path"], 2);
     assert_eq!(json["fanout_histogram"].to_string(), "{\"1\":64}");
     assert_eq!(json["live_nodes"], 96);
-    // Check toggle stats fields exist and are numbers
-    assert!(
-        json["gate_output_toggles"].is_number(),
-        "gate_output_toggles missing or not a number"
-    );
-    assert!(
-        json["gate_input_toggles"].is_number(),
-        "gate_input_toggles missing or not a number"
-    );
-    assert!(
-        json["primary_input_toggles"].is_number(),
-        "primary_input_toggles missing or not a number"
-    );
-    assert!(
-        json["primary_output_toggles"].is_number(),
-        "primary_output_toggles missing or not a number"
-    );
+
     // Check expected values for this simple AND circuit
-    assert_eq!(json["gate_output_toggles"], 31);
-    assert!(
-        json["gate_output_toggles"].as_u64().unwrap() > 0,
-        "gate_output_toggles should be nonzero"
+    use std::collections::HashMap;
+    let expected_toggle_stats: HashMap<&str, i32> = [
+        ("gate_output_toggles", 363),
+        ("gate_input_toggles", 980),
+        ("primary_input_toggles", 980),
+        ("primary_output_toggles", 363),
+    ]
+    .iter()
+    .cloned()
+    .collect();
+    // Check that we covered all the keys in the toggle object.
+    assert_eq!(
+        json["toggle_stats"].as_object().unwrap().len(),
+        expected_toggle_stats.len()
     );
-    assert!(
-        json["gate_input_toggles"].as_u64().unwrap() > 0,
-        "gate_input_toggles should be nonzero"
-    );
-    assert!(
-        json["primary_input_toggles"].as_u64().unwrap() > 0,
-        "primary_input_toggles should be nonzero"
-    );
-    assert!(
-        json["primary_output_toggles"].as_u64().unwrap() > 0,
-        "primary_output_toggles should be nonzero"
-    );
+    for (key, value) in expected_toggle_stats.iter() {
+        assert_eq!(json["toggle_stats"][key].as_i64().unwrap(), *value as i64);
+    }
 }
 
 #[test]
@@ -1122,19 +1107,7 @@ fn test_ir2gates_quiet_json_output_no_toggle() {
     assert_eq!(json["live_nodes"], 96);
     // Check toggle stats fields exist and are null
     assert!(
-        json["gate_output_toggles"].is_null(),
-        "gate_output_toggles should be null"
-    );
-    assert!(
-        json["gate_input_toggles"].is_null(),
-        "gate_input_toggles should be null"
-    );
-    assert!(
-        json["primary_input_toggles"].is_null(),
-        "primary_input_toggles should be null"
-    );
-    assert!(
-        json["primary_output_toggles"].is_null(),
-        "primary_output_toggles should be null"
+        json["toggle_stats"].is_null(),
+        "toggle_stats should be null"
     );
 }

@@ -161,10 +161,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         live_nodes: live_nodes.len(),
         deepest_path: depth_stats.deepest_path.len(),
         fanout_histogram: hist.clone(),
-        gate_output_toggles: toggle_stats.as_ref().map(|s| s.gate_output_toggles),
-        gate_input_toggles: toggle_stats.as_ref().map(|s| s.gate_input_toggles),
-        primary_input_toggles: toggle_stats.as_ref().map(|s| s.primary_input_toggles),
-        primary_output_toggles: toggle_stats.as_ref().map(|s| s.primary_output_toggles),
+        toggle_stats,
         toggle_transitions,
     };
 

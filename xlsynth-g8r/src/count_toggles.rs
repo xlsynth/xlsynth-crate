@@ -1,10 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::AigBitVector;
 use crate::gate::GateFn;
 use crate::gate_sim::{eval, Collect};
 use bitvec::vec::BitVec;
+use serde::Serialize;
 use xlsynth::IrBits;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ToggleStats {
+    /// The number of toggles at all gate outputs, where a gate is an AND2 node
+    /// in the graph.
+    pub gate_output_toggles: usize,
+
+    /// The number of toggles at all gate inputs, where a gate is an AND2 node
+    /// in the graph.
+    pub gate_input_toggles: usize,
+
+    /// The number of toggles in the raw batch input vectors (primary inputs).
+    pub primary_input_toggles: usize,
+
+    /// The number of toggles at the circuit's output pins only.
+    pub primary_output_toggles: usize,
+}
 
 /// Counts toggles at gate outputs, primary inputs, and in the raw batch input
 /// vectors for a batch of input vectors.
@@ -151,27 +168,13 @@ pub fn count_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> ToggleSt
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToggleStats {
-    /// The number of toggles at all gate outputs, where a gate is an AND2 node
-    /// in the graph.
-    pub gate_output_toggles: usize,
-
-    /// The number of toggles at all gate inputs, where a gate is an AND2 node
-    /// in the graph.
-    pub gate_input_toggles: usize,
-
-    /// The number of toggles in the raw batch input vectors (primary inputs).
-    pub primary_input_toggles: usize,
-
-    /// The number of toggles at the circuit's output pins only.
-    pub primary_output_toggles: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::{
+        gate::AigBitVector,
+        gate_builder::{GateBuilder, GateBuilderOptions},
+    };
     use xlsynth::IrBits;
 
     #[test]
