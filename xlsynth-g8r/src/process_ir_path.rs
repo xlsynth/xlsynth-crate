@@ -18,7 +18,7 @@ use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate;
 use crate::get_summary_stats::get_gate_depth;
 use crate::ir2gate;
-use crate::logical_effort::compute_critical_path_delay;
+use crate::logical_effort::compute_logical_effort_min_delay;
 use crate::use_count::get_id_to_use_count;
 use crate::xls_ir::ir;
 use crate::xls_ir::ir_parser;
@@ -30,7 +30,7 @@ pub struct Ir2GatesSummaryStats {
     pub fanout_histogram: BTreeMap<usize, usize>,
     pub toggle_stats: Option<count_toggles::ToggleStats>,
     pub toggle_transitions: Option<usize>,
-    pub logical_effort_critical_path_delay: Option<f64>,
+    pub logical_effort_deepest_path_min_delay: f64,
 }
 
 pub struct Options {
@@ -120,7 +120,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     let depth_stats = get_gate_depth(&gate_fn, &live_nodes);
 
     // Compute critical path delay
-    let logical_effort_critical_path_delay = Some(compute_critical_path_delay(&gate_fn));
+    let logical_effort_deepest_path_min_delay = compute_logical_effort_min_delay(&gate_fn);
 
     // Compute fanout histogram and include in summary stats
     let hist = fanout_histogram(&gate_fn);
@@ -158,7 +158,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         fanout_histogram: hist_sorted,
         toggle_stats,
         toggle_transitions,
-        logical_effort_critical_path_delay,
+        logical_effort_deepest_path_min_delay,
     };
 
     if options.quiet {
@@ -178,12 +178,10 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     }
 
     // Print the critical path delay
-    if let Some(delay) = logical_effort_critical_path_delay {
-        println!(
-            "== Logical effort critical path delay: {:.4} (FO4 units)",
-            delay
-        );
-    }
+    println!(
+        "== Logical effort deepest path min delay: {:.4} (FO4 units)",
+        logical_effort_deepest_path_min_delay
+    );
 
     // ANSI histogram printing with buckets of width 5:
     let bucket_width = 5;
