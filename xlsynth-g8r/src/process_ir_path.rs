@@ -120,7 +120,8 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     let depth_stats = get_gate_depth(&gate_fn, &live_nodes);
 
     // Compute critical path delay
-    let logical_effort_deepest_path_min_delay = compute_logical_effort_min_delay(&gate_fn);
+    let logical_effort_deepest_path_min_delay =
+        compute_logical_effort_min_delay(&gate_fn, &crate::logical_effort::Options::default());
 
     // Compute fanout histogram and include in summary stats
     let hist = fanout_histogram(&gate_fn);
