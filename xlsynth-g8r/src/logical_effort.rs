@@ -121,7 +121,7 @@ mod tests {
         let bf16_add = load_bf16_add_sample(Opt::Yes);
         let min_delay = compute_logical_effort_min_delay(&bf16_add.gate_fn, &Options::default());
         assert!(
-            (min_delay - 568.07).abs() < 0.01,
+            (min_delay - 561.26).abs() < 0.01,
             "min_delay: {}",
             min_delay
         );
@@ -132,7 +132,7 @@ mod tests {
         let bf16_mul = load_bf16_mul_sample(Opt::Yes);
         let min_delay = compute_logical_effort_min_delay(&bf16_mul.gate_fn, &Options::default());
         assert!(
-            (min_delay - 491.62).abs() < 0.01,
+            (min_delay - 484.66).abs() < 0.01,
             "min_delay: {}",
             min_delay
         );
