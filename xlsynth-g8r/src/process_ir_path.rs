@@ -16,31 +16,21 @@ use crate::fraig;
 use crate::fraig::IterationBounds;
 use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate;
-use crate::get_summary_stats::{get_gate_depth, Ir2GatesSummaryStats};
+use crate::get_summary_stats::get_gate_depth;
 use crate::ir2gate;
+use crate::logical_effort::compute_logical_effort_min_delay;
 use crate::use_count::get_id_to_use_count;
 use crate::xls_ir::ir;
 use crate::xls_ir::ir_parser;
 
-fn collect_op_frequencies(f: &ir::Fn) -> HashMap<String, usize> {
-    let mut op_freqs = HashMap::new();
-    for node in f.nodes.iter() {
-        let op = node.to_signature_string(f);
-        *op_freqs.entry(op).or_insert(0) += 1;
-    }
-    op_freqs
-}
-
-fn print_op_freqs(ir_top: &ir::Fn) {
-    let op_freqs = collect_op_frequencies(&ir_top);
-    println!("Op frequencies:");
-    let mut op_freqs_vec: Vec<_> = op_freqs.iter().collect();
-    op_freqs_vec.sort_by(|(op_a, count_a), (op_b, count_b)| {
-        count_b.cmp(count_a).then_with(|| op_a.cmp(op_b))
-    });
-    for (op, freq) in op_freqs_vec.iter() {
-        println!("  {:4} :: {}", freq, op);
-    }
+#[derive(Debug, serde::Serialize)]
+pub struct Ir2GatesSummaryStats {
+    pub live_nodes: usize,
+    pub deepest_path: usize,
+    pub fanout_histogram: BTreeMap<usize, usize>,
+    pub toggle_stats: Option<count_toggles::ToggleStats>,
+    pub toggle_transitions: Option<usize>,
+    pub logical_effort_deepest_path_min_delay: f64,
 }
 
 pub struct Options {
@@ -129,6 +119,10 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
 
     let depth_stats = get_gate_depth(&gate_fn, &live_nodes);
 
+    // Compute critical path delay
+    let logical_effort_deepest_path_min_delay =
+        compute_logical_effort_min_delay(&gate_fn, &crate::logical_effort::Options::default());
+
     // Compute fanout histogram and include in summary stats
     let hist = fanout_histogram(&gate_fn);
     let hist_sorted: BTreeMap<usize, usize> = hist.clone().into_iter().collect();
@@ -165,6 +159,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         fanout_histogram: hist_sorted,
         toggle_stats,
         toggle_transitions,
+        logical_effort_deepest_path_min_delay,
     };
 
     if options.quiet {
@@ -182,6 +177,12 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
             id_to_use_count.get(&gate_ref).unwrap_or(&0)
         );
     }
+
+    // Print the critical path delay
+    println!(
+        "== Logical effort deepest path min delay: {:.4} (FO4 units)",
+        logical_effort_deepest_path_min_delay
+    );
 
     // ANSI histogram printing with buckets of width 5:
     let bucket_width = 5;
@@ -246,4 +247,26 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     }
 
     summary_stats
+}
+
+// Add back print_op_freqs if missing
+fn collect_op_frequencies(f: &ir::Fn) -> HashMap<String, usize> {
+    let mut op_freqs = HashMap::new();
+    for node in f.nodes.iter() {
+        let op = node.to_signature_string(f);
+        *op_freqs.entry(op).or_insert(0) += 1;
+    }
+    op_freqs
+}
+
+fn print_op_freqs(ir_top: &ir::Fn) {
+    let op_freqs = collect_op_frequencies(&ir_top);
+    println!("Op frequencies:");
+    let mut op_freqs_vec: Vec<_> = op_freqs.iter().collect();
+    op_freqs_vec.sort_by(|(op_a, count_a), (op_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| op_a.cmp(op_b))
+    });
+    for (op, freq) in op_freqs_vec.iter() {
+        println!("  {:4} :: {}", freq, op);
+    }
 }

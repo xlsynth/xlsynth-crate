@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::count_toggles::ToggleStats;
 use crate::fanout::fanout_histogram;
 use crate::gate::{self, AigNode};
 use crate::use_count::get_id_to_use_count;
@@ -20,15 +19,6 @@ pub struct GateDepthStats {
     pub depth_to_count: HashMap<usize, usize>,
     pub deepest_path: Vec<gate::AigRef>,
     pub ref_to_depth: HashMap<gate::AigRef, usize>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct Ir2GatesSummaryStats {
-    pub live_nodes: usize,
-    pub deepest_path: usize,
-    pub fanout_histogram: BTreeMap<usize, usize>,
-    pub toggle_stats: Option<ToggleStats>,
-    pub toggle_transitions: Option<usize>,
 }
 
 /// Returns:

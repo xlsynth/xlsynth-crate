@@ -229,6 +229,11 @@ impl GateBuilder {
         self.add_and_binary(lhs_n, rhs_n)
     }
 
+    pub fn add_nand_binary(&mut self, lhs: AigOperand, rhs: AigOperand) -> AigOperand {
+        let and_result = self.add_and_binary(lhs, rhs);
+        self.add_not(and_result)
+    }
+
     pub fn add_and_nary(
         &mut self,
         args: &[AigOperand],
