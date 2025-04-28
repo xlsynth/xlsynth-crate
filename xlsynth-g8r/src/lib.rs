@@ -24,6 +24,7 @@ pub mod ir2gate;
 pub mod ir2gate_utils;
 pub mod ir_value_utils;
 pub mod liberty;
+pub mod logical_effort;
 pub mod process_ir_path;
 pub mod propose_equiv;
 pub mod test_utils;
