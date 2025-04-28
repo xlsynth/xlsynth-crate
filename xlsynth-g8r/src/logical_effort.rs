@@ -82,6 +82,7 @@ mod tests {
 
     use super::*;
 
+    /// Sample courtesy https://my.eng.utah.edu/~cs6710/slides/cs6710-log-effx2.pdf
     #[test]
     fn test_three_layer_and_graph() {
         let _ = env_logger::builder().is_test(true).try_init();
