@@ -16,7 +16,10 @@ fn get_fanout_map(gate_fn: &GateFn) -> HashMap<AigRef, usize> {
             _ => {}
         }
     }
-    fanout_map.insert(AigRef { id: 0 }, 0);
+
+    // Make sure literal node does not have a meaningful fanout.
+    fanout_map.remove(&AigRef { id: 0 });
+
     fanout_map
 }
 
