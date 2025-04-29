@@ -8,6 +8,8 @@ use bitvec::vec::BitVec;
 use xlsynth::IrBits;
 
 use crate::gate::{AigNode, AigOperand, GateFn};
+use crate::ir_value_utils::ir_bits_from_lsb_is_0;
+use crate::ir_value_utils::ir_bits_from_msb_is_0;
 
 pub struct GateSimResult {
     pub outputs: Vec<IrBits>,
@@ -121,7 +123,7 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
         for bit in output.bit_vector.iter_lsb_to_msb() {
             bits.push(*env.get(bit).unwrap());
         }
-        outputs.push(crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits));
+        outputs.push(ir_bits_from_lsb_is_0(&bits));
     }
     GateSimResult {
         outputs,
