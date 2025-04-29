@@ -2,10 +2,8 @@
 
 use crate::gate::GateFn;
 use crate::gate_sim::{eval, Collect};
-use crate::ir_value_utils::ir_bits_from_bitvec_msb_is_0;
 use bitvec::vec::BitVec;
 use serde::Serialize;
-use xlsynth::ir_value::IrFormatPreference;
 use xlsynth::IrBits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,27 +53,6 @@ pub fn count_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> ToggleSt
         all_values_vec.push(all_values);
     }
 
-    // After collecting all_values_vec, print the values at all primary input gates
-    // for the first 3 transitions
-    if log::log_enabled!(log::Level::Debug) {
-        for (i, values) in all_values_vec.iter().enumerate().take(3) {
-            let ir_bits = ir_bits_from_bitvec_msb_is_0(&values);
-            log::debug!(
-                "Transition {}: input gate values: {}",
-                i,
-                ir_bits.to_string_fmt(IrFormatPreference::Binary, false)
-            );
-        }
-    }
-
-    // For each gate, print its type and input operand info
-    for (gate_idx, gate) in gate_fn.gates.iter().enumerate() {
-        log::debug!("Gate {}: {:?}", gate_idx, gate);
-        for operand in gate.get_operands() {
-            let node = &gate_fn.gates[operand.node.id];
-            log::debug!("  Input operand node {}: {:?}", operand.node.id, node);
-        }
-    }
     // For each consecutive pair, count toggles at all gate outputs (AND2 nodes
     // only)
     let and2_indices: Vec<usize> = gate_fn
