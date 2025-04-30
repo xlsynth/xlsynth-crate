@@ -356,6 +356,10 @@ fn main() {
                 .add_bool_arg("fold", "Fold the gate representation")
                 .add_bool_arg("hash", "Hash the gate representation")
                 .add_bool_arg("fraig", "Run fraig optimization")
+                .add_bool_arg(
+                    "compute_graph_logical_effort",
+                    "Compute the graph logical effort worst case delay",
+                )
                 .arg(
                     clap::Arg::new("toggle_sample_count")
                         .long("toggle-sample-count")
