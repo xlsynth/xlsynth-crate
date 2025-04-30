@@ -128,6 +128,10 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             "bulk_replace::tests::test_replace_node_with_constant",
             "get_summary_stats::tests::test_get_summary_stats_bf16_add",
             "count_toggles::integration_tests::test_bf16_mul_toggle_counting",
+            # Exclude additional slow tests as requested
+            "logical_effort::tests::test_compute_logical_effort_min_delay_bf16_mul",
+            "logical_effort::tests::test_compute_logical_effort_min_delay_bf16_add",
+            "propose_equiv::tests::test_propose_equiv_graph_with_redundancies",
         ]
     },
 }

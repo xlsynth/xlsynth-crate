@@ -52,32 +52,7 @@ pub fn count_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> ToggleSt
             .expect("Collect::All should produce all_values");
         all_values_vec.push(all_values);
     }
-    // After collecting all_values_vec, print the values at all primary input gates
-    // for the first 3 transitions
-    let num_input_gates = gate_fn
-        .inputs
-        .iter()
-        .map(|input| input.bit_vector.get_bit_count())
-        .sum::<usize>();
-    for (i, values) in all_values_vec.iter().enumerate().take(3) {
-        let mut input_bits = Vec::new();
-        for gate_idx in 0..num_input_gates {
-            input_bits.push(if values[gate_idx] { '1' } else { '0' });
-        }
-        log::debug!(
-            "Transition {}: input gate values: {}",
-            i,
-            input_bits.iter().collect::<String>()
-        );
-    }
-    // For each gate, print its type and input operand info
-    for (gate_idx, gate) in gate_fn.gates.iter().enumerate() {
-        log::debug!("Gate {}: {:?}", gate_idx, gate);
-        for operand in gate.get_operands() {
-            let node = &gate_fn.gates[operand.node.id];
-            log::debug!("  Input operand node {}: {:?}", operand.node.id, node);
-        }
-    }
+
     // For each consecutive pair, count toggles at all gate outputs (AND2 nodes
     // only)
     let and2_indices: Vec<usize> = gate_fn

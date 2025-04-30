@@ -265,7 +265,7 @@ mod tests {
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_mul");
         assert_eq!(results.did_converge, DidConverge::Yes(2));
         assert_eq!(results.original_nodes, 1172);
-        assert_eq!(results.optimized_nodes, 1147);
+        assert_eq!(results.optimized_nodes, 1146);
         assert_eq!(results.original_depth, 109);
         assert_eq!(results.optimized_depth, 105);
     }
@@ -276,9 +276,9 @@ mod tests {
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_add");
         assert_eq!(results.did_converge, DidConverge::Yes(4));
         assert_eq!(results.original_nodes, 1292);
-        assert_eq!(results.optimized_nodes, 1125);
+        assert_eq!(results.optimized_nodes, 1095);
         assert_eq!(results.original_depth, 130);
-        assert_eq!(results.optimized_depth, 122);
+        assert_eq!(results.optimized_depth, 120);
     }
 
     #[test]

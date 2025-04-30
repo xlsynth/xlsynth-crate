@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 
+use crate::ir_value_utils::ir_bits_from_bitvec_lsb_is_0;
 use bitvec::vec::BitVec;
-use xlsynth::{IrBits, IrValue};
+use xlsynth::IrBits;
 
 use crate::topo::post_order_operands;
 use crate::xls_ir::ir;
@@ -336,37 +337,24 @@ pub struct GateFn {
     pub gates: Vec<AigNode>,
 }
 
-fn ir_bits_from_bitvec(bv: BitVec) -> IrBits {
-    let mut bv_str: String = format!("bits[{}]:0b", bv.len());
-    for b in bv {
-        bv_str.push(if b { '1' } else { '0' });
-    }
-    IrValue::parse_typed(&bv_str).unwrap().to_bits().unwrap()
-}
-
 impl GateFn {
     /// Collapses a sparse mapping of AigRefs to boolean values into a vector of
     /// IrBits that can be fed to gate / IR simulation as input stimulus.
     pub fn map_to_inputs(&self, map: HashMap<AigRef, bool>) -> Vec<IrBits> {
-        let mut bitvecs: Vec<BitVec> = self
-            .inputs
-            .iter()
-            .map(|i| BitVec::repeat(false, i.get_bit_count()))
-            .collect();
-        for (input_num, input) in self.inputs.iter().enumerate() {
-            for bit_index in 0..input.get_bit_count() {
-                let aig_ref = input.bit_vector.get_lsb(bit_index).non_negated().unwrap();
+        let mut results: Vec<IrBits> = Vec::new();
+        for input in self.inputs.iter() {
+            let mut bitvec = BitVec::new();
+            for bit in input.bit_vector.iter_lsb_to_msb() {
+                let aig_ref = bit.non_negated().unwrap();
                 let bit_value = map.get(&aig_ref).expect(&format!(
                     "all input gates should be present in provided sparse map; missing: {:?}",
                     aig_ref
                 ));
-                bitvecs[input_num].set(bit_index, *bit_value);
+                bitvec.push(*bit_value);
             }
+            results.push(ir_bits_from_bitvec_lsb_is_0(&bitvec));
         }
-        bitvecs
-            .into_iter()
-            .map(|bv| ir_bits_from_bitvec(bv))
-            .collect()
+        results
     }
 
     pub fn get_flat_type(&self) -> ir::FunctionType {
@@ -602,5 +590,58 @@ impl GateFn {
     /// Checks that the given AigOperand's node is in-bounds for this GateFn.
     pub fn validate_operand(&self, operand: AigOperand) {
         self.validate_ref(operand.node);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use std::collections::HashMap;
+    use xlsynth::IrBits;
+
+    #[test]
+    fn test_map_to_inputs_single_input() {
+        // Use GateBuilder to create a single 4-bit input
+        let mut gb = GateBuilder::new("test_fn".to_string(), GateBuilderOptions::opt());
+        let input_vec = gb.add_input("in".to_string(), 4);
+        // Add a dummy output (required by GateBuilder)
+        gb.add_output("out".to_string(), input_vec.clone());
+        let gate_fn = gb.build();
+
+        // lsb 0: true
+        // lsb 1: false
+        // lsb 2: true
+        // lsb 3: false
+        let mut map = HashMap::new();
+        for i in 0..4 {
+            map.insert(input_vec.get_lsb(i).node, i % 2 == 0);
+        }
+
+        let inputs = gate_fn.map_to_inputs(map);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0], IrBits::make_ubits(4, 0b0101).unwrap());
+    }
+
+    #[test]
+    fn test_map_to_inputs_multiple_inputs() {
+        // Use GateBuilder to create two 3-bit inputs
+        let mut gb = GateBuilder::new("test_fn_multi".to_string(), GateBuilderOptions::opt());
+        let input0 = gb.add_input("in0".to_string(), 3);
+        let input1 = gb.add_input("in1".to_string(), 3);
+        // Add a dummy output (required by GateBuilder)
+        gb.add_output("out0".to_string(), input0.clone());
+        gb.add_output("out1".to_string(), input1.clone());
+        let gate_fn = gb.build();
+
+        // Set up a map for 6 bits: [1,0,1] for in0, [0,1,0] for in1
+        let mut map = HashMap::new();
+        for i in 0..3 {
+            map.insert(input0.get_lsb(i).node, i % 2 == 0);
+            map.insert(input1.get_lsb(i).node, i % 2 == 1);
+        }
+        let inputs = gate_fn.map_to_inputs(map);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0], IrBits::make_ubits(3, 0b101).unwrap());
+        assert_eq!(inputs[1], IrBits::make_ubits(3, 0b010).unwrap());
     }
 }
