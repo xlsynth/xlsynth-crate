@@ -17,6 +17,7 @@ use crate::fraig::IterationBounds;
 use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate;
 use crate::get_summary_stats::get_gate_depth;
+use crate::graph_logical_effort::analyze_graph_logical_effort;
 use crate::ir2gate;
 use crate::logical_effort::compute_logical_effort_min_delay;
 use crate::use_count::get_id_to_use_count;
@@ -31,6 +32,7 @@ pub struct Ir2GatesSummaryStats {
     pub toggle_stats: Option<count_toggles::ToggleStats>,
     pub toggle_transitions: Option<usize>,
     pub logical_effort_deepest_path_min_delay: f64,
+    pub graph_logical_effort_worst_case_delay: f64,
 }
 
 pub struct Options {
@@ -153,6 +155,9 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         (None, None)
     };
 
+    let graph_logical_effort_analysis = analyze_graph_logical_effort(&gate_fn);
+    let graph_logical_effort_worst_case_delay = graph_logical_effort_analysis.delay;
+
     let summary_stats = Ir2GatesSummaryStats {
         live_nodes: live_nodes.len(),
         deepest_path: depth_stats.deepest_path.len(),
@@ -160,6 +165,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         toggle_stats,
         toggle_transitions,
         logical_effort_deepest_path_min_delay,
+        graph_logical_effort_worst_case_delay,
     };
 
     if options.quiet {
