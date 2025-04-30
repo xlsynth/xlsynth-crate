@@ -1105,6 +1105,10 @@ fn test_ir2gates_quiet_json_output_no_toggle() {
     assert_eq!(json["deepest_path"], 2);
     assert_eq!(json["fanout_histogram"].to_string(), "{\"1\":64}");
     assert_eq!(json["live_nodes"], 96);
+    assert_eq!(
+        json["graph_logical_effort_worst_case_delay"].to_string(),
+        "3.333333333333333"
+    );
     // Check toggle stats fields exist and are null
     assert!(
         json["toggle_stats"].is_null(),

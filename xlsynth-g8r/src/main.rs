@@ -43,6 +43,11 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     toggle_sample_seed: u64,
 
+    /// Whether to compute the graph logical effort worst case delay.
+    #[arg(long, default_value_t = false)]
+    #[arg(action = clap::ArgAction::Set)]
+    compute_graph_logical_effort: bool,
+
     /// The path to the XLS IR file.
     input: String,
 }
@@ -60,6 +65,7 @@ fn main() {
         quiet: args.emit_netlist,
         toggle_sample_count: args.toggle_sample_count,
         toggle_sample_seed: args.toggle_sample_seed,
+        compute_graph_logical_effort: args.compute_graph_logical_effort,
     };
     let input_path = std::path::Path::new(&args.input);
     process_ir_path(input_path, &options);

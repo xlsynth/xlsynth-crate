@@ -20,6 +20,7 @@ pub mod gate2ir;
 pub mod gate_builder;
 pub mod gate_sim;
 pub mod get_summary_stats;
+pub mod graph_logical_effort;
 pub mod ir2gate;
 pub mod ir2gate_utils;
 pub mod ir_value_utils;
