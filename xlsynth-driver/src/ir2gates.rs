@@ -16,6 +16,8 @@ fn ir2gates(
     toggle_sample_count: usize,
     toggle_sample_seed: u64,
     compute_graph_logical_effort: bool,
+    graph_logical_effort_beta1: f64,
+    graph_logical_effort_beta2: f64,
 ) {
     log::info!("ir2gates");
     let options = process_ir_path::Options {
@@ -28,6 +30,8 @@ fn ir2gates(
         toggle_sample_count,
         toggle_sample_seed,
         compute_graph_logical_effort,
+        graph_logical_effort_beta1,
+        graph_logical_effort_beta2,
     };
     let stats = process_ir_path::process_ir_path(input_file, &options);
     if quiet {
@@ -74,6 +78,14 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("false") => false,
         _ => true, // default for compute_graph_logical_effort is true
     };
+    let graph_logical_effort_beta1 = matches
+        .get_one::<String>("graph_logical_effort_beta1")
+        .map(|s| s.parse::<f64>().unwrap_or(1.0))
+        .unwrap_or(1.0);
+    let graph_logical_effort_beta2 = matches
+        .get_one::<String>("graph_logical_effort_beta2")
+        .map(|s| s.parse::<f64>().unwrap_or(0.0))
+        .unwrap_or(0.0);
     let input_path = std::path::Path::new(input_file);
 
     ir2gates(
@@ -85,5 +97,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         toggle_sample_count,
         toggle_sample_seed,
         compute_graph_logical_effort,
+        graph_logical_effort_beta1,
+        graph_logical_effort_beta2,
     );
 }
