@@ -360,6 +360,23 @@ fn main() {
                     "compute_graph_logical_effort",
                     "Compute the graph logical effort worst case delay",
                 )
+                // Beta parameters for the graph logical effort computation.
+                .arg(
+                    clap::Arg::new("graph_logical_effort_beta1")
+                        .long("graph-logical-effort-beta1")
+                        .value_name("BETA1")
+                        .help("Beta1 value for graph logical effort computation (default 1.0)")
+                        .default_value("1.0")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("graph_logical_effort_beta2")
+                        .long("graph-logical-effort-beta2")
+                        .value_name("BETA2")
+                        .help("Beta2 value for graph logical effort computation (default 0.0)")
+                        .default_value("0.0")
+                        .action(clap::ArgAction::Set),
+                )
                 .arg(
                     clap::Arg::new("toggle_sample_count")
                         .long("toggle-sample-count")

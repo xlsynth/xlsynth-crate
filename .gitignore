@@ -6,3 +6,5 @@ xlsynth-g8r/fuzz/artifacts/
 __pycache__
 .pytest_cache
 .ruff_cache
+.idea/
+Cargo.lock

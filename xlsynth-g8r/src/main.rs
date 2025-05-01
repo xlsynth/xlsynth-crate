@@ -48,6 +48,16 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     compute_graph_logical_effort: bool,
 
+    /// The beta1 value for the graph logical effort computation.
+    #[arg(long, default_value_t = 1.0)]
+    #[arg(action = clap::ArgAction::Set)]
+    graph_logical_effort_beta1: f64,
+
+    /// The beta2 value for the graph logical effort computation.
+    #[arg(long, default_value_t = 0.0)]
+    #[arg(action = clap::ArgAction::Set)]
+    graph_logical_effort_beta2: f64,
+
     /// The path to the XLS IR file.
     input: String,
 }
@@ -66,6 +76,8 @@ fn main() {
         toggle_sample_count: args.toggle_sample_count,
         toggle_sample_seed: args.toggle_sample_seed,
         compute_graph_logical_effort: args.compute_graph_logical_effort,
+        graph_logical_effort_beta1: args.graph_logical_effort_beta1,
+        graph_logical_effort_beta2: args.graph_logical_effort_beta2,
     };
     let input_path = std::path::Path::new(&args.input);
     process_ir_path(input_path, &options);
