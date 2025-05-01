@@ -225,7 +225,10 @@ pub struct GraphLogicalEffortOptions {
 
 /// Analyzes a GateFn for logical effort using standard NAND2 parameters and
 /// eff_with_branch. Returns the DAG, critical path, and delay.
-pub fn analyze_graph_logical_effort(gate_fn: &GateFn, options: &GraphLogicalEffortOptions) -> LogicalEffortAnalysis {
+pub fn analyze_graph_logical_effort(
+    gate_fn: &GateFn,
+    options: &GraphLogicalEffortOptions,
+) -> LogicalEffortAnalysis {
     let g_nand = 4.0 / 3.0;
     let p_nand = 2.0;
     let mut dag: HashMap<AigRef, Vec<(AigRef, f64, f64)>> = HashMap::new();

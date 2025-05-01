@@ -47,12 +47,12 @@ struct Args {
     #[arg(long, default_value_t = false)]
     #[arg(action = clap::ArgAction::Set)]
     compute_graph_logical_effort: bool,
-    
+
     /// The beta1 value for the graph logical effort computation.
     #[arg(long, default_value_t = 1.0)]
     #[arg(action = clap::ArgAction::Set)]
     graph_logical_effort_beta1: f64,
-    
+
     /// The beta2 value for the graph logical effort computation.
     #[arg(long, default_value_t = 0.0)]
     #[arg(action = clap::ArgAction::Set)]
