@@ -17,6 +17,7 @@ use crate::fraig::IterationBounds;
 use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate;
 use crate::get_summary_stats::get_gate_depth;
+use crate::graph_logical_effort;
 use crate::graph_logical_effort::analyze_graph_logical_effort;
 use crate::ir2gate;
 use crate::logical_effort::compute_logical_effort_min_delay;
@@ -48,6 +49,8 @@ pub struct Options {
     pub toggle_sample_seed: u64,
     /// If true, compute the graph logical effort worst case delay.
     pub compute_graph_logical_effort: bool,
+    pub graph_logical_effort_beta1: f64,
+    pub graph_logical_effort_beta2: f64,
 }
 
 /// Command line entry point (e.g. it exits the process on error).
@@ -158,7 +161,11 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     };
 
     let graph_logical_effort_worst_case_delay = if options.compute_graph_logical_effort {
-        let graph_logical_effort_analysis = analyze_graph_logical_effort(&gate_fn);
+        let graph_logical_effort_analysis = analyze_graph_logical_effort(&gate_fn,
+            &graph_logical_effort::GraphLogicalEffortOptions {
+                beta1: options.graph_logical_effort_beta1,
+                beta2: options.graph_logical_effort_beta2,
+            });
         Some(graph_logical_effort_analysis.delay)
     } else {
         None

@@ -79,10 +79,10 @@ where
         let left = on <= of && cn <= cf;
         let right = on >= of && cn >= cf;
         if left {
-            return on >= cn && of >= cf && op >= cp;
+            return on <= cn && of >= cf && op >= cp;
         }
         if right {
-            return on <= cn && of >= cf && op >= cp;
+            return on >= cn && of >= cf && op >= cp;
         }
         false
     }
@@ -186,17 +186,29 @@ where
     }
 }
 
-/// Pre-compute an `h` function assuming branch loads (fan-out).
+/// Pre-compute an `h` function (effort) using fan-out and a quadratic model:
+/// effort(u) = β₁ · f + β₂ · f², where f = fan-out of `u`.
+///
+/// * `beta1` defaults to 1.0
+/// * `beta2` defaults to 0.0
 /// Assumes all sinks have Cin = 1.0.
 /// Returns a function to be used as `pin_load` in `worst_case_delay`.
-fn eff_with_branch(
+pub fn eff_with_branch(
     dag: &HashMap<AigRef, Vec<(AigRef, f64, f64)>>,
+    beta1: f64,
+    beta2: f64,
 ) -> impl Fn(AigRef, AigRef) -> f64 + '_ {
+    // 1. pre-compute fan-out for every node
     let mut tot_load: HashMap<AigRef, usize> = HashMap::new();
     for (&u, edges) in dag.iter() {
         tot_load.insert(u, edges.len());
     }
-    move |u, _v| *tot_load.get(&u).unwrap_or(&0) as f64
+
+    // 2. capture β₁, β₂ and the table by value
+    move |u, _v| {
+        let f = *tot_load.get(&u).unwrap_or(&0) as f64;
+        beta1 * f + beta2 * f.powi(2)
+    }
 }
 
 /// Result of logical effort analysis for a GateFn.
@@ -206,9 +218,14 @@ pub struct LogicalEffortAnalysis {
     pub delay: f64,
 }
 
+pub struct GraphLogicalEffortOptions {
+    pub beta1: f64,
+    pub beta2: f64,
+}
+
 /// Analyzes a GateFn for logical effort using standard NAND2 parameters and
 /// eff_with_branch. Returns the DAG, critical path, and delay.
-pub fn analyze_graph_logical_effort(gate_fn: &GateFn) -> LogicalEffortAnalysis {
+pub fn analyze_graph_logical_effort(gate_fn: &GateFn, options: &GraphLogicalEffortOptions) -> LogicalEffortAnalysis {
     let g_nand = 4.0 / 3.0;
     let p_nand = 2.0;
     let mut dag: HashMap<AigRef, Vec<(AigRef, f64, f64)>> = HashMap::new();
@@ -222,7 +239,7 @@ pub fn analyze_graph_logical_effort(gate_fn: &GateFn) -> LogicalEffortAnalysis {
             _ => {}
         }
     }
-    let pin_load = eff_with_branch(&dag);
+    let pin_load = eff_with_branch(&dag, options.beta1, options.beta2);
     let (path, delay) = worst_case_delay(&dag, pin_load, &gate_fn.gates);
     LogicalEffortAnalysis { dag, path, delay }
 }
@@ -264,9 +281,26 @@ mod tests {
             gb.add_output(format!("n2_{}", _i + 1), sink.into());
         }
         let gate_fn = gb.build();
-        let analysis = analyze_graph_logical_effort(&gate_fn);
+        let options = GraphLogicalEffortOptions {
+            beta1: 1.0,
+            beta2: 0.0,
+        };
+        let analysis = analyze_graph_logical_effort(&gate_fn, &options);
         log::info!("critical path: {:?}", analysis.path);
         let expected = 12.666666666666663;
+        let epsilon = 1e-6;
+        assert!(
+            (analysis.delay - expected).abs() < epsilon,
+            "delay was {}",
+            analysis.delay
+        );
+        let options = GraphLogicalEffortOptions {
+            beta1: 1.0,
+            beta2: 1.0,
+        };
+        let analysis = analyze_graph_logical_effort(&gate_fn, &options);
+        log::info!("critical path: {:?}", analysis.path);
+        let expected = 98.0;
         let epsilon = 1e-6;
         assert!(
             (analysis.delay - expected).abs() < epsilon,
@@ -315,7 +349,11 @@ mod tests {
             gb.add_output(format!("sink_{}", _i + 1), sink.into());
         }
         let gate_fn = gb.build();
-        let analysis = analyze_graph_logical_effort(&gate_fn);
+        let options = GraphLogicalEffortOptions {
+            beta1: 1.0,
+            beta2: 0.0,
+        };
+        let analysis = analyze_graph_logical_effort(&gate_fn, &options);
         log::info!("critical path: {:?}", analysis.path);
         let expected = 19.804607143470097;
         let epsilon = 1e-6;
@@ -329,8 +367,24 @@ mod tests {
     #[test]
     fn test_graph_logical_effort_bf16_add() {
         let bf16_add = load_bf16_add_sample(Opt::Yes);
-        let analysis = analyze_graph_logical_effort(&bf16_add.gate_fn);
+        let options = GraphLogicalEffortOptions {
+            beta1: 1.0,
+            beta2: 0.0,
+        };
+        let analysis = analyze_graph_logical_effort(&bf16_add.gate_fn, &options);
         let expected = 574.7532677701352;
+        let epsilon = 0.01;
+        assert!(
+            (analysis.delay - expected).abs() < epsilon,
+            "delay was {}",
+            analysis.delay
+        );
+        let options = GraphLogicalEffortOptions {
+            beta1: 1.5,
+            beta2: 0.5,
+        };
+        let analysis = analyze_graph_logical_effort(&bf16_add.gate_fn, &options);
+        let expected = 1288.909156005443;
         let epsilon = 0.01;
         assert!(
             (analysis.delay - expected).abs() < epsilon,
@@ -342,7 +396,11 @@ mod tests {
     #[test]
     fn test_graph_logical_effort_bf16_mul() {
         let bf16_mul = load_bf16_mul_sample(Opt::Yes);
-        let analysis = analyze_graph_logical_effort(&bf16_mul.gate_fn);
+        let options = GraphLogicalEffortOptions {
+            beta1: 1.0,
+            beta2: 0.0,
+        };
+        let analysis = analyze_graph_logical_effort(&bf16_mul.gate_fn, &options);
         let expected = 501.5777103695469;
         let epsilon = 0.01;
         assert!(
