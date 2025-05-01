@@ -29,11 +29,20 @@ pub enum IterationBounds {
     ToConvergence,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize)]
 pub enum DidConverge {
     // Payload is the number of iterations taken to converge.
     Yes(usize),
     No,
+}
+
+// Add struct to record stats for each fraig iteration
+#[derive(Debug, serde::Serialize)]
+pub struct FraigIterationStat {
+    pub gate_count: usize,
+    pub counterexample_count: usize,
+    pub proposed_equiv_classes: usize,
+    pub replacements_count: usize,
 }
 
 pub fn fraig_optimize(
@@ -41,10 +50,12 @@ pub fn fraig_optimize(
     input_sample_count: usize,
     iteration_bounds: IterationBounds,
     rng: &mut impl Rng,
-) -> Result<(GateFn, DidConverge), Box<dyn Error>> {
+) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
     let mut iteration_count = 0;
     let mut current_fn = f.clone();
     let mut counterexamples: HashSet<Vec<IrBits>> = HashSet::new();
+    // Initialize iteration stats collection
+    let mut iteration_stats: Vec<FraigIterationStat> = Vec::new();
     loop {
         log::info!(
             "fraig_optimize; iteration: {} counterexamples: {}",
@@ -88,7 +99,18 @@ pub fn fraig_optimize(
 
         if validation_result.proven_equiv_sets.is_empty() {
             // Converged -- no proven equivalences found.
-            return Ok((current_fn, DidConverge::Yes(iteration_count)));
+            // Record stats for this iteration with zero replacements
+            iteration_stats.push(FraigIterationStat {
+                gate_count: current_fn.gates.len(),
+                counterexample_count: counterexamples.len(),
+                proposed_equiv_classes: equiv_classes.len(),
+                replacements_count: 0,
+            });
+            return Ok((
+                current_fn,
+                DidConverge::Yes(iteration_count),
+                iteration_stats,
+            ));
         }
         // Accumulate counterexamples for next iteration
         for cex in validation_result.cex_inputs {
@@ -164,6 +186,14 @@ pub fn fraig_optimize(
             }
         }
 
+        // Record stats for this iteration before replacements
+        iteration_stats.push(FraigIterationStat {
+            gate_count: current_fn.gates.len(),
+            counterexample_count: counterexamples.len(),
+            proposed_equiv_classes: equiv_classes.len(),
+            replacements_count: replacements.len(),
+        });
+
         // We get the updated function by bulk replacing nodes with their lower-depth
         // equivalents here.
         let new_fn = bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt());
@@ -171,7 +201,7 @@ pub fn fraig_optimize(
 
         iteration_count += 1;
     }
-    Ok((current_fn, DidConverge::No))
+    Ok((current_fn, DidConverge::No, iteration_stats))
 }
 
 #[cfg(test)]
@@ -212,7 +242,7 @@ mod tests {
         log::info!("do_fraig_and_report: {}", name);
         let start = Instant::now();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(FRAIG_SEED);
-        let (optimized_fn, did_converge) = fraig_optimize(
+        let (optimized_fn, did_converge, _iteration_stats) = fraig_optimize(
             gate_fn,
             input_sample_count,
             IterationBounds::ToConvergence,
@@ -286,7 +316,7 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let test_graph = setup_padded_graph_with_equal_depth_opposite_polarity();
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-        let (optimized_fn, _did_converge) =
+        let (optimized_fn, _did_converge, _iteration_stats) =
             fraig_optimize(&test_graph.g, 8, IterationBounds::ToConvergence, &mut rng)
                 .expect("fraig_optimize should not panic");
 

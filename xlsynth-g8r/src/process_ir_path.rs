@@ -13,7 +13,7 @@ use crate::emit_netlist;
 use crate::fanout::fanout_histogram;
 use crate::find_structures;
 use crate::fraig;
-use crate::fraig::IterationBounds;
+use crate::fraig::{DidConverge, FraigIterationStat, IterationBounds};
 use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate;
 use crate::get_summary_stats::get_gate_depth;
@@ -34,6 +34,8 @@ pub struct Ir2GatesSummaryStats {
     pub toggle_transitions: Option<usize>,
     pub logical_effort_deepest_path_min_delay: f64,
     pub graph_logical_effort_worst_case_delay: Option<f64>,
+    pub fraig_did_converge: Option<DidConverge>,
+    pub fraig_iteration_stats: Option<Vec<FraigIterationStat>>,
 }
 
 pub struct Options {
@@ -41,6 +43,15 @@ pub struct Options {
     pub fold: bool,
     pub hash: bool,
     pub fraig: bool,
+
+    /// If not set, we fraig to convergence.
+    pub fraig_max_iterations: Option<usize>,
+
+    /// If not set, we scale the gate count down by some policy (e.g. divide
+    /// down by 128 and then round to the nearest 256) and use that many
+    /// samples.
+    pub fraig_sim_samples: Option<usize>,
+
     pub quiet: bool,
     pub emit_netlist: bool,
     /// If > 0, generate this many random input samples and print toggle stats.
@@ -89,19 +100,51 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     )
     .unwrap();
     let mut gate_fn = gatify_output.gate_fn;
+    // Prepare to capture fraig statistics if enabled
+    let mut fraig_did_converge: Option<DidConverge> = None;
+    let mut fraig_iteration_stats: Option<Vec<FraigIterationStat>> = None;
     if options.fraig {
+        log::info!(
+            "fraig is enabled for GateFn {:?} with {} nodes",
+            gate_fn.name,
+            gate_fn.gates.len()
+        );
+        let iteration_bounds = if let Some(max_iterations) = options.fraig_max_iterations {
+            IterationBounds::MaxIterations(max_iterations)
+        } else {
+            IterationBounds::ToConvergence
+        };
+        let sim_samples = match options.fraig_sim_samples {
+            Some(n) => n,
+            None => {
+                let gate_count = gate_fn.gates.len();
+                let scaled = (gate_count as f64 / 8.0).ceil() as usize;
+                // Round the scaled value to the nearest 256, it must be more than zero.
+                let result = round_up_to_nearest_multiple(scaled, 256);
+                log::info!(
+                    "fraig sim samples; gate count: {}, scaled: {}, result: {}",
+                    gate_count,
+                    scaled,
+                    result
+                );
+                result
+            }
+        };
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
         let fraig_result: Result<_, _> =
-            fraig::fraig_optimize(&gate_fn, 256, IterationBounds::ToConvergence, &mut rng);
+            fraig::fraig_optimize(&gate_fn, sim_samples, iteration_bounds, &mut rng);
         if !fraig_result.is_ok() {
             eprintln!("Fraig optimization failed");
             std::process::exit(1);
         }
-        let (optimized_fn, did_converge) = fraig_result.unwrap();
+        let (optimized_fn, did_converge, iteration_stats) = fraig_result.unwrap();
         if !options.quiet {
             println!("Fraig convergence: {:?}", did_converge);
         }
         gate_fn = optimized_fn;
+        // Capture fraig results for JSON
+        fraig_did_converge = Some(did_converge);
+        fraig_iteration_stats = Some(iteration_stats);
     }
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
@@ -181,6 +224,8 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         toggle_transitions,
         logical_effort_deepest_path_min_delay,
         graph_logical_effort_worst_case_delay,
+        fraig_did_converge,
+        fraig_iteration_stats,
     };
 
     if options.quiet {
@@ -268,6 +313,18 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     }
 
     summary_stats
+}
+
+fn round_up_to_nearest_multiple<T>(x: T, y: T) -> T
+where
+    T: std::ops::Mul<Output = T>
+        + std::ops::Add<Output = T>
+        + std::ops::Sub<Output = T>
+        + std::ops::Div<Output = T>
+        + num_traits::One
+        + Copy,
+{
+    ((x + y - T::one()) / y) * y
 }
 
 // Add back print_op_freqs if missing

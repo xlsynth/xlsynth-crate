@@ -63,7 +63,6 @@ pub fn find_structures(f: &GateFn) -> HashMap<String, usize> {
     let mut structure_to_count = HashMap::new();
     for (node, count) in node_to_use_count.iter() {
         if *count == 1 {
-            log::info!("node {:?} has use count {}", node, count);
             let (structure, _next_number) = traverse_to_structure(node, &node_to_use_count, 0, f);
             *structure_to_count.entry(structure).or_insert(0) += 1;
         }
