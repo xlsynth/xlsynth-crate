@@ -356,6 +356,20 @@ fn main() {
                 .add_bool_arg("fold", "Fold the gate representation")
                 .add_bool_arg("hash", "Hash the gate representation")
                 .add_bool_arg("fraig", "Run fraig optimization")
+                .arg(
+                    clap::Arg::new("fraig_max_iterations")
+                        .long("fraig-max-iterations")
+                        .value_name("N")
+                        .help("Maximum number of iterations for fraig optimization")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("fraig_sim_samples")
+                        .long("fraig-sim-samples")
+                        .value_name("N")
+                        .help("Number of samples to use for fraig optimization")
+                        .action(clap::ArgAction::Set),
+                )
                 .add_bool_arg(
                     "compute_graph_logical_effort",
                     "Compute the graph logical effort worst case delay",

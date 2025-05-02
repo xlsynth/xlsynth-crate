@@ -24,6 +24,12 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     fraig: bool,
 
+    #[arg(long)]
+    fraig_max_iterations: Option<usize>,
+
+    #[arg(long)]
+    fraig_sim_samples: Option<usize>,
+
     /// Whether to check equivalence between the IR and the gate function.
     #[arg(long, default_value = "true")]
     #[arg(long, default_value_t = true)]
@@ -78,6 +84,8 @@ fn main() {
         compute_graph_logical_effort: args.compute_graph_logical_effort,
         graph_logical_effort_beta1: args.graph_logical_effort_beta1,
         graph_logical_effort_beta2: args.graph_logical_effort_beta2,
+        fraig_max_iterations: args.fraig_max_iterations,
+        fraig_sim_samples: args.fraig_sim_samples,
     };
     let input_path = std::path::Path::new(&args.input);
     process_ir_path(input_path, &options);
