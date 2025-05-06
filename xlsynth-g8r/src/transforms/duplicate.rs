@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::gate::{AigNode, AigRef, GateFn};
 use crate::topo::topo_sort_refs;
 use rand::seq::SliceRandom;
