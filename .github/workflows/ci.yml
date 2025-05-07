@@ -361,7 +361,7 @@ jobs:
   valgrind-tests:
     name: Valgrind Tests on Ubuntu Latest
     needs: [lint-check-ubuntu]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Set up Rust nightly
         uses: actions-rs/toolchain@v1
