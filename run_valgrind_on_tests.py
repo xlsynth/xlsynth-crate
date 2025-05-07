@@ -313,6 +313,7 @@ def run_valgrind(
         "--leak-check=full",
         "--track-origins=yes",
         "--sym-offsets=yes",
+        "--leak-check=full",
         # --demangle=no is added conditionally below
         exe,
     ]
