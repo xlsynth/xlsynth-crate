@@ -9,7 +9,7 @@ use std::rc::Rc;
 use xlsynth::IrBits;
 
 /// Converts an XLS IR function to Boolector bitvector logic.
-/// Processes all nodes in topological order. Supports Literal and GetParam.
+/// Processes all nodes in topological order.
 pub fn ir_fn_to_boolector(btor: Rc<Btor>, f: &Fn) -> BV<Rc<Btor>> {
     let topo = get_topological(f);
     let mut env: HashMap<NodeRef, BV<Rc<Btor>>> = HashMap::new();
