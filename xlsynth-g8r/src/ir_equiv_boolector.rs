@@ -1,5 +1,6 @@
-use crate::test_utils::{load_bf16_add_sample, Opt};
-use crate::xls_ir::ir::{Fn, NodePayload, NodeRef, Param, ParamId};
+// SPDX-License-Identifier: Apache-2.0
+
+use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 use crate::xls_ir::ir_utils::get_topological;
 use boolector::option::{BtorOption, ModelGen};
 use boolector::{Btor, SolverResult, BV};
@@ -60,6 +61,24 @@ pub fn ir_fn_to_boolector(btor: Rc<Btor>, f: &Fn) -> BV<Rc<Btor>> {
                 match op {
                     crate::xls_ir::ir::Unop::Not => arg_bv.not(),
                     crate::xls_ir::ir::Unop::Neg => arg_bv.neg(),
+                    crate::xls_ir::ir::Unop::OrReduce => {
+                        let width = arg_bv.get_width();
+                        let mut result = arg_bv.slice(0, 0);
+                        for i in 1..width {
+                            let bit = arg_bv.slice(i, i);
+                            result = result.or(&bit);
+                        }
+                        result
+                    }
+                    crate::xls_ir::ir::Unop::AndReduce => {
+                        let width = arg_bv.get_width();
+                        let mut result = arg_bv.slice(0, 0);
+                        for i in 1..width {
+                            let bit = arg_bv.slice(i, i);
+                            result = result.and(&bit);
+                        }
+                        result
+                    }
                     _ => panic!("Unop {:?} not yet implemented in Boolector conversion", op),
                 }
             }
@@ -100,6 +119,31 @@ pub fn ir_fn_to_boolector(btor: Rc<Btor>, f: &Fn) -> BV<Rc<Btor>> {
                         acc.xor(next)
                     })
                 }
+                crate::xls_ir::ir::NaryOp::Nor => {
+                    assert!(elems.len() >= 2, "Nor must have at least two operands");
+                    let mut it = elems.iter();
+                    let first = env
+                        .get(it.next().unwrap())
+                        .expect("Nor operand must be present")
+                        .clone();
+                    let or_result = it.fold(first, |acc, nref| {
+                        let next = env.get(nref).expect("Nor operand must be present");
+                        acc.or(next)
+                    });
+                    or_result.not()
+                }
+                crate::xls_ir::ir::NaryOp::Or => {
+                    assert!(elems.len() >= 2, "Or must have at least two operands");
+                    let mut it = elems.iter();
+                    let first = env
+                        .get(it.next().unwrap())
+                        .expect("Or operand must be present")
+                        .clone();
+                    it.fold(first, |acc, nref| {
+                        let next = env.get(nref).expect("Or operand must be present");
+                        acc.or(next)
+                    })
+                }
                 _ => panic!(
                     "NaryOp {:?} not yet implemented in Boolector conversion",
                     op
@@ -119,8 +163,8 @@ pub fn ir_fn_to_boolector(btor: Rc<Btor>, f: &Fn) -> BV<Rc<Btor>> {
                     Binop::Ult => a_bv.ult(b_bv),
                     Binop::Ule => a_bv.ulte(b_bv),
                     Binop::Umul | Binop::Smul => a_bv.mul(b_bv),
-                    Binop::Shll => a_bv.sll(b_bv),
-                    Binop::Shrl => a_bv.srl(b_bv),
+                    Binop::Shll => shift_boolector(a_bv, b_bv, |x, y| x.sll(y)),
+                    Binop::Shrl => shift_boolector(a_bv, b_bv, |x, y| x.srl(y)),
                     Binop::Shra => a_bv.sra(b_bv),
                     _ => panic!("Binop {:?} not yet implemented in Boolector conversion", op),
                 }
@@ -166,6 +210,41 @@ pub fn ir_fn_to_boolector(btor: Rc<Btor>, f: &Fn) -> BV<Rc<Btor>> {
                     "SignExt: new_bit_count must be greater than argument width"
                 );
                 arg_bv.sext(to_width - from_width)
+            }
+            NodePayload::PrioritySel {
+                selector,
+                cases,
+                default,
+            } => {
+                assert!(cases.len() > 0, "PrioritySel must have at least one case");
+                let selector_bv = env.get(selector).expect("Selector BV must be present");
+                let case_bvs: Vec<_> = cases
+                    .iter()
+                    .map(|c| env.get(c).expect("Case BV must be present"))
+                    .collect();
+                let default_bv = if let Some(dref) = default {
+                    env.get(dref).expect("Default BV must be present")
+                } else {
+                    panic!("PrioritySel requires a default value");
+                };
+                let mut result = default_bv.clone();
+                for (i, case_bv) in case_bvs.iter().enumerate().rev() {
+                    let bit = selector_bv.slice(i as u32, i as u32);
+                    result = bit.cond_bv(case_bv, &result);
+                }
+                result
+            }
+            NodePayload::Tuple(elems) => {
+                assert!(!elems.is_empty(), "Tuple must have at least one element");
+                let mut it = elems.iter();
+                let first = env
+                    .get(it.next().unwrap())
+                    .expect("Tuple element must be present")
+                    .clone();
+                it.fold(first, |acc, nref| {
+                    let next = env.get(nref).expect("Tuple element must be present");
+                    acc.concat(next)
+                })
             }
             other => todo!("Boolector conversion for {:?} not yet implemented", other),
         };
@@ -220,10 +299,41 @@ pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
     }
 }
 
+fn shift_boolector<F>(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>, shift_op: F) -> BV<Rc<Btor>>
+where
+    F: std::ops::Fn(&BV<Rc<Btor>>, &BV<Rc<Btor>>) -> BV<Rc<Btor>>,
+{
+    let orig_width = val.get_width();
+    // Find the smallest power of two >= orig_width
+    let mut pow2 = 1;
+    while pow2 < orig_width {
+        pow2 *= 2;
+    }
+    let k = (pow2 as f64).log2() as u32;
+    // Zero-extend val to pow2 bits if needed
+    let val_pow2 = if pow2 == orig_width {
+        val.clone()
+    } else {
+        val.uext(pow2 - orig_width)
+    };
+    // Adjust shamt to k bits
+    let shamt_k = match shamt.get_width().cmp(&k) {
+        std::cmp::Ordering::Equal => shamt.clone(),
+        std::cmp::Ordering::Less => shamt.uext(k - shamt.get_width()),
+        std::cmp::Ordering::Greater => shamt.slice(k - 1, 0),
+    };
+    let shifted = shift_op(&val_pow2, &shamt_k);
+    // Slice result back to original width
+    shifted.slice(orig_width - 1, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir::{Fn, Node, NodePayload, Type};
+    use crate::{
+        test_utils::{load_bf16_add_sample, Opt},
+        xls_ir::ir::{Fn, Node, NodePayload, Type},
+    };
     use xlsynth::IrValue;
 
     #[test]
