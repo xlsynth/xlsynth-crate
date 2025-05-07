@@ -4,15 +4,28 @@ use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 use crate::xls_ir::ir_utils::get_topological;
 use boolector::option::{BtorOption, ModelGen};
 use boolector::{Btor, SolverResult, BV};
+use log::debug;
 use std::collections::HashMap;
 use std::rc::Rc;
 use xlsynth::IrBits;
 
+/// Result of converting an XLS IR function to Boolector logic.
+pub struct IrFnBoolectorResult {
+    pub output: BV<Rc<Btor>>,
+    pub inputs: Vec<(String, BV<Rc<Btor>>)>,
+}
+
 /// Converts an XLS IR function to Boolector bitvector logic.
-/// Processes all nodes in topological order.
-pub fn ir_fn_to_boolector(btor: Rc<Btor>, f: &Fn) -> BV<Rc<Btor>> {
+/// If param_bvs is provided, uses those BVs for parameters; otherwise, creates
+/// new ones.
+pub fn ir_fn_to_boolector(
+    btor: Rc<Btor>,
+    f: &Fn,
+    param_bvs: Option<&HashMap<String, BV<Rc<Btor>>>>,
+) -> IrFnBoolectorResult {
     let topo = get_topological(f);
     let mut env: HashMap<NodeRef, BV<Rc<Btor>>> = HashMap::new();
+    let mut inputs = Vec::new();
     for node_ref in topo {
         let node = &f.nodes[node_ref.index];
         let bv = match &node.payload {
@@ -35,7 +48,22 @@ pub fn ir_fn_to_boolector(btor: Rc<Btor>, f: &Fn) -> BV<Rc<Btor>> {
                     .find(|p| p.id == *param_id)
                     .expect("Param not found");
                 let width = param.ty.bit_count() as u32;
-                BV::new(btor.clone(), width, Some(&param.name))
+                if let Some(map) = param_bvs {
+                    assert!(
+                        map.contains_key(&param.name),
+                        "param_bvs missing param '{}', all param names: {:?}",
+                        param.name,
+                        map.keys()
+                    );
+                    map.get(&param.name)
+                        .expect("param_bvs missing param")
+                        .clone()
+                } else {
+                    let bv = BV::new(btor.clone(), width, Some(&param.name));
+                    debug!("Adding param BV: name={}, width={}", param.name, width);
+                    inputs.push((param.name.clone(), bv.clone()));
+                    bv
+                }
             }
             NodePayload::TupleIndex { tuple, index } => {
                 // Get the tuple BV and type
@@ -260,7 +288,7 @@ pub fn ir_fn_to_boolector(btor: Rc<Btor>, f: &Fn) -> BV<Rc<Btor>> {
     }
     let ret_node_ref = f.ret_node_ref.expect("Function must have a return node");
     if let Some(bv) = env.remove(&ret_node_ref) {
-        bv
+        IrFnBoolectorResult { output: bv, inputs }
     } else {
         panic!("Cannot return Nil node from ir_fn_to_boolector: Boolector does not support 0-width bitvectors");
     }
@@ -276,24 +304,65 @@ pub enum EquivResult {
 /// Checks equivalence of two IR functions using Boolector.
 /// Only supports literal-only, zero-parameter functions for now.
 pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    // Only support zero-parameter, literal-only functions for now.
-    assert!(
-        lhs.params.is_empty() && rhs.params.is_empty(),
-        "Only zero-parameter functions supported"
-    );
     assert_eq!(lhs.ret_ty, rhs.ret_ty, "Return types must match");
+    // Check for duplicate parameter names
+    let mut seen = std::collections::HashSet::new();
+    for param in &lhs.params {
+        assert!(
+            seen.insert(&param.name),
+            "Duplicate parameter name '{}' in lhs.params",
+            param.name
+        );
+    }
+    // Check that parameter lists are identical (name, type, order)
+    assert_eq!(
+        lhs.params.len(),
+        rhs.params.len(),
+        "Parameter count mismatch"
+    );
+    for (l, r) in lhs.params.iter().zip(rhs.params.iter()) {
+        assert_eq!(
+            l.name, r.name,
+            "Parameter name mismatch: {} vs {}",
+            l.name, r.name
+        );
+        assert_eq!(
+            l.ty, r.ty,
+            "Parameter type mismatch for {}: {:?} vs {:?}",
+            l.name, l.ty, r.ty
+        );
+    }
     let btor = Rc::new(Btor::new());
     btor.set_opt(BtorOption::ModelGen(ModelGen::All));
-    let lhs_bv = ir_fn_to_boolector(btor.clone(), lhs);
-    let rhs_bv = ir_fn_to_boolector(btor.clone(), rhs);
+    // Create shared parameter BVs for all parameters (by name)
+    let mut param_bvs = HashMap::new();
+    for param in &lhs.params {
+        let width = param.ty.bit_count() as u32;
+        let bv = BV::new(btor.clone(), width, Some(&param.name));
+        param_bvs.insert(param.name.clone(), bv);
+    }
+    let lhs_result = ir_fn_to_boolector(btor.clone(), lhs, Some(&param_bvs));
+    let rhs_result = ir_fn_to_boolector(btor.clone(), rhs, Some(&param_bvs));
     // Assert that outputs are not equal (look for a counterexample)
-    let diff = lhs_bv._ne(&rhs_bv);
+    let diff = lhs_result.output._ne(&rhs_result.output);
     diff.assert();
     match btor.sat() {
         SolverResult::Unsat => EquivResult::Proved,
         SolverResult::Sat => {
-            // No inputs, so just return empty Vec for counterexample
-            EquivResult::Disproved(vec![])
+            // Extract input assignments from the model
+            let mut counterexample = Vec::new();
+            for param in &lhs.params {
+                let bv = param_bvs.get(&param.name).unwrap();
+                let width = bv.get_width() as usize;
+                let value = bv.get_a_solution().as_u64().unwrap();
+                debug!(
+                    "Extracting param: name={}, width={}, value={}",
+                    param.name, width, value
+                );
+                let bits = xlsynth::IrBits::make_ubits(width, value).unwrap();
+                counterexample.push(bits);
+            }
+            EquivResult::Disproved(counterexample)
         }
         SolverResult::Unknown => panic!("Solver returned unknown result"),
     }
@@ -397,8 +466,97 @@ mod tests {
         let sample = load_bf16_add_sample(Opt::No);
         let g8r_fn = sample.g8r_pkg.get_fn(&sample.mangled_fn_name).unwrap();
         let btor = Rc::new(Btor::new());
-        let bv = ir_fn_to_boolector(btor, g8r_fn);
+        let bv = ir_fn_to_boolector(btor, g8r_fn, None);
         // bf16 is 16 bits
-        assert_eq!(bv.get_width(), 16);
+        assert_eq!(bv.output.get_width(), 16);
+    }
+
+    #[test]
+    fn test_check_equiv_counterexample_for_x_eq_42() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        use crate::xls_ir::ir::{Fn, Node, NodePayload, Type};
+        use xlsynth::IrValue;
+        // f(x) = x == 42
+        let param_id = crate::xls_ir::ir::ParamId::new(1);
+        let param = crate::xls_ir::ir::Param {
+            name: "x".to_string(),
+            ty: Type::Bits(8),
+            id: param_id,
+        };
+        let param_ref = crate::xls_ir::ir::NodeRef { index: 0 };
+        let literal_42 = Node {
+            text_id: 2,
+            name: Some("literal.2".to_string()),
+            ty: Type::Bits(8),
+            payload: NodePayload::Literal(IrValue::make_ubits(8, 42).unwrap()),
+        };
+        let literal_42_ref = crate::xls_ir::ir::NodeRef { index: 1 };
+        let eq_node = Node {
+            text_id: 3,
+            name: Some("eq.3".to_string()),
+            ty: Type::Bits(1),
+            payload: NodePayload::Binop(crate::xls_ir::ir::Binop::Eq, param_ref, literal_42_ref),
+        };
+        let eq_node_ref = crate::xls_ir::ir::NodeRef { index: 2 };
+        let f = Fn {
+            name: "f".to_string(),
+            params: vec![param],
+            ret_ty: Type::Bits(1),
+            nodes: vec![
+                Node {
+                    text_id: 1,
+                    name: Some("param.1".to_string()),
+                    ty: Type::Bits(8),
+                    payload: NodePayload::GetParam(param_id),
+                },
+                literal_42,
+                eq_node,
+            ],
+            ret_node_ref: Some(eq_node_ref),
+        };
+        // g(x) = false
+        let false_node = Node {
+            text_id: 2,
+            name: Some("literal.2".to_string()),
+            ty: Type::Bits(1),
+            payload: NodePayload::Literal(IrValue::make_ubits(1, 0).unwrap()),
+        };
+        let false_node_ref = crate::xls_ir::ir::NodeRef { index: 1 };
+        let g = Fn {
+            name: "g".to_string(),
+            params: vec![crate::xls_ir::ir::Param {
+                name: "x".to_string(),
+                ty: Type::Bits(8),
+                id: param_id,
+            }],
+            ret_ty: Type::Bits(1),
+            nodes: vec![
+                Node {
+                    text_id: 1,
+                    name: Some("param.1".to_string()),
+                    ty: Type::Bits(8),
+                    payload: NodePayload::GetParam(param_id),
+                },
+                false_node,
+            ],
+            ret_node_ref: Some(false_node_ref),
+        };
+        let result = check_equiv(&f, &g);
+        match result {
+            EquivResult::Disproved(ref cex) => {
+                assert_eq!(cex.len(), 1);
+                let bits = &cex[0];
+                assert_eq!(bits.get_bit_count(), 8);
+                // Should be 42
+                let mut value = 0u64;
+                for i in 0..8 {
+                    if bits.get_bit(i).unwrap() {
+                        value |= 1 << i;
+                    }
+                }
+                assert_eq!(value, 42);
+            }
+            _ => panic!("Expected Disproved with counterexample"),
+        }
     }
 }
