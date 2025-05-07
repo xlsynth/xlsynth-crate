@@ -132,6 +132,9 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             "logical_effort::tests::test_compute_logical_effort_min_delay_bf16_mul",
             "logical_effort::tests::test_compute_logical_effort_min_delay_bf16_add",
             "propose_equiv::tests::test_propose_equiv_graph_with_redundancies",
+            "graph_logical_effort::tests::test_graph_logical_effort_bf16_add",
+            "graph_logical_effort::tests::test_graph_logical_effort_bf16_mul",
+            "propose_equiv::tests::test_propose_equiv_simple_graph",
         ]
     },
 }
@@ -307,6 +310,9 @@ def run_valgrind(
         "valgrind",
         "--error-exitcode=1",
         f"--suppressions={suppression_path}",
+        "--leak-check=full",
+        "--track-origins=yes",
+        "--sym-offsets=yes",
         "--leak-check=full",
         # --demangle=no is added conditionally below
         exe,

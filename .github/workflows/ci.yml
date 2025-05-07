@@ -30,6 +30,13 @@ jobs:
           sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
           protoc --version
 
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          profile: minimal
+          override: true
+
       - name: Set up Python + pre-commit
         run: |
           cd ${GITHUB_WORKSPACE}
@@ -361,7 +368,7 @@ jobs:
   valgrind-tests:
     name: Valgrind Tests on Ubuntu Latest
     needs: [lint-check-ubuntu]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Set up Rust nightly
         uses: actions-rs/toolchain@v1
