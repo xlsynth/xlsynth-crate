@@ -337,9 +337,8 @@ jobs:
 
       - name: Set up dependencies
         run: |
-          dnf install -y gcc openssl-devel libffi-devel make curl cmake git --nobest
-          dnf install -y protobuf-compiler
-          dnf install -y llvm-toolset
+          dnf install -y epel-release
+          dnf install -y gcc gcc-c++ make glibc-devel libstdc++-devel patch which findutils diffutils gmp-devel openssl-devel libffi-devel curl cmake git protobuf-compiler llvm-toolset --nobest
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env
