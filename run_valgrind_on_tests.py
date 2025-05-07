@@ -311,6 +311,8 @@ def run_valgrind(
         "--error-exitcode=1",
         f"--suppressions={suppression_path}",
         "--leak-check=full",
+        "--track-origins=yes",
+        "--sym-offsets=yes",
         # --demangle=no is added conditionally below
         exe,
     ]
