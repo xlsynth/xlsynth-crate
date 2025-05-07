@@ -26,6 +26,7 @@ rand = "0.8.5"
 varisat = "0.2.2"
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
+boolector = { version = "0.4.3", features = ["vendor-lgl"] }
 
 [dev-dependencies]
 anyhow = "1.0.86"
