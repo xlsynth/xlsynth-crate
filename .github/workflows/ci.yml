@@ -90,7 +90,7 @@ jobs:
       - name: Install libc++ from llvm-18
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget gnupg
+          sudo apt-get install -y wget gnupg curl cmake
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -131,15 +131,12 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Build crate
-        run: cargo build --workspace -vv
-
       - name: Test crate
         run: |
           cargo clean
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --workspace
+          cargo test --features with-boolector --workspace
 
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
@@ -294,14 +291,10 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Build crate
-        run: cargo build --workspace -vv
-
       - name: Test crate
         run: |
-          cargo clean
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --workspace
+          cargo test --features with-boolector --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
