@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#![cfg(feature = "boolector")]
+
 use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 use crate::xls_ir::ir_utils::get_topological;
 use boolector::option::{BtorOption, ModelGen};
