@@ -10,7 +10,6 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
     let comment_prefix = if filename.ends_with(".yml")
         || filename.ends_with(".yaml")
         || filename.ends_with(".py")
-        || filename.ends_with(".so")
         || filename == "requirements.txt"
     {
         "#"
@@ -86,6 +85,11 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             }
 
             if path.file_name().unwrap().to_str().unwrap() == "estimator_model.proto" {
+                continue;
+            }
+
+            // DSOs are binary files don't check for SPDX.
+            if path.file_name().unwrap().to_str().unwrap().ends_with(".so") {
                 continue;
             }
 
