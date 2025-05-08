@@ -153,7 +153,7 @@ jobs:
       - name: Install dependencies for Python scripts and downloads
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip wget unzip git sudo build-essential pkg-config libssl-dev curl cmake
+          apt-get install -y --no-install-recommends python3 python3-pip wget unzip git sudo build-essential pkg-config libssl-dev
           pip3 install -r requirements.txt
 
       - name: Set up Python + pre-commit
@@ -212,7 +212,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
           # Install prerequisites for llvm.sh and libc++ installation
-          apt-get install -y --no-install-recommends wget gnupg lsb-release software-properties-common cmake
+          apt-get install -y --no-install-recommends wget gnupg lsb-release software-properties-common
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -330,8 +330,9 @@ jobs:
 
       - name: Set up dependencies
         run: |
-          dnf install -y epel-release
-          dnf install -y gcc gcc-c++ make glibc-devel libstdc++-devel patch which findutils diffutils gmp-devel openssl-devel libffi-devel curl cmake git protobuf-compiler llvm-toolset --nobest
+          dnf install -y gcc openssl-devel libffi-devel make curl --nobest
+          dnf install -y protobuf-compiler
+          dnf install -y llvm-toolset
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env
@@ -385,7 +386,7 @@ jobs:
       - name: Install libc++ from llvm-18
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget gnupg curl cmake
+          sudo apt-get install -y wget gnupg
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
