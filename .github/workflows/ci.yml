@@ -146,7 +146,9 @@ jobs:
           cargo clean
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          RUSTFLAGS="-L native=$PWD/boolector_libs" cargo test --features with-boolector-system --workspace
+          export LD_LIBRARY_PATH="${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          echo "LD_LIBRARY_PATH for test execution: $LD_LIBRARY_PATH"
+          RUSTFLAGS="-L native=${{ github.workspace }}/boolector_libs" cargo test --features with-boolector-system --workspace
 
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
