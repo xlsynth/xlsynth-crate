@@ -55,6 +55,10 @@ path = "src/main.rs"
 name = "try-parse-liberty"
 path = "src/liberty/try_parse.rs"
 
+[[bin]]
+name = "check-ir-equivalence"
+path = "src/bin/check-ir-equivalence.rs"
+
 [[bench]]
 name = "bf16_mul_gatesim_bench"
 harness = false
