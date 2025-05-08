@@ -607,8 +607,8 @@ dslx_path = ["{}", "{}"]
     );
 }
 
-#[test_case(true; "with_tool_path")]
-fn test_irequiv_subcommand_equivalent(use_tool_path: bool) {
+#[test]
+fn test_irequiv_subcommand_equivalent() {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
     let lhs_ir = "package add_then_sub
@@ -627,19 +627,15 @@ fn my_main(x: bits[32]) -> bits[32] {
     std::fs::write(&rhs_path, rhs_ir).unwrap();
 
     // Write out toolchain configuration.
-    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = "[toolchain]\n".to_string();
-    let toolchain_toml_contents = if use_tool_path {
-        add_tool_path_value(&toolchain_toml_contents)
-    } else {
-        toolchain_toml_contents
-    };
-    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+    let toolchain_toml_contents_with_path = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents_with_path).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("--toolchain")
-        .arg(toolchain_toml.to_str().unwrap())
+        .arg(toolchain_toml_path.to_str().unwrap())
         .arg("ir-equiv")
         .arg(lhs_path.to_str().unwrap())
         .arg(rhs_path.to_str().unwrap())
@@ -655,8 +651,8 @@ fn my_main(x: bits[32]) -> bits[32] {
     assert!(stdout.contains("success: Verified equivalent"));
 }
 
-#[test_case(true; "with_tool_path")]
-fn test_irequiv_subcommand_non_equivalent(use_tool_path: bool) {
+#[test]
+fn test_irequiv_subcommand_non_equivalent() {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
     let lhs_ir = "package add_then_sub
@@ -675,19 +671,15 @@ fn my_main(x: bits[32]) -> bits[32] {
     std::fs::write(&rhs_path, rhs_ir).unwrap();
 
     // Write out toolchain configuration.
-    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = "[toolchain]\n".to_string();
-    let toolchain_toml_contents = if use_tool_path {
-        add_tool_path_value(&toolchain_toml_contents)
-    } else {
-        toolchain_toml_contents
-    };
-    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+    let toolchain_toml_contents_with_path = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents_with_path).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("--toolchain")
-        .arg(toolchain_toml.to_str().unwrap())
+        .arg(toolchain_toml_path.to_str().unwrap())
         .arg("ir-equiv")
         .arg(lhs_path.to_str().unwrap())
         .arg(rhs_path.to_str().unwrap())
@@ -1116,20 +1108,14 @@ fn test_ir2gates_quiet_json_output_no_toggle() {
     );
 }
 
-#[cfg(feature = "with-boolector")]
+// Test for ir-equiv subcommand using Boolector
+#[cfg(feature = "has-boolector")]
 #[test]
 fn test_irequiv_subcommand_boolector_equivalent() {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
-    let lhs_ir = "package add_then_sub
-fn my_main(x: bits[32]) -> bits[32] {
-    add.2: bits[32] = add(x, x)
-    ret sub.3: bits[32] = sub(add.2, x)
-}";
-    let rhs_ir = "package identity
-fn my_main(x: bits[32]) -> bits[32] {
-    ret identity.2: bits[32] = identity(x)
-}";
+    let lhs_ir = "package add_then_sub\nfn my_main(x: bits[32]) -> bits[32] {\n    add.2: bits[32] = add(x, x)\n    ret sub.3: bits[32] = sub(add.2, x)\n}";
+    let rhs_ir = "package identity\nfn my_main(x: bits[32]) -> bits[32] {\n    ret identity.2: bits[32] = identity(x)\n}";
     // Write the IR files to the temp directory.
     let lhs_path = temp_dir.path().join("lhs.ir");
     std::fs::write(&lhs_path, lhs_ir).unwrap();
@@ -1137,14 +1123,16 @@ fn my_main(x: bits[32]) -> bits[32] {
     std::fs::write(&rhs_path, rhs_ir).unwrap();
 
     // Write out toolchain configuration.
-    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = "[toolchain]\n".to_string();
-    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+    // Unconditionally add tool_path for this test for now.
+    let toolchain_toml_contents_with_path = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents_with_path).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = std::process::Command::new(command_path)
         .arg("--toolchain")
-        .arg(toolchain_toml.to_str().unwrap())
+        .arg(toolchain_toml_path.to_str().unwrap())
         .arg("ir-equiv")
         .arg(lhs_path.to_str().unwrap())
         .arg(rhs_path.to_str().unwrap())
