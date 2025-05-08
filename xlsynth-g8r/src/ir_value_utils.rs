@@ -53,6 +53,51 @@ pub fn ir_bits_from_msb_is_0(bits: &[bool]) -> IrBits {
     IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
 }
 
+pub fn ir_value_from_bits_with_type(
+    bits: &IrBits,
+    ty: &crate::xls_ir::ir::Type,
+) -> xlsynth::IrValue {
+    match ty {
+        crate::xls_ir::ir::Type::Bits(width) => {
+            assert_eq!(bits.get_bit_count(), *width);
+            xlsynth::IrValue::from_bits(bits)
+        }
+        crate::xls_ir::ir::Type::Array(array_ty) => {
+            let elem_width = array_ty.element_type.bit_count();
+            let mut elements = Vec::with_capacity(array_ty.element_count);
+            for i in 0..array_ty.element_count {
+                let start = i * elem_width;
+                let end = start + elem_width;
+                let mut elem_bits_vec = Vec::with_capacity(elem_width);
+                for j in start..end {
+                    elem_bits_vec.push(bits.get_bit(j).unwrap());
+                }
+                let elem_bits = ir_bits_from_lsb_is_0(&elem_bits_vec);
+                let elem_value = ir_value_from_bits_with_type(&elem_bits, &array_ty.element_type);
+                elements.push(elem_value);
+            }
+            xlsynth::IrValue::make_array(&elements).unwrap()
+        }
+        crate::xls_ir::ir::Type::Tuple(types) => {
+            let mut elements = Vec::with_capacity(types.len());
+            let mut offset = 0;
+            for t in types.iter() {
+                let t_width = t.bit_count();
+                let mut elem_bits_vec = Vec::with_capacity(t_width);
+                for j in offset..offset + t_width {
+                    elem_bits_vec.push(bits.get_bit(j).unwrap());
+                }
+                let elem_bits = ir_bits_from_lsb_is_0(&elem_bits_vec);
+                let elem_value = ir_value_from_bits_with_type(&elem_bits, t);
+                elements.push(elem_value);
+                offset += t_width;
+            }
+            xlsynth::IrValue::make_tuple(&elements)
+        }
+        crate::xls_ir::ir::Type::Token => xlsynth::IrValue::make_tuple(&[]), // Tokens are zero bits
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

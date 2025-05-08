@@ -29,3 +29,6 @@ pretty_assertions = "1.3"
 
 [build-dependencies]
 prost-build = "0.12"
+
+[features]
+with-boolector = ["xlsynth-g8r/with-boolector"]

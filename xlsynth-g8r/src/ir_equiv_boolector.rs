@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(feature = "boolector")]
+#![cfg(feature = "with-boolector")]
 
 use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 use crate::xls_ir::ir_utils::get_topological;
@@ -30,6 +30,11 @@ pub fn ir_fn_to_boolector(
     let mut inputs = Vec::new();
     for node_ref in topo {
         let node = &f.nodes[node_ref.index];
+        log::trace!(
+            "[ir_fn_to_boolector] Processing node_ref: {:?}, node: {:?}",
+            node_ref,
+            node
+        );
         let bv = match &node.payload {
             NodePayload::Literal(ir_value) => {
                 let bits = ir_value.to_bits().expect("Literal must be bits");
@@ -109,6 +114,7 @@ pub fn ir_fn_to_boolector(
                         }
                         result
                     }
+                    crate::xls_ir::ir::Unop::Identity => arg_bv.clone(),
                     _ => panic!("Unop {:?} not yet implemented in Boolector conversion", op),
                 }
             }
@@ -192,10 +198,21 @@ pub fn ir_fn_to_boolector(
                     Binop::Ugt => a_bv.ugt(b_bv),
                     Binop::Ult => a_bv.ult(b_bv),
                     Binop::Ule => a_bv.ulte(b_bv),
-                    Binop::Umul | Binop::Smul => a_bv.mul(b_bv),
+                    Binop::Umul | Binop::Smul => {
+                        let prod = a_bv.mul(b_bv);
+                        let expected_width = node.ty.bit_count() as u32;
+                        let prod_width = prod.get_width();
+                        if prod_width > expected_width {
+                            prod.slice(expected_width - 1, 0)
+                        } else if prod_width < expected_width {
+                            prod.uext(expected_width - prod_width)
+                        } else {
+                            prod
+                        }
+                    }
                     Binop::Shll => shift_boolector(a_bv, b_bv, |x, y| x.sll(y)),
                     Binop::Shrl => shift_boolector(a_bv, b_bv, |x, y| x.srl(y)),
-                    Binop::Shra => a_bv.sra(b_bv),
+                    Binop::Shra => shift_boolector(a_bv, b_bv, |x, y| x.sra(y)),
                     _ => panic!("Binop {:?} not yet implemented in Boolector conversion", op),
                 }
             }
@@ -266,15 +283,67 @@ pub fn ir_fn_to_boolector(
             }
             NodePayload::Tuple(elems) => {
                 assert!(!elems.is_empty(), "Tuple must have at least one element");
+                for nref in elems {
+                    log::trace!(
+                        "[ir_fn_to_boolector] Tuple element: {:?}, node: {:?}, in env: {}",
+                        nref,
+                        f.nodes[nref.index],
+                        env.contains_key(nref)
+                    );
+                }
                 let mut it = elems.iter();
                 let first = env
                     .get(it.next().unwrap())
                     .expect("Tuple element must be present")
                     .clone();
                 it.fold(first, |acc, nref| {
-                    let next = env.get(nref).expect("Tuple element must be present");
+                    if !env.contains_key(nref) {
+                        log::trace!(
+                            "[ir_fn_to_boolector] (fold) Tuple element missing: {:?}, node: {:?}",
+                            nref,
+                            f.nodes[nref.index]
+                        );
+                    }
+                    let next = env
+                        .get(nref)
+                        .expect("Tuple element must be present (in fold)");
                     acc.concat(next)
                 })
+            }
+            NodePayload::ArrayIndex {
+                array,
+                indices,
+                assumed_in_bounds: _assumed_in_bounds,
+            } => {
+                // Only support single index for now
+                assert_eq!(
+                    indices.len(),
+                    1,
+                    "Only single-dimensional array indexing is supported"
+                );
+                let array_bv = env.get(array).expect("Array BV must be present");
+                let index_bv = env.get(&indices[0]).expect("Index BV must be present");
+                let array_ty = f.get_node_ty(*array);
+                let (element_type, element_count) = match array_ty {
+                    crate::xls_ir::ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                    _ => panic!("ArrayIndex: expected array type"),
+                };
+                let elem_width = element_type.bit_count() as u32;
+                // Build a chain of selects for each possible index value
+                let mut result = None;
+                for i in 0..element_count {
+                    let high = ((i + 1) * elem_width as usize - 1) as u32;
+                    let low = (i * elem_width as usize) as u32;
+                    let elem = array_bv.slice(high, low);
+                    let idx_val = BV::from_u64(array_bv.get_btor(), i as u64, index_bv.get_width());
+                    let is_this = index_bv._eq(&idx_val);
+                    result = Some(if let Some(acc) = result {
+                        is_this.cond_bv(&elem, &acc)
+                    } else {
+                        elem
+                    });
+                }
+                result.expect("ArrayIndex: array must have at least one element")
             }
             other => todo!("Boolector conversion for {:?} not yet implemented", other),
         };
@@ -289,6 +358,18 @@ pub fn ir_fn_to_boolector(
         env.insert(node_ref, bv);
     }
     let ret_node_ref = f.ret_node_ref.expect("Function must have a return node");
+    if !env.contains_key(&ret_node_ref) {
+        let ret_node = &f.nodes[ret_node_ref.index];
+        log::trace!(
+            "[ir_fn_to_boolector] Return node not found in env! ret_node_ref: {:?}, node: {:?}",
+            ret_node_ref,
+            ret_node
+        );
+        log::trace!(
+            "[ir_fn_to_boolector] env keys: {:?}",
+            env.keys().collect::<Vec<_>>()
+        );
+    }
     if let Some(bv) = env.remove(&ret_node_ref) {
         IrFnBoolectorResult { output: bv, inputs }
     } else {
@@ -356,13 +437,18 @@ pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
             for param in &lhs.params {
                 let bv = param_bvs.get(&param.name).unwrap();
                 let width = bv.get_width() as usize;
-                let value = bv.get_a_solution().as_u64().unwrap();
-                debug!(
-                    "Extracting param: name={}, width={}, value={}",
-                    param.name, width, value
-                );
-                let bits = xlsynth::IrBits::make_ubits(width, value).unwrap();
-                counterexample.push(bits);
+                let solution = bv.get_a_solution();
+                let disamb = solution.disambiguate();
+                let bitstr = disamb.as_01x_str();
+                let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
+                if bits.len() != width {
+                    log::trace!(
+                        "[ir_fn_to_boolector] Solution width mismatch for param: name={}, expected width={}, got {}",
+                        param.name, width, bits.len()
+                    );
+                }
+                let ir_bits = crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits);
+                counterexample.push(ir_bits);
             }
             EquivResult::Disproved(counterexample)
         }

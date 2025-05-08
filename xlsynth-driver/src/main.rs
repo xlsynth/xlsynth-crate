@@ -314,7 +314,11 @@ fn main() {
                         .required(true)
                         .index(2),
                 )
-                .add_ir_top_arg(false),
+                .add_ir_top_arg(false)
+                .add_bool_arg(
+                    "boolector",
+                    "Use Boolector for equivalence checking (requires --features=with-boolector)",
+                ),
         )
         .subcommand(
             clap::Command::new("ir-ged")

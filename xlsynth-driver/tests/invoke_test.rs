@@ -1115,3 +1115,57 @@ fn test_ir2gates_quiet_json_output_no_toggle() {
         "toggle_stats should be null"
     );
 }
+
+#[cfg(feature = "with-boolector")]
+#[test]
+fn test_irequiv_subcommand_boolector_equivalent() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_ir = "package add_then_sub
+fn my_main(x: bits[32]) -> bits[32] {
+    add.2: bits[32] = add(x, x)
+    ret sub.3: bits[32] = sub(add.2, x)
+}";
+    let rhs_ir = "package identity
+fn my_main(x: bits[32]) -> bits[32] {
+    ret identity.2: bits[32] = identity(x)
+}";
+    // Write the IR files to the temp directory.
+    let lhs_path = temp_dir.path().join("lhs.ir");
+    std::fs::write(&lhs_path, lhs_ir).unwrap();
+    let rhs_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_path, rhs_ir).unwrap();
+
+    // Write out toolchain configuration.
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = "[toolchain]\n".to_string();
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .arg("--boolector=true")
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
+    assert!(
+        output.status.success(),
+        "Boolector ir-equiv should succeed; stderr: {}",
+        stderr
+    );
+    assert!(
+        stdout.contains("Boolector proved equivalence"),
+        "stdout: {}",
+        stdout
+    );
+}
