@@ -30,7 +30,7 @@ pub fn ir_fn_to_boolector(
     let mut inputs = Vec::new();
     for node_ref in topo {
         let node = &f.nodes[node_ref.index];
-        log::info!(
+        log::trace!(
             "[ir_fn_to_boolector] Processing node_ref: {:?}, node: {:?}",
             node_ref,
             node
@@ -283,7 +283,7 @@ pub fn ir_fn_to_boolector(
             NodePayload::Tuple(elems) => {
                 assert!(!elems.is_empty(), "Tuple must have at least one element");
                 for nref in elems {
-                    log::info!(
+                    log::trace!(
                         "[ir_fn_to_boolector] Tuple element: {:?}, node: {:?}, in env: {}",
                         nref,
                         f.nodes[nref.index],
@@ -297,7 +297,7 @@ pub fn ir_fn_to_boolector(
                     .clone();
                 it.fold(first, |acc, nref| {
                     if !env.contains_key(nref) {
-                        log::info!(
+                        log::trace!(
                             "[ir_fn_to_boolector] (fold) Tuple element missing: {:?}, node: {:?}",
                             nref,
                             f.nodes[nref.index]
@@ -359,12 +359,12 @@ pub fn ir_fn_to_boolector(
     let ret_node_ref = f.ret_node_ref.expect("Function must have a return node");
     if !env.contains_key(&ret_node_ref) {
         let ret_node = &f.nodes[ret_node_ref.index];
-        log::info!(
+        log::trace!(
             "[ir_fn_to_boolector] Return node not found in env! ret_node_ref: {:?}, node: {:?}",
             ret_node_ref,
             ret_node
         );
-        log::info!(
+        log::trace!(
             "[ir_fn_to_boolector] env keys: {:?}",
             env.keys().collect::<Vec<_>>()
         );
@@ -441,7 +441,7 @@ pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
                 let bitstr = disamb.as_01x_str();
                 let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
                 if bits.len() != width {
-                    log::info!(
+                    log::trace!(
                         "[ir_fn_to_boolector] Solution width mismatch for param: name={}, expected width={}, got {}",
                         param.name, width, bits.len()
                     );
