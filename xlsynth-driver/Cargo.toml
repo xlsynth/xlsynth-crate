@@ -32,4 +32,9 @@ regex = "1.11.1"
 prost-build = "0.12"
 
 [features]
-with-boolector = ["xlsynth-g8r/with-boolector"]
+default = []
+has-boolector = ["xlsynth-g8r/has-boolector"]
+# Enables boolector support, defaulting to system linking
+with-boolector-system = ["xlsynth-g8r/with-boolector-system", "has-boolector"]
+# Enables boolector support AND builds it from source
+with-boolector-built = ["xlsynth-g8r/with-boolector-built", "has-boolector"]

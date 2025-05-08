@@ -26,7 +26,7 @@ rand = "0.8.5"
 varisat = "0.2.2"
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
-boolector = { version = "0.4.3", features = ["vendor-lgl"], optional = true }
+boolector = { version = "0.4.3", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0.86"
@@ -41,7 +41,9 @@ maplit = "1.0.2"
 
 [features]
 default = []
-with-boolector = ["boolector"]
+has-boolector = []
+with-boolector-system = ["dep:boolector", "has-boolector"]
+with-boolector-built = ["dep:boolector", "boolector/vendor-lgl", "has-boolector"]
 
 [lib]
 name = "xlsynth_g8r"

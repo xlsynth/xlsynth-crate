@@ -131,12 +131,22 @@ jobs:
           profile: minimal
           override: true
 
+      - name: Download and set up Boolector
+        run: |
+          mkdir -p boolector_libs
+          wget -O boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          echo "Boolector lib downloaded to $(pwd)/boolector_libs"
+          ls -l boolector_libs/
+
       - name: Test crate
+        env:
+          BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
+          LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
         run: |
           cargo clean
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector --workspace
+          RUSTFLAGS="-L native=$PWD/boolector_libs" cargo test --features with-boolector-system --workspace
 
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
@@ -294,7 +304,7 @@ jobs:
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector --workspace
+          cargo test --features with-boolector-built --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
