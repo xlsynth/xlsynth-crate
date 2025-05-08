@@ -114,6 +114,7 @@ pub fn ir_fn_to_boolector(
                         }
                         result
                     }
+                    crate::xls_ir::ir::Unop::Identity => arg_bv.clone(),
                     _ => panic!("Unop {:?} not yet implemented in Boolector conversion", op),
                 }
             }
