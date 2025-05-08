@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(feature = "boolector")]
-
 use clap::Parser;
+
+#[cfg(feature = "with-boolector")]
 use xlsynth_g8r::ir_equiv_boolector;
+
 use xlsynth_g8r::ir_value_utils::ir_value_from_bits_with_type;
 use xlsynth_g8r::xls_ir::ir::Package;
 use xlsynth_g8r::xls_ir::ir_parser::Parser as IrParser;
@@ -47,6 +48,12 @@ fn main() {
         .get_fn(&args.top)
         .unwrap_or_else(|| panic!("function '{}' not found in {}", args.top, args.ir2));
 
+    if !cfg!(feature = "with-boolector") {
+        eprintln!("error: check-ir-equivalence requires --features=with-boolector");
+        std::process::exit(1);
+    }
+
+    #[cfg(feature = "with-boolector")]
     match ir_equiv_boolector::check_equiv(f1, f2) {
         ir_equiv_boolector::EquivResult::Proved => {
             println!("Equivalence result: PROVED");

@@ -6,7 +6,9 @@ use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
 
+#[cfg(feature = "with-boolector")]
 use xlsynth_g8r::ir_equiv_boolector;
+
 use xlsynth_g8r::xls_ir::ir_parser;
 
 const SUBCOMMAND: &str = "ir-equiv";
