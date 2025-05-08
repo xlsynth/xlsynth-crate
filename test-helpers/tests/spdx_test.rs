@@ -10,6 +10,7 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
     let comment_prefix = if filename.ends_with(".yml")
         || filename.ends_with(".yaml")
         || filename.ends_with(".py")
+        || filename.ends_with(".so")
         || filename == "requirements.txt"
     {
         "#"
