@@ -31,6 +31,12 @@ pub struct ToolchainConfig {
     /// Disabling a warning that is already disabled in the default set is fine
     /// and has no effect.
     pub disable_warnings: Option<Vec<String>>,
+
+    pub gate_format: Option<String>,
+
+    pub assert_format: Option<String>,
+
+    pub use_system_verilog: Option<bool>,
 }
 
 /// Helper for extracting the DSLX standard library path from the command line

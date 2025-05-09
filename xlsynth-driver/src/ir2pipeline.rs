@@ -14,7 +14,7 @@ pub fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>
     // See which of pipeline_stages or clock_period_ps we're using.
     let pipeline_spec = extract_pipeline_spec(matches);
 
-    let codegen_flags = extract_codegen_flags(matches);
+    let codegen_flags = extract_codegen_flags(matches, config.as_ref());
 
     ir2pipeline(
         input_path,

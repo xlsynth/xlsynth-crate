@@ -26,6 +26,7 @@ colored = "2"
 test-helpers = { path = "../test-helpers" }
 test-case = "3.3.1"
 pretty_assertions = "1.3"
+regex = "1.11.1"
 
 [build-dependencies]
 prost-build = "0.12"
