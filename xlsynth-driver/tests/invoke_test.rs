@@ -1235,23 +1235,10 @@ fn main(pred: bool, x: u1) -> u1 {
         println!("INFO: Updating golden file: {}", golden_path.display());
         std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
     } else {
-        let golden_regex =
-            std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-        let golden_lines: Vec<_> = golden_regex.lines().collect();
-        let output_lines: Vec<_> = stdout.lines().collect();
+        let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
         assert_eq!(
-            golden_lines.len(),
-            output_lines.len(),
-            "Line count mismatch"
+            stdout, golden_sv,
+            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
-
-        for (g, o) in golden_lines.iter().zip(output_lines.iter()) {
-            if g.trim_start().starts_with("should_be_one:") {
-                let re = regex::Regex::new(r"should_be_one: .*").unwrap();
-                assert!(re.is_match(o), "Line did not match: {}", o);
-            } else {
-                assert_eq!(g, o, "Line mismatch:\nexpected: {}\nactual:   {}", g, o);
-            }
-        }
     }
 }

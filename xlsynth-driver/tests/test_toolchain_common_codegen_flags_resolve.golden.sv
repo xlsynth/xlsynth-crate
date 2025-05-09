@@ -24,6 +24,6 @@ module __test__main(
     p1_gated <= p1_gated_comb;
   end
   assign out = p1_gated;
-  should_be_one: assert property (@(posedge clk) disable iff ($sampled($isunknown(p0_x))) p0_x) else $fatal(0, "Assertion failure via assert! @ \w+/test.x:3:12-3:40");
+  `BR_ASSERT(should_be_one, p0_x)
 endmodule
 
