@@ -25,10 +25,42 @@ pub fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
     }
 }
 
+#[derive(Debug)]
+pub struct CodegenFlags {
+    input_valid_signal: Option<String>,
+    output_valid_signal: Option<String>,
+    use_system_verilog: Option<bool>,
+    flop_inputs: Option<bool>,
+    flop_outputs: Option<bool>,
+    add_idle_output: Option<bool>,
+    module_name: Option<String>,
+    array_index_bounds_checking: Option<bool>,
+    separate_lines: Option<bool>,
+    reset: Option<String>,
+    reset_active_low: Option<bool>,
+    reset_asynchronous: Option<bool>,
+    gate_format: Option<String>,
+    assert_format: Option<String>,
+}
+
 /// Extracts flags that we pass to the "codegen" step of the process (i.e.
 /// generating lowered Verilog).
-pub fn extract_codegen_flags(matches: &ArgMatches) -> CodegenFlags {
-    let result = CodegenFlags {
+pub fn extract_codegen_flags(
+    matches: &ArgMatches,
+    toolchain_config: Option<&crate::toolchain_config::ToolchainConfig>,
+) -> CodegenFlags {
+    let (gate_format, assert_format) = if let Some(config) = toolchain_config {
+        if let Some(gate_format) = &config.gate_format {
+            (Some(gate_format.clone()), None)
+        } else if let Some(assert_format) = &config.assert_format {
+            (None, Some(assert_format.clone()))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    CodegenFlags {
         input_valid_signal: matches
             .get_one::<String>("input_valid_signal")
             .map(|s| s.to_string()),
@@ -37,7 +69,8 @@ pub fn extract_codegen_flags(matches: &ArgMatches) -> CodegenFlags {
             .map(|s| s.to_string()),
         use_system_verilog: matches
             .get_one::<String>("use_system_verilog")
-            .map(|s| s == "true"),
+            .map(|s| s == "true")
+            .or_else(|| toolchain_config.and_then(|c| c.use_system_verilog)),
         flop_inputs: matches
             .get_one::<String>("flop_inputs")
             .map(|s| s == "true"),
@@ -63,8 +96,9 @@ pub fn extract_codegen_flags(matches: &ArgMatches) -> CodegenFlags {
         reset_asynchronous: matches
             .get_one::<String>("reset_asynchronous")
             .map(|s| s == "true"),
-    };
-    result
+        gate_format,
+        assert_format,
+    }
 }
 
 pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
@@ -107,23 +141,13 @@ pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
     if let Some(reset_asynchronous) = codegen_flags.reset_asynchronous {
         pieces.push(format!("reset_asynchronous: {reset_asynchronous}"));
     }
+    if let Some(gate_format) = &codegen_flags.gate_format {
+        pieces.push(format!("gate_format: \"{gate_format}\""));
+    }
+    if let Some(assert_format) = &codegen_flags.assert_format {
+        pieces.push(format!("assert_format: \"{assert_format}\""));
+    }
     pieces.join("\n")
-}
-
-#[derive(Debug)]
-pub struct CodegenFlags {
-    input_valid_signal: Option<String>,
-    output_valid_signal: Option<String>,
-    use_system_verilog: Option<bool>,
-    flop_inputs: Option<bool>,
-    flop_outputs: Option<bool>,
-    add_idle_output: Option<bool>,
-    module_name: Option<String>,
-    array_index_bounds_checking: Option<bool>,
-    separate_lines: Option<bool>,
-    reset: Option<String>,
-    reset_active_low: Option<bool>,
-    reset_asynchronous: Option<bool>,
 }
 
 /// Adds the given code-generation flags to the command in command-line-arg

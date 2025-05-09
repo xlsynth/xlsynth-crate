@@ -9,6 +9,7 @@ use crate::tools::run_check_ir_equivalence_main;
 #[cfg(feature = "with-boolector")]
 use xlsynth_g8r::ir_equiv_boolector;
 
+#[cfg(feature = "with-boolector")]
 use xlsynth_g8r::xls_ir::ir_parser;
 
 const SUBCOMMAND: &str = "ir-equiv";

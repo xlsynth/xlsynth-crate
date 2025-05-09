@@ -22,6 +22,7 @@ fn dslx2pipeline(
     keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
 ) {
+    log::info!("dslx2pipeline; config: {:?}", config);
     let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
     let ir_top = xlsynth::mangle_dslx_name(module_name, dslx_top).unwrap();
     log::info!("dslx2pipeline; dslx_top: {}; ir_top: {}", dslx_top, ir_top);
@@ -153,7 +154,7 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
     let pipeline_spec = extract_pipeline_spec(matches);
     let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
     let keep_temps = matches.get_one::<String>("keep_temps").map(|s| s == "true");
-    let codegen_flags = extract_codegen_flags(matches);
+    let codegen_flags = extract_codegen_flags(matches, config.as_ref());
 
     // Stub function for DSLX to SV conversion
     dslx2pipeline(

@@ -1169,3 +1169,89 @@ fn my_main(x: bits[32]) -> bits[32] {
         stdout
     );
 }
+
+#[test]
+fn test_toolchain_common_codegen_flags_resolve() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    log::info!("test_toolchain_common_codegen_flags_resolve");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml = r#"
+[toolchain]
+gate_format = "br_gate_buf gated_{output}(.in({input}), .out({output}))"
+assert_format = "`BR_ASSERT({label}, {condition})"
+use_system_verilog = true
+"#;
+    std::fs::write(&toolchain_path, toolchain_toml).unwrap();
+
+    let dslx = r#"
+fn main(pred: bool, x: u1) -> u1 {
+    assert!(x == u1:1, "should_be_one");
+    let gated = gate!(pred, x);
+    gated
+}
+"#;
+    let dslx_path = temp_dir.path().join("test.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut command = std::process::Command::new(command_path);
+    command
+        .arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
+        .arg("dslx2pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--flop_inputs=true")
+        .arg("--flop_outputs=true")
+        .arg("--delay_model")
+        .arg("unit");
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        command.env("RUST_LOG", rust_log);
+    }
+    let output = command.output().unwrap();
+
+    println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Path to the golden file
+    let golden_path =
+        std::path::Path::new("tests/test_toolchain_common_codegen_flags_resolve.golden.sv");
+
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
+        println!("INFO: Updating golden file: {}", golden_path.display());
+        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
+    } else {
+        let golden_regex =
+            std::fs::read_to_string(golden_path).expect("Failed to read golden file");
+        let golden_lines: Vec<_> = golden_regex.lines().collect();
+        let output_lines: Vec<_> = stdout.lines().collect();
+        assert_eq!(
+            golden_lines.len(),
+            output_lines.len(),
+            "Line count mismatch"
+        );
+
+        for (g, o) in golden_lines.iter().zip(output_lines.iter()) {
+            if g.trim_start().starts_with("should_be_one:") {
+                let re = regex::Regex::new(r"should_be_one: .*").unwrap();
+                assert!(re.is_match(o), "Line did not match: {}", o);
+            } else {
+                assert_eq!(g, o, "Line mismatch:\nexpected: {}\nactual:   {}", g, o);
+            }
+        }
+    }
+}
