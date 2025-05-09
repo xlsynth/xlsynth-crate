@@ -1170,19 +1170,26 @@ fn my_main(x: bits[32]) -> bits[32] {
     );
 }
 
-#[test]
-fn test_toolchain_common_codegen_flags_resolve() {
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_toolchain_common_codegen_flags_resolve(use_tool_path: bool) {
     let _ = env_logger::builder().is_test(true).try_init();
     log::info!("test_toolchain_common_codegen_flags_resolve");
     let temp_dir = tempfile::tempdir().unwrap();
-    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
-    let toolchain_toml = r#"
-[toolchain]
-gate_format = "br_gate_buf gated_{output}(.in({input}), .out({output}))"
-assert_format = "`BR_ASSERT({label}, {condition})"
-use_system_verilog = true
-"#;
-    std::fs::write(&toolchain_path, toolchain_toml).unwrap();
+
+    // Write out toolchain configuration.
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let mut toolchain_toml_contents = "[toolchain]\n".to_string();
+    toolchain_toml_contents +=
+        "gate_format = \"br_gate_buf gated_{output}(.in({input}), .out({output}))\"\n";
+    toolchain_toml_contents += "assert_format = \"`BR_ASSERT({label}, {condition})\"\n";
+    toolchain_toml_contents += "use_system_verilog = true\n";
+    let toolchain_toml_contents = if use_tool_path {
+        add_tool_path_value(&toolchain_toml_contents)
+    } else {
+        toolchain_toml_contents
+    };
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
 
     let dslx = r#"
 fn main(pred: bool, x: u1) -> u1 {
@@ -1198,7 +1205,7 @@ fn main(pred: bool, x: u1) -> u1 {
     let mut command = std::process::Command::new(command_path);
     command
         .arg("--toolchain")
-        .arg(toolchain_path.to_str().unwrap())
+        .arg(toolchain_toml.to_str().unwrap())
         .arg("dslx2pipeline")
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())

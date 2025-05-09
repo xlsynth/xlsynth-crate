@@ -24,6 +24,8 @@ module __test__main(
     p1_gated <= p1_gated_comb;
   end
   assign out = p1_gated;
+  `ifdef ASSERT_ON
   `BR_ASSERT(should_be_one, p0_x)
+  `endif  // ASSERT_ON
 endmodule
 

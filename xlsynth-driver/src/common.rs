@@ -141,6 +141,7 @@ pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
     if let Some(assert_format) = &codegen_flags.assert_format {
         pieces.push(format!("assert_format: {assert_format:?}"));
     }
+    pieces.push(format!("assertion_macro_names: \"ASSERT_ON\""));
     pieces.join("\n")
 }
 
@@ -187,5 +188,11 @@ pub fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
     }
     if let Some(reset_asynchronous) = codegen_flags.reset_asynchronous {
         command.arg(format!("--reset_asynchronous={reset_asynchronous}"));
+    }
+    if let Some(gate_format) = &codegen_flags.gate_format {
+        command.arg(format!("--gate_format={gate_format}"));
+    }
+    if let Some(assert_format) = &codegen_flags.assert_format {
+        command.arg(format!("--assert_format={assert_format}"));
     }
 }
