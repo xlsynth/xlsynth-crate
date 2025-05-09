@@ -50,13 +50,7 @@ pub fn extract_codegen_flags(
     toolchain_config: Option<&crate::toolchain_config::ToolchainConfig>,
 ) -> CodegenFlags {
     let (gate_format, assert_format) = if let Some(config) = toolchain_config {
-        if let Some(gate_format) = &config.gate_format {
-            (Some(gate_format.clone()), None)
-        } else if let Some(assert_format) = &config.assert_format {
-            (None, Some(assert_format.clone()))
-        } else {
-            (None, None)
-        }
+        (config.gate_format.clone(), config.assert_format.clone())
     } else {
         (None, None)
     };
