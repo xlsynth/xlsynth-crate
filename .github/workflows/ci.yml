@@ -142,6 +142,12 @@ jobs:
           fi
           echo "Boolector lib downloaded to $(pwd)/boolector_libs"
           ls -l boolector_libs/
+          sudo cp boolector_libs/libboolector.so /usr/local/lib/
+          sudo ldconfig
+          echo "Listing /usr/local/lib for libboolector.so:"
+          ls -l /usr/local/lib/libboolector.so || echo "libboolector.so not found in /usr/local/lib!"
+          echo "ldconfig -p | grep boolector:"
+          ldconfig -p | grep boolector || echo "libboolector.so not found in ldconfig!"
 
       - name: Test crate
         env:
@@ -153,12 +159,12 @@ jobs:
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           export LD_LIBRARY_PATH="${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           echo "LD_LIBRARY_PATH for test execution: $LD_LIBRARY_PATH"
-          if [ ! -f "${{ github.workspace }}/boolector_libs/libboolector.so" ]; then
-            echo "ERROR: libboolector.so not found in ${{ github.workspace }}/boolector_libs" >&2
-            ls -l ${{ github.workspace }}/boolector_libs
+          if [ ! -f "/usr/local/lib/libboolector.so" ]; then
+            echo "ERROR: libboolector.so not found in /usr/local/lib" >&2
+            ls -l /usr/local/lib | grep boolector || true
             exit 1
           fi
-          RUSTFLAGS="-L native=${{ github.workspace }}/boolector_libs" cargo test --features with-boolector-system --workspace
+          cargo test --features with-boolector-system --workspace
 
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
