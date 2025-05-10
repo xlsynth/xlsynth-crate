@@ -135,6 +135,11 @@ jobs:
         run: |
           mkdir -p boolector_libs
           wget -O boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          if [ ! -f boolector_libs/libboolector.so ]; then
+            echo "ERROR: libboolector.so was not downloaded correctly!" >&2
+            ls -l boolector_libs/
+            exit 1
+          fi
           echo "Boolector lib downloaded to $(pwd)/boolector_libs"
           ls -l boolector_libs/
 
@@ -148,6 +153,11 @@ jobs:
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           export LD_LIBRARY_PATH="${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           echo "LD_LIBRARY_PATH for test execution: $LD_LIBRARY_PATH"
+          if [ ! -f "${{ github.workspace }}/boolector_libs/libboolector.so" ]; then
+            echo "ERROR: libboolector.so not found in ${{ github.workspace }}/boolector_libs" >&2
+            ls -l ${{ github.workspace }}/boolector_libs
+            exit 1
+          fi
           RUSTFLAGS="-L native=${{ github.workspace }}/boolector_libs" cargo test --features with-boolector-system --workspace
 
   # -----------------------------------------------------------
