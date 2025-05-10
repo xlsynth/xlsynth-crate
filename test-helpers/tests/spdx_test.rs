@@ -88,6 +88,11 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
 
+            // DSOs are binary files don't check for SPDX.
+            if path.file_name().unwrap().to_str().unwrap().ends_with(".so") {
+                continue;
+            }
+
             if let Some(extension) = path.extension() {
                 if extension == "md"
                     || extension == "lock"

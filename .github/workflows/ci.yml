@@ -131,12 +131,40 @@ jobs:
           profile: minimal
           override: true
 
+      - name: Download and set up Boolector
+        run: |
+          mkdir -p boolector_libs
+          wget -O boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          if [ ! -f boolector_libs/libboolector.so ]; then
+            echo "ERROR: libboolector.so was not downloaded correctly!" >&2
+            ls -l boolector_libs/
+            exit 1
+          fi
+          echo "Boolector lib downloaded to $(pwd)/boolector_libs"
+          ls -l boolector_libs/
+          sudo cp boolector_libs/libboolector.so /usr/lib/
+          sudo ldconfig
+          echo "Listing /usr/lib for libboolector.so:"
+          ls -l /usr/lib/libboolector.so || echo "libboolector.so not found in /usr/lib!"
+          echo "ldconfig -p | grep boolector:"
+          ldconfig -p | grep boolector || echo "libboolector.so not found in ldconfig!"
+
       - name: Test crate
+        env:
+          BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
+          LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
         run: |
           cargo clean
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector --workspace
+          export LD_LIBRARY_PATH="${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          echo "LD_LIBRARY_PATH for test execution: $LD_LIBRARY_PATH"
+          if [ ! -f "/usr/lib/libboolector.so" ]; then
+            echo "ERROR: libboolector.so not found in /usr/lib" >&2
+            ls -l /usr/lib | grep boolector || true
+            exit 1
+          fi
+          cargo test --features with-boolector-system --workspace
 
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
@@ -294,7 +322,7 @@ jobs:
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector --workspace
+          cargo test --features with-boolector-built --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job

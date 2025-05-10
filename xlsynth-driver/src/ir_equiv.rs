@@ -6,10 +6,10 @@ use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
 
-#[cfg(feature = "with-boolector")]
+#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::ir_equiv_boolector;
 
-#[cfg(feature = "with-boolector")]
+#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::xls_ir::ir_parser;
 
 const SUBCOMMAND: &str = "ir-equiv";
@@ -61,7 +61,7 @@ fn ir_equiv(
     }
 }
 
-#[cfg(feature = "with-boolector")]
+#[cfg(feature = "has-boolector")]
 fn run_boolector_equiv_check(
     lhs_path: &std::path::Path,
     rhs_path: &std::path::Path,
@@ -136,12 +136,12 @@ pub fn handle_ir_equiv(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         .unwrap_or(false);
     if use_boolector {
         // If the feature is not enabled, error out.
-        #[cfg(not(feature = "with-boolector"))]
+        #[cfg(not(feature = "has-boolector"))]
         {
-            eprintln!("Error: --boolector requested but this binary was not built with --features=with-boolector");
+            eprintln!("Error: --boolector requested but this binary was not built with the has-boolector feature (enabled by with-boolector-system or with-boolector-built).");
             std::process::exit(1);
         }
-        #[cfg(feature = "with-boolector")]
+        #[cfg(feature = "has-boolector")]
         #[allow(unreachable_code)]
         {
             log::info!("run_boolector_equiv_check");
