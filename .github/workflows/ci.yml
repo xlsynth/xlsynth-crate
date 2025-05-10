@@ -142,10 +142,10 @@ jobs:
           fi
           echo "Boolector lib downloaded to $(pwd)/boolector_libs"
           ls -l boolector_libs/
-          sudo cp boolector_libs/libboolector.so /usr/local/lib/
+          sudo cp boolector_libs/libboolector.so /usr/lib/
           sudo ldconfig
-          echo "Listing /usr/local/lib for libboolector.so:"
-          ls -l /usr/local/lib/libboolector.so || echo "libboolector.so not found in /usr/local/lib!"
+          echo "Listing /usr/lib for libboolector.so:"
+          ls -l /usr/lib/libboolector.so || echo "libboolector.so not found in /usr/lib!"
           echo "ldconfig -p | grep boolector:"
           ldconfig -p | grep boolector || echo "libboolector.so not found in ldconfig!"
 
@@ -159,9 +159,9 @@ jobs:
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           export LD_LIBRARY_PATH="${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           echo "LD_LIBRARY_PATH for test execution: $LD_LIBRARY_PATH"
-          if [ ! -f "/usr/local/lib/libboolector.so" ]; then
-            echo "ERROR: libboolector.so not found in /usr/local/lib" >&2
-            ls -l /usr/local/lib | grep boolector || true
+          if [ ! -f "/usr/lib/libboolector.so" ]; then
+            echo "ERROR: libboolector.so not found in /usr/lib" >&2
+            ls -l /usr/lib | grep boolector || true
             exit 1
           fi
           cargo test --features with-boolector-system --workspace
