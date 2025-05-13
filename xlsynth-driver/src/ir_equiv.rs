@@ -17,11 +17,17 @@ const SUBCOMMAND: &str = "ir-equiv";
 fn ir_equiv(
     lhs: &std::path::Path,
     rhs: &std::path::Path,
-    top: Option<&str>,
+    lhs_top: Option<&str>,
+    rhs_top: Option<&str>,
     config: &Option<ToolchainConfig>,
 ) {
     log::info!("ir-equiv");
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
+        if lhs_top != rhs_top {
+            eprintln!("Error: --top flag is required for tool-based equivalence checking");
+            std::process::exit(1);
+        }
+        let top = lhs_top;
         let output = run_check_ir_equivalence_main(lhs, rhs, top, tool_path);
         match output {
             Ok(stdout) => {
@@ -65,7 +71,8 @@ fn ir_equiv(
 fn run_boolector_equiv_check(
     lhs_path: &std::path::Path,
     rhs_path: &std::path::Path,
-    top: Option<&str>,
+    lhs_top: Option<&str>,
+    rhs_top: Option<&str>,
 ) -> ! {
     // Parse both IR files to xls_ir::ir::Package
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
@@ -83,7 +90,7 @@ fn run_boolector_equiv_check(
         }
     };
     // Select the function to check (top or first)
-    let lhs_fn = if let Some(top_name) = top {
+    let lhs_fn = if let Some(top_name) = lhs_top {
         lhs_pkg.get_fn(top_name).unwrap_or_else(|| {
             eprintln!("Top function '{}' not found in lhs IR file", top_name);
             std::process::exit(1);
@@ -94,7 +101,7 @@ fn run_boolector_equiv_check(
             std::process::exit(1);
         })
     };
-    let rhs_fn = if let Some(top_name) = top {
+    let rhs_fn = if let Some(top_name) = rhs_top {
         rhs_pkg.get_fn(top_name).unwrap_or_else(|| {
             eprintln!("Top function '{}' not found in rhs IR file", top_name);
             std::process::exit(1);
@@ -122,11 +129,31 @@ pub fn handle_ir_equiv(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_ir_equiv");
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();
     let rhs = matches.get_one::<String>("rhs_ir_file").unwrap();
+
+    let mut lhs_top = matches.get_one::<String>("lhs_ir_top").map(|s| s.as_str());
+    let mut rhs_top = matches.get_one::<String>("rhs_ir_top").map(|s| s.as_str());
+
     let top = if let Some(top) = matches.get_one::<String>("ir_top") {
         Some(top.as_str())
     } else {
         None
     };
+
+    if top.is_some() && (lhs_top.is_some() || rhs_top.is_some()) {
+        eprintln!("Error: --ir_top and --lhs_ir_top/--rhs_ir_top cannot be used together");
+        std::process::exit(1);
+    }
+
+    if lhs_top.is_some() ^ rhs_top.is_some() {
+        eprintln!("Error: --lhs_ir_top and --rhs_ir_top must be used together");
+        std::process::exit(1);
+    }
+
+    if top.is_some() {
+        lhs_top = top;
+        rhs_top = top;
+    }
+
     let lhs_path = std::path::Path::new(lhs);
     let rhs_path = std::path::Path::new(rhs);
 
@@ -145,10 +172,10 @@ pub fn handle_ir_equiv(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         #[allow(unreachable_code)]
         {
             log::info!("run_boolector_equiv_check");
-            run_boolector_equiv_check(lhs_path, rhs_path, top);
+            run_boolector_equiv_check(lhs_path, rhs_path, lhs_top, rhs_top);
             unreachable!();
         }
     }
     // Default: use the toolchain-based equivalence check
-    ir_equiv(lhs_path, rhs_path, top, config);
+    ir_equiv(lhs_path, rhs_path, lhs_top, rhs_top, config);
 }

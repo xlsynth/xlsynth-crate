@@ -315,6 +315,16 @@ fn main() {
                         .index(2),
                 )
                 .add_ir_top_arg(false)
+                .arg(
+                    Arg::new("lhs_ir_top")
+                        .long("lhs_ir_top")
+                        .help("The top-level entry point for the left-hand side IR"),
+                )
+                .arg(
+                    Arg::new("rhs_ir_top")
+                        .long("rhs_ir_top")
+                        .help("The top-level entry point for the right-hand side IR"),
+                )
                 .add_bool_arg(
                     "boolector",
                     "Use Boolector for equivalence checking (requires --features=with-boolector)",
