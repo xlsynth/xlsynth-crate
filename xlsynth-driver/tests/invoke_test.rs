@@ -1158,6 +1158,49 @@ fn test_irequiv_subcommand_boolector_equivalent() {
     );
 }
 
+/// Test for ir-equiv command using Boolector with different IR top entry
+/// points.
+#[cfg(feature = "has-boolector")]
+#[test]
+fn test_irequiv_subcommand_boolector_different_top_entry_points() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_ir = "package add_then_sub\nfn lhs_main(x: bits[32]) -> bits[32] {\n    add.2: bits[32] = add(x, x)\n    ret sub.3: bits[32] = sub(add.2, x)\n}";
+    let rhs_ir = "package identity\nfn rhs_main(x: bits[32]) -> bits[32] {\n    ret identity.2: bits[32] = identity(x)\n}";
+    // Write the IR files to the temp directory.
+    let lhs_path = temp_dir.path().join("lhs.ir");
+    std::fs::write(&lhs_path, lhs_ir).unwrap();
+    let rhs_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_path, rhs_ir).unwrap();
+
+    // Write out toolchain configuration.
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = "[toolchain]\n".to_string();
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg("--boolector=true")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--lhs_ir_top")
+        .arg("lhs_main")
+        .arg("--rhs_ir_top")
+        .arg("rhs_main")
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
+    assert!(output.status.success());
+    assert!(stdout.contains("Boolector proved equivalence"));
+}
+
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]
 fn test_toolchain_common_codegen_flags_resolve(use_tool_path: bool) {
