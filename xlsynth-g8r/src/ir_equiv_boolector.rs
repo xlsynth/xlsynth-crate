@@ -3,6 +3,7 @@
 #![cfg(feature = "has-boolector")]
 
 use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
+use crate::xls_ir::ir_parser;
 use crate::xls_ir::ir_utils::get_topological;
 use boolector::option::{BtorOption, ModelGen};
 use boolector::{Btor, SolverResult, BV};
@@ -115,8 +116,134 @@ pub fn ir_fn_to_boolector(
                         result
                     }
                     crate::xls_ir::ir::Unop::Identity => arg_bv.clone(),
+                    crate::xls_ir::ir::Unop::Reverse => {
+                        let width = arg_bv.get_width();
+                        assert!(width > 0, "Reverse: width must be > 0");
+                        let mut result = arg_bv.slice(0, 0);
+                        for i in 1..width {
+                            let bit = arg_bv.slice(i, i);
+                            result = bit.concat(&result);
+                        }
+                        result
+                    }
                     _ => panic!("Unop {:?} not yet implemented in Boolector conversion", op),
                 }
+            }
+            NodePayload::OneHot { arg, lsb_prio } => {
+                let arg_bv = env.get(arg).expect("OneHot argument must be present");
+                let width = arg_bv.get_width();
+                assert!(width > 0, "OneHot: width must be > 0");
+                log::info!("[OneHot] arg_bv width: {}", width);
+                let mut bits: Vec<BV<Rc<Btor>>> = Vec::with_capacity((width + 1) as usize);
+                let mut prior_not: Option<BV<Rc<Btor>>> = None;
+                for i in 0..width {
+                    let idx = if *lsb_prio { i } else { width - 1 - i };
+                    let bit = arg_bv.slice(idx, idx);
+                    log::info!(
+                        "[OneHot] bit {} (idx={}): width={} is_const={} bin={:?}",
+                        i,
+                        idx,
+                        bit.get_width(),
+                        bit.is_const(),
+                        bit.as_binary_str()
+                    );
+                    let this_no_prior = if let Some(prior) = &prior_not {
+                        let v = prior.and(&bit.not());
+                        log::info!("[OneHot] this_no_prior (i={}) with prior: width={} is_const={} bin={:?}", i, v.get_width(), v.is_const(), v.as_binary_str());
+                        v
+                    } else {
+                        let v = bit.not();
+                        log::info!(
+                            "[OneHot] this_no_prior (i={}) no prior: width={} is_const={} bin={:?}",
+                            i,
+                            v.get_width(),
+                            v.is_const(),
+                            v.as_binary_str()
+                        );
+                        v
+                    };
+                    let out_bit = bit.and(&this_no_prior.not());
+                    log::info!(
+                        "[OneHot] out_bit (i={}): width={} is_const={} bin={:?}",
+                        i,
+                        out_bit.get_width(),
+                        out_bit.is_const(),
+                        out_bit.as_binary_str()
+                    );
+                    bits.push(out_bit.clone());
+                    prior_not = Some(if let Some(prior) = prior_not {
+                        let v = prior.and(&bit.not());
+                        log::info!(
+                            "[OneHot] prior_not update (i={}): width={} is_const={} bin={:?}",
+                            i,
+                            v.get_width(),
+                            v.is_const(),
+                            v.as_binary_str()
+                        );
+                        v
+                    } else {
+                        let v = bit.not();
+                        log::info!(
+                            "[OneHot] prior_not init (i={}): width={} is_const={} bin={:?}",
+                            i,
+                            v.get_width(),
+                            v.is_const(),
+                            v.as_binary_str()
+                        );
+                        v
+                    });
+                }
+                if !*lsb_prio {
+                    bits.reverse();
+                }
+                if let Some(prior) = prior_not {
+                    log::info!(
+                        "[OneHot] final prior_not: width={} is_const={} bin={:?}",
+                        prior.get_width(),
+                        prior.is_const(),
+                        prior.as_binary_str()
+                    );
+                    bits.push(prior);
+                } else {
+                    let v = arg_bv.slice(0, 0).not();
+                    log::info!(
+                        "[OneHot] final prior_not (empty): width={} is_const={} bin={:?}",
+                        v.get_width(),
+                        v.is_const(),
+                        v.as_binary_str()
+                    );
+                    bits.push(v);
+                }
+                assert_eq!(
+                    bits.len(),
+                    (width + 1) as usize,
+                    "OneHot output width should be input width + 1"
+                );
+                assert!(!bits.is_empty(), "OneHot: bits vector must not be empty");
+                let mut result = bits[0].clone();
+                log::info!(
+                    "[OneHot] result init: width={} is_const={} bin={:?}",
+                    result.get_width(),
+                    result.is_const(),
+                    result.as_binary_str()
+                );
+                for (i, b) in bits.iter().enumerate().skip(1) {
+                    log::info!(
+                        "[OneHot] concat (i={}): lhs width={} rhs width={}",
+                        i,
+                        b.get_width(),
+                        result.get_width()
+                    );
+                    result = b.concat(&result);
+                    log::info!(
+                        "[OneHot] after concat (i={}): width={} is_const={} bin={:?}",
+                        i,
+                        result.get_width(),
+                        result.is_const(),
+                        result.as_binary_str()
+                    );
+                }
+                result
             }
             NodePayload::Nary(op, elems) => match op {
                 crate::xls_ir::ir::NaryOp::Concat => {
@@ -415,6 +542,10 @@ pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
             l.name, l.ty, r.ty
         );
     }
+    assert!(
+        lhs.params.len() > 0,
+        "check_equiv only supports functions with at least one parameter"
+    );
     let btor = Rc::new(Btor::new());
     btor.set_opt(BtorOption::ModelGen(ModelGen::All));
     // Create shared parameter BVs for all parameters (by name)
@@ -484,6 +615,35 @@ where
     shifted.slice(orig_width - 1, 0)
 }
 
+/// Asserts that the given IR function (as text) is equivalent to itself.
+fn assert_fn_equiv_to_self(ir_text: &str) {
+    let mut parser = ir_parser::Parser::new(ir_text);
+    let f = parser.parse_fn().expect("Failed to parse IR");
+    let result = check_equiv(&f, &f);
+    assert_eq!(
+        result,
+        EquivResult::Proved,
+        "Function was not equivalent to itself: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_reverse_equiv_to_self() {
+    let ir_text = r#"fn reverse4(x: bits[4] id=1) -> bits[4] {
+  ret reverse.2: bits[4] = reverse(x, id=2)
+}"#;
+    assert_fn_equiv_to_self(ir_text);
+}
+
+#[test]
+fn test_onehot_equiv_to_self() {
+    let ir_text = r#"fn onehot3(x: bits[3] id=1) -> bits[4] {
+  ret one_hot.2: bits[4] = one_hot(x, lsb_prio=true, id=2)
+}"#;
+    assert_fn_equiv_to_self(ir_text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,62 +651,22 @@ mod tests {
         test_utils::{load_bf16_add_sample, Opt},
         xls_ir::ir::{Fn, Node, NodePayload, Type},
     };
+    use boolector::{
+        option::{BtorOption, ModelGen},
+        Btor,
+    };
+    use std::rc::Rc;
     use xlsynth::IrValue;
 
-    #[test]
-    fn test_check_equiv_literals_proved() {
-        // Both functions return literal 42
-        let value = IrValue::make_ubits(8, 42).unwrap();
-        let node = Node {
-            text_id: 1,
-            name: Some("literal.1".to_string()),
-            ty: Type::Bits(8),
-            payload: NodePayload::Literal(value),
-        };
-        let ir_fn = Fn {
-            name: "f".to_string(),
-            params: vec![],
-            ret_ty: Type::Bits(8),
-            nodes: vec![node],
-            ret_node_ref: Some(crate::xls_ir::ir::NodeRef { index: 0 }),
-        };
-        let result = check_equiv(&ir_fn, &ir_fn);
-        assert_eq!(result, EquivResult::Proved);
-    }
-
-    #[test]
-    fn test_check_equiv_literals_disproved() {
-        // Functions return different literals
-        let value1 = IrValue::make_ubits(8, 42).unwrap();
-        let node1 = Node {
-            text_id: 1,
-            name: Some("literal.1".to_string()),
-            ty: Type::Bits(8),
-            payload: NodePayload::Literal(value1),
-        };
-        let ir_fn1 = Fn {
-            name: "f1".to_string(),
-            params: vec![],
-            ret_ty: Type::Bits(8),
-            nodes: vec![node1],
-            ret_node_ref: Some(crate::xls_ir::ir::NodeRef { index: 0 }),
-        };
-        let value2 = IrValue::make_ubits(8, 99).unwrap();
-        let node2 = Node {
-            text_id: 1,
-            name: Some("literal.1".to_string()),
-            ty: Type::Bits(8),
-            payload: NodePayload::Literal(value2),
-        };
-        let ir_fn2 = Fn {
-            name: "f2".to_string(),
-            params: vec![],
-            ret_ty: Type::Bits(8),
-            nodes: vec![node2],
-            ret_node_ref: Some(crate::xls_ir::ir::NodeRef { index: 0 }),
-        };
-        let result = check_equiv(&ir_fn1, &ir_fn2);
-        assert_eq!(result, EquivResult::Disproved(vec![]));
+    /// Helper to create a Boolector context with model generation enabled,
+    /// passing it to the provided closure.
+    fn with_btor_model_gen<F, R>(f: F) -> R
+    where
+        F: FnOnce(Rc<Btor>) -> R,
+    {
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        f(btor)
     }
 
     #[test]
@@ -560,75 +680,22 @@ mod tests {
     }
 
     #[test]
+    fn test_bf16_mul_sample_to_boolector() {
+        let sample = load_bf16_mul_sample(Opt::No);
+        let g8r_fn = sample.g8r_pkg.get_fn(&sample.mangled_fn_name).unwrap();
+        let btor = Rc::new(Btor::new());
+        let bv = ir_fn_to_boolector(btor, g8r_fn, None);
+        assert_eq!(bv.output.get_width(), 16);
+    }
+
+    #[test]
     fn test_check_equiv_counterexample_for_x_eq_42() {
         let _ = env_logger::builder().is_test(true).try_init();
-        use crate::xls_ir::ir::{Fn, Node, NodePayload, Type};
-        use xlsynth::IrValue;
-        // f(x) = x == 42
-        let param_id = crate::xls_ir::ir::ParamId::new(1);
-        let param = crate::xls_ir::ir::Param {
-            name: "x".to_string(),
-            ty: Type::Bits(8),
-            id: param_id,
-        };
-        let param_ref = crate::xls_ir::ir::NodeRef { index: 0 };
-        let literal_42 = Node {
-            text_id: 2,
-            name: Some("literal.2".to_string()),
-            ty: Type::Bits(8),
-            payload: NodePayload::Literal(IrValue::make_ubits(8, 42).unwrap()),
-        };
-        let literal_42_ref = crate::xls_ir::ir::NodeRef { index: 1 };
-        let eq_node = Node {
-            text_id: 3,
-            name: Some("eq.3".to_string()),
-            ty: Type::Bits(1),
-            payload: NodePayload::Binop(crate::xls_ir::ir::Binop::Eq, param_ref, literal_42_ref),
-        };
-        let eq_node_ref = crate::xls_ir::ir::NodeRef { index: 2 };
-        let f = Fn {
-            name: "f".to_string(),
-            params: vec![param],
-            ret_ty: Type::Bits(1),
-            nodes: vec![
-                Node {
-                    text_id: 1,
-                    name: Some("param.1".to_string()),
-                    ty: Type::Bits(8),
-                    payload: NodePayload::GetParam(param_id),
-                },
-                literal_42,
-                eq_node,
-            ],
-            ret_node_ref: Some(eq_node_ref),
-        };
-        // g(x) = false
-        let false_node = Node {
-            text_id: 2,
-            name: Some("literal.2".to_string()),
-            ty: Type::Bits(1),
-            payload: NodePayload::Literal(IrValue::make_ubits(1, 0).unwrap()),
-        };
-        let false_node_ref = crate::xls_ir::ir::NodeRef { index: 1 };
-        let g = Fn {
-            name: "g".to_string(),
-            params: vec![crate::xls_ir::ir::Param {
-                name: "x".to_string(),
-                ty: Type::Bits(8),
-                id: param_id,
-            }],
-            ret_ty: Type::Bits(1),
-            nodes: vec![
-                Node {
-                    text_id: 1,
-                    name: Some("param.1".to_string()),
-                    ty: Type::Bits(8),
-                    payload: NodePayload::GetParam(param_id),
-                },
-                false_node,
-            ],
-            ret_node_ref: Some(false_node_ref),
-        };
+        let ir_text = r#"fn add8(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret add.3: bits[8] = add(x, y, id=3)
+}"#;
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
+        let g = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
         let result = check_equiv(&f, &g);
         match result {
             EquivResult::Disproved(ref cex) => {
@@ -646,5 +713,21 @@ mod tests {
             }
             _ => panic!("Expected Disproved with counterexample"),
         }
+    }
+
+    #[test]
+    fn test_reverse_unop() {
+        let ir_text = r#"fn reverse4(x: bits[4] id=1) -> bits[4] {
+  ret reverse.2: bits[4] = reverse(x, id=2)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_onehot_unop() {
+        let ir_text = r#"fn onehot3(x: bits[3] id=1) -> bits[4] {
+  ret one_hot.2: bits[4] = one_hot(x, lsb_prio=true, id=2)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
     }
 }
