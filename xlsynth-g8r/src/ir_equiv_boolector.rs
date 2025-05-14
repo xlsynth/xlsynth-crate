@@ -343,8 +343,43 @@ pub fn ir_fn_to_boolector(
                     Binop::Ult => a_bv.ult(b_bv),
                     Binop::Ule => a_bv.ulte(b_bv),
                     Binop::Umul | Binop::Smul => {
-                        let prod = a_bv.mul(b_bv);
                         let expected_width = node.ty.bit_count() as u32;
+                        let (a_ext, b_ext) = match op {
+                            Binop::Umul => (
+                                if a_bv.get_width() < expected_width {
+                                    a_bv.uext(expected_width - a_bv.get_width())
+                                } else if a_bv.get_width() > expected_width {
+                                    a_bv.slice(expected_width - 1, 0)
+                                } else {
+                                    a_bv.clone()
+                                },
+                                if b_bv.get_width() < expected_width {
+                                    b_bv.uext(expected_width - b_bv.get_width())
+                                } else if b_bv.get_width() > expected_width {
+                                    b_bv.slice(expected_width - 1, 0)
+                                } else {
+                                    b_bv.clone()
+                                },
+                            ),
+                            Binop::Smul => (
+                                if a_bv.get_width() < expected_width {
+                                    a_bv.sext(expected_width - a_bv.get_width())
+                                } else if a_bv.get_width() > expected_width {
+                                    a_bv.slice(expected_width - 1, 0)
+                                } else {
+                                    a_bv.clone()
+                                },
+                                if b_bv.get_width() < expected_width {
+                                    b_bv.sext(expected_width - b_bv.get_width())
+                                } else if b_bv.get_width() > expected_width {
+                                    b_bv.slice(expected_width - 1, 0)
+                                } else {
+                                    b_bv.clone()
+                                },
+                            ),
+                            _ => unreachable!(),
+                        };
+                        let prod = a_ext.mul(&b_ext);
                         let prod_width = prod.get_width();
                         if prod_width > expected_width {
                             prod.slice(expected_width - 1, 0)
