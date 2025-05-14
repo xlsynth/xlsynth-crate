@@ -36,17 +36,7 @@ pub fn ir_fn_to_boolector(
             node
         );
         let bv = match &node.payload {
-            NodePayload::Literal(ir_value) => {
-                let bits = ir_value.to_bits().expect("Literal must be bits");
-                let width = bits.get_bit_count() as u32;
-                let mut value = 0u64;
-                for i in 0..width {
-                    if bits.get_bit(i as usize).unwrap() {
-                        value |= 1 << i;
-                    }
-                }
-                BV::from_u64(btor.clone(), value, width)
-            }
+            NodePayload::Literal(ir_value) => ir_value_to_bv(btor.clone(), ir_value, &node.ty),
             NodePayload::GetParam(param_id) => {
                 // Find the parameter by id
                 let param = f
@@ -390,6 +380,7 @@ pub fn ir_fn_to_boolector(
                     Binop::Sgt => a_bv.sgt(b_bv),
                     Binop::Slt => a_bv.slt(b_bv),
                     Binop::Sle => a_bv.slte(b_bv),
+                    Binop::Sge => a_bv.sgte(b_bv),
                     _ => panic!("Binop {:?} not yet implemented in Boolector conversion", op),
                 }
             }
@@ -551,6 +542,30 @@ pub fn ir_fn_to_boolector(
                 // For now, treat as a no-op (like Nil/AfterAll).
                 continue;
             }
+            NodePayload::Decode { arg, width } => {
+                let arg_bv = env.get(arg).expect("Decode arg must be present");
+                let in_width = arg_bv.get_width() as usize;
+                let out_width = *width;
+                assert!(
+                    out_width <= (1 << in_width),
+                    "Decode output width must be <= 2^input_width"
+                );
+                // For each output bit i, set to 1 iff arg_bv == i, else 0
+                let mut bits = Vec::with_capacity(out_width);
+                for i in 0..out_width {
+                    let i_bv = BV::from_u64(btor.clone(), i as u64, in_width as u32);
+                    let eq = arg_bv._eq(&i_bv);
+                    // eq is 1-bit; extend to 1-bit BV
+                    bits.push(eq);
+                }
+                // Concatenate bits into a single BV (LSB first)
+                bits.reverse();
+                let mut out = bits[0].clone();
+                for b in bits.iter().skip(1) {
+                    out = out.concat(b);
+                }
+                out
+            }
             other => todo!("Boolector conversion for {:?} not yet implemented", other),
         };
         // Assert the width matches the node's annotated type
@@ -701,6 +716,73 @@ where
     let shifted = shift_op(&val_pow2, &shamt_k);
     // Slice result back to original width
     shifted.slice(orig_width - 1, 0)
+}
+
+fn irbits_to_binary_str(bits: &xlsynth::IrBits) -> String {
+    let width = bits.get_bit_count();
+    (0..width)
+        .rev() // Boolector expects MSB first in the string
+        .map(|i| if bits.get_bit(i).unwrap() { '1' } else { '0' })
+        .collect()
+}
+
+fn ir_value_to_bv(
+    btor: Rc<Btor>,
+    ir_value: &xlsynth::IrValue,
+    ty: &crate::xls_ir::ir::Type,
+) -> BV<Rc<Btor>> {
+    match ty {
+        crate::xls_ir::ir::Type::Bits(width) => {
+            let bits = ir_value.to_bits().expect("Bits literal must be bits");
+            if *width <= 64 {
+                let mut value = 0u64;
+                for i in 0..*width {
+                    if bits.get_bit(i).unwrap() {
+                        value |= 1 << i;
+                    }
+                }
+                BV::from_u64(btor, value, *width as u32)
+            } else {
+                let bin_str = irbits_to_binary_str(&bits);
+                BV::from_binary_str(btor, &bin_str)
+            }
+        }
+        crate::xls_ir::ir::Type::Array(array_ty) => {
+            let elements = ir_value
+                .get_elements()
+                .expect("Array literal must have elements");
+            let mut bvs = Vec::new();
+            for elem in elements.iter().rev() {
+                // LSB = last element
+                let bv = ir_value_to_bv(btor.clone(), elem, &array_ty.element_type);
+                bvs.push(bv);
+            }
+            let mut result = bvs[0].clone();
+            for bv in bvs.iter().skip(1) {
+                result = result.concat(bv);
+            }
+            result
+        }
+        crate::xls_ir::ir::Type::Tuple(types) => {
+            let elements = ir_value
+                .get_elements()
+                .expect("Tuple literal must have elements");
+            let mut bvs = Vec::new();
+            for (elem, elem_ty) in elements.iter().rev().zip(types.iter().rev()) {
+                let bv = ir_value_to_bv(btor.clone(), elem, elem_ty);
+                bvs.push(bv);
+            }
+            let mut result = bvs[0].clone();
+            for bv in bvs.iter().skip(1) {
+                result = result.concat(bv);
+            }
+            result
+        }
+        crate::xls_ir::ir::Type::Token => {
+            // Tokens are zero bits
+            BV::from_u64(btor, 0, 0)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -925,5 +1007,85 @@ mod tests {
             EquivResult::Proved => (),
             EquivResult::Disproved(_) => panic!("Expected Proved, got Disproved"),
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "Literal must be bits")]
+    fn test_non_bits_literal_panics() {
+        let ir_text = r#"fn f() -> bits[8][2] {
+  ret literal.1: bits[8][2] = literal(value=[1, 2], id=1)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let _ = ir_fn_to_boolector(btor, &f, None);
+    }
+
+    #[test]
+    fn test_array_literal_to_bv() {
+        let ir_text = r#"fn f() -> bits[4][2] {
+  ret literal.1: bits[4][2] = literal(value=[1, 2], id=1)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let result = ir_fn_to_boolector(btor.clone(), &f, None);
+        // The expected bit pattern is [1,2] as two 4-bit values, LSB = last element (2)
+        // 1 = 0b0001, 2 = 0b0010, so bits = 0b00100001 (LSB = 1, next 4 bits = 2)
+        let out = result.output.as_u64().unwrap();
+        assert_eq!(out, 0b00100001);
+    }
+
+    #[test]
+    fn test_large_bits_literal_to_bv() {
+        let ir_text = r#"fn f() -> bits[80] {
+  ret literal.1: bits[80] = literal(value=1208925819614629174706175, id=1)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let result = ir_fn_to_boolector(btor.clone(), &f, None);
+        // 1208925819614629174706175 = 0xFFFFFFFFFFFFFFFFFFF (80 bits, all ones)
+        let out_str = result.output.as_binary_str().unwrap();
+        let expected = "1".repeat(80);
+        assert_eq!(out_str, expected);
+    }
+
+    #[test]
+    fn test_decode_equiv_to_self() {
+        let ir_text = r#"fn decode4(x: bits[2] id=1) -> bits[4] {
+  ret decode.2: bits[4] = decode(x, width=4, id=2)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_decode_known_case() {
+        let ir_text = r#"fn decode4(x: bits[2] id=1) -> bits[4] {
+  ret decode.2: bits[4] = decode(x, width=4, id=2)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        // x = 2
+        let x_bv = BV::from_u64(btor.clone(), 2, 2);
+        let mut param_bvs = std::collections::HashMap::new();
+        param_bvs.insert("x".to_string(), x_bv);
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        let out = result.output.as_u64().unwrap();
+        // decode(2) for width=4 is 0b0100 = 4
+        assert_eq!(out, 0b0100);
+    }
+
+    #[test]
+    fn test_sge_equiv_to_self() {
+        let ir_text = r#"fn sge4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
+  ret sge.3: bits[1] = sge(x, y, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
     }
 }
