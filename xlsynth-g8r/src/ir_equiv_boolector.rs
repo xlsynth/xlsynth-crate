@@ -5,6 +5,10 @@
 use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 use crate::xls_ir::ir_parser;
 use crate::xls_ir::ir_utils::get_topological;
+use crate::{
+    test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
+    xls_ir::ir::{Node, Type},
+};
 use boolector::option::{BtorOption, ModelGen};
 use boolector::{Btor, SolverResult, BV};
 use log::debug;
@@ -340,6 +344,8 @@ pub fn ir_fn_to_boolector(
                     Binop::Shll => shift_boolector(a_bv, b_bv, |x, y| x.sll(y)),
                     Binop::Shrl => shift_boolector(a_bv, b_bv, |x, y| x.srl(y)),
                     Binop::Shra => shift_boolector(a_bv, b_bv, |x, y| x.sra(y)),
+                    Binop::Sgt => a_bv.sgt(b_bv),
+                    Binop::Slt => a_bv.slt(b_bv),
                     _ => panic!("Binop {:?} not yet implemented in Boolector conversion", op),
                 }
             }
@@ -471,6 +477,26 @@ pub fn ir_fn_to_boolector(
                     });
                 }
                 result.expect("ArrayIndex: array must have at least one element")
+            }
+            NodePayload::Encode { arg } => {
+                let arg_bv = env.get(arg).expect("Encode argument must be present");
+                let width = arg_bv.get_width();
+                assert!(width > 0, "Encode: width must be > 0");
+                let out_width = (width as f64).log2().ceil() as u32;
+                assert_eq!(
+                    node.ty.bit_count() as u32,
+                    out_width,
+                    "Encode: output width must be log2(input width)"
+                );
+                // Priority encoder: for each bit, if set, output its index
+                let mut result = BV::from_u64(btor.clone(), 0, out_width);
+                for i in (0..width).rev() {
+                    // MSB priority
+                    let bit = arg_bv.slice(i, i);
+                    let idx_bv = BV::from_u64(btor.clone(), i as u64, out_width);
+                    result = bit.cond_bv(&idx_bv, &result);
+                }
+                result
             }
             other => todo!("Boolector conversion for {:?} not yet implemented", other),
         };
@@ -644,11 +670,35 @@ fn test_onehot_equiv_to_self() {
     assert_fn_equiv_to_self(ir_text);
 }
 
+#[test]
+fn test_encode_equiv_to_self() {
+    let ir_text = r#"fn encode4(x: bits[4] id=1) -> bits[2] {
+  ret encode.2: bits[2] = encode(x, id=2)
+}"#;
+    assert_fn_equiv_to_self(ir_text);
+}
+
+#[test]
+fn test_sgt_equiv_to_self() {
+    let ir_text = r#"fn sgt4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
+  ret sgt.3: bits[1] = sgt(x, y, id=3)
+}"#;
+    assert_fn_equiv_to_self(ir_text);
+}
+
+#[test]
+fn test_slt_equiv_to_self() {
+    let ir_text = r#"fn slt4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
+  ret slt.3: bits[1] = slt(x, y, id=3)
+}"#;
+    assert_fn_equiv_to_self(ir_text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        test_utils::{load_bf16_add_sample, Opt},
+        test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
         xls_ir::ir::{Fn, Node, NodePayload, Type},
     };
     use boolector::{
