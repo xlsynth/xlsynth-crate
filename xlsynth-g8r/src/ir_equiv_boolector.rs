@@ -1010,16 +1010,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Literal must be bits")]
     fn test_non_bits_literal_panics() {
-        let ir_text = r#"fn f() -> bits[8][2] {
-  ret literal.1: bits[8][2] = literal(value=[1, 2], id=1)
+        // This test previously expected a panic for array literals, but now arrays are
+        // supported. Instead, we test that an array literal is accepted and
+        // produces the expected result.
+        let ir_text = r#"fn f() -> bits[4][2] {
+  ret literal.1: bits[4][2] = literal(value=[1, 2], id=1)
 }"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let btor = Rc::new(Btor::new());
         btor.set_opt(BtorOption::ModelGen(ModelGen::All));
-        let _ = ir_fn_to_boolector(btor, &f, None);
+        let result = ir_fn_to_boolector(btor, &f, None);
+        // The expected bit pattern is [1,2] as two 4-bit values, LSB = last element (2)
+        // 1 = 0b0001, 2 = 0b0010, so bits = 0b00100001 (LSB = 1, next 4 bits = 2)
+        let out = result.output.as_u64().unwrap();
+        assert_eq!(out, 0b00100001);
     }
 
     #[test]
