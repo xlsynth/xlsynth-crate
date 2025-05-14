@@ -327,7 +327,7 @@ fn main() {
                 )
                 .add_bool_arg(
                     "boolector",
-                    "Use Boolector for equivalence checking (requires --features=with-boolector)",
+                    "Use Boolector for equivalence checking (requires --features=with-boolector-built or --features=with-boolector-system)",
                 ),
         )
         .subcommand(

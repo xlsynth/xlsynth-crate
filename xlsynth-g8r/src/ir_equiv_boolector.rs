@@ -3,12 +3,7 @@
 #![cfg(feature = "has-boolector")]
 
 use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
-use crate::xls_ir::ir_parser;
 use crate::xls_ir::ir_utils::get_topological;
-use crate::{
-    test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
-    xls_ir::ir::{Node, Type},
-};
 use boolector::option::{BtorOption, ModelGen};
 use boolector::{Btor, SolverResult, BV};
 use log::debug;
@@ -324,10 +319,6 @@ pub fn ir_fn_to_boolector(
                     });
                     and_result.not()
                 }
-                _ => panic!(
-                    "NaryOp {:?} not yet implemented in Boolector conversion",
-                    op
-                ),
             },
             NodePayload::Binop(op, a, b) => {
                 let a_bv = env.get(a).expect("Binop lhs must be present");
@@ -699,138 +690,121 @@ where
     shifted.slice(orig_width - 1, 0)
 }
 
-/// Asserts that the given IR function (as text) is equivalent to itself.
-fn assert_fn_equiv_to_self(ir_text: &str) {
-    let mut parser = ir_parser::Parser::new(ir_text);
-    let f = parser.parse_fn().expect("Failed to parse IR");
-    let result = check_equiv(&f, &f);
-    assert_eq!(
-        result,
-        EquivResult::Proved,
-        "Function was not equivalent to itself: {:?}",
-        result
-    );
-}
-
-#[test]
-fn test_reverse_equiv_to_self() {
-    let ir_text = r#"fn reverse4(x: bits[4] id=1) -> bits[4] {
-  ret reverse.2: bits[4] = reverse(x, id=2)
-}"#;
-    assert_fn_equiv_to_self(ir_text);
-}
-
-#[test]
-fn test_onehot_equiv_to_self() {
-    let ir_text = r#"fn onehot3(x: bits[3] id=1) -> bits[4] {
-  ret one_hot.2: bits[4] = one_hot(x, lsb_prio=true, id=2)
-}"#;
-    assert_fn_equiv_to_self(ir_text);
-}
-
-#[test]
-fn test_encode_equiv_to_self() {
-    let ir_text = r#"fn encode4(x: bits[4] id=1) -> bits[2] {
-  ret encode.2: bits[2] = encode(x, id=2)
-}"#;
-    assert_fn_equiv_to_self(ir_text);
-}
-
-#[test]
-fn test_sgt_equiv_to_self() {
-    let ir_text = r#"fn sgt4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
-  ret sgt.3: bits[1] = sgt(x, y, id=3)
-}"#;
-    assert_fn_equiv_to_self(ir_text);
-}
-
-#[test]
-fn test_slt_equiv_to_self() {
-    let ir_text = r#"fn slt4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
-  ret slt.3: bits[1] = slt(x, y, id=3)
-}"#;
-    assert_fn_equiv_to_self(ir_text);
-}
-
-#[test]
-fn test_sle_equiv_to_self() {
-    let ir_text = r#"fn sle4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
-  ret sle.3: bits[1] = sle(x, y, id=3)
-}"#;
-    assert_fn_equiv_to_self(ir_text);
-}
-
-#[test]
-fn test_check_equiv_counterexample_for_x_eq_42() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    let ir_text_f = r#"fn f(x: bits[8] id=1) -> bits[1] {
-  literal.2: bits[8] = literal(value=42, id=2)
-  ret eq.3: bits[1] = eq(x, literal.2, id=3)
-}"#;
-    let ir_text_g = r#"fn g(x: bits[8] id=1) -> bits[1] {
-  ret false.2: bits[1] = literal(value=0, id=2)
-}"#;
-    let f = ir_parser::Parser::new(ir_text_f).parse_fn().unwrap();
-    let g = ir_parser::Parser::new(ir_text_g).parse_fn().unwrap();
-    let result = check_equiv(&f, &g);
-    match result {
-        EquivResult::Disproved(ref cex) => {
-            assert_eq!(cex.len(), 1);
-            let bits = &cex[0];
-            assert_eq!(bits.get_bit_count(), 8);
-            // Should be 42
-            let mut value = 0u64;
-            for i in 0..8 {
-                if bits.get_bit(i).unwrap() {
-                    value |= 1 << i;
-                }
-            }
-            assert_eq!(value, 42);
-        }
-        _ => panic!("Expected Disproved with counterexample"),
-    }
-}
-
-#[test]
-fn test_nand_equiv_to_self() {
-    let ir_text = r#"fn nand4(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
-  ret nand.3: bits[4] = nand(x, y, id=3)
-}"#;
-    assert_fn_equiv_to_self(ir_text);
-}
-
-#[test]
-fn test_afterall_noop() {
-    let ir_text = r#"fn afterall_noop(x: bits[1] id=1) -> bits[1] {
-  afterall.2: () = after_all()
-  ret x
-}"#;
-    assert_fn_equiv_to_self(ir_text);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
-        xls_ir::ir::{Fn, Node, NodePayload, Type},
-    };
-    use boolector::{
-        option::{BtorOption, ModelGen},
-        Btor,
-    };
+    use crate::test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt};
+    use crate::xls_ir::ir_parser;
+    use boolector::Btor;
     use std::rc::Rc;
-    use xlsynth::IrValue;
 
-    /// Helper to create a Boolector context with model generation enabled,
-    /// passing it to the provided closure.
-    fn with_btor_model_gen<F, R>(f: F) -> R
-    where
-        F: FnOnce(Rc<Btor>) -> R,
-    {
-        let btor = Rc::new(Btor::new());
-        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
-        f(btor)
+    /// Asserts that the given IR function (as text) is equivalent to itself.
+    fn assert_fn_equiv_to_self(ir_text: &str) {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().expect("Failed to parse IR");
+        let result = check_equiv(&f, &f);
+        assert_eq!(
+            result,
+            EquivResult::Proved,
+            "Function was not equivalent to itself: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_reverse_equiv_to_self() {
+        let ir_text = r#"fn reverse4(x: bits[4] id=1) -> bits[4] {
+  ret reverse.2: bits[4] = reverse(x, id=2)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_onehot_equiv_to_self() {
+        let ir_text = r#"fn onehot3(x: bits[3] id=1) -> bits[4] {
+  ret one_hot.2: bits[4] = one_hot(x, lsb_prio=true, id=2)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_encode_equiv_to_self() {
+        let ir_text = r#"fn encode4(x: bits[4] id=1) -> bits[2] {
+  ret encode.2: bits[2] = encode(x, id=2)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_sgt_equiv_to_self() {
+        let ir_text = r#"fn sgt4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
+  ret sgt.3: bits[1] = sgt(x, y, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_slt_equiv_to_self() {
+        let ir_text = r#"fn slt4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
+  ret slt.3: bits[1] = slt(x, y, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_sle_equiv_to_self() {
+        let ir_text = r#"fn sle4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
+  ret sle.3: bits[1] = sle(x, y, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_check_equiv_counterexample_for_x_eq_42() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let ir_text_f = r#"fn f(x: bits[8] id=1) -> bits[1] {
+  literal.2: bits[8] = literal(value=42, id=2)
+  ret eq.3: bits[1] = eq(x, literal.2, id=3)
+}"#;
+        let ir_text_g = r#"fn g(x: bits[8] id=1) -> bits[1] {
+  ret false.2: bits[1] = literal(value=0, id=2)
+}"#;
+        let f = ir_parser::Parser::new(ir_text_f).parse_fn().unwrap();
+        let g = ir_parser::Parser::new(ir_text_g).parse_fn().unwrap();
+        let result = check_equiv(&f, &g);
+        match result {
+            EquivResult::Disproved(ref cex) => {
+                assert_eq!(cex.len(), 1);
+                let bits = &cex[0];
+                assert_eq!(bits.get_bit_count(), 8);
+                // Should be 42
+                let mut value = 0u64;
+                for i in 0..8 {
+                    if bits.get_bit(i).unwrap() {
+                        value |= 1 << i;
+                    }
+                }
+                assert_eq!(value, 42);
+            }
+            _ => panic!("Expected Disproved with counterexample"),
+        }
+    }
+
+    #[test]
+    fn test_nand_equiv_to_self() {
+        let ir_text = r#"fn nand4(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
+  ret nand.3: bits[4] = nand(x, y, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_afterall_noop() {
+        let ir_text = r#"fn afterall_noop(x: bits[1] id=1) -> bits[1] {
+  afterall.2: token = after_all()
+  ret identity.3: bits[1] = identity(x, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
     }
 
     #[test]
