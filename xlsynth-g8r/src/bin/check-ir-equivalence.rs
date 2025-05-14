@@ -2,7 +2,7 @@
 
 use clap::Parser;
 
-#[cfg(feature = "with-boolector")]
+#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::ir_equiv_boolector;
 
 use xlsynth_g8r::ir_value_utils::ir_value_from_bits_with_type;
@@ -48,12 +48,12 @@ fn main() {
         .get_fn(&args.top)
         .unwrap_or_else(|| panic!("function '{}' not found in {}", args.top, args.ir2));
 
-    if !cfg!(feature = "with-boolector") {
-        eprintln!("error: check-ir-equivalence requires --features=with-boolector");
+    if !cfg!(feature = "has-boolector") {
+        eprintln!("error: check-ir-equivalence requires --features=with-boolector-built or --features=with-boolector-system");
         std::process::exit(1);
     }
 
-    #[cfg(feature = "with-boolector")]
+    #[cfg(feature = "has-boolector")]
     match ir_equiv_boolector::check_equiv(f1, f2) {
         ir_equiv_boolector::EquivResult::Proved => {
             println!("Equivalence result: PROVED");
