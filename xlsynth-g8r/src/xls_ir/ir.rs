@@ -166,6 +166,8 @@ pub enum Binop {
 
     Sdiv,
     Udiv,
+    Umod,
+    Smod,
 
     Gate,
 }
@@ -180,7 +182,7 @@ pub fn operator_to_binop(operator: &str) -> Option<Binop> {
         "array_concat" => Some(Binop::ArrayConcat),
         "smulp" => Some(Binop::Smulp),
         "umulp" => Some(Binop::Umulp),
-
+        "umod" => Some(Binop::Umod),
         "eq" => Some(Binop::Eq),
         "ne" => Some(Binop::Ne),
         // signed comparisons
@@ -200,6 +202,8 @@ pub fn operator_to_binop(operator: &str) -> Option<Binop> {
         "smul" => Some(Binop::Smul),
         "sdiv" => Some(Binop::Sdiv),
         "udiv" => Some(Binop::Udiv),
+        "umod" => Some(Binop::Umod),
+        "smod" => Some(Binop::Smod),
 
         // "special" operations
         "gate" => Some(Binop::Gate),
@@ -232,6 +236,8 @@ pub fn binop_to_operator(binop: Binop) -> &'static str {
         Binop::Gate => "gate",
         Binop::Sdiv => "sdiv",
         Binop::Udiv => "udiv",
+        Binop::Umod => "umod",
+        Binop::Smod => "smod",
     }
 }
 

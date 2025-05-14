@@ -380,6 +380,10 @@ pub fn ir_fn_to_boolector(
                             prod
                         }
                     }
+                    Binop::Umod => a_bv.urem(b_bv),
+                    Binop::Smod => a_bv.srem(b_bv),
+                    Binop::Udiv => a_bv.udiv(b_bv),
+                    Binop::Sdiv => a_bv.sdiv(b_bv),
                     Binop::Shll => shift_boolector(a_bv, b_bv, |x, y| x.sll(y)),
                     Binop::Shrl => shift_boolector(a_bv, b_bv, |x, y| x.srl(y)),
                     Binop::Shra => shift_boolector(a_bv, b_bv, |x, y| x.sra(y)),
@@ -635,7 +639,8 @@ pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
     // Assert that outputs are not equal (look for a counterexample)
     let diff = lhs_result.output._ne(&rhs_result.output);
     diff.assert();
-    match btor.sat() {
+    let sat_result = btor.sat();
+    match sat_result {
         SolverResult::Unsat => EquivResult::Proved,
         SolverResult::Sat => {
             // Extract input assignments from the model
@@ -643,6 +648,14 @@ pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
             for param in &lhs.params {
                 let bv = param_bvs.get(&param.name).unwrap();
                 let width = bv.get_width() as usize;
+                // Assert SAT before retrieving model
+                assert_eq!(
+                    sat_result,
+                    SolverResult::Sat,
+                    "Expected SAT before retrieving model for param '{}', got {:?}",
+                    param.name,
+                    sat_result
+                );
                 let solution = bv.get_a_solution();
                 let disamb = solution.disambiguate();
                 let bitstr = disamb.as_01x_str();
@@ -812,6 +825,7 @@ mod tests {
         let sample = load_bf16_add_sample(Opt::No);
         let g8r_fn = sample.g8r_pkg.get_fn(&sample.mangled_fn_name).unwrap();
         let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
         let bv = ir_fn_to_boolector(btor, g8r_fn, None);
         // bf16 is 16 bits
         assert_eq!(bv.output.get_width(), 16);
@@ -822,6 +836,7 @@ mod tests {
         let sample = load_bf16_mul_sample(Opt::No);
         let g8r_fn = sample.g8r_pkg.get_fn(&sample.mangled_fn_name).unwrap();
         let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
         let bv = ir_fn_to_boolector(btor, g8r_fn, None);
         assert_eq!(bv.output.get_width(), 16);
     }
@@ -840,5 +855,75 @@ mod tests {
   ret one_hot.2: bits[4] = one_hot(x, lsb_prio=true, id=2)
 }"#;
         assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_umod_equiv_to_self() {
+        let ir_text = r#"fn umod4(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
+  ret umod.3: bits[4] = umod(x, y, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_umod_known_case() {
+        let ir_text = r#"fn umod_known(x: bits[4] id=1) -> bits[4] {
+  literal.2: bits[4] = literal(value=5, id=2)
+  ret umod.3: bits[4] = umod(x, literal.2, id=3)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().expect("Failed to parse IR");
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let mut param_bvs = std::collections::HashMap::new();
+        // x = 13
+        let x_val = 13u64;
+        let x_bv = BV::from_u64(btor.clone(), x_val, 4);
+        param_bvs.insert("x".to_string(), x_bv);
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        let sat_result = btor.sat();
+        assert_eq!(
+            sat_result,
+            boolector::SolverResult::Sat,
+            "Expected SAT before retrieving model, got {:?}",
+            sat_result
+        );
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        // 13 mod 5 = 3
+        assert_eq!(out, 3);
+    }
+
+    #[test]
+    fn test_udiv_umod_recompose_equiv_identity() {
+        // This test checks that for all x, y (y != 0), the following holds:
+        //   let q = x / y;
+        //   let r = x % y;
+        //   x == q * y + r
+        // We encode this as two functions and check equivalence:
+        //   (1) identity(x, y) = x
+        //   (2) recompose(x, y) = (x / y) * y + (x % y)
+        // We restrict y != 0 by using a 3-bit y and adding 1, so y in [1,8].
+
+        let ir_identity = r#"fn identity(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret identity.3: bits[8] = identity(x, id=3)
+}"#;
+
+        let ir_recompose = r#"fn recompose(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  one: bits[8] = literal(value=1, id=100)
+  y1: bits[8] = add(y, one, id=101)
+  q: bits[8] = udiv(x, y1, id=3)
+  r: bits[8] = umod(x, y1, id=4)
+  prod: bits[8] = umul(q, y1, id=5)
+  ret sum: bits[8] = add(prod, r, id=6)
+}"#;
+
+        // Use the existing assert_fn_equiv helper to check equivalence
+        let f = ir_parser::Parser::new(ir_identity).parse_fn().unwrap();
+        let g = ir_parser::Parser::new(ir_recompose).parse_fn().unwrap();
+        let result = check_equiv(&f, &g);
+        match result {
+            EquivResult::Proved => (),
+            EquivResult::Disproved(_) => panic!("Expected Proved, got Disproved"),
+        }
     }
 }
