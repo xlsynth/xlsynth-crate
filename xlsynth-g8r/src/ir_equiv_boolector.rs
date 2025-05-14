@@ -311,6 +311,19 @@ pub fn ir_fn_to_boolector(
                         acc.or(next)
                     })
                 }
+                crate::xls_ir::ir::NaryOp::Nand => {
+                    assert!(elems.len() >= 2, "Nand must have at least two operands");
+                    let mut it = elems.iter();
+                    let first = env
+                        .get(it.next().unwrap())
+                        .expect("Nand operand must be present")
+                        .clone();
+                    let and_result = it.fold(first, |acc, nref| {
+                        let next = env.get(nref).expect("Nand operand must be present");
+                        acc.and(next)
+                    });
+                    and_result.not()
+                }
                 _ => panic!(
                     "NaryOp {:?} not yet implemented in Boolector conversion",
                     op
@@ -346,6 +359,7 @@ pub fn ir_fn_to_boolector(
                     Binop::Shra => shift_boolector(a_bv, b_bv, |x, y| x.sra(y)),
                     Binop::Sgt => a_bv.sgt(b_bv),
                     Binop::Slt => a_bv.slt(b_bv),
+                    Binop::Sle => a_bv.slte(b_bv),
                     _ => panic!("Binop {:?} not yet implemented in Boolector conversion", op),
                 }
             }
@@ -497,6 +511,15 @@ pub fn ir_fn_to_boolector(
                     result = bit.cond_bv(&idx_bv, &result);
                 }
                 result
+            }
+            NodePayload::AfterAll(_) => {
+                // AfterAll is a no-op for Boolector; do not insert a BV (like Nil)
+                continue;
+            }
+            NodePayload::Assert { .. } => {
+                // TODO: Turn Assert into a proof objective in Boolector.
+                // For now, treat as a no-op (like Nil/AfterAll).
+                continue;
             }
             other => todo!("Boolector conversion for {:?} not yet implemented", other),
         };
@@ -694,6 +717,62 @@ fn test_slt_equiv_to_self() {
     assert_fn_equiv_to_self(ir_text);
 }
 
+#[test]
+fn test_sle_equiv_to_self() {
+    let ir_text = r#"fn sle4(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
+  ret sle.3: bits[1] = sle(x, y, id=3)
+}"#;
+    assert_fn_equiv_to_self(ir_text);
+}
+
+#[test]
+fn test_check_equiv_counterexample_for_x_eq_42() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let ir_text_f = r#"fn f(x: bits[8] id=1) -> bits[1] {
+  literal.2: bits[8] = literal(value=42, id=2)
+  ret eq.3: bits[1] = eq(x, literal.2, id=3)
+}"#;
+    let ir_text_g = r#"fn g(x: bits[8] id=1) -> bits[1] {
+  ret false.2: bits[1] = literal(value=0, id=2)
+}"#;
+    let f = ir_parser::Parser::new(ir_text_f).parse_fn().unwrap();
+    let g = ir_parser::Parser::new(ir_text_g).parse_fn().unwrap();
+    let result = check_equiv(&f, &g);
+    match result {
+        EquivResult::Disproved(ref cex) => {
+            assert_eq!(cex.len(), 1);
+            let bits = &cex[0];
+            assert_eq!(bits.get_bit_count(), 8);
+            // Should be 42
+            let mut value = 0u64;
+            for i in 0..8 {
+                if bits.get_bit(i).unwrap() {
+                    value |= 1 << i;
+                }
+            }
+            assert_eq!(value, 42);
+        }
+        _ => panic!("Expected Disproved with counterexample"),
+    }
+}
+
+#[test]
+fn test_nand_equiv_to_self() {
+    let ir_text = r#"fn nand4(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
+  ret nand.3: bits[4] = nand(x, y, id=3)
+}"#;
+    assert_fn_equiv_to_self(ir_text);
+}
+
+#[test]
+fn test_afterall_noop() {
+    let ir_text = r#"fn afterall_noop(x: bits[1] id=1) -> bits[1] {
+  afterall.2: () = after_all()
+  ret x
+}"#;
+    assert_fn_equiv_to_self(ir_text);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,33 +815,6 @@ mod tests {
         let btor = Rc::new(Btor::new());
         let bv = ir_fn_to_boolector(btor, g8r_fn, None);
         assert_eq!(bv.output.get_width(), 16);
-    }
-
-    #[test]
-    fn test_check_equiv_counterexample_for_x_eq_42() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let ir_text = r#"fn add8(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
-  ret add.3: bits[8] = add(x, y, id=3)
-}"#;
-        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
-        let g = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
-        let result = check_equiv(&f, &g);
-        match result {
-            EquivResult::Disproved(ref cex) => {
-                assert_eq!(cex.len(), 1);
-                let bits = &cex[0];
-                assert_eq!(bits.get_bit_count(), 8);
-                // Should be 42
-                let mut value = 0u64;
-                for i in 0..8 {
-                    if bits.get_bit(i).unwrap() {
-                        value |= 1 << i;
-                    }
-                }
-                assert_eq!(value, 42);
-            }
-            _ => panic!("Expected Disproved with counterexample"),
-        }
     }
 
     #[test]
