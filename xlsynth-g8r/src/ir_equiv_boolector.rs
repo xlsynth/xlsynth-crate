@@ -137,13 +137,13 @@ pub fn ir_fn_to_boolector(
                 let arg_bv = env.get(arg).expect("OneHot argument must be present");
                 let width = arg_bv.get_width();
                 assert!(width > 0, "OneHot: width must be > 0");
-                log::info!("[OneHot] arg_bv width: {}", width);
+                log::trace!("[OneHot] arg_bv width: {}", width);
                 let mut bits: Vec<BV<Rc<Btor>>> = Vec::with_capacity((width + 1) as usize);
                 let mut prior_not: Option<BV<Rc<Btor>>> = None;
                 for i in 0..width {
                     let idx = if *lsb_prio { i } else { width - 1 - i };
                     let bit = arg_bv.slice(idx, idx);
-                    log::info!(
+                    log::trace!(
                         "[OneHot] bit {} (idx={}): width={} is_const={} bin={:?}",
                         i,
                         idx,
@@ -153,11 +153,11 @@ pub fn ir_fn_to_boolector(
                     );
                     let this_no_prior = if let Some(prior) = &prior_not {
                         let v = prior.and(&bit.not());
-                        log::info!("[OneHot] this_no_prior (i={}) with prior: width={} is_const={} bin={:?}", i, v.get_width(), v.is_const(), v.as_binary_str());
+                        log::trace!("[OneHot] this_no_prior (i={}) with prior: width={} is_const={} bin={:?}", i, v.get_width(), v.is_const(), v.as_binary_str());
                         v
                     } else {
                         let v = bit.not();
-                        log::info!(
+                        log::trace!(
                             "[OneHot] this_no_prior (i={}) no prior: width={} is_const={} bin={:?}",
                             i,
                             v.get_width(),
@@ -167,7 +167,7 @@ pub fn ir_fn_to_boolector(
                         v
                     };
                     let out_bit = bit.and(&this_no_prior.not());
-                    log::info!(
+                    log::trace!(
                         "[OneHot] out_bit (i={}): width={} is_const={} bin={:?}",
                         i,
                         out_bit.get_width(),
@@ -177,7 +177,7 @@ pub fn ir_fn_to_boolector(
                     bits.push(out_bit.clone());
                     prior_not = Some(if let Some(prior) = prior_not {
                         let v = prior.and(&bit.not());
-                        log::info!(
+                        log::trace!(
                             "[OneHot] prior_not update (i={}): width={} is_const={} bin={:?}",
                             i,
                             v.get_width(),
@@ -187,7 +187,7 @@ pub fn ir_fn_to_boolector(
                         v
                     } else {
                         let v = bit.not();
-                        log::info!(
+                        log::trace!(
                             "[OneHot] prior_not init (i={}): width={} is_const={} bin={:?}",
                             i,
                             v.get_width(),
@@ -201,7 +201,7 @@ pub fn ir_fn_to_boolector(
                     bits.reverse();
                 }
                 if let Some(prior) = prior_not {
-                    log::info!(
+                    log::trace!(
                         "[OneHot] final prior_not: width={} is_const={} bin={:?}",
                         prior.get_width(),
                         prior.is_const(),
@@ -210,7 +210,7 @@ pub fn ir_fn_to_boolector(
                     bits.push(prior);
                 } else {
                     let v = arg_bv.slice(0, 0).not();
-                    log::info!(
+                    log::trace!(
                         "[OneHot] final prior_not (empty): width={} is_const={} bin={:?}",
                         v.get_width(),
                         v.is_const(),
@@ -225,21 +225,21 @@ pub fn ir_fn_to_boolector(
                 );
                 assert!(!bits.is_empty(), "OneHot: bits vector must not be empty");
                 let mut result = bits[0].clone();
-                log::info!(
+                log::trace!(
                     "[OneHot] result init: width={} is_const={} bin={:?}",
                     result.get_width(),
                     result.is_const(),
                     result.as_binary_str()
                 );
                 for (i, b) in bits.iter().enumerate().skip(1) {
-                    log::info!(
+                    log::trace!(
                         "[OneHot] concat (i={}): lhs width={} rhs width={}",
                         i,
                         b.get_width(),
                         result.get_width()
                     );
                     result = b.concat(&result);
-                    log::info!(
+                    log::trace!(
                         "[OneHot] after concat (i={}): width={} is_const={} bin={:?}",
                         i,
                         result.get_width(),
