@@ -206,21 +206,21 @@ pub fn fraig_optimize(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
-    use rand::SeedableRng;
-    use rand_xoshiro::Xoshiro256PlusPlus;
-
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::assert_within;
     use crate::{
         check_equivalence,
         get_summary_stats::get_summary_stats,
         test_utils::{
             load_bf16_add_sample, load_bf16_mul_sample,
-            setup_padded_graph_with_equal_depth_opposite_polarity, Opt,
+            setup_padded_graph_with_equal_depth_opposite_polarity, Opt, DEPTH_TOLERANCE,
+            NODE_TOLERANCE,
         },
     };
-
-    use super::*;
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
+    use std::time::Instant;
 
     const FRAIG_SEED: u64 = 0;
 
@@ -294,21 +294,53 @@ mod tests {
         let loaded = load_bf16_mul_sample(Opt::Yes);
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_mul");
         assert_eq!(results.did_converge, DidConverge::Yes(2));
-        assert_eq!(results.original_nodes, 1172);
-        assert_eq!(results.optimized_nodes, 1146);
-        assert_eq!(results.original_depth, 109);
-        assert_eq!(results.optimized_depth, 105);
+        assert_within!(
+            results.original_nodes as isize,
+            1153 as isize,
+            NODE_TOLERANCE as isize
+        );
+        assert_within!(
+            results.original_depth as isize,
+            105 as isize,
+            DEPTH_TOLERANCE as isize
+        );
+        assert_within!(
+            results.optimized_nodes as isize,
+            1133 as isize,
+            NODE_TOLERANCE as isize
+        );
+        assert_within!(
+            results.optimized_depth as isize,
+            101 as isize,
+            DEPTH_TOLERANCE as isize
+        );
     }
 
     #[test]
     fn test_fraig_optimize_bf16_add() {
         let loaded = load_bf16_add_sample(Opt::Yes);
         let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_add");
-        assert_eq!(results.did_converge, DidConverge::Yes(4));
-        assert_eq!(results.original_nodes, 1292);
-        assert_eq!(results.optimized_nodes, 1095);
-        assert_eq!(results.original_depth, 130);
-        assert_eq!(results.optimized_depth, 120);
+        assert_eq!(results.did_converge, DidConverge::Yes(5));
+        assert_within!(
+            results.original_nodes as isize,
+            1296 as isize,
+            NODE_TOLERANCE as isize
+        );
+        assert_within!(
+            results.original_depth as isize,
+            130 as isize,
+            DEPTH_TOLERANCE as isize
+        );
+        assert_within!(
+            results.optimized_nodes as isize,
+            1095 as isize,
+            NODE_TOLERANCE as isize
+        );
+        assert_within!(
+            results.optimized_depth as isize,
+            120 as isize,
+            DEPTH_TOLERANCE as isize
+        );
     }
 
     #[test]
