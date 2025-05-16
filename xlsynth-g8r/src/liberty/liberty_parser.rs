@@ -66,13 +66,13 @@ impl<I: Iterator<Item = u8>> LibertyParser<I> {
 
     fn parse_block_member(&mut self) -> Result<BlockMember, String> {
         let attr_name = self.stream.pop_identifier_or_error("attribute name")?;
-        log::info!("attr_name: {:?}", attr_name);
+        log::trace!("attr_name: {:?}", attr_name);
         if self.stream.try_pop(b":")? {
             let value = self.pop_value("attribute value")?;
             self.stream.pop_semi_or_newline("attribute value end")?;
             Ok(BlockMember::BlockAttr(BlockAttr { attr_name, value }))
         } else {
-            log::info!(
+            log::trace!(
                 "no colon implies block- or tuple-like attribute; name: {:?} rest: {:?}",
                 attr_name,
                 self.stream.peek_line()
