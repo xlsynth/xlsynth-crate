@@ -48,7 +48,7 @@ fn high_integrity_download(
     url: &str,
     out_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env_tmp_dir = PathBuf::from(std::env::temp_dir());
+    let env_tmp_dir = std::env::temp_dir();
     assert!(
         env_tmp_dir.exists(),
         "environment-based temp directory {} does not exist",
@@ -60,7 +60,7 @@ fn high_integrity_download(
     std::fs::create_dir_all(&tmp_dir).expect("create temp directory should succeed");
 
     // Download the sha256 checksum file to the temp directory.
-    let checksum_url = format!("{}.sha256", url);
+    let checksum_url = format!("{url}.sha256");
 
     let filename = out_path.file_name().unwrap();
     let checksum_path = tmp_dir.join(format!("{}.sha256", filename.to_str().unwrap()));
@@ -103,7 +103,7 @@ fn high_integrity_download(
         tmp_out_path.display()
     );
     let sha256 = sha2::Sha256::digest(std::fs::read(&tmp_out_path)?);
-    let got_checksum_str = format!("{:x}", sha256);
+    let got_checksum_str = format!("{sha256:x}");
 
     if want_checksum_str != got_checksum_str {
         return Err(format!(
@@ -157,10 +157,7 @@ fn high_integrity_download_with_retries(
         attempts += 1;
         match high_integrity_download(url, out_path) {
             Ok(_) => return Ok(()),
-            Err(e) => println!(
-                "cargo:error=failed to download file on attempt {}: {}",
-                attempts, e
-            ),
+            Err(e) => println!("cargo:error=failed to download file on attempt {attempts}: {e}"),
         }
         std::thread::sleep(std::time::Duration::from_secs(delay));
         delay *= 2;
@@ -201,12 +198,10 @@ fn is_rocky() -> bool {
     if let Ok(file) = file {
         // Read through the lines in the file
         let reader = std::io::BufReader::new(file);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                // Check if the line contains `ID="rocky"`
-                if line.contains("ID=\"rocky\"") {
-                    return true;
-                }
+        for line in reader.lines().map_while(|line| line.ok()) {
+            // Check if the line contains `ID="rocky"`
+            if line.contains("ID=\"rocky\"") {
+                return true;
             }
         }
         println!("cargo:info=Did not find rocky ID line in OS release data");
@@ -254,7 +249,7 @@ fn get_dso_info() -> DsoInfo {
 fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
     let dso_info: DsoInfo = get_dso_info();
     let dso_url = dso_info.get_dso_url(url_base);
-    let dso_path = PathBuf::from(&out_dir).join(&dso_info.get_dso_filename());
+    let dso_path = PathBuf::from(&out_dir).join(dso_info.get_dso_filename());
 
     // Check if the DSO has already been downloaded
     if dso_path.exists() {
@@ -277,7 +272,7 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
 
     if cfg!(target_os = "macos") {
         let dso_filename = dso_info.get_dso_filename();
-        println!("cargo:info=Fixing DSO id: to {}", dso_filename);
+        println!("cargo:info=Fixing DSO id: to {dso_filename}");
         // Fix the DSO id so it can be found via the rpath.
         let status = Command::new("install_name_tool")
             .arg("-id")
@@ -296,7 +291,7 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
 
 fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
     let stdlib_path =
-        PathBuf::from(&out_dir).join(format!("dslx_stdlib_{}", RELEASE_LIB_VERSION_TAG));
+        PathBuf::from(&out_dir).join(format!("dslx_stdlib_{RELEASE_LIB_VERSION_TAG}"));
     if stdlib_path.exists() {
         println!(
             "cargo:info=DSLX stdlib path already downloaded to: {}",
@@ -347,17 +342,15 @@ fn main() {
         let dso_name = &dso_name[3..];
         let stdlib_path_string = std::env::var("DSLX_STDLIB_PATH").unwrap();
         println!("cargo:rustc-env=XLS_DSO_PATH={}", dso_path.display());
-        println!("cargo:rustc-env=DSLX_STDLIB_PATH={}", stdlib_path_string);
+        println!("cargo:rustc-env=DSLX_STDLIB_PATH={stdlib_path_string}");
         println!("cargo:rustc-link-search=native={}", dso_dir.display());
-        println!("cargo:rustc-link-lib=dylib={}", dso_name);
+        println!("cargo:rustc-link-lib=dylib={dso_name}");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dso_dir.display());
         return;
     }
 
-    let url_base = format!(
-        "https://github.com/xlsynth/xlsynth/releases/download/{}/",
-        RELEASE_LIB_VERSION_TAG
-    );
+    let url_base =
+        format!("https://github.com/xlsynth/xlsynth/releases/download/{RELEASE_LIB_VERSION_TAG}/");
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
     // Ensure the out directory exists.
@@ -435,10 +428,11 @@ fn main() {
         );
 
         println!("cargo:rerun-if-changed=build.rs");
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir);
-        println!("cargo:rustc-link-search=native={}", out_dir);
-        println!("cargo:rustc-link-lib=dylib={}", dso_info.get_dso_name());
-        println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{out_dir}");
+        println!("cargo:rustc-link-search=native={out_dir}");
+        let dso_name_str = dso_info.get_dso_name();
+        println!("cargo:rustc-link-lib=dylib={dso_name_str}");
+        println!("cargo:rustc-env=XLS_DSO_PATH={out_dir}");
         return;
     }
 
@@ -446,7 +440,8 @@ fn main() {
 
     // Ensure the DSO is copied to the correct location
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rustc-link-search=native={}", out_dir);
-    println!("cargo:rustc-link-lib=dylib={}", dso_info.get_dso_name());
-    println!("cargo:rustc-env=XLS_DSO_PATH={}", out_dir);
+    println!("cargo:rustc-link-search=native={out_dir}");
+    let dso_name_str = dso_info.get_dso_name();
+    println!("cargo:rustc-link-lib=dylib={dso_name_str}");
+    println!("cargo:rustc-env=XLS_DSO_PATH={out_dir}");
 }

@@ -5,7 +5,9 @@ use clap::Parser;
 #[cfg(feature = "has-boolector")]
 use xlsynth_g8r::ir_equiv_boolector;
 
+#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::ir_value_utils::ir_value_from_bits_with_type;
+
 use xlsynth_g8r::xls_ir::ir::Package;
 use xlsynth_g8r::xls_ir::ir_parser::Parser as IrParser;
 
@@ -33,11 +35,8 @@ fn parse_package(path: &str) -> Package {
         .unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e))
 }
 
-fn main() {
-    let _ = env_logger::builder().try_init();
-    log::info!("Starting check-ir-equivalence");
-    let args = Args::parse();
-
+#[cfg(feature = "has-boolector")]
+fn main_has_boolector(args: Args) {
     let pkg1 = parse_package(&args.ir1);
     let pkg2 = parse_package(&args.ir2);
 
@@ -48,12 +47,6 @@ fn main() {
         .get_fn(&args.top)
         .unwrap_or_else(|| panic!("function '{}' not found in {}", args.top, args.ir2));
 
-    if !cfg!(feature = "has-boolector") {
-        eprintln!("error: check-ir-equivalence requires --features=with-boolector-built or --features=with-boolector-system");
-        std::process::exit(1);
-    }
-
-    #[cfg(feature = "has-boolector")]
     match ir_equiv_boolector::check_equiv(f1, f2) {
         ir_equiv_boolector::EquivResult::Proved => {
             println!("Equivalence result: PROVED");
@@ -72,5 +65,20 @@ fn main() {
                 println!("  {:?}", values);
             }
         }
+    }
+}
+
+fn main() {
+    let _ = env_logger::builder().try_init();
+    log::info!("Starting check-ir-equivalence");
+    let args = Args::parse();
+
+    #[cfg(feature = "has-boolector")]
+    main_has_boolector(args);
+
+    #[cfg(not(feature = "has-boolector"))]
+    {
+        eprintln!("error: check-ir-equivalence requires --features=with-boolector-built or --features=with-boolector-system");
+        std::process::exit(1);
     }
 }

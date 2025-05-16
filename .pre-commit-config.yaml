@@ -30,6 +30,13 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: clippy-xlsynth-sys
+        name: clippy (xlsynth-sys)
+        description: Run cargo clippy on xlsynth-sys with warnings as errors
+        entry: cargo clippy -p xlsynth-sys --no-deps -- -D warnings
+        language: system
+        pass_filenames: false
+
       - id: mypy
         name: mypy
         description: Run mypy type checking on Python scripts
