@@ -26,6 +26,9 @@ pub mod ir2gate_utils;
 pub mod ir_equiv_boolector;
 pub mod ir_value_utils;
 pub mod liberty;
+pub mod liberty_proto {
+    include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
+}
 pub mod logical_effort;
 pub mod process_ir_path;
 pub mod propose_equiv;

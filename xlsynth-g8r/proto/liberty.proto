@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package liberty;
+
+message Library {
+  repeated Cell cells = 1;
+}
+
+message Cell {
+  string name = 1;
+  repeated Pin pins = 2;
+  double area = 3;
+}
+
+enum PinDirection {
+  INVALID = 0;
+  OUTPUT = 1;
+  INPUT = 2;
+}
+
+message Pin {
+  PinDirection direction = 1;
+  string function = 2;
+}

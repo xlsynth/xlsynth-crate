@@ -93,6 +93,15 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             if path.file_name().unwrap().to_str().unwrap().ends_with(".so") {
                 continue;
             }
+            if path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(".bin")
+            {
+                continue;
+            }
 
             if let Some(extension) = path.extension() {
                 if extension == "md"

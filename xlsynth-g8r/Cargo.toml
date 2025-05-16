@@ -27,6 +27,9 @@ varisat = "0.2.2"
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
 boolector = { version = "0.4.3", optional = true }
+prost = "0.12"
+prost-types = "0.12"
+prost-reflect = { version = "0.12", features = ["text-format"] }
 
 [dev-dependencies]
 anyhow = "1.0.86"
@@ -38,6 +41,9 @@ pretty_assertions = "1.4.1"
 regex = "1.10.5"
 test-case = "3.3.1"
 maplit = "1.0.2"
+
+[build-dependencies]
+prost-build = "0.12"
 
 [features]
 default = []
