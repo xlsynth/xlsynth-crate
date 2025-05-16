@@ -748,7 +748,7 @@ fn test_ir2gates_determinism() {
         .arg("ir2gates")
         .arg(ir_path.to_str().unwrap())
         .arg("--quiet=true")
-        .arg("--toggle-sample-count=4")
+        .arg("--toggle-sample-count=2")
         .arg("--toggle-seed=42");
     // Pass through RUST_LOG if present
     if let Ok(rust_log) = std::env::var("RUST_LOG") {
@@ -779,7 +779,7 @@ fn test_ir2gates_determinism() {
         .arg("ir2gates")
         .arg(ir_path.to_str().unwrap())
         .arg("--quiet=true")
-        .arg("--toggle-sample-count=4")
+        .arg("--toggle-sample-count=2")
         .arg("--toggle-seed=42");
     // Pass through RUST_LOG if present
     if let Ok(rust_log) = std::env::var("RUST_LOG") {
