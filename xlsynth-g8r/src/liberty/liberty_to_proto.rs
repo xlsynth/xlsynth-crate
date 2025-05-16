@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::liberty::{CharReader, LibertyParser};
 use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
 use flate2::bufread::GzDecoder;
-use prost::Message;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -117,9 +118,8 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty_proto::Library;
+    use prost::Message;
     use prost_reflect::{DescriptorPool, DynamicMessage};
-    use std::fs::File;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -163,7 +163,7 @@ mod tests {
         let dyn_msg = DynamicMessage::decode(msg_desc, &*buf).unwrap();
         let textproto = dyn_msg.to_text_format();
         println!("Pretty-printed textproto:\n{}", textproto);
-        assert!(textproto.contains("cells {"));
-        assert!(textproto.contains("name: \"my_and\""));
+        assert!(textproto.contains("cells:["));
+        assert!(textproto.contains("name:\"my_and\""));
     }
 }

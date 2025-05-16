@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let descriptor_path = std::path::Path::new(&out_dir).join("liberty.bin");

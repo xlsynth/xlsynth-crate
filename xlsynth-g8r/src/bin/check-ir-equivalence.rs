@@ -8,7 +8,10 @@ use xlsynth_g8r::ir_equiv_boolector;
 #[cfg(feature = "has-boolector")]
 use xlsynth_g8r::ir_value_utils::ir_value_from_bits_with_type;
 
+#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::xls_ir::ir::Package;
+
+#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::xls_ir::ir_parser::Parser as IrParser;
 
 /// Checks equivalence of two XLS IR functions by name.
@@ -26,6 +29,7 @@ struct Args {
     top: String,
 }
 
+#[cfg(feature = "has-boolector")]
 fn parse_package(path: &str) -> Package {
     let file_content =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
@@ -71,10 +75,12 @@ fn main_has_boolector(args: Args) {
 fn main() {
     let _ = env_logger::builder().try_init();
     log::info!("Starting check-ir-equivalence");
-    let args = Args::parse();
 
     #[cfg(feature = "has-boolector")]
-    main_has_boolector(args);
+    {
+        let args = Args::parse();
+        main_has_boolector(args);
+    }
 
     #[cfg(not(feature = "has-boolector"))]
     {
