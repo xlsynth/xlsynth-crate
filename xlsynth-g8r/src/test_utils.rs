@@ -16,6 +16,31 @@ pub const BF16_FRACTION_BITS: usize = 7;
 pub const BF16_FRACTION_MASK: usize = (1 << BF16_FRACTION_BITS) - 1;
 pub const BF16_TOTAL_BITS: usize = 16;
 
+// Returns (ok, diff)
+pub fn within<T>(left: T, right: T, epsilon: T) -> (bool, T)
+where
+    T: num_traits::Signed + num_traits::Num + PartialOrd + Copy,
+{
+    let diff = (left - right).abs();
+    (diff <= epsilon, diff)
+}
+
+#[macro_export]
+macro_rules! assert_within {
+    ($left:expr, $right:expr, $epsilon:expr $(,)?) => {{
+        let (ok, diff) = $crate::test_utils::within($left, $right, $epsilon);
+        assert!(
+            ok,
+            "assertion failed: `assert_within!({}, {}, {})` (left: {}, right: {}, epsilon: {}, diff: {})",
+            stringify!($left), stringify!($right), stringify!($epsilon),
+            $left, $right, $epsilon, diff
+        );
+    }};
+}
+
+pub const NODE_TOLERANCE: isize = 5;
+pub const DEPTH_TOLERANCE: isize = 2;
+
 pub struct LoadedSample {
     pub ir_package: IrPackage,
     pub ir_fn: IrFunction,

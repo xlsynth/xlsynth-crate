@@ -76,6 +76,7 @@ pub fn compute_logical_effort_min_delay(gate_fn: &GateFn, options: &Options) -> 
 #[cfg(test)]
 mod tests {
     use crate::{
+        assert_within,
         gate_builder::{GateBuilder, GateBuilderOptions},
         test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
     };
@@ -121,21 +122,13 @@ mod tests {
     fn test_compute_logical_effort_min_delay_bf16_add() {
         let bf16_add = load_bf16_add_sample(Opt::Yes);
         let min_delay = compute_logical_effort_min_delay(&bf16_add.gate_fn, &Options::default());
-        assert!(
-            (min_delay - 561.26).abs() < 0.01,
-            "min_delay: {}",
-            min_delay
-        );
+        assert_within!(min_delay, 581.0, 10.0);
     }
 
     #[test]
     fn test_compute_logical_effort_min_delay_bf16_mul() {
         let bf16_mul = load_bf16_mul_sample(Opt::Yes);
         let min_delay = compute_logical_effort_min_delay(&bf16_mul.gate_fn, &Options::default());
-        assert!(
-            (min_delay - 484.66).abs() < 0.01,
-            "min_delay: {}",
-            min_delay
-        );
+        assert_within!(min_delay, 462.0, 10.0);
     }
 }

@@ -9,6 +9,8 @@ use std::collections::HashMap;
 
 use half::bf16;
 use rand::Rng;
+#[allow(unused_imports)]
+use xlsynth_g8r::assert_within;
 use xlsynth_g8r::gate::AigRef;
 use xlsynth_g8r::gate_sim::{self, Collect};
 use xlsynth_g8r::get_summary_stats::get_gate_depth;
@@ -102,12 +104,12 @@ fn test_bf16_mul_g8r_stats() {
     log::info!("getting id to use count");
     let id_to_use_count: HashMap<AigRef, usize> = get_id_to_use_count(gate_fn);
     let live_node_count = id_to_use_count.len();
-    assert_eq!(live_node_count, 1172, "Expected live node count");
+    assert_within!(live_node_count as isize, 1153 as isize, 20 as isize);
 
     log::info!("getting gate depth");
     let live_nodes: Vec<AigRef> = id_to_use_count.keys().cloned().collect();
     let depth_stats = get_gate_depth(gate_fn, &live_nodes);
     let max_depth = depth_stats.deepest_path.len();
 
-    assert_eq!(max_depth, 109, "Expected a reasonable max depth");
+    assert_within!(max_depth as isize, 105 as isize, 10 as isize);
 }

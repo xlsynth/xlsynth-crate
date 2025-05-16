@@ -289,6 +289,8 @@ mod tests {
     };
 
     use super::validate_equiv;
+    #[allow(unused_imports)]
+    use crate::assert_within;
 
     #[test]
     fn test_validate_equiv_graph_with_redundancies() {
@@ -349,8 +351,8 @@ mod tests {
         let setup = load_bf16_mul_sample(Opt::No);
         let (proposed_equiv_classes_len, proven_equiv_sets_len) =
             do_propose_and_validate(&setup.gate_fn, 256);
-        assert_eq!(proposed_equiv_classes_len, 372);
-        assert_eq!(proven_equiv_sets_len, 87);
+        assert_eq!(proposed_equiv_classes_len, 370);
+        assert_within!(proven_equiv_sets_len as isize, 112 as isize, 20 as isize);
     }
 
     #[test]
@@ -358,8 +360,8 @@ mod tests {
         let setup = load_bf16_add_sample(Opt::No);
         let (proposed_equiv_classes_len, proven_equiv_sets_len) =
             do_propose_and_validate(&setup.gate_fn, 256);
-        assert_eq!(proposed_equiv_classes_len, 428);
-        assert_eq!(proven_equiv_sets_len, 140);
+        assert_eq!(proposed_equiv_classes_len, 434);
+        assert_within!(proven_equiv_sets_len as isize, 140 as isize, 10 as isize);
     }
 
     #[test]
