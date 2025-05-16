@@ -131,6 +131,7 @@ jobs:
           toolchain: nightly
           profile: minimal
           override: true
+          components: clippy
 
       - name: Download and set up Boolector
         run: |
@@ -255,6 +256,7 @@ jobs:
           toolchain: nightly
           profile: minimal
           override: true
+          components: clippy
 
       - name: Show rustfmt and cargo versions
         run: |
@@ -319,6 +321,7 @@ jobs:
           toolchain: nightly
           profile: minimal
           override: true
+          components: clippy
 
       - name: Test crate
         run: |
@@ -398,6 +401,7 @@ jobs:
           toolchain: nightly
           profile: minimal
           override: true
+          components: clippy
 
       - name: Check out code
         uses: actions/checkout@v2
@@ -463,6 +467,7 @@ jobs:
           toolchain: nightly
           profile: minimal
           override: true
+          components: clippy
 
       - name: Pre-download artifacts using download_release.py
         env:
