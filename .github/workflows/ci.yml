@@ -36,6 +36,7 @@ jobs:
           toolchain: nightly
           profile: minimal
           override: true
+          components: clippy
 
       - name: Set up Python + pre-commit
         run: |
