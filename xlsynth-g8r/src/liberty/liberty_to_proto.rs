@@ -57,6 +57,16 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                         }
                         let mut direction = PinDirection::Invalid as i32;
                         let mut function = String::new();
+                        let mut pin_name = String::new();
+                        if let Some(crate::liberty::liberty_parser::Value::Identifier(s)) =
+                            pin_block.qualifiers.get(0)
+                        {
+                            pin_name = s.clone();
+                        } else if let Some(crate::liberty::liberty_parser::Value::String(s)) =
+                            pin_block.qualifiers.get(0)
+                        {
+                            pin_name = s.clone();
+                        }
                         for pin_member in &pin_block.members {
                             if let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) =
                                 pin_member
@@ -75,6 +85,7 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                         pins.push(Pin {
                             direction,
                             function,
+                            name: pin_name,
                         });
                     }
                 }

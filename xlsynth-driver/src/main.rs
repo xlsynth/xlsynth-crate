@@ -38,12 +38,14 @@ mod common;
 mod dslx2ir;
 mod dslx2pipeline;
 mod dslx2sv_types;
+mod gv2ir;
 mod ir2delayinfo;
 mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
 mod ir_equiv;
 mod ir_ged;
+mod lib2proto;
 mod report_cli_error;
 mod toolchain_config;
 mod tools;
@@ -422,6 +424,41 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 ),
         )
+        .subcommand(
+            clap::Command::new("lib2proto")
+                .about("Converts Liberty file(s) to proto or textproto")
+                .arg(
+                    Arg::new("liberty_files")
+                        .help("Liberty file(s)")
+                        .required(true)
+                        .num_args(1..)
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .help("Output file (.proto or .textproto)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("gv2ir")
+                .about("Converts a gate-level netlist and Liberty proto to XLS IR")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .help("Input gate-level netlist (.gv)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Input Liberty proto (.proto or .textproto)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                ),
+        )
         .get_matches();
 
     let mut toml_path: Option<String> = matches
@@ -487,6 +524,10 @@ fn main() {
         ir_ged::handle_ir_ged(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
         ir2gates::handle_ir2gates(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("lib2proto") {
+        lib2proto::handle_lib2proto(matches);
+    } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
+        gv2ir::handle_gv2ir(matches);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {

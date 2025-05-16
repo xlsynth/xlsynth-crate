@@ -27,9 +27,10 @@ varisat = "0.2.2"
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
 boolector = { version = "0.4.3", optional = true }
-prost = "0.12"
-prost-types = "0.12"
-prost-reflect = { version = "0.12", features = ["text-format"] }
+prost = "0.12.6"
+prost-types = "0.12.6"
+prost-reflect = { version = "0.12.0", features = ["text-format"] }
+string-interner = "0.14"
 
 [dev-dependencies]
 anyhow = "1.0.86"
