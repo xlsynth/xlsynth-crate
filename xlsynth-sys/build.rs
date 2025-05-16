@@ -48,7 +48,7 @@ fn high_integrity_download(
     url: &str,
     out_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env_tmp_dir = PathBuf::from(std::env::temp_dir());
+    let env_tmp_dir = std::env::temp_dir();
     assert!(
         env_tmp_dir.exists(),
         "environment-based temp directory {} does not exist",
@@ -201,12 +201,10 @@ fn is_rocky() -> bool {
     if let Ok(file) = file {
         // Read through the lines in the file
         let reader = std::io::BufReader::new(file);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                // Check if the line contains `ID="rocky"`
-                if line.contains("ID=\"rocky\"") {
-                    return true;
-                }
+        for line in reader.lines().map_while(|line| line.ok()) {
+            // Check if the line contains `ID="rocky"`
+            if line.contains("ID=\"rocky\"") {
+                return true;
             }
         }
         println!("cargo:info=Did not find rocky ID line in OS release data");
@@ -254,7 +252,7 @@ fn get_dso_info() -> DsoInfo {
 fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
     let dso_info: DsoInfo = get_dso_info();
     let dso_url = dso_info.get_dso_url(url_base);
-    let dso_path = PathBuf::from(&out_dir).join(&dso_info.get_dso_filename());
+    let dso_path = PathBuf::from(&out_dir).join(dso_info.get_dso_filename());
 
     // Check if the DSO has already been downloaded
     if dso_path.exists() {
