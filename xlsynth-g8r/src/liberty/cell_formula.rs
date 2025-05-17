@@ -15,6 +15,12 @@ pub enum Term {
     Constant(bool),
 }
 
+/// Context for emitting a formula term, used for error reporting.
+pub struct EmitContext<'a> {
+    pub cell_name: &'a str,
+    pub original_formula: &'a str,
+}
+
 impl Term {
     /// Recursively collect all input names in the formula.
     pub fn inputs(&self) -> Vec<String> {
@@ -40,28 +46,31 @@ impl Term {
         &self,
         gb: &mut GateBuilder,
         input_map: &HashMap<String, AigOperand>,
-    ) -> AigOperand {
+        context: &EmitContext,
+    ) -> Result<AigOperand, String> {
         match self {
-            Term::Input(name) => input_map
-                .get(name)
-                .cloned()
-                .expect("input not found in map"),
+            Term::Input(name) => input_map.get(name).cloned().ok_or_else(|| {
+                format!(
+                    "Input '{}' not found in map for cell '{}' (formula: \"{}\")",
+                    name, context.cell_name, context.original_formula
+                )
+            }),
             Term::And(lhs, rhs) => {
-                let l = lhs.emit_formula_term(gb, input_map);
-                let r = rhs.emit_formula_term(gb, input_map);
-                gb.add_and_binary(l, r)
+                let l = lhs.emit_formula_term(gb, input_map, context)?;
+                let r = rhs.emit_formula_term(gb, input_map, context)?;
+                Ok(gb.add_and_binary(l, r))
             }
             Term::Or(lhs, rhs) => {
-                let l = lhs.emit_formula_term(gb, input_map);
-                let r = rhs.emit_formula_term(gb, input_map);
-                gb.add_or_binary(l, r)
+                let l = lhs.emit_formula_term(gb, input_map, context)?;
+                let r = rhs.emit_formula_term(gb, input_map, context)?;
+                Ok(gb.add_or_binary(l, r))
             }
             Term::Negate(inner) => {
-                let x = inner.emit_formula_term(gb, input_map);
-                gb.add_not(x)
+                let x = inner.emit_formula_term(gb, input_map, context)?;
+                Ok(gb.add_not(x))
             }
-            Term::Constant(true) => gb.get_true(),
-            Term::Constant(false) => gb.get_false(),
+            Term::Constant(true) => Ok(gb.get_true()),
+            Term::Constant(false) => Ok(gb.get_false()),
         }
     }
 }
@@ -364,7 +373,13 @@ mod tests {
             Box::new(Term::Input("A".to_string())),
             Box::new(Term::Input("B".to_string())),
         );
-        let out = term.emit_formula_term(&mut gb, &input_map);
+        let context = EmitContext {
+            cell_name: "test_cell_and",
+            original_formula: "A * B",
+        };
+        let out = term
+            .emit_formula_term(&mut gb, &input_map, &context)
+            .unwrap();
         gb.add_output("out".to_string(), crate::gate::AigBitVector::from_bit(out));
         let gate_fn = gb.build();
         let s = gate_fn.to_string();
@@ -382,7 +397,13 @@ mod tests {
             Box::new(Term::Input("A".to_string())),
             Box::new(Term::Input("B".to_string())),
         )));
-        let out = term.emit_formula_term(&mut gb, &input_map);
+        let context = EmitContext {
+            cell_name: "test_cell_not_or",
+            original_formula: "!(A + B)",
+        };
+        let out = term
+            .emit_formula_term(&mut gb, &input_map, &context)
+            .unwrap();
         gb.add_output("out".to_string(), crate::gate::AigBitVector::from_bit(out));
         let gate_fn = gb.build();
         let s = gate_fn.to_string();
@@ -398,7 +419,13 @@ mod tests {
         let mut gb = GateBuilder::new("test_true".to_string(), GateBuilderOptions::no_opt());
         let input_map = HashMap::new();
         let term = Term::Constant(true);
-        let out = term.emit_formula_term(&mut gb, &input_map);
+        let context = EmitContext {
+            cell_name: "test_cell_true",
+            original_formula: "1",
+        };
+        let out = term
+            .emit_formula_term(&mut gb, &input_map, &context)
+            .unwrap();
         assert!(gb.is_known_true(out));
     }
     #[test]
@@ -406,7 +433,39 @@ mod tests {
         let mut gb = GateBuilder::new("test_false".to_string(), GateBuilderOptions::no_opt());
         let input_map = HashMap::new();
         let term = Term::Constant(false);
-        let out = term.emit_formula_term(&mut gb, &input_map);
+        let context = EmitContext {
+            cell_name: "test_cell_false",
+            original_formula: "0",
+        };
+        let out = term
+            .emit_formula_term(&mut gb, &input_map, &context)
+            .unwrap();
         assert!(gb.is_known_false(out));
+    }
+    #[test]
+    fn test_emit_formula_term_missing_input() {
+        let mut gb = GateBuilder::new("test_missing".to_string(), GateBuilderOptions::no_opt());
+        let a = gb.add_input("a".to_string(), 1);
+        let mut input_map = HashMap::new();
+        input_map.insert("A".to_string(), *a.get_lsb(0));
+        // "B" is intentionally missing from input_map
+
+        let term = Term::And(
+            Box::new(Term::Input("A".to_string())),
+            Box::new(Term::Input("B".to_string())),
+        );
+        let context = EmitContext {
+            cell_name: "test_cell_missing_input",
+            original_formula: "A * B",
+        };
+
+        let result = term.emit_formula_term(&mut gb, &input_map, &context);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert_eq!(
+                e,
+                "Input 'B' not found in map for cell 'test_cell_missing_input' (formula: \"A * B\")"
+            );
+        }
     }
 }
