@@ -298,6 +298,9 @@ fn find_estimator_for_op<'a>(
     literal_operands: &[bool],
 ) -> Option<&'a proto::Estimator> {
     for op_model in em.op_models.iter() {
+        if op_model.op != op {
+            continue;
+        }
         // Reminder: an `OpModel` has a "typical case" estimator and can have any number
         // of "specializations" that match on the predicates we get. The specializations
         // take precedence if they are matched on.
@@ -329,9 +332,7 @@ fn find_estimator_for_op<'a>(
                 }
             }
         }
-        if op_model.op == op {
-            return Some(&op_model.estimator.as_ref().unwrap());
-        }
+        return Some(&op_model.estimator.as_ref().unwrap());
     }
     None
 }
@@ -969,5 +970,45 @@ data_points {
         };
         let specialized_delay = eval_estimator_model(&em, &specialized_node).unwrap();
         assert_eq!(format!("{:.2}", specialized_delay), "0.00");
+    }
+
+    // The op-specific specializations should not affect other operations. This
+    // regression test verifies that when we evaluate a node for `kSub`, the
+    // `kAdd` specializations are ignored and the default `kSub` estimator is
+    // used instead of accidentally matching the `kAdd` specialization.
+    #[test]
+    fn test_find_estimator_respects_op() {
+        let textproto = r#"
+op_models {
+  op: "kAdd"
+  estimator {
+    fixed: 111
+  }
+  specializations {
+    kind: OPERANDS_IDENTICAL
+    estimator {
+      fixed: 222
+    }
+  }
+}
+op_models {
+  op: "kSub"
+  estimator {
+    fixed: 333
+  }
+}
+"#;
+
+        let em = parse_estimator_model_textproto(textproto).unwrap();
+        let node = FakeNode {
+            op: "kSub".to_string(),
+            result_bit_count: 32,
+            operand_bit_count: |_i| 32,
+            operand_count: 2,
+            operand_is_literal: |_i| false,
+            all_operands_identical: true,
+        };
+        let delay = eval_estimator_model(&em, &node).unwrap();
+        assert_eq!(delay, 333.0);
     }
 }
