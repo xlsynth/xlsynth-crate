@@ -33,18 +33,22 @@ pub fn project_gatefn_from_netlist_and_liberty(
     }
     // Build cell formula map: (cell_name, pin_name) -> Term
     type CellPinKey = (String, String);
-    let mut cell_formula_map: HashMap<CellPinKey, crate::liberty::cell_formula::Term> =
+    let mut cell_formula_map: HashMap<CellPinKey, (crate::liberty::cell_formula::Term, String)> =
         HashMap::new();
     for cell in &liberty_lib.cells {
         for pin in &cell.pins {
             if pin.direction == 1 && !pin.function.is_empty() {
+                let original_formula_string = pin.function.clone(); // Keep original string
                 let term = cell_formula::parse_formula(&pin.function).map_err(|e| {
                     format!(
-                        "Failed to parse formula for cell '{}', pin '{}': {}",
-                        cell.name, pin.name, e
+                        "Failed to parse formula for cell '{}', pin '{}' (formula: \\\"{}\\\"): {}",
+                        cell.name, pin.name, original_formula_string, e
                     )
                 })?;
-                cell_formula_map.insert((cell.name.clone(), pin.name.clone()), term);
+                cell_formula_map.insert(
+                    (cell.name.clone(), pin.name.clone()),
+                    (term, original_formula_string), // Store Term and original string
+                );
             }
         }
     }
@@ -204,10 +208,17 @@ pub fn project_gatefn_from_netlist_and_liberty(
                 let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
                 if pin_dir == 1 {
                     let key = (type_name.to_string(), port_name.to_string());
-                    let formula = cell_formula_map.get(&key).ok_or_else(|| {
-                        format!("No formula for cell '{}', pin '{}'", type_name, port_name)
-                    })?;
-                    let out_op = formula.emit_formula_term(&mut gb, &input_map);
+                    let (formula_ast, original_formula_str) =
+                        cell_formula_map.get(&key).ok_or_else(|| {
+                            format!("No formula for cell '{}', pin '{}'", type_name, port_name)
+                        })?;
+
+                    let context = crate::liberty::cell_formula::EmitContext {
+                        cell_name: type_name,
+                        // Use the stored original string
+                        original_formula: original_formula_str.as_str(),
+                    };
+                    let out_op = formula_ast.emit_formula_term(&mut gb, &input_map, &context)?;
                     match netref {
                         crate::netlist::parse::NetRef::Simple(net_idx) => {
                             if net_to_bv.contains_key(net_idx) {
