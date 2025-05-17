@@ -605,41 +605,105 @@ pub enum EquivResult {
     Disproved(Vec<IrBits>), // Counterexample input
 }
 
+/// Helper to flatten a BV output (tuple) to a single BV
+fn flatten_bv(bv: &BV<Rc<Btor>>, ty: &crate::xls_ir::ir::Type) -> BV<Rc<Btor>> {
+    match ty {
+        crate::xls_ir::ir::Type::Bits(_) => bv.clone(),
+        crate::xls_ir::ir::Type::Tuple(members) => {
+            let mut offset = 0;
+            let mut result = None;
+            for member in members.iter().rev() {
+                let width = member.bit_count() as u32;
+                let slice = bv.slice(offset + width - 1, offset);
+                offset += width;
+                result = Some(if let Some(acc) = result {
+                    slice.concat(&acc)
+                } else {
+                    slice
+                });
+            }
+            result.expect("Tuple must have at least one member")
+        }
+        _ => unimplemented!("flatten_bv for {:?}", ty),
+    }
+}
+
+/// Helper to flatten a type to a single bit width (tuples, arrays, bits)
+pub fn flatten_type(ty: &crate::xls_ir::ir::Type) -> usize {
+    match ty {
+        crate::xls_ir::ir::Type::Bits(width) => *width,
+        crate::xls_ir::ir::Type::Tuple(members) => members.iter().map(|t| flatten_type(&**t)).sum(),
+        crate::xls_ir::ir::Type::Array(arr) => flatten_type(&arr.element_type) * arr.element_count,
+        _ => unimplemented!("flatten_type for {:?}", ty),
+    }
+}
+
 /// Checks equivalence of two IR functions using Boolector.
 /// Only supports literal-only, zero-parameter functions for now.
-pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    assert_eq!(lhs.ret_ty, rhs.ret_ty, "Return types must match");
-    // Check for duplicate parameter names
-    let mut seen = std::collections::HashSet::new();
-    for param in &lhs.params {
-        assert!(
-            seen.insert(&param.name),
-            "Duplicate parameter name '{}' in lhs.params",
-            param.name
-        );
+fn check_equiv_internal(lhs: &Fn, rhs: &Fn, flatten_aggregates: bool) -> EquivResult {
+    // Helper to pretty-print a function signature
+    fn signature_str(f: &Fn) -> String {
+        let params = f
+            .params
+            .iter()
+            .map(|p| format!("{}: {:?}", p.name, p.ty))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("fn {}({}) -> {:?}", f.name, params, f.ret_ty)
     }
-    // Check that parameter lists are identical (name, type, order)
-    assert_eq!(
-        lhs.params.len(),
-        rhs.params.len(),
-        "Parameter count mismatch"
-    );
-    for (l, r) in lhs.params.iter().zip(rhs.params.iter()) {
+    log::info!("LHS signature: {}", signature_str(lhs));
+    log::info!("RHS signature: {}", signature_str(rhs));
+    if flatten_aggregates {
+        // Flatten parameter types
+        let lhs_param_flat: Vec<usize> = lhs.params.iter().map(|p| flatten_type(&p.ty)).collect();
+        let rhs_param_flat: Vec<usize> = rhs.params.iter().map(|p| flatten_type(&p.ty)).collect();
+        log::info!("LHS flattened param widths: {:?}", lhs_param_flat);
+        log::info!("RHS flattened param widths: {:?}", rhs_param_flat);
         assert_eq!(
-            l.name, r.name,
-            "Parameter name mismatch: {} vs {}",
-            l.name, r.name
+            lhs_param_flat, rhs_param_flat,
+            "Flattened parameter bit widths must match: lhs={:?} rhs={:?}",
+            lhs_param_flat, rhs_param_flat
         );
+        // Flatten return types
+        let lhs_width = flatten_type(&lhs.ret_ty);
+        let rhs_width = flatten_type(&rhs.ret_ty);
+        log::info!("LHS flattened return width: {}", lhs_width);
+        log::info!("RHS flattened return width: {}", rhs_width);
         assert_eq!(
-            l.ty, r.ty,
-            "Parameter type mismatch for {}: {:?} vs {:?}",
-            l.name, l.ty, r.ty
+            lhs_width, rhs_width,
+            "Flattened return widths must match: lhs={} rhs={}",
+            lhs_width, rhs_width
         );
+    } else {
+        assert_eq!(lhs.ret_ty, rhs.ret_ty, "Return types must match");
+        // Check for duplicate parameter names
+        let mut seen = std::collections::HashSet::new();
+        for param in &lhs.params {
+            assert!(
+                seen.insert(&param.name),
+                "Duplicate parameter name '{}' in lhs.params",
+                param.name
+            );
+        }
+        // Check that parameter lists are identical (name, type, order)
+        assert_eq!(
+            lhs.params.len(),
+            rhs.params.len(),
+            "Parameter count mismatch"
+        );
+        for (l, r) in lhs.params.iter().zip(rhs.params.iter()) {
+            assert_eq!(
+                l.name, r.name,
+                "Parameter name mismatch: {} vs {}",
+                l.name, r.name
+            );
+            assert_eq!(
+                l.ty, r.ty,
+                "Parameter type mismatch for {}: {:?} vs {:?}",
+                l.name, l.ty, r.ty
+            );
+        }
     }
-    assert!(
-        lhs.params.len() > 0,
-        "check_equiv only supports functions with at least one parameter"
-    );
     let btor = Rc::new(Btor::new());
     btor.set_opt(BtorOption::ModelGen(ModelGen::All));
     // Create shared parameter BVs for all parameters (by name)
@@ -651,8 +715,19 @@ pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
     }
     let lhs_result = ir_fn_to_boolector(btor.clone(), lhs, Some(&param_bvs));
     let rhs_result = ir_fn_to_boolector(btor.clone(), rhs, Some(&param_bvs));
+    // Flatten outputs if needed
+    let lhs_out = if flatten_aggregates {
+        flatten_bv(&lhs_result.output, &lhs.ret_ty)
+    } else {
+        lhs_result.output.clone()
+    };
+    let rhs_out = if flatten_aggregates {
+        flatten_bv(&rhs_result.output, &rhs.ret_ty)
+    } else {
+        rhs_result.output.clone()
+    };
     // Assert that outputs are not equal (look for a counterexample)
-    let diff = lhs_result.output._ne(&rhs_result.output);
+    let diff = lhs_out._ne(&rhs_out);
     diff.assert();
     let sat_result = btor.sat();
     match sat_result {
@@ -688,6 +763,16 @@ pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
         }
         SolverResult::Unknown => panic!("Solver returned unknown result"),
     }
+}
+
+/// Standard equivalence check (no aggregate flattening)
+pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
+    check_equiv_internal(lhs, rhs, false)
+}
+
+/// Equivalence check with tuple/array flattening
+pub fn check_equiv_flattened(lhs: &Fn, rhs: &Fn) -> EquivResult {
+    check_equiv_internal(lhs, rhs, true)
 }
 
 fn shift_boolector<F>(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>, shift_op: F) -> BV<Rc<Btor>>
@@ -789,6 +874,7 @@ fn ir_value_to_bv(
 mod tests {
     use super::*;
     use crate::test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt};
+    use crate::xls_ir::ir::{ArrayTypeData, Type};
     use crate::xls_ir::ir_parser;
     use boolector::Btor;
     use std::rc::Rc;
@@ -1093,5 +1179,28 @@ mod tests {
   ret sge.3: bits[1] = sge(x, y, id=3)
 }"#;
         assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_flatten_type_equivalence_flat_vs_aggregate() {
+        // Flat bits[256]
+        let flat = Type::Bits(256);
+
+        // Array of 32 tuples, each tuple is (bits[1], bits[4], bits[3])
+        let tuple = Type::Tuple(vec![
+            Box::new(Type::Bits(1)),
+            Box::new(Type::Bits(4)),
+            Box::new(Type::Bits(3)),
+        ]);
+        let array = Type::Array(ArrayTypeData {
+            element_type: Box::new(tuple),
+            element_count: 32,
+        });
+
+        let flat_result = flatten_type(&flat);
+        let array_result = flatten_type(&array);
+
+        assert_eq!(flat_result, 256);
+        assert_eq!(array_result, 256);
     }
 }

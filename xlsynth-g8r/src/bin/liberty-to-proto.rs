@@ -68,6 +68,7 @@ mod tests {
         lib.cells.push(Cell {
             area: 1.0,
             pins: vec![Pin {
+                name: "A".to_string(),
                 direction: PinDirection::Input as i32,
                 function: "A".to_string(),
             }],

@@ -271,6 +271,16 @@ impl AigBitVector {
     pub fn is_empty(&self) -> bool {
         self.operands.is_empty()
     }
+
+    pub fn set_lsb(&mut self, index: usize, value: AigOperand) {
+        assert!(
+            index < self.operands.len(),
+            "set_lsb: index {} out of bounds for bit vector of length {}",
+            index,
+            self.operands.len()
+        );
+        self.operands[index] = value;
+    }
 }
 
 fn io_to_string(name: &str, bit_vector: &AigBitVector) -> String {

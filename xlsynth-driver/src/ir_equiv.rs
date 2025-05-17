@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::ArgMatches;
-
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
@@ -73,6 +71,8 @@ fn run_boolector_equiv_check(
     rhs_path: &std::path::Path,
     lhs_top: Option<&str>,
     rhs_top: Option<&str>,
+    flatten_aggregates: bool,
+    drop_params: &[String],
 ) -> ! {
     // Parse both IR files to xls_ir::ir::Package
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
@@ -91,29 +91,41 @@ fn run_boolector_equiv_check(
     };
     // Select the function to check (top or first)
     let lhs_fn = if let Some(top_name) = lhs_top {
-        lhs_pkg.get_fn(top_name).unwrap_or_else(|| {
+        lhs_pkg.get_fn(top_name).cloned().unwrap_or_else(|| {
             eprintln!("Top function '{}' not found in lhs IR file", top_name);
             std::process::exit(1);
         })
     } else {
-        lhs_pkg.get_top().unwrap_or_else(|| {
+        lhs_pkg.get_top().cloned().unwrap_or_else(|| {
             eprintln!("No top function found in lhs IR file");
             std::process::exit(1);
         })
     };
     let rhs_fn = if let Some(top_name) = rhs_top {
-        rhs_pkg.get_fn(top_name).unwrap_or_else(|| {
+        rhs_pkg.get_fn(top_name).cloned().unwrap_or_else(|| {
             eprintln!("Top function '{}' not found in rhs IR file", top_name);
             std::process::exit(1);
         })
     } else {
-        rhs_pkg.get_top().unwrap_or_else(|| {
+        rhs_pkg.get_top().cloned().unwrap_or_else(|| {
             eprintln!("No top function found in rhs IR file");
             std::process::exit(1);
         })
     };
+    // Drop parameters by name and check for usage
+    let lhs_fn = lhs_fn
+        .drop_params(drop_params)
+        .expect("Dropped parameter is used in the function body!");
+    let rhs_fn = rhs_fn
+        .drop_params(drop_params)
+        .expect("Dropped parameter is used in the function body!");
     // Run Boolector equivalence check
-    match ir_equiv_boolector::check_equiv(lhs_fn, rhs_fn) {
+    let result = if flatten_aggregates {
+        xlsynth_g8r::ir_equiv_boolector::check_equiv_flattened(&lhs_fn, &rhs_fn)
+    } else {
+        xlsynth_g8r::ir_equiv_boolector::check_equiv(&lhs_fn, &rhs_fn)
+    };
+    match result {
         ir_equiv_boolector::EquivResult::Proved => {
             println!("success: Boolector proved equivalence");
             std::process::exit(0);
@@ -125,7 +137,7 @@ fn run_boolector_equiv_check(
     }
 }
 
-pub fn handle_ir_equiv(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
+pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_ir_equiv");
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();
     let rhs = matches.get_one::<String>("rhs_ir_file").unwrap();
@@ -171,8 +183,24 @@ pub fn handle_ir_equiv(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         #[cfg(feature = "has-boolector")]
         #[allow(unreachable_code)]
         {
+            let flatten_aggregates = matches
+                .get_one::<String>("flatten_aggregates")
+                .map(|s| s == "true")
+                .unwrap_or(false);
+            let drop_params: Vec<String> = matches
+                .get_one::<String>("drop_params")
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                .unwrap_or_else(Vec::new);
+
             log::info!("run_boolector_equiv_check");
-            run_boolector_equiv_check(lhs_path, rhs_path, lhs_top, rhs_top);
+            run_boolector_equiv_check(
+                lhs_path,
+                rhs_path,
+                lhs_top,
+                rhs_top,
+                flatten_aggregates,
+                &drop_params,
+            );
             unreachable!();
         }
     }
