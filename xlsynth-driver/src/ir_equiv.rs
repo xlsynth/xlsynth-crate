@@ -173,14 +173,6 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         .get_one::<String>("boolector")
         .map(|s| s == "true")
         .unwrap_or(false);
-    let flatten_aggregates = matches
-        .get_one::<String>("flatten_aggregates")
-        .map(|s| s == "true")
-        .unwrap_or(false);
-    let drop_params: Vec<String> = matches
-        .get_one::<String>("drop_params")
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
-        .unwrap_or_else(Vec::new);
     if use_boolector {
         // If the feature is not enabled, error out.
         #[cfg(not(feature = "has-boolector"))]
@@ -191,6 +183,15 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         #[cfg(feature = "has-boolector")]
         #[allow(unreachable_code)]
         {
+            let flatten_aggregates = matches
+                .get_one::<String>("flatten_aggregates")
+                .map(|s| s == "true")
+                .unwrap_or(false);
+            let drop_params: Vec<String> = matches
+                .get_one::<String>("drop_params")
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                .unwrap_or_else(Vec::new);
+
             log::info!("run_boolector_equiv_check");
             run_boolector_equiv_check(
                 lhs_path,

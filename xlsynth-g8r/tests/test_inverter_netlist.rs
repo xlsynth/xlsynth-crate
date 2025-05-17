@@ -2,6 +2,14 @@
 
 //! Integration test for a single inverter netlist and matching Liberty proto.
 
+use prost::Message;
+use std::fs::File;
+use std::io::Write;
+use tempfile::NamedTempFile;
+use xlsynth_g8r::liberty_proto::Library;
+use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
+use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
+
 const LIBERTY_INVERTER_AND_BUF_TEXTPROTO: &str = r#"
 cells: {
   name: "INVX1"
@@ -31,22 +39,12 @@ cells: {
 }
 "#;
 
-use prost::Message;
-use std::fs::File;
-use std::io::Write;
-use tempfile::NamedTempFile;
-use xlsynth_g8r::liberty_proto::Library;
-use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
-use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
-
 #[test]
 fn test_single_inverter_netlist_and_liberty() {
-    // Use only the INVX1 cell from the constant
-    let liberty_textproto = LIBERTY_INVERTER_AND_BUF_TEXTPROTO
-        .lines()
-        .take_while(|line| !line.contains("BUFX1"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let _ = env_logger::builder().is_test(true).try_init();
+    // Use the full constant (both INVX1 and BUFX1)
+    let liberty_textproto = LIBERTY_INVERTER_AND_BUF_TEXTPROTO;
+    log::info!("Liberty textproto used in test:\n{}", liberty_textproto);
 
     // Minimal netlist (.v) as a string
     let netlist = r#"
@@ -179,9 +177,10 @@ endmodule
         )
         .unwrap();
     let s = gate_fn.to_string();
-    // Check that both y1[0] and y2[0] are assigned to the same value, which is
-    // not(a) and that n[0] is not(a)
-    assert!(s.contains("n[0] = not("), "GateFn output: {}", s);
-    assert!(s.contains("y1[0] = n[0]"), "GateFn output: {}", s);
-    assert!(s.contains("y2[0] = n[0]"), "GateFn output: {}", s);
+    // Check that the output matches the expected GateFn string
+    let expected = r#"fn top(a: bits[1] = [%1]) -> (y1: bits[1] = [not(%1)], y2: bits[1] = [not(%1)]) {
+  y1[0] = not(%1)
+  y2[0] = not(%1)
+}"#;
+    assert_eq!(s.trim(), expected.trim(), "GateFn output:\n{}", s);
 }
