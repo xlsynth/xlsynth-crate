@@ -743,7 +743,7 @@ impl NodePayload {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Node {
     /// All nodes have known ids.
     pub text_id: usize,
@@ -811,7 +811,7 @@ pub struct FunctionType {
     pub return_type: Type,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Fn {
     pub name: String,
     pub params: Vec<Param>,
@@ -846,14 +846,109 @@ impl Fn {
         &mut self.nodes[node_ref.index]
     }
 
-    /*
-    pub fn validate(&self) -> Result<(), String> {
-        for node in self.nodes.iter() {
-            node.payload.validate(self)?;
+    /// Returns a new Fn with the given parameter names dropped.
+    /// Returns Err if any dropped parameter is used in the function body.
+    pub fn drop_params(mut self, params: &[String]) -> Result<Self, String> {
+        let dropped: Vec<_> = self
+            .params
+            .iter()
+            .filter(|p| params.contains(&p.name))
+            .map(|p| p.id)
+            .collect();
+        self.params.retain(|p| !params.contains(&p.name));
+        // Find all GetParam nodes for dropped params
+        let mut offending = Vec::new();
+        for (i, node) in self.nodes.iter().enumerate() {
+            if let crate::xls_ir::ir::NodePayload::GetParam(param_id) = &node.payload {
+                if dropped.contains(param_id) {
+                    offending.push((i, *param_id));
+                }
+            }
         }
-        Ok(())
+        // For each offending node, check if it is referenced by any other node
+        let mut to_nil = Vec::new();
+        for (idx, param_id) in offending {
+            let node_ref = crate::xls_ir::ir::NodeRef { index: idx };
+            let is_used = self.nodes.iter().any(|n| {
+                use crate::xls_ir::ir::NodePayload::*;
+                match &n.payload {
+                    Tuple(nodes) | Array(nodes) => nodes.contains(&node_ref),
+                    TupleIndex { tuple, .. } => tuple == &node_ref,
+                    Binop(_, a, b) => a == &node_ref || b == &node_ref,
+                    Unop(_, a) => a == &node_ref,
+                    SignExt { arg, .. } | ZeroExt { arg, .. } => arg == &node_ref,
+                    ArrayUpdate {
+                        array,
+                        value,
+                        indices,
+                    } => array == &node_ref || value == &node_ref || indices.contains(&node_ref),
+                    ArrayIndex { array, indices, .. } => {
+                        array == &node_ref || indices.contains(&node_ref)
+                    }
+                    DynamicBitSlice { arg, start, .. } => arg == &node_ref || start == &node_ref,
+                    BitSlice { arg, .. } => arg == &node_ref,
+                    BitSliceUpdate {
+                        arg,
+                        start,
+                        update_value,
+                    } => arg == &node_ref || start == &node_ref || update_value == &node_ref,
+                    Assert {
+                        token, activate, ..
+                    } => token == &node_ref || activate == &node_ref,
+                    Trace {
+                        token,
+                        activated,
+                        operands,
+                        ..
+                    } => {
+                        token == &node_ref || activated == &node_ref || operands.contains(&node_ref)
+                    }
+                    AfterAll(nodes) => nodes.contains(&node_ref),
+                    Nary(_, nodes) => nodes.contains(&node_ref),
+                    Invoke { operands, .. } => operands.contains(&node_ref),
+                    PrioritySel {
+                        selector,
+                        cases,
+                        default,
+                    } => {
+                        selector == &node_ref
+                            || cases.contains(&node_ref)
+                            || default.map_or(false, |d| d == node_ref)
+                    }
+                    OneHotSel { selector, cases } => {
+                        selector == &node_ref || cases.contains(&node_ref)
+                    }
+                    OneHot { arg, .. } => arg == &node_ref,
+                    Sel {
+                        selector,
+                        cases,
+                        default,
+                    } => {
+                        selector == &node_ref
+                            || cases.contains(&node_ref)
+                            || default.map_or(false, |d| d == node_ref)
+                    }
+                    Cover { predicate, .. } => predicate == &node_ref,
+                    Decode { arg, .. } => arg == &node_ref,
+                    Encode { arg } => arg == &node_ref,
+                    _ => false,
+                }
+            });
+            if is_used {
+                return Err(format!(
+                    "Dropped parameter with id {:?} is used in the function body (node {})!",
+                    param_id, idx
+                ));
+            } else {
+                to_nil.push(idx);
+            }
+        }
+        // Clobber unused GetParam nodes with Nil
+        for idx in to_nil {
+            self.nodes[idx].payload = crate::xls_ir::ir::NodePayload::Nil;
+        }
+        Ok(self)
     }
-    */
 }
 
 impl std::fmt::Display for Fn {

@@ -330,6 +330,16 @@ fn main() {
                 .add_bool_arg(
                     "boolector",
                     "Use Boolector for equivalence checking (requires --features=with-boolector-built or --features=with-boolector-system)",
+                )
+                .add_bool_arg(
+                    "flatten_aggregates",
+                    "Flatten tuple and array types to bits for equivalence checking",
+                )
+                .arg(
+                    Arg::new("drop_params")
+                        .long("drop_params")
+                        .help("Comma-separated list of parameter names to drop from both functions before equivalence checking")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
