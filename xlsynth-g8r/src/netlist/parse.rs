@@ -472,11 +472,25 @@ impl<R: Read + 'static> TokenScanner<R> {
 
     fn pop_identifier(&mut self, start: Pos) -> Token {
         let mut ident = String::new();
-        while let Some(c) = self.peekc() {
-            if c.is_alphanumeric() || c == '_' {
+        // Check if it's an escaped identifier
+        if self.peekc() == Some('\\') {
+            self.popc(); // Consume the backslash character.
+            while let Some(c) = self.peekc() {
+                if c.is_whitespace() {
+                    // End of escaped identifier, consume the whitespace
+                    self.popc();
+                    break;
+                }
                 ident.push(self.popc().unwrap());
-            } else {
-                break;
+            }
+        } else {
+            // Regular identifier
+            while let Some(c) = self.peekc() {
+                if c.is_alphanumeric() || c == '_' {
+                    ident.push(self.popc().unwrap());
+                } else {
+                    break;
+                }
             }
         }
         let limit = self.pos;
@@ -528,7 +542,9 @@ impl<R: Read + 'static> TokenScanner<R> {
             }
         }
         // Handle identifier/keyword
-        if c.is_ascii_alphabetic() || c == '_' {
+        //
+        // Note that "escaped identifiers" can begin with the backslash character.
+        if c.is_ascii_alphabetic() || c == '_' || c == '\\' {
             return Ok(Some(self.pop_identifier(start)));
         }
         // Handle number (plain integer literal)
@@ -1775,6 +1791,18 @@ mod tests {
         assert_eq!(net_indices.len(), 1);
         let out = &parser.nets[net_indices[0].0];
         assert_eq!(out.width, Some((26, 0)));
+
+        // Example: wire \p0_umul_8[0] ;
+        let input = "wire \\p0_umul_8[0] ;";
+        let mut parser = Parser::new(TokenScanner::from_str(input));
+        let net_indices = parser.parse_wire_decl().expect("no error");
+        assert_eq!(net_indices.len(), 1);
+        let p0_net = &parser.nets[net_indices[0].0];
+        assert_eq!(
+            parser.interner.resolve(p0_net.name).unwrap(),
+            "p0_umul_8[0]"
+        );
+        assert_eq!(p0_net.width, None);
     }
 
     #[test]
@@ -1844,5 +1872,39 @@ wire [255:0] a;"#;
             }
             _ => panic!("Expected PartSelect net ref"),
         }
+    }
+
+    #[test]
+    fn test_token_scanner_escaped_identifier() {
+        let input = "\\escaped-ident ;";
+        let mut scanner = TokenScanner::from_str(input);
+        let t1 = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(t1.payload, TokenPayload::Identifier(ref s) if s == "escaped-ident"));
+        let t2 = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(t2.payload, TokenPayload::Semi));
+        assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_token_scanner_escaped_identifier_with_special_chars() {
+        let input = "\\!@#$%^&*()-+= ;";
+        let mut scanner = TokenScanner::from_str(input);
+        let t1 = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(t1.payload, TokenPayload::Identifier(ref s) if s == "!@#$%^&*()-+="));
+        let t2 = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(t2.payload, TokenPayload::Semi));
+        assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_token_scanner_escaped_identifier_leading_backslash_from_error() {
+        // This test is based on the error message provided:
+        // wire \p0_umul_8[0] ;
+        let input = "\\p0_umul_8[0] ;";
+        let mut scanner = TokenScanner::from_str(input);
+        let t = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(t.payload, TokenPayload::Identifier(ref s) if s == "p0_umul_8[0]"));
+        assert!(scanner.popt().expect("no scan error").unwrap().payload == TokenPayload::Semi);
+        assert!(scanner.popt().expect("no scan error").is_none());
     }
 }
