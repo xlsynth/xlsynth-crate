@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::liberty::util::human_readable_size;
 use crate::liberty::{CharReader, LibertyParser};
 use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
 use flate2::bufread::GzDecoder;
@@ -100,6 +101,17 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
     let mut libraries = Vec::new();
     for path in paths {
         log::info!("Parsing Liberty file: {}", path.as_ref().display());
+        // Log the human-readable file size
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                let size = meta.len();
+                let human_size = human_readable_size(size);
+                log::info!("  Size: {}", human_size);
+            }
+            Err(e) => {
+                log::warn!("  Could not stat file: {}", e);
+            }
+        }
         let file = File::open(&path)
             .map_err(|e| format!("Failed to open {}: {}", path.as_ref().display(), e))?;
         let streamer: Box<dyn std::io::Read> = if path
@@ -119,10 +131,12 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
             .map_err(|e| format!("Parse error in {}: {}", path.as_ref().display(), e))?;
         libraries.push(library);
     }
+    log::info!("Flattening cells from {} libraries...", libraries.len());
     let mut all_cells = Vec::new();
     for lib in &libraries {
         all_cells.extend(block_to_proto_cells(lib));
     }
+    log::info!("Flattened {} cells", all_cells.len());
     Ok(Library { cells: all_cells })
 }
 
@@ -176,5 +190,23 @@ mod tests {
         println!("Pretty-printed textproto:\n{}", textproto);
         assert!(textproto.contains("cells:["));
         assert!(textproto.contains("name:\"my_and\""));
+    }
+
+    #[test]
+    fn test_committed_liberty_bin_matches_generated() {
+        // Path to the committed descriptor
+        let committed = std::fs::read("proto/liberty.bin").expect("read committed liberty.bin");
+        // Generate a fresh descriptor set in a temp dir
+        let tmp = tempfile::tempdir().unwrap();
+        let descriptor_path = tmp.path().join("liberty.bin");
+        prost_build::Config::new()
+            .file_descriptor_set_path(&descriptor_path)
+            .compile_protos(&["proto/liberty.proto"], &["proto"])
+            .expect("Failed to compile proto");
+        let generated = std::fs::read(&descriptor_path).expect("read generated liberty.bin");
+        assert_eq!(
+            committed, generated,
+            "Committed proto/liberty.bin is out of date; re-run build and commit the new file"
+        );
     }
 }

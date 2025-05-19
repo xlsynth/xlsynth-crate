@@ -11,6 +11,7 @@ pub enum Term {
     Input(String),
     And(Box<Term>, Box<Term>),
     Or(Box<Term>, Box<Term>),
+    Xor(Box<Term>, Box<Term>),
     Negate(Box<Term>),
     Constant(bool),
 }
@@ -19,6 +20,8 @@ pub enum Term {
 pub struct EmitContext<'a> {
     pub cell_name: &'a str,
     pub original_formula: &'a str,
+    pub instance_name: Option<&'a str>,
+    pub port_map: Option<&'a std::collections::HashMap<String, String>>, // port_name -> net_name
 }
 
 impl Term {
@@ -31,7 +34,7 @@ impl Term {
     fn collect_inputs(&self, v: &mut Vec<String>) {
         match self {
             Term::Input(s) => v.push(s.clone()),
-            Term::And(a, b) | Term::Or(a, b) => {
+            Term::And(a, b) | Term::Or(a, b) | Term::Xor(a, b) => {
                 a.collect_inputs(v);
                 b.collect_inputs(v);
             }
@@ -50,10 +53,24 @@ impl Term {
     ) -> Result<AigOperand, String> {
         match self {
             Term::Input(name) => input_map.get(name).cloned().ok_or_else(|| {
-                format!(
+                let available: Vec<_> = input_map.keys().cloned().collect();
+                let required: Vec<_> = self.inputs();
+                let mut msg = format!(
                     "Input '{}' not found in map for cell '{}' (formula: \"{}\")",
                     name, context.cell_name, context.original_formula
-                )
+                );
+                if let Some(inst) = context.instance_name {
+                    msg.push_str(&format!("\n  Instance name: {}", inst));
+                }
+                if let Some(port_map) = context.port_map {
+                    msg.push_str("\n  Port mapping:");
+                    for (port, net) in port_map {
+                        msg.push_str(&format!("\n    .{}({})", port, net));
+                    }
+                }
+                msg.push_str(&format!("\n  Available inputs: {:?}", available));
+                msg.push_str(&format!("\n  Required by formula: {:?}", required));
+                msg
             }),
             Term::And(lhs, rhs) => {
                 let l = lhs.emit_formula_term(gb, input_map, context)?;
@@ -64,6 +81,11 @@ impl Term {
                 let l = lhs.emit_formula_term(gb, input_map, context)?;
                 let r = rhs.emit_formula_term(gb, input_map, context)?;
                 Ok(gb.add_or_binary(l, r))
+            }
+            Term::Xor(lhs, rhs) => {
+                let l = lhs.emit_formula_term(gb, input_map, context)?;
+                let r = rhs.emit_formula_term(gb, input_map, context)?;
+                Ok(gb.add_xor_binary(l, r))
             }
             Term::Negate(inner) => {
                 let x = inner.emit_formula_term(gb, input_map, context)?;
@@ -92,6 +114,7 @@ enum Tok {
     RParen,
     And,
     Or,
+    Xor,
     Not,
     Const(bool),
 }
@@ -112,12 +135,16 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 tokens.push(Tok::RParen);
                 chars.next();
             }
-            '*' => {
+            '*' | '&' => {
                 tokens.push(Tok::And);
                 chars.next();
             }
-            '+' => {
+            '+' | '|' => {
                 tokens.push(Tok::Or);
+                chars.next();
+            }
+            '^' => {
+                tokens.push(Tok::Xor);
                 chars.next();
             }
             '!' => {
@@ -156,11 +183,22 @@ fn parse_expr(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
 }
 
 fn parse_or(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
-    let (mut lhs, mut rest) = parse_and(tokens)?;
+    let (mut lhs, mut rest) = parse_xor(tokens)?;
     while let Some(Tok::Or) = rest.first() {
         rest = &rest[1..];
-        let (rhs, rest2) = parse_and(rest)?;
+        let (rhs, rest2) = parse_xor(rest)?;
         lhs = Term::Or(Box::new(lhs), Box::new(rhs));
+        rest = rest2;
+    }
+    Ok((lhs, rest))
+}
+
+fn parse_xor(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
+    let (mut lhs, mut rest) = parse_and(tokens)?;
+    while let Some(Tok::Xor) = rest.first() {
+        rest = &rest[1..];
+        let (rhs, rest2) = parse_and(rest)?;
+        lhs = Term::Xor(Box::new(lhs), Box::new(rhs));
         rest = rest2;
     }
     Ok((lhs, rest))
@@ -376,6 +414,8 @@ mod tests {
         let context = EmitContext {
             cell_name: "test_cell_and",
             original_formula: "A * B",
+            instance_name: None,
+            port_map: None,
         };
         let out = term
             .emit_formula_term(&mut gb, &input_map, &context)
@@ -400,6 +440,8 @@ mod tests {
         let context = EmitContext {
             cell_name: "test_cell_not_or",
             original_formula: "!(A + B)",
+            instance_name: None,
+            port_map: None,
         };
         let out = term
             .emit_formula_term(&mut gb, &input_map, &context)
@@ -422,6 +464,8 @@ mod tests {
         let context = EmitContext {
             cell_name: "test_cell_true",
             original_formula: "1",
+            instance_name: None,
+            port_map: None,
         };
         let out = term
             .emit_formula_term(&mut gb, &input_map, &context)
@@ -436,6 +480,8 @@ mod tests {
         let context = EmitContext {
             cell_name: "test_cell_false",
             original_formula: "0",
+            instance_name: None,
+            port_map: None,
         };
         let out = term
             .emit_formula_term(&mut gb, &input_map, &context)
@@ -457,15 +503,56 @@ mod tests {
         let context = EmitContext {
             cell_name: "test_cell_missing_input",
             original_formula: "A * B",
+            instance_name: None,
+            port_map: None,
         };
-
         let result = term.emit_formula_term(&mut gb, &input_map, &context);
         assert!(result.is_err());
         if let Err(e) = result {
-            assert_eq!(
-                e,
-                "Input 'B' not found in map for cell 'test_cell_missing_input' (formula: \"A * B\")"
-            );
+            assert!(e.contains("Input 'B' not found in map for cell 'test_cell_missing_input' (formula: \"A * B\")"));
+            assert!(e.contains("Available inputs: [\"A\"]"));
+            assert!(e.contains("Required by formula: [\"B\"]"));
         }
+    }
+    #[test]
+    fn test_parse_and_with_star_and_ampersand() {
+        let t1 = parse_formula("(A * B)").unwrap();
+        let t2 = parse_formula("(A & B)").unwrap();
+        assert_eq!(t1, t2);
+        let t3 = parse_formula("(A & B * C)").unwrap();
+        let t4 = parse_formula("(A * B & C)").unwrap();
+        assert_eq!(t3, t4);
+    }
+    #[test]
+    fn test_parse_or_with_plus_and_pipe() {
+        let t1 = parse_formula("(A + B)").unwrap();
+        let t2 = parse_formula("(A | B)").unwrap();
+        assert_eq!(t1, t2);
+        let t3 = parse_formula("(A | B + C)").unwrap();
+        let t4 = parse_formula("(A + B | C)").unwrap();
+        assert_eq!(t3, t4);
+    }
+    #[test]
+    fn test_parse_xor_with_caret() {
+        let t1 = parse_formula("(A ^ B)").unwrap();
+        let t2 = parse_formula("(A ^ B ^ C)").unwrap();
+        use Term::*;
+        assert_eq!(
+            t1,
+            Xor(
+                Box::new(Input("A".to_string())),
+                Box::new(Input("B".to_string()))
+            )
+        );
+        assert_eq!(
+            t2,
+            Xor(
+                Box::new(Xor(
+                    Box::new(Input("A".to_string())),
+                    Box::new(Input("B".to_string()))
+                )),
+                Box::new(Input("C".to_string()))
+            )
+        );
     }
 }
