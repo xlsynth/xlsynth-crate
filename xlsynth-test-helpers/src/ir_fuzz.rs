@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
 
 #[derive(Debug, Arbitrary, Clone)]
-enum FuzzUnop {
+pub enum FuzzUnop {
     // bitwise not (one's complement negation)
     Not,
     // two's complement negation
@@ -21,7 +21,7 @@ enum FuzzUnop {
 }
 
 #[derive(Debug, Arbitrary, Clone)]
-enum FuzzBinop {
+pub enum FuzzBinop {
     // bitwise
     And,
     Nand,
@@ -54,7 +54,7 @@ enum FuzzBinop {
 }
 
 #[derive(Debug, Clone, Arbitrary)]
-struct FuzzOperand {
+pub struct FuzzOperand {
     index: u8,
 }
 
