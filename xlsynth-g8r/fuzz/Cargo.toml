@@ -14,6 +14,7 @@ log = "0.4"
 env_logger = "0.11"
 xlsynth = { path = "../../xlsynth", version = "0.0.142" }
 rand = "0.8"
+xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
 
 [dependencies.xlsynth-g8r]
 path = ".."
