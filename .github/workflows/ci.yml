@@ -509,6 +509,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev build-essential
 
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Build and run fuzz_gatify for 10 seconds
         run: |
           cargo install cargo-fuzz
