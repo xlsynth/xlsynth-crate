@@ -514,6 +514,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
+      - name: Install libc++ (C++ standard library)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc++1 libc++abi1
+
       - name: Build and run fuzz_gatify for 10 seconds
         run: |
           cargo install cargo-fuzz
