@@ -57,7 +57,7 @@ fn test_dslx2sv_types_subcommand(use_tool_path: bool) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    test_helpers::assert_valid_sv(&stdout);
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
     assert_eq!(
         stdout.trim(),
         r"typedef enum logic [1:0] {
@@ -98,7 +98,7 @@ struct MyStruct {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    test_helpers::assert_valid_sv(&stdout);
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
     assert_eq!(
         stdout.trim(),
         "localparam bit unsigned [31:0] Count = 32'h00000018;
@@ -222,7 +222,7 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    test_helpers::assert_valid_sv(&stdout);
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
 
     let golden_path =
         std::path::Path::new("tests/test_dslx2pipeline_with_update_of_1d_array.golden.sv");
@@ -460,7 +460,7 @@ fn test_dslx2pipeline_with_reset_signal() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     log::info!("stdout: {}", stdout);
     log::info!("stderr: {}", stderr);
-    test_helpers::assert_valid_sv(&stdout);
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
 
     // Define the path for the new golden file
     let golden_path = std::path::Path::new("tests/test_dslx2pipeline_with_reset_signal.golden.sv");

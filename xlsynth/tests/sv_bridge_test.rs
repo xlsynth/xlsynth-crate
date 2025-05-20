@@ -37,7 +37,7 @@ fn test_sv_bridge_structure_zoo() {
 
     // Check that our generated `imported_sv` matches a golden expectation too,
     // because why not.
-    test_helpers::assert_valid_sv(&imported_sv);
+    xlsynth_test_helpers::assert_valid_sv(&imported_sv);
     let imported_sv_golden = std::fs::read_to_string("tests/want_common_zoo.golden.sv").unwrap();
     assert_eq!(imported_sv, imported_sv_golden);
 
@@ -48,12 +48,12 @@ fn test_sv_bridge_structure_zoo() {
     log::info!("structure_zoo.sv:\n{}", got_sv);
 
     // Check that the SV we got is also valid SV.
-    test_helpers::assert_valid_sv_flist(&[
-        test_helpers::FlistEntry {
+    xlsynth_test_helpers::assert_valid_sv_flist(&[
+        xlsynth_test_helpers::FlistEntry {
             filename: "common_zoo.sv".to_string(),
             contents: imported_sv,
         },
-        test_helpers::FlistEntry {
+        xlsynth_test_helpers::FlistEntry {
             filename: "structure_zoo.sv".to_string(),
             contents: got_sv.clone(),
         },
