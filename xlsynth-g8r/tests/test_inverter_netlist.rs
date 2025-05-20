@@ -101,6 +101,7 @@ endmodule
         &parser.nets,
         &parser.interner,
         &liberty_lib,
+        &std::collections::HashSet::new(),
     )
     .unwrap();
     let s = gate_fn.to_string();
@@ -174,6 +175,7 @@ endmodule
             &parser.nets,
             &parser.interner,
             &liberty_lib,
+            &std::collections::HashSet::new(),
         )
         .unwrap();
     let s = gate_fn.to_string();

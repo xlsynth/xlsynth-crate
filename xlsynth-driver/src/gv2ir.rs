@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage};
+use prost_reflect::DynamicMessage;
 use std::fs::File;
 use std::io::Read;
+use xlsynth_g8r::gate2ir::gate_fn_to_xlsynth_ir;
+use xlsynth_g8r::liberty::descriptor::liberty_descriptor_pool;
+use xlsynth_g8r::liberty_proto::Library;
+use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
+use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
 pub fn handle_gv2ir(matches: &clap::ArgMatches) {
-    use xlsynth_g8r::gate2ir::gate_fn_to_xlsynth_ir;
-    use xlsynth_g8r::liberty_proto::Library;
-    use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
-    use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
-
     let netlist_path = matches.get_one::<String>("netlist").unwrap();
     let liberty_proto_path = matches.get_one::<String>("liberty_proto").unwrap();
 
@@ -18,7 +18,18 @@ pub fn handle_gv2ir(matches: &clap::ArgMatches) {
     let file = File::open(netlist_path).expect("failed to open netlist");
     let scanner = TokenScanner::from_file_with_path(file, netlist_path.into());
     let mut parser = NetlistParser::new(scanner);
-    let modules = parser.parse_file().expect("failed to parse netlist");
+    let modules = match parser.parse_file() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Failed to parse netlist: {} at {:?}", e.message, e.span);
+            if let Some(line) = parser.get_line(e.span.start.lineno) {
+                eprintln!("{}", line);
+                let col = (e.span.start.colno as usize).saturating_sub(1);
+                eprintln!("{}^", " ".repeat(col));
+            }
+            std::process::exit(1);
+        }
+    };
     assert_eq!(modules.len(), 1);
     let module = &modules[0];
 
@@ -30,12 +41,8 @@ pub fn handle_gv2ir(matches: &clap::ArgMatches) {
         .expect("failed to read liberty proto");
     let liberty_lib = Library::decode(&buf[..])
         .or_else(|_| {
-            // Try textproto
-            let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-            let descriptor_path = std::path::Path::new(&out_dir).join("liberty.bin");
-            let descriptor_bytes =
-                std::fs::read(descriptor_path).expect("Failed to read liberty.bin");
-            let descriptor_pool = DescriptorPool::decode(&descriptor_bytes[..]).unwrap();
+            // Try textproto using the canonical embedded descriptor
+            let descriptor_pool = liberty_descriptor_pool();
             let msg_desc = descriptor_pool
                 .get_message_by_name("liberty.Library")
                 .unwrap();
@@ -47,14 +54,26 @@ pub fn handle_gv2ir(matches: &clap::ArgMatches) {
         })
         .expect("failed to decode liberty proto");
 
+    // Parse dff_cells flag
+    let dff_cells: std::collections::HashSet<String> = matches
+        .get_one::<String>("dff_cells")
+        .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
     // Project to GateFn
-    let gate_fn = project_gatefn_from_netlist_and_liberty(
+    let gate_fn = match project_gatefn_from_netlist_and_liberty(
         module,
         &parser.nets,
         &parser.interner,
         &liberty_lib,
-    )
-    .unwrap();
+        &dff_cells,
+    ) {
+        Ok(gf) => gf,
+        Err(e) => {
+            eprintln!("Failed to project GateFn: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // Convert to IR and print
     let flat_type = gate_fn.get_flat_type();

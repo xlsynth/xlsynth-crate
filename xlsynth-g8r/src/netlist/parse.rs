@@ -40,6 +40,7 @@ pub enum NetRef {
     Simple(NetIndex),
     BitSelect(NetIndex, u32),       // b[5]
     PartSelect(NetIndex, u32, u32), // b[msb:lsb]
+    Literal(IrBits),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -547,7 +548,7 @@ impl<R: Read + 'static> TokenScanner<R> {
         if c.is_ascii_alphabetic() || c == '_' || c == '\\' {
             return Ok(Some(self.pop_identifier(start)));
         }
-        // Handle number (plain integer literal)
+        // Handle number (plain integer literal or Verilog-style literal)
         if c.is_ascii_digit() {
             let mut num = String::new();
             while let Some(c) = self.peekc() {
@@ -557,29 +558,76 @@ impl<R: Read + 'static> TokenScanner<R> {
                     break;
                 }
             }
-            // Parse as IrBits (decimal, width 32 per Verilog standard)
-            let irbits_str = format!("bits[32]:{}", num);
-            let value = match xlsynth::IrValue::parse_typed(&irbits_str) {
-                Ok(v) => v.to_bits().unwrap(),
-                Err(e) => {
-                    let line = (self.line_lookup)(start.lineno)
-                        .unwrap_or_else(|| "<line unavailable>".to_string());
-                    let col = (start.colno as usize).saturating_sub(1);
-                    panic!(
-                        "Failed to parse integer literal '{}': {}\nLine {}: {}\n{}^",
-                        irbits_str,
-                        e,
-                        start.lineno,
-                        line,
-                        " ".repeat(col)
-                    );
-                }
+            let width = if !num.is_empty() {
+                Some(num.parse::<usize>().unwrap())
+            } else {
+                None
             };
-            let limit = self.pos;
-            return Ok(Some(Token {
-                payload: TokenPayload::VerilogInt { width: None, value },
-                span: Span { start, limit },
-            }));
+            if self.peekc() == Some('\'') {
+                self.popc(); // consume '
+                             // Now parse base and value as a string until whitespace or punctuation
+                let mut base_and_value = String::new();
+                while let Some(c) = self.peekc() {
+                    if c.is_whitespace() || c == ')' || c == ';' || c == ',' {
+                        break;
+                    }
+                    base_and_value.push(self.popc().unwrap());
+                }
+                // Convert Verilog base to Rust-style
+                let base_and_value = if let Some((_base, _rest)) = base_and_value
+                    .split_once(|c: char| c == 'b' || c == 'h' || c == 'o' || c == 'd')
+                {
+                    let (base_char, _value_str) = base_and_value.split_at(1);
+                    let prefix = match base_char {
+                        "b" => "0b",
+                        "h" => "0x",
+                        "o" => "0o",
+                        "d" => "",
+                        _ => "",
+                    };
+                    format!("{}{}", prefix, &base_and_value[1..])
+                } else {
+                    base_and_value.clone()
+                };
+                let irbits_str = if let Some(width) = width {
+                    format!("bits[{}]:{}", width, base_and_value)
+                } else {
+                    base_and_value.clone()
+                };
+                let value = xlsynth::IrValue::parse_typed(&irbits_str)
+                    .unwrap()
+                    .to_bits()
+                    .unwrap();
+                let limit = self.pos;
+                return Ok(Some(Token {
+                    payload: TokenPayload::VerilogInt { width, value },
+                    span: Span { start, limit },
+                }));
+            } else {
+                // Parse as IrBits (decimal, width 32 per Verilog standard)
+                let irbits_str = format!("bits[32]:{}", num);
+                let value = match xlsynth::IrValue::parse_typed(&irbits_str) {
+                    Ok(v) => v.to_bits().unwrap(),
+                    Err(e) => {
+                        let line = (self.line_lookup)(start.lineno)
+                            .unwrap_or_else(|| "<line unavailable>".to_string());
+                        let col = (start.colno as usize).saturating_sub(1);
+                        panic!(
+                            "Failed to parse integer literal '{}': {}\nLine {}: {}\n{}^",
+                            irbits_str,
+                            e,
+                            start.lineno,
+                            line,
+                            " ".repeat(col)
+                        );
+                    }
+                };
+                let limit = self.pos;
+                return Ok(Some(Token {
+                    payload: TokenPayload::VerilogInt { width: None, value },
+                    span: Span { start, limit },
+                }));
+            }
         }
         // Handle line comments
         if c == '/' {
@@ -1295,7 +1343,7 @@ impl<R: Read + 'static> Parser<R> {
                     limit: self.scanner.pos,
                 },
             })?;
-            let (_net_name, net_ref) = match net_tok.payload {
+            let net_ref = match net_tok.payload {
                 TokenPayload::Identifier(s) => {
                     let net_sym = self.interner.get_or_intern(s);
                     let net_idx = self
@@ -1384,11 +1432,11 @@ impl<R: Read + 'static> Parser<R> {
                                                 span: cbrack_tok.span,
                                             });
                                         }
-                                        (net_sym, NetRef::PartSelect(net_idx, msb, lsb))
+                                        NetRef::PartSelect(net_idx, msb, lsb)
                                     }
                                     TokenPayload::CBrack => {
                                         // bit-select: [index]
-                                        (net_sym, NetRef::BitSelect(net_idx, msb))
+                                        NetRef::BitSelect(net_idx, msb)
                                     }
                                     _ => {
                                         return Err(ScanError {
@@ -1399,12 +1447,13 @@ impl<R: Read + 'static> Parser<R> {
                                     }
                                 }
                             }
-                            _ => (net_sym, NetRef::Simple(net_idx)),
+                            _ => NetRef::Simple(net_idx),
                         }
                     } else {
-                        (net_sym, NetRef::Simple(net_idx))
+                        NetRef::Simple(net_idx)
                     }
                 }
+                TokenPayload::VerilogInt { value, width: _ } => NetRef::Literal(value),
                 _ => {
                     return Err(ScanError {
                         message: "expected identifier for net name".to_string(),
@@ -1905,6 +1954,68 @@ wire [255:0] a;"#;
         let t = scanner.popt().expect("no scan error").unwrap();
         assert!(matches!(t.payload, TokenPayload::Identifier(ref s) if s == "p0_umul_8[0]"));
         assert!(scanner.popt().expect("no scan error").unwrap().payload == TokenPayload::Semi);
+        assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_parse_instance_with_literal_tieoff() {
+        // Setup: declare wire b;
+        let mut parser = Parser::new(TokenScanner::from_str("wire b;"));
+        parser.parse_wire_decl().expect("no error");
+        // Instance with .A(1'b0)
+        let input = "TypeName inst (.A(1'b0));";
+        let mut parser2 = Parser::new(TokenScanner::from_str(input));
+        parser2.nets = parser.nets.clone();
+        parser2.interner = parser.interner.clone();
+        let inst = parser2
+            .parse_instance()
+            .expect("should parse instance with literal tie-off");
+        assert_eq!(inst.connections.len(), 1);
+        let (port, netref) = &inst.connections[0];
+        let port_name = parser2.interner.resolve(*port).unwrap();
+        assert_eq!(port_name, "A");
+        match netref {
+            NetRef::Literal(bits) => {
+                // Should be 1'b0, i.e. width=1, value=0
+                assert_eq!(bits.get_bit_count(), 1);
+                assert_eq!(bits.to_string(), "bits[1]:0");
+            }
+            _ => panic!("Expected Literal net ref, got {:?}", netref),
+        }
+    }
+
+    #[test]
+    fn test_token_scanner_verilog_style_literal() {
+        let input = "1'b0 8'hFF 16'd42";
+        let mut scanner = TokenScanner::from_str(input);
+        let t1 = scanner.popt().expect("no scan error").unwrap();
+        match t1.payload {
+            TokenPayload::VerilogInt { width, ref value } => {
+                assert_eq!(width, Some(1));
+                assert_eq!(value.get_bit_count(), 1);
+                assert_eq!(value.to_string(), "bits[1]:0");
+            }
+            _ => panic!("Expected VerilogInt for 1'b0"),
+        }
+        let t2 = scanner.popt().expect("no scan error").unwrap();
+        match t2.payload {
+            TokenPayload::VerilogInt { width, ref value } => {
+                assert_eq!(width, Some(8));
+                assert_eq!(value.get_bit_count(), 8);
+                assert_eq!(value.to_string(), "bits[8]:255");
+            }
+            _ => panic!("Expected VerilogInt for 8'hFF"),
+        }
+
+        let t3 = scanner.popt().expect("no scan error").unwrap();
+        match t3.payload {
+            TokenPayload::VerilogInt { width, ref value } => {
+                assert_eq!(width, Some(16));
+                assert_eq!(value.get_bit_count(), 16);
+                assert_eq!(value.to_string(), "bits[16]:42");
+            }
+            _ => panic!("Expected VerilogInt for 16'd42"),
+        }
         assert!(scanner.popt().expect("no scan error").is_none());
     }
 }

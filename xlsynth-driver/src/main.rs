@@ -467,7 +467,13 @@ fn main() {
                         .help("Input Liberty proto (.proto or .textproto)")
                         .required(true)
                         .action(ArgAction::Set),
-                ),
+                )
+                .arg(
+                    Arg::new("dff_cells")
+                        .long("dff_cells")
+                        .help("Comma-separated list of DFF cell names to treat as identity (D->Q)")
+                        .action(ArgAction::Set),
+                )
         )
         .get_matches();
 

@@ -112,6 +112,7 @@ fn main() {
             &parser.nets,
             &parser.interner,
             &liberty_lib,
+            &std::collections::HashSet::new(),
         )
         .unwrap_or_else(|e| {
             eprintln!("Error during netlist projection: {}", e);

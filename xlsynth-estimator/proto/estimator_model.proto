@@ -357,13 +357,13 @@ message DataPoints {
 //   * which operand these element counts apply to
 //   * the element count(s)
 message OperandElementCounts {
-  optional int64 operand_number = 1;
+  int64 operand_number = 1;
   repeated int64 element_counts = 2;
 }
 
 // Detailed specification of the operand and result types
 message Parameterization {
-  optional int64 result_width = 1;
+  int64 result_width = 1;
   repeated int64 operand_widths = 2;
   // --- anything below is used only with array types ---
   repeated int64 result_element_counts = 3;
@@ -372,10 +372,10 @@ message Parameterization {
 
 // Specifies the set of sample points for a particular op
 message OpSamples {
-  optional string op = 1;
+  string op = 1;
   repeated Parameterization samples = 2;
-  optional SpecializationKind specialization = 3;
-  optional string attributes = 4;
+  SpecializationKind specialization = 3;
+  string attributes = 4;
 }
 
 // Multiple OpSamples messages
