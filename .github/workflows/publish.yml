@@ -83,6 +83,13 @@ jobs:
       - name: Wait for crates.io to update
         run: sleep 20
 
+      - name: Publish xlsynth-test-helpers
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cd xlsynth-test-helpers
+          cargo publish --token $CARGO_REGISTRY_TOKEN
+
       - name: Publish xlsynth
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

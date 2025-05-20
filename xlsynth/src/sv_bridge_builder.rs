@@ -458,7 +458,7 @@ mod tests {
         let dslx = "type MyType = u64[4];";
         let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(sv, "typedef logic [3:0] [63:0] my_type_t;\n");
-        test_helpers::assert_valid_sv(&sv);
+        xlsynth_test_helpers::assert_valid_sv(&sv);
     }
 
     /// Demonstrates that we do not change the case of enum members that are
@@ -469,7 +469,7 @@ mod tests {
         enum OpType : u2 { Read = 0, Write = 1 }
         "#;
         let sv = simple_convert_for_test(dslx).unwrap();
-        test_helpers::assert_valid_sv(&sv);
+        xlsynth_test_helpers::assert_valid_sv(&sv);
         assert_eq!(
             sv,
             r#"typedef enum logic [1:0] {
@@ -489,7 +489,7 @@ mod tests {
         enum MyEnum : u2 { MY_FIRST_VALUE = 0, MY_SECOND_VALUE = 1 }
         "#;
         let sv = simple_convert_for_test(dslx).unwrap();
-        test_helpers::assert_valid_sv(&sv);
+        xlsynth_test_helpers::assert_valid_sv(&sv);
         assert_eq!(
             sv,
             r#"typedef enum logic [1:0] {
@@ -524,7 +524,7 @@ mod tests {
         let dslx = "type MyType = u8;";
         let sv = simple_convert_for_test(dslx).unwrap();
         assert_eq!(sv, "typedef logic [7:0] my_type_t;\n");
-        test_helpers::assert_valid_sv(&sv);
+        xlsynth_test_helpers::assert_valid_sv(&sv);
     }
 
     /// Demonstrates that we get an error when we attempt to emit two enums who

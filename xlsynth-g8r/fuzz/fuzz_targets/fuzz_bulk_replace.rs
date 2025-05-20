@@ -70,6 +70,9 @@ struct FuzzGateGraph {
 }
 
 fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOptions)> {
+    let num_ops = sample.num_ops.min(32);
+    let num_outputs = sample.num_outputs.min(16);
+    let chain_depth = sample.chain_depth.min(8);
     let opts = if sample.use_opt {
         GateBuilderOptions::opt()
     } else {
@@ -82,6 +85,9 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
         let bv = builder.add_input(format!("in{}", i), sample.input_width as usize);
         for j in 0..sample.input_width {
             nodes.push(*bv.get_lsb(j as usize));
+            if nodes.len() > 256 {
+                return None;
+            }
         }
     }
     // Add constants
@@ -94,21 +100,30 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
         };
         const_nodes.push(op);
         nodes.push(op);
+        if nodes.len() > 256 {
+            return None;
+        }
     }
     // Defensive: If no nodes, skip AND and output generation
     if nodes.is_empty() {
         return None;
     }
     // Add deep AND chain if requested
-    if sample.chain_depth > 0 && !nodes.is_empty() {
+    if chain_depth > 0 && !nodes.is_empty() {
         let mut chain = nodes[0];
-        for i in 1..(sample.chain_depth as usize).min(nodes.len()) {
+        for i in 1..(chain_depth as usize).min(nodes.len()) {
             chain = builder.add_and_binary(chain, nodes[i]);
+            if nodes.len() > 256 {
+                return None;
+            }
         }
         nodes.push(chain);
+        if nodes.len() > 256 {
+            return None;
+        }
     }
     // Add a variety of gate operations
-    for op in sample.ops.iter().take(sample.num_ops as usize) {
+    for op in sample.ops.iter().take(num_ops as usize) {
         if nodes.is_empty() {
             break;
         }
@@ -212,6 +227,9 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
             }
         };
         nodes.push(new_node);
+        if nodes.len() > 256 {
+            return None;
+        }
     }
     // Add redundant AND pairs
     for pair in &sample.redundant_pairs {
@@ -229,7 +247,13 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
         let and1 = builder.add_and_binary(a, b);
         let and2 = builder.add_and_binary(a, b);
         nodes.push(and1);
+        if nodes.len() > 256 {
+            return None;
+        }
         nodes.push(and2);
+        if nodes.len() > 256 {
+            return None;
+        }
     }
     // Add high fanout ANDs if requested
     if let Some(fanout_idx) = sample.fanout_node {
@@ -241,6 +265,9 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
             for i in 0..5.min(nodes.len()) {
                 let and = builder.add_and_binary(fanout, nodes[i]);
                 nodes.push(and);
+                if nodes.len() > 256 {
+                    return None;
+                }
             }
         }
     }
@@ -248,8 +275,13 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
     if nodes.is_empty() {
         return None;
     }
+    // Defensive: Avoid building overly large graphs
+    if nodes.len() > 256 {
+        println!("[fuzz] nodes.len() exceeded cap: {}", nodes.len());
+        return None;
+    }
     // Add outputs
-    let max_outputs = nodes.len().min(sample.num_outputs as usize);
+    let max_outputs = nodes.len().min(num_outputs as usize);
     for i in 0..max_outputs {
         builder.add_output(format!("out{}", i), AigBitVector::from_bit(nodes[i]));
     }
@@ -257,7 +289,13 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
     if builder.outputs.is_empty() {
         return None;
     }
-    Some((builder.build(), opts))
+    let graph = builder.build();
+    println!(
+        "[fuzz] About to return graph: nodes.len() = {}, outputs = {}",
+        graph.gates.len(),
+        graph.outputs.len()
+    );
+    Some((graph, opts))
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -274,14 +312,24 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
     let _ = env_logger::builder().is_test(true).try_init();
     // Clamp the number of operations to avoid excessive graph size and OOM
     const MAX_OPS: u8 = 64;
+    const MAX_OUTPUTS: u8 = 16;
+    const MAX_CHAIN_DEPTH: u8 = 8;
     let mut graph = data.0.clone();
     graph.num_ops = graph.num_ops.min(MAX_OPS);
+    graph.num_outputs = graph.num_outputs.min(MAX_OUTPUTS);
+    graph.chain_depth = graph.chain_depth.min(MAX_CHAIN_DEPTH);
     // Build the graph using the clamped parameters
     let result = build_gate_graph(&graph);
     let (gate_fn, opts) = match result {
         Some(pair) => pair,
         None => return, // skip degenerate graph
     };
+    println!("[fuzz] FuzzGateGraph: {:?}", data.0);
+    println!(
+        "[fuzz] gate_fn.gates.len() = {}, gate_fn.outputs.len() = {}",
+        gate_fn.gates.len(),
+        gate_fn.outputs.len()
+    );
     if gate_fn.outputs.is_empty() {
         // Skip degenerate graphs with no outputs
         return;
@@ -423,7 +471,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
         }
         s
     };
-    let (new_fn, _map) = bulk_replace(&gate_fn, &substitutions, opts);
+    let new_fn = bulk_replace(&gate_fn, &substitutions, opts);
     // Assert that substitution does not increase node count
     assert!(
         new_fn.gates.len() <= gate_fn.gates.len(),
@@ -453,7 +501,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
 
     // 2. Idempotence: running bulk_replace again should yield the same result
     //    (structurally)
-    let (new_fn2, _map2) = bulk_replace(&new_fn, &substitutions, opts);
+    let new_fn2 = bulk_replace(&new_fn, &substitutions, opts);
     assert_eq!(
         new_fn.outputs.len(),
         new_fn2.outputs.len(),
@@ -490,7 +538,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
             // zero-width or too big to fit in u64, skip this fuzz case
             return;
         }
-        let bits = fuzz_utils::arbitrary_irbits(&mut rng, width).unwrap();
+        let bits = fuzz_utils::arbitrary_irbits(&mut rng, width);
         input_vecs.push(bits);
     }
     let orig_sim = eval(&gate_fn, &input_vecs, Collect::None);
