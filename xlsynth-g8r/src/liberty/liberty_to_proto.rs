@@ -194,8 +194,8 @@ mod tests {
 
     #[test]
     fn test_committed_liberty_bin_matches_generated() {
-        // Path to the committed descriptor
-        let committed = std::fs::read("proto/liberty.bin").expect("read committed liberty.bin");
+        // Embed the committed descriptor for robust comparison
+        let committed = include_bytes!("../../proto/liberty.bin") as &[u8];
         // Generate a fresh descriptor set in a temp dir
         let tmp = tempfile::tempdir().unwrap();
         let descriptor_path = tmp.path().join("liberty.bin");
