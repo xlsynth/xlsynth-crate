@@ -711,7 +711,10 @@ fn test_ir2gates_determinism() {
     let _ = env_logger::try_init();
     log::info!("test_ir2gates_determinism");
 
-    let dslx = "fn main(a: u32, b: u32) -> u32 { a + b * (a ^ b) }";
+    // Use 4-bit operands instead of full 32-bit values so that the
+    // gate-level representation is significantly smaller. This keeps the
+    // FRAIG optimization step in `ir2gates` from dominating the test runtime.
+    let dslx = "fn main(a: u4, b: u4) -> u4 { a + b * (a ^ b) }";
 
     // Make a temporary directory and files.
     let temp_dir = tempfile::tempdir().unwrap();
