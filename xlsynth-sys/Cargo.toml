@@ -14,7 +14,7 @@ links = "xlsynth"
 libc = "0.2"
 
 [build-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 flate2 = "1.0"
 tar = "0.4"
 sha2 = "0.10"
