@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
 
 #[derive(Debug, Arbitrary, Clone)]
-enum FuzzUnop {
+pub enum FuzzUnop {
     // bitwise not (one's complement negation)
     Not,
     // two's complement negation
@@ -21,7 +21,7 @@ enum FuzzUnop {
 }
 
 #[derive(Debug, Arbitrary, Clone)]
-enum FuzzBinop {
+pub enum FuzzBinop {
     // bitwise
     And,
     Nand,
@@ -54,12 +54,12 @@ enum FuzzBinop {
 }
 
 #[derive(Debug, Clone, Arbitrary)]
-struct FuzzOperand {
+pub struct FuzzOperand {
     index: u8,
 }
 
 #[derive(Debug, Arbitrary, Clone)]
-enum FuzzOp {
+pub enum FuzzOp {
     Literal {
         bits: u8,
         value: u64,
@@ -123,10 +123,8 @@ enum FuzzOp {
     },
 }
 
-/// Flattened opcode-only version of FuzzOp so we can ensure we select among all
-/// available ops when making an arbitrary op.
 #[derive(Debug, Clone, Arbitrary)]
-enum FuzzOpFlat {
+pub enum FuzzOpFlat {
     Literal,
     Unop,
     Binop,
@@ -145,7 +143,8 @@ enum FuzzOpFlat {
     DynamicBitSlice,
 }
 
-/// This function helps assure we have a FuzzOpFlat for each FuzzOp.
+/// Flattened opcode-only version of FuzzOp so we can ensure we select among all
+/// available ops when making an arbitrary op.
 #[allow(dead_code)]
 fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
     match op {
@@ -169,7 +168,7 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
 }
 
 // Generate a random IR function with only AND/NOT operations
-fn generate_ir_fn(
+pub fn generate_ir_fn(
     input_bits: u8,
     ops: Vec<FuzzOp>,
     package: &mut xlsynth::IrPackage,
@@ -389,9 +388,9 @@ fn generate_ir_fn(
 }
 
 #[derive(Debug, Clone)]
-struct FuzzSample {
-    input_bits: u8,
-    ops: Vec<FuzzOp>,
+pub struct FuzzSample {
+    pub input_bits: u8,
+    pub ops: Vec<FuzzOp>,
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {

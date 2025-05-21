@@ -486,3 +486,48 @@ jobs:
           echo "Using XLS_DSO_PATH=${XLS_DSO_PATH}"
           echo "Using DSLX_STDLIB_PATH=${DSLX_STDLIB_PATH}"
           cargo test -p xlsynth --verbose
+
+  # -----------------------------------------------------------
+  # 7) Fuzz smoke test for fuzz_gatify on Ubuntu Latest
+  # -----------------------------------------------------------
+  fuzz-gatify-smoke:
+    name: Fuzz Gatify Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          profile: minimal
+          override: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev build-essential
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install libc++ (C++ standard library)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc++1 libc++abi1
+
+      - name: Download xlsynth tools for fuzzing
+        run: |
+          pip3 install -r requirements.txt
+          python3 download_release.py -p ubuntu2004 --binaries check_ir_equivalence_main -o /tmp/xlsynth_tools_smoke
+
+      - name: Build and run fuzz_gatify for 10 seconds
+        env:
+          XLSYNTH_TOOLS: /tmp/xlsynth_tools_smoke
+        run: |
+          cargo install cargo-fuzz
+          cd xlsynth-g8r/fuzz
+          cargo fuzz run fuzz_gatify -- -max_total_time=10
