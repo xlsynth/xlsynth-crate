@@ -7,19 +7,16 @@ use xlsynth_g8r::process_ir_path::{process_ir_path, Options};
 #[derive(Parser, Debug)]
 struct Args {
     /// Whether to perform AIG folding optimizations
-    #[arg(long, default_value = "true")]
     #[arg(long, default_value_t = true)]
     #[arg(action = clap::ArgAction::Set)]
     fold: bool,
 
     /// Whether to hash the AIG nodes.
-    #[arg(long, default_value = "true")]
     #[arg(long, default_value_t = true)]
     #[arg(action = clap::ArgAction::Set)]
     hash: bool,
 
     /// Whether to run "fraiging" optimization.
-    #[arg(long, default_value = "true")]
     #[arg(long, default_value_t = true)]
     #[arg(action = clap::ArgAction::Set)]
     fraig: bool,
@@ -31,7 +28,6 @@ struct Args {
     fraig_sim_samples: Option<usize>,
 
     /// Whether to check equivalence between the IR and the gate function.
-    #[arg(long, default_value = "true")]
     #[arg(long, default_value_t = true)]
     #[arg(action = clap::ArgAction::Set)]
     check_equivalence: bool,
