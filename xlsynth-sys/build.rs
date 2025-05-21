@@ -321,8 +321,17 @@ fn main() {
     }
 
     if std::env::var("XLS_DSO_PATH").is_ok() && std::env::var("DSLX_STDLIB_PATH").is_ok() {
-        println!("cargo:info=Using XLS_DSO_PATH and DSLX_STDLIB_PATH environment variables");
+        println!(
+            "cargo:info=Using XLS_DSO_PATH {:?} and DSLX_STDLIB_PATH {:?}",
+            std::env::var("XLS_DSO_PATH"),
+            std::env::var("DSLX_STDLIB_PATH")
+        );
         let dso_path_string = std::env::var("XLS_DSO_PATH").unwrap();
+        let stdlib_path_string = std::env::var("DSLX_STDLIB_PATH").unwrap();
+
+        // Extract information from the DSO path -- we need:
+        // * the directory for linker search path and rpath for the binary
+        // * the name for the library-to-link-to flag
         let dso_path = PathBuf::from(&dso_path_string);
         let dso_dir = dso_path.parent().unwrap();
         let dso_name = dso_path.file_name().unwrap();
@@ -337,10 +346,10 @@ fn main() {
         }
         assert!(
             dso_name.starts_with("lib"),
-            "DSO name should start with 'lib'"
+            "DSO name should start with 'lib'; dso_name: {:?}",
+            dso_name
         );
         let dso_name = &dso_name[3..];
-        let stdlib_path_string = std::env::var("DSLX_STDLIB_PATH").unwrap();
         println!("cargo:rustc-env=XLS_DSO_PATH={}", dso_path.display());
         println!("cargo:rustc-env=DSLX_STDLIB_PATH={stdlib_path_string}");
         println!("cargo:rustc-link-search=native={}", dso_dir.display());
