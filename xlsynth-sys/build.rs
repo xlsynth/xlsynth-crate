@@ -170,16 +170,19 @@ fn high_integrity_download_with_retries(
     .into())
 }
 
-/// Simple helper that downloads a file to the given path using HTTPS with
-/// reqwest.
+/// Download a file from a URL using ureq.
 fn download_file_via_https(
     url: &str,
     dest: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let response = reqwest::blocking::get(url)?.error_for_status()?;
+    let response = ureq::get(url).call()?;
+    if response.status() != 200 {
+        return Err(format!("Failed to download {}: HTTP {}", url, response.status()).into());
+    }
     let mut file = std::fs::File::create(dest)?;
-    let bytes = response.bytes()?;
-    std::io::copy(&mut bytes.as_ref(), &mut file)?;
+    let (_parts, body) = response.into_parts();
+    let mut reader = body.into_reader();
+    std::io::copy(&mut reader, &mut file)?;
     Ok(())
 }
 
