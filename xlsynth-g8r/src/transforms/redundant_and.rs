@@ -142,11 +142,9 @@ pub fn remove_redundant_and(g: &mut GateFn, node: AigRef) -> Result<(), &'static
 }
 
 /// Picks a random redundant `AND(x, x)` gate in the graph and collapses it.
-/// Returns the `AigRef` of the collapsed gate, or `None` if no such gate exists.
-pub fn remove_redundant_and_rand<R: Rng + ?Sized>(
-    g: &mut GateFn,
-    rng: &mut R,
-) -> Option<AigRef> {
+/// Returns the `AigRef` of the collapsed gate, or `None` if no such gate
+/// exists.
+pub fn remove_redundant_and_rand<R: Rng + ?Sized>(g: &mut GateFn, rng: &mut R) -> Option<AigRef> {
     let candidates: Vec<AigRef> = g
         .gates
         .iter()
@@ -183,7 +181,13 @@ mod tests {
         let op = g1.outputs[0].bit_vector.get_lsb(0).clone();
         let mut g2 = g1.clone();
         let new_ref = insert_redundant_and(&mut g2, op);
-        g2.outputs[0].bit_vector.set_lsb(0, AigOperand { node: new_ref, negated: false });
+        g2.outputs[0].bit_vector.set_lsb(
+            0,
+            AigOperand {
+                node: new_ref,
+                negated: false,
+            },
+        );
         remove_redundant_and(&mut g2, new_ref).unwrap();
         assert_eq!(g1.to_string(), g2.to_string());
     }
@@ -217,4 +221,3 @@ mod tests {
         assert!(res.is_none());
     }
 }
-
