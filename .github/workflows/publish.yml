@@ -31,13 +31,13 @@ jobs:
 
       - name: Validate version matches
         run: |
-          python check_version_is.py "${{ steps.version_vars.outputs.version_no_v }}"
+          python3 check_version_is.py "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Download xlsynth binaries
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          python3 -V  # Print the python3 version.
+          python3 -V
           pip3 install --break-system-packages requests
           python3 download_release.py -p arm64 -o xlsynth_tools
 
@@ -76,6 +76,9 @@ jobs:
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
 
+      - name: Install Python dependencies for polling script
+        run: python3 -m pip install requests
+
       - name: Publish xlsynth-sys to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
@@ -84,7 +87,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-sys on crates.io
-        run: python sleep_until_version_seen.py xlsynth-sys "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 sleep_until_version_seen.py xlsynth-sys "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth
         env:
@@ -94,7 +97,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth on crates.io
-        run: python sleep_until_version_seen.py xlsynth "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 sleep_until_version_seen.py xlsynth "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-test-helpers
         env:
@@ -104,7 +107,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-test-helpers on crates.io
-        run: python sleep_until_version_seen.py xlsynth-test-helpers "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 sleep_until_version_seen.py xlsynth-test-helpers "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-g8r
         env:
@@ -114,7 +117,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-g8r on crates.io
-        run: python sleep_until_version_seen.py xlsynth-g8r "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 sleep_until_version_seen.py xlsynth-g8r "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-driver
         env:
