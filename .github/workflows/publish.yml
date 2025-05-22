@@ -77,7 +77,7 @@ jobs:
           cargo test --workspace
 
       - name: Install Python dependencies for polling script
-        run: python3 -m pip install requests
+        run: python3 -m pip install --break-system-packages requests
 
       - name: Publish xlsynth-sys to crates.io
         env:
