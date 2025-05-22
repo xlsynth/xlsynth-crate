@@ -416,6 +416,16 @@ pub fn ir_fn_to_boolector(
                 );
                 sel_bv.cond_bv(case1, case0)
             }
+            NodePayload::ZeroExt { arg, new_bit_count } => {
+                let arg_bv = env.get(arg).expect("ZeroExt argument must be present");
+                let from_width = arg_bv.get_width();
+                let to_width = *new_bit_count as u32;
+                assert!(
+                    to_width > from_width,
+                    "ZeroExt: new_bit_count must be greater than argument width"
+                );
+                arg_bv.uext(to_width - from_width)
+            }
             NodePayload::SignExt { arg, new_bit_count } => {
                 let arg_bv = env.get(arg).expect("SignExt argument must be present");
                 let from_width = arg_bv.get_width();
@@ -1216,6 +1226,31 @@ mod tests {
   ret shll.3: bits[1] = shll(x, s, id=3)
 }"#;
         assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_zero_ext_equiv_to_self() {
+        let ir_text = r#"fn zext4(x: bits[4] id=1) -> bits[8] {
+  ret zero_ext.2: bits[8] = zero_ext(x, new_bit_count=8, id=2)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_zero_ext_known_case() {
+        let ir_text = r#"fn zext_const() -> bits[8] {
+  literal.1: bits[4] = literal(value=10, id=1)
+  ret zero_ext.2: bits[8] = zero_ext(literal.1, new_bit_count=8, id=2)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let result = ir_fn_to_boolector(btor.clone(), &f, None);
+        let sat_result = btor.sat();
+        assert_eq!(sat_result, boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        assert_eq!(out, 10);
     }
 
     #[test]
