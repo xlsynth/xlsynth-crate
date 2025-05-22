@@ -785,7 +785,13 @@ where
     while pow2 < orig_width {
         pow2 *= 2;
     }
-    let k = (pow2 as f64).log2() as u32;
+    let mut k = (pow2 as f64).log2() as u32;
+    if k == 0 {
+        // Boolector does not support zero-width bitvectors for shift amounts.
+        // Use a minimum width of one to avoid invalid slice operations when the
+        // value being shifted is a single bit.
+        k = 1;
+    }
     // Zero-extend val to pow2 bits if needed
     let val_pow2 = if pow2 == orig_width {
         val.clone()
@@ -1202,5 +1208,35 @@ mod tests {
 
         assert_eq!(flat_result, 256);
         assert_eq!(array_result, 256);
+    }
+
+    #[test]
+    fn test_shift_single_bit_equiv_to_self() {
+        let ir_text = r#"fn shl1(x: bits[1] id=1, s: bits[1] id=2) -> bits[1] {
+  ret shll.3: bits[1] = shll(x, s, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_shift_single_bit_known_case() {
+        let ir_text = r#"fn shl1_const(x: bits[1] id=1) -> bits[1] {
+  one: bits[1] = literal(value=1, id=2)
+  ret shll.3: bits[1] = shll(x, one, id=3)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let mut param_bvs = std::collections::HashMap::new();
+        // x = 1
+        let x_bv = BV::from_u64(btor.clone(), 1, 1);
+        param_bvs.insert("x".to_string(), x_bv);
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        let sat_result = btor.sat();
+        assert_eq!(sat_result, boolector::SolverResult::Sat);
+        // 1 shifted left by 1 with 1-bit width should produce 0
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        assert_eq!(out, 0);
     }
 }
