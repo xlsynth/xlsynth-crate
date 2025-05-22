@@ -14,7 +14,7 @@ slang-rs = "0.12.0"
 tempfile = "3.13"
 log = "0.4"
 env_logger = "0.11"
-xlsynth = { path = "../xlsynth" }
+xlsynth = { version = "0.0.142", path = "../xlsynth" }
 arbitrary = { version = "1.3", features = ["derive"] }
 
 [dev-dependencies]
