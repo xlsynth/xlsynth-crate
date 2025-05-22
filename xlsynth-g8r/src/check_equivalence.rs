@@ -5,6 +5,14 @@ use std::time::Instant;
 use crate::{gate, gate2ir, xls_ir::ir};
 
 pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), String> {
+    check_equivalence_with_top(orig_package, gate_package, None)
+}
+
+pub fn check_equivalence_with_top(
+    orig_package: &str,
+    gate_package: &str,
+    top_fn_name: Option<&str>,
+) -> Result<(), String> {
     let tempdir = tempfile::tempdir().unwrap();
     let temp_path = tempdir.into_path(); // This prevents auto-deletion
     let orig_path = temp_path.join("orig.ir");
@@ -28,7 +36,11 @@ pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), S
     command.arg("--alsologtostderr");
     command.arg(orig_path.to_str().unwrap());
     command.arg(gate_path.to_str().unwrap());
-    log::info!("check_equivalence; running command: {:?}", command);
+    if let Some(top) = top_fn_name {
+        command.arg("--top");
+        command.arg(top);
+    }
+    log::info!("check_equivalence_with_top; running command: {:?}", command);
     let start = Instant::now();
     let output = command.output().unwrap();
     let elapsed = start.elapsed();
@@ -40,7 +52,7 @@ pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), S
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    log::info!("check_equivalence; successful in {:?}", elapsed);
+    log::info!("check_equivalence_with_top; successful in {:?}", elapsed);
     Ok(())
 }
 

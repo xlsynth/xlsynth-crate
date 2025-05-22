@@ -164,6 +164,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "boolector"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5567f99e46c8f1f61624adafd2fdf4424b203d9fc5534368421725af17c5fd21"
+dependencies = [
+ "boolector-sys",
+ "libc",
+]
+
+[[package]]
+name = "boolector-sys"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17f0c2f69c37174fb92110f2949c79ad87f6ab48bf45e2e3220b669c10698093"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "bytes"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1645,6 +1664,7 @@ version = "0.0.142"
 dependencies = [
  "bitvec",
  "blake3",
+ "boolector",
  "clap",
  "env_logger",
  "flate2",

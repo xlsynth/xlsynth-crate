@@ -15,9 +15,7 @@ env_logger = "0.11"
 xlsynth = { path = "../../xlsynth", version = "0.0.147" }
 rand = "0.8"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
-
-[dependencies.xlsynth-g8r]
-path = ".."
+xlsynth-g8r = { path = "../../xlsynth-g8r", features = ["with-boolector-system"] }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -32,5 +30,11 @@ doc = false
 [[bin]]
 name = "fuzz_bulk_replace"
 path = "fuzz_targets/fuzz_bulk_replace.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ir_opt_equiv"
+path = "fuzz_targets/fuzz_ir_opt_equiv.rs"
 test = false
 doc = false
