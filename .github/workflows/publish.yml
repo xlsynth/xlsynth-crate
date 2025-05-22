@@ -20,14 +20,18 @@ jobs:
       - name: Check version numbers
         run: python bump_version_numbers.py check
 
+      - name: Set up version variables
+        id: version_vars
+        run: |
+          FULL_VERSION="${GITHUB_REF#refs/tags/}"
+          echo "FULL_VERSION=$FULL_VERSION"
+          VERSION_NO_V="${FULL_VERSION#v}"
+          echo "VERSION_NO_V=$VERSION_NO_V"
+          echo "::set-output name=version_no_v::$VERSION_NO_V"
+
       - name: Validate version matches
         run: |
-          # GITHUB_REF will be something like "refs/tags/v0.0.57"
-          # We'll strip off the "refs/tags/" part, leaving "v0.0.57".
-          VERSION="${GITHUB_REF#refs/tags/}"
-
-          # Now invoke the Python script, passing the version.
-          python check_version_is.py "$VERSION"
+          python check_version_is.py "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Download xlsynth binaries
         env:
@@ -42,9 +46,8 @@ jobs:
           wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
           unzip protoc-29.1-osx-aarch_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
-          sudo mv protoc /tmp/  # Move these out of the way to not interfere with build.
-          sudo mv protoc-*.zip /tmp/  # Move these out of the way to not interfere with build.
-          # Emit the protobuf compiler version number.
+          sudo mv protoc /tmp/
+          sudo mv protoc-*.zip /tmp/
           protoc --version
 
       - name: Set up Rust
@@ -80,8 +83,8 @@ jobs:
           cd xlsynth-sys
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
-      - name: Wait for crates.io to update
-        run: sleep 20
+      - name: Wait for xlsynth-sys on crates.io
+        run: python sleep_until_version_seen.py xlsynth-sys "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth
         env:
@@ -90,8 +93,8 @@ jobs:
           cd xlsynth
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
-      - name: Wait for crates.io to update
-        run: sleep 20
+      - name: Wait for xlsynth on crates.io
+        run: python sleep_until_version_seen.py xlsynth "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-test-helpers
         env:
@@ -100,8 +103,8 @@ jobs:
           cd xlsynth-test-helpers
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
-      - name: Wait for crates.io to update
-        run: sleep 20
+      - name: Wait for xlsynth-test-helpers on crates.io
+        run: python sleep_until_version_seen.py xlsynth-test-helpers "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-g8r
         env:
@@ -110,8 +113,8 @@ jobs:
           cd xlsynth-g8r
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
-      - name: Wait for crates.io to update
-        run: sleep 20
+      - name: Wait for xlsynth-g8r on crates.io
+        run: python sleep_until_version_seen.py xlsynth-g8r "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-driver
         env:
@@ -119,6 +122,8 @@ jobs:
         run: |
           cd xlsynth-driver
           cargo publish --token $CARGO_REGISTRY_TOKEN
+
+      # No wait needed after the last crate published in the sequence
 
       - name: Bump version numbers
         if: success()
