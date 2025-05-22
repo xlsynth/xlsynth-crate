@@ -488,6 +488,20 @@ pub fn ir_fn_to_boolector(
                     acc.concat(next)
                 })
             }
+            NodePayload::Array(elems) => {
+                assert!(!elems.is_empty(), "Array must have at least one element");
+                let mut it = elems.iter().rev();
+                let first = env
+                    .get(it.next().unwrap())
+                    .expect("Array element must be present")
+                    .clone();
+                it.fold(first, |acc, nref| {
+                    let next = env
+                        .get(nref)
+                        .expect("Array element must be present (in fold)");
+                    acc.concat(next)
+                })
+            }
             NodePayload::ArrayIndex {
                 array,
                 indices,
@@ -522,6 +536,108 @@ pub fn ir_fn_to_boolector(
                     });
                 }
                 result.expect("ArrayIndex: array must have at least one element")
+            }
+            NodePayload::ArrayUpdate {
+                array,
+                value,
+                indices,
+            } => {
+                assert_eq!(
+                    indices.len(),
+                    1,
+                    "Only single-dimensional array updates are supported",
+                );
+                let array_bv = env.get(array).expect("Array BV must be present");
+                let value_bv = env.get(value).expect("Update value BV must be present");
+                let index_bv = env.get(&indices[0]).expect("Index BV must be present");
+                let array_ty = f.get_node_ty(*array);
+                let (elem_ty, elem_count) = match array_ty {
+                    crate::xls_ir::ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                    _ => panic!("ArrayUpdate: expected array type"),
+                };
+                let elem_width = elem_ty.bit_count() as u32;
+                let mut result: Option<BV<Rc<Btor>>> = None;
+                for i in (0..elem_count).rev() {
+                    let high = ((i + 1) * elem_width as usize - 1) as u32;
+                    let low = (i * elem_width as usize) as u32;
+                    let orig_elem = array_bv.slice(high, low);
+                    let idx_val = BV::from_u64(array_bv.get_btor(), i as u64, index_bv.get_width());
+                    let is_this = index_bv._eq(&idx_val);
+                    let selected = is_this.cond_bv(value_bv, &orig_elem);
+                    result = Some(if let Some(acc) = result {
+                        selected.concat(&acc)
+                    } else {
+                        selected
+                    });
+                }
+                result.expect("ArrayUpdate: array must have at least one element")
+            }
+            NodePayload::DynamicBitSlice { arg, start, width } => {
+                let arg_bv = env.get(arg).expect("DynamicBitSlice arg must be present");
+                let start_bv = env
+                    .get(start)
+                    .expect("DynamicBitSlice start must be present");
+                let shifted = shift_boolector(arg_bv, start_bv, |x, y| x.srl(y));
+                shifted.slice(*width as u32 - 1, 0)
+            }
+            NodePayload::BitSliceUpdate {
+                arg,
+                start,
+                update_value,
+            } => {
+                let arg_bv = env.get(arg).expect("BitSliceUpdate arg must be present");
+                let start_bv = env
+                    .get(start)
+                    .expect("BitSliceUpdate start must be present");
+                let update_bv = env
+                    .get(update_value)
+                    .expect("BitSliceUpdate value must be present");
+                let width = update_bv.get_width();
+                let ones = BV::from_u64(btor.clone(), (1u64 << width) - 1, width);
+                let ones_ext = if arg_bv.get_width() > width {
+                    ones.uext(arg_bv.get_width() - width)
+                } else {
+                    ones.clone()
+                };
+                let mask = shift_boolector(&ones_ext, start_bv, |x, y| x.sll(y));
+                let update_ext = if arg_bv.get_width() > update_bv.get_width() {
+                    update_bv.uext(arg_bv.get_width() - update_bv.get_width())
+                } else {
+                    update_bv.clone()
+                };
+                let update_shifted = shift_boolector(&update_ext, start_bv, |x, y| x.sll(y));
+                let cleared = arg_bv.and(&mask.not());
+                let inserted = update_shifted.and(&mask);
+                cleared.or(&inserted)
+            }
+            NodePayload::Trace { .. } => {
+                // Trace has no effect on value computation
+                continue;
+            }
+            NodePayload::Invoke { .. } => {
+                panic!("Invoke not supported in Boolector conversion");
+            }
+            NodePayload::OneHotSel { selector, cases } => {
+                let selector_bv = env.get(selector).expect("Selector BV must be present");
+                assert_eq!(selector_bv.get_width() as usize, cases.len());
+                let case_bvs: Vec<_> = cases
+                    .iter()
+                    .map(|c| env.get(c).expect("Case BV must be present"))
+                    .collect();
+                let width = case_bvs[0].get_width();
+                let zero = BV::from_u64(btor.clone(), 0, width);
+                let mut result = zero.clone();
+                for (i, case) in case_bvs.iter().enumerate() {
+                    let bit = selector_bv.slice(i as u32, i as u32);
+                    let mask = bit.repeat(width);
+                    let masked = mask.and(case);
+                    result = result.or(&masked);
+                }
+                result
+            }
+            NodePayload::Cover { .. } => {
+                // Cover statements do not contribute to value computation
+                continue;
             }
             NodePayload::Encode { arg } => {
                 let arg_bv = env.get(arg).expect("Encode argument must be present");
@@ -576,7 +692,6 @@ pub fn ir_fn_to_boolector(
                 }
                 out
             }
-            other => todo!("Boolector conversion for {:?} not yet implemented", other),
         };
         // Assert the width matches the node's annotated type
         let expected_width = node.ty.bit_count() as u32;
