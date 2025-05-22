@@ -3,3 +3,4 @@
 pub mod double_negate;
 pub mod duplicate;
 pub mod swap_operands;
+pub mod toggle_output;
