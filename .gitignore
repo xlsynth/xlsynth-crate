@@ -9,3 +9,5 @@ __pycache__
 .ruff_cache
 .idea/
 Cargo.lock
+xlsynth_tools/
+slang
