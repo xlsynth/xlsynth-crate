@@ -96,6 +96,10 @@ fn validate_local_version_gt_released(
 #[test]
 fn test_xlsynth_crate_version() {
     let _ = env_logger::builder().is_test(true).try_init();
+    if std::env::var("CARGO_NET_OFFLINE").is_ok() {
+        eprintln!("CARGO_NET_OFFLINE set - skipping network dependent test");
+        return;
+    }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth");
     validate_local_version_gt_released("xlsynth", &workspace_path).unwrap();
@@ -104,6 +108,10 @@ fn test_xlsynth_crate_version() {
 #[test]
 fn test_xlsynth_sys_crate_version() {
     let _ = env_logger::builder().is_test(true).try_init();
+    if std::env::var("CARGO_NET_OFFLINE").is_ok() {
+        eprintln!("CARGO_NET_OFFLINE set - skipping network dependent test");
+        return;
+    }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth-sys");
     validate_local_version_gt_released("xlsynth-sys", &workspace_path).unwrap();
@@ -112,6 +120,10 @@ fn test_xlsynth_sys_crate_version() {
 #[test]
 fn test_xlsynth_driver_crate_version() {
     let _ = env_logger::builder().is_test(true).try_init();
+    if std::env::var("CARGO_NET_OFFLINE").is_ok() {
+        eprintln!("CARGO_NET_OFFLINE set - skipping network dependent test");
+        return;
+    }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth-driver");
     validate_local_version_gt_released("xlsynth-driver", &workspace_path).unwrap();
