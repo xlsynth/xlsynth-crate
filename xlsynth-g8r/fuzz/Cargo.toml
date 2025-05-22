@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-g8r-fuzz"
-version = "0.0.144"
+version = "0.0.145"
 publish = false
 edition = "2021"
 
@@ -12,7 +12,7 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
-xlsynth = { path = "../../xlsynth", version = "0.0.144" }
+xlsynth = { path = "../../xlsynth", version = "0.0.145" }
 rand = "0.8"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
 
