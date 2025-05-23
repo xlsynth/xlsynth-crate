@@ -5,3 +5,4 @@ pub mod duplicate;
 pub mod redundant_and;
 pub mod swap_operands;
 pub mod toggle_output;
+pub mod true_and;
