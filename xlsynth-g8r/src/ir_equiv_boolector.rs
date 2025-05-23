@@ -320,9 +320,25 @@ pub fn ir_fn_to_boolector(
                         let shamt_width = shamt_bv.get_width();
                         let btor = val_bv.get_btor();
 
+                        // Determine a comparison width that can represent `val_width`.
+                        let mut bits_needed = 0u32;
+                        let mut tmp = val_width;
+                        while tmp > 0 {
+                            bits_needed += 1;
+                            tmp >>= 1;
+                        }
+                        let cmp_width = std::cmp::max(shamt_width, std::cmp::max(bits_needed, 1));
+
+                        // Bring `shamt_bv` to `cmp_width` bits for the comparison.
+                        let shamt_cmp = match shamt_width.cmp(&cmp_width) {
+                            std::cmp::Ordering::Equal => shamt_bv.clone(),
+                            std::cmp::Ordering::Less => shamt_bv.uext(cmp_width - shamt_width),
+                            std::cmp::Ordering::Greater => shamt_bv.slice(cmp_width - 1, 0),
+                        };
+
                         let val_width_for_cmp_bv =
-                            BV::from_u64(btor.clone(), val_width as u64, shamt_width);
-                        let cond_saturate = shamt_bv.ugte(&val_width_for_cmp_bv);
+                            BV::from_u64(btor.clone(), val_width as u64, cmp_width);
+                        let cond_saturate = shamt_cmp.ugte(&val_width_for_cmp_bv);
 
                         let saturated_val = BV::from_u64(btor.clone(), 0, val_width);
                         let shifted_val_core_logic =
@@ -337,9 +353,23 @@ pub fn ir_fn_to_boolector(
                         let shamt_width = shamt_bv.get_width();
                         let btor = val_bv.get_btor();
 
+                        let mut bits_needed = 0u32;
+                        let mut tmp = val_width;
+                        while tmp > 0 {
+                            bits_needed += 1;
+                            tmp >>= 1;
+                        }
+                        let cmp_width = std::cmp::max(shamt_width, std::cmp::max(bits_needed, 1));
+
+                        let shamt_cmp = match shamt_width.cmp(&cmp_width) {
+                            std::cmp::Ordering::Equal => shamt_bv.clone(),
+                            std::cmp::Ordering::Less => shamt_bv.uext(cmp_width - shamt_width),
+                            std::cmp::Ordering::Greater => shamt_bv.slice(cmp_width - 1, 0),
+                        };
+
                         let val_width_for_cmp_bv =
-                            BV::from_u64(btor.clone(), val_width as u64, shamt_width);
-                        let cond_saturate = shamt_bv.ugte(&val_width_for_cmp_bv);
+                            BV::from_u64(btor.clone(), val_width as u64, cmp_width);
+                        let cond_saturate = shamt_cmp.ugte(&val_width_for_cmp_bv);
 
                         let saturated_val = BV::from_u64(btor.clone(), 0, val_width);
                         let shifted_val_core_logic =
@@ -354,9 +384,23 @@ pub fn ir_fn_to_boolector(
                         let shamt_width = shamt_bv.get_width();
                         let btor = val_bv.get_btor();
 
+                        let mut bits_needed = 0u32;
+                        let mut tmp = val_width;
+                        while tmp > 0 {
+                            bits_needed += 1;
+                            tmp >>= 1;
+                        }
+                        let cmp_width = std::cmp::max(shamt_width, std::cmp::max(bits_needed, 1));
+
+                        let shamt_cmp = match shamt_width.cmp(&cmp_width) {
+                            std::cmp::Ordering::Equal => shamt_bv.clone(),
+                            std::cmp::Ordering::Less => shamt_bv.uext(cmp_width - shamt_width),
+                            std::cmp::Ordering::Greater => shamt_bv.slice(cmp_width - 1, 0),
+                        };
+
                         let val_width_for_cmp_bv =
-                            BV::from_u64(btor.clone(), val_width as u64, shamt_width);
-                        let cond_saturate = shamt_bv.ugte(&val_width_for_cmp_bv);
+                            BV::from_u64(btor.clone(), val_width as u64, cmp_width);
+                        let cond_saturate = shamt_cmp.ugte(&val_width_for_cmp_bv);
 
                         let saturated_val = if val_width == 0 {
                             BV::from_u64(btor.clone(), 0, 0)
@@ -1779,5 +1823,23 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
             EquivResult::Proved,
             "Original and Optimized IR for shrl saturation fuzz case should be equivalent after shift saturation fix"
         );
+    }
+
+    #[test]
+    fn test_shift_single_bit_zero_amount_identity() {
+        let ir_shl = r#"fn shl1_zero(x: bits[1] id=1) -> bits[1] {
+  zero: bits[1] = literal(value=0, id=2)
+  ret shll.3: bits[1] = shll(x, zero, id=3)
+}"#;
+        let ir_id = r#"fn id1(x: bits[1] id=1) -> bits[1] {
+  ret id.2: bits[1] = identity(x, id=2)
+}"#;
+        let f_shl = crate::xls_ir::ir_parser::Parser::new(ir_shl)
+            .parse_fn()
+            .unwrap();
+        let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
+            .parse_fn()
+            .unwrap();
+        assert_eq!(check_equiv(&f_shl, &f_id), EquivResult::Proved);
     }
 }
