@@ -23,6 +23,31 @@ pub struct FnBuilder {
     package: Arc<RwLock<IrPackagePtr>>,
 }
 
+macro_rules! binary_op_method {
+    ($name:ident, $lib_fn:ident) => {
+        pub fn $name(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
+            let fn_builder_guard = self.fn_builder.write().unwrap();
+            let bvalue_ptr = lib_support::$lib_fn(
+                fn_builder_guard,
+                a.ptr.read().unwrap(),
+                b.ptr.read().unwrap(),
+                name,
+            );
+            BValue { ptr: bvalue_ptr }
+        }
+    };
+}
+
+macro_rules! unary_op_method {
+    ($name:ident, $lib_fn:ident) => {
+        pub fn $name(&mut self, a: &BValue, name: Option<&str>) -> BValue {
+            let fn_builder_guard = self.fn_builder.write().unwrap();
+            let bvalue_ptr = lib_support::$lib_fn(fn_builder_guard, a.ptr.read().unwrap(), name);
+            BValue { ptr: bvalue_ptr }
+        }
+    };
+}
+
 impl FnBuilder {
     pub fn new(package: &mut IrPackage, name: &str, should_verify: bool) -> Self {
         let package_guard = package.ptr.write().unwrap();
@@ -65,241 +90,28 @@ impl FnBuilder {
         BValue { ptr: bvalue_ptr }
     }
 
-    pub fn add(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_add(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn sub(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_sub(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn and(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_and(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn nand(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_nand(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn or(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_or(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn xor(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_xor(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn eq(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_eq(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn ne(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_ne(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn ule(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_ule(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn ult(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_ult(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn uge(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_uge(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn ugt(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_ugt(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn sle(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_sle(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn slt(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_slt(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn sge(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_sge(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn sgt(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_sgt(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn not(&mut self, a: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_not(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn neg(&mut self, a: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_negate(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn rev(&mut self, a: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_reverse(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn or_reduce(&mut self, a: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_or_reduce(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn and_reduce(&mut self, a: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_and_reduce(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
-
-    pub fn xor_reduce(&mut self, a: &BValue, name: Option<&str>) -> BValue {
-        let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_xor_reduce(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
-        BValue { ptr: bvalue_ptr }
-    }
+    binary_op_method!(add, xls_function_builder_add_add);
+    binary_op_method!(sub, xls_function_builder_add_sub);
+    binary_op_method!(and, xls_function_builder_add_and);
+    binary_op_method!(nand, xls_function_builder_add_nand);
+    binary_op_method!(or, xls_function_builder_add_or);
+    binary_op_method!(xor, xls_function_builder_add_xor);
+    binary_op_method!(eq, xls_function_builder_add_eq);
+    binary_op_method!(ne, xls_function_builder_add_ne);
+    binary_op_method!(ule, xls_function_builder_add_ule);
+    binary_op_method!(ult, xls_function_builder_add_ult);
+    binary_op_method!(uge, xls_function_builder_add_uge);
+    binary_op_method!(ugt, xls_function_builder_add_ugt);
+    binary_op_method!(sle, xls_function_builder_add_sle);
+    binary_op_method!(slt, xls_function_builder_add_slt);
+    binary_op_method!(sge, xls_function_builder_add_sge);
+    binary_op_method!(sgt, xls_function_builder_add_sgt);
+    unary_op_method!(not, xls_function_builder_add_not);
+    unary_op_method!(neg, xls_function_builder_add_negate);
+    unary_op_method!(rev, xls_function_builder_add_reverse);
+    unary_op_method!(or_reduce, xls_function_builder_add_or_reduce);
+    unary_op_method!(and_reduce, xls_function_builder_add_and_reduce);
+    unary_op_method!(xor_reduce, xls_function_builder_add_xor_reduce);
 
     pub fn sign_extend(
         &mut self,
