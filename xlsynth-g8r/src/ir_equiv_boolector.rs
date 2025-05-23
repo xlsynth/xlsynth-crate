@@ -1630,14 +1630,12 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
     fn test_encode_148_equiv_literal_7() {
         let _ = env_logger::builder().is_test(true).try_init();
         let ir_text_encode_148 = r#"
-package encode_148_pkg
 fn func_encode_148() -> bits[3] {
   val_148: bits[8] = literal(value=148, id=1)
   ret result: bits[3] = encode(val_148, id=2)
 }
 "#;
         let ir_text_literal_7 = r#"
-package encode_148_pkg
 fn func_literal_7() -> bits[3] {
   ret result: bits[3] = literal(value=7, id=1)
 }
