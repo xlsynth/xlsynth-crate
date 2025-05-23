@@ -115,122 +115,53 @@ pub fn ir_fn_to_boolector(
                         }
                         result
                     }
-                    _ => panic!("Unop {:?} not yet implemented in Boolector conversion", op),
+                    crate::xls_ir::ir::Unop::XorReduce => {
+                        let width = arg_bv.get_width();
+                        let mut result = arg_bv.slice(0, 0);
+                        for i in 1..width {
+                            let bit = arg_bv.slice(i, i);
+                            result = result.xor(&bit);
+                        }
+                        result
+                    }
                 }
             }
             NodePayload::OneHot { arg, lsb_prio } => {
+                // Implements XLS semantics:
+                //   out[i] = arg[i] & !arg[0..i-1] (if lsb_prio)
+                // or out[i] = arg[i] & !arg[i+1..] (if msb priority)
+                //   out[N] = (arg == 0)
+
                 let arg_bv = env.get(arg).expect("OneHot argument must be present");
                 let width = arg_bv.get_width();
                 assert!(width > 0, "OneHot: width must be > 0");
-                log::trace!("[OneHot] arg_bv width: {}", width);
-                let mut bits: Vec<BV<Rc<Btor>>> = Vec::with_capacity((width + 1) as usize);
-                let mut prior_not: Option<BV<Rc<Btor>>> = None;
+
+                let btor = arg_bv.get_btor();
+                let mut outputs: Vec<BV<Rc<Btor>>> = Vec::with_capacity((width + 1) as usize);
+
+                // prior_clear is 1 when no earlier-priority bits have been seen.
+                let mut prior_clear = BV::from_u64(btor.clone(), 1, 1);
+
                 for i in 0..width {
                     let idx = if *lsb_prio { i } else { width - 1 - i };
                     let bit = arg_bv.slice(idx, idx);
-                    log::trace!(
-                        "[OneHot] bit {} (idx={}): width={} is_const={} bin={:?}",
-                        i,
-                        idx,
-                        bit.get_width(),
-                        bit.is_const(),
-                        bit.as_binary_str()
-                    );
-                    let this_no_prior = if let Some(prior) = &prior_not {
-                        let v = prior.and(&bit.not());
-                        log::trace!("[OneHot] this_no_prior (i={}) with prior: width={} is_const={} bin={:?}", i, v.get_width(), v.is_const(), v.as_binary_str());
-                        v
-                    } else {
-                        let v = bit.not();
-                        log::trace!(
-                            "[OneHot] this_no_prior (i={}) no prior: width={} is_const={} bin={:?}",
-                            i,
-                            v.get_width(),
-                            v.is_const(),
-                            v.as_binary_str()
-                        );
-                        v
-                    };
-                    let out_bit = bit.and(&this_no_prior.not());
-                    log::trace!(
-                        "[OneHot] out_bit (i={}): width={} is_const={} bin={:?}",
-                        i,
-                        out_bit.get_width(),
-                        out_bit.is_const(),
-                        out_bit.as_binary_str()
-                    );
-                    bits.push(out_bit.clone());
-                    prior_not = Some(if let Some(prior) = prior_not {
-                        let v = prior.and(&bit.not());
-                        log::trace!(
-                            "[OneHot] prior_not update (i={}): width={} is_const={} bin={:?}",
-                            i,
-                            v.get_width(),
-                            v.is_const(),
-                            v.as_binary_str()
-                        );
-                        v
-                    } else {
-                        let v = bit.not();
-                        log::trace!(
-                            "[OneHot] prior_not init (i={}): width={} is_const={} bin={:?}",
-                            i,
-                            v.get_width(),
-                            v.is_const(),
-                            v.as_binary_str()
-                        );
-                        v
-                    });
+                    let out_bit = bit.and(&prior_clear);
+                    outputs.push(out_bit);
+                    // Update prior_clear = prior_clear & !bit
+                    prior_clear = prior_clear.and(&bit.not());
                 }
+
                 if !*lsb_prio {
-                    bits.reverse();
+                    outputs.reverse(); // now outputs[0] is bit0
                 }
-                if let Some(prior) = prior_not {
-                    log::trace!(
-                        "[OneHot] final prior_not: width={} is_const={} bin={:?}",
-                        prior.get_width(),
-                        prior.is_const(),
-                        prior.as_binary_str()
-                    );
-                    bits.push(prior);
-                } else {
-                    let v = arg_bv.slice(0, 0).not();
-                    log::trace!(
-                        "[OneHot] final prior_not (empty): width={} is_const={} bin={:?}",
-                        v.get_width(),
-                        v.is_const(),
-                        v.as_binary_str()
-                    );
-                    bits.push(v);
-                }
-                assert_eq!(
-                    bits.len(),
-                    (width + 1) as usize,
-                    "OneHot output width should be input width + 1"
-                );
-                assert!(!bits.is_empty(), "OneHot: bits vector must not be empty");
-                let mut result = bits[0].clone();
-                log::trace!(
-                    "[OneHot] result init: width={} is_const={} bin={:?}",
-                    result.get_width(),
-                    result.is_const(),
-                    result.as_binary_str()
-                );
-                for (i, b) in bits.iter().enumerate().skip(1) {
-                    log::trace!(
-                        "[OneHot] concat (i={}): lhs width={} rhs width={}",
-                        i,
-                        b.get_width(),
-                        result.get_width()
-                    );
+
+                // Final bit indicates no bits set in input.
+                outputs.push(prior_clear.clone()); // index = width
+
+                // Concatenate: start with LSB bit and prepend higher bits to build final value.
+                let mut result = outputs[0].clone();
+                for b in outputs.iter().skip(1) {
                     result = b.concat(&result);
-                    log::trace!(
-                        "[OneHot] after concat (i={}): width={} is_const={} bin={:?}",
-                        i,
-                        result.get_width(),
-                        result.is_const(),
-                        result.as_binary_str()
-                    );
                 }
                 result
             }
@@ -396,33 +327,42 @@ pub fn ir_fn_to_boolector(
                 cases,
                 default,
             } => {
-                // Only support 2-way select for now
-                assert!(
-                    cases.len() == 2 && default.is_none(),
-                    "Only 2-way select without default supported"
-                );
+                // General n-way select with optional default
+                assert!(cases.len() > 0, "Sel must have at least one case");
                 let sel_bv = env.get(selector).expect("Selector BV must be present");
-                let case0 = env.get(&cases[0]).expect("Case 0 BV must be present");
-                let case1 = env.get(&cases[1]).expect("Case 1 BV must be present");
-                assert_eq!(
-                    sel_bv.get_width(),
-                    1,
-                    "Selector BV must be 1 bit for 2-way select"
-                );
-                assert_eq!(
-                    case0.get_width(),
-                    case1.get_width(),
-                    "Case widths must match"
-                );
-                sel_bv.cond_bv(case1, case0)
+                let case_bvs: Vec<_> = cases
+                    .iter()
+                    .map(|c| env.get(c).expect("Case BV must be present"))
+                    .collect();
+                let width = case_bvs[0].get_width();
+                for (_i, case_bv) in case_bvs.iter().enumerate() {
+                    assert_eq!(case_bv.get_width(), width, "All case widths must match");
+                }
+                let sel_width = sel_bv.get_width();
+                let mut result = if let Some(default_ref) = default {
+                    env.get(default_ref)
+                        .expect("Default BV must be present")
+                        .clone()
+                } else {
+                    // If no default, use the last case as the default (mimic array index OOB
+                    // behavior)
+                    (*case_bvs.last().unwrap()).clone()
+                };
+                // Build a chain of selects for each possible index value
+                for (i, case_bv) in case_bvs.iter().enumerate().rev() {
+                    let idx_val = BV::from_u64(btor.clone(), i as u64, sel_width);
+                    let is_this = sel_bv._eq(&idx_val);
+                    result = is_this.cond_bv(case_bv, &result);
+                }
+                result
             }
             NodePayload::ZeroExt { arg, new_bit_count } => {
                 let arg_bv = env.get(arg).expect("ZeroExt argument must be present");
                 let from_width = arg_bv.get_width();
                 let to_width = *new_bit_count as u32;
                 assert!(
-                    to_width > from_width,
-                    "ZeroExt: new_bit_count must be greater than argument width"
+                    to_width >= from_width,
+                    "ZeroExt: new_bit_count must be >= argument width"
                 );
                 arg_bv.uext(to_width - from_width)
             }
@@ -431,8 +371,8 @@ pub fn ir_fn_to_boolector(
                 let from_width = arg_bv.get_width();
                 let to_width = *new_bit_count as u32;
                 assert!(
-                    to_width > from_width,
-                    "SignExt: new_bit_count must be greater than argument width"
+                    to_width >= from_width,
+                    "SignExt: new_bit_count must be >= argument width"
                 );
                 arg_bv.sext(to_width - from_width)
             }
@@ -577,8 +517,59 @@ pub fn ir_fn_to_boolector(
                 let start_bv = env
                     .get(start)
                     .expect("DynamicBitSlice start must be present");
-                let shifted = shift_boolector(arg_bv, start_bv, |x, y| x.srl(y));
-                shifted.slice(*width as u32 - 1, 0)
+
+                let arg_width = arg_bv.get_width();
+
+                // Choose index width large enough to represent either start or arg_width-1.
+                let needed_for_arg = {
+                    let mut bits = 0u32;
+                    while (1u32 << bits) <= arg_width {
+                        bits += 1;
+                    }
+                    // ensure non-zero
+                    std::cmp::max(bits, 1)
+                };
+                let idx_width = std::cmp::max(start_bv.get_width() + 1, needed_for_arg);
+
+                let start_ext = if idx_width > start_bv.get_width() {
+                    start_bv.uext(idx_width - start_bv.get_width())
+                } else {
+                    start_bv.clone()
+                };
+
+                let mut bits = Vec::with_capacity(*width);
+                for i in 0..*width {
+                    let btor = arg_bv.get_btor();
+
+                    let idx_const = BV::from_u64(btor.clone(), i as u64, idx_width);
+                    let idx = start_ext.add(&idx_const);
+
+                    // in_bounds = idx < arg_width
+                    let arg_width_bv = BV::from_u64(btor.clone(), arg_width as u64, idx_width);
+                    let in_bounds = idx.ult(&arg_width_bv);
+
+                    // Select the bit at position `idx` if in bounds, else zero.
+                    // Boolector lacks variable-index extract, so build a chain of conditional
+                    // selects.
+                    let mut selected_bit = BV::from_u64(btor.clone(), 0, 1);
+                    for j in 0..arg_width {
+                        let j_bv = BV::from_u64(btor.clone(), j as u64, idx_width);
+                        let is_this = idx._eq(&j_bv);
+                        let bit = arg_bv.slice(j, j);
+                        selected_bit = is_this.cond_bv(&bit, &selected_bit);
+                    }
+
+                    let out_bit =
+                        in_bounds.cond_bv(&selected_bit, &BV::from_u64(btor.clone(), 0, 1));
+                    bits.push(out_bit);
+                }
+
+                // Concatenate bits into a single BV (LSB first): bits[0] is bit0.
+                let mut result = bits[0].clone();
+                for b in bits.iter().skip(1) {
+                    result = b.concat(&result);
+                }
+                result
             }
             NodePayload::BitSliceUpdate {
                 arg,
@@ -1238,7 +1229,7 @@ mod tests {
         let f = parser.parse_fn().unwrap();
         let btor = Rc::new(Btor::new());
         btor.set_opt(BtorOption::ModelGen(ModelGen::All));
-        let result = ir_fn_to_boolector(btor, &f, None);
+        let result = ir_fn_to_boolector(btor.clone(), &f, None);
         // The expected bit pattern is [1,2] as two 4-bit values, LSB = last element (2)
         // 1 = 0b0001, 2 = 0b0010, so bits = 0b00100001 (LSB = 1, next 4 bits = 2)
         let out = result.output.as_u64().unwrap();
@@ -1388,5 +1379,202 @@ mod tests {
         // 1 shifted left by 1 with 1-bit width should produce 0
         let out = result.output.get_a_solution().as_u64().unwrap();
         assert_eq!(out, 0);
+    }
+
+    #[test]
+    fn test_sel_3way_with_default() {
+        let ir_text = r#"fn sel3(x: bits[2] id=1, a: bits[4] id=2, b: bits[4] id=3, c: bits[4] id=4, d: bits[4] id=5) -> bits[4] {
+  ret sel.6: bits[4] = sel(x, cases=[a, b, c], default=d, id=6)
+}"#;
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        // Try all selector values 0, 1, 2, 3
+        for sel_val in [0, 1, 2, 3].iter().cloned() {
+            let btor = Rc::new(Btor::new());
+            btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+            let mut param_bvs = std::collections::HashMap::new();
+            param_bvs.insert("x".to_string(), BV::from_u64(btor.clone(), sel_val, 2));
+            param_bvs.insert("a".to_string(), BV::from_u64(btor.clone(), 0xA, 4));
+            param_bvs.insert("b".to_string(), BV::from_u64(btor.clone(), 0xB, 4));
+            param_bvs.insert("c".to_string(), BV::from_u64(btor.clone(), 0xC, 4));
+            param_bvs.insert("d".to_string(), BV::from_u64(btor.clone(), 0xD, 4));
+            let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+            let sat_result = btor.sat();
+            assert_eq!(
+                sat_result,
+                boolector::SolverResult::Sat,
+                "Expected SAT for sel_val={}",
+                sel_val
+            );
+            let out = result.output.get_a_solution().as_u64().unwrap();
+            let expected = match sel_val {
+                0 => 0xA,
+                1 => 0xB,
+                2 => 0xC,
+                3 => 0xD,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                out, expected,
+                "sel3({}, ...) should yield 0x{:X}",
+                sel_val, expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_boolector_self_equiv_dynamic_bit_slice() {
+        let ir_text = r#"package fuzz_pkg
+
+fn fuzz_test(input: bits[4] id=1) -> bits[1] {
+  ret dynamic_bit_slice.2: bits[1] = dynamic_bit_slice(input, input, width=1, id=2)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let pkg = parser.parse_package().unwrap();
+        let f = pkg.get_fn("fuzz_test").unwrap();
+        let result = check_equiv(f, f);
+        assert_eq!(
+            result,
+            EquivResult::Proved,
+            "Boolector should prove self-equivalence for dynamic_bit_slice IR"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_bit_slice_oob_returns_zero() {
+        // input width = 3, slice width = 2, start = 7 (0b111) – entirely out of bounds.
+        let ir_text = r#"fn slice_oob(input: bits[3] id=1) -> bits[2] {
+  ret dynamic_bit_slice.2: bits[2] = dynamic_bit_slice(input, input, width=2, id=2)
+}"#;
+
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+
+        let mut param_bvs = std::collections::HashMap::new();
+        // input = 0b111 = 7
+        param_bvs.insert("input".to_string(), BV::from_u64(btor.clone(), 7, 3));
+
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        let sat_result = btor.sat();
+        assert_eq!(sat_result, boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        assert_eq!(out, 0, "Out-of-bounds dynamic_bit_slice should return zero");
+    }
+
+    #[test]
+    fn test_dynamic_bit_slice_always_zero_equiv_literal() {
+        // The slice is always out-of-bounds for at least one of its bits, and any
+        // in-bounds bit is guaranteed to be zero because it comes from a higher
+        // index than the bit that carries the set value.  Hence the result is always 0.
+        let ir_slice = r#"fn slice_fn(x: bits[3] id=1) -> bits[2] {
+  ret dynamic_bit_slice.2: bits[2] = dynamic_bit_slice(x, x, width=2, id=2)
+}"#;
+        let ir_zero = r#"fn zero_fn(x: bits[3] id=1) -> bits[2] {
+  ret zero.2: bits[2] = literal(value=0, id=2)
+}"#;
+        let slice_f = crate::xls_ir::ir_parser::Parser::new(ir_slice)
+            .parse_fn()
+            .unwrap();
+        let zero_f = crate::xls_ir::ir_parser::Parser::new(ir_zero)
+            .parse_fn()
+            .unwrap();
+        let result = check_equiv(&slice_f, &zero_f);
+        assert_eq!(result, EquivResult::Proved);
+    }
+
+    #[test]
+    fn test_xorreduce_equiv_to_self() {
+        let ir_text = r#"fn xor4(x: bits[4] id=1) -> bits[1] {
+  ret xor_reduce.2: bits[1] = xor_reduce(x, id=2)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_xorreduce_known_case() {
+        let ir_text = r#"fn xor4(x: bits[4] id=1) -> bits[1] {
+  ret xor_reduce.2: bits[1] = xor_reduce(x, id=2)
+}"#;
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let mut param_bvs = std::collections::HashMap::new();
+        // x = 0b1011 (11) -> parity 1 (odd number of ones)
+        param_bvs.insert("x".to_string(), BV::from_u64(btor.clone(), 0b1011, 4));
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        let sat_result = btor.sat();
+        assert_eq!(sat_result, boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        assert_eq!(out, 1);
+    }
+
+    #[test]
+    fn test_onehot_msb_priority_constant() {
+        // Matches the failing fuzz example: input literal 33 (0b100001) with MSB
+        // priority should yield 0b100000 (32)
+        let ir_onehot = r#"fn f() -> bits[7] {
+  lit: bits[6] = literal(value=33, id=1)
+  ret one_hot.2: bits[7] = one_hot(lit, lsb_prio=false, id=2)
+}"#;
+
+        let ir_const = r#"fn g() -> bits[7] {
+  ret k32: bits[7] = literal(value=32, id=1)
+}"#;
+
+        let f = crate::xls_ir::ir_parser::Parser::new(ir_onehot)
+            .parse_fn()
+            .unwrap();
+        let g = crate::xls_ir::ir_parser::Parser::new(ir_const)
+            .parse_fn()
+            .unwrap();
+        let result = check_equiv(&f, &g);
+        assert_eq!(
+            result,
+            EquivResult::Proved,
+            "OneHot implementation mismatch for MSB priority constant case"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_bit_slice_start_zero_identity() {
+        let ir_text = r#"fn f(x: bits[2] id=1) -> bits[2] {
+  zero: bits[5] = literal(value=0, id=2)
+  ret s: bits[2] = dynamic_bit_slice(x, zero, width=2, id=3)
+}"#;
+        let ir_id = r#"fn g(x: bits[2] id=1) -> bits[2] {
+  ret id: bits[2] = identity(x, id=2)
+}"#;
+
+        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
+            .parse_fn()
+            .unwrap();
+        let g = crate::xls_ir::ir_parser::Parser::new(ir_id)
+            .parse_fn()
+            .unwrap();
+        let res = check_equiv(&f, &g);
+        assert_eq!(res, EquivResult::Proved);
+    }
+
+    #[test]
+    fn test_dynamic_bit_slice_const_start_matches_bit_slice() {
+        let ir_dyn = r#"fn f(x: bits[8] id=1) -> bits[2] {
+  one: bits[1] = literal(value=1, id=2)
+  ret s: bits[2] = dynamic_bit_slice(x, one, width=2, id=3)
+}"#;
+        let ir_static = r#"fn g(x: bits[8] id=1) -> bits[2] {
+  ret bs: bits[2] = bit_slice(x, start=1, width=2, id=2)
+}"#;
+        let f = crate::xls_ir::ir_parser::Parser::new(ir_dyn)
+            .parse_fn()
+            .unwrap();
+        let g = crate::xls_ir::ir_parser::Parser::new(ir_static)
+            .parse_fn()
+            .unwrap();
+        assert_eq!(check_equiv(&f, &g), EquivResult::Proved);
     }
 }

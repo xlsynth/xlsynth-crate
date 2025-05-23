@@ -137,13 +137,6 @@ jobs:
         run: |
           mkdir -p boolector_libs
           wget -O boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
-          if [ ! -f boolector_libs/libboolector.so ]; then
-            echo "ERROR: libboolector.so was not downloaded correctly!" >&2
-            ls -l boolector_libs/
-            exit 1
-          fi
-          echo "Boolector lib downloaded to $(pwd)/boolector_libs"
-          ls -l boolector_libs/
           sudo cp boolector_libs/libboolector.so /usr/lib/
           sudo ldconfig
           echo "Listing /usr/lib for libboolector.so:"
@@ -514,19 +507,40 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      - name: Install libc++ (C++ standard library)
+      - name: Download and set up Boolector
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libc++1 libc++abi1
+          mkdir -p boolector_libs
+          wget -O boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          sudo cp boolector_libs/libboolector.so /usr/lib/
+          sudo ldconfig
+
+      - name: Verify Boolector library presence
+        run: |
+          ls -l /usr/lib/libboolector.so
+          ldconfig -p | grep boolector
 
       - name: Download xlsynth tools for fuzzing
         run: |
           pip3 install -r requirements.txt
-          python3 download_release.py -p ubuntu2004 --binaries check_ir_equivalence_main -o /tmp/xlsynth_tools_smoke
+          python3 download_release.py -p rocky8 --binaries check_ir_equivalence_main -d -o /tmp/xlsynth_tools_smoke
+          sudo mv /tmp/xlsynth_tools_smoke/libxls-rocky8.so /usr/lib/libxls-rocky8.so
+          sudo ldconfig
+
+      - name: Build and run fuzz_ir_opt_equiv for 10 seconds
+        env:
+          XLSYNTH_TOOLS: /tmp/xlsynth_tools_smoke
+          XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
+          DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
+        run: |
+          cargo install cargo-fuzz
+          cd xlsynth-g8r/fuzz
+          cargo fuzz run fuzz_ir_opt_equiv -- -max_total_time=10
 
       - name: Build and run fuzz_gatify for 10 seconds
         env:
           XLSYNTH_TOOLS: /tmp/xlsynth_tools_smoke
+          XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
+          DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cargo install cargo-fuzz
           cd xlsynth-g8r/fuzz

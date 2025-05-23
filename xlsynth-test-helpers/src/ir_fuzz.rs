@@ -262,7 +262,10 @@ pub fn generate_ir_fn(
             } => {
                 assert!(new_bit_count > 0, "zero extend has new bit count of 0");
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
-                let node = fn_builder.zero_extend(operand, new_bit_count as u64, None);
+                let operand_width =
+                    fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u8;
+                let clamped_new_bit_count = std::cmp::max(new_bit_count, operand_width);
+                let node = fn_builder.zero_extend(operand, clamped_new_bit_count as u64, None);
                 available_nodes.push(node);
             }
             FuzzOp::SignExt {
@@ -271,7 +274,10 @@ pub fn generate_ir_fn(
             } => {
                 assert!(new_bit_count > 0, "sign extend has new bit count of 0");
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
-                let node = fn_builder.sign_extend(operand, new_bit_count as u64, None);
+                let operand_width =
+                    fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u8;
+                let clamped_new_bit_count = std::cmp::max(new_bit_count, operand_width);
+                let node = fn_builder.sign_extend(operand, clamped_new_bit_count as u64, None);
                 available_nodes.push(node);
             }
             FuzzOp::BitSlice {

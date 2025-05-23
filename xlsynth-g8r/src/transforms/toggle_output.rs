@@ -3,7 +3,7 @@
 use rand::seq::SliceRandom;
 use rand::Rng;
 
-use crate::gate::{AigOperand, GateFn};
+use crate::gate::GateFn;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutputBitLoc {
