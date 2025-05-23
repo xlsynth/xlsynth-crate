@@ -153,7 +153,8 @@ pub fn remove_true_and(g: &mut GateFn, node: AigRef) -> Result<(), &'static str>
 }
 
 /// Picks a random `AND(x, true)` gate in the graph and collapses it.
-/// Returns the `AigRef` of the collapsed gate, or `None` if no such gate exists.
+/// Returns the `AigRef` of the collapsed gate, or `None` if no such gate
+/// exists.
 pub fn remove_true_and_rand<R: Rng + ?Sized>(g: &mut GateFn, rng: &mut R) -> Option<AigRef> {
     let true_op = AigOperand {
         node: AigRef { id: 0 },
@@ -237,4 +238,3 @@ mod tests {
         assert!(res.is_none());
     }
 }
-
