@@ -107,13 +107,21 @@ pub fn ir_fn_to_boolector(
                     crate::xls_ir::ir::Unop::Identity => arg_bv.clone(),
                     crate::xls_ir::ir::Unop::Reverse => {
                         let width = arg_bv.get_width();
-                        assert!(width > 0, "Reverse: width must be > 0");
-                        let mut result = arg_bv.slice(0, 0);
-                        for i in 1..width {
-                            let bit = arg_bv.slice(i, i);
-                            result = bit.concat(&result);
+                        if width == 0 {
+                            arg_bv.clone()
+                        } else {
+                            // Iterate from LSB to MSB of the input, and construct the result such
+                            // that the input LSB becomes the output MSB.
+                            // Boolector's concat A.concat(B) means A is MSB part, B is LSB part.
+                            // Start with original LSB as the initial (most significant part of)
+                            // result.
+                            let mut result = arg_bv.slice(0, 0); // original LSB
+                            for i in 1..width {
+                                let bit = arg_bv.slice(i, i); // next original bit (towards MSB)
+                                result = result.concat(&bit); // current_result_MSBs.concat(new_LSB_bit)
+                            }
+                            result
                         }
-                        result
                     }
                     crate::xls_ir::ir::Unop::XorReduce => {
                         let width = arg_bv.get_width();
@@ -1652,6 +1660,40 @@ fn func_literal_7() -> bits[3] {
             result,
             EquivResult::Proved,
             "Encode(148) (bits[8]->bits[3]) should be equivalent to literal(7)"
+        );
+    }
+
+    #[test]
+    fn test_one_hot_reverse_fuzz_case() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let ir_text_original = r#"
+fn original_fn(input: bits[3] id=1) -> bits[5] {
+  one_hot.2: bits[4] = one_hot(input, lsb_prio=true, id=2)
+  one_hot.3: bits[5] = one_hot(one_hot.2, lsb_prio=true, id=3)
+  ret reverse.4: bits[5] = reverse(one_hot.3, id=4)
+}
+"#;
+        let ir_text_optimized = r#"
+fn optimized_fn(input: bits[3] id=1) -> bits[5] {
+  one_hot.2: bits[4] = one_hot(input, lsb_prio=true, id=2)
+  reverse.8: bits[4] = reverse(one_hot.2, id=8)
+  literal.12: bits[1] = literal(value=0, id=12)
+  ret concat.10: bits[5] = concat(reverse.8, literal.12, id=10)
+}
+"#;
+
+        let fn_original = ir_parser::Parser::new(ir_text_original)
+            .parse_fn()
+            .expect("Failed to parse original_fn IR for one_hot_reverse_fuzz_case");
+        let fn_optimized = ir_parser::Parser::new(ir_text_optimized)
+            .parse_fn()
+            .expect("Failed to parse optimized_fn IR for one_hot_reverse_fuzz_case");
+
+        let result = check_equiv(&fn_original, &fn_optimized);
+        assert_eq!(
+            result,
+            EquivResult::Proved,
+            "Original and Optimized IR for one_hot_reverse fuzz case should be equivalent after reverse fix"
         );
     }
 }
