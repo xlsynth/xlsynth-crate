@@ -313,9 +313,61 @@ pub fn ir_fn_to_boolector(
                     Binop::Smod => a_bv.srem(b_bv),
                     Binop::Udiv => a_bv.udiv(b_bv),
                     Binop::Sdiv => a_bv.sdiv(b_bv),
-                    Binop::Shll => shift_boolector(a_bv, b_bv, |x, y| x.sll(y)),
-                    Binop::Shrl => shift_boolector(a_bv, b_bv, |x, y| x.srl(y)),
-                    Binop::Shra => shift_boolector(a_bv, b_bv, |x, y| x.sra(y)),
+                    Binop::Shll => {
+                        let val_bv = env.get(a).expect("Shll arg must be present");
+                        let shamt_bv = env.get(b).expect("Shll shamt must be present");
+                        let val_width = val_bv.get_width();
+                        let shamt_width = shamt_bv.get_width();
+                        let btor = val_bv.get_btor();
+
+                        let val_width_for_cmp_bv =
+                            BV::from_u64(btor.clone(), val_width as u64, shamt_width);
+                        let cond_saturate = shamt_bv.ugte(&val_width_for_cmp_bv);
+
+                        let saturated_val = BV::from_u64(btor.clone(), 0, val_width);
+                        let shifted_val_core_logic =
+                            shift_boolector(val_bv, shamt_bv, |x, y| x.sll(y));
+
+                        cond_saturate.cond_bv(&saturated_val, &shifted_val_core_logic)
+                    }
+                    Binop::Shrl => {
+                        let val_bv = env.get(a).expect("Shrl arg must be present");
+                        let shamt_bv = env.get(b).expect("Shrl shamt must be present");
+                        let val_width = val_bv.get_width();
+                        let shamt_width = shamt_bv.get_width();
+                        let btor = val_bv.get_btor();
+
+                        let val_width_for_cmp_bv =
+                            BV::from_u64(btor.clone(), val_width as u64, shamt_width);
+                        let cond_saturate = shamt_bv.ugte(&val_width_for_cmp_bv);
+
+                        let saturated_val = BV::from_u64(btor.clone(), 0, val_width);
+                        let shifted_val_core_logic =
+                            shift_boolector(val_bv, shamt_bv, |x, y| x.srl(y));
+
+                        cond_saturate.cond_bv(&saturated_val, &shifted_val_core_logic)
+                    }
+                    Binop::Shra => {
+                        let val_bv = env.get(a).expect("Shra arg must be present");
+                        let shamt_bv = env.get(b).expect("Shra shamt must be present");
+                        let val_width = val_bv.get_width();
+                        let shamt_width = shamt_bv.get_width();
+                        let btor = val_bv.get_btor();
+
+                        let val_width_for_cmp_bv =
+                            BV::from_u64(btor.clone(), val_width as u64, shamt_width);
+                        let cond_saturate = shamt_bv.ugte(&val_width_for_cmp_bv);
+
+                        let saturated_val = if val_width == 0 {
+                            BV::from_u64(btor.clone(), 0, 0)
+                        } else {
+                            val_bv.slice(val_width - 1, val_width - 1).repeat(val_width)
+                        };
+                        let shifted_val_core_logic =
+                            shift_boolector(val_bv, shamt_bv, |x, y| x.sra(y));
+
+                        cond_saturate.cond_bv(&saturated_val, &shifted_val_core_logic)
+                    }
                     Binop::Sgt => a_bv.sgt(b_bv),
                     Binop::Slt => a_bv.slt(b_bv),
                     Binop::Sle => a_bv.slte(b_bv),
@@ -1694,6 +1746,38 @@ fn optimized_fn(input: bits[3] id=1) -> bits[5] {
             result,
             EquivResult::Proved,
             "Original and Optimized IR for one_hot_reverse fuzz case should be equivalent after reverse fix"
+        );
+    }
+
+    #[test]
+    fn test_shrl_saturation_fuzz_case() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let ir_text_original = r#"
+fn original_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
+  eq.2: bits[1] = eq(input, input, id=2)
+  sign_ext.3: bits[8] = sign_ext(input, new_bit_count=8, id=3)
+  ret shrl.4: bits[1] = shrl(eq.2, sign_ext.3, id=4)
+}
+"#;
+        let ir_text_optimized = r#"
+fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
+  literal.6: bits[8] = literal(value=0, id=6)
+  ret eq.7: bits[1] = eq(input, literal.6, id=7)
+}
+"#;
+
+        let fn_original = ir_parser::Parser::new(ir_text_original)
+            .parse_fn()
+            .expect("Failed to parse original_shrl_saturation_fn IR");
+        let fn_optimized = ir_parser::Parser::new(ir_text_optimized)
+            .parse_fn()
+            .expect("Failed to parse optimized_shrl_saturation_fn IR");
+
+        let result = check_equiv(&fn_original, &fn_optimized);
+        assert_eq!(
+            result,
+            EquivResult::Proved,
+            "Original and Optimized IR for shrl saturation fuzz case should be equivalent after shift saturation fix"
         );
     }
 }
