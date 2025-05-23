@@ -359,9 +359,7 @@ pub fn ir_fn_to_boolector(
                         let cond_saturate = shamt_bv.ugte(&val_width_for_cmp_bv);
 
                         let saturated_val = if val_width == 0 {
-                            BV::from_u64(btor.clone(), 0, 0) // Or however
-                                                             // 0-width is
-                                                             // handled
+                            BV::from_u64(btor.clone(), 0, 0)
                         } else {
                             val_bv.slice(val_width - 1, val_width - 1).repeat(val_width)
                         };
