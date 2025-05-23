@@ -130,6 +130,26 @@ pub(crate) unsafe fn c_str_to_rust(xls_c_str: *mut std::os::raw::c_char) -> Stri
     result
 }
 
+/// Returns a CString built from the given string and a pointer to its contents.
+/// The CString must be kept alive as long as the pointer is used.
+fn cstring_and_ptr(name: &str) -> (CString, *const std::os::raw::c_char) {
+    let cstr = CString::new(name).unwrap();
+    let ptr = cstr.as_ptr();
+    (cstr, ptr)
+}
+
+/// Like [`cstring_and_ptr`] but for optional strings. The returned pointer is
+/// null if the option is `None`.
+fn optional_cstring_and_ptr(name: Option<&str>) -> (Option<CString>, *const std::os::raw::c_char) {
+    if let Some(s) = name {
+        let cstr = CString::new(s).unwrap();
+        let ptr = cstr.as_ptr();
+        (Some(cstr), ptr)
+    } else {
+        (None, std::ptr::null())
+    }
+}
+
 pub(crate) fn xls_value_free(p: *mut CIrValue) {
     unsafe { xlsynth_sys::xls_value_free(p) }
 }
@@ -262,11 +282,7 @@ pub(crate) fn xls_parse_ir_package(
     filename: Option<&str>,
 ) -> Result<crate::ir_package::IrPackage, XlsynthError> {
     let ir_cstring = CString::new(ir).unwrap();
-    let filename_cstr = filename.map(|s| CString::new(s).unwrap());
-    let filename_ptr = filename_cstr
-        .as_ref()
-        .map(|s| s.as_ptr())
-        .unwrap_or(std::ptr::null());
+    let (_filename_cstr, filename_ptr) = optional_cstring_and_ptr(filename);
     let mut xls_package_out: *mut CIrPackage = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_parse_ir_package, ir_cstring.as_ptr(), filename_ptr; xls_package_out)?;
     let package = crate::ir_package::IrPackage {
@@ -277,9 +293,8 @@ pub(crate) fn xls_parse_ir_package(
 }
 
 pub(crate) fn xls_package_new(name: &str) -> Result<crate::ir_package::IrPackage, XlsynthError> {
-    let name_cstr = CString::new(name).unwrap();
-    let xls_package_out: *mut CIrPackage =
-        unsafe { xlsynth_sys::xls_package_create(name_cstr.as_ptr()) };
+    let (_name_cstr, name_ptr) = cstring_and_ptr(name);
+    let xls_package_out: *mut CIrPackage = unsafe { xlsynth_sys::xls_package_create(name_ptr) };
     Ok(crate::ir_package::IrPackage {
         ptr: Arc::new(RwLock::new(IrPackagePtr(xls_package_out))),
         filename: None,
@@ -291,8 +306,7 @@ pub(crate) fn xls_function_builder_new(
     name: &str,
     should_verify: bool,
 ) -> Arc<RwLock<IrFnBuilderPtr>> {
-    let name_cstr = CString::new(name).unwrap();
-    let name_ptr = name_cstr.as_ptr();
+    let (_name_cstr, name_ptr) = cstring_and_ptr(name);
     let fn_builder =
         unsafe { xlsynth_sys::xls_function_builder_create(name_ptr, package, should_verify) };
     assert!(!fn_builder.is_null());
@@ -304,8 +318,7 @@ pub(crate) fn xls_function_builder_add_parameter(
     name: &str,
     type_: &IrType,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = CString::new(name).unwrap();
-    let name_ptr = name_cstr.as_ptr();
+    let (_name_cstr, name_ptr) = cstring_and_ptr(name);
     let type_raw = type_.ptr;
     let bvalue_raw =
         unsafe { xlsynth_sys::xls_function_builder_add_parameter(builder.ptr, name_ptr, type_raw) };
@@ -319,8 +332,7 @@ pub(crate) fn xls_function_builder_add_dynamic_bit_slice(
     width: u64,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let width_i64 = width as i64;
     let bvalue_raw = unsafe {
@@ -342,8 +354,7 @@ pub(crate) fn xls_function_builder_add_bit_slice(
     width: u64,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw = unsafe {
         xlsynth_sys::xls_builder_base_add_bit_slice(
@@ -362,8 +373,7 @@ pub(crate) fn xls_function_builder_add_concat(
     values: &[RwLockReadGuard<BValuePtr>],
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let values_ptrs: Vec<*mut CIrBValue> = values.iter().map(|v| v.ptr).collect();
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw = unsafe {
@@ -382,8 +392,7 @@ pub(crate) fn xls_function_builder_add_literal(
     value: &IrValue,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw =
         unsafe { xlsynth_sys::xls_builder_base_add_literal(builder_base, value.ptr, name_ptr) };
@@ -395,8 +404,7 @@ pub(crate) fn xls_function_builder_add_tuple(
     elements: &[RwLockReadGuard<BValuePtr>],
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let mut elements_ptrs: Vec<*mut CIrBValue> = elements.iter().map(|v| v.ptr).collect();
     let bvalue_raw = unsafe {
@@ -416,8 +424,7 @@ pub(crate) fn xls_function_builder_add_tuple_index(
     index: u64,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw = unsafe {
         xlsynth_sys::xls_builder_base_add_tuple_index(
@@ -461,8 +468,7 @@ pub(crate) fn xls_package_set_top_by_name(
     package: *mut CIrPackage,
     name: &str,
 ) -> Result<(), XlsynthError> {
-    let name_cstr = CString::new(name).unwrap();
-    let name_ptr = name_cstr.as_ptr();
+    let (_name_cstr, name_ptr) = cstring_and_ptr(name);
     xls_ffi_call_noreturn!(xlsynth_sys::xls_package_set_top_by_name, package, name_ptr)?;
     Ok(())
 }
@@ -697,8 +703,7 @@ pub(crate) fn xls_function_builder_add_array(
     elements: &[RwLockReadGuard<BValuePtr>],
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let elements_ptrs: Vec<*mut CIrBValue> = elements.iter().map(|v| v.ptr).collect();
     let bvalue_raw = unsafe {
@@ -720,8 +725,7 @@ pub(crate) fn xls_function_builder_add_array_index_multi(
     assumed_in_bounds: bool,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let index_ptrs: Vec<*mut CIrBValue> = index.iter().map(|v| v.ptr).collect();
     let bvalue_raw = unsafe {
@@ -744,8 +748,7 @@ pub(crate) fn xls_function_builder_add_bit_slice_update(
     update: RwLockReadGuard<BValuePtr>,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw = unsafe {
         xlsynth_sys::xls_builder_base_add_bit_slice_update(
@@ -766,8 +769,7 @@ pub(crate) fn xls_function_builder_add_select(
     default_value: RwLockReadGuard<BValuePtr>,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let cases_ptrs: Vec<*mut CIrBValue> = cases.iter().map(|v| v.ptr).collect();
     let bvalue_raw = unsafe {
@@ -788,8 +790,7 @@ pub(crate) fn xls_function_builder_add_array_concat(
     arrays: &[RwLockReadGuard<BValuePtr>],
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let arrays_ptrs: Vec<*mut CIrBValue> = arrays.iter().map(|v| v.ptr).collect();
     let bvalue_raw = unsafe {
@@ -810,8 +811,7 @@ pub(crate) fn xls_function_builder_add_array_slice(
     width: i64,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let bvalue_raw = unsafe {
         xlsynth_sys::xls_builder_base_add_array_slice(
@@ -833,8 +833,7 @@ pub(crate) fn xls_function_builder_add_array_update(
     assumed_in_bounds: bool,
     name: Option<&str>,
 ) -> Arc<RwLock<BValuePtr>> {
-    let name_cstr = name.map(|s| CString::new(s).unwrap());
-    let name_ptr = name_cstr.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+    let (_name_cstr, name_ptr) = optional_cstring_and_ptr(name);
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let indices_ptrs: Vec<*mut CIrBValue> = indices.iter().map(|v| v.ptr).collect();
     let bvalue_raw = unsafe {
