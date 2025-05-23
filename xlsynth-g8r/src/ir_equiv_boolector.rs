@@ -632,23 +632,71 @@ pub fn ir_fn_to_boolector(
             }
             NodePayload::Encode { arg } => {
                 let arg_bv = env.get(arg).expect("Encode argument must be present");
-                let width = arg_bv.get_width();
-                assert!(width > 0, "Encode: width must be > 0");
-                let out_width = (width as f64).log2().ceil() as u32;
-                assert_eq!(
-                    node.ty.bit_count() as u32,
-                    out_width,
-                    "Encode: output width must be log2(input width)"
-                );
-                // Priority encoder: for each bit, if set, output its index
-                let mut result = BV::from_u64(btor.clone(), 0, out_width);
-                for i in (0..width).rev() {
-                    // MSB priority
-                    let bit = arg_bv.slice(i, i);
-                    let idx_bv = BV::from_u64(btor.clone(), i as u64, out_width);
-                    result = bit.cond_bv(&idx_bv, &result);
+                let input_width = arg_bv.get_width(); // N: input bitwidth
+                assert!(input_width > 0, "Encode: input_width N must be > 0");
+
+                // M: output bitwidth, taken from the node's type information.
+                // XLS IR ensures this is ceil(log2(N)) with a minimum of 1 if N > 0,
+                // or 0 if N=0 (though N>0 is asserted above).
+                // Specifically, if N=1, M=1 for XLS's typical clog2 definition in types.
+                let out_width = node.ty.bit_count() as u32;
+
+                // If out_width is 0, it implies an unusual case (e.g. input_width=0 or IR type
+                // mismatch). Given `input_width > 0`, `out_width` should also
+                // be > 0 based on XLS semantics for encode. For example,
+                // encode(bits[1]) should yield bits[1] (out_width=1).
+                // If somehow out_width became 0, the logic would produce a 0-width BV.
+                assert!(out_width > 0 || (input_width == 1 && out_width ==0), "Encode: output_width M should generally be > 0 if input_width N > 0. Found M={} for N={}", out_width, input_width);
+
+                let btor_ctx = arg_bv.get_btor();
+
+                if out_width == 0 {
+                    // This case should ideally not be hit if input_width > 0 and IR types are
+                    // consistent with XLS spec (e.g. encode(bits[1]) ->
+                    // bits[1]). However, if node.ty.bit_count() is indeed 0,
+                    // return a 0-width BV.
+                    BV::from_u64(btor_ctx, 0, 0)
+                } else {
+                    let mut output_bit_bvs = Vec::with_capacity(out_width as usize);
+
+                    // For each output bit j (from 0 for LSB to out_width-1 for MSB)
+                    for j in 0..out_width {
+                        let mut or_candidates_for_output_bit_j: Vec<BV<Rc<Btor>>> = Vec::new();
+                        // For each input bit position i (from 0 to input_width-1)
+                        for i in 0..input_width {
+                            // Check if the j-th bit of the *index i* is 1.
+                            // (i as u64 >> j) extracts the j-th bit of i.
+                            if ((i as u64 >> j) & 1) != 0 {
+                                // If so, the input_bit[i] (i.e., arg_bv.slice(i,i))
+                                // contributes to this output_bit[j].
+                                or_candidates_for_output_bit_j.push(arg_bv.slice(i, i));
+                            }
+                        }
+
+                        let current_output_bit_val = if or_candidates_for_output_bit_j.is_empty() {
+                            // If no input bits contribute, this output bit is 0.
+                            BV::from_u64(btor_ctx.clone(), 0, 1)
+                        } else {
+                            // OR all contributing input bits.
+                            let mut or_op_result = or_candidates_for_output_bit_j[0].clone();
+                            for k_idx in 1..or_candidates_for_output_bit_j.len() {
+                                or_op_result =
+                                    or_op_result.or(&or_candidates_for_output_bit_j[k_idx]);
+                            }
+                            or_op_result
+                        };
+                        output_bit_bvs.push(current_output_bit_val);
+                    }
+
+                    // Concatenate the calculated output bits to form the final result.
+                    // output_bit_bvs[0] is the LSB, output_bit_bvs[out_width-1] is the MSB.
+                    // Boolector's concat is msb.concat(lsb_aggregate).
+                    let mut final_result_bv = output_bit_bvs[0].clone(); // Start with LSB
+                    for k_idx in 1..(out_width as usize) {
+                        final_result_bv = output_bit_bvs[k_idx].concat(&final_result_bv);
+                    }
+                    final_result_bv
                 }
-                result
             }
             NodePayload::AfterAll(_) => {
                 // AfterAll is a no-op for Boolector; do not insert a BV (like Nil)
@@ -1576,5 +1624,36 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
             .parse_fn()
             .unwrap();
         assert_eq!(check_equiv(&f, &g), EquivResult::Proved);
+    }
+
+    #[test]
+    fn test_encode_148_equiv_literal_7() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let ir_text_encode_148 = r#"
+package encode_148_pkg
+fn func_encode_148() -> bits[3] {
+  val_148: bits[8] = literal(value=148, id=1)
+  ret result: bits[3] = encode(val_148, id=2)
+}
+"#;
+        let ir_text_literal_7 = r#"
+package encode_148_pkg
+fn func_literal_7() -> bits[3] {
+  ret result: bits[3] = literal(value=7, id=1)
+}
+"#;
+        let f_encode = ir_parser::Parser::new(ir_text_encode_148)
+            .parse_fn()
+            .expect("Failed to parse encode_148 IR");
+        let f_literal = ir_parser::Parser::new(ir_text_literal_7)
+            .parse_fn()
+            .expect("Failed to parse literal_7 IR");
+
+        let result = check_equiv(&f_encode, &f_literal);
+        assert_eq!(
+            result,
+            EquivResult::Proved,
+            "Encode(148) (bits[8]->bits[3]) should be equivalent to literal(7)"
+        );
     }
 }
