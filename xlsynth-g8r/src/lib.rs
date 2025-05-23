@@ -30,6 +30,7 @@ pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
 }
 pub mod logical_effort;
+pub mod mcmc_logic;
 pub mod netlist;
 pub mod process_ir_path;
 pub mod propose_equiv;

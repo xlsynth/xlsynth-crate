@@ -62,10 +62,12 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
                     node: operand.node,
                     negated: false,
                 };
-                let base_value = *env.get(&base_operand).expect(&format!(
-                    "Input base value should be seeded: {:?}",
-                    base_operand
-                ));
+                let base_value = *env.get(&base_operand).unwrap_or_else(|| {
+                    panic!(
+                        "Input base value should be seeded for node: {:?}, negated: {}",
+                        base_operand.node, base_operand.negated
+                    )
+                });
                 // Apply negation only if this operand requires it
                 if operand.negated {
                     !base_value
@@ -83,14 +85,10 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
             }
             AigNode::And2 { a, b, tags } => {
                 // Get the final values already computed for the input operands
-                let a_value = *env.get(a).expect(&format!(
-                    "Input operand 'a' value not found for AND node: {:?}",
-                    a
-                ));
-                let b_value = *env.get(b).expect(&format!(
-                    "Input operand 'b' value not found for AND node: {:?}",
-                    b
-                ));
+                let a_value = *env.get(a)
+                    .unwrap_or_else(|| panic!("Input operand 'a' value not found for AND node. Operand a: {:?}, negated: {}", a.node, a.negated));
+                let b_value = *env.get(b)
+                    .unwrap_or_else(|| panic!("Input operand 'b' value not found for AND node. Operand b: {:?}, negated: {}", b.node, b.negated));
                 // Compute the AND result
                 let and_result = a_value && b_value;
                 if let Some(tags) = tags

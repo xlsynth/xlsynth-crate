@@ -1,161 +1,176 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use rand::seq::SliceRandom;
-use rand::Rng;
+use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::transforms::transform_trait::{
+    Transform, TransformDirection, TransformKind, TransformLocation,
+};
+use anyhow::{anyhow, Result};
 
-use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DoubleNegated {
-    /// (output index, bit index within that output)
-    Output { out_idx: usize, bit_idx: usize },
-    /// (parent AND node, is_rhs = true if it's the second operand b)
-    AndFanIn { node: AigRef, is_rhs: bool },
-}
-
-/// Push/pull a double-negation through an AND2 edge.
-/// * `g` – gate graph to mutate
-/// * `op` – the operand feeding an AND2 whose negated flag we want to toggle
-/// Returns the *new* operand (with its `negated` bit flipped) if successful.
-/// Fails if the operand feeds a primary input or literal.
-pub fn double_negate(g: &mut GateFn, op: AigOperand) -> Result<AigOperand, &'static str> {
-    match &mut g.gates[op.node.id] {
-        // Cannot push negation into inputs or literals.
-        AigNode::Input { .. } | AigNode::Literal(_) => {
-            return Err("cannot double-negate input/literal")
-        }
+/// Primitive: Applies double negation to an operand `op`.
+/// `op.node` MUST be an And2 gate.
+/// Flips `op.negated`, and flips `negated` on both children of `op.node`.
+/// Returns the new value for `op`.
+fn do_double_negate_on_gates(
+    gates: &mut Vec<AigNode>,
+    op: AigOperand,
+) -> Result<AigOperand, &'static str> {
+    if op.node.id >= gates.len() {
+        return Err("Operand node ID out of bounds in do_double_negate");
+    }
+    match &mut gates[op.node.id] {
         AigNode::And2 { a, b, .. } => {
-            // Flip the negation flag on *this* operand.
             let mut new_op = op;
-            new_op.negated = !new_op.negated;
-
-            // Also flip both child edges of the AND2 it feeds.
-            a.negated = !a.negated;
-            b.negated = !b.negated;
+            new_op.negated = !new_op.negated; // Flip negation on the operand itself
+            a.negated = !a.negated; // Flip negation on child a
+            b.negated = !b.negated; // Flip negation on child b
             Ok(new_op)
         }
+        _ => Err("Operand node for do_double_negate must be an And2 gate"),
     }
 }
 
-/// Randomly selects an operand eligible for double-negation and applies it.
-/// Returns Ok(()) if a move was made, Err if no eligible operand exists.
-pub fn double_negate_rand<R: Rng + ?Sized>(
-    g: &mut GateFn,
-    rng: &mut R,
-) -> Result<DoubleNegated, &'static str> {
-    // Collect (operand, location) pairs.
-    let mut candidates: Vec<(AigOperand, DoubleNegated)> = Vec::new();
+#[derive(Debug)]
+pub struct DoubleNegateTransform;
 
-    // 1. Primary outputs
-    for (out_idx, out) in g.outputs.iter().enumerate() {
-        for (bit_idx, bit) in out.bit_vector.iter_lsb_to_msb().enumerate() {
-            if matches!(g.gates[bit.node.id], AigNode::And2 { .. }) {
-                candidates.push((*bit, DoubleNegated::Output { out_idx, bit_idx }));
-            }
-        }
+impl DoubleNegateTransform {
+    pub fn new() -> Self {
+        DoubleNegateTransform
     }
-    // 2. Internal And2 fan-ins
-    for (idx, node) in g.gates.iter().enumerate() {
-        if let AigNode::And2 { a, b, .. } = node {
-            if matches!(g.gates[a.node.id], AigNode::And2 { .. }) {
-                candidates.push((
-                    *a,
-                    DoubleNegated::AndFanIn {
-                        node: AigRef { id: idx },
-                        is_rhs: false,
-                    },
-                ));
-            }
-            if matches!(g.gates[b.node.id], AigNode::And2 { .. }) {
-                candidates.push((
-                    *b,
-                    DoubleNegated::AndFanIn {
-                        node: AigRef { id: idx },
-                        is_rhs: true,
-                    },
-                ));
-            }
-        }
-    }
-
-    if candidates.is_empty() {
-        return Err("no eligible operand for double-negate");
-    }
-
-    let (chosen_op, loc) = *candidates.choose(rng).unwrap();
-    let new_op = double_negate(g, chosen_op)?;
-
-    match loc {
-        DoubleNegated::Output { out_idx, bit_idx } => {
-            let out = &mut g.outputs[out_idx];
-            let replaced: Vec<AigOperand> = out
-                .bit_vector
-                .iter_lsb_to_msb()
-                .enumerate()
-                .map(|(i, op)| if i == bit_idx { new_op } else { *op })
-                .collect();
-            out.bit_vector = AigBitVector::from_lsb_is_index_0(&replaced);
-        }
-        DoubleNegated::AndFanIn { node, is_rhs } => {
-            if let AigNode::And2 { a, b, .. } = &mut g.gates[node.id] {
-                if is_rhs {
-                    *b = new_op;
-                } else {
-                    *a = new_op;
-                }
-            }
-        }
-    }
-
-    Ok(loc)
 }
 
-/// Re-apply a double-negation at a known location.
-///
-/// Layering:
-/// 1. `double_negate` – primitive: flips one operand + its two fan-ins.
-/// 2. `double_negate_rand` – picks a random eligible operand, calls (1),
-///    patches the graph, and returns a `DoubleNegated` descriptor.
-/// 3. `apply_double_negate_at_location` (this fn) – given that descriptor,
-///    looks up the current operand, calls (1) again, and rewires the result.
-pub fn apply_double_negate_at_location(g: &mut GateFn, loc: DoubleNegated) {
-    let op = match loc {
-        DoubleNegated::Output { out_idx, bit_idx } => {
-            *g.outputs[out_idx].bit_vector.get_lsb(bit_idx)
-        }
-        DoubleNegated::AndFanIn { node, is_rhs } => {
-            if let AigNode::And2 { a, b, .. } = g.gates[node.id] {
-                if is_rhs {
-                    b
-                } else {
-                    a
-                }
-            } else {
-                panic!("location refers to non-And2 node");
-            }
-        }
-    };
-    let new_op = double_negate(g, op).expect("double_negate should succeed");
-    // splice back similar to logic in rand version
-    match loc {
-        DoubleNegated::Output { out_idx, bit_idx } => {
-            let out = &mut g.outputs[out_idx];
-            let replaced: Vec<AigOperand> = out
-                .bit_vector
-                .iter_lsb_to_msb()
-                .enumerate()
-                .map(|(i, p)| if i == bit_idx { new_op } else { *p })
-                .collect();
-            out.bit_vector = AigBitVector::from_lsb_is_index_0(&replaced);
-        }
-        DoubleNegated::AndFanIn { node, is_rhs } => {
-            if let AigNode::And2 { a, b, .. } = &mut g.gates[node.id] {
-                if is_rhs {
-                    *b = new_op;
-                } else {
-                    *a = new_op;
+impl Transform for DoubleNegateTransform {
+    fn kind(&self) -> TransformKind {
+        TransformKind::DoubleNegate
+    }
+
+    fn find_candidates(
+        &mut self,
+        g: &GateFn,
+        _direction: TransformDirection, // Self-inverse, direction doesn't change candidates
+    ) -> Vec<TransformLocation> {
+        let mut candidates = Vec::new();
+
+        // 1. Primary outputs whose node is an And2
+        for (out_idx, output_spec) in g.outputs.iter().enumerate() {
+            for (bit_idx, output_op) in output_spec.bit_vector.iter_lsb_to_msb().enumerate() {
+                if output_op.node.id < g.gates.len()
+                    && matches!(g.gates[output_op.node.id], AigNode::And2 { .. })
+                {
+                    candidates.push(TransformLocation::OutputPortBit {
+                        output_idx: out_idx,
+                        bit_idx,
+                    });
                 }
             }
+        }
+
+        // 2. Operands of And2 gates, where the operand's node is also an And2
+        for (parent_idx, parent_gate) in g.gates.iter().enumerate() {
+            if let AigNode::And2 {
+                a: op_a, b: op_b, ..
+            } = parent_gate
+            {
+                let parent_ref = AigRef { id: parent_idx };
+                // Check operand a
+                if op_a.node.id < g.gates.len()
+                    && matches!(g.gates[op_a.node.id], AigNode::And2 { .. })
+                {
+                    candidates.push(TransformLocation::Operand(parent_ref, false));
+                    // false for LHS
+                }
+                // Check operand b
+                if op_b.node.id < g.gates.len()
+                    && matches!(g.gates[op_b.node.id], AigNode::And2 { .. })
+                {
+                    candidates.push(TransformLocation::Operand(parent_ref, true));
+                    // true for RHS
+                }
+            }
+        }
+        candidates
+    }
+
+    fn apply(
+        &self,
+        g: &mut GateFn,
+        candidate_location: &TransformLocation,
+        _direction: TransformDirection, // Self-inverse, direction doesn't change behavior
+    ) -> Result<()> {
+        match candidate_location {
+            TransformLocation::OutputPortBit {
+                output_idx,
+                bit_idx,
+            } => {
+                if *output_idx >= g.outputs.len()
+                    || *bit_idx >= g.outputs[*output_idx].bit_vector.get_bit_count()
+                {
+                    return Err(anyhow!(
+                        "OutputPortBit location out of bounds: {:?}",
+                        candidate_location
+                    ));
+                }
+                let current_op_val = *g.outputs[*output_idx].bit_vector.get_lsb(*bit_idx);
+                let new_op_val = do_double_negate_on_gates(&mut g.gates, current_op_val)
+                    .map_err(anyhow::Error::msg)?;
+
+                let output_bv_mut = &mut g.outputs[*output_idx].bit_vector;
+                let mut ops: Vec<AigOperand> = output_bv_mut.iter_lsb_to_msb().copied().collect();
+                if *bit_idx < ops.len() {
+                    ops[*bit_idx] = new_op_val;
+                    *output_bv_mut = crate::gate::AigBitVector::from_lsb_is_index_0(&ops);
+                    Ok(())
+                } else {
+                    Err(anyhow!(
+                        "OutputPortBit bit_idx out of bounds during splice: {:?}",
+                        candidate_location
+                    ))
+                }
+            }
+            TransformLocation::Operand(parent_ref, is_rhs) => {
+                if parent_ref.id >= g.gates.len() {
+                    return Err(anyhow!(
+                        "Operand location parent_ref out of bounds: {:?}",
+                        parent_ref
+                    ));
+                }
+                let target_op_val = match &g.gates[parent_ref.id] {
+                    AigNode::And2 { a, b, .. } => {
+                        if *is_rhs {
+                            *b
+                        } else {
+                            *a
+                        }
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Operand location parent_ref {:?} is not an And2 gate internally",
+                            parent_ref
+                        ))
+                    }
+                };
+
+                let new_op_val = do_double_negate_on_gates(&mut g.gates, target_op_val)
+                    .map_err(anyhow::Error::msg)?;
+
+                match &mut g.gates[parent_ref.id] {
+                    AigNode::And2 { a, b, .. } => {
+                        if *is_rhs {
+                            *b = new_op_val;
+                        } else {
+                            *a = new_op_val;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(anyhow!(
+                        "Operand location parent_ref {:?} became not And2 gate during update",
+                        parent_ref
+                    )),
+                }
+            }
+            _ => Err(anyhow!(
+                "Invalid location type for DoubleNegateTransform: {:?}",
+                candidate_location
+            )),
         }
     }
 }
@@ -163,41 +178,186 @@ pub fn apply_double_negate_at_location(g: &mut GateFn, loc: DoubleNegated) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gate::{AigNode, AigOperand, AigRef};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
 
-    #[test]
-    fn test_double_negate_self_inverse() {
-        // Build o = AND(i0, i1)
-        let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
-        let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
-        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
-        let a = gb.add_and_binary(i0, i1);
-        gb.add_output("o".to_string(), a.into());
-        let g1 = gb.build();
-
-        // Pick that single output operand.
-        let op = g1.outputs[0].bit_vector.get_lsb(0).clone();
-        let mut g2 = g1.clone();
-        double_negate(&mut g2, op).unwrap();
-        double_negate(&mut g2, op).unwrap(); // apply twice
-        assert_eq!(g1.to_string(), g2.to_string());
+    fn test_do_double_negate_primitive_direct(
+        gates: &mut Vec<AigNode>,
+        op: AigOperand,
+    ) -> Result<AigOperand, &'static str> {
+        do_double_negate_on_gates(gates, op)
     }
 
     #[test]
-    fn test_double_negate_rand_progress() {
-        let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+    fn test_double_negate_on_output() {
+        let mut gb = GateBuilder::new("f_out".to_string(), GateBuilderOptions::no_opt());
         let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
         let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
-        let a = gb.add_and_binary(i0, i1);
-        gb.add_output("o".to_string(), a.into());
-        let mut g = gb.build();
-        let pre = g.to_string();
-        let mut rng = StdRng::seed_from_u64(123);
-        let loc = double_negate_rand(&mut g, &mut rng).unwrap();
-        apply_double_negate_at_location(&mut g, loc);
-        let post_twice = g.to_string();
-        assert_eq!(pre, post_twice);
+        let and_op = gb.add_and_binary(i0, i1);
+        gb.add_output("o".to_string(), and_op.into());
+        let g_original = gb.build();
+        let mut g_transformed = g_original.clone();
+
+        let mut transform = DoubleNegateTransform::new();
+        let candidates = transform.find_candidates(&g_transformed, TransformDirection::Forward);
+
+        let target_loc = candidates
+            .iter()
+            .find(|loc| {
+                matches!(
+                    loc,
+                    TransformLocation::OutputPortBit {
+                        output_idx: 0,
+                        bit_idx: 0
+                    }
+                )
+            })
+            .expect("Candidate not found");
+
+        transform
+            .apply(&mut g_transformed, target_loc, TransformDirection::Forward)
+            .unwrap();
+        assert_ne!(g_original.to_string(), g_transformed.to_string());
+
+        transform
+            .apply(&mut g_transformed, target_loc, TransformDirection::Backward)
+            .unwrap();
+        assert_eq!(g_original.to_string(), g_transformed.to_string());
+    }
+
+    #[test]
+    fn test_double_negate_on_and_operand() {
+        let mut gb = GateBuilder::new("f_fanin".to_string(), GateBuilderOptions::no_opt());
+        let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
+        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
+        let i2 = gb.add_input("i2".to_string(), 1).get_lsb(0).clone();
+        let inner_and_op = gb.add_and_binary(i0, i1);
+        let root_and_op = gb.add_and_binary(inner_and_op, i2);
+        gb.add_output("o".to_string(), root_and_op.into());
+        let g_original = gb.build();
+        let mut g_transformed = g_original.clone();
+
+        let mut transform = DoubleNegateTransform::new();
+        let candidates = transform.find_candidates(&g_transformed, TransformDirection::Forward);
+
+        let target_loc = candidates
+            .iter()
+            .find(
+                |loc| matches!(loc, TransformLocation::Operand(r, false) if *r == root_and_op.node),
+            )
+            .expect("Candidate not found");
+
+        transform
+            .apply(&mut g_transformed, target_loc, TransformDirection::Forward)
+            .unwrap();
+        assert_ne!(g_original.to_string(), g_transformed.to_string());
+
+        transform
+            .apply(&mut g_transformed, target_loc, TransformDirection::Backward)
+            .unwrap();
+        assert_eq!(g_original.to_string(), g_transformed.to_string());
+    }
+
+    #[test]
+    fn test_do_double_negate_primitive() {
+        // Manually construct gates for primitive test
+        // Nodes: 0: Literal(false), 1: Input(i0), 2: Input(i1), 3: And2(i0, i1)
+        let mut gates_vec = vec![
+            AigNode::Literal(false),
+            AigNode::Input {
+                name: "i0".to_string(),
+                lsb_index: 0,
+            },
+            AigNode::Input {
+                name: "i1".to_string(),
+                lsb_index: 0,
+            },
+            AigNode::And2 {
+                a: AigOperand {
+                    node: AigRef { id: 1 },
+                    negated: false,
+                },
+                b: AigOperand {
+                    node: AigRef { id: 2 },
+                    negated: false,
+                },
+                tags: None,
+            },
+        ];
+        let initial_op = AigOperand {
+            node: AigRef { id: 3 },
+            negated: false,
+        }; // Targeting the And2 gate
+
+        // Original state: And2(i0, i1) (negated=false)
+        // Children: i0 (negated=false), i1 (negated=false)
+        match &gates_vec[initial_op.node.id] {
+            AigNode::And2 { a, b, .. } => {
+                assert!(!initial_op.negated);
+                assert!(!a.negated);
+                assert!(!b.negated);
+            }
+            _ => panic!("Expected And2 gate"),
+        }
+
+        let result_op = test_do_double_negate_primitive_direct(&mut gates_vec, initial_op).unwrap();
+
+        // After double negation on the And2 node itself:
+        // Operand to And2 is now negated: !And2(...)
+        // Children of And2 are now negated: And2(!i0, !i1)
+        assert!(result_op.negated, "Outer operand should be negated");
+        match &gates_vec[result_op.node.id] {
+            // result_op.node is same as initial_op.node
+            AigNode::And2 { a, b, .. } => {
+                assert!(a.negated, "Child a should be negated");
+                assert!(b.negated, "Child b should be negated");
+            }
+            _ => panic!("Expected And2 gate after transform"),
+        }
+
+        // Apply again to reverse
+        let final_op = test_do_double_negate_primitive_direct(&mut gates_vec, result_op).unwrap();
+        assert!(
+            !final_op.negated,
+            "Outer operand should be un-negated after second application"
+        );
+        match &gates_vec[final_op.node.id] {
+            AigNode::And2 { a, b, .. } => {
+                assert!(!a.negated, "Child a should be un-negated");
+                assert!(!b.negated, "Child b should be un-negated");
+            }
+            _ => panic!("Expected And2 gate after second transform"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Operand node for do_double_negate must be an And2 gate")]
+    fn test_do_double_negate_on_input_node_fails() {
+        // Manually construct: 0: Literal(false), 1: Input(i0)
+        let mut gates_vec = vec![
+            AigNode::Literal(false),
+            AigNode::Input {
+                name: "i0".to_string(),
+                lsb_index: 0,
+            },
+        ];
+        let op_on_input = AigOperand {
+            node: AigRef { id: 1 },
+            negated: false,
+        }; // Targeting the input node
+           // This should panic because do_double_negate expects an And2 gate
+        test_do_double_negate_primitive_direct(&mut gates_vec, op_on_input).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "Operand node ID out of bounds")]
+    fn test_do_double_negate_out_of_bounds() {
+        let mut gates_vec = vec![AigNode::Literal(false)]; // Only literal false
+        let op_out_of_bounds = AigOperand {
+            node: AigRef { id: 100 },
+            negated: false,
+        }; // ID 100 is out of bounds
+           // This should panic
+        test_do_double_negate_primitive_direct(&mut gates_vec, op_out_of_bounds).unwrap();
     }
 }

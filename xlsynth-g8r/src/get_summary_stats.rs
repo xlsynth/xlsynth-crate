@@ -31,8 +31,9 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
             depths.insert(operand.node, 0);
         }
     }
-    for (gate_id, gate) in gate_fn.gates.iter().enumerate() {
-        let gate_ref = gate::AigRef { id: gate_id };
+
+    for gate_ref in gate_fn.post_order_refs() {
+        let gate: &AigNode = &gate_fn.gates[gate_ref.id];
         match gate {
             &AigNode::Input { .. } => {
                 continue;
