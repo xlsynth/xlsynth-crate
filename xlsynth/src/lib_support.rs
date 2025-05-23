@@ -140,9 +140,7 @@ fn cstring_and_ptr(name: &str) -> (CString, *const std::os::raw::c_char) {
 
 /// Like [`cstring_and_ptr`] but for optional strings. The returned pointer is
 /// null if the option is `None`.
-fn optional_cstring_and_ptr(
-    name: Option<&str>,
-) -> (Option<CString>, *const std::os::raw::c_char) {
+fn optional_cstring_and_ptr(name: Option<&str>) -> (Option<CString>, *const std::os::raw::c_char) {
     if let Some(s) = name {
         let cstr = CString::new(s).unwrap();
         let ptr = cstr.as_ptr();
@@ -309,7 +307,8 @@ pub(crate) fn xls_function_builder_new(
     should_verify: bool,
 ) -> Arc<RwLock<IrFnBuilderPtr>> {
     let (_name_cstr, name_ptr) = cstring_and_ptr(name);
-    let fn_builder = unsafe { xlsynth_sys::xls_function_builder_create(name_ptr, package, should_verify) };
+    let fn_builder =
+        unsafe { xlsynth_sys::xls_function_builder_create(name_ptr, package, should_verify) };
     assert!(!fn_builder.is_null());
     Arc::new(RwLock::new(IrFnBuilderPtr { ptr: fn_builder }))
 }
