@@ -30,6 +30,8 @@ pub enum TransformKind {
     RewireOperand,
     PushNegation,
     MergeEquivLeaves,
+    SplitFanout,
+    MergeFanout,
 }
 
 impl fmt::Display for TransformKind {
@@ -57,6 +59,8 @@ impl fmt::Display for TransformKind {
             TransformKind::RewireOperand => write!(f, "RewireOp"),
             TransformKind::PushNegation => write!(f, "PushNeg"),
             TransformKind::MergeEquivLeaves => write!(f, "MergeLeaves"),
+            TransformKind::SplitFanout => write!(f, "SplitFan"),
+            TransformKind::MergeFanout => write!(f, "MergeFan"),
         }
     }
 }
@@ -94,6 +98,10 @@ pub enum TransformLocation {
         parent: AigRef,
         is_rhs: bool,
         old_op: AigOperand,
+    },
+    FanoutEdge {
+        parent: AigRef,
+        child: AigRef,
     },
 }
 
