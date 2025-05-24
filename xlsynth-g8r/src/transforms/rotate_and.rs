@@ -335,8 +335,9 @@ mod tests {
         let i3 = gb.add_input("i3".to_string(), 1).get_lsb(0).clone();
         let inner_and = gb.add_and_binary(i0, i1); // (i0 & i1)
         let outer_and1 = gb.add_and_binary(inner_and, i2); // ((i0 & i1) & i2)
-        let _outer_and2 = gb.add_and_binary(inner_and, i3); // ((i0 & i1) & i3) - inner_and has fanout 2
+        let outer_and2 = gb.add_and_binary(inner_and, i3); // ((i0 & i1) & i3) - inner_and has fanout 2
         gb.add_output("o1".to_string(), outer_and1.into());
+        gb.add_output("o2".to_string(), outer_and2.into()); // Add second output to ensure inner_and has fanout 2
         let mut g = gb.build();
         let res = rotate_and_right_primitive(&mut g, outer_and1.node);
         assert!(res.is_err());
@@ -355,8 +356,9 @@ mod tests {
         let i3 = gb.add_input("i3".to_string(), 1).get_lsb(0).clone();
         let inner_and = gb.add_and_binary(i1, i2); // (i1 & i2)
         let outer_and1 = gb.add_and_binary(i0, inner_and); // (i0 & (i1 & i2))
-        let _outer_and2 = gb.add_and_binary(i3, inner_and); // (i3 & (i1 & i2)) - inner_and has fanout 2
+        let outer_and2 = gb.add_and_binary(i3, inner_and); // (i3 & (i1 & i2)) - inner_and has fanout 2
         gb.add_output("o1".to_string(), outer_and1.into());
+        gb.add_output("o2".to_string(), outer_and2.into()); // Add second output to ensure inner_and has fanout 2
         let mut g = gb.build();
         let res = rotate_and_left_primitive(&mut g, outer_and1.node);
         assert!(res.is_err());
