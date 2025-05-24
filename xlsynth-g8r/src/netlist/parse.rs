@@ -523,8 +523,6 @@ impl<R: Read + 'static> TokenScanner<R> {
             Some(c) => c,
             None => return Ok(None),
         };
-        // Debug: log char_buf when encountering '('
-        // (char_buf logging removed for noise reduction)
         // Handle annotation: use only peekc/popc, no direct char_buf access
         if c == '(' {
             // Temporarily pop '(', peek next char, and restore if not annotation

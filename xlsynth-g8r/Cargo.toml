@@ -22,7 +22,7 @@ half = "2.6"
 blake3 = "1.5"
 once_cell = "1.19"
 bitvec = "1.0.1"
-rand = "0.8.5"
+rand = { version = "0.8.5", features = ["std"] }
 varisat = "0.2.2"
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
@@ -31,6 +31,11 @@ prost = "0.12.6"
 prost-types = "0.12.6"
 prost-reflect = { version = "0.12.0", features = ["text-format"] }
 string-interner = "0.14"
+anyhow = "1.0.86"
+rand_pcg = "0.3.1"
+ahash = "0.8.12"
+rand_core = { version = "0.9.3", features = ["std"] }
+ctrlc = { version = "3.4.4", features = ["termination"] }
 
 [dev-dependencies]
 anyhow = "1.0.86"
@@ -70,10 +75,18 @@ path = "src/liberty/try_parse.rs"
 name = "check-ir-equivalence"
 path = "src/bin/check-ir-equivalence.rs"
 
+[[bin]]
+name = "mcmc-driver"
+path = "src/bin/mcmc-driver.rs"
+
 [[bench]]
 name = "bf16_mul_gatesim_bench"
 harness = false
 
 [[bench]]
 name = "gatify_bench"
+harness = false
+
+[[bench]]
+name = "mcmc_benchmark"
 harness = false

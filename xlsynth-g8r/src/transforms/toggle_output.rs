@@ -1,121 +1,173 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use rand::seq::SliceRandom;
-use rand::Rng;
+use crate::gate::{AigBitVector, AigOperand, GateFn};
+use crate::transforms::transform_trait::{
+    Transform, TransformDirection, TransformKind, TransformLocation,
+};
+use anyhow::{anyhow, Result};
 
-use crate::gate::GateFn;
+/// Primitive: Inverts a single bit in one of the primary output ports.
+/// Also inverts the `negated` attribute on the corresponding `AigOperand`.
+fn do_toggle_output_bit(g: &mut GateFn, output_idx: usize, bit_idx: usize) -> Result<()> {
+    if output_idx >= g.outputs.len() {
+        return Err(anyhow!(
+            "Output index {} out of bounds ({} outputs)",
+            output_idx,
+            g.outputs.len()
+        ));
+    }
+    let output_spec = &mut g.outputs[output_idx];
+    if bit_idx >= output_spec.bit_vector.get_bit_count() {
+        return Err(anyhow!(
+            "Bit index {} out of bounds for output '{}' ({} bits)",
+            bit_idx,
+            output_spec.name,
+            output_spec.bit_vector.get_bit_count()
+        ));
+    }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OutputBitLoc {
-    pub out_idx: usize,
-    pub bit_idx: usize,
+    let mut current_ops: Vec<AigOperand> =
+        output_spec.bit_vector.iter_lsb_to_msb().copied().collect();
+    if bit_idx < current_ops.len() {
+        current_ops[bit_idx].negated = !current_ops[bit_idx].negated;
+        output_spec.bit_vector = AigBitVector::from_lsb_is_index_0(&current_ops);
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Bit index {} out of bounds for collected ops ({} ops) for output '{}'",
+            bit_idx,
+            current_ops.len(),
+            output_spec.name
+        ))
+    }
 }
 
-/// Toggles the negation flag on a specific output bit.
-///
-/// Returns an error if the indices are out of range.
-pub fn toggle_output_bit(g: &mut GateFn, loc: OutputBitLoc) -> Result<(), &'static str> {
-    if loc.out_idx >= g.outputs.len() {
-        return Err("toggle_output_bit: out_idx out of range");
+#[derive(Debug)]
+pub struct ToggleOutputBitTransform;
+
+impl ToggleOutputBitTransform {
+    pub fn new() -> Self {
+        ToggleOutputBitTransform
     }
-    let bv = &mut g.outputs[loc.out_idx].bit_vector;
-    if loc.bit_idx >= bv.get_bit_count() {
-        return Err("toggle_output_bit: bit_idx out of range");
-    }
-    let op = *bv.get_lsb(loc.bit_idx);
-    let mut new_op = op;
-    new_op.negated = !new_op.negated;
-    bv.set_lsb(loc.bit_idx, new_op);
-    Ok(())
 }
 
-/// Picks a random output bit and toggles its negation flag.
-///
-/// Returns the location of the toggled bit on success.
-pub fn toggle_output_bit_rand<R: Rng + ?Sized>(
-    g: &mut GateFn,
-    rng: &mut R,
-) -> Result<OutputBitLoc, &'static str> {
-    if g.outputs.is_empty() {
-        return Err("toggle_output_bit_rand: no outputs");
+impl Transform for ToggleOutputBitTransform {
+    fn kind(&self) -> TransformKind {
+        TransformKind::ToggleOutputBit
     }
-    let mut candidates = Vec::new();
-    for (out_idx, out) in g.outputs.iter().enumerate() {
-        for bit_idx in 0..out.get_bit_count() {
-            candidates.push(OutputBitLoc { out_idx, bit_idx });
+
+    fn find_candidates(
+        &mut self,
+        g: &GateFn,
+        _direction: TransformDirection,
+    ) -> Vec<TransformLocation> {
+        let mut candidates = Vec::new();
+        for (output_idx, output_spec) in g.outputs.iter().enumerate() {
+            for bit_idx in 0..output_spec.bit_vector.get_bit_count() {
+                candidates.push(TransformLocation::OutputPortBit {
+                    output_idx,
+                    bit_idx,
+                });
+            }
+        }
+        candidates
+    }
+
+    fn apply(
+        &self,
+        g: &mut GateFn,
+        candidate_location: &TransformLocation,
+        _direction: TransformDirection, // This transform is its own inverse
+    ) -> Result<()> {
+        match candidate_location {
+            TransformLocation::OutputPortBit {
+                output_idx,
+                bit_idx,
+            } => do_toggle_output_bit(g, *output_idx, *bit_idx),
+            _ => Err(anyhow!(
+                "Invalid location type for ToggleOutputBitTransform: {:?}",
+                candidate_location
+            )),
         }
     }
-    if candidates.is_empty() {
-        return Err("toggle_output_bit_rand: no bits to toggle");
-    }
-    let loc = *candidates.choose(rng).unwrap();
-    toggle_output_bit(g, loc)?;
-    Ok(loc)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
+    use crate::{
+        gate::AigRef,
+        gate_builder::{GateBuilder, GateBuilderOptions},
+    };
 
     #[test]
-    fn test_toggle_output_bit_self_inverse() {
+    fn test_toggle_output_bit_transform_applies_and_reverses() {
         let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
         let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
-        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
-        let a = gb.add_and_binary(i0, i1);
-        gb.add_output("o".to_string(), a.into());
-        let g1 = gb.build();
+        gb.add_output("o0".to_string(), i0.into());
+        let g_original = gb.build();
+        let mut g_transformed = g_original.clone();
 
-        let mut g2 = g1.clone();
-        let loc = OutputBitLoc {
-            out_idx: 0,
-            bit_idx: 0,
-        };
-        toggle_output_bit(&mut g2, loc).unwrap();
-        toggle_output_bit(&mut g2, loc).unwrap();
-        assert_eq!(g1.to_string(), g2.to_string());
+        let mut transform = ToggleOutputBitTransform::new();
+        let candidates = transform.find_candidates(&g_transformed, TransformDirection::Forward);
+        assert!(!candidates.is_empty(), "Should find candidates");
+
+        let candidate_loc = &candidates[0];
+
+        let original_output_negation = g_transformed.outputs[0].bit_vector.get_lsb(0).negated;
+        transform
+            .apply(
+                &mut g_transformed,
+                candidate_loc,
+                TransformDirection::Forward,
+            )
+            .unwrap();
+        let transformed_output_negation = g_transformed.outputs[0].bit_vector.get_lsb(0).negated;
+        assert_ne!(
+            original_output_negation, transformed_output_negation,
+            "Forward transform should change negation"
+        );
+
+        transform
+            .apply(
+                &mut g_transformed,
+                candidate_loc,
+                TransformDirection::Backward,
+            )
+            .unwrap();
+        let reverted_output_negation = g_transformed.outputs[0].bit_vector.get_lsb(0).negated;
+        assert_eq!(
+            original_output_negation, reverted_output_negation,
+            "Backward transform should revert negation"
+        );
+        assert_eq!(
+            g_original.to_string(),
+            g_transformed.to_string(),
+            "Graph should be identical after forward and backward transform"
+        );
     }
 
     #[test]
-    fn test_toggle_output_bit_rand_round_trip() {
+    fn test_toggle_output_bit_transform_invalid_location() {
         let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
         let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
-        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
-        let a = gb.add_and_binary(i0, i1);
-        gb.add_output("o".to_string(), a.into());
+        gb.add_output("o0".to_string(), i0.into());
         let mut g = gb.build();
-        let pre = g.to_string();
-        let mut rng = StdRng::seed_from_u64(123);
-        let loc = toggle_output_bit_rand(&mut g, &mut rng).unwrap();
-        toggle_output_bit(&mut g, loc).unwrap();
-        let post = g.to_string();
-        assert_eq!(pre, post);
+        let transform = ToggleOutputBitTransform::new();
+        let invalid_loc = TransformLocation::Node(AigRef { id: 0 });
+        assert!(transform
+            .apply(&mut g, &invalid_loc, TransformDirection::Forward)
+            .is_err());
     }
 
     #[test]
-    fn test_toggle_output_bit_invalid_indices() {
+    fn test_do_toggle_output_bit_out_of_bounds() {
         let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
         let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
-        gb.add_output("o".to_string(), i0.into());
+        gb.add_output("o0".to_string(), i0.into());
         let mut g = gb.build();
-        let res = toggle_output_bit(
-            &mut g,
-            OutputBitLoc {
-                out_idx: 1,
-                bit_idx: 0,
-            },
-        );
-        assert!(res.is_err());
-        let res = toggle_output_bit(
-            &mut g,
-            OutputBitLoc {
-                out_idx: 0,
-                bit_idx: 1,
-            },
-        );
-        assert!(res.is_err());
+
+        assert!(do_toggle_output_bit(&mut g, 1, 0).is_err());
+        assert!(do_toggle_output_bit(&mut g, 0, 1).is_err());
     }
 }
