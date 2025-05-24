@@ -32,7 +32,6 @@ const INITIAL_TEMPERATURE: f64 = 5.0;
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
 const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 1;
-const PERIODIC_DUMP_ITERATION_INTERVAL: u64 = 5000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cost {
@@ -295,6 +294,7 @@ pub fn mcmc(
     objective: Objective,
     periodic_dump_dir: Option<PathBuf>,
     paranoid: bool,
+    checkpoint_interval: u64,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -475,56 +475,58 @@ pub fn mcmc(
         }
 
         // Periodic dump of current best GateFn and its stats.
-        if let Some(ref dump_dir) = periodic_dump_dir {
-            if iterations_count % PERIODIC_DUMP_ITERATION_INTERVAL == 0 {
-                // Ensure directory exists.
-                let _ = std::fs::create_dir_all(dump_dir);
-                let g8r_path = dump_dir.join(format!("best_iter_{}.g8r", iterations_count));
-                let stats_path =
-                    dump_dir.join(format!("best_iter_{}.stats.json", iterations_count));
+        if checkpoint_interval > 0 {
+            if let Some(ref dump_dir) = periodic_dump_dir {
+                if iterations_count % checkpoint_interval == 0 {
+                    // Ensure directory exists.
+                    let _ = std::fs::create_dir_all(dump_dir);
+                    let g8r_path = dump_dir.join(format!("best_iter_{}.g8r", iterations_count));
+                    let stats_path =
+                        dump_dir.join(format!("best_iter_{}.stats.json", iterations_count));
 
-                // Before dumping, verify equivalence to original for extra safety.
-                let equiv_ok = oracle_equiv_sat(&original_gfn_for_check, &best_gfn);
-                if !equiv_ok {
-                    panic!(
-                        "[mcmc] Equivalence failure during checkpoint at iteration {} (best_gfn not equivalent to original). Aborting.",
-                        iterations_count
-                    );
-                }
+                    // Before dumping, verify equivalence to original for extra safety.
+                    let equiv_ok = oracle_equiv_sat(&original_gfn_for_check, &best_gfn);
+                    if !equiv_ok {
+                        panic!(
+                            "[mcmc] Equivalence failure during checkpoint at iteration {} (best_gfn not equivalent to original). Aborting.",
+                            iterations_count
+                        );
+                    }
 
-                if let Err(e) = std::fs::write(&g8r_path, best_gfn.to_string()) {
-                    eprintln!(
-                        "[mcmc] Warning: Failed to write periodic GateFn dump to {}: {:?}",
-                        g8r_path.display(),
-                        e
-                    );
-                }
+                    if let Err(e) = std::fs::write(&g8r_path, best_gfn.to_string()) {
+                        eprintln!(
+                            "[mcmc] Warning: Failed to write periodic GateFn dump to {}: {:?}",
+                            g8r_path.display(),
+                            e
+                        );
+                    }
 
-                let stats = get_summary_stats::get_summary_stats(&best_gfn);
-                match serde_json::to_string_pretty(&stats) {
-                    Ok(json) => {
-                        if let Err(e) = std::fs::write(&stats_path, json) {
+                    let stats = get_summary_stats::get_summary_stats(&best_gfn);
+                    match serde_json::to_string_pretty(&stats) {
+                        Ok(json) => {
+                            if let Err(e) = std::fs::write(&stats_path, json) {
+                                eprintln!(
+                                    "[mcmc] Warning: Failed to write periodic stats dump to {}: {:?}",
+                                    stats_path.display(),
+                                    e
+                                );
+                            } else {
+                                // Both GateFn and stats written successfully
+                                println!(
+                                    "[mcmc] Iter {}: checkpoint written to {} and {} | Equivalence: {}",
+                                    iterations_count,
+                                    g8r_path.display(),
+                                    stats_path.display(),
+                                    if equiv_ok { "OK" } else { "FAIL" }
+                                );
+                            }
+                        }
+                        Err(e) => {
                             eprintln!(
-                                "[mcmc] Warning: Failed to write periodic stats dump to {}: {:?}",
-                                stats_path.display(),
-                                e
-                            );
-                        } else {
-                            // Both GateFn and stats written successfully
-                            println!(
-                                "[mcmc] Iter {}: checkpoint written to {} and {} | Equivalence: {}",
-                                iterations_count,
-                                g8r_path.display(),
-                                stats_path.display(),
-                                if equiv_ok { "OK" } else { "FAIL" }
+                                "[mcmc] Warning: Failed to serialize stats for periodic dump at iteration {}: {:?}",
+                                iterations_count, e
                             );
                         }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[mcmc] Warning: Failed to serialize stats for periodic dump at iteration {}: {:?}",
-                            iterations_count, e
-                        );
                     }
                 }
             }

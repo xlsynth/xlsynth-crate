@@ -195,7 +195,7 @@ impl Transform for RotateAndRightTransform {
     }
 
     fn always_equivalent(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -266,7 +266,7 @@ impl Transform for RotateAndLeftTransform {
     }
 
     fn always_equivalent(&self) -> bool {
-        true
+        false
     }
 }
 

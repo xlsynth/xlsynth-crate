@@ -52,6 +52,10 @@ struct CliArgs {
     /// detected.
     #[clap(long)]
     paranoid: bool,
+
+    /// Iterations between checkpoints written to disk (0 to disable).
+    #[clap(long, value_parser, default_value_t = 5000)]
+    checkpoint_iters: u64,
 }
 
 fn main() -> Result<()> {
@@ -148,6 +152,7 @@ fn main() -> Result<()> {
         cli.metric,
         Some(output_dir_for_dumps.clone()),
         cli.paranoid,
+        cli.checkpoint_iters,
     );
 
     if !running.load(Ordering::SeqCst) {
