@@ -14,7 +14,31 @@ use std::collections::{HashMap, HashSet};
 use crate::gate::{AigNode, AigRef, GateFn};
 use crate::propose_equiv::EquivNode;
 use crate::topo::extract_cone;
+use varisat::ExtendFormula;
 use xlsynth::IrBits;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EquivResult {
+    Proved,
+    Disproved(Vec<IrBits>),
+}
+
+/// Context holding a SAT solver so clause memory can be reused across calls.
+pub struct Ctx<'a> {
+    solver: varisat::Solver<'a>,
+}
+
+impl<'a> Ctx<'a> {
+    pub fn new() -> Self {
+        Self {
+            solver: varisat::Solver::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.solver = varisat::Solver::new();
+    }
+}
 
 pub struct ValidationResult {
     /// Sets that were proven equivalent, i.e. any value in set i can be
@@ -185,6 +209,125 @@ fn solver_model_to_cex(
     // Now map_to_inputs should receive a map covering all expected inputs
     let cex = gate_fn.map_to_inputs(inputs_map);
     cex
+}
+
+fn build_gate_fn(
+    solver: &mut impl varisat::ExtendFormula,
+    gate_fn: &GateFn,
+    input_lits: &[Vec<varisat::Lit>],
+) -> (HashMap<AigRef, varisat::Lit>, Vec<varisat::Lit>) {
+    let mut input_map = HashMap::new();
+    for (i, inp) in gate_fn.inputs.iter().enumerate() {
+        for (j, op) in inp.bit_vector.iter_lsb_to_msb().enumerate() {
+            input_map.insert(op.node, input_lits[i][j]);
+        }
+    }
+
+    let output_refs: Vec<AigRef> = gate_fn
+        .outputs
+        .iter()
+        .flat_map(|o| o.bit_vector.iter_lsb_to_msb())
+        .map(|op| op.node)
+        .collect();
+    let (cone_gates, cone_inputs) = extract_cone(&output_refs, &gate_fn.gates);
+
+    let mut map = HashMap::new();
+
+    for g in &cone_gates {
+        let lit = solver.new_lit();
+        map.insert(*g, lit);
+    }
+
+    for input in &cone_inputs {
+        let lit = *input_map
+            .get(input)
+            .expect("cone input should be in primary input map");
+        map.insert(*input, lit);
+    }
+
+    for g in &cone_gates {
+        let out_lit = map[g];
+        match &gate_fn.gates[g.id] {
+            AigNode::Literal(v) => {
+                if *v {
+                    solver.add_clause(&[out_lit]);
+                } else {
+                    solver.add_clause(&[!out_lit]);
+                }
+            }
+            AigNode::And2 { a, b, .. } => {
+                let a_lit = if a.negated {
+                    !map[&a.node]
+                } else {
+                    map[&a.node]
+                };
+                let b_lit = if b.negated {
+                    !map[&b.node]
+                } else {
+                    map[&b.node]
+                };
+                add_tseitsin_and(solver, a_lit, b_lit, out_lit);
+            }
+            AigNode::Input { .. } => {}
+        }
+    }
+
+    let mut outputs = Vec::new();
+    for out in &gate_fn.outputs {
+        for bit in out.bit_vector.iter_lsb_to_msb() {
+            let base = map[&bit.node];
+            outputs.push(if bit.negated { !base } else { base });
+        }
+    }
+
+    (map, outputs)
+}
+
+/// Checks equivalence of two gate functions using a SAT solver.
+pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult {
+    ctx.reset();
+
+    assert_eq!(a.inputs.len(), b.inputs.len());
+    assert_eq!(a.outputs.len(), b.outputs.len());
+
+    let mut input_lits = Vec::new();
+    for (ia, ib) in a.inputs.iter().zip(b.inputs.iter()) {
+        assert_eq!(ia.get_bit_count(), ib.get_bit_count());
+        let mut lits = Vec::new();
+        for _ in 0..ia.get_bit_count() {
+            lits.push(ctx.solver.new_lit());
+        }
+        input_lits.push(lits);
+    }
+
+    let (_map_a, outputs_a) = build_gate_fn(&mut ctx.solver, a, &input_lits);
+    let (_map_b, outputs_b) = build_gate_fn(&mut ctx.solver, b, &input_lits);
+
+    let mut miters = Vec::new();
+    for (la, lb) in outputs_a.iter().zip(outputs_b.iter()) {
+        let m = ctx.solver.new_lit();
+        add_tseitsin_xor(&mut ctx.solver, *la, *lb, m);
+        miters.push(m);
+    }
+
+    ctx.solver.add_clause(&miters);
+    match ctx.solver.solve() {
+        Ok(false) => EquivResult::Proved,
+        Ok(true) => {
+            let model = ctx.solver.model().expect("model available when SAT");
+            let model_set: HashSet<varisat::Lit> = model.iter().cloned().collect();
+            let mut map = HashMap::new();
+            for (i, inp) in a.inputs.iter().enumerate() {
+                for (j, op) in inp.bit_vector.iter_lsb_to_msb().enumerate() {
+                    let lit = input_lits[i][j];
+                    map.insert(op.node, model_set.contains(&lit));
+                }
+            }
+            let cex = a.map_to_inputs(map);
+            EquivResult::Disproved(cex)
+        }
+        Err(e) => panic!("Solver error: {:?}", e),
+    }
 }
 
 pub fn validate_equiv(
