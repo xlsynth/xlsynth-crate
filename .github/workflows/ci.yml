@@ -161,6 +161,12 @@ jobs:
           fi
           cargo test --features with-boolector-system --workspace
 
+      - name: Ensure benches compile
+        env:
+          BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
+          LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+        run: cargo bench --workspace --no-run
+
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
   # -----------------------------------------------------------

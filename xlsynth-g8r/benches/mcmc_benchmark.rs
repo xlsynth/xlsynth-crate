@@ -21,7 +21,6 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
 
     group.bench_function("mcmc_iteration_bf16_add", |b| {
         let mut rng = Pcg64Mcg::seed_from_u64(12345);
-        let mut all_transforms = get_all_transforms();
         let initial_temp = 20.0;
 
         b.iter_batched(
@@ -30,18 +29,19 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                 let current_cost_cloned = cost(&current_gfn_cloned);
                 let best_gfn_cloned = start_gfn.clone();
                 let best_cost_cloned = current_cost_cloned;
-
+                let all_transforms = get_all_transforms();
                 (
                     current_gfn_cloned,
                     current_cost_cloned,
                     best_gfn_cloned,
                     best_cost_cloned,
+                    all_transforms,
                 )
             },
-            |(current_gfn, current_cost, mut best_gfn, mut best_cost)| {
+            |(current_gfn, current_cost, mut best_gfn, mut best_cost, all_transforms)| {
                 let mut context = McmcContext {
                     rng: &mut rng,
-                    all_transforms: &mut all_transforms,
+                    all_transforms,
                 };
                 let _result: McmcIterationOutput = mcmc_iteration(
                     current_gfn,
