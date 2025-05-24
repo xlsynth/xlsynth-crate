@@ -5,6 +5,7 @@ pub mod balance_and_tree;
 pub mod double_negate;
 pub mod duplicate;
 pub mod false_and;
+pub mod push_negation;
 pub mod redundant_and;
 pub mod rewire_operand;
 pub mod rotate_and;
@@ -22,6 +23,7 @@ use crate::transforms::true_and::{InsertTrueAndTransform, RemoveTrueAndTransform
 use balance_and_tree::{BalanceAndTreeTransform, UnbalanceAndTreeTransform};
 use double_negate::DoubleNegateTransform;
 use duplicate::{DuplicateGateTransform, UnduplicateGateTransform};
+use push_negation::PushNegationTransform;
 use redundant_and::{InsertRedundantAndTransform, RemoveRedundantAndTransform};
 use rewire_operand::RewireOperandTransform;
 use swap_operands::SwapOperandsTransform;
@@ -53,5 +55,6 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(BalanceAndTreeTransform::new()),
         Box::new(UnbalanceAndTreeTransform::new()),
         Box::new(RewireOperandTransform::new()),
+        Box::new(PushNegationTransform::new()),
     ]
 }
