@@ -445,7 +445,7 @@ mod tests {
         gb.add_output("o".to_string(), and_gate_op.into());
         let mut g = gb.build();
 
-        let mut transform = InsertTrueAndTransform::new();
+        let transform = InsertTrueAndTransform::new();
         // Candidate should be Operand(and_gate_ref, is_rhs=true) which refers to
         // const_false_ref
         let candidate_loc = TransformLocation::Operand(and_gate_op.node, true);

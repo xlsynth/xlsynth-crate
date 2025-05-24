@@ -128,6 +128,10 @@ impl Transform for InsertFalseAndTransform {
             )),
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -185,12 +189,16 @@ impl Transform for RemoveFalseAndTransform {
             )),
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::{AigNode, AigOperand};
+    use crate::gate::AigNode;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::test_utils::setup_simple_graph;
 
