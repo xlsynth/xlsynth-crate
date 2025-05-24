@@ -77,7 +77,7 @@ fn run_chain(
         seed,
         running,
         cfg.disabled_transforms.clone().unwrap_or_default(),
-        cfg.verbose,
+        cfg.verbose || cfg.paranoid,
         cfg.metric,
         None,
         cfg.paranoid,
