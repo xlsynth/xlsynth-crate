@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rand::distributions::Distribution;
+use rand::distributions::WeightedIndex;
 use rand::prelude::{Rng, SeedableRng, SliceRandom};
 use rand_pcg::Pcg64Mcg;
 
@@ -22,8 +24,9 @@ use crate::test_utils::{
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
 use crate::xls_ir::ir_parser;
+use clap::ValueEnum;
 
-const INITIAL_TEMPERATURE: f64 = 20.0;
+const INITIAL_TEMPERATURE: f64 = 5.0;
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
 const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 1;
@@ -81,6 +84,7 @@ impl Default for McmcStats {
 pub struct McmcContext<'a> {
     pub rng: &'a mut Pcg64Mcg,
     pub all_transforms: Vec<Box<dyn crate::transforms::transform_trait::Transform>>,
+    pub weights: Vec<f64>,
 }
 
 /// Details of what occurred during a single MCMC iteration attempt.
@@ -101,6 +105,24 @@ pub struct McmcIterationOutput {
     pub oracle_time_micros: u128, // Time spent in oracle, 0 if not run
 }
 
+/// Objective used to evaluate cost improvements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Objective {
+    Nodes,
+    Depth,
+    Product,
+}
+
+impl Objective {
+    fn metric(self, c: &Cost) -> u64 {
+        match self {
+            Objective::Nodes => c.nodes as u64,
+            Objective::Depth => c.depth as u64,
+            Objective::Product => (c.nodes as u64) * (c.depth as u64),
+        }
+    }
+}
+
 /// Performs a single iteration of the MCMC process.
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_iteration(
@@ -111,6 +133,7 @@ pub fn mcmc_iteration(
     best_cost: &mut Cost,  // Mutated if new best is found
     context: &mut McmcContext,
     temp: f64,
+    objective: Objective,
 ) -> McmcIterationOutput {
     let mut iteration_best_gfn_updated = false;
 
@@ -126,7 +149,8 @@ pub fn mcmc_iteration(
         };
     }
 
-    let chosen_transform_idx = context.rng.gen_range(0..context.all_transforms.len());
+    let dist = WeightedIndex::new(&context.weights).expect("non-empty weights");
+    let chosen_transform_idx = dist.sample(context.rng);
     let chosen_transform = &mut context.all_transforms[chosen_transform_idx];
     let current_transform_kind = chosen_transform.kind();
 
@@ -193,11 +217,13 @@ pub fn mcmc_iteration(
                     oracle_time_micros,
                 }
             } else {
-                if new_candidate_cost < current_cost
-                    || context.rng.gen::<f64>()
-                        < ((current_cost.nodes as f64 - new_candidate_cost.nodes as f64) / temp)
-                            .exp()
-                {
+                let curr_metric = objective.metric(&current_cost) as f64;
+                let new_metric = objective.metric(&new_candidate_cost) as f64;
+                let better = new_metric < curr_metric;
+                let accept_prob = ((curr_metric - new_metric) / temp).exp();
+                let metropolis = context.rng.gen::<f64>() < accept_prob;
+
+                if better || metropolis {
                     if new_candidate_cost < *best_cost {
                         *best_gfn = candidate_gfn.clone();
                         *best_cost = new_candidate_cost;
@@ -248,6 +274,7 @@ pub fn mcmc(
     running: Arc<AtomicBool>,
     disabled_transform_names: Vec<String>,
     verbose: bool,
+    objective: Objective,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -288,9 +315,12 @@ pub fn mcmc(
 
     let mut stats = McmcStats::default();
 
+    let weights = build_transform_weights(&all_available_transforms, objective);
+
     let mut mcmc_context = McmcContext {
         rng: &mut iteration_rng,
-        all_transforms: all_available_transforms, // Pass the filtered list
+        all_transforms: all_available_transforms,
+        weights,
     };
 
     let start_time = Instant::now();
@@ -346,6 +376,7 @@ pub fn mcmc(
             &mut best_cost,
             &mut mcmc_context, // Pass context here
             current_temp,
+            objective,
         );
         log::trace!("MCMC iteration completed: {:?}", iterations_count);
 
@@ -459,4 +490,33 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
         println!("Successfully gatified main function into GateFn.");
         Ok(gatify_output.gate_fn)
     }
+}
+
+/// Returns a vector of weights for the given transforms and objective.
+pub fn build_transform_weights<
+    T: AsRef<[Box<dyn crate::transforms::transform_trait::Transform>]>,
+>(
+    transforms: T,
+    objective: Objective,
+) -> Vec<f64> {
+    use crate::transforms::transform_trait::TransformKind;
+    fn weight_for_kind(k: TransformKind, obj: Objective) -> f64 {
+        use TransformKind::*;
+        match obj {
+            Objective::Nodes | Objective::Product => match k {
+                RemoveRedundantAnd | RemoveFalseAnd | RemoveTrueAnd | UnduplicateGate => 3.0,
+                InsertRedundantAnd | InsertFalseAnd | InsertTrueAnd | DuplicateGate => 0.5,
+                _ => 1.0,
+            },
+            Objective::Depth => match k {
+                RotateAndRight | RotateAndLeft => 3.0,
+                _ => 1.0,
+            },
+        }
+    }
+    transforms
+        .as_ref()
+        .iter()
+        .map(|t| weight_for_kind(t.kind(), objective))
+        .collect()
 }

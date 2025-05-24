@@ -4,7 +4,10 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use rand::prelude::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::time::Duration;
-use xlsynth_g8r::mcmc_logic::{cost, load_start, mcmc_iteration, McmcContext, McmcIterationOutput};
+use xlsynth_g8r::mcmc_logic::{
+    build_transform_weights, cost, load_start, mcmc_iteration, McmcContext, McmcIterationOutput,
+    Objective,
+};
 use xlsynth_g8r::transforms::get_all_transforms;
 
 fn benchmark_mcmc_iteration(c: &mut Criterion) {
@@ -39,9 +42,12 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                 )
             },
             |(current_gfn, current_cost, mut best_gfn, mut best_cost, all_transforms)| {
+                let objective = Objective::Product;
+                let weights = build_transform_weights(&all_transforms, objective);
                 let mut context = McmcContext {
                     rng: &mut rng,
                     all_transforms,
+                    weights,
                 };
                 let _result: McmcIterationOutput = mcmc_iteration(
                     current_gfn,
@@ -50,6 +56,7 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     &mut best_cost,
                     &mut context,
                     initial_temp,
+                    objective,
                 );
             },
             criterion::BatchSize::SmallInput,
