@@ -116,7 +116,6 @@ impl Transform for RewireOperandTransform {
         } else {
             loc.old_op
         };
-<<<<<<< HEAD
 
         // Sanity checks to prevent cycles or self-loops.
         if target_op.node == loc.parent {
@@ -130,8 +129,6 @@ impl Transform for RewireOperandTransform {
             ));
         }
 
-=======
->>>>>>> af56463 (Add RewireOperand transform)
         rewire_operand_primitive(g, loc.parent, loc.is_rhs, target_op)
             .map(|_| ())
             .map_err(anyhow::Error::msg)
