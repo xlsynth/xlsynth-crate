@@ -7,6 +7,7 @@ pub mod redundant_and;
 pub mod rotate_and;
 pub mod swap_operands;
 pub mod swap_outputs;
+pub mod toggle_operand_negation;
 pub mod toggle_output;
 pub mod transform_trait;
 pub mod true_and;
@@ -19,6 +20,7 @@ use duplicate::{DuplicateGateTransform, UnduplicateGateTransform};
 use redundant_and::{InsertRedundantAndTransform, RemoveRedundantAndTransform};
 use swap_operands::SwapOperandsTransform;
 use swap_outputs::SwapOutputBitsTransform;
+use toggle_operand_negation::ToggleOperandNegationTransform;
 use toggle_output::ToggleOutputBitTransform;
 use transform_trait::Transform;
 
@@ -27,6 +29,7 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
     vec![
         Box::new(SwapOperandsTransform::new()),
         Box::new(ToggleOutputBitTransform::new()),
+        Box::new(ToggleOperandNegationTransform::new()),
         Box::new(DoubleNegateTransform::new()),
         Box::new(DuplicateGateTransform::new()),
         Box::new(UnduplicateGateTransform::new()),
