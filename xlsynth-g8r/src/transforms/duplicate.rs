@@ -197,6 +197,10 @@ impl Transform for DuplicateGateTransform {
             ))
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -330,6 +334,10 @@ impl Transform for UnduplicateGateTransform {
                 "Backward direction not supported for UnduplicateGateTransform"
             ))
         }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
     }
 }
 

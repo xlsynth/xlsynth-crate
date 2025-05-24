@@ -197,6 +197,10 @@ impl Transform for InsertRedundantAndTransform {
             )),
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -255,6 +259,10 @@ impl Transform for RemoveRedundantAndTransform {
                 candidate_location
             )),
         }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
     }
 }
 

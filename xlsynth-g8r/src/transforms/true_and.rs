@@ -227,6 +227,10 @@ impl Transform for InsertTrueAndTransform {
             )),
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
 }
 
 // --- RemoveTrueAnd Transform ---
@@ -290,6 +294,10 @@ impl Transform for RemoveTrueAndTransform {
                 candidate_location
             )),
         }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
     }
 }
 
