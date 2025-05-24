@@ -48,6 +48,7 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     rng: &mut rng,
                     all_transforms,
                     weights,
+                    sat_ctx: xlsynth_g8r::validate_equiv::Ctx::new(),
                 };
                 let _result: McmcIterationOutput = mcmc_iteration(
                     current_gfn,
