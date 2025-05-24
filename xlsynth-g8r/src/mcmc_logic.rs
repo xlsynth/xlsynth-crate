@@ -22,8 +22,9 @@ use crate::test_utils::{
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
 use crate::xls_ir::ir_parser;
+use clap::ValueEnum;
 
-const INITIAL_TEMPERATURE: f64 = 20.0;
+const INITIAL_TEMPERATURE: f64 = 5.0;
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
 const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 1;
@@ -101,6 +102,24 @@ pub struct McmcIterationOutput {
     pub oracle_time_micros: u128, // Time spent in oracle, 0 if not run
 }
 
+/// Objective used to evaluate cost improvements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Objective {
+    Nodes,
+    Depth,
+    Product,
+}
+
+impl Objective {
+    fn metric(self, c: &Cost) -> u64 {
+        match self {
+            Objective::Nodes => c.nodes as u64,
+            Objective::Depth => c.depth as u64,
+            Objective::Product => (c.nodes as u64) * (c.depth as u64),
+        }
+    }
+}
+
 /// Performs a single iteration of the MCMC process.
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_iteration(
@@ -111,6 +130,7 @@ pub fn mcmc_iteration(
     best_cost: &mut Cost,  // Mutated if new best is found
     context: &mut McmcContext,
     temp: f64,
+    objective: Objective,
 ) -> McmcIterationOutput {
     let mut iteration_best_gfn_updated = false;
 
@@ -193,11 +213,13 @@ pub fn mcmc_iteration(
                     oracle_time_micros,
                 }
             } else {
-                if new_candidate_cost < current_cost
-                    || context.rng.gen::<f64>()
-                        < ((current_cost.nodes as f64 - new_candidate_cost.nodes as f64) / temp)
-                            .exp()
-                {
+                let curr_metric = objective.metric(&current_cost) as f64;
+                let new_metric = objective.metric(&new_candidate_cost) as f64;
+                let better = new_metric < curr_metric;
+                let accept_prob = ((curr_metric - new_metric) / temp).exp();
+                let metropolis = context.rng.gen::<f64>() < accept_prob;
+
+                if better || metropolis {
                     if new_candidate_cost < *best_cost {
                         *best_gfn = candidate_gfn.clone();
                         *best_cost = new_candidate_cost;
@@ -346,6 +368,7 @@ pub fn mcmc(
             &mut best_cost,
             &mut mcmc_context, // Pass context here
             current_temp,
+            Objective::Nodes,
         );
         log::trace!("MCMC iteration completed: {:?}", iterations_count);
 
