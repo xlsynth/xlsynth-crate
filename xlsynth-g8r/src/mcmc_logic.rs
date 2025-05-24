@@ -25,6 +25,8 @@ use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
 use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
+use serde_json;
+use std::path::PathBuf;
 
 const INITIAL_TEMPERATURE: f64 = 5.0;
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
@@ -102,6 +104,8 @@ pub struct McmcIterationOutput {
     pub output_cost: Cost,  // Cost of output_gfn
     pub best_gfn_updated: bool,
     pub outcome: IterationOutcomeDetails,
+    pub transform_always_equivalent: bool,
+    pub transform: Option<TransformKind>,
     pub oracle_time_micros: u128, // Time spent in oracle, 0 if not run
 }
 
@@ -134,6 +138,7 @@ pub fn mcmc_iteration(
     context: &mut McmcContext,
     temp: f64,
     objective: Objective,
+    paranoid: bool,
 ) -> McmcIterationOutput {
     let mut iteration_best_gfn_updated = false;
 
@@ -146,6 +151,8 @@ pub fn mcmc_iteration(
             outcome: IterationOutcomeDetails::CandidateFailure, /* Or a new outcome? For now,
                                                                  * CandidateFailure */
             oracle_time_micros: 0,
+            transform_always_equivalent: true,
+            transform: None,
         };
     }
 
@@ -176,6 +183,8 @@ pub fn mcmc_iteration(
             best_gfn_updated: false,
             outcome: IterationOutcomeDetails::CandidateFailure,
             oracle_time_micros: 0,
+            transform_always_equivalent: true,
+            transform: Some(current_transform_kind),
         };
     }
 
@@ -198,7 +207,7 @@ pub fn mcmc_iteration(
             let new_candidate_cost = cost(&candidate_gfn);
             log::trace!("new_candidate_cost: {:?}", new_candidate_cost);
             let mut oracle_time_micros = 0u128;
-            let is_equiv = if chosen_transform.always_equivalent() {
+            let is_equiv = if chosen_transform.always_equivalent() && !paranoid {
                 true
             } else {
                 let oracle_start_time = Instant::now();
@@ -215,6 +224,8 @@ pub fn mcmc_iteration(
                     best_gfn_updated: false,
                     outcome: IterationOutcomeDetails::OracleFailure,
                     oracle_time_micros,
+                    transform_always_equivalent: chosen_transform.always_equivalent(),
+                    transform: Some(current_transform_kind),
                 }
             } else {
                 let curr_metric = objective.metric(&current_cost) as f64;
@@ -237,6 +248,8 @@ pub fn mcmc_iteration(
                             kind: current_transform_kind,
                         },
                         oracle_time_micros,
+                        transform_always_equivalent: chosen_transform.always_equivalent(),
+                        transform: Some(current_transform_kind),
                     }
                 } else {
                     McmcIterationOutput {
@@ -245,6 +258,8 @@ pub fn mcmc_iteration(
                         best_gfn_updated: false,
                         outcome: IterationOutcomeDetails::MetropolisReject,
                         oracle_time_micros,
+                        transform_always_equivalent: chosen_transform.always_equivalent(),
+                        transform: Some(current_transform_kind),
                     }
                 }
             }
@@ -261,6 +276,8 @@ pub fn mcmc_iteration(
                 best_gfn_updated: false,
                 outcome: IterationOutcomeDetails::ApplyFailure,
                 oracle_time_micros: 0,
+                transform_always_equivalent: true,
+                transform: Some(current_transform_kind),
             }
         }
     }
@@ -269,12 +286,15 @@ pub fn mcmc_iteration(
 /// Runs the MCMC optimization process.
 pub fn mcmc(
     initial_gfn_param: GateFn,
-    secs: u64,
+    max_iters: u64,
     seed: u64,
     running: Arc<AtomicBool>,
     disabled_transform_names: Vec<String>,
     verbose: bool,
     objective: Objective,
+    periodic_dump_dir: Option<PathBuf>,
+    paranoid: bool,
+    checkpoint_interval: u64,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -308,7 +328,9 @@ pub fn mcmc(
         all_available_transforms.len()
     );
 
-    let mut current_gfn = initial_gfn_param.clone();
+    let original_gfn_for_check = initial_gfn_param.clone(); // Keep original for later equivalence checks
+
+    let mut current_gfn = original_gfn_for_check.clone();
     let mut current_cost = cost(&current_gfn);
     let mut best_gfn = initial_gfn_param;
     let mut best_cost = current_cost;
@@ -324,19 +346,14 @@ pub fn mcmc(
     };
 
     let start_time = Instant::now();
-    let end_time = start_time + Duration::from_secs(secs);
-    let annealing_duration_secs = secs;
-
     let mut iterations_count: u64 = 0;
     let mut last_print_time = Instant::now();
 
-    while running.load(Ordering::SeqCst) && Instant::now() < end_time {
+    while running.load(Ordering::SeqCst) && iterations_count < max_iters {
         iterations_count += 1;
 
-        let time_since_start_secs = (Instant::now() - start_time).as_secs_f64();
-        let current_temp = INITIAL_TEMPERATURE
-            * (1.0 - time_since_start_secs / annealing_duration_secs as f64)
-                .max(MIN_TEMPERATURE_RATIO);
+        let progress_ratio = (iterations_count as f64) / (max_iters as f64);
+        let current_temp = INITIAL_TEMPERATURE * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
 
         // Print action about to be taken if verbose
         if verbose {
@@ -377,6 +394,7 @@ pub fn mcmc(
             &mut mcmc_context, // Pass context here
             current_temp,
             objective,
+            paranoid,
         );
         log::trace!("MCMC iteration completed: {:?}", iterations_count);
 
@@ -401,6 +419,13 @@ pub fn mcmc(
             IterationOutcomeDetails::OracleFailure => {
                 stats.rejected_oracle += 1;
                 // oracle_time_micros > 0 when this outcome occurs
+                if paranoid && iteration_output.transform_always_equivalent {
+                    panic!(
+                        "[mcmc] equivalence failure for always-equivalent transform at iteration {}; transform: {:?} should always be equivalent",
+                        iterations_count,
+                        iteration_output.transform
+                    );
+                }
             }
             IterationOutcomeDetails::MetropolisReject => {
                 stats.rejected_metro += 1;
@@ -447,6 +472,64 @@ pub fn mcmc(
             );
             let _ = std::io::stdout().flush();
             last_print_time = Instant::now();
+        }
+
+        // Periodic dump of current best GateFn and its stats.
+        if checkpoint_interval > 0 {
+            if let Some(ref dump_dir) = periodic_dump_dir {
+                if iterations_count % checkpoint_interval == 0 {
+                    // Ensure directory exists.
+                    let _ = std::fs::create_dir_all(dump_dir);
+                    let g8r_path = dump_dir.join(format!("best_iter_{}.g8r", iterations_count));
+                    let stats_path =
+                        dump_dir.join(format!("best_iter_{}.stats.json", iterations_count));
+
+                    // Before dumping, verify equivalence to original for extra safety.
+                    let equiv_ok = oracle_equiv_sat(&original_gfn_for_check, &best_gfn);
+                    if !equiv_ok {
+                        panic!(
+                            "[mcmc] Equivalence failure during checkpoint at iteration {} (best_gfn not equivalent to original). Aborting.",
+                            iterations_count
+                        );
+                    }
+
+                    if let Err(e) = std::fs::write(&g8r_path, best_gfn.to_string()) {
+                        eprintln!(
+                            "[mcmc] Warning: Failed to write periodic GateFn dump to {}: {:?}",
+                            g8r_path.display(),
+                            e
+                        );
+                    }
+
+                    let stats = get_summary_stats::get_summary_stats(&best_gfn);
+                    match serde_json::to_string_pretty(&stats) {
+                        Ok(json) => {
+                            if let Err(e) = std::fs::write(&stats_path, json) {
+                                eprintln!(
+                                    "[mcmc] Warning: Failed to write periodic stats dump to {}: {:?}",
+                                    stats_path.display(),
+                                    e
+                                );
+                            } else {
+                                // Both GateFn and stats written successfully
+                                println!(
+                                    "[mcmc] Iter {}: checkpoint written to {} and {} | Equivalence: {}",
+                                    iterations_count,
+                                    g8r_path.display(),
+                                    stats_path.display(),
+                                    if equiv_ok { "OK" } else { "FAIL" }
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[mcmc] Warning: Failed to serialize stats for periodic dump at iteration {}: {:?}",
+                                iterations_count, e
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     best_gfn

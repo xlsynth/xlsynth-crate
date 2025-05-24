@@ -45,6 +45,11 @@ pub fn remove_false_and_primitive(g: &mut GateFn, node: AigRef) -> Result<(), &'
         node: AigRef { id: 0 },
         negated: false,
     };
+    let true_op = AigOperand {
+        node: AigRef { id: 0 },
+        negated: true,
+    };
+
     for gate in &mut g.gates {
         if let AigNode::And2 {
             a: ref mut op_a,
@@ -53,10 +58,10 @@ pub fn remove_false_and_primitive(g: &mut GateFn, node: AigRef) -> Result<(), &'
         } = gate
         {
             if op_a.node == node {
-                *op_a = false_op;
+                *op_a = if op_a.negated { true_op } else { false_op };
             }
             if op_b.node == node {
-                *op_b = false_op;
+                *op_b = if op_b.negated { true_op } else { false_op };
             }
         }
     }
@@ -64,7 +69,9 @@ pub fn remove_false_and_primitive(g: &mut GateFn, node: AigRef) -> Result<(), &'
         for idx in 0..output.bit_vector.get_bit_count() {
             let op = *output.bit_vector.get_lsb(idx);
             if op.node == node {
-                output.bit_vector.set_lsb(idx, false_op);
+                output
+                    .bit_vector
+                    .set_lsb(idx, if op.negated { true_op } else { false_op });
             }
         }
     }

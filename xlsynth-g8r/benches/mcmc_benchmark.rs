@@ -57,6 +57,7 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     &mut context,
                     initial_temp,
                     objective,
+                    false,
                 );
             },
             criterion::BatchSize::SmallInput,
