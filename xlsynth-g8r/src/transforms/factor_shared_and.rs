@@ -216,16 +216,16 @@ impl Transform for FactorSharedAndTransform {
                         continue;
                     }
                     let mut eq_count = 0;
-                    if ll_a == *rl_a {
+                    if *ll_a == *rl_a {
                         eq_count += 1;
                     }
-                    if ll_a == *rl_b {
+                    if *ll_a == *rl_b {
                         eq_count += 1;
                     }
-                    if ll_b == *rl_a {
+                    if *ll_b == *rl_a {
                         eq_count += 1;
                     }
-                    if ll_b == *rl_b {
+                    if *ll_b == *rl_b {
                         eq_count += 1;
                     }
                     if eq_count == 1 {
