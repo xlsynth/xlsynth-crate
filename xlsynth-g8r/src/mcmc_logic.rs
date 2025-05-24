@@ -732,12 +732,15 @@ pub fn build_transform_weights<
         use TransformKind::*;
         match obj {
             Objective::Nodes | Objective::Product => match k {
-                RemoveRedundantAnd | RemoveFalseAnd | RemoveTrueAnd | UnduplicateGate => 3.0,
-                InsertRedundantAnd | InsertFalseAnd | InsertTrueAnd | DuplicateGate => 0.5,
+                RemoveRedundantAnd | RemoveFalseAnd | RemoveTrueAnd | UnduplicateGate
+                | MergeFanout => 3.0,
+                InsertRedundantAnd | InsertFalseAnd | InsertTrueAnd | DuplicateGate
+                | SplitFanout | UnfactorSharedAnd => 0.5,
                 _ => 1.0,
             },
             Objective::Depth => match k {
-                RotateAndRight | RotateAndLeft | BalanceAndTree | UnbalanceAndTree => 3.0,
+                RotateAndRight | RotateAndLeft | BalanceAndTree | UnbalanceAndTree
+                | SplitFanout | FactorSharedAnd => 3.0,
                 _ => 1.0,
             },
         }
