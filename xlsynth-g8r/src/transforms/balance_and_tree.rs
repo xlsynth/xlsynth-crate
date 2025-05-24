@@ -328,6 +328,13 @@ impl Transform for BalanceAndTreeTransform {
         match candidate_location {
             TransformLocation::Node(root) => {
                 if let Some((orient, nodes, ops)) = collect_chain(g, *root, &use_counts) {
+                    if nodes.len() + 1 != ops.len() {
+                        return Err(anyhow!(
+                            "collect_chain produced inconsistent sizes: nodes={}, ops={}",
+                            nodes.len(),
+                            ops.len()
+                        ));
+                    }
                     build_balanced(g, &nodes, &ops)?;
                     if let AigNode::And2 { tags, .. } = &mut g.gates[root.id] {
                         let tag = match orient {
