@@ -173,6 +173,10 @@ impl Transform for DoubleNegateTransform {
             )),
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

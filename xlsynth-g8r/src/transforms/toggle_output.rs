@@ -90,6 +90,10 @@ impl Transform for ToggleOutputBitTransform {
             )),
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

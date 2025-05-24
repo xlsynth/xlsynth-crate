@@ -73,6 +73,10 @@ impl Transform for SwapOperandsTransform {
             )),
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

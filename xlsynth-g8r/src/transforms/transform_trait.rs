@@ -90,4 +90,9 @@ pub trait Transform: Debug + Send + Sync {
         candidate_location: &TransformLocation,
         direction: TransformDirection,
     ) -> Result<()>;
+
+    /// Indicates whether this transform is always semantics preserving.
+    /// When `true`, applying the transform cannot change the functional
+    /// behaviour of the circuit, so equivalence checks can be skipped.
+    fn always_equivalent(&self) -> bool;
 }

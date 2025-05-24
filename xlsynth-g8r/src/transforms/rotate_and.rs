@@ -175,6 +175,10 @@ impl Transform for RotateAndRightTransform {
             )),
         }
     }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
 }
 
 // --- RotateAndLeftTransform ---
@@ -241,6 +245,10 @@ impl Transform for RotateAndLeftTransform {
                 candidate_location
             )),
         }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
     }
 }
 

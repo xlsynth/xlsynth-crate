@@ -154,8 +154,15 @@ pub fn mcmc_iteration(
     match chosen_transform.apply(&mut candidate_gfn, chosen_location, direction) {
         Ok(()) => {
             let new_candidate_cost = cost(&candidate_gfn);
-            let oracle_start_time = Instant::now();
-            let is_equiv = oracle_equiv_sat(&current_gfn, &candidate_gfn);
+            let mut oracle_time_micros = 0u128;
+            let is_equiv = if chosen_transform.always_equivalent() {
+                true
+            } else {
+                let oracle_start_time = Instant::now();
+                let res = oracle_equiv_sat(&current_gfn, &candidate_gfn);
+                oracle_time_micros = oracle_start_time.elapsed().as_micros();
+                res
+            };
 
             if !is_equiv {
                 McmcIterationOutput {
@@ -163,7 +170,7 @@ pub fn mcmc_iteration(
                     output_cost: current_cost,
                     best_gfn_updated: false,
                     outcome: IterationOutcomeDetails::OracleFailure,
-                    oracle_time_micros: oracle_start_time.elapsed().as_micros(),
+                    oracle_time_micros,
                 }
             } else {
                 if new_candidate_cost < current_cost
@@ -183,7 +190,7 @@ pub fn mcmc_iteration(
                         outcome: IterationOutcomeDetails::Accepted {
                             kind: current_transform_kind,
                         },
-                        oracle_time_micros: oracle_start_time.elapsed().as_micros(),
+                        oracle_time_micros,
                     }
                 } else {
                     McmcIterationOutput {
@@ -191,7 +198,7 @@ pub fn mcmc_iteration(
                         output_cost: current_cost,
                         best_gfn_updated: false,
                         outcome: IterationOutcomeDetails::MetropolisReject,
-                        oracle_time_micros: oracle_start_time.elapsed().as_micros(),
+                        oracle_time_micros,
                     }
                 }
             }
@@ -290,7 +297,9 @@ pub fn mcmc(
             IterationOutcomeDetails::Accepted { kind } => {
                 stats.accepted_overall += 1;
                 *stats.accepted_edits_by_kind.entry(kind).or_insert(0) += 1;
-                stats.oracle_verified += 1;
+                if iteration_output.oracle_time_micros > 0 {
+                    stats.oracle_verified += 1;
+                }
             }
             IterationOutcomeDetails::CandidateFailure => {
                 stats.rejected_candidate_fail += 1;
@@ -300,10 +309,13 @@ pub fn mcmc(
             }
             IterationOutcomeDetails::OracleFailure => {
                 stats.rejected_oracle += 1;
+                // oracle_time_micros > 0 when this outcome occurs
             }
             IterationOutcomeDetails::MetropolisReject => {
                 stats.rejected_metro += 1;
-                stats.oracle_verified += 1;
+                if iteration_output.oracle_time_micros > 0 {
+                    stats.oracle_verified += 1;
+                }
             }
         }
 
