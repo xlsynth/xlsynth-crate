@@ -14,7 +14,7 @@ use tempfile::Builder;
 use xlsynth_g8r::get_summary_stats::SummaryStats;
 
 use xlsynth_g8r::get_summary_stats;
-use xlsynth_g8r::mcmc_logic::{load_start, mcmc};
+use xlsynth_g8r::mcmc_logic::{load_start, mcmc, Objective};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -42,6 +42,10 @@ struct CliArgs {
     /// Print every MCMC iteration and action (for debugging hangs)
     #[clap(long)]
     verbose: bool,
+
+    /// Metric to optimize: nodes, depth, or product (nodes*depth)
+    #[clap(long, value_enum, default_value_t = Objective::Product)]
+    metric: Objective,
 }
 
 fn main() -> Result<()> {
@@ -80,6 +84,7 @@ fn main() -> Result<()> {
         running.clone(),
         cli.disabled_transforms.unwrap_or_default(),
         cli.verbose,
+        cli.metric,
     );
 
     if !running.load(Ordering::SeqCst) {

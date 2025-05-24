@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rand::distributions::Distribution;
+use rand::distributions::WeightedIndex;
 use rand::prelude::{Rng, SeedableRng, SliceRandom};
 use rand_pcg::Pcg64Mcg;
 
@@ -82,6 +84,7 @@ impl Default for McmcStats {
 pub struct McmcContext<'a> {
     pub rng: &'a mut Pcg64Mcg,
     pub all_transforms: Vec<Box<dyn crate::transforms::transform_trait::Transform>>,
+    pub weights: Vec<f64>,
 }
 
 /// Details of what occurred during a single MCMC iteration attempt.
@@ -146,7 +149,8 @@ pub fn mcmc_iteration(
         };
     }
 
-    let chosen_transform_idx = context.rng.gen_range(0..context.all_transforms.len());
+    let dist = WeightedIndex::new(&context.weights).expect("non-empty weights");
+    let chosen_transform_idx = dist.sample(context.rng);
     let chosen_transform = &mut context.all_transforms[chosen_transform_idx];
     let current_transform_kind = chosen_transform.kind();
 
@@ -270,6 +274,7 @@ pub fn mcmc(
     running: Arc<AtomicBool>,
     disabled_transform_names: Vec<String>,
     verbose: bool,
+    objective: Objective,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -310,9 +315,31 @@ pub fn mcmc(
 
     let mut stats = McmcStats::default();
 
+    // Compute weights based on objective
+    fn weight_for_kind(k: TransformKind, obj: Objective) -> f64 {
+        use TransformKind::*;
+        match obj {
+            Objective::Nodes | Objective::Product => match k {
+                RemoveRedundantAnd | RemoveFalseAnd | RemoveTrueAnd | UnduplicateGate => 3.0,
+                InsertRedundantAnd | InsertFalseAnd | InsertTrueAnd | DuplicateGate => 0.5,
+                _ => 1.0,
+            },
+            Objective::Depth => match k {
+                RotateAndRight | RotateAndLeft => 3.0,
+                _ => 1.0,
+            },
+        }
+    }
+
+    let weights: Vec<f64> = all_available_transforms
+        .iter()
+        .map(|t| weight_for_kind(t.kind(), objective))
+        .collect();
+
     let mut mcmc_context = McmcContext {
         rng: &mut iteration_rng,
-        all_transforms: all_available_transforms, // Pass the filtered list
+        all_transforms: all_available_transforms,
+        weights,
     };
 
     let start_time = Instant::now();
@@ -368,7 +395,7 @@ pub fn mcmc(
             &mut best_cost,
             &mut mcmc_context, // Pass context here
             current_temp,
-            Objective::Nodes,
+            objective,
         );
         log::trace!("MCMC iteration completed: {:?}", iterations_count);
 
