@@ -360,7 +360,7 @@ impl Transform for BalanceAndTreeTransform {
     }
 
     fn always_equivalent(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -457,7 +457,7 @@ impl Transform for UnbalanceAndTreeTransform {
     }
 
     fn always_equivalent(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -566,5 +566,33 @@ mod tests {
             TransformDirection::Forward,
         );
         assert!(res.is_err(), "Balancing branching chain should fail");
+    }
+
+    #[test]
+    fn test_chain_with_interior_fanout_accepted() {
+        let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+        let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
+        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
+        let i2 = gb.add_input("i2".to_string(), 1).get_lsb(0).clone();
+        let i3 = gb.add_input("i3".to_string(), 1).get_lsb(0).clone();
+        // Build left-leaning chain n1->n2->n3
+        let n1 = gb.add_and_binary(i0, i1);
+        let n2 = gb.add_and_binary(n1, i2);
+        let n3 = gb.add_and_binary(n2, i3);
+        // Add extra fanout use of n2
+        let extra_and = gb.add_and_binary(n2, i0);
+        gb.add_output("o".to_string(), n3.into());
+        gb.add_output("o2".to_string(), extra_and.into());
+        let g = gb.build();
+
+        let mut bal = BalanceAndTreeTransform::new();
+        let cands = bal.find_candidates(&g, TransformDirection::Forward);
+        assert!(
+            !cands.is_empty(),
+            "Chain with interior fanout should now be accepted for oracle checking"
+        );
+        // Ensure we can apply without panic.
+        bal.apply(&mut g.clone(), &cands[0], TransformDirection::Forward)
+            .expect("Transform should apply even with interior fanout");
     }
 }
