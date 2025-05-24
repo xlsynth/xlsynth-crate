@@ -23,6 +23,8 @@ pub enum TransformKind {
     SwapOutputBits,
     RotateAndRight,
     RotateAndLeft,
+    AndAbsorbRight,
+    AndAbsorbLeft,
     ToggleOperandNegation,
     RewireOperand,
 }
@@ -44,6 +46,8 @@ impl fmt::Display for TransformKind {
             TransformKind::SwapOutputBits => write!(f, "SwapOutBits"),
             TransformKind::RotateAndRight => write!(f, "RotAndR"),
             TransformKind::RotateAndLeft => write!(f, "RotAndL"),
+            TransformKind::AndAbsorbRight => write!(f, "AbsorbR"),
+            TransformKind::AndAbsorbLeft => write!(f, "AbsorbL"),
             TransformKind::ToggleOperandNegation => write!(f, "TogOpNeg"),
             TransformKind::RewireOperand => write!(f, "RewireOp"),
         }
