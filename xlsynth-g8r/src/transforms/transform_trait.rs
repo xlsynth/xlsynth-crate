@@ -25,6 +25,8 @@ pub enum TransformKind {
     RotateAndLeft,
     AndAbsorbRight,
     AndAbsorbLeft,
+    BalanceAndTree,
+    UnbalanceAndTree,
     ToggleOperandNegation,
     RewireOperand,
 }
@@ -48,6 +50,8 @@ impl fmt::Display for TransformKind {
             TransformKind::RotateAndLeft => write!(f, "RotAndL"),
             TransformKind::AndAbsorbRight => write!(f, "AbsorbR"),
             TransformKind::AndAbsorbLeft => write!(f, "AbsorbL"),
+            TransformKind::BalanceAndTree => write!(f, "BalTree"),
+            TransformKind::UnbalanceAndTree => write!(f, "UnbalTree"),
             TransformKind::ToggleOperandNegation => write!(f, "TogOpNeg"),
             TransformKind::RewireOperand => write!(f, "RewireOp"),
         }

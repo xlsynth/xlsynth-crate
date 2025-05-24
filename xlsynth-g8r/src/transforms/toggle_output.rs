@@ -91,7 +91,12 @@ impl Transform for ToggleOutputBitTransform {
             TransformLocation::OutputPortBit {
                 output_idx,
                 bit_idx,
-            } => do_toggle_output_bit(g, *output_idx, *bit_idx),
+            } => {
+                let res = do_toggle_output_bit(g, *output_idx, *bit_idx);
+                // Assert strong invariant: toggling output bit must not create cycles.
+                crate::topo::debug_assert_no_cycles(&g.gates, "toggle_output_bit");
+                res
+            }
             _ => Err(anyhow!(
                 "Invalid location type for ToggleOutputBitTransform: {:?}",
                 candidate_location

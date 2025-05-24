@@ -80,7 +80,7 @@ fn add_param_for_gate_fn_input(
     input: &gate::Input,
     param_type: &ir::Type,
 ) -> Result<(), XlsynthError> {
-    log::debug!("Processing input {:?}", input);
+    log::trace!("Processing input {:?}", input);
     // Note that inputs are bitvectors, so we add them as a single parameter and
     // then slice out all the bits for the environment.
     let param_bit_count = input.get_bit_count() as u64;
@@ -88,12 +88,12 @@ fn add_param_for_gate_fn_input(
     let param = fb.param(input.name.as_str(), &ty);
     let flat_param = flatten(&param, param_type, fb);
     if param_bit_count == 1 {
-        log::debug!("Mapping single-bit input {:?}", input);
+        log::trace!("Mapping single-bit input {:?}", input);
         node_env.insert(*input.bit_vector.get_lsb(0), flat_param);
     } else {
-        log::debug!("Processing multi-bit input {:?}", input);
+        log::trace!("Processing multi-bit input {:?}", input);
         for (i, g) in input.bit_vector.iter_lsb_to_msb().enumerate() {
-            log::debug!("Processing bit {} of multi-bit input {:?}", i, input);
+            log::trace!("Processing bit {} of multi-bit input {:?}", i, input);
             let bit = fb.bit_slice(
                 &flat_param,
                 i as u64,
@@ -198,7 +198,7 @@ pub fn gate_fn_to_xlsynth_ir(
     function_type: &ir::FunctionType,
 ) -> Result<xlsynth::IrPackage, XlsynthError> {
     assert_eq!(gate_fn.inputs.len(), function_type.param_types.len());
-    log::debug!(
+    log::trace!(
         "Converting gate function `{}` to IR:\n{}",
         gate_fn.name,
         gate_fn.to_string()
@@ -356,7 +356,7 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let package =
             gate_fn_to_xlsynth_ir(&gatify_output.gate_fn, "sample", &ir_top.get_type()).unwrap();
         let gate_fn_as_xls_ir = package.to_string();
-        log::debug!("gate_fn_as_xls_ir:\n{}", gate_fn_as_xls_ir);
+        log::trace!("gate_fn_as_xls_ir:\n{}", gate_fn_as_xls_ir);
         assert_eq!(gate_fn_as_xls_ir, input_ir_text);
     }
 }

@@ -639,7 +639,7 @@ pub fn build_transform_weights<
                 _ => 1.0,
             },
             Objective::Depth => match k {
-                RotateAndRight | RotateAndLeft => 3.0,
+                RotateAndRight | RotateAndLeft | BalanceAndTree | UnbalanceAndTree => 3.0,
                 _ => 1.0,
             },
         }
