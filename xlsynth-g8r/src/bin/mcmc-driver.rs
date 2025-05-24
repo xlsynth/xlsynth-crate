@@ -18,6 +18,8 @@ use xlsynth_g8r::get_summary_stats::SummaryStats;
 use xlsynth_g8r::get_summary_stats;
 use xlsynth_g8r::mcmc_logic::{cost, load_start, mcmc, Best, Objective};
 
+use std::time::{Duration, Instant};
+
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 struct CliArgs {
@@ -70,6 +72,7 @@ fn run_chain(
     start: GateFn,
     running: Arc<AtomicBool>,
     best: Arc<Best>,
+    chain_no: usize,
 ) {
     mcmc(
         start,
@@ -83,6 +86,7 @@ fn run_chain(
         cfg.paranoid,
         cfg.checkpoint_iters,
         Some(best),
+        Some(chain_no),
     );
 }
 
@@ -182,44 +186,83 @@ fn main() -> Result<()> {
         let start_cl = start_gfn.clone();
         let seed_i = cli.seed ^ i as u64;
         handles.push(std::thread::spawn(move || {
-            run_chain(Arc::new(cfg), seed_i, start_cl, running_cl, best_cl);
+            run_chain(
+                Arc::new(cfg),
+                seed_i,
+                start_cl,
+                running_cl,
+                best_cl,
+                i as usize,
+            );
         }));
     }
 
+    let mut last_print = Instant::now();
     for h in handles {
+        while !h.is_finished() {
+            if last_print.elapsed() > Duration::from_secs(5) {
+                let best_gfn = best.get();
+                let stats = get_summary_stats::get_summary_stats(&best_gfn);
+                println!(
+                    "[mcmc] [main] interim global best: nodes={}, depth={}",
+                    stats.live_nodes, stats.deepest_path
+                );
+                last_print = Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         let _ = h.join();
     }
 
     if !running.load(Ordering::SeqCst) {
-        println!("MCMC process was interrupted.");
+        let best_gfn = best.get();
+        let stats = get_summary_stats::get_summary_stats(&best_gfn);
+        println!("[mcmc] process was interrupted.");
+        println!(
+            "[mcmc] Global best at interruption: nodes={}, depth={}",
+            stats.live_nodes, stats.deepest_path
+        );
+        println!(
+            "[mcmc] Will write output to: {} and stats to: {}",
+            output_g8r_path.display(),
+            output_stats_path.display()
+        );
     }
 
-    let best_gfn = best.get();
-    let final_summary_stats: SummaryStats = get_summary_stats::get_summary_stats(&best_gfn);
-    println!(
-        "MCMC finished. Final best GateFn stats: nodes={}, depth={}",
-        final_summary_stats.live_nodes, final_summary_stats.deepest_path
-    );
+    println!("[mcmc] All MCMC chains joined. Writing final output...");
 
-    println!(
-        "Dumping best GateFn as text to: {}",
-        output_g8r_path.display()
-    );
-    let mut f_g8r = fs::File::create(&output_g8r_path)?;
-    f_g8r.write_all(best_gfn.to_string().as_bytes())?;
-    println!("Successfully wrote output to {}", output_g8r_path.display());
+    // Only the main thread (not a worker) should write output.
+    if std::thread::current().name().is_none() {
+        let best_gfn = best.get();
+        let final_summary_stats: SummaryStats = get_summary_stats::get_summary_stats(&best_gfn);
+        println!(
+            "[mcmc] finished. Final best GateFn stats: nodes={}, depth={}",
+            final_summary_stats.live_nodes, final_summary_stats.deepest_path
+        );
 
-    println!(
-        "Dumping best GateFn stats as JSON to: {}",
-        output_stats_path.display()
-    );
-    let mut f_stats = fs::File::create(&output_stats_path)?;
-    let stats_json = serde_json::to_string_pretty(&final_summary_stats)?;
-    f_stats.write_all(stats_json.as_bytes())?;
-    println!(
-        "Successfully wrote stats to {}",
-        output_stats_path.display()
-    );
+        println!(
+            "[mcmc] Dumping best GateFn as text to: {}",
+            output_g8r_path.display()
+        );
+        let mut f_g8r = fs::File::create(&output_g8r_path)?;
+        f_g8r.write_all(best_gfn.to_string().as_bytes())?;
+        println!(
+            "[mcmc] Successfully wrote output to {}",
+            output_g8r_path.display()
+        );
+
+        println!(
+            "[mcmc] Dumping best GateFn stats as JSON to: {}",
+            output_stats_path.display()
+        );
+        let mut f_stats = fs::File::create(&output_stats_path)?;
+        let stats_json = serde_json::to_string_pretty(&final_summary_stats)?;
+        f_stats.write_all(stats_json.as_bytes())?;
+        println!(
+            "[mcmc] Successfully wrote stats to {}",
+            output_stats_path.display()
+        );
+    }
 
     Ok(())
 }

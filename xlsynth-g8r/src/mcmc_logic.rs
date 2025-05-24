@@ -332,6 +332,7 @@ pub fn mcmc(
     paranoid: bool,
     checkpoint_interval: u64,
     shared_best: Option<Arc<Best>>,
+    chain_no: Option<usize>,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -413,15 +414,33 @@ pub fn mcmc(
                 let candidate_locations = chosen_transform.find_candidates(&current_gfn, direction);
                 if !candidate_locations.is_empty() {
                     let chosen_location = candidate_locations.choose(mcmc_context.rng).unwrap();
-                    println!(
-                        "[mcmc][verbose] iter {}: About to apply {:?} ({:?}) at {:?}",
-                        iterations_count, current_transform_kind, direction, chosen_location
-                    );
+                    if let Some(chain) = chain_no {
+                        println!(
+                            "[mcmc][verbose] c{:03}:i{:06}: About to apply {:?} ({:?}) at {:?}",
+                            chain,
+                            iterations_count,
+                            current_transform_kind,
+                            direction,
+                            chosen_location
+                        );
+                    } else {
+                        println!(
+                            "[mcmc][verbose] iter {}: About to apply {:?} ({:?}) at {:?}",
+                            iterations_count, current_transform_kind, direction, chosen_location
+                        );
+                    }
                 } else {
-                    println!(
-                        "[mcmc][verbose] iter {}: No candidates for {:?} ({:?})",
-                        iterations_count, current_transform_kind, direction
-                    );
+                    if let Some(chain) = chain_no {
+                        println!(
+                            "[mcmc][verbose] c{:03}:i{:06}: No candidates for {:?} ({:?})",
+                            chain, iterations_count, current_transform_kind, direction
+                        );
+                    } else {
+                        println!(
+                            "[mcmc][verbose] iter {}: No candidates for {:?} ({:?})",
+                            iterations_count, current_transform_kind, direction
+                        );
+                    }
                 }
             }
         }
@@ -510,13 +529,23 @@ pub fn mcmc(
                 .collect::<Vec<String>>()
                 .join(", ");
 
-            println!(
-                "[mcmc] iter: {} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/O/M): {}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Accepted: {} ({})         ",
-                iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
-                stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_oracle, stats.rejected_metro,
-                stats.oracle_verified, avg_oracle_ms,
-                stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
-            );
+            if let Some(chain) = chain_no {
+                println!(
+                    "[mcmc] c{:03}:i{:06} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/O/M): {}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Accepted: {} ({})         ",
+                    chain, iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
+                    stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_oracle, stats.rejected_metro,
+                    stats.oracle_verified, avg_oracle_ms,
+                    stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
+                );
+            } else {
+                println!(
+                    "[mcmc] iter: {} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/O/M): {}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Accepted: {} ({})         ",
+                    iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
+                    stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_oracle, stats.rejected_metro,
+                    stats.oracle_verified, avg_oracle_ms,
+                    stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
+                );
+            }
             let _ = std::io::stdout().flush();
             last_print_time = Instant::now();
         }
@@ -527,9 +556,17 @@ pub fn mcmc(
                 if iterations_count % checkpoint_interval == 0 {
                     // Ensure directory exists.
                     let _ = std::fs::create_dir_all(dump_dir);
-                    let g8r_path = dump_dir.join(format!("best_iter_{}.g8r", iterations_count));
-                    let stats_path =
-                        dump_dir.join(format!("best_iter_{}.stats.json", iterations_count));
+                    let prefix = if let Some(chain) = chain_no {
+                        format!("c{}-", chain)
+                    } else {
+                        String::new()
+                    };
+                    let g8r_path =
+                        dump_dir.join(format!("{}best_iter_{}.g8r", prefix, iterations_count));
+                    let stats_path = dump_dir.join(format!(
+                        "{}best_iter_{}.stats.json",
+                        prefix, iterations_count
+                    ));
 
                     // Before dumping, verify equivalence to original for extra safety.
                     let equiv_ok = oracle_equiv_sat(&original_gfn_for_check, &best_gfn);
