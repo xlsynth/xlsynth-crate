@@ -16,6 +16,10 @@ pub enum TransformKind {
     RemoveRedundantAnd,
     DuplicateGate,
     UnduplicateGate,
+    InsertTrueAnd,
+    RemoveTrueAnd,
+    RotateAndRight,
+    RotateAndLeft,
 }
 
 impl fmt::Display for TransformKind {
@@ -28,6 +32,10 @@ impl fmt::Display for TransformKind {
             TransformKind::RemoveRedundantAnd => write!(f, "RemRedAnd"),
             TransformKind::DuplicateGate => write!(f, "DupGate"),
             TransformKind::UnduplicateGate => write!(f, "UndupGate"),
+            TransformKind::InsertTrueAnd => write!(f, "InsTrueAnd"),
+            TransformKind::RemoveTrueAnd => write!(f, "RemTrueAnd"),
+            TransformKind::RotateAndRight => write!(f, "RotAndR"),
+            TransformKind::RotateAndLeft => write!(f, "RotAndL"),
         }
     }
 }

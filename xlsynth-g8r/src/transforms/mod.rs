@@ -9,6 +9,8 @@ pub mod toggle_output;
 pub mod transform_trait;
 pub mod true_and;
 
+use crate::transforms::rotate_and::{RotateAndLeftTransform, RotateAndRightTransform};
+use crate::transforms::true_and::{InsertTrueAndTransform, RemoveTrueAndTransform};
 use double_negate::DoubleNegateTransform;
 use duplicate::{DuplicateGateTransform, UnduplicateGateTransform};
 use redundant_and::{InsertRedundantAndTransform, RemoveRedundantAndTransform};
@@ -26,5 +28,9 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(UnduplicateGateTransform::new()),
         Box::new(InsertRedundantAndTransform::new()),
         Box::new(RemoveRedundantAndTransform::new()),
+        Box::new(InsertTrueAndTransform::new()),
+        Box::new(RemoveTrueAndTransform::new()),
+        Box::new(RotateAndRightTransform::new()),
+        Box::new(RotateAndLeftTransform::new()),
     ]
 }
