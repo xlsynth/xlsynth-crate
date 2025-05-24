@@ -23,6 +23,7 @@ pub enum TransformKind {
     SwapOutputBits,
     RotateAndRight,
     RotateAndLeft,
+    ToggleOperandNegation,
 }
 
 impl fmt::Display for TransformKind {
@@ -42,6 +43,7 @@ impl fmt::Display for TransformKind {
             TransformKind::SwapOutputBits => write!(f, "SwapOutBits"),
             TransformKind::RotateAndRight => write!(f, "RotAndR"),
             TransformKind::RotateAndLeft => write!(f, "RotAndL"),
+            TransformKind::ToggleOperandNegation => write!(f, "TogOpNeg"),
         }
     }
 }
