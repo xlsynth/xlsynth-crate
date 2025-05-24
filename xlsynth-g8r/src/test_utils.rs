@@ -581,6 +581,31 @@ pub fn setup_padded_graph_with_equal_depth_opposite_polarity(
     }
 }
 
+/// Returns true if the two GateFn are structurally equivalent (same output
+/// hashes and negations).
+pub fn structurally_equivalent(a: &GateFn, b: &GateFn) -> bool {
+    if a.outputs.len() != b.outputs.len() {
+        return false;
+    }
+    let mut hasher_a = crate::aig_hasher::AigHasher::new();
+    let mut hasher_b = crate::aig_hasher::AigHasher::new();
+    for (out_a, out_b) in a.outputs.iter().zip(b.outputs.iter()) {
+        if out_a.bit_vector.get_bit_count() != out_b.bit_vector.get_bit_count() {
+            return false;
+        }
+        for i in 0..out_a.bit_vector.get_bit_count() {
+            let op_a = out_a.bit_vector.get_lsb(i);
+            let op_b = out_b.bit_vector.get_lsb(i);
+            let hash_a = hasher_a.get_hash(&op_a.node, &a.gates);
+            let hash_b = hasher_b.get_hash(&op_b.node, &b.gates);
+            if hash_a != hash_b || op_a.negated != op_b.negated {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

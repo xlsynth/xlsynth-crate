@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::test_utils::structurally_equivalent;
 use crate::topo::reaches_target as node_reaches_target;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
@@ -198,6 +199,9 @@ impl Transform for FactorSharedAndTransform {
         let mut cands = Vec::new();
         for (idx, node) in g.gates.iter().enumerate() {
             if let AigNode::And2 { a: l, b: r, .. } = node {
+                if l.node == r.node && l.negated == r.negated {
+                    continue;
+                }
                 if l.negated || r.negated {
                     continue;
                 }
@@ -351,31 +355,34 @@ mod tests {
     #[test]
     fn test_factor_and_unfactor_round_trip() {
         let (mut g, outer) = setup_factor_graph();
-        let orig = g.to_string();
+        let orig = g.clone();
         let mut f = FactorSharedAndTransform::new();
         let cands = f.find_candidates(&g, TransformDirection::Forward);
         assert_eq!(cands.len(), 1);
         assert!(matches!(cands[0], TransformLocation::Node(r) if r == outer));
         f.apply(&mut g, &cands[0], TransformDirection::Forward)
             .unwrap();
-        assert_ne!(g.to_string(), orig);
+        assert!(!structurally_equivalent(&g, &orig));
         let mut u = UnfactorSharedAndTransform::new();
         let c2 = u.find_candidates(&g, TransformDirection::Forward);
         assert_eq!(c2.len(), 1);
         u.apply(&mut g, &c2[0], TransformDirection::Forward)
             .unwrap();
-        assert_eq!(g.to_string(), orig);
+        assert!(structurally_equivalent(&g, &orig));
     }
 
     #[test]
     fn test_factor_shared_and_no_candidate_when_identical() {
-        let (mut g, _outer) = setup_factor_graph();
-        // Modify graph so both children identical
-        if let AigNode::And2 { a, b, .. } = &g.gates[1] {
-            g.gates[2] = AigNode::And2 {
-                a: *a,
-                b: *b,
-                tags: None,
+        let (mut g, outer) = setup_factor_graph();
+        // Make both children of the outer node point to the same node (id 1)
+        if let AigNode::And2 { a, b, .. } = &mut g.gates[outer.id] {
+            *a = AigOperand {
+                node: AigRef { id: 1 },
+                negated: false,
+            };
+            *b = AigOperand {
+                node: AigRef { id: 1 },
+                negated: false,
             };
         }
         let mut f = FactorSharedAndTransform::new();
