@@ -30,14 +30,6 @@ pub fn swap_output_bits_primitive(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub struct SwapOutputBitsLocation {
-    pub out_a_idx: usize,
-    pub bit_a_idx: usize,
-    pub out_b_idx: usize,
-    pub bit_b_idx: usize,
-}
-
 #[derive(Debug)]
 pub struct SwapOutputBitsTransform;
 
@@ -63,14 +55,12 @@ impl Transform for SwapOutputBitsTransform {
                 for out_b in out_a..g.outputs.len() {
                     let start_b = if out_b == out_a { bit_a + 1 } else { 0 };
                     for bit_b in start_b..g.outputs[out_b].bit_vector.get_bit_count() {
-                        candidates.push(TransformLocation::Custom(Box::new(
-                            SwapOutputBitsLocation {
-                                out_a_idx: out_a,
-                                bit_a_idx: bit_a,
-                                out_b_idx: out_b,
-                                bit_b_idx: bit_b,
-                            },
-                        )));
+                        candidates.push(TransformLocation::SwapOutputBits {
+                            out_a_idx: out_a,
+                            bit_a_idx: bit_a,
+                            out_b_idx: out_b,
+                            bit_b_idx: bit_b,
+                        });
                     }
                 }
             }
@@ -85,19 +75,13 @@ impl Transform for SwapOutputBitsTransform {
         _direction: TransformDirection,
     ) -> Result<()> {
         match candidate_location {
-            TransformLocation::Custom(b) => {
-                let loc = b
-                    .downcast_ref::<SwapOutputBitsLocation>()
-                    .ok_or_else(|| anyhow!("Invalid location type for SwapOutputBitsTransform"))?;
-                swap_output_bits_primitive(
-                    g,
-                    loc.out_a_idx,
-                    loc.bit_a_idx,
-                    loc.out_b_idx,
-                    loc.bit_b_idx,
-                )
-                .map_err(anyhow::Error::msg)
-            }
+            TransformLocation::SwapOutputBits {
+                out_a_idx,
+                bit_a_idx,
+                out_b_idx,
+                bit_b_idx,
+            } => swap_output_bits_primitive(g, *out_a_idx, *bit_a_idx, *out_b_idx, *bit_b_idx)
+                .map_err(anyhow::Error::msg),
             _ => Err(anyhow!(
                 "Invalid location type for SwapOutputBitsTransform: {:?}",
                 candidate_location
