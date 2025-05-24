@@ -456,7 +456,8 @@ pub fn mcmc(
         iterations_count += 1;
 
         let progress_ratio = (iterations_count as f64) / (max_iters as f64);
-        let current_temp = (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
+        let current_temp =
+            options.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
 
         // Print action about to be taken if verbose
         if verbose {
@@ -751,6 +752,7 @@ pub fn build_transform_weights<
 #[derive(Clone, Debug)]
 pub struct McmcOptions {
     pub sat_reset_interval: u64,
+    pub initial_temperature: f64,
 }
 
 fn write_checkpoint(
