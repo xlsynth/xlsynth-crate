@@ -25,11 +25,14 @@ use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
 use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
+use serde_json;
+use std::path::PathBuf;
 
 const INITIAL_TEMPERATURE: f64 = 5.0;
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
 const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 1;
+const PERIODIC_DUMP_ITERATION_INTERVAL: u64 = 5000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cost {
@@ -275,6 +278,7 @@ pub fn mcmc(
     disabled_transform_names: Vec<String>,
     verbose: bool,
     objective: Objective,
+    periodic_dump_dir: Option<PathBuf>,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -447,6 +451,44 @@ pub fn mcmc(
             );
             let _ = std::io::stdout().flush();
             last_print_time = Instant::now();
+        }
+
+        // Periodic dump of current best GateFn and its stats.
+        if let Some(ref dump_dir) = periodic_dump_dir {
+            if iterations_count % PERIODIC_DUMP_ITERATION_INTERVAL == 0 {
+                // Ensure directory exists.
+                let _ = std::fs::create_dir_all(dump_dir);
+                let g8r_path = dump_dir.join(format!("best_iter_{}.g8r", iterations_count));
+                let stats_path =
+                    dump_dir.join(format!("best_iter_{}.stats.json", iterations_count));
+
+                if let Err(e) = std::fs::write(&g8r_path, best_gfn.to_string()) {
+                    eprintln!(
+                        "[mcmc] Warning: Failed to write periodic GateFn dump to {}: {:?}",
+                        g8r_path.display(),
+                        e
+                    );
+                }
+
+                let stats = get_summary_stats::get_summary_stats(&best_gfn);
+                match serde_json::to_string_pretty(&stats) {
+                    Ok(json) => {
+                        if let Err(e) = std::fs::write(&stats_path, json) {
+                            eprintln!(
+                                "[mcmc] Warning: Failed to write periodic stats dump to {}: {:?}",
+                                stats_path.display(),
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[mcmc] Warning: Failed to serialize stats for periodic dump at iteration {}: {:?}",
+                            iterations_count, e
+                        );
+                    }
+                }
+            }
         }
     }
     best_gfn
