@@ -29,6 +29,7 @@ pub enum TransformKind {
     UnbalanceAndTree,
     ToggleOperandNegation,
     RewireOperand,
+    PushNegation,
 }
 
 impl fmt::Display for TransformKind {
@@ -54,6 +55,7 @@ impl fmt::Display for TransformKind {
             TransformKind::UnbalanceAndTree => write!(f, "UnbalTree"),
             TransformKind::ToggleOperandNegation => write!(f, "TogOpNeg"),
             TransformKind::RewireOperand => write!(f, "RewireOp"),
+            TransformKind::PushNegation => write!(f, "PushNeg"),
         }
     }
 }
