@@ -255,3 +255,29 @@ pub fn debug_assert_no_cycles(nodes: &[AigNode], context: &str) {
         );
     }
 }
+
+/// Returns `true` if `target` is reachable from `start` following operand
+/// edges. Uses a depth-first traversal over the sub-DAG rooted at `start`.
+pub fn reaches_target(nodes: &[AigNode], start: AigRef, target: AigRef) -> bool {
+    if start == target {
+        return true;
+    }
+    let mut stack = vec![start];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        if current == target {
+            return true;
+        }
+        match &nodes[current.id] {
+            AigNode::And2 { a, b, .. } => {
+                stack.push(a.node);
+                stack.push(b.node);
+            }
+            _ => {}
+        }
+    }
+    false
+}

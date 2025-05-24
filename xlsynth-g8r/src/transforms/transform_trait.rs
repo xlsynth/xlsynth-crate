@@ -24,6 +24,7 @@ pub enum TransformKind {
     RotateAndRight,
     RotateAndLeft,
     ToggleOperandNegation,
+    RewireOperand,
 }
 
 impl fmt::Display for TransformKind {
@@ -44,6 +45,7 @@ impl fmt::Display for TransformKind {
             TransformKind::RotateAndRight => write!(f, "RotAndR"),
             TransformKind::RotateAndLeft => write!(f, "RotAndL"),
             TransformKind::ToggleOperandNegation => write!(f, "TogOpNeg"),
+            TransformKind::RewireOperand => write!(f, "RewireOp"),
         }
     }
 }
