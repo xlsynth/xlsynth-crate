@@ -285,8 +285,6 @@ fn build_gate_fn(
 
 /// Checks equivalence of two gate functions using a SAT solver.
 pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult {
-    ctx.reset();
-
     assert_eq!(a.inputs.len(), b.inputs.len());
     assert_eq!(a.outputs.len(), b.outputs.len());
 

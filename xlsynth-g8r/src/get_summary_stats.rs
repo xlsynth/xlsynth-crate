@@ -75,7 +75,7 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
         };
     }
 
-    log::info!("Deepest primary output: {:?}", deepest_primary_output);
+    log::trace!("Deepest primary output: {:?}", deepest_primary_output);
 
     let mut deepest_path = vec![];
     // Get the GateRef having the largest depth.
