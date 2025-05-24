@@ -4,6 +4,7 @@ pub mod and_absorb;
 pub mod balance_and_tree;
 pub mod double_negate;
 pub mod duplicate;
+pub mod factor_shared_and;
 pub mod false_and;
 pub mod merge_equiv_leaves;
 pub mod push_negation;
@@ -25,6 +26,7 @@ use crate::transforms::true_and::{InsertTrueAndTransform, RemoveTrueAndTransform
 use balance_and_tree::{BalanceAndTreeTransform, UnbalanceAndTreeTransform};
 use double_negate::DoubleNegateTransform;
 use duplicate::{DuplicateGateTransform, UnduplicateGateTransform};
+use factor_shared_and::{FactorSharedAndTransform, UnfactorSharedAndTransform};
 use merge_equiv_leaves::MergeEquivLeavesTransform;
 use push_negation::PushNegationTransform;
 use redundant_and::{InsertRedundantAndTransform, RemoveRedundantAndTransform};
@@ -63,5 +65,7 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(MergeEquivLeavesTransform::new()),
         Box::new(SplitFanoutTransform::new()),
         Box::new(MergeFanoutTransform::new()),
+        Box::new(FactorSharedAndTransform::new()),
+        Box::new(UnfactorSharedAndTransform::new()),
     ]
 }
