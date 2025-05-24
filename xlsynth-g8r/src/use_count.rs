@@ -21,8 +21,6 @@ pub fn get_id_to_use_count(gate_fn: &gate::GateFn) -> HashMap<gate::AigRef, usiz
     // should not do it again.
     let mut worklist = Vec::new();
 
-    log::trace!("Adding {} outputs to worklist", gate_fn.outputs.len());
-
     // Start from outputs - each output use counts as 1
     for output in gate_fn.outputs.iter() {
         for operand in output.bit_vector.iter_lsb_to_msb() {
@@ -37,11 +35,8 @@ pub fn get_id_to_use_count(gate_fn: &gate::GateFn) -> HashMap<gate::AigRef, usiz
         // Skip if we've already processed this node's arguments
         let first_time_seen = processed_nodes.insert(node);
         if !first_time_seen {
-            log::trace!("Already seen node {:?}", node);
             continue;
         }
-
-        log::trace!("Processing node {:?}", node);
 
         // Get the node's arguments and process them
         let gate: &gate::AigNode = &gate_fn.gates[node.id];

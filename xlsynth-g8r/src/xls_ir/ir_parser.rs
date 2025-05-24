@@ -107,7 +107,6 @@ impl Parser {
     }
 
     fn pop_identifier_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
-        log::debug!("pop_identifier_or_error");
         self.drop_whitespace();
         let mut identifier = String::new();
         while let Some(c) = self.peekc() {
@@ -182,9 +181,7 @@ impl Parser {
         ty: &ir::Type,
         ctx: &str,
     ) -> Result<xlsynth::IrValue, ParseError> {
-        log::debug!("pop_bits_value_or_error");
         let value = self.pop_number_string_or_error(ctx)?;
-        log::debug!("pop_bits_value_or_error; value: {:?}", value);
         Ok(xlsynth::IrValue::parse_typed(&format!("{}:{}", ty, value)).unwrap())
     }
 
@@ -204,7 +201,6 @@ impl Parser {
     fn try_drop(&mut self, s: &str) -> bool {
         self.drop_whitespace();
         if self.peek_is(s) {
-            log::debug!("try_drop({:?}); peek matched", s);
             self.offset += s.len();
             true
         } else {
@@ -213,7 +209,6 @@ impl Parser {
     }
 
     fn drop_or_error_with_ctx(&mut self, s: &str, ctx: &str) -> Result<(), ParseError> {
-        log::debug!("drop_or_error_with_ctx: {:?}; ctx: {:?}", s, ctx);
         self.drop_whitespace();
         if self.try_drop(s) {
             Ok(())
@@ -295,7 +290,6 @@ impl Parser {
             default_id
         };
         let id = ir::ParamId::new(raw_id);
-        log::debug!("parse_param; name: {:?}; ty: {:?}; id: {:?}", name, ty, id);
         Ok(ir::Param { name, ty, id })
     }
 
@@ -317,12 +311,7 @@ impl Parser {
     }
 
     fn pop_node_name_or_error(&mut self, ctx: &str) -> Result<NameOrId, ParseError> {
-        log::debug!(
-            "pop_node_name_or_error; rest_of_line: {:?}",
-            self.rest_of_line()
-        );
         let name: String = self.pop_identifier_or_error(ctx)?;
-        log::debug!("pop_node_name_or_error; name: {:?}", name);
         if self.try_drop(".") {
             let id = self.pop_number_usize_or_error(ctx)?;
             Ok(NameOrId::Id(id))
@@ -336,9 +325,7 @@ impl Parser {
         node_env: &IrNodeEnv,
         ctx: &str,
     ) -> Result<ir::NodeRef, ParseError> {
-        log::debug!("parse_node_ref; rest_of_line: {:?}", self.rest_of_line());
         let name_or_id = self.pop_node_name_or_error(ctx)?;
-        log::debug!("parse_node_ref; name_or_id: {:?}", name_or_id);
         let maybe_node_ref = node_env.name_id_to_ref(&name_or_id);
         match maybe_node_ref {
             Some(node_ref) => Ok(*node_ref),
@@ -353,7 +340,6 @@ impl Parser {
     }
 
     fn parse_file_number(&mut self, file_table: &mut FileTable) -> Result<(), ParseError> {
-        log::debug!("parse_file_number");
         self.drop_or_error("file_number")?;
         let id = self.pop_number_usize_or_error("file_number")?;
         let path = self.pop_string_or_error()?;

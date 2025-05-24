@@ -138,6 +138,13 @@ pub fn mcmc_iteration(
 
     let candidate_locations = chosen_transform.find_candidates(&current_gfn, direction);
 
+    log::trace!(
+        "Found {} candidates for {:?} ({:?})",
+        candidate_locations.len(),
+        current_transform_kind,
+        direction
+    );
+
     if candidate_locations.is_empty() {
         return McmcIterationOutput {
             output_gfn: current_gfn,
@@ -149,11 +156,23 @@ pub fn mcmc_iteration(
     }
 
     let chosen_location = candidate_locations.choose(context.rng).unwrap();
+
+    log::trace!("Chosen location: {:?}", chosen_location);
+
     let mut candidate_gfn = current_gfn.clone();
+
+    log::trace!(
+        "Applying transform {:?} ({:?}) to {:?}",
+        current_transform_kind,
+        direction,
+        chosen_location
+    );
 
     match chosen_transform.apply(&mut candidate_gfn, chosen_location, direction) {
         Ok(()) => {
+            log::trace!("Transform applied successfully; determining cost...");
             let new_candidate_cost = cost(&candidate_gfn);
+            log::trace!("new_candidate_cost: {:?}", new_candidate_cost);
             let mut oracle_time_micros = 0u128;
             let is_equiv = if chosen_transform.always_equivalent() {
                 true
@@ -163,6 +182,7 @@ pub fn mcmc_iteration(
                 oracle_time_micros = oracle_start_time.elapsed().as_micros();
                 res
             };
+            log::trace!("is_equiv: {:?}", is_equiv);
 
             if !is_equiv {
                 McmcIterationOutput {
@@ -203,13 +223,20 @@ pub fn mcmc_iteration(
                 }
             }
         }
-        Err(_) => McmcIterationOutput {
-            output_gfn: current_gfn,
-            output_cost: current_cost,
-            best_gfn_updated: false,
-            outcome: IterationOutcomeDetails::ApplyFailure,
-            oracle_time_micros: 0,
-        },
+        Err(e) => {
+            log::debug!(
+                "Error applying transform {:?}: {:?}",
+                current_transform_kind,
+                e
+            );
+            McmcIterationOutput {
+                output_gfn: current_gfn,
+                output_cost: current_cost,
+                best_gfn_updated: false,
+                outcome: IterationOutcomeDetails::ApplyFailure,
+                oracle_time_micros: 0,
+            }
+        }
     }
 }
 
@@ -220,6 +247,7 @@ pub fn mcmc(
     seed: u64,
     running: Arc<AtomicBool>,
     disabled_transform_names: Vec<String>,
+    verbose: bool,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -280,6 +308,37 @@ pub fn mcmc(
             * (1.0 - time_since_start_secs / annealing_duration_secs as f64)
                 .max(MIN_TEMPERATURE_RATIO);
 
+        // Print action about to be taken if verbose
+        if verbose {
+            // Print transform, direction, and candidate info
+            if !mcmc_context.all_transforms.is_empty() {
+                let chosen_transform_idx = mcmc_context
+                    .rng
+                    .gen_range(0..mcmc_context.all_transforms.len());
+                let chosen_transform = &mut mcmc_context.all_transforms[chosen_transform_idx];
+                let current_transform_kind = chosen_transform.kind();
+                let direction = if mcmc_context.rng.gen::<bool>() {
+                    TransformDirection::Forward
+                } else {
+                    TransformDirection::Backward
+                };
+                let candidate_locations = chosen_transform.find_candidates(&current_gfn, direction);
+                if !candidate_locations.is_empty() {
+                    let chosen_location = candidate_locations.choose(mcmc_context.rng).unwrap();
+                    println!(
+                        "[mcmc][verbose] iter {}: About to apply {:?} ({:?}) at {:?}",
+                        iterations_count, current_transform_kind, direction, chosen_location
+                    );
+                } else {
+                    println!(
+                        "[mcmc][verbose] iter {}: No candidates for {:?} ({:?})",
+                        iterations_count, current_transform_kind, direction
+                    );
+                }
+            }
+        }
+
+        log::trace!("Starting MCMC iteration: {:?}", iterations_count);
         let iteration_output = mcmc_iteration(
             current_gfn, // current_gfn is moved in
             current_cost,
@@ -288,6 +347,7 @@ pub fn mcmc(
             &mut mcmc_context, // Pass context here
             current_temp,
         );
+        log::trace!("MCMC iteration completed: {:?}", iterations_count);
 
         current_gfn = iteration_output.output_gfn; // new current_gfn obtained from output
         current_cost = iteration_output.output_cost;
