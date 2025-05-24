@@ -29,7 +29,11 @@ pub enum TransformKind {
     UnbalanceAndTree,
     ToggleOperandNegation,
     RewireOperand,
+<<<<<<< HEAD
     PushNegation,
+=======
+    MergeEquivLeaves,
+>>>>>>> 62f7486 (Format merge_equiv_leaves files)
 }
 
 impl fmt::Display for TransformKind {
@@ -55,7 +59,11 @@ impl fmt::Display for TransformKind {
             TransformKind::UnbalanceAndTree => write!(f, "UnbalTree"),
             TransformKind::ToggleOperandNegation => write!(f, "TogOpNeg"),
             TransformKind::RewireOperand => write!(f, "RewireOp"),
+<<<<<<< HEAD
             TransformKind::PushNegation => write!(f, "PushNeg"),
+=======
+            TransformKind::MergeEquivLeaves => write!(f, "MergeLeaves"),
+>>>>>>> 62f7486 (Format merge_equiv_leaves files)
         }
     }
 }
