@@ -38,9 +38,15 @@ struct CliArgs {
     /// List of transform kinds to disable (e.g., SwapOp, DblNeg).
     #[clap(long, value_delimiter = ',', num_args = 0.., use_value_delimiter = true)]
     disabled_transforms: Option<Vec<String>>,
+
+    /// Print every MCMC iteration and action (for debugging hangs)
+    #[clap(long)]
+    verbose: bool,
 }
 
 fn main() -> Result<()> {
+    let _ = env_logger::try_init();
+
     let cli = CliArgs::parse();
     println!("MCMC Driver started with args: {:?}", cli);
 
@@ -73,6 +79,7 @@ fn main() -> Result<()> {
         cli.seed,
         running.clone(),
         cli.disabled_transforms.unwrap_or_default(),
+        cli.verbose,
     );
 
     if !running.load(Ordering::SeqCst) {

@@ -7,6 +7,32 @@ use crate::transforms::transform_trait::{
 use crate::use_count::get_id_to_use_count;
 use anyhow::{anyhow, Result};
 
+/// Returns true if `target` is reachable from `start` by following operand
+/// edges. Performs a DFS limited to the sub‐DAG rooted at `start`.
+fn node_reaches_target(g: &GateFn, start: AigRef, target: AigRef) -> bool {
+    if start == target {
+        return true;
+    }
+    let mut stack = vec![start];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        if current == target {
+            return true;
+        }
+        match &g.gates[current.id] {
+            AigNode::And2 { a, b, .. } => {
+                stack.push(a.node);
+                stack.push(b.node);
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 // --- Primitives ---
 
 /// Rotates an AND tree to the right: `((a & b) & c) -> (a & (b & c))`.
@@ -28,6 +54,12 @@ pub fn rotate_and_right_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &
         AigNode::And2 { a, b, .. } => (a, b), // a_op is 'a', b_op is 'b' from ((a & b) & c)
         _ => return Err("rotate_and_right_primitive: inner (left op of outer) is not And2"),
     };
+
+    // Ensure that `right_op_of_outer` does NOT (transitively) depend on
+    // `inner_ref`.
+    if node_reaches_target(g, right_op_of_outer.node, inner_ref) {
+        return Err("rotate_and_right_primitive: right operand depends on inner; rotation would create a cycle");
+    }
 
     let use_counts = get_id_to_use_count(g);
     if *use_counts.get(&inner_ref).unwrap_or(&0) != 1 {
@@ -57,6 +89,9 @@ pub fn rotate_and_right_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &
             negated: false,  // inner_ref itself is not negated as an operand
         };
     }
+
+    // Sanity-check: ensure we did not introduce cycles.
+    crate::topo::debug_assert_no_cycles(&g.gates, "rotate_and_right_primitive");
     Ok(())
 }
 
@@ -78,6 +113,11 @@ pub fn rotate_and_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
         AigNode::And2 { a, b, .. } => (a, b), // b_op is 'b', c_op is 'c' from (a & (b & c))
         _ => return Err("rotate_and_left_primitive: inner (right op of outer) is not And2"),
     };
+
+    // Ensure that `left_op_of_outer` does NOT (transitively) depend on `inner_ref`.
+    if node_reaches_target(g, left_op_of_outer.node, inner_ref) {
+        return Err("rotate_and_left_primitive: left operand depends on inner; rotation would create a cycle");
+    }
 
     let use_counts = get_id_to_use_count(g);
     if *use_counts.get(&inner_ref).unwrap_or(&0) != 1 {
@@ -107,6 +147,9 @@ pub fn rotate_and_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
         };
         *outer_rhs = c_op; // c
     }
+
+    // Sanity-check that we didn't create a cycle.
+    crate::topo::debug_assert_no_cycles(&g.gates, "rotate_and_left_primitive");
     Ok(())
 }
 

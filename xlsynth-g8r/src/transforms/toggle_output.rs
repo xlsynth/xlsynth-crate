@@ -59,8 +59,12 @@ impl Transform for ToggleOutputBitTransform {
     fn find_candidates(
         &mut self,
         g: &GateFn,
-        _direction: TransformDirection,
+        direction: TransformDirection,
     ) -> Vec<TransformLocation> {
+        log::trace!(
+            "Finding candidates for ToggleOutputBitTransform; direction: {:?}",
+            direction
+        );
         let mut candidates = Vec::new();
         for (output_idx, output_spec) in g.outputs.iter().enumerate() {
             for bit_idx in 0..output_spec.bit_vector.get_bit_count() {
@@ -79,6 +83,10 @@ impl Transform for ToggleOutputBitTransform {
         candidate_location: &TransformLocation,
         _direction: TransformDirection, // This transform is its own inverse
     ) -> Result<()> {
+        log::trace!(
+            "Applying ToggleOutputBitTransform to {:?}",
+            candidate_location
+        );
         match candidate_location {
             TransformLocation::OutputPortBit {
                 output_idx,
