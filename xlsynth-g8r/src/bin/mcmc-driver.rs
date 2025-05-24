@@ -22,9 +22,9 @@ struct CliArgs {
     /// Input file (.ir) or sample (sample://name)
     input_path: String,
 
-    /// MCMC duration in seconds.
-    #[clap(short, long, value_parser)]
-    secs: u64,
+    /// Number of MCMC iterations to perform.
+    #[clap(short = 'n', long, value_parser)]
+    iters: u64,
 
     /// Random seed
     #[clap(short = 'S', long, value_parser, default_value_t = 1)]
@@ -46,6 +46,12 @@ struct CliArgs {
     /// Metric to optimize: nodes, depth, or product (nodes*depth)
     #[clap(long, value_enum, default_value_t = Objective::Product)]
     metric: Objective,
+
+    /// Verify equivalence for every accepted edit even if the transform is
+    /// marked always_equivalent, and abort if any equivalence failure is
+    /// detected.
+    #[clap(long)]
+    paranoid: bool,
 }
 
 fn main() -> Result<()> {
@@ -134,13 +140,14 @@ fn main() -> Result<()> {
 
     let best_gfn = mcmc(
         start_gfn,
-        cli.secs,
+        cli.iters,
         cli.seed,
         running.clone(),
         cli.disabled_transforms.unwrap_or_default(),
         cli.verbose,
         cli.metric,
         Some(output_dir_for_dumps.clone()),
+        cli.paranoid,
     );
 
     if !running.load(Ordering::SeqCst) {
