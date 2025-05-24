@@ -44,11 +44,8 @@ impl fmt::Display for TransformKind {
             TransformKind::SwapOutputBits => write!(f, "SwapOutBits"),
             TransformKind::RotateAndRight => write!(f, "RotAndR"),
             TransformKind::RotateAndLeft => write!(f, "RotAndL"),
-<<<<<<< HEAD
             TransformKind::ToggleOperandNegation => write!(f, "TogOpNeg"),
-=======
             TransformKind::RewireOperand => write!(f, "RewireOp"),
->>>>>>> 543cc0d (Add RewireOperand transform)
         }
     }
 }
