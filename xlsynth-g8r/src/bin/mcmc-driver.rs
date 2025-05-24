@@ -73,6 +73,7 @@ fn run_chain(
     running: Arc<AtomicBool>,
     best: Arc<Best>,
     chain_no: usize,
+    periodic_dump_dir: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
     let options = McmcOptions {
         sat_reset_interval: 20000, // or make this configurable
@@ -85,7 +86,7 @@ fn run_chain(
         cfg.disabled_transforms.clone().unwrap_or_default(),
         cfg.verbose || cfg.paranoid,
         cfg.metric,
-        None,
+        periodic_dump_dir,
         cfg.paranoid,
         cfg.checkpoint_iters,
         Some(best),
@@ -128,36 +129,43 @@ fn main() -> Result<()> {
     let output_g8r_filename = "best.g8r";
     let output_stats_filename = "best.stats.json";
 
-    let (output_g8r_path, output_stats_path, _temp_dir_holder): (
+    let (output_g8r_path, output_stats_path, output_dir, _temp_dir_holder): (
+        PathBuf,
         PathBuf,
         PathBuf,
         Option<tempfile::TempDir>,
     ) = match &cli.output {
         Some(path_str) => {
             let p = PathBuf::from(path_str);
-            if p.is_dir() || path_str.ends_with('/') || path_str.ends_with('\\') {
+            let dir = if p.is_dir() || path_str.ends_with('/') || path_str.ends_with('\\') {
                 fs::create_dir_all(&p)?;
-                (
-                    p.join(output_g8r_filename),
-                    p.join(output_stats_filename),
-                    None,
-                )
+                p.clone()
             } else {
                 if let Some(parent) = p.parent() {
                     if !parent.exists() {
                         fs::create_dir_all(parent)?;
                     }
                 }
-                let stats_p = p.with_file_name(
+                p.parent().unwrap_or(&p).to_path_buf()
+            };
+            let g8r = if p.is_dir() || path_str.ends_with('/') || path_str.ends_with('\\') {
+                p.join(output_g8r_filename)
+            } else {
+                p.clone()
+            };
+            let stats_p = if p.is_dir() || path_str.ends_with('/') || path_str.ends_with('\\') {
+                p.join(output_stats_filename)
+            } else {
+                p.with_file_name(
                     p.file_stem()
                         .unwrap_or_default()
                         .to_str()
                         .unwrap_or("best")
                         .to_owned()
                         + ".stats.json",
-                );
-                (p, stats_p, None)
-            }
+                )
+            };
+            (g8r, stats_p, dir, None)
         }
         None => {
             let temp_dir = Builder::new().prefix("mcmc_output_").tempdir()?;
@@ -169,6 +177,7 @@ fn main() -> Result<()> {
             (
                 base_path.join(output_g8r_filename),
                 base_path.join(output_stats_filename),
+                base_path.to_path_buf(),
                 Some(temp_dir),
             )
         }
@@ -193,6 +202,7 @@ fn main() -> Result<()> {
         let start_cl = start_gfn.clone();
         let seed_i = cli.seed ^ i as u64;
         let error_flag_cl = error_flag.clone();
+        let output_dir_cl = output_dir.clone();
         handles.push(std::thread::spawn(move || {
             if let Err(e) = run_chain(
                 Arc::new(cfg),
@@ -201,6 +211,7 @@ fn main() -> Result<()> {
                 running_cl.clone(),
                 best_cl,
                 i as usize,
+                Some(output_dir_cl),
             ) {
                 let mut guard = error_flag_cl.lock().unwrap();
                 *guard = Some(e);
@@ -254,38 +265,36 @@ fn main() -> Result<()> {
 
     println!("[mcmc] All MCMC chains joined. Writing final output...");
 
-    // Only the main thread (not a worker) should write output.
-    if std::thread::current().name().is_none() {
-        let best_gfn = best.get();
-        let final_summary_stats: SummaryStats = get_summary_stats::get_summary_stats(&best_gfn);
-        println!(
-            "[mcmc] finished. Final best GateFn stats: nodes={}, depth={}",
-            final_summary_stats.live_nodes, final_summary_stats.deepest_path
-        );
+    // We are back on the main thread; write out the results once.
+    let best_gfn = best.get();
+    let final_summary_stats: SummaryStats = get_summary_stats::get_summary_stats(&best_gfn);
+    println!(
+        "[mcmc] finished. Final best GateFn stats: nodes={}, depth={}",
+        final_summary_stats.live_nodes, final_summary_stats.deepest_path
+    );
 
-        println!(
-            "[mcmc] Dumping best GateFn as text to: {}",
-            output_g8r_path.display()
-        );
-        let mut f_g8r = fs::File::create(&output_g8r_path)?;
-        f_g8r.write_all(best_gfn.to_string().as_bytes())?;
-        println!(
-            "[mcmc] Successfully wrote output to {}",
-            output_g8r_path.display()
-        );
+    println!(
+        "[mcmc] Dumping best GateFn as text to: {}",
+        output_g8r_path.display()
+    );
+    let mut f_g8r = fs::File::create(&output_g8r_path)?;
+    f_g8r.write_all(best_gfn.to_string().as_bytes())?;
+    println!(
+        "[mcmc] Successfully wrote output to {}",
+        output_g8r_path.display()
+    );
 
-        println!(
-            "[mcmc] Dumping best GateFn stats as JSON to: {}",
-            output_stats_path.display()
-        );
-        let mut f_stats = fs::File::create(&output_stats_path)?;
-        let stats_json = serde_json::to_string_pretty(&final_summary_stats)?;
-        f_stats.write_all(stats_json.as_bytes())?;
-        println!(
-            "[mcmc] Successfully wrote stats to {}",
-            output_stats_path.display()
-        );
-    }
+    println!(
+        "[mcmc] Dumping best GateFn stats as JSON to: {}",
+        output_stats_path.display()
+    );
+    let mut f_stats = fs::File::create(&output_stats_path)?;
+    let stats_json = serde_json::to_string_pretty(&final_summary_stats)?;
+    f_stats.write_all(stats_json.as_bytes())?;
+    println!(
+        "[mcmc] Successfully wrote stats to {}",
+        output_stats_path.display()
+    );
 
     Ok(())
 }
