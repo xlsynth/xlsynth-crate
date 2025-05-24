@@ -4,6 +4,7 @@ pub mod double_negate;
 pub mod duplicate;
 pub mod false_and;
 pub mod redundant_and;
+pub mod rewire_operand;
 pub mod rotate_and;
 pub mod swap_operands;
 pub mod swap_outputs;
@@ -18,6 +19,7 @@ use crate::transforms::true_and::{InsertTrueAndTransform, RemoveTrueAndTransform
 use double_negate::DoubleNegateTransform;
 use duplicate::{DuplicateGateTransform, UnduplicateGateTransform};
 use redundant_and::{InsertRedundantAndTransform, RemoveRedundantAndTransform};
+use rewire_operand::RewireOperandTransform;
 use swap_operands::SwapOperandsTransform;
 use swap_outputs::SwapOutputBitsTransform;
 use toggle_operand_negation::ToggleOperandNegationTransform;
@@ -42,5 +44,6 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(SwapOutputBitsTransform::new()),
         Box::new(RotateAndRightTransform::new()),
         Box::new(RotateAndLeftTransform::new()),
+        Box::new(RewireOperandTransform::new()),
     ]
 }
