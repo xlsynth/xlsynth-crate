@@ -14,7 +14,6 @@ use rand::prelude::{Rng, SeedableRng, SliceRandom};
 use rand_pcg::Pcg64Mcg;
 
 // Imports from the xlsynth_g8r crate
-use crate::check_equivalence::validate_same_gate_fn;
 use crate::gate::GateFn; // Cost is now defined in this file
 use crate::get_summary_stats;
 use crate::ir2gate::{self, GatifyOptions};
@@ -23,6 +22,7 @@ use crate::test_utils::{
 };
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
+use crate::validate_equiv::{self, Ctx as SatCtx, EquivResult};
 use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
 use serde_json;
@@ -48,10 +48,12 @@ pub fn cost(g: &GateFn) -> Cost {
     }
 }
 
-/// Placeholder for SAT-based equivalence check.
-/// Currently uses simulation-based check via validate_same_gate_fn.
-pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> bool {
-    validate_same_gate_fn(lhs, rhs).is_ok()
+/// Checks equivalence of two `GateFn`s using the SAT based solver.
+pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn, ctx: &mut SatCtx) -> bool {
+    matches!(
+        validate_equiv::check_equiv(lhs, rhs, ctx),
+        EquivResult::Proved
+    )
 }
 
 /// Holds MCMC iteration statistics.
@@ -123,6 +125,7 @@ pub struct McmcContext<'a> {
     pub rng: &'a mut Pcg64Mcg,
     pub all_transforms: Vec<Box<dyn crate::transforms::transform_trait::Transform>>,
     pub weights: Vec<f64>,
+    pub sat_ctx: SatCtx<'a>,
 }
 
 /// Details of what occurred during a single MCMC iteration attempt.
@@ -247,7 +250,7 @@ pub fn mcmc_iteration(
                 true
             } else {
                 let oracle_start_time = Instant::now();
-                let res = oracle_equiv_sat(&current_gfn, &candidate_gfn);
+                let res = oracle_equiv_sat(&current_gfn, &candidate_gfn, &mut context.sat_ctx);
                 oracle_time_micros = oracle_start_time.elapsed().as_micros();
                 res
             };
@@ -385,6 +388,7 @@ pub fn mcmc(
         rng: &mut iteration_rng,
         all_transforms: all_available_transforms,
         weights,
+        sat_ctx: SatCtx::new(),
     };
 
     let start_time = Instant::now();
@@ -569,7 +573,11 @@ pub fn mcmc(
                     ));
 
                     // Before dumping, verify equivalence to original for extra safety.
-                    let equiv_ok = oracle_equiv_sat(&original_gfn_for_check, &best_gfn);
+                    let equiv_ok = oracle_equiv_sat(
+                        &original_gfn_for_check,
+                        &best_gfn,
+                        &mut mcmc_context.sat_ctx,
+                    );
                     if !equiv_ok {
                         panic!(
                             "[mcmc] Equivalence failure during checkpoint at iteration {} (best_gfn not equivalent to original). Aborting.",
