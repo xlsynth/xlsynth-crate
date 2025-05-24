@@ -252,9 +252,8 @@ pub fn mcmc_iteration(
                 let oracle_start_time = Instant::now();
                 let sat_res = oracle_equiv_sat(&current_gfn, &candidate_gfn, &mut context.sat_ctx);
                 oracle_time_micros = oracle_start_time.elapsed().as_micros();
-                let mut external_res = true;
                 if paranoid {
-                    external_res = crate::check_equivalence::validate_same_gate_fn(
+                    let external_res = crate::check_equivalence::validate_same_gate_fn(
                         &current_gfn,
                         &candidate_gfn,
                     )

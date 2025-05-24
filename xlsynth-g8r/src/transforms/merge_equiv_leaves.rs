@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aig_hasher::AigHasher;
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::gate::{AigNode, AigRef, GateFn};
 use crate::transforms::rewire_operand::rewire_operand_primitive;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
 use anyhow::{anyhow, Result};
-
-#[derive(Debug, Clone)]
-pub struct MergeEquivLeavesLocation {
-    pub parent: AigRef,
-    pub replace_rhs: bool,
-    pub old_op: AigOperand,
-}
 
 #[derive(Debug)]
 pub struct MergeEquivLeavesTransform;
@@ -45,20 +38,16 @@ impl Transform for MergeEquivLeavesTransform {
                 let hash_b = hasher.get_hash(&b.node, &g.gates);
                 if hash_a == hash_b && a.negated == b.negated {
                     let parent = AigRef { id: idx };
-                    cands.push(TransformLocation::Custom(Box::new(
-                        MergeEquivLeavesLocation {
-                            parent,
-                            replace_rhs: true,
-                            old_op: *b,
-                        },
-                    )));
-                    cands.push(TransformLocation::Custom(Box::new(
-                        MergeEquivLeavesLocation {
-                            parent,
-                            replace_rhs: false,
-                            old_op: *a,
-                        },
-                    )));
+                    cands.push(TransformLocation::OperandTarget {
+                        parent,
+                        is_rhs: true,
+                        old_op: *b,
+                    });
+                    cands.push(TransformLocation::OperandTarget {
+                        parent,
+                        is_rhs: false,
+                        old_op: *a,
+                    });
                 }
             }
         }
@@ -71,10 +60,12 @@ impl Transform for MergeEquivLeavesTransform {
         candidate_location: &TransformLocation,
         direction: TransformDirection,
     ) -> Result<()> {
-        let loc = match candidate_location {
-            TransformLocation::Custom(b) => b
-                .downcast_ref::<MergeEquivLeavesLocation>()
-                .ok_or_else(|| anyhow!("Invalid location type for MergeEquivLeavesTransform"))?,
+        let (parent, is_rhs, old_op) = match candidate_location {
+            TransformLocation::OperandTarget {
+                parent,
+                is_rhs,
+                old_op,
+            } => (parent, is_rhs, old_op),
             _ => {
                 return Err(anyhow!(
                     "Invalid location type for MergeEquivLeavesTransform: {:?}",
@@ -82,17 +73,17 @@ impl Transform for MergeEquivLeavesTransform {
                 ))
             }
         };
-        if loc.parent.id >= g.gates.len() {
+        if parent.id >= g.gates.len() {
             return Err(anyhow!("Parent ref out of bounds"));
         }
-        match g.gates[loc.parent.id] {
+        match g.gates[parent.id] {
             AigNode::And2 { .. } => {}
             _ => return Err(anyhow!("Parent node is not And2")),
         }
         let target_op = if direction == TransformDirection::Forward {
-            match g.gates[loc.parent.id] {
+            match g.gates[parent.id] {
                 AigNode::And2 { a, b, .. } => {
-                    if loc.replace_rhs {
+                    if *is_rhs {
                         a
                     } else {
                         b
@@ -101,9 +92,9 @@ impl Transform for MergeEquivLeavesTransform {
                 _ => unreachable!(),
             }
         } else {
-            loc.old_op
+            *old_op
         };
-        rewire_operand_primitive(g, loc.parent, loc.replace_rhs, target_op)
+        rewire_operand_primitive(g, parent, *is_rhs, &target_op)
             .map(|_| ())
             .map_err(anyhow::Error::msg)
     }

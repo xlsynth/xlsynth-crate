@@ -12,9 +12,9 @@ use rand::Rng;
 /// Returns the previous operand value.
 pub fn rewire_operand_primitive(
     g: &mut GateFn,
-    parent: AigRef,
+    parent: &AigRef,
     is_rhs: bool,
-    new_op: AigOperand,
+    new_op: &AigOperand,
 ) -> Result<AigOperand, &'static str> {
     if parent.id >= g.gates.len() {
         return Err("Parent ref out of bounds in rewire_operand_primitive");
@@ -23,22 +23,14 @@ pub fn rewire_operand_primitive(
         AigNode::And2 { a, b, .. } => {
             let old = if is_rhs { *b } else { *a };
             if is_rhs {
-                *b = new_op;
+                *b = *new_op;
             } else {
-                *a = new_op;
+                *a = *new_op;
             }
             Ok(old)
         }
         _ => Err("Parent is not And2 in rewire_operand_primitive"),
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct RewireOperandLocation {
-    pub parent: AigRef,
-    pub is_rhs: bool,
-    pub old_op: AigOperand,
-    pub new_op: AigOperand,
 }
 
 #[derive(Debug)]
@@ -71,24 +63,24 @@ impl Transform for RewireOperandTransform {
                     },
                     negated: rng.gen(),
                 };
-                cands.push(TransformLocation::Custom(Box::new(RewireOperandLocation {
+                cands.push(TransformLocation::OperandReplacement {
                     parent,
                     is_rhs: false,
                     old_op: *a,
                     new_op: new_op_lhs,
-                })));
+                });
                 let new_op_rhs = AigOperand {
                     node: AigRef {
                         id: rng.gen_range(0..g.gates.len()),
                     },
                     negated: rng.gen(),
                 };
-                cands.push(TransformLocation::Custom(Box::new(RewireOperandLocation {
+                cands.push(TransformLocation::OperandReplacement {
                     parent,
                     is_rhs: true,
                     old_op: *b,
                     new_op: new_op_rhs,
-                })));
+                });
             }
         }
         cands
@@ -100,10 +92,13 @@ impl Transform for RewireOperandTransform {
         candidate_location: &TransformLocation,
         direction: TransformDirection,
     ) -> Result<()> {
-        let loc = match candidate_location {
-            TransformLocation::Custom(b) => b
-                .downcast_ref::<RewireOperandLocation>()
-                .ok_or_else(|| anyhow!("Invalid location type for RewireOperandTransform"))?,
+        let (parent, is_rhs, old_op, new_op) = match candidate_location {
+            TransformLocation::OperandReplacement {
+                parent,
+                is_rhs,
+                old_op,
+                new_op,
+            } => (parent, is_rhs, old_op, new_op),
             _ => {
                 return Err(anyhow!(
                     "Invalid candidate location for RewireOperandTransform: {:?}",
@@ -112,24 +107,24 @@ impl Transform for RewireOperandTransform {
             }
         };
         let target_op = if direction == TransformDirection::Forward {
-            loc.new_op
+            new_op
         } else {
-            loc.old_op
+            old_op
         };
 
         // Sanity checks to prevent cycles or self-loops.
-        if target_op.node == loc.parent {
+        if target_op.node == *parent {
             return Err(anyhow!(
                 "RewireOperand would create self-loop: operand points to its own parent"
             ));
         }
-        if node_reaches_target(&g.gates, target_op.node, loc.parent) {
+        if node_reaches_target(&g.gates, target_op.node, *parent) {
             return Err(anyhow!(
                 "RewireOperand would introduce cycle (target depends on parent)"
             ));
         }
 
-        rewire_operand_primitive(g, loc.parent, loc.is_rhs, target_op)
+        rewire_operand_primitive(g, parent, *is_rhs, target_op)
             .map(|_| ())
             .map_err(anyhow::Error::msg)
     }
@@ -154,7 +149,7 @@ mod tests {
         gb.add_output("o".to_string(), and_op.into());
         let mut g = gb.build();
         let new_op = i2;
-        let old = rewire_operand_primitive(&mut g, and_op.node, false, new_op).unwrap();
+        let old = rewire_operand_primitive(&mut g, &and_op.node, false, &new_op).unwrap();
         match &g.gates[and_op.node.id] {
             AigNode::And2 { a, .. } => {
                 assert_eq!(*a, new_op);
@@ -162,7 +157,7 @@ mod tests {
             _ => panic!("and_op not And2"),
         }
         // revert
-        rewire_operand_primitive(&mut g, and_op.node, false, old).unwrap();
+        rewire_operand_primitive(&mut g, &and_op.node, false, &old).unwrap();
         assert_eq!(g.outputs[0].bit_vector.get_lsb(0).node, and_op.node);
     }
 
@@ -175,13 +170,12 @@ mod tests {
         let and_op = gb.add_and_binary(i0, i1);
         gb.add_output("o".to_string(), and_op.into());
         let mut g = gb.build();
-        let loc = RewireOperandLocation {
+        let tloc = TransformLocation::OperandReplacement {
             parent: and_op.node,
             is_rhs: true,
             old_op: i1,
             new_op: i2,
         };
-        let tloc = TransformLocation::Custom(Box::new(loc.clone()));
         let t = RewireOperandTransform::new();
         t.apply(&mut g, &tloc, TransformDirection::Forward).unwrap();
         match &g.gates[and_op.node.id] {

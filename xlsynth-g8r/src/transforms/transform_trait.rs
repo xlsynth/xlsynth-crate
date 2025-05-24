@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigRef, GateFn};
+use crate::gate::{AigOperand, AigRef, GateFn};
 use anyhow::Result;
-use std::any::Any;
 use std::fmt::{self, Debug};
 
 /// Enum representing the different kinds of transformations that can be
@@ -29,11 +28,8 @@ pub enum TransformKind {
     UnbalanceAndTree,
     ToggleOperandNegation,
     RewireOperand,
-<<<<<<< HEAD
     PushNegation,
-=======
     MergeEquivLeaves,
->>>>>>> 62f7486 (Format merge_equiv_leaves files)
 }
 
 impl fmt::Display for TransformKind {
@@ -59,11 +55,8 @@ impl fmt::Display for TransformKind {
             TransformKind::UnbalanceAndTree => write!(f, "UnbalTree"),
             TransformKind::ToggleOperandNegation => write!(f, "TogOpNeg"),
             TransformKind::RewireOperand => write!(f, "RewireOp"),
-<<<<<<< HEAD
             TransformKind::PushNegation => write!(f, "PushNeg"),
-=======
             TransformKind::MergeEquivLeaves => write!(f, "MergeLeaves"),
->>>>>>> 62f7486 (Format merge_equiv_leaves files)
         }
     }
 }
@@ -77,12 +70,31 @@ pub enum TransformDirection {
 
 /// Represents a specific location in the GateFn where a transform can be
 /// applied.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TransformLocation {
     Node(AigRef),
     Operand(AigRef, bool),
-    OutputPortBit { output_idx: usize, bit_idx: usize },
-    Custom(Box<dyn Any + Send + Sync>),
+    OutputPortBit {
+        output_idx: usize,
+        bit_idx: usize,
+    },
+    OperandReplacement {
+        parent: AigRef,
+        is_rhs: bool,
+        old_op: AigOperand,
+        new_op: AigOperand,
+    },
+    SwapOutputBits {
+        out_a_idx: usize,
+        bit_a_idx: usize,
+        out_b_idx: usize,
+        bit_b_idx: usize,
+    },
+    OperandTarget {
+        parent: AigRef,
+        is_rhs: bool,
+        old_op: AigOperand,
+    },
 }
 
 /// Defines a reversible transformation that can be applied to a `GateFn`.
