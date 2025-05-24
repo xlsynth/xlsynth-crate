@@ -55,8 +55,18 @@ fn collect_chain(
                     && matches!(g.gates[a.node.id], AigNode::And2 { .. })
                     && *use_counts.get(&a.node).unwrap_or(&0) == 1
                 {
+                    // Ensure the sibling `b` is a true leaf; if it also looks
+                    // like the next link of a chain we would be balancing a
+                    // *branching* tree which is not semantics-preserving.
+                    if !b.negated
+                        && matches!(g.gates[b.node.id], AigNode::And2 { .. })
+                        && *use_counts.get(&b.node).unwrap_or(&0) == 1
+                    {
+                        return None; // branching, abort
+                    }
                     ops_rev.push(b);
                     cur = a.node;
+                    continue;
                 } else {
                     ops_rev.push(b);
                     ops_rev.push(a);
@@ -68,8 +78,17 @@ fn collect_chain(
                     && matches!(g.gates[b.node.id], AigNode::And2 { .. })
                     && *use_counts.get(&b.node).unwrap_or(&0) == 1
                 {
+                    // sibling `a` must be a leaf, otherwise branching
+                    if !a.negated
+                        && matches!(g.gates[a.node.id], AigNode::And2 { .. })
+                        && *use_counts.get(&a.node).unwrap_or(&0) == 1
+                    {
+                        return None; // branching
+                    }
                     ops_rev.push(a);
+                    nodes.push(cur);
                     cur = b.node;
+                    continue;
                 } else {
                     ops_rev.push(a);
                     ops_rev.push(b);
@@ -154,6 +173,12 @@ fn build_chain(
             }
         }
         Orientation::Right => {
+            if ops_inorder.len() < 3 {
+                return Err(anyhow!(
+                    "build_chain expected at least 3 operands for Right orientation, got {}",
+                    ops_inorder.len()
+                ));
+            }
             if let AigNode::And2 { a, b, .. } = &mut g.gates[current.id] {
                 *a = ops_inorder[ops_inorder.len() - 2];
                 *b = ops_inorder[ops_inorder.len() - 1];
@@ -177,6 +202,81 @@ fn build_chain(
     }
     crate::topo::debug_assert_no_cycles(&g.gates, "unbalance_and_tree");
     Ok(())
+}
+
+/// Starting from `root`, follow a monotonic chain along the given `orient`
+/// direction, collecting:
+///   * `nodes`: the `AigRef`s that form the internal AND gates of the chain in
+///     root-to-leaf order.
+///   * `ops`:  the operands that appear *between* the chain links, given in
+///     inorder such that `ops.len() == nodes.len() + 1` – exactly what
+///     `build_chain` expects.
+///
+/// Returns `None` if `root` is not an `And2` or does not have a monotonic
+/// chain along the requested orientation.
+fn collect_chain_linear(
+    g: &GateFn,
+    root: AigRef,
+    orient: Orientation,
+    use_counts: &HashMap<AigRef, usize>,
+) -> Option<(Vec<AigRef>, Vec<AigOperand>)> {
+    let mut nodes = Vec::new();
+    let mut ops_rev = Vec::new();
+
+    let mut cur = root;
+    loop {
+        // Current node must be And2.
+        let (a, b) = match g.gates[cur.id] {
+            AigNode::And2 { a, b, .. } => (a, b),
+            _ => return None,
+        };
+
+        match orient {
+            Orientation::Left => {
+                // Chain grows on the *left* input.
+                if !a.negated
+                    && matches!(g.gates[a.node.id], AigNode::And2 { .. })
+                    && *use_counts.get(&a.node).unwrap_or(&0) == 1
+                {
+                    // Still in the chain. The *other* operand (b) is a leaf at
+                    // this level.
+                    ops_rev.push(b);
+                    nodes.push(cur);
+                    cur = a.node;
+                    continue;
+                } else {
+                    // Final link – both a & b are leaves.
+                    ops_rev.push(b);
+                    ops_rev.push(a);
+                    nodes.push(cur);
+                    break;
+                }
+            }
+            Orientation::Right => {
+                // Chain grows on the *right* input.
+                if !b.negated
+                    && matches!(g.gates[b.node.id], AigNode::And2 { .. })
+                    && *use_counts.get(&b.node).unwrap_or(&0) == 1
+                {
+                    ops_rev.push(a);
+                    nodes.push(cur);
+                    cur = b.node;
+                    continue;
+                } else {
+                    ops_rev.push(a);
+                    ops_rev.push(b);
+                    nodes.push(cur);
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut ops = ops_rev;
+    if orient == Orientation::Left {
+        ops.reverse();
+    }
+    Some((nodes, ops))
 }
 
 #[derive(Debug)]
@@ -266,33 +366,6 @@ impl UnbalanceAndTreeTransform {
     }
 }
 
-fn preorder_collect(g: &GateFn, root: AigRef, nodes: &mut Vec<AigRef>) {
-    nodes.push(root);
-    if let AigNode::And2 { a, b, .. } = g.gates[root.id] {
-        if let AigNode::And2 { .. } = g.gates[a.node.id] {
-            preorder_collect(g, a.node, nodes);
-        }
-        if let AigNode::And2 { .. } = g.gates[b.node.id] {
-            preorder_collect(g, b.node, nodes);
-        }
-    }
-}
-
-fn inorder_collect(g: &GateFn, root: AigRef, ops: &mut Vec<AigOperand>) {
-    if let AigNode::And2 { a, b, .. } = g.gates[root.id] {
-        if let AigNode::And2 { .. } = g.gates[a.node.id] {
-            inorder_collect(g, a.node, ops);
-        } else {
-            ops.push(a);
-        }
-        if let AigNode::And2 { .. } = g.gates[b.node.id] {
-            inorder_collect(g, b.node, ops);
-        } else {
-            ops.push(b);
-        }
-    }
-}
-
 impl Transform for UnbalanceAndTreeTransform {
     fn kind(&self) -> TransformKind {
         TransformKind::UnbalanceAndTree
@@ -342,11 +415,18 @@ impl Transform for UnbalanceAndTreeTransform {
                     }
                     _ => return Err(anyhow!("Root is not And2 with tags")),
                 };
-                let mut nodes = Vec::new();
-                preorder_collect(g, *root, &mut nodes);
-                let mut ops = Vec::new();
-                inorder_collect(g, *root, &mut ops);
+                let use_counts = get_id_to_use_count(g);
+                let (nodes, ops) = collect_chain_linear(g, *root, orient, &use_counts)
+                    .ok_or_else(|| anyhow!("Failed to collect chain for unbalance"))?;
+                if nodes.len() < 2 {
+                    return Err(anyhow!(
+                        "UnbalanceAndTree requires at least two nodes in chain; found {}",
+                        nodes.len()
+                    ));
+                }
                 build_chain(g, orient, &nodes, &ops)?;
+                // Assert strong invariant: UnbalanceAndTree must not create cycles.
+                crate::topo::debug_assert_no_cycles(&g.gates, "unbalance_and_tree");
                 if let AigNode::And2 { tags: Some(ts), .. } = &mut g.gates[root.id] {
                     ts.retain(|t| t != TAG_LEFT && t != TAG_RIGHT);
                     if ts.is_empty() {
@@ -378,7 +458,7 @@ impl Transform for UnbalanceAndTreeTransform {
 mod tests {
     use super::*;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-    use crate::transforms::transform_trait::Transform;
+    use crate::transforms::transform_trait::{Transform, TransformLocation};
 
     fn setup_left_chain() -> GateFn {
         let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
@@ -410,5 +490,74 @@ mod tests {
             .apply(&mut g, &c2[0], TransformDirection::Forward)
             .unwrap();
         assert_eq!(g.to_string(), original);
+    }
+
+    #[test]
+    fn test_balance_and_unbalance_roundtrip_right() {
+        // Construct a right-leaning AND chain: o = ((((i0 & i1) & i2) & i3)) with chain
+        // on the right.
+        let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+        let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
+        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
+        let i2 = gb.add_input("i2".to_string(), 1).get_lsb(0).clone();
+        let i3 = gb.add_input("i3".to_string(), 1).get_lsb(0).clone();
+        let n1 = gb.add_and_binary(i0, i1); // depth 1
+        let n2 = gb.add_and_binary(n1, i2); // depth 2 (chain on RHS of root will start here)
+        let n3 = gb.add_and_binary(n2, i3); // depth 3, right-leaning chain root
+        let root_op = gb.add_and_binary(n2, n3);
+        gb.add_output("o".to_string(), root_op.into());
+        let mut g = gb.build();
+        let _root = root_op.node; // AigRef of the root AND gate
+        let original = g.to_string();
+
+        // Balance, then unbalance, and ensure we round-trip.
+        let mut bal = BalanceAndTreeTransform::new();
+        let candidates = bal.find_candidates(&g, TransformDirection::Forward);
+        assert!(!candidates.is_empty());
+        bal.apply(&mut g, &candidates[0], TransformDirection::Forward)
+            .unwrap();
+        assert_ne!(g.to_string(), original);
+
+        let mut unbal = UnbalanceAndTreeTransform::new();
+        let c2 = unbal.find_candidates(&g, TransformDirection::Forward);
+        assert!(!c2.is_empty());
+        unbal
+            .apply(&mut g, &c2[0], TransformDirection::Forward)
+            .unwrap();
+        assert_eq!(g.to_string(), original);
+    }
+
+    #[test]
+    fn test_branching_chain_not_balanced() {
+        // Build a root AND with two AND children (branching tree). This SHOULD
+        // NOT be considered a valid candidate for BalanceAndTreeTransform.
+        let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+        let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
+        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
+        let i2 = gb.add_input("i2".to_string(), 1).get_lsb(0).clone();
+        let i3 = gb.add_input("i3".to_string(), 1).get_lsb(0).clone();
+
+        let left_chain = gb.add_and_binary(i0, i1); // left child AND
+        let right_chain = gb.add_and_binary(i2, i3); // right child AND
+
+        let root_op = gb.add_and_binary(left_chain, right_chain);
+        gb.add_output("o".to_string(), root_op.into());
+        let mut g = gb.build();
+        let root = root_op.node; // AigRef of the root AND gate
+
+        let mut bal = BalanceAndTreeTransform::new();
+        let cands = bal.find_candidates(&g, TransformDirection::Forward);
+        assert!(
+            cands.is_empty(),
+            "Branching chain should not be a candidate for balancing"
+        );
+
+        // For good measure attempt to apply directly to root and expect Err.
+        let res = bal.apply(
+            &mut g,
+            &TransformLocation::Node(root),
+            TransformDirection::Forward,
+        );
+        assert!(res.is_err(), "Balancing branching chain should fail");
     }
 }
