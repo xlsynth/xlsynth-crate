@@ -76,6 +76,9 @@ jobs:
       - name: Run version check test
         run: cargo test --test version_test
 
+      - name: Ensure benches compile
+        run: cargo bench --workspace --no-run
+
   # -----------------------------------------------------------
   # 2) Build/test on Ubuntu 22.04 and 24.04
   # -----------------------------------------------------------
