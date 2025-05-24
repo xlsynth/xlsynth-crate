@@ -250,9 +250,23 @@ pub fn mcmc_iteration(
                 true
             } else {
                 let oracle_start_time = Instant::now();
-                let res = oracle_equiv_sat(&current_gfn, &candidate_gfn, &mut context.sat_ctx);
+                let sat_res = oracle_equiv_sat(&current_gfn, &candidate_gfn, &mut context.sat_ctx);
                 oracle_time_micros = oracle_start_time.elapsed().as_micros();
-                res
+                let mut external_res = true;
+                if paranoid {
+                    external_res = crate::check_equivalence::validate_same_gate_fn(
+                        &current_gfn,
+                        &candidate_gfn,
+                    )
+                    .is_ok();
+                    if sat_res != external_res {
+                        panic!(
+                            "[mcmc] ERROR: SAT oracle and external check_equivalence_with_top DISAGREE in mcmc_iteration: SAT oracle: {}, external: {}",
+                            sat_res, external_res
+                        );
+                    }
+                }
+                sat_res
             };
             log::trace!("is_equiv: {:?}", is_equiv);
 
@@ -337,7 +351,7 @@ pub fn mcmc(
     shared_best: Option<Arc<Best>>,
     chain_no: Option<usize>,
     options: McmcOptions,
-) -> GateFn {
+) -> Result<GateFn> {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
 
@@ -357,7 +371,7 @@ pub fn mcmc(
 
     if all_available_transforms.is_empty() {
         println!("Warning: All transforms have been disabled. No MCMC will be performed.");
-        return initial_gfn_param;
+        return Ok(initial_gfn_param);
     }
 
     println!(
@@ -572,71 +586,46 @@ pub fn mcmc(
                         "{}best_iter_{}.stats.json",
                         prefix, iterations_count
                     ));
-
-                    // Before dumping, verify equivalence to original for extra safety.
-                    let equiv_ok = oracle_equiv_sat(
+                    write_checkpoint(
+                        &g8r_path,
+                        &stats_path,
                         &original_gfn_for_check,
                         &best_gfn,
                         &mut mcmc_context.sat_ctx,
-                    );
-                    if !equiv_ok {
-                        panic!(
-                            "[mcmc] Equivalence failure during checkpoint at iteration {} (best_gfn not equivalent to original). Aborting.",
-                            iterations_count
-                        );
-                    }
-
-                    if let Err(e) = std::fs::write(&g8r_path, best_gfn.to_string()) {
-                        eprintln!(
-                            "[mcmc] Warning: Failed to write periodic GateFn dump to {}: {:?}",
-                            g8r_path.display(),
-                            e
-                        );
-                    }
-
-                    let stats = get_summary_stats::get_summary_stats(&best_gfn);
-                    match serde_json::to_string_pretty(&stats) {
-                        Ok(json) => {
-                            if let Err(e) = std::fs::write(&stats_path, json) {
-                                eprintln!(
-                                    "[mcmc] Warning: Failed to write periodic stats dump to {}: {:?}",
-                                    stats_path.display(),
-                                    e
-                                );
-                            } else {
-                                // Both GateFn and stats written successfully
-                                println!(
-                                    "[mcmc] Iter {}: checkpoint written to {} and {} | Equivalence: {}",
-                                    iterations_count,
-                                    g8r_path.display(),
-                                    stats_path.display(),
-                                    if equiv_ok { "OK" } else { "FAIL" }
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[mcmc] Warning: Failed to serialize stats for periodic dump at iteration {}: {:?}",
-                                iterations_count, e
-                            );
-                        }
-                    }
+                        iterations_count,
+                        "Iter checkpoint",
+                    )?;
                 }
             }
         }
 
         // Periodically reset SAT context to avoid unbounded memory growth.
         if options.sat_reset_interval > 0 && iterations_count % options.sat_reset_interval == 0 {
-            let vars = mcmc_context.sat_ctx.solver.num_vars();
-            let clauses = mcmc_context.sat_ctx.solver.num_clauses();
-            println!(
-                "[mcmc] SAT context: {} vars, {} clauses at iter {}. Resetting SAT context.",
-                vars, clauses, iterations_count
-            );
+            println!("[mcmc] SAT context reset at iter {}.", iterations_count);
             mcmc_context.sat_ctx.reset();
         }
     }
-    best_gfn
+
+    // Final checkpoint (for main thread write-out)
+    if let Some(ref dump_dir) = periodic_dump_dir {
+        let prefix = if let Some(chain) = chain_no {
+            format!("c{}-", chain)
+        } else {
+            String::new()
+        };
+        let g8r_path = dump_dir.join(format!("{}final_best.g8r", prefix));
+        let stats_path = dump_dir.join(format!("{}final_best.stats.json", prefix));
+        write_checkpoint(
+            &g8r_path,
+            &stats_path,
+            &original_gfn_for_check,
+            &best_gfn,
+            &mut mcmc_context.sat_ctx,
+            iterations_count,
+            "Final checkpoint",
+        )?;
+    }
+    Ok(best_gfn)
 }
 
 /// Loads the starting `GateFn` from either a sample or an IR file.
@@ -711,4 +700,72 @@ pub fn build_transform_weights<
 #[derive(Clone, Debug)]
 pub struct McmcOptions {
     pub sat_reset_interval: u64,
+}
+
+fn write_checkpoint(
+    g8r_path: &Path,
+    stats_path: &Path,
+    original_gfn: &GateFn,
+    best_gfn: &GateFn,
+    sat_ctx: &mut SatCtx,
+    iter: u64,
+    context: &str,
+) -> Result<()> {
+    // Cross-check equivalence
+    let equiv_ok_sat = oracle_equiv_sat(original_gfn, best_gfn, sat_ctx);
+    let equiv_ok_external =
+        match crate::check_equivalence::validate_same_gate_fn(original_gfn, best_gfn) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("[mcmc] External check_equivalence_with_top failed: {}", e);
+                false
+            }
+        };
+    if equiv_ok_sat != equiv_ok_external {
+        return Err(anyhow::anyhow!(
+            "[mcmc] ERROR: SAT oracle and external check_equivalence_with_top DISAGREE at checkpoint iter {}: SAT oracle: {}, external: {}",
+            iter, equiv_ok_sat, equiv_ok_external
+        ));
+    }
+    if !equiv_ok_sat {
+        return Err(anyhow::anyhow!(
+            "[mcmc] Equivalence failure during checkpoint at iteration {} (best_gfn not equivalent to original). Aborting.",
+            iter
+        ));
+    }
+    if let Err(e) = std::fs::write(g8r_path, best_gfn.to_string()) {
+        eprintln!(
+            "[mcmc] Warning: Failed to write {} checkpoint to {}: {:?}",
+            context,
+            g8r_path.display(),
+            e
+        );
+    }
+    let stats = get_summary_stats::get_summary_stats(best_gfn);
+    match serde_json::to_string_pretty(&stats) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(stats_path, json) {
+                eprintln!(
+                    "[mcmc] Warning: Failed to write {} stats checkpoint to {}: {:?}",
+                    context,
+                    stats_path.display(),
+                    e
+                );
+            } else {
+                println!(
+                    "[mcmc] {}: checkpoint written to {} and {} | Equivalence: OK",
+                    context,
+                    g8r_path.display(),
+                    stats_path.display()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[mcmc] Warning: Failed to serialize stats for {} checkpoint at iteration {}: {:?}",
+                context, iter, e
+            );
+        }
+    }
+    Ok(())
 }

@@ -301,6 +301,7 @@ pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult
     let (_map_a, outputs_a) = build_gate_fn(&mut ctx.solver, a, &input_lits);
     let (_map_b, outputs_b) = build_gate_fn(&mut ctx.solver, b, &input_lits);
 
+    // Build XOR miters for each corresponding output bit.
     let mut miters = Vec::new();
     for (la, lb) in outputs_a.iter().zip(outputs_b.iter()) {
         let m = ctx.solver.new_lit();
@@ -308,9 +309,18 @@ pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult
         miters.push(m);
     }
 
-    ctx.solver.add_clause(&miters);
+    // Fresh literal that stands for "outputs differ in *some* bit".
+    let diff = ctx.solver.new_lit();
+    // diff -> OR(miters)  === (!diff OR m1 OR m2 ...)
+    let mut clause = Vec::with_capacity(miters.len() + 1);
+    clause.push(!diff);
+    clause.extend(miters.iter().cloned());
+    ctx.solver.add_clause(&clause);
+
+    // Ask the solver to find an assignment where outputs differ.
+    ctx.solver.assume(&[diff]);
     match ctx.solver.solve() {
-        Ok(false) => EquivResult::Proved,
+        Ok(false) => EquivResult::Proved, // UNSAT ⇒ no way for outputs to differ.
         Ok(true) => {
             let model = ctx.solver.model().expect("model available when SAT");
             let model_set: HashSet<varisat::Lit> = model.iter().cloned().collect();

@@ -73,7 +73,7 @@ fn run_chain(
     running: Arc<AtomicBool>,
     best: Arc<Best>,
     chain_no: usize,
-) {
+) -> Result<(), anyhow::Error> {
     let options = McmcOptions {
         sat_reset_interval: 20000, // or make this configurable
     };
@@ -89,12 +89,10 @@ fn run_chain(
         cfg.paranoid,
         cfg.checkpoint_iters,
         Some(best),
-<<<<<<< HEAD
         Some(chain_no),
-=======
         options,
->>>>>>> ea7d495 (Reset sat context periodically.)
-    );
+    )?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -186,21 +184,28 @@ fn main() -> Result<()> {
     let best = Arc::new(Best::new(init_metric, start_gfn.clone()));
 
     let mut handles = Vec::new();
+    use std::sync::Mutex;
+    let error_flag = Arc::new(Mutex::new(None));
     for i in 0..cli.threads {
         let cfg = cli.clone();
         let running_cl = running.clone();
         let best_cl = best.clone();
         let start_cl = start_gfn.clone();
         let seed_i = cli.seed ^ i as u64;
+        let error_flag_cl = error_flag.clone();
         handles.push(std::thread::spawn(move || {
-            run_chain(
+            if let Err(e) = run_chain(
                 Arc::new(cfg),
                 seed_i,
                 start_cl,
-                running_cl,
+                running_cl.clone(),
                 best_cl,
                 i as usize,
-            );
+            ) {
+                let mut guard = error_flag_cl.lock().unwrap();
+                *guard = Some(e);
+                running_cl.store(false, Ordering::SeqCst);
+            }
         }));
     }
 
@@ -216,9 +221,20 @@ fn main() -> Result<()> {
                 );
                 last_print = Instant::now();
             }
+            // If any thread reported an error, break out early
+            if error_flag.lock().unwrap().is_some() {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
         let _ = h.join();
+    }
+    if let Some(e) = error_flag.lock().unwrap().as_ref() {
+        eprintln!(
+            "[mcmc] ERROR: Aborting due to error in one of the chains: {}",
+            e
+        );
+        std::process::exit(1);
     }
 
     if !running.load(Ordering::SeqCst) {
