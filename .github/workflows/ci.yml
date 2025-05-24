@@ -76,9 +76,6 @@ jobs:
       - name: Run version check test
         run: cargo test --test version_test
 
-      - name: Ensure benches compile
-        run: cargo bench --workspace --no-run
-
   # -----------------------------------------------------------
   # 2) Build/test on Ubuntu 22.04 and 24.04
   # -----------------------------------------------------------
@@ -163,6 +160,12 @@ jobs:
             exit 1
           fi
           cargo test --features with-boolector-system --workspace
+
+      - name: Ensure benches compile
+        env:
+          BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
+          LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+        run: cargo bench --workspace --no-run
 
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
