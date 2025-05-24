@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use clap::Parser;
+use num_cpus;
 use serde_json;
 use std::fs;
 use std::io::Write;
@@ -11,12 +12,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::Builder;
+use xlsynth_g8r::gate::GateFn;
 use xlsynth_g8r::get_summary_stats::SummaryStats;
 
 use xlsynth_g8r::get_summary_stats;
-use xlsynth_g8r::mcmc_logic::{load_start, mcmc, Objective};
+use xlsynth_g8r::mcmc_logic::{cost, load_start, mcmc, Best, Objective};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 struct CliArgs {
     /// Input file (.ir) or sample (sample://name)
@@ -56,6 +58,32 @@ struct CliArgs {
     /// Iterations between checkpoints written to disk (0 to disable).
     #[clap(long, value_parser, default_value_t = 5000)]
     checkpoint_iters: u64,
+
+    /// Number of parallel MCMC chains to run.
+    #[clap(long, value_parser, default_value_t = num_cpus::get() as u64)]
+    threads: u64,
+}
+
+fn run_chain(
+    cfg: Arc<CliArgs>,
+    seed: u64,
+    start: GateFn,
+    running: Arc<AtomicBool>,
+    best: Arc<Best>,
+) {
+    mcmc(
+        start,
+        cfg.iters,
+        seed,
+        running,
+        cfg.disabled_transforms.clone().unwrap_or_default(),
+        cfg.verbose,
+        cfg.metric,
+        None,
+        cfg.paranoid,
+        cfg.checkpoint_iters,
+        Some(best),
+    );
 }
 
 fn main() -> Result<()> {
@@ -137,28 +165,36 @@ fn main() -> Result<()> {
         }
     };
 
-    let output_dir_for_dumps = output_g8r_path
-        .parent()
-        .expect("Output path should have parent directory")
-        .to_path_buf();
+    let init_cost = cost(&start_gfn);
+    let init_metric = match cli.metric {
+        Objective::Nodes => init_cost.nodes as usize,
+        Objective::Depth => init_cost.depth as usize,
+        Objective::Product => init_cost.nodes * init_cost.depth,
+    };
 
-    let best_gfn = mcmc(
-        start_gfn,
-        cli.iters,
-        cli.seed,
-        running.clone(),
-        cli.disabled_transforms.unwrap_or_default(),
-        cli.verbose,
-        cli.metric,
-        Some(output_dir_for_dumps.clone()),
-        cli.paranoid,
-        cli.checkpoint_iters,
-    );
+    let best = Arc::new(Best::new(init_metric, start_gfn.clone()));
+
+    let mut handles = Vec::new();
+    for i in 0..cli.threads {
+        let cfg = cli.clone();
+        let running_cl = running.clone();
+        let best_cl = best.clone();
+        let start_cl = start_gfn.clone();
+        let seed_i = cli.seed ^ i as u64;
+        handles.push(std::thread::spawn(move || {
+            run_chain(Arc::new(cfg), seed_i, start_cl, running_cl, best_cl);
+        }));
+    }
+
+    for h in handles {
+        let _ = h.join();
+    }
 
     if !running.load(Ordering::SeqCst) {
         println!("MCMC process was interrupted.");
     }
 
+    let best_gfn = best.get();
     let final_summary_stats: SummaryStats = get_summary_stats::get_summary_stats(&best_gfn);
     println!(
         "MCMC finished. Final best GateFn stats: nodes={}, depth={}",
