@@ -1,37 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::topo::reaches_target as node_reaches_target;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
 use crate::use_count::get_id_to_use_count;
 use anyhow::{anyhow, Result};
-
-/// Returns true if `target` is reachable from `start` by following operand
-/// edges. Performs a DFS limited to the sub‐DAG rooted at `start`.
-fn node_reaches_target(g: &GateFn, start: AigRef, target: AigRef) -> bool {
-    if start == target {
-        return true;
-    }
-    let mut stack = vec![start];
-    let mut visited = std::collections::HashSet::new();
-    while let Some(current) = stack.pop() {
-        if !visited.insert(current) {
-            continue;
-        }
-        if current == target {
-            return true;
-        }
-        match &g.gates[current.id] {
-            AigNode::And2 { a, b, .. } => {
-                stack.push(a.node);
-                stack.push(b.node);
-            }
-            _ => {}
-        }
-    }
-    false
-}
 
 // --- Primitives ---
 
@@ -57,7 +32,7 @@ pub fn rotate_and_right_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &
 
     // Ensure that `right_op_of_outer` does NOT (transitively) depend on
     // `inner_ref`.
-    if node_reaches_target(g, right_op_of_outer.node, inner_ref) {
+    if node_reaches_target(&g.gates, right_op_of_outer.node, inner_ref) {
         return Err("rotate_and_right_primitive: right operand depends on inner; rotation would create a cycle");
     }
 
@@ -115,7 +90,7 @@ pub fn rotate_and_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
     };
 
     // Ensure that `left_op_of_outer` does NOT (transitively) depend on `inner_ref`.
-    if node_reaches_target(g, left_op_of_outer.node, inner_ref) {
+    if node_reaches_target(&g.gates, left_op_of_outer.node, inner_ref) {
         return Err("rotate_and_left_primitive: left operand depends on inner; rotation would create a cycle");
     }
 

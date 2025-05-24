@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::topo::reaches_target as node_reaches_target;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -115,6 +116,19 @@ impl Transform for RewireOperandTransform {
         } else {
             loc.old_op
         };
+
+        // Sanity checks to prevent cycles or self-loops.
+        if target_op.node == loc.parent {
+            return Err(anyhow!(
+                "RewireOperand would create self-loop: operand points to its own parent"
+            ));
+        }
+        if node_reaches_target(&g.gates, target_op.node, loc.parent) {
+            return Err(anyhow!(
+                "RewireOperand would introduce cycle (target depends on parent)"
+            ));
+        }
+
         rewire_operand_primitive(g, loc.parent, loc.is_rhs, target_op)
             .map(|_| ())
             .map_err(anyhow::Error::msg)
