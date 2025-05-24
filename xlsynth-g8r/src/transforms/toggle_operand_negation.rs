@@ -132,6 +132,7 @@ mod tests {
     fn test_toggle_operand_negation_primitive_non_and() {
         let mut gb = GateBuilder::new("g".to_string(), GateBuilderOptions::no_opt());
         let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
+        gb.add_output("o".to_string(), i0.into());
         let mut g = gb.build();
         assert!(toggle_operand_negation_primitive(&mut g, i0.node, false).is_err());
     }
