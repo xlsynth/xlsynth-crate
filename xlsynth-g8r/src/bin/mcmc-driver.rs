@@ -64,6 +64,10 @@ struct CliArgs {
     /// Number of parallel MCMC chains to run.
     #[clap(long, value_parser, default_value_t = num_cpus::get() as u64)]
     threads: u64,
+
+    /// Initial temperature for MCMC (default: 5.0)
+    #[clap(long, value_parser, default_value_t = 5.0)]
+    initial_temperature: f64,
 }
 
 fn run_chain(
@@ -77,6 +81,7 @@ fn run_chain(
 ) -> Result<(), anyhow::Error> {
     let options = McmcOptions {
         sat_reset_interval: 20000, // or make this configurable
+        initial_temperature: cfg.initial_temperature,
     };
     mcmc(
         start,

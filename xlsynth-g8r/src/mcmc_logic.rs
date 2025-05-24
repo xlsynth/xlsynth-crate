@@ -15,6 +15,7 @@ use rand_pcg::Pcg64Mcg;
 
 // Imports from the xlsynth_g8r crate
 use crate::gate::GateFn; // Cost is now defined in this file
+use crate::gate_sim::{self, Collect};
 use crate::get_summary_stats;
 use crate::ir2gate::{self, GatifyOptions};
 use crate::test_utils::{
@@ -27,8 +28,8 @@ use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
 use serde_json;
 use std::path::PathBuf;
+use xlsynth::IrBits;
 
-const INITIAL_TEMPERATURE: f64 = 5.0;
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
 const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 1;
@@ -48,12 +49,9 @@ pub fn cost(g: &GateFn) -> Cost {
     }
 }
 
-/// Checks equivalence of two `GateFn`s using the SAT based solver.
-pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn, ctx: &mut SatCtx) -> bool {
-    matches!(
-        validate_equiv::check_equiv(lhs, rhs, ctx),
-        EquivResult::Proved
-    )
+/// Checks equivalence of two `GateFn`s using the external IR-based checker.
+pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> bool {
+    crate::check_equivalence::validate_same_gate_fn(lhs, rhs).is_ok()
 }
 
 /// Holds MCMC iteration statistics.
@@ -67,6 +65,8 @@ pub struct McmcStats {
     pub oracle_verified: usize,
     pub total_oracle_time_micros: u128,
     pub accepted_edits_by_kind: HashMap<TransformKind, usize>,
+    pub rejected_sim_fail: usize,
+    pub total_sim_time_micros: u128,
 }
 
 impl Default for McmcStats {
@@ -80,6 +80,8 @@ impl Default for McmcStats {
             oracle_verified: 0,
             total_oracle_time_micros: 0,
             accepted_edits_by_kind: HashMap::new(),
+            rejected_sim_fail: 0,
+            total_sim_time_micros: 0,
         }
     }
 }
@@ -132,6 +134,7 @@ pub struct McmcContext<'a> {
 pub enum IterationOutcomeDetails {
     CandidateFailure,
     ApplyFailure,
+    SimFailure,
     OracleFailure,
     MetropolisReject,
     Accepted { kind: TransformKind },
@@ -164,6 +167,32 @@ impl Objective {
             Objective::Product => (c.nodes as u64) * (c.depth as u64),
         }
     }
+}
+
+/// Returns true if the outputs of lhs and rhs match for all random input
+/// vectors.
+fn fast_sim_equiv(
+    lhs: &GateFn,
+    rhs: &GateFn,
+    num_samples: usize,
+    rng: &mut impl rand::Rng,
+) -> bool {
+    if lhs.inputs.len() != rhs.inputs.len() || lhs.outputs.len() != rhs.outputs.len() {
+        return false;
+    }
+    for _ in 0..num_samples {
+        let inputs: Vec<IrBits> = lhs
+            .inputs
+            .iter()
+            .map(|input| crate::fuzz_utils::arbitrary_irbits(rng, input.bit_vector.get_bit_count()))
+            .collect();
+        let lhs_out = gate_sim::eval(lhs, &inputs, Collect::None).outputs;
+        let rhs_out = gate_sim::eval(rhs, &inputs, Collect::None).outputs;
+        if lhs_out != rhs_out {
+            return false;
+        }
+    }
+    true
 }
 
 /// Performs a single iteration of the MCMC process.
@@ -249,9 +278,23 @@ pub fn mcmc_iteration(
             let is_equiv = if chosen_transform.always_equivalent() && !paranoid {
                 true
             } else {
+                let sim_start = Instant::now();
+                let sim_equiv = fast_sim_equiv(&current_gfn, &candidate_gfn, 16, context.rng);
+                let sim_time_micros = sim_start.elapsed().as_micros();
+                if !sim_equiv {
+                    return McmcIterationOutput {
+                        output_gfn: current_gfn,
+                        output_cost: current_cost,
+                        best_gfn_updated: false,
+                        outcome: IterationOutcomeDetails::SimFailure,
+                        oracle_time_micros: sim_time_micros,
+                        transform_always_equivalent: chosen_transform.always_equivalent(),
+                        transform: Some(current_transform_kind),
+                    };
+                }
+                oracle_time_micros = sim_time_micros;
                 let oracle_start_time = Instant::now();
-                let sat_res = oracle_equiv_sat(&current_gfn, &candidate_gfn, &mut context.sat_ctx);
-                oracle_time_micros = oracle_start_time.elapsed().as_micros();
+                let sat_res = oracle_equiv_sat(&current_gfn, &candidate_gfn);
                 if paranoid {
                     let external_res = crate::check_equivalence::validate_same_gate_fn(
                         &current_gfn,
@@ -413,7 +456,8 @@ pub fn mcmc(
         iterations_count += 1;
 
         let progress_ratio = (iterations_count as f64) / (max_iters as f64);
-        let current_temp = INITIAL_TEMPERATURE * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
+        let current_temp =
+            options.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
 
         // Print action about to be taken if verbose
         if verbose {
@@ -494,6 +538,10 @@ pub fn mcmc(
             IterationOutcomeDetails::ApplyFailure => {
                 stats.rejected_apply_fail += 1;
             }
+            IterationOutcomeDetails::SimFailure => {
+                stats.rejected_sim_fail += 1;
+                stats.total_sim_time_micros += iteration_output.oracle_time_micros;
+            }
             IterationOutcomeDetails::OracleFailure => {
                 stats.rejected_oracle += 1;
                 // oracle_time_micros > 0 when this outcome occurs
@@ -536,6 +584,11 @@ pub fn mcmc(
             } else {
                 0.0
             };
+            let avg_sim_ms = if stats.rejected_sim_fail > 0 {
+                (stats.total_sim_time_micros as f64 / stats.rejected_sim_fail as f64) / 1000.0
+            } else {
+                0.0
+            };
 
             let mut sorted_edits_vec: Vec<(&TransformKind, &usize)> =
                 stats.accepted_edits_by_kind.iter().collect();
@@ -549,18 +602,18 @@ pub fn mcmc(
 
             if let Some(chain) = chain_no {
                 println!(
-                    "[mcmc] c{:03}:i{:06} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/O/M): {}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Accepted: {} ({})         ",
+                    "[mcmc] c{:03}:i{:06} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/SIM/O/M): {}/{}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Avg Sim (ms): {:.3} | Accepted: {} ({})         ",
                     chain, iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
-                    stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_oracle, stats.rejected_metro,
-                    stats.oracle_verified, avg_oracle_ms,
+                    stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_sim_fail, stats.rejected_oracle, stats.rejected_metro,
+                    stats.oracle_verified, avg_oracle_ms, avg_sim_ms,
                     stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
                 );
             } else {
                 println!(
-                    "[mcmc] iter: {} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/O/M): {}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Accepted: {} ({})         ",
+                    "[mcmc] iter: {} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/SIM/O/M): {}/{}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Avg Sim (ms): {:.3} | Accepted: {} ({})         ",
                     iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
-                    stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_oracle, stats.rejected_metro,
-                    stats.oracle_verified, avg_oracle_ms,
+                    stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_sim_fail, stats.rejected_oracle, stats.rejected_metro,
+                    stats.oracle_verified, avg_oracle_ms, avg_sim_ms,
                     stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
                 );
             }
@@ -699,6 +752,7 @@ pub fn build_transform_weights<
 #[derive(Clone, Debug)]
 pub struct McmcOptions {
     pub sat_reset_interval: u64,
+    pub initial_temperature: f64,
 }
 
 fn write_checkpoint(
@@ -711,7 +765,7 @@ fn write_checkpoint(
     context: &str,
 ) -> Result<()> {
     // Cross-check equivalence
-    let equiv_ok_sat = oracle_equiv_sat(original_gfn, best_gfn, sat_ctx);
+    let equiv_ok_sat = oracle_equiv_sat(original_gfn, best_gfn);
     let equiv_ok_external =
         match crate::check_equivalence::validate_same_gate_fn(original_gfn, best_gfn) {
             Ok(_) => true,
