@@ -315,26 +315,7 @@ pub fn mcmc(
 
     let mut stats = McmcStats::default();
 
-    // Compute weights based on objective
-    fn weight_for_kind(k: TransformKind, obj: Objective) -> f64 {
-        use TransformKind::*;
-        match obj {
-            Objective::Nodes | Objective::Product => match k {
-                RemoveRedundantAnd | RemoveFalseAnd | RemoveTrueAnd | UnduplicateGate => 3.0,
-                InsertRedundantAnd | InsertFalseAnd | InsertTrueAnd | DuplicateGate => 0.5,
-                _ => 1.0,
-            },
-            Objective::Depth => match k {
-                RotateAndRight | RotateAndLeft => 3.0,
-                _ => 1.0,
-            },
-        }
-    }
-
-    let weights: Vec<f64> = all_available_transforms
-        .iter()
-        .map(|t| weight_for_kind(t.kind(), objective))
-        .collect();
+    let weights = build_transform_weights(&all_available_transforms, objective);
 
     let mut mcmc_context = McmcContext {
         rng: &mut iteration_rng,
@@ -509,4 +490,33 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
         println!("Successfully gatified main function into GateFn.");
         Ok(gatify_output.gate_fn)
     }
+}
+
+/// Returns a vector of weights for the given transforms and objective.
+pub fn build_transform_weights<
+    T: AsRef<[Box<dyn crate::transforms::transform_trait::Transform>]>,
+>(
+    transforms: T,
+    objective: Objective,
+) -> Vec<f64> {
+    use crate::transforms::transform_trait::TransformKind;
+    fn weight_for_kind(k: TransformKind, obj: Objective) -> f64 {
+        use TransformKind::*;
+        match obj {
+            Objective::Nodes | Objective::Product => match k {
+                RemoveRedundantAnd | RemoveFalseAnd | RemoveTrueAnd | UnduplicateGate => 3.0,
+                InsertRedundantAnd | InsertFalseAnd | InsertTrueAnd | DuplicateGate => 0.5,
+                _ => 1.0,
+            },
+            Objective::Depth => match k {
+                RotateAndRight | RotateAndLeft => 3.0,
+                _ => 1.0,
+            },
+        }
+    }
+    transforms
+        .as_ref()
+        .iter()
+        .map(|t| weight_for_kind(t.kind(), objective))
+        .collect()
 }

@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigOperand, GateFn};
+use crate::gate::GateFn;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
 use anyhow::{anyhow, Result};
-use std::any::Any;
 
 /// Primitive: swaps two output bits in a `GateFn`.
 pub fn swap_output_bits_primitive(
