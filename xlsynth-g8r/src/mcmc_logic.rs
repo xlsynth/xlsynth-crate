@@ -4,8 +4,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rand::distributions::Distribution;
@@ -79,6 +79,42 @@ impl Default for McmcStats {
             total_oracle_time_micros: 0,
             accepted_edits_by_kind: HashMap::new(),
         }
+    }
+}
+
+/// Shared best-so-far candidate across threads.
+pub struct Best {
+    pub cost: AtomicUsize,
+    pub gate: Mutex<GateFn>,
+}
+
+impl Best {
+    pub fn new(initial_cost: usize, gate: GateFn) -> Self {
+        Self {
+            cost: AtomicUsize::new(initial_cost),
+            gate: Mutex::new(gate),
+        }
+    }
+
+    pub fn try_update(&self, new_cost: usize, new_gate: GateFn) {
+        let mut current = self.cost.load(Ordering::SeqCst);
+        while new_cost < current {
+            match self
+                .cost
+                .compare_exchange(current, new_cost, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => {
+                    let mut g = self.gate.lock().unwrap();
+                    *g = new_gate;
+                    return;
+                }
+                Err(v) => current = v,
+            }
+        }
+    }
+
+    pub fn get(&self) -> GateFn {
+        self.gate.lock().unwrap().clone()
     }
 }
 
@@ -295,6 +331,7 @@ pub fn mcmc(
     periodic_dump_dir: Option<PathBuf>,
     paranoid: bool,
     checkpoint_interval: u64,
+    shared_best: Option<Arc<Best>>,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -334,6 +371,10 @@ pub fn mcmc(
     let mut current_cost = cost(&current_gfn);
     let mut best_gfn = initial_gfn_param;
     let mut best_cost = current_cost;
+
+    if let Some(ref b) = shared_best {
+        b.try_update(objective.metric(&best_cost) as usize, best_gfn.clone());
+    }
 
     let mut stats = McmcStats::default();
 
@@ -432,6 +473,12 @@ pub fn mcmc(
                 if iteration_output.oracle_time_micros > 0 {
                     stats.oracle_verified += 1;
                 }
+            }
+        }
+
+        if iteration_output.best_gfn_updated {
+            if let Some(ref b) = shared_best {
+                b.try_update(objective.metric(&best_cost) as usize, best_gfn.clone());
             }
         }
 
