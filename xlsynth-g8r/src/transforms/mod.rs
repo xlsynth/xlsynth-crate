@@ -10,6 +10,7 @@ pub mod push_negation;
 pub mod redundant_and;
 pub mod rewire_operand;
 pub mod rotate_and;
+pub mod split_fanout;
 pub mod swap_operands;
 pub mod swap_outputs;
 pub mod toggle_operand_negation;
@@ -28,6 +29,7 @@ use merge_equiv_leaves::MergeEquivLeavesTransform;
 use push_negation::PushNegationTransform;
 use redundant_and::{InsertRedundantAndTransform, RemoveRedundantAndTransform};
 use rewire_operand::RewireOperandTransform;
+use split_fanout::{MergeFanoutTransform, SplitFanoutTransform};
 use swap_operands::SwapOperandsTransform;
 use swap_outputs::SwapOutputBitsTransform;
 use toggle_operand_negation::ToggleOperandNegationTransform;
@@ -59,5 +61,7 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(RewireOperandTransform::new()),
         Box::new(PushNegationTransform::new()),
         Box::new(MergeEquivLeavesTransform::new()),
+        Box::new(SplitFanoutTransform::new()),
+        Box::new(MergeFanoutTransform::new()),
     ]
 }
