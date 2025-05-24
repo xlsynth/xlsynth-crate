@@ -20,6 +20,7 @@ pub enum TransformKind {
     RemoveFalseAnd,
     InsertTrueAnd,
     RemoveTrueAnd,
+    SwapOutputBits,
     RotateAndRight,
     RotateAndLeft,
 }
@@ -38,6 +39,7 @@ impl fmt::Display for TransformKind {
             TransformKind::RemoveFalseAnd => write!(f, "RemFalseAnd"),
             TransformKind::InsertTrueAnd => write!(f, "InsTrueAnd"),
             TransformKind::RemoveTrueAnd => write!(f, "RemTrueAnd"),
+            TransformKind::SwapOutputBits => write!(f, "SwapOutBits"),
             TransformKind::RotateAndRight => write!(f, "RotAndR"),
             TransformKind::RotateAndLeft => write!(f, "RotAndL"),
         }
