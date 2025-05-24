@@ -25,7 +25,7 @@ pub enum EquivResult {
 
 /// Context holding a SAT solver so clause memory can be reused across calls.
 pub struct Ctx<'a> {
-    solver: varisat::Solver<'a>,
+    pub(crate) solver: varisat::Solver<'a>,
 }
 
 impl<'a> Ctx<'a> {

@@ -336,6 +336,7 @@ pub fn mcmc(
     checkpoint_interval: u64,
     shared_best: Option<Arc<Best>>,
     chain_no: Option<usize>,
+    options: McmcOptions,
 ) -> GateFn {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -623,6 +624,17 @@ pub fn mcmc(
                 }
             }
         }
+
+        // Periodically reset SAT context to avoid unbounded memory growth.
+        if options.sat_reset_interval > 0 && iterations_count % options.sat_reset_interval == 0 {
+            let vars = mcmc_context.sat_ctx.solver.num_vars();
+            let clauses = mcmc_context.sat_ctx.solver.num_clauses();
+            println!(
+                "[mcmc] SAT context: {} vars, {} clauses at iter {}. Resetting SAT context.",
+                vars, clauses, iterations_count
+            );
+            mcmc_context.sat_ctx.reset();
+        }
     }
     best_gfn
 }
@@ -694,4 +706,9 @@ pub fn build_transform_weights<
         .iter()
         .map(|t| weight_for_kind(t.kind(), objective))
         .collect()
+}
+
+#[derive(Clone, Debug)]
+pub struct McmcOptions {
+    pub sat_reset_interval: u64,
 }

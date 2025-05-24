@@ -16,7 +16,7 @@ use xlsynth_g8r::gate::GateFn;
 use xlsynth_g8r::get_summary_stats::SummaryStats;
 
 use xlsynth_g8r::get_summary_stats;
-use xlsynth_g8r::mcmc_logic::{cost, load_start, mcmc, Best, Objective};
+use xlsynth_g8r::mcmc_logic::{cost, load_start, mcmc, Best, McmcOptions, Objective};
 
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,9 @@ fn run_chain(
     best: Arc<Best>,
     chain_no: usize,
 ) {
+    let options = McmcOptions {
+        sat_reset_interval: 20000, // or make this configurable
+    };
     mcmc(
         start,
         cfg.iters,
@@ -86,7 +89,11 @@ fn run_chain(
         cfg.paranoid,
         cfg.checkpoint_iters,
         Some(best),
+<<<<<<< HEAD
         Some(chain_no),
+=======
+        options,
+>>>>>>> ea7d495 (Reset sat context periodically.)
     );
 }
 
