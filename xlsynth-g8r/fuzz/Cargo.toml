@@ -38,3 +38,9 @@ name = "fuzz_ir_opt_equiv"
 path = "fuzz_targets/fuzz_ir_opt_equiv.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_gate_fn_roundtrip"
+path = "fuzz_targets/fuzz_gate_fn_roundtrip.rs"
+test = false
+doc = false
