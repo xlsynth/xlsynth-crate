@@ -160,13 +160,13 @@ jobs:
             ls -l /usr/lib | grep boolector || true
             exit 1
           fi
-          cargo test --features with-boolector-system --workspace
+          cargo test --features with-boolector-system,with-z3-system --workspace
 
       - name: Ensure benches compile
         env:
           BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
           LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
-        run: cargo bench --workspace --no-run
+        run: cargo bench --features with-z3-system --workspace --no-run
 
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
@@ -264,13 +264,13 @@ jobs:
           cargo --version
 
       - name: Build crate
-        run: cargo build --workspace -vv
+        run: cargo build --features with-z3-system --workspace -vv
 
       - name: Test crate
         run: |
           cargo clean
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --workspace
+          cargo test --features with-z3-system --workspace
 
   # -----------------------------------------------------------
   # 4) macOS job
@@ -326,7 +326,7 @@ jobs:
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-built --workspace
+          cargo test --features with-boolector-built,with-z3-built --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
@@ -362,8 +362,6 @@ jobs:
 
       - name: Set up dependencies
         run: |
-          dnf install -y gcc gcc-c++ openssl-devel libffi-devel make curl cmake --nobest
-          dnf install -y protobuf-compiler
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env
@@ -443,7 +441,7 @@ jobs:
           chmod +x slang
 
       - name: Build crate
-        run: cargo build --workspace -vv
+        run: cargo build --features with-z3-system --workspace -vv
 
       - name: Run Valgrind Tests
         run: |
