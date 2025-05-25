@@ -141,7 +141,12 @@ pub fn dce_safe(orig_fn: &GateFn) -> GateFn {
             let unreachable_non_inputs: Vec<_> = unreachable
                 .iter()
                 .cloned()
-                .filter(|&id| !matches!(result.gates[id], crate::gate::AigNode::Input { .. }))
+                .filter(|&id| {
+                    !matches!(
+                        result.gates[id],
+                        crate::gate::AigNode::Input { .. } | crate::gate::AigNode::Literal(_)
+                    )
+                })
                 .collect();
             // Do some trace logging before our assertion so we can easily get some more
             // context if it ever fails.
