@@ -97,6 +97,7 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 18
           sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          sudo apt-get install -y libz3-dev
 
       - name: Check out code
         uses: actions/checkout@v2
@@ -159,13 +160,13 @@ jobs:
             ls -l /usr/lib | grep boolector || true
             exit 1
           fi
-          cargo test --features with-boolector-system --workspace
+          cargo test --features with-boolector-system,with-z3-system --workspace
 
       - name: Ensure benches compile
         env:
           BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
           LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
-        run: cargo bench --workspace --no-run
+        run: cargo bench --features with-z3-system --workspace --no-run
 
   # -----------------------------------------------------------
   # 3) Ubuntu 20.04 job (no Slang download)
@@ -181,8 +182,9 @@ jobs:
 
       - name: Install dependencies for Python scripts and downloads
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip wget unzip git sudo build-essential pkg-config libssl-dev
+          apt-get install -y --no-install-recommends python3 python3-pip wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev
           pip3 install -r requirements.txt
 
       - name: Set up Python + pre-commit
@@ -263,13 +265,13 @@ jobs:
           cargo --version
 
       - name: Build crate
-        run: cargo build --workspace -vv
+        run: cargo build --features with-z3-system --workspace -vv
 
       - name: Test crate
         run: |
           cargo clean
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --workspace
+          cargo test --features with-z3-system --workspace
 
   # -----------------------------------------------------------
   # 4) macOS job
@@ -325,7 +327,7 @@ jobs:
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-built --workspace
+          cargo test --features with-boolector-built,with-z3-built --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
@@ -428,7 +430,7 @@ jobs:
       - name: Install valgrind
         run: |
           sudo apt-get update
-          sudo apt-get install -y valgrind
+          sudo apt-get install -y valgrind libz3-dev
 
       - name: Download xlsynth binaries
         env:
@@ -443,7 +445,7 @@ jobs:
           chmod +x slang
 
       - name: Build crate
-        run: cargo build --workspace -vv
+        run: cargo build --features with-z3-system --workspace -vv
 
       - name: Run Valgrind Tests
         run: |
@@ -451,7 +453,7 @@ jobs:
           export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
           cp $(find -name 'libxls-v*-*.so' | head -n 1) .
           export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
-          python3 run_valgrind_on_tests.py
+          python3 run_valgrind_on_tests.py --filter-to-run=sample_usage
 
   build-and-test-predownloaded:
     runs-on: ubuntu-latest

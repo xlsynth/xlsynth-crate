@@ -15,7 +15,7 @@ env_logger = "0.11"
 xlsynth = { path = "../../xlsynth", version = "0.0.148" }
 rand = "0.8"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
-xlsynth-g8r = { path = "../../xlsynth-g8r", features = ["with-boolector-system"] }
+xlsynth-g8r = { path = "../../xlsynth-g8r", features = ["with-boolector-system", "with-z3-system"] }
 
 [lib]
 name = "xlsynth_g8r_fuzz"
@@ -52,5 +52,11 @@ doc = false
 [[bin]]
 name = "fuzz_gate_transform_equiv"
 path = "fuzz_targets/fuzz_gate_transform_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_gate_transform_arbitrary"
+path = "fuzz_targets/fuzz_gate_transform_arbitrary.rs"
 test = false
 doc = false

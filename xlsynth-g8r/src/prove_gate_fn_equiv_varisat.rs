@@ -13,15 +13,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::gate::{AigNode, AigRef, GateFn};
 use crate::propose_equiv::EquivNode;
+pub use crate::prove_gate_fn_equiv_common::EquivResult;
 use crate::topo::extract_cone;
 use varisat::ExtendFormula;
 use xlsynth::IrBits;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum EquivResult {
-    Proved,
-    Disproved(Vec<IrBits>),
-}
 
 /// Context holding a SAT solver so clause memory can be reused across calls.
 pub struct Ctx<'a> {

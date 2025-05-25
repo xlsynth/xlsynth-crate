@@ -25,6 +25,7 @@ once_cell = "1.19"
 bitvec = "1.0.1"
 rand = { version = "0.8.5", features = ["std"] }
 varisat = "0.2.2"
+z3 = { version = "0.12", optional = true }
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
 boolector = { version = "0.4.3", optional = true }
@@ -60,6 +61,8 @@ default = []
 has-boolector = []
 with-boolector-system = ["dep:boolector", "has-boolector"]
 with-boolector-built = ["dep:boolector", "boolector/vendor-lgl", "has-boolector"]
+with-z3-system = ["dep:z3"]
+with-z3-built = ["dep:z3", "z3/static-link-z3"]
 
 [lib]
 name = "xlsynth_g8r"

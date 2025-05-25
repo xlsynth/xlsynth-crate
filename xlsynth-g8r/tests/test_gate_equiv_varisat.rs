@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::validate_equiv::{prove_gate_fn_equiv, Ctx, EquivResult};
+use xlsynth_g8r::prove_gate_fn_equiv_varisat::{prove_gate_fn_equiv, Ctx, EquivResult};
 
 #[test]
 fn test_simple_equivalence() {

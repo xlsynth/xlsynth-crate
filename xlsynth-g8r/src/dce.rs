@@ -172,6 +172,7 @@ pub fn dce_safe(orig_fn: &GateFn) -> GateFn {
 /// order (children first). This is essentially the original implementation
 /// before we made it panic-safe.  It is kept around because it is ~15-20 %
 /// faster when the precondition holds.
+#[allow(unused)]
 fn dce_simple(orig_fn: &GateFn) -> GateFn {
     let mut reachable = HashSet::new();
     let mut stack = Vec::new();

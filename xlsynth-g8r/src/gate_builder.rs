@@ -976,7 +976,7 @@ mod tests {
             builder.add_output("o".to_string(), AigBitVector::from_bit(result_linear));
             builder.build()
         };
-        check_equivalence::validate_same_gate_fn(&gate_fn_tree, &gate_fn_linear)
+        check_equivalence::prove_same_gate_fn_via_ir(&gate_fn_tree, &gate_fn_linear)
             .expect("tree and linear reduce should be equivalent");
     }
 

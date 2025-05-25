@@ -367,7 +367,7 @@ mod tests {
     fn test_gatify_add_carry_select(bits: usize, carry_select_partitions: &[usize]) {
         let ripple = make_ripple_carry(bits);
         let carry = make_carry_select(bits, carry_select_partitions);
-        check_equivalence::validate_same_gate_fn(&ripple, &carry)
+        check_equivalence::prove_same_gate_fn_via_ir(&ripple, &carry)
             .expect("carry select and ripple carry should be equivalent");
     }
 
@@ -400,7 +400,7 @@ mod tests {
             builder.add_output("results".to_string(), result.into());
             builder.build()
         };
-        check_equivalence::validate_same_gate_fn(&via_adder, &via_bit_tests)
+        check_equivalence::prove_same_gate_fn_via_ir(&via_adder, &via_bit_tests)
             .expect("ule via adder and ule via bit tests should be equivalent");
     }
 }

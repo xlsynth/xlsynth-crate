@@ -37,9 +37,12 @@ pub mod mcmc_logic;
 pub mod netlist;
 pub mod process_ir_path;
 pub mod propose_equiv;
+pub mod prove_gate_fn_equiv_common;
+pub mod prove_gate_fn_equiv_varisat;
+#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
+pub mod prove_gate_fn_equiv_z3;
 pub mod test_utils;
 pub mod topo;
 pub mod transforms;
 pub mod use_count;
-pub mod validate_equiv;
 pub mod xls_ir;

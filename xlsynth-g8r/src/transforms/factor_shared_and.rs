@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
-use crate::test_utils::structurally_equivalent;
 use crate::topo::reaches_target as node_reaches_target;
+use crate::topo::reaches_target as reaches;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -104,6 +104,9 @@ pub fn factor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), 
 /// Expands `(a & (b & c))` into `((a & b) & (a & c))`.
 /// The operand that is not the `And2` child becomes the common factor.
 pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'static str> {
+    // Ensure we start with an acyclic graph.
+    crate::topo::debug_assert_no_cycles(&g.gates, "unfactor_shared_and_primitive (pre)");
+
     let (left, right) = match g.gates[outer.id] {
         AigNode::And2 { a, b, .. } => (a, b),
         _ => return Err("unfactor_shared_and_primitive: outer is not And2"),
@@ -143,8 +146,23 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         return Err("unfactor_shared_and_primitive: polarity mismatch between common operand and inner gate");
     }
 
-    // Choose unique operand as inner_a; keep ordering deterministic.
-    let unique_op = inner_a;
+    // Choose the inner operand that is *not* the common operand so the two
+    // operands of the newly created gate are distinct.  This eliminates the
+    // possibility that the new gate references the same operand twice, which
+    // previously led to a self-cycle in certain degenerate cases.
+    let unique_op = if inner_a == common_op {
+        inner_b
+    } else {
+        inner_a
+    };
+
+    // Sanity check – operands of the new gate must be distinct to avoid
+    // degenerate AND(a,a) which is a no-op and can later be canonicalised in a
+    // different transform.
+    assert!(
+        unique_op != common_op,
+        "unfactor_shared_and_primitive picked identical operands for new gate"
+    );
 
     // Reject if pulling any of the inner operands (or the common op) upward
     // would introduce a back-edge to `outer`.
@@ -155,9 +173,14 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         return Err("unfactor_shared_and_primitive: would create cycle");
     }
 
-    // Reject patterns that would create self-referential loops
-    if common_op.node == inner_ref || unique_op.node == inner_ref {
-        return Err("unfactor_shared_and_primitive: would create self-loop");
+    // Reject patterns that would create self-referential loops or back-edges via
+    // inner_ref.
+    if common_op.node == inner_ref
+        || unique_op.node == inner_ref
+        || node_reaches_target(&g.gates, common_op.node, inner_ref)
+        || node_reaches_target(&g.gates, unique_op.node, inner_ref)
+    {
+        return Err("unfactor_shared_and_primitive: would create self-loop or back-edge");
     }
 
     let new_gate = AigNode::And2 {
@@ -197,8 +220,122 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         }
     }
 
-    crate::topo::debug_assert_no_cycles(&g.gates, "unfactor_shared_and_primitive");
+    crate::topo::debug_assert_no_cycles(&g.gates, "unfactor_shared_and_primitive (post)");
     Ok(())
+}
+
+/// Returns true if applying unfactor_shared_and_primitive at `outer` would
+/// succeed AND leave the graph acyclic. Implements a quick look-before-we-leap
+/// test used by `find_candidates` to filter out problematic nodes.
+fn can_unfactor_without_cycle(g: &GateFn, outer: AigRef) -> bool {
+    // This mirrors the *analysis* portion of `unfactor_shared_and_primitive`
+    // but without mutating the graph. If any of the structural pre-conditions
+    // fail we deem the transform unsafe (i.e. would create a cycle or be ill
+    // formed) and therefore do **not** propose it.
+
+    // outer must be an AND2.
+    let (left, right) = match g.gates[outer.id] {
+        AigNode::And2 { a, b, .. } => (a, b),
+        _ => return false,
+    };
+
+    let use_counts = get_id_to_use_count(g);
+
+    // Identify inner_ref and common operand as in the real transform.
+    let (_inner_is_rhs, inner_ref, common_op) = if !right.negated
+        && matches!(g.gates[right.node.id], AigNode::And2 { .. })
+        && *use_counts.get(&right.node).unwrap_or(&0) == 1
+    {
+        (true, right.node, left)
+    } else if !left.negated
+        && matches!(g.gates[left.node.id], AigNode::And2 { .. })
+        && *use_counts.get(&left.node).unwrap_or(&0) == 1
+    {
+        (false, left.node, right)
+    } else {
+        return false;
+    };
+
+    let (inner_a, inner_b) = match g.gates[inner_ref.id] {
+        AigNode::And2 { a, b, .. } => (a, b),
+        _ => return false,
+    };
+
+    // Degenerate inner gate.
+    if inner_a == inner_b {
+        return false;
+    }
+
+    // polarity mismatch
+    let same_node_diff_pol =
+        |x: AigOperand| x.node == common_op.node && x.negated != common_op.negated;
+    if same_node_diff_pol(inner_a) || same_node_diff_pol(inner_b) {
+        return false;
+    }
+
+    // Determine unique operand (one that differs from common_op).
+    let unique_op = if inner_a == common_op {
+        inner_b
+    } else {
+        inner_a
+    };
+    if unique_op == common_op {
+        return false; // would create AND(x,x)
+    }
+
+    // Check reachability conditions that would create a cycle after adding
+    // new edges.
+    if node_reaches_target(&g.gates, common_op.node, outer)
+        || node_reaches_target(&g.gates, unique_op.node, outer)
+        || node_reaches_target(&g.gates, common_op.node, inner_ref)
+        || node_reaches_target(&g.gates, unique_op.node, inner_ref)
+    {
+        return false;
+    }
+
+    // Additional self-loop avoidance.
+    if common_op.node == inner_ref || unique_op.node == inner_ref {
+        return false;
+    }
+
+    true
+}
+
+/// Returns true if applying `factor_shared_and_primitive` at `outer` would not
+/// introduce a cycle.
+fn can_factor_without_cycle(g: &GateFn, outer: AigRef) -> bool {
+    let (left, right) = match g.gates[outer.id] {
+        AigNode::And2 { a, b, .. } => (a, b),
+        _ => return false,
+    };
+
+    if left.negated || right.negated {
+        return false;
+    }
+
+    let (ll_a, ll_b) = match g.gates[left.node.id] {
+        AigNode::And2 { a, b, .. } => (a, b),
+        _ => return false,
+    };
+    let (rl_a, rl_b) = match g.gates[right.node.id] {
+        AigNode::And2 { a, b, .. } => (a, b),
+        _ => return false,
+    };
+
+    // Identify shared operand (guaranteed unique by earlier pattern checks).
+    let shared = if ll_a == rl_a || ll_a == rl_b {
+        ll_a
+    } else {
+        ll_b
+    };
+
+    // After factoring we will create a new edge shared -> outer
+    // This is safe unless shared already (transitively) reaches outer.
+    if reaches(&g.gates, shared.node, outer) {
+        return false;
+    }
+
+    true
 }
 
 #[derive(Debug)]
@@ -261,7 +398,10 @@ impl Transform for FactorSharedAndTransform {
                         eq_count += 1;
                     }
                     if eq_count == 1 {
-                        cands.push(TransformLocation::Node(AigRef { id: idx }));
+                        let cand_ref = AigRef { id: idx };
+                        if can_factor_without_cycle(g, cand_ref) {
+                            cands.push(TransformLocation::Node(cand_ref));
+                        }
                     }
                 }
             }
@@ -329,7 +469,10 @@ impl Transform for UnfactorSharedAndTransform {
                     && matches!(g.gates[b.node.id], AigNode::And2 { .. })
                     && *use_counts.get(&b.node).unwrap_or(&0) == 1;
                 if a_is_inner ^ b_is_inner {
-                    cands.push(TransformLocation::Node(AigRef { id: idx }));
+                    let candidate_ref = AigRef { id: idx };
+                    if can_unfactor_without_cycle(g, candidate_ref) {
+                        cands.push(TransformLocation::Node(candidate_ref));
+                    }
                 }
             }
         }
@@ -366,7 +509,10 @@ impl Transform for UnfactorSharedAndTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::{
+        gate_builder::{GateBuilder, GateBuilderOptions},
+        test_utils::structurally_equivalent,
+    };
 
     fn setup_factor_graph() -> (GateFn, AigRef) {
         let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
