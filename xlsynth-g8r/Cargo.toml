@@ -91,3 +91,7 @@ harness = false
 [[bench]]
 name = "mcmc_benchmark"
 harness = false
+
+[[bench]]
+name = "sim_vs_simd_bench"
+harness = false

@@ -3,6 +3,7 @@
 #![feature(map_try_insert)]
 #![feature(let_chains)]
 #![feature(custom_test_frameworks)]
+#![feature(portable_simd)]
 
 pub mod aig_hasher;
 mod aig_simplify;
@@ -19,6 +20,7 @@ pub mod gate;
 pub mod gate2ir;
 pub mod gate_builder;
 pub mod gate_sim;
+pub mod gate_simd;
 pub mod get_summary_stats;
 pub mod graph_logical_effort;
 pub mod ir2gate;
