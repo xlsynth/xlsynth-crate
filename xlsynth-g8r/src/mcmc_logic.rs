@@ -50,9 +50,14 @@ pub fn cost(g: &GateFn) -> Cost {
     }
 }
 
-/// Checks equivalence of two `GateFn`s using the external IR-based checker.
+/// Checks equivalence of two `GateFn`s using the RustSAT-based checker.
 pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> bool {
-    crate::check_equivalence::validate_same_gate_fn(lhs, rhs).is_ok()
+    // Use the RustSAT-based equivalence checker for improved speed.
+    let mut sat_ctx = crate::validate_equiv::Ctx::new();
+    match crate::validate_equiv_rustsat::check_equiv(lhs, rhs, &mut sat_ctx) {
+        crate::validate_equiv::EquivResult::Proved => true,
+        crate::validate_equiv::EquivResult::Disproved(_) => false,
+    }
 }
 
 /// Holds MCMC iteration statistics.
@@ -269,22 +274,14 @@ pub fn mcmc_iteration(
                         transform: Some(current_transform_kind),
                     };
                 }
+                // Record simulation time first.
                 oracle_time_micros = sim_time_micros;
-                let oracle_start_time = Instant::now();
+
+                // Measure SAT oracle time separately and add it.
+                let sat_start = Instant::now();
                 let sat_res = oracle_equiv_sat(&current_gfn, &candidate_gfn);
-                if paranoid {
-                    let external_res = crate::check_equivalence::validate_same_gate_fn(
-                        &current_gfn,
-                        &candidate_gfn,
-                    )
-                    .is_ok();
-                    if sat_res != external_res {
-                        panic!(
-                            "[mcmc] ERROR: SAT oracle and external check_equivalence_with_top DISAGREE in mcmc_iteration: SAT oracle: {}, external: {}",
-                            sat_res, external_res
-                        );
-                    }
-                }
+                let sat_time_micros = sat_start.elapsed().as_micros();
+                oracle_time_micros += sat_time_micros;
                 sat_res
             };
             log::trace!("is_equiv: {:?}", is_equiv);

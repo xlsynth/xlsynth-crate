@@ -38,6 +38,8 @@ ahash = "0.8.12"
 rand_core = { version = "0.9.3", features = ["std"] }
 ctrlc = { version = "3.4.4", features = ["termination"] }
 libc = "0.2"
+rustsat = "0.7"
+rustsat-cadical = "0.7"
 
 [dev-dependencies]
 anyhow = "1.0.86"
