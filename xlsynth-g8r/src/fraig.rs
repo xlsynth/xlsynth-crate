@@ -21,7 +21,8 @@ use xlsynth::IrBits;
 use crate::{
     bulk_replace::bulk_replace, bulk_replace::SubstitutionMap, gate::AigOperand, gate::AigRef,
     gate::GateFn, gate_builder::GateBuilderOptions, get_summary_stats::get_gate_depth,
-    propose_equiv::propose_equiv, propose_equiv::EquivNode, validate_equiv::validate_equiv,
+    propose_equiv::propose_equivalence_classes, propose_equiv::EquivNode,
+    validate_equiv::validate_equivalence_classes,
 };
 
 pub enum IterationBounds {
@@ -72,7 +73,8 @@ pub fn fraig_optimize(
                 // Keep going!
             }
         }
-        let equiv_classes = propose_equiv(&current_fn, input_sample_count, rng, &counterexamples);
+        let equiv_classes =
+            propose_equivalence_classes(&current_fn, input_sample_count, rng, &counterexamples);
 
         log::info!(
             "fraig_optimize: propose_equiv proposed {} classes",
@@ -95,7 +97,7 @@ pub fn fraig_optimize(
             (rep_node.is_inverted(), rep_node.aig_ref().id)
         });
 
-        let validation_result = validate_equiv(&current_fn, &equiv_classes_vec)?;
+        let validation_result = validate_equivalence_classes(&current_fn, &equiv_classes_vec)?;
 
         if validation_result.proven_equiv_sets.is_empty() {
             // Converged -- no proven equivalences found.

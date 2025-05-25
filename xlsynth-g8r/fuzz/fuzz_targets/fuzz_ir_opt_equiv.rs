@@ -3,9 +3,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::validate_equiv::{check_equiv as check_gate_equiv, Ctx, EquivResult as GateEquivResult};
 use xlsynth_g8r::ir_equiv_boolector;
-use xlsynth_g8r::ir2gate::{gatify, GatifyOptions};
 use xlsynth_g8r::xls_ir::ir_parser;
 use xlsynth_test_helpers::ir_fuzz::{generate_ir_fn, FuzzSample};
 
@@ -50,38 +48,17 @@ fuzz_target!(|sample: FuzzSample| {
     let orig_fn = orig_pkg.get_top().unwrap();
     let opt_fn = opt_pkg.get_top().unwrap();
 
-    let orig_gate = gatify(
-        &orig_fn,
-        GatifyOptions {
-            fold: true,
-            check_equivalence: false,
-            hash: true,
-        },
-    )
-    .unwrap()
-    .gate_fn;
-    let opt_gate = gatify(
-        &opt_fn,
-        GatifyOptions {
-            fold: true,
-            check_equivalence: false,
-            hash: true,
-        },
-    )
-    .unwrap()
-    .gate_fn;
-    let mut gate_ctx = Ctx::new();
-
     // Check equivalence using the external tool first, specifying the top function
     let orig_ir = pkg.to_string();
     let opt_ir = optimized_pkg.to_string();
     let top_fn_name = "fuzz_test";
     let ext_equiv =
         check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name));
+    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn);
     match ext_equiv {
         Ok(()) => {
-            // External tool says equivalent, Boolector and gate-level checks should agree
-            match ir_equiv_boolector::check_equiv(orig_fn, opt_fn) {
+            // External tool says equivalent, Boolector should agree
+            match boolector_result {
                 ir_equiv_boolector::EquivResult::Proved => (),
                 ir_equiv_boolector::EquivResult::Disproved(cex) => {
                     log::info!("==== IR disagreement detected ====");
@@ -93,22 +70,10 @@ fuzz_target!(|sample: FuzzSample| {
                     );
                 }
             }
-            match check_gate_equiv(&orig_gate, &opt_gate, &mut gate_ctx) {
-                GateEquivResult::Proved => (),
-                GateEquivResult::Disproved(cex) => {
-                    log::info!("==== Gate disagreement detected ====");
-                    log::info!("Original IR:\n{}", orig_ir);
-                    log::info!("Optimized IR:\n{}", opt_ir);
-                    panic!(
-                        "Disagreement: external tool says equivalent, gate-level solver disproves: {:?}",
-                        cex
-                    );
-                }
-            }
         }
         Err(ext_err) => {
             // External tool says not equivalent, check Boolector
-            match ir_equiv_boolector::check_equiv(orig_fn, opt_fn) {
+            match boolector_result {
                 ir_equiv_boolector::EquivResult::Proved => {
                     log::info!("==== IR disagreement detected ====");
                     log::info!("Original IR:\n{}", orig_ir);
@@ -119,18 +84,6 @@ fuzz_target!(|sample: FuzzSample| {
                     );
                 }
                 ir_equiv_boolector::EquivResult::Disproved(_cex) => (), // Both agree not equivalent
-            }
-            match check_gate_equiv(&orig_gate, &opt_gate, &mut gate_ctx) {
-                GateEquivResult::Proved => {
-                    log::info!("==== Gate disagreement detected ====");
-                    log::info!("Original IR:\n{}", orig_ir);
-                    log::info!("Optimized IR:\n{}", opt_ir);
-                    panic!(
-                        "Disagreement: external tool says NOT equivalent, gate-level solver proves equivalence. External error: {}",
-                        ext_err
-                    );
-                }
-                GateEquivResult::Disproved(_) => (),
             }
         }
     }

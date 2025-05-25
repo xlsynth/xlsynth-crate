@@ -1034,12 +1034,12 @@ fn check_equiv_internal(lhs: &Fn, rhs: &Fn, flatten_aggregates: bool) -> EquivRe
 }
 
 /// Standard equivalence check (no aggregate flattening)
-pub fn check_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
+pub fn prove_ir_fn_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
     check_equiv_internal(lhs, rhs, false)
 }
 
 /// Equivalence check with tuple/array flattening
-pub fn check_equiv_flattened(lhs: &Fn, rhs: &Fn) -> EquivResult {
+pub fn prove_ir_equiv_flattened(lhs: &Fn, rhs: &Fn) -> EquivResult {
     check_equiv_internal(lhs, rhs, true)
 }
 
@@ -1157,7 +1157,7 @@ mod tests {
     fn assert_fn_equiv_to_self(ir_text: &str) {
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().expect("Failed to parse IR");
-        let result = check_equiv(&f, &f);
+        let result = prove_ir_fn_equiv(&f, &f);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -1226,7 +1226,7 @@ mod tests {
 }"#;
         let f = ir_parser::Parser::new(ir_text_f).parse_fn().unwrap();
         let g = ir_parser::Parser::new(ir_text_g).parse_fn().unwrap();
-        let result = check_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g);
         match result {
             EquivResult::Disproved(ref cex) => {
                 assert_eq!(cex.len(), 1);
@@ -1362,7 +1362,7 @@ mod tests {
         // Use the existing assert_fn_equiv helper to check equivalence
         let f = ir_parser::Parser::new(ir_identity).parse_fn().unwrap();
         let g = ir_parser::Parser::new(ir_recompose).parse_fn().unwrap();
-        let result = check_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g);
         match result {
             EquivResult::Proved => (),
             EquivResult::Disproved(_) => panic!("Expected Proved, got Disproved"),
@@ -1585,7 +1585,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let mut parser = ir_parser::Parser::new(ir_text);
         let pkg = parser.parse_package().unwrap();
         let f = pkg.get_fn("fuzz_test").unwrap();
-        let result = check_equiv(f, f);
+        let result = prove_ir_fn_equiv(f, f);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -1634,7 +1634,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let zero_f = crate::xls_ir::ir_parser::Parser::new(ir_zero)
             .parse_fn()
             .unwrap();
-        let result = check_equiv(&slice_f, &zero_f);
+        let result = prove_ir_fn_equiv(&slice_f, &zero_f);
         assert_eq!(result, EquivResult::Proved);
     }
 
@@ -1684,7 +1684,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_const)
             .parse_fn()
             .unwrap();
-        let result = check_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -1708,7 +1708,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_id)
             .parse_fn()
             .unwrap();
-        let res = check_equiv(&f, &g);
+        let res = prove_ir_fn_equiv(&f, &g);
         assert_eq!(res, EquivResult::Proved);
     }
 
@@ -1727,7 +1727,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_static)
             .parse_fn()
             .unwrap();
-        assert_eq!(check_equiv(&f, &g), EquivResult::Proved);
+        assert_eq!(prove_ir_fn_equiv(&f, &g), EquivResult::Proved);
     }
 
     #[test]
@@ -1751,7 +1751,7 @@ fn func_literal_7() -> bits[3] {
             .parse_fn()
             .expect("Failed to parse literal_7 IR");
 
-        let result = check_equiv(&f_encode, &f_literal);
+        let result = prove_ir_fn_equiv(&f_encode, &f_literal);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -1785,7 +1785,7 @@ fn optimized_fn(input: bits[3] id=1) -> bits[5] {
             .parse_fn()
             .expect("Failed to parse optimized_fn IR for one_hot_reverse_fuzz_case");
 
-        let result = check_equiv(&fn_original, &fn_optimized);
+        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -1817,7 +1817,7 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
             .parse_fn()
             .expect("Failed to parse optimized_shrl_saturation_fn IR");
 
-        let result = check_equiv(&fn_original, &fn_optimized);
+        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -1840,6 +1840,6 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
         let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
             .parse_fn()
             .unwrap();
-        assert_eq!(check_equiv(&f_shl, &f_id), EquivResult::Proved);
+        assert_eq!(prove_ir_fn_equiv(&f_shl, &f_id), EquivResult::Proved);
     }
 }

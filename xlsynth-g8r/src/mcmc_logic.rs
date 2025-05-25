@@ -431,7 +431,7 @@ pub fn mcmc(
     let simd_inputs = generate_simd_inputs(&original_gfn_for_check, &mut iteration_rng);
 
     // Compute baseline outputs for the initial GateFn.
-    let mut baseline_outputs = gate_simd::eval(&original_gfn_for_check, &simd_inputs).outputs;
+    let baseline_outputs = gate_simd::eval(&original_gfn_for_check, &simd_inputs).outputs;
 
     let mut mcmc_context = McmcContext {
         rng: &mut iteration_rng,

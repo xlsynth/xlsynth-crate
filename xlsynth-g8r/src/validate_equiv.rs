@@ -284,7 +284,7 @@ fn build_gate_fn(
 }
 
 /// Checks equivalence of two gate functions using a SAT solver.
-pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult {
+pub fn prove_gate_fn_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult {
     assert_eq!(a.inputs.len(), b.inputs.len());
     assert_eq!(a.outputs.len(), b.outputs.len());
 
@@ -338,7 +338,7 @@ pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult
     }
 }
 
-pub fn validate_equiv(
+pub fn validate_equivalence_classes(
     gate_fn: &GateFn,
     equiv_classes: &[&[EquivNode]],
 ) -> Result<ValidationResult, ValidationError> {
@@ -432,14 +432,14 @@ mod tests {
 
     use crate::{
         gate::GateFn,
-        propose_equiv::{propose_equiv, EquivNode},
+        propose_equiv::{propose_equivalence_classes, EquivNode},
         test_utils::{
             load_bf16_add_sample, load_bf16_mul_sample, setup_graph_with_redundancies,
             setup_partially_equiv_graph, Opt,
         },
     };
 
-    use super::validate_equiv;
+    use super::validate_equivalence_classes;
     #[allow(unused_imports)]
     use crate::assert_within;
 
@@ -448,12 +448,13 @@ mod tests {
         let setup = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
         let counterexamples = HashSet::new();
-        let equiv_classes = propose_equiv(&setup.g, 16, &mut seeded_rng, &counterexamples);
+        let equiv_classes =
+            propose_equivalence_classes(&setup.g, 16, &mut seeded_rng, &counterexamples);
         let classes: Vec<&[EquivNode]> = equiv_classes
             .values()
             .map(|nodes| nodes.as_slice())
             .collect();
-        let validation_result = validate_equiv(&setup.g, &classes).unwrap();
+        let validation_result = validate_equivalence_classes(&setup.g, &classes).unwrap();
         // There are 2 redundancies and they have inverted pairs.
         assert_eq!(validation_result.proven_equiv_sets.len(), 4);
     }
@@ -462,7 +463,7 @@ mod tests {
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
         let propose_start = Instant::now();
         let counterexamples = HashSet::new();
-        let proposed_equiv_classes = propose_equiv(
+        let proposed_equiv_classes = propose_equivalence_classes(
             &gate_fn,
             input_sample_count,
             &mut seeded_rng,
@@ -481,7 +482,7 @@ mod tests {
             .map(|nodes| nodes.as_slice())
             .collect();
         let validate_start = Instant::now();
-        let validation_result = validate_equiv(&gate_fn, &classes).unwrap();
+        let validation_result = validate_equivalence_classes(&gate_fn, &classes).unwrap();
         let validate_end = Instant::now();
         let validate_duration = validate_end - validate_start;
         eprintln!(
@@ -526,7 +527,7 @@ mod tests {
             EquivNode::Normal(setup.c.node),
         ];
 
-        let validation_result = validate_equiv(&setup.g, &[proposed_class]).unwrap();
+        let validation_result = validate_equivalence_classes(&setup.g, &[proposed_class]).unwrap();
 
         // Expect one proven set containing only a and b.
         assert_eq!(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::validate_equiv::{check_equiv, Ctx, EquivResult};
+use xlsynth_g8r::validate_equiv::{prove_gate_fn_equiv, Ctx, EquivResult};
 
 #[test]
 fn test_simple_equivalence() {
@@ -13,7 +13,7 @@ fn test_simple_equivalence() {
     let g1 = gb.build();
 
     let mut ctx = Ctx::new();
-    assert_eq!(check_equiv(&g1, &g1, &mut ctx), EquivResult::Proved);
+    assert_eq!(prove_gate_fn_equiv(&g1, &g1, &mut ctx), EquivResult::Proved);
 }
 
 #[test]
@@ -33,7 +33,7 @@ fn test_simple_inequivalence() {
     let g2 = gb2.build();
 
     let mut ctx = Ctx::new();
-    match check_equiv(&g1, &g2, &mut ctx) {
+    match prove_gate_fn_equiv(&g1, &g2, &mut ctx) {
         EquivResult::Proved => panic!("Expected inequivalent"),
         EquivResult::Disproved(_) => (),
     }

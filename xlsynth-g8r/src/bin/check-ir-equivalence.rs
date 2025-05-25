@@ -51,7 +51,7 @@ fn main_has_boolector(args: Args) {
         .get_fn(&args.top)
         .unwrap_or_else(|| panic!("function '{}' not found in {}", args.top, args.ir2));
 
-    match ir_equiv_boolector::check_equiv(f1, f2) {
+    match ir_equiv_boolector::prove_ir_fn_equiv(f1, f2) {
         ir_equiv_boolector::EquivResult::Proved => {
             println!("Equivalence result: PROVED");
         }
