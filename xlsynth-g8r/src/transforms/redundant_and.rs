@@ -17,6 +17,9 @@ pub fn insert_redundant_and_primitive(g: &mut GateFn, op: AigOperand) -> AigRef 
     };
     let new_ref = AigRef { id: g.gates.len() };
     g.gates.push(new_gate);
+    // Strong post-condition: inserting a fresh AND(x,x) must never introduce
+    // cycles.
+    crate::topo::debug_assert_no_cycles(&g.gates, "insert_redundant_and_primitive");
     new_ref
 }
 

@@ -130,13 +130,27 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         _ => unreachable!(),
     };
 
+    if inner_a == inner_b {
+        return Err("unfactor_shared_and_primitive: inner gate is AND(x,x); no unique operands");
+    }
+
+    let unique_op = if inner_a == common_op {
+        inner_b
+    } else if inner_b == common_op {
+        inner_a
+    } else {
+        return Err("unfactor_shared_and_primitive: inner gate does not contain common operand");
+    };
+
+    debug_assert!(unique_op != common_op);
+
     if node_reaches_target(&g.gates, common_op.node, outer) {
         return Err("unfactor_shared_and_primitive: would create cycle");
     }
 
     let new_gate = AigNode::And2 {
         a: common_op,
-        b: inner_a,
+        b: unique_op,
         tags: None,
     };
     let new_ref = AigRef { id: g.gates.len() };
@@ -144,7 +158,7 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[inner_ref.id] {
         *a = common_op;
-        *b = inner_b;
+        *b = unique_op;
     }
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[outer.id] {
