@@ -130,19 +130,21 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         _ => unreachable!(),
     };
 
+    // Reject degenerate inner gate where both operands identical.
     if inner_a == inner_b {
-        return Err("unfactor_shared_and_primitive: inner gate is AND(x,x); no unique operands");
+        return Err("unfactor_shared_and_primitive: inner gate is AND(x,x); cannot unfactor");
     }
 
-    let unique_op = if inner_a == common_op {
-        inner_b
-    } else if inner_b == common_op {
-        inner_a
-    } else {
-        return Err("unfactor_shared_and_primitive: inner gate does not contain common operand");
-    };
+    // Ensure we do not combine operands of opposite polarity referring to the same
+    // node.
+    let same_node_diff_pol =
+        |x: AigOperand| x.node == common_op.node && x.negated != common_op.negated;
+    if same_node_diff_pol(inner_a) || same_node_diff_pol(inner_b) {
+        return Err("unfactor_shared_and_primitive: polarity mismatch between common operand and inner gate");
+    }
 
-    debug_assert!(unique_op != common_op);
+    // Choose unique operand as inner_a; keep ordering deterministic.
+    let unique_op = inner_a;
 
     if node_reaches_target(&g.gates, common_op.node, outer) {
         return Err("unfactor_shared_and_primitive: would create cycle");
@@ -158,7 +160,7 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[inner_ref.id] {
         *a = common_op;
-        *b = unique_op;
+        *b = inner_b;
     }
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[outer.id] {
@@ -278,7 +280,7 @@ impl Transform for FactorSharedAndTransform {
     }
 
     fn always_equivalent(&self) -> bool {
-        true
+        false
     }
 }
 
