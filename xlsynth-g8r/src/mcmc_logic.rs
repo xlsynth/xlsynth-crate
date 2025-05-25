@@ -14,6 +14,7 @@ use rand::prelude::{Rng, SeedableRng, SliceRandom};
 use rand_pcg::Pcg64Mcg;
 
 // Imports from the xlsynth_g8r crate
+use crate::dce;
 use crate::gate::GateFn;
 use crate::gate_simd::{self, Vec256};
 use crate::get_summary_stats;
@@ -248,8 +249,7 @@ pub fn mcmc_iteration(
     match chosen_transform.apply(&mut candidate_gfn, chosen_location, direction) {
         Ok(()) => {
             log::trace!("Transform applied successfully; determining cost...");
-            let new_candidate_cost = cost(&candidate_gfn);
-            log::trace!("new_candidate_cost: {:?}", new_candidate_cost);
+            // We'll compute cost after potential DCE later.
             let mut oracle_time_micros = 0u128;
             let is_equiv = if chosen_transform.always_equivalent() && !paranoid {
                 true
@@ -300,6 +300,11 @@ pub fn mcmc_iteration(
                     transform: Some(current_transform_kind),
                 }
             } else {
+                // Apply DCE to remove any dead nodes, reducing memory footprint.
+                let candidate_gfn_dce = dce::dce(&candidate_gfn);
+
+                let new_candidate_cost = cost(&candidate_gfn_dce);
+
                 let curr_metric = objective.metric(&current_cost) as f64;
                 let new_metric = objective.metric(&new_candidate_cost) as f64;
                 let better = new_metric < curr_metric;
@@ -308,12 +313,12 @@ pub fn mcmc_iteration(
 
                 if better || metropolis {
                     if new_candidate_cost < *best_cost {
-                        *best_gfn = candidate_gfn.clone();
+                        *best_gfn = candidate_gfn_dce.clone();
                         *best_cost = new_candidate_cost;
                         iteration_best_gfn_updated = true;
                     }
                     McmcIterationOutput {
-                        output_gfn: candidate_gfn,
+                        output_gfn: candidate_gfn_dce,
                         output_cost: new_candidate_cost,
                         best_gfn_updated: iteration_best_gfn_updated,
                         outcome: IterationOutcomeDetails::Accepted {
