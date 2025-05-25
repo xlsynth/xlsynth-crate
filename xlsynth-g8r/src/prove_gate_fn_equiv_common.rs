@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use xlsynth::IrBits;
 
 #[derive(Debug, PartialEq, Eq)]

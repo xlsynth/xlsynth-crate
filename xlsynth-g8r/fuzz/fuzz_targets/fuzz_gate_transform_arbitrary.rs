@@ -6,7 +6,9 @@ use rand::seq::IteratorRandom;
 use rand::thread_rng;
 
 use xlsynth_g8r::prove_gate_fn_equiv_common::EquivResult;
-use xlsynth_g8r::prove_gate_fn_equiv_varisat::{prove_gate_fn_equiv as prove_sat, Ctx as SatCtx};
+use xlsynth_g8r::prove_gate_fn_equiv_varisat::{
+    prove_gate_fn_equiv as prove_sat, Ctx as VarisatCtx,
+};
 use xlsynth_g8r::prove_gate_fn_equiv_z3::{prove_gate_fn_equiv as prove_z3, Ctx as Z3Ctx};
 use xlsynth_g8r::transforms::{self, transform_trait::TransformDirection};
 use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
@@ -61,9 +63,9 @@ fuzz_target!(|graph: FuzzGraph| {
         attempts += 1; // Count this attempted (and successful) application
 
         // Cross-check equivalence solvers.
-        let mut sat_ctx = SatCtx::new();
+        let mut varisat_ctx = VarisatCtx::new();
         let mut z3_ctx = Z3Ctx::new();
-        let sat_orig_cur = prove_sat(&orig_g, &cur_g, &mut sat_ctx);
+        let sat_orig_cur = prove_sat(&orig_g, &cur_g, &mut varisat_ctx);
         let z3_orig_cur = prove_z3(&orig_g, &cur_g, &mut z3_ctx);
         assert_eq!(
             matches!(sat_orig_cur, EquivResult::Proved),
@@ -74,9 +76,9 @@ fuzz_target!(|graph: FuzzGraph| {
             z3_orig_cur
         );
 
-        let mut sat_ctx2 = SatCtx::new();
+        let mut varisat_ctx2 = VarisatCtx::new();
         let mut z3_ctx2 = Z3Ctx::new();
-        let sat_cur_next = prove_sat(&cur_g, &next_g, &mut sat_ctx2);
+        let sat_cur_next = prove_sat(&cur_g, &next_g, &mut varisat_ctx2);
         let z3_cur_next = prove_z3(&cur_g, &next_g, &mut z3_ctx2);
         assert_eq!(
             matches!(sat_cur_next, EquivResult::Proved),
