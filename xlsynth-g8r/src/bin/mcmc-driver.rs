@@ -20,6 +20,36 @@ use xlsynth_g8r::mcmc_logic::{cost, load_start, mcmc, Best, McmcOptions, Objecti
 
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use libc;
+
+/// Returns the current resident-set size in MiB (Linux-only). On other
+/// platforms this always returns `None`.
+#[cfg(target_os = "linux")]
+fn rss_megabytes() -> Option<u64> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    if let Ok(f) = File::open("/proc/self/statm") {
+        let mut line = String::new();
+        if BufReader::new(f).read_line(&mut line).is_ok() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(resident_pages) = parts[1].parse::<u64>() {
+                    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 };
+                    return Some(resident_pages * page_size / (1024 * 1024));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rss_megabytes() -> Option<u64> {
+    None
+}
+
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 struct CliArgs {
@@ -231,9 +261,12 @@ fn main() -> Result<()> {
             if last_print.elapsed() > Duration::from_secs(5) {
                 let best_gfn = best.get();
                 let stats = get_summary_stats::get_summary_stats(&best_gfn);
+                let rss_mb = rss_megabytes().unwrap_or(0) as f64;
                 println!(
-                    "[mcmc] [main] interim global best: nodes={}, depth={}",
-                    stats.live_nodes, stats.deepest_path
+                    "[mcmc] [main] interim global best: nodes={}, depth={}, rss={:.3} GiB",
+                    stats.live_nodes,
+                    stats.deepest_path,
+                    rss_mb / 1024.0
                 );
                 last_print = Instant::now();
             }
@@ -258,8 +291,10 @@ fn main() -> Result<()> {
         let stats = get_summary_stats::get_summary_stats(&best_gfn);
         println!("[mcmc] process was interrupted.");
         println!(
-            "[mcmc] Global best at interruption: nodes={}, depth={}",
-            stats.live_nodes, stats.deepest_path
+            "[mcmc] Global best at interruption: nodes={}, depth={}, rss={} MiB",
+            stats.live_nodes,
+            stats.deepest_path,
+            rss_megabytes().unwrap_or(0)
         );
         println!(
             "[mcmc] Will write output to: {} and stats to: {}",
@@ -274,8 +309,10 @@ fn main() -> Result<()> {
     let best_gfn = best.get();
     let final_summary_stats: SummaryStats = get_summary_stats::get_summary_stats(&best_gfn);
     println!(
-        "[mcmc] finished. Final best GateFn stats: nodes={}, depth={}",
-        final_summary_stats.live_nodes, final_summary_stats.deepest_path
+        "[mcmc] finished. Final best GateFn stats: nodes={}, depth={}, rss={} MiB",
+        final_summary_stats.live_nodes,
+        final_summary_stats.deepest_path,
+        rss_megabytes().unwrap_or(0)
     );
 
     println!(
