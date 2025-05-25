@@ -53,7 +53,7 @@ fn rss_megabytes() -> Option<u64> {
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 struct CliArgs {
-    /// Input file (.ir) or sample (sample://name)
+    /// Input file (.ir or .g8r) or sample (sample://name)
     input_path: String,
 
     /// Number of MCMC iterations to perform.

@@ -29,6 +29,7 @@ use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
 use core::simd::u64x4;
 use serde_json;
+use std::fs;
 use std::path::PathBuf;
 
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
@@ -673,7 +674,8 @@ pub fn mcmc(
     Ok(best_gfn)
 }
 
-/// Loads the starting `GateFn` from either a sample or an IR file.
+/// Loads the starting `GateFn` from either a sample, a `.g8r` file, or an IR
+/// file.
 pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
     let p_str = p_generic.as_ref().to_str().unwrap_or_default();
 
@@ -692,24 +694,45 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
         );
         Ok(loaded_sample.gate_fn)
     } else {
-        println!("Loading IR from path: {}", p_str);
-        let package = ir_parser::parse_path_to_package(p_generic.as_ref())
-            .map_err(|e| anyhow::anyhow!("Failed to parse IR package '{}': {:?}", p_str, e))?;
+        let path = p_generic.as_ref();
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("g8r") => {
+                println!("Loading GateFn from path: {}", p_str);
+                let contents = fs::read_to_string(path).map_err(|e| {
+                    anyhow::anyhow!("Failed to read GateFn file '{}': {}", p_str, e)
+                })?;
+                let gfn = GateFn::from_str(&contents).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse GateFn from '{}': {}", p_str, e)
+                })?;
+                let g_cost = cost(&gfn);
+                println!(
+                    "Loaded GateFn. Initial stats: nodes={}, depth={}",
+                    g_cost.nodes, g_cost.depth
+                );
+                Ok(gfn)
+            }
+            _ => {
+                println!("Loading IR from path: {}", p_str);
+                let package = ir_parser::parse_path_to_package(path).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse IR package '{}': {:?}", p_str, e)
+                })?;
 
-        let top_entity = package
-            .get_top()
-            .ok_or_else(|| anyhow::anyhow!("No top entity found in IR package '{}'", p_str))?;
-        println!("Found top function: {}", top_entity.name);
+                let top_entity = package.get_top().ok_or_else(|| {
+                    anyhow::anyhow!("No top entity found in IR package '{}'", p_str)
+                })?;
+                println!("Found top function: {}", top_entity.name);
 
-        let gatify_options = GatifyOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-        };
-        let gatify_output = ir2gate::gatify(top_entity, gatify_options)
-            .map_err(|e| anyhow::anyhow!("Failed to gatify IR from '{}': {}", p_str, e))?;
-        println!("Successfully gatified main function into GateFn.");
-        Ok(gatify_output.gate_fn)
+                let gatify_options = GatifyOptions {
+                    fold: true,
+                    hash: true,
+                    check_equivalence: false,
+                };
+                let gatify_output = ir2gate::gatify(top_entity, gatify_options)
+                    .map_err(|e| anyhow::anyhow!("Failed to gatify IR from '{}': {}", p_str, e))?;
+                println!("Successfully gatified main function into GateFn.");
+                Ok(gatify_output.gate_fn)
+            }
+        }
     }
 }
 
