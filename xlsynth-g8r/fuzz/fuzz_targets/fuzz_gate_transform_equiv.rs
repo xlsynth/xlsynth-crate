@@ -11,7 +11,7 @@ fuzz_target!(|graph: FuzzGraph| {
         return;
     }
     let _ = env_logger::builder().is_test(true).try_init();
-    let Some(mut g) = build_graph(&graph) else {
+    let Some(g) = build_graph(&graph) else {
         return;
     };
     let mut transforms = transforms::get_equiv_transforms();

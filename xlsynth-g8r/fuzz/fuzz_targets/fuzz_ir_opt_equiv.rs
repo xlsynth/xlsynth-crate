@@ -3,7 +3,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::ir2gate::{gatify, GatifyOptions};
 use xlsynth_g8r::ir_equiv_boolector;
 use xlsynth_g8r::xls_ir::ir_parser;
 use xlsynth_test_helpers::ir_fuzz::{generate_ir_fn, FuzzSample};
