@@ -19,6 +19,7 @@ pub mod fuzz_utils;
 pub mod gate;
 pub mod gate2ir;
 pub mod gate_builder;
+pub mod gate_parser;
 pub mod gate_sim;
 pub mod gate_simd;
 pub mod get_summary_stats;
