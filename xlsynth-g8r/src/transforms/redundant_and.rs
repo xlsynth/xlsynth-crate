@@ -17,6 +17,9 @@ pub fn insert_redundant_and_primitive(g: &mut GateFn, op: AigOperand) -> AigRef 
     };
     let new_ref = AigRef { id: g.gates.len() };
     g.gates.push(new_gate);
+    // Strong post-condition: inserting a fresh AND(x,x) must never introduce
+    // cycles.
+    crate::topo::debug_assert_no_cycles(&g.gates, "insert_redundant_and_primitive");
     new_ref
 }
 
@@ -150,6 +153,11 @@ impl Transform for InsertRedundantAndTransform {
                     negated: false,
                 };
                 g.outputs[*output_idx].bit_vector.set_lsb(*bit_idx, new_op);
+                // Post-condition: wrapping output must not create cycles.
+                crate::topo::debug_assert_no_cycles(
+                    &g.gates,
+                    "InsertRedundantAndTransform::apply (OutputPortBit)",
+                );
                 Ok(())
             }
             TransformLocation::Operand(parent_ref, is_rhs) => {
@@ -186,6 +194,10 @@ impl Transform for InsertRedundantAndTransform {
                         } else {
                             *a = new_op;
                         }
+                        crate::topo::debug_assert_no_cycles(
+                            &g.gates,
+                            "InsertRedundantAndTransform::apply (Operand)",
+                        );
                         Ok(())
                     }
                     _ => unreachable!(), // Should have been caught above

@@ -32,6 +32,8 @@ pub enum TransformKind {
     MergeEquivLeaves,
     SplitFanout,
     MergeFanout,
+    FactorSharedAnd,
+    UnfactorSharedAnd,
 }
 
 impl fmt::Display for TransformKind {
@@ -61,6 +63,8 @@ impl fmt::Display for TransformKind {
             TransformKind::MergeEquivLeaves => write!(f, "MergeLeaves"),
             TransformKind::SplitFanout => write!(f, "SplitFan"),
             TransformKind::MergeFanout => write!(f, "MergeFan"),
+            TransformKind::FactorSharedAnd => write!(f, "FactorAnd"),
+            TransformKind::UnfactorSharedAnd => write!(f, "UnfactorAnd"),
         }
     }
 }
