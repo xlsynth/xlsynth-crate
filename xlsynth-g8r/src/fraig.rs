@@ -277,7 +277,7 @@ mod tests {
         eprintln!("{}: took {:?}", name, elapsed);
 
         let check_equiv_start = Instant::now();
-        check_equivalence::validate_same_gate_fn(&gate_fn, &optimized_fn)
+        check_equivalence::prove_same_gate_fn_via_ir(&gate_fn, &optimized_fn)
             .expect("fraig optimization should preserve equivalence");
         let check_equiv_elapsed = check_equiv_start.elapsed();
         eprintln!("{}: check_equiv took {:?}", name, check_equiv_elapsed);
@@ -372,7 +372,7 @@ mod tests {
         );
 
         // Outputs should be equivalent
-        check_equivalence::validate_same_gate_fn(&test_graph.g, &optimized_fn)
+        check_equivalence::prove_same_gate_fn_via_ir(&test_graph.g, &optimized_fn)
             .expect("fraig optimization should preserve equivalence");
     }
 }

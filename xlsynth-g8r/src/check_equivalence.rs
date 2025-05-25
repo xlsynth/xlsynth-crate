@@ -103,7 +103,7 @@ pub fn validate_same_fn(orig_fn: &ir::Fn, gate_fn: &gate::GateFn) -> Result<(), 
     result
 }
 
-pub fn validate_same_gate_fn(lhs: &gate::GateFn, rhs: &gate::GateFn) -> Result<(), String> {
+pub fn prove_same_gate_fn_via_ir(lhs: &gate::GateFn, rhs: &gate::GateFn) -> Result<(), String> {
     let lhs_type = lhs.get_flat_type();
     let rhs_type = rhs.get_flat_type();
     if lhs_type != rhs_type {

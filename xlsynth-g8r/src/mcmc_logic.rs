@@ -52,7 +52,7 @@ pub fn cost(g: &GateFn) -> Cost {
 
 /// Checks equivalence of two `GateFn`s using the external IR-based checker.
 pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> bool {
-    crate::check_equivalence::validate_same_gate_fn(lhs, rhs).is_ok()
+    crate::check_equivalence::prove_same_gate_fn_via_ir(lhs, rhs).is_ok()
 }
 
 /// Holds MCMC iteration statistics.
@@ -271,7 +271,7 @@ pub fn mcmc_iteration(
                 oracle_time_micros = sim_time_micros;
                 let sat_res = oracle_equiv_sat(&current_gfn, &candidate_gfn);
                 if paranoid {
-                    let external_res = crate::check_equivalence::validate_same_gate_fn(
+                    let external_res = crate::check_equivalence::prove_same_gate_fn_via_ir(
                         &current_gfn,
                         &candidate_gfn,
                     )
@@ -791,7 +791,7 @@ fn write_checkpoint(
     // Cross-check equivalence
     let equiv_ok_sat = oracle_equiv_sat(original_gfn, best_gfn);
     let equiv_ok_external =
-        match crate::check_equivalence::validate_same_gate_fn(original_gfn, best_gfn) {
+        match crate::check_equivalence::prove_same_gate_fn_via_ir(original_gfn, best_gfn) {
             Ok(_) => true,
             Err(e) => {
                 eprintln!("[mcmc] External check_equivalence_with_top failed: {}", e);
