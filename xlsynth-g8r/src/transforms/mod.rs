@@ -3,15 +3,18 @@
 pub mod and_absorb;
 pub mod and_false;
 pub mod balance_and_tree;
+pub mod constant_and;
 pub mod double_negate;
 pub mod duplicate;
 pub mod factor_shared_and;
 pub mod false_and;
+pub mod flatten_branching_and;
 pub mod merge_equiv_leaves;
 pub mod push_negation;
 pub mod redundant_and;
 pub mod rewire_operand;
 pub mod rotate_and;
+pub mod rotate_and_cascade;
 pub mod split_fanout;
 pub mod swap_operands;
 pub mod swap_outputs;
@@ -26,13 +29,16 @@ use crate::transforms::rotate_and::{RotateAndLeftTransform, RotateAndRightTransf
 use crate::transforms::true_and::{InsertTrueAndTransform, RemoveTrueAndTransform};
 use and_false::RemoveFalseOperandAndTransform;
 use balance_and_tree::{BalanceAndTreeTransform, UnbalanceAndTreeTransform};
+use constant_and::RemoveConstantAndTransform;
 use double_negate::DoubleNegateTransform;
 use duplicate::{DuplicateGateTransform, UnduplicateGateTransform};
 use factor_shared_and::{FactorSharedAndTransform, UnfactorSharedAndTransform};
+use flatten_branching_and::FlattenBranchingAndTransform;
 use merge_equiv_leaves::MergeEquivLeavesTransform;
 use push_negation::PushNegationTransform;
 use redundant_and::{InsertRedundantAndTransform, RemoveRedundantAndTransform};
 use rewire_operand::RewireOperandTransform;
+use rotate_and_cascade::{RotateAndLeftCascadeTransform, RotateAndRightCascadeTransform};
 use split_fanout::{MergeFanoutTransform, SplitFanoutTransform};
 use swap_operands::SwapOperandsTransform;
 use swap_outputs::SwapOutputBitsTransform;
@@ -56,9 +62,12 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(InsertTrueAndTransform::new()),
         Box::new(RemoveTrueAndTransform::new()),
         Box::new(RemoveFalseOperandAndTransform::new()),
+        Box::new(RemoveConstantAndTransform::new()),
         Box::new(SwapOutputBitsTransform::new()),
         Box::new(RotateAndRightTransform::new()),
         Box::new(RotateAndLeftTransform::new()),
+        Box::new(RotateAndRightCascadeTransform::new()),
+        Box::new(RotateAndLeftCascadeTransform::new()),
         Box::new(AndAbsorbRightTransform::new()),
         Box::new(AndAbsorbLeftTransform::new()),
         Box::new(BalanceAndTreeTransform::new()),
@@ -70,5 +79,6 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(MergeFanoutTransform::new()),
         Box::new(FactorSharedAndTransform::new()),
         Box::new(UnfactorSharedAndTransform::new()),
+        Box::new(FlattenBranchingAndTransform::new()),
     ]
 }

@@ -35,6 +35,10 @@ pub enum TransformKind {
     FactorSharedAnd,
     UnfactorSharedAnd,
     RemoveFalseOperandAnd,
+    FlattenBranchingAnd,
+    RotateAndRightCascade,
+    RotateAndLeftCascade,
+    RemoveConstantAnd,
 }
 
 impl fmt::Display for TransformKind {
@@ -66,6 +70,10 @@ impl fmt::Display for TransformKind {
             TransformKind::MergeFanout => write!(f, "MergeFan"),
             TransformKind::FactorSharedAnd => write!(f, "FactorAnd"),
             TransformKind::UnfactorSharedAnd => write!(f, "UnfactorAnd"),
+            TransformKind::FlattenBranchingAnd => write!(f, "FlatBranchAnd"),
+            TransformKind::RotateAndRightCascade => write!(f, "RotCascadeR"),
+            TransformKind::RotateAndLeftCascade => write!(f, "RotCascadeL"),
+            TransformKind::RemoveConstantAnd => write!(f, "RemConstAnd"),
             TransformKind::RemoveFalseOperandAnd => write!(f, "RemFalseOp"),
         }
     }
