@@ -42,4 +42,5 @@ pub mod transforms;
 pub mod use_count;
 pub mod validate_equiv;
 pub mod validate_equiv_rustsat;
+pub mod validate_equiv_z3;
 pub mod xls_ir;

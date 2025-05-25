@@ -25,6 +25,7 @@ use crate::test_utils::{
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
 use crate::validate_equiv::Ctx as SatCtx;
+use crate::validate_equiv_z3::check_equiv;
 use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
 use core::simd::u64x4;
@@ -52,9 +53,8 @@ pub fn cost(g: &GateFn) -> Cost {
 
 /// Checks equivalence of two `GateFn`s using the RustSAT-based checker.
 pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> bool {
-    // Use the RustSAT-based equivalence checker for improved speed.
-    let mut sat_ctx = crate::validate_equiv::Ctx::new();
-    match crate::validate_equiv_rustsat::check_equiv(lhs, rhs, &mut sat_ctx) {
+    let mut dummy_ctx = crate::validate_equiv::Ctx::new();
+    match check_equiv(lhs, rhs, &mut dummy_ctx) {
         crate::validate_equiv::EquivResult::Proved => true,
         crate::validate_equiv::EquivResult::Disproved(_) => false,
     }

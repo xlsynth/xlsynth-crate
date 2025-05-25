@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod and_absorb;
+pub mod and_false;
 pub mod balance_and_tree;
 pub mod double_negate;
 pub mod duplicate;
@@ -23,6 +24,7 @@ use crate::transforms::and_absorb::{AndAbsorbLeftTransform, AndAbsorbRightTransf
 use crate::transforms::false_and::{InsertFalseAndTransform, RemoveFalseAndTransform};
 use crate::transforms::rotate_and::{RotateAndLeftTransform, RotateAndRightTransform};
 use crate::transforms::true_and::{InsertTrueAndTransform, RemoveTrueAndTransform};
+use and_false::RemoveFalseOperandAndTransform;
 use balance_and_tree::{BalanceAndTreeTransform, UnbalanceAndTreeTransform};
 use double_negate::DoubleNegateTransform;
 use duplicate::{DuplicateGateTransform, UnduplicateGateTransform};
@@ -53,6 +55,7 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(RemoveFalseAndTransform::new()),
         Box::new(InsertTrueAndTransform::new()),
         Box::new(RemoveTrueAndTransform::new()),
+        Box::new(RemoveFalseOperandAndTransform::new()),
         Box::new(SwapOutputBitsTransform::new()),
         Box::new(RotateAndRightTransform::new()),
         Box::new(RotateAndLeftTransform::new()),

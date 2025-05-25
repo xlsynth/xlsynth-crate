@@ -39,9 +39,7 @@ rand_core = { version = "0.9.3", features = ["std"] }
 ctrlc = { version = "3.4.4", features = ["termination"] }
 libc = "0.2"
 rustsat = "0.7"
-rustsat-cadical = "0.7"
-rustsat-batsat = "0.7"
-rustsat-minisat = "0.7"
+z3 = { version = "0.12", default-features = false, features=["static-link-z3"] }
 
 [dev-dependencies]
 anyhow = "1.0.86"

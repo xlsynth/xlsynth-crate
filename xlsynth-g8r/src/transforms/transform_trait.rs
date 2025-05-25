@@ -34,6 +34,7 @@ pub enum TransformKind {
     MergeFanout,
     FactorSharedAnd,
     UnfactorSharedAnd,
+    RemoveFalseOperandAnd,
 }
 
 impl fmt::Display for TransformKind {
@@ -65,6 +66,7 @@ impl fmt::Display for TransformKind {
             TransformKind::MergeFanout => write!(f, "MergeFan"),
             TransformKind::FactorSharedAnd => write!(f, "FactorAnd"),
             TransformKind::UnfactorSharedAnd => write!(f, "UnfactorAnd"),
+            TransformKind::RemoveFalseOperandAnd => write!(f, "RemFalseOp"),
         }
     }
 }

@@ -8,9 +8,9 @@ use crate::validate_equiv::{Ctx, EquivResult};
 use rustsat::instances::SatInstance;
 use rustsat::solvers::{Solve, SolveIncremental, SolverResult};
 use rustsat::types::{Assignment, Lit, TernaryVal};
-use rustsat_batsat::BasicSolver;
-use rustsat_cadical::{CaDiCaL, Config, Limit};
-use rustsat_minisat::core::Minisat;
+// use rustsat_batsat::BasicSolver;
+// use rustsat_cadical::{CaDiCaL, Config, Limit};
+// use rustsat_minisat::core::Minisat;
 
 // Tseitin clauses for: output <=> a AND b
 fn add_tseitsin_and(inst: &mut SatInstance, a: Lit, b: Lit, output: Lit) {
@@ -160,7 +160,8 @@ pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, _ctx: &mut Ctx<'a>) -> EquivResul
     //   • XLSYNTH_ORACLE_SOLVER=cadical → explicit CaDiCaL
     let chosen = env::var("XLSYNTH_ORACLE_SOLVER").unwrap_or_else(|_| "cadical".into());
 
-    let (sat_result, model_opt): (SolverResult, Option<Assignment>) = match chosen.as_str() {
+    let (sat_result, model_opt): (SolverResult, Option<Assignment>) = todo!();
+    /*match chosen.as_str() {
         "batsat" => {
             let mut solver = BasicSolver::default();
             solver.add_cnf(cnf).expect("add cnf");
@@ -196,7 +197,7 @@ pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, _ctx: &mut Ctx<'a>) -> EquivResul
             };
             (res, model)
         }
-    };
+    };*/
 
     match sat_result {
         SolverResult::Unsat => EquivResult::Proved,
