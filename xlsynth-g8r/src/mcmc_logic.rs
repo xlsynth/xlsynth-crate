@@ -20,12 +20,10 @@ use crate::gate_simd::{self, Vec256};
 use crate::get_summary_stats;
 use crate::ir2gate::{self, GatifyOptions};
 use crate::test_utils::{
-    load_bf16_add_sample, load_bf16_mul_sample, load_ripple_carry_adder_8b_sample, LoadedSample,
-    Opt as SampleOpt,
+    load_bf16_add_sample, load_bf16_mul_sample, load_ripple_carry_adder_8b_sample, Opt as SampleOpt,
 };
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
-use crate::validate_equiv::Ctx as SatCtx;
 use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
 use core::simd::u64x4;
@@ -130,7 +128,6 @@ pub struct McmcContext<'a> {
     pub rng: &'a mut Pcg64Mcg,
     pub all_transforms: Vec<Box<dyn crate::transforms::transform_trait::Transform>>,
     pub weights: Vec<f64>,
-    pub sat_ctx: SatCtx<'a>,
 }
 
 /// Details of what occurred during a single MCMC iteration attempt.
@@ -272,7 +269,6 @@ pub fn mcmc_iteration(
                     };
                 }
                 oracle_time_micros = sim_time_micros;
-                let oracle_start_time = Instant::now();
                 let sat_res = oracle_equiv_sat(&current_gfn, &candidate_gfn);
                 if paranoid {
                     let external_res = crate::check_equivalence::validate_same_gate_fn(
@@ -437,7 +433,6 @@ pub fn mcmc(
         rng: &mut iteration_rng,
         all_transforms: all_available_transforms,
         weights,
-        sat_ctx: SatCtx::new(),
     };
 
     let start_time = Instant::now();
@@ -638,18 +633,11 @@ pub fn mcmc(
                         &stats_path,
                         &original_gfn_for_check,
                         &best_gfn,
-                        &mut mcmc_context.sat_ctx,
                         iterations_count,
                         "Iter checkpoint",
                     )?;
                 }
             }
-        }
-
-        // Periodically reset SAT context to avoid unbounded memory growth.
-        if options.sat_reset_interval > 0 && iterations_count % options.sat_reset_interval == 0 {
-            println!("[mcmc] SAT context reset at iter {}.", iterations_count);
-            mcmc_context.sat_ctx.reset();
         }
     }
 
@@ -667,7 +655,6 @@ pub fn mcmc(
             &stats_path,
             &original_gfn_for_check,
             &best_gfn,
-            &mut mcmc_context.sat_ctx,
             iterations_count,
             "Final checkpoint",
         )?;
@@ -798,7 +785,6 @@ fn write_checkpoint(
     stats_path: &Path,
     original_gfn: &GateFn,
     best_gfn: &GateFn,
-    sat_ctx: &mut SatCtx,
     iter: u64,
     context: &str,
 ) -> Result<()> {

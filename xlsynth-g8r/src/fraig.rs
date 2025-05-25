@@ -22,7 +22,7 @@ use crate::{
     bulk_replace::bulk_replace, bulk_replace::SubstitutionMap, gate::AigOperand, gate::AigRef,
     gate::GateFn, gate_builder::GateBuilderOptions, get_summary_stats::get_gate_depth,
     propose_equiv::propose_equivalence_classes, propose_equiv::EquivNode,
-    validate_equiv::validate_equivalence_classes,
+    prove_gate_fn_equiv_varisat::validate_equivalence_classes,
 };
 
 pub enum IterationBounds {
@@ -170,12 +170,12 @@ pub fn fraig_optimize(
                     // Same polarity: substitute directly
                     (EquivNode::Normal(_), EquivNode::Normal(rep_ref))
                     | (EquivNode::Inverted(_), EquivNode::Inverted(rep_ref)) => {
-                        AigOperand::from(*rep_ref)
+                        AigOperand::from(rep_ref)
                     }
                     // Different polarity: substitute with negation
                     (EquivNode::Normal(_), EquivNode::Inverted(rep_ref))
                     | (EquivNode::Inverted(_), EquivNode::Normal(rep_ref)) => {
-                        AigOperand::from(*rep_ref).negate()
+                        AigOperand::from(rep_ref).negate()
                     }
                 };
 

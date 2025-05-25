@@ -44,5 +44,4 @@ pub mod test_utils;
 pub mod topo;
 pub mod transforms;
 pub mod use_count;
-pub mod validate_equiv;
 pub mod xls_ir;

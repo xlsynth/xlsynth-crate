@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
-use crate::test_utils::structurally_equivalent;
 use crate::topo::reaches_target as node_reaches_target;
 use crate::topo::reaches_target as reaches;
 use crate::transforms::transform_trait::{
@@ -243,7 +242,7 @@ fn can_unfactor_without_cycle(g: &GateFn, outer: AigRef) -> bool {
     let use_counts = get_id_to_use_count(g);
 
     // Identify inner_ref and common operand as in the real transform.
-    let (inner_is_rhs, inner_ref, common_op) = if !right.negated
+    let (_inner_is_rhs, inner_ref, common_op) = if !right.negated
         && matches!(g.gates[right.node.id], AigNode::And2 { .. })
         && *use_counts.get(&right.node).unwrap_or(&0) == 1
     {
@@ -510,7 +509,10 @@ impl Transform for UnfactorSharedAndTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::{
+        gate_builder::{GateBuilder, GateBuilderOptions},
+        test_utils::structurally_equivalent,
+    };
 
     fn setup_factor_graph() -> (GateFn, AigRef) {
         let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
