@@ -285,6 +285,11 @@ jobs:
       - name: Note Xcode version
         run: xcodebuild -version
 
+      - name: Install Z3 SMT solver
+        run: |
+          brew install z3
+          echo "Installed z3 version: $(z3 --version)"
+
       - name: Download xlsynth binaries
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -363,6 +368,7 @@ jobs:
         run: |
           dnf install -y gcc openssl-devel libffi-devel make curl --nobest
           dnf install -y protobuf-compiler
+          dnf install -y z3 z3-devel
           dnf install -y llvm-toolset
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
