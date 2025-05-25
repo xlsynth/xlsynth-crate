@@ -3,6 +3,7 @@
 use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::ir2gate;
+use crate::ir2gate_utils::gatify_add_ripple_carry;
 use crate::xls_ir::ir::Package as CrateIrPackage;
 use crate::xls_ir::ir_parser;
 use half::bf16;
@@ -192,6 +193,26 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
         gate_fn,
         mangled_fn_name: mangled_name,
     }
+}
+
+/// Creates a ripple-carry adder with the given number of bits.
+pub fn make_ripple_carry_adder(bits: usize) -> GateFn {
+    let mut gb = GateBuilder::new(
+        format!("ripple_carry_adder_{}b", bits),
+        GateBuilderOptions::no_opt(),
+    );
+    let lhs = gb.add_input("lhs".to_string(), bits);
+    let rhs = gb.add_input("rhs".to_string(), bits);
+    let c_in = gb.add_input("c_in".to_string(), 1).get_lsb(0).clone();
+    let (c_out, sum) = gatify_add_ripple_carry(&lhs, &rhs, c_in, Some("ripple_carry"), &mut gb);
+    gb.add_output("c_out".to_string(), AigBitVector::from_bit(c_out));
+    gb.add_output("sum".to_string(), sum);
+    gb.build()
+}
+
+/// Returns an eight-bit ripple-carry adder sample as a `GateFn`.
+pub fn load_ripple_carry_adder_8b_sample() -> GateFn {
+    make_ripple_carry_adder(8)
 }
 
 pub struct TestGraph {
