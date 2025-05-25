@@ -121,9 +121,9 @@ fn run_boolector_equiv_check(
         .expect("Dropped parameter is used in the function body!");
     // Run Boolector equivalence check
     let result = if flatten_aggregates {
-        xlsynth_g8r::ir_equiv_boolector::check_equiv_flattened(&lhs_fn, &rhs_fn)
+        xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lhs_fn, &rhs_fn)
     } else {
-        xlsynth_g8r::ir_equiv_boolector::check_equiv(&lhs_fn, &rhs_fn)
+        xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn)
     };
     match result {
         ir_equiv_boolector::EquivResult::Proved => {
@@ -137,6 +137,7 @@ fn run_boolector_equiv_check(
     }
 }
 
+/// Implements the "ir-equiv" subcommand.
 pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_ir_equiv");
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();

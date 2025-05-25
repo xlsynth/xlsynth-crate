@@ -66,7 +66,7 @@ fn gen_random_inputs(gate_fn: &GateFn, rng: &mut impl Rng) -> Vec<IrBits> {
 /// Returns a mapping from hash value (a hash over the history for a given gate
 /// as it's fed random samples) to a sequence of the nodes that had the same
 /// history.
-pub fn propose_equiv(
+pub fn propose_equivalence_classes(
     gate_fn: &GateFn,
     input_sample_count: usize,
     rng: &mut impl Rng,
@@ -168,7 +168,8 @@ mod tests {
         let graph = setup_simple_graph();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
         let counterexamples = HashSet::new();
-        let equiv_classes = propose_equiv(&graph.g, 4096, &mut seeded_rng, &counterexamples);
+        let equiv_classes =
+            propose_equivalence_classes(&graph.g, 4096, &mut seeded_rng, &counterexamples);
         // There are no redundancies in this graph, so we should not find any
         // equivalence classes.
         assert!(equiv_classes.is_empty());
@@ -180,7 +181,8 @@ mod tests {
         let graph = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
         let counterexamples = HashSet::new();
-        let equiv_classes = propose_equiv(&graph.g, 4096, &mut seeded_rng, &counterexamples);
+        let equiv_classes =
+            propose_equivalence_classes(&graph.g, 4096, &mut seeded_rng, &counterexamples);
         log::info!("equiv_classes: {:?}", equiv_classes);
         assert_eq!(equiv_classes.len(), 4); // Expect 4 classes: normal pairs and inverted pairs
         let mut values = equiv_classes.values().collect::<Vec<_>>();
