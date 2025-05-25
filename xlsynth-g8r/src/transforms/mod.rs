@@ -69,3 +69,11 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(UnfactorSharedAndTransform::new()),
     ]
 }
+
+/// Returns all transforms that are always semantics preserving.
+pub fn get_equiv_transforms() -> Vec<Box<dyn Transform>> {
+    get_all_transforms()
+        .into_iter()
+        .filter(|t| t.always_equivalent())
+        .collect()
+}
