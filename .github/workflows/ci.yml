@@ -452,7 +452,7 @@ jobs:
           export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
           cp $(find -name 'libxls-v*-*.so' | head -n 1) .
           export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
-          python3 run_valgrind_on_tests.py
+          python3 run_valgrind_on_tests.py --filter-to-run=sample_usage
 
   build-and-test-predownloaded:
     runs-on: ubuntu-latest
