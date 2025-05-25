@@ -11,20 +11,24 @@ fuzz_target!(|graph: FuzzGraph| {
         return;
     }
     let _ = env_logger::builder().is_test(true).try_init();
-    let Some(mut g) = build_graph(&graph) else { return; };
+    let Some(mut g) = build_graph(&graph) else {
+        return;
+    };
     let mut transforms = transforms::get_equiv_transforms();
     if transforms.is_empty() {
         return;
     }
     let mut rng = rand::thread_rng();
-    let t = transforms.iter().choose(&mut rng).unwrap();
+    let t = transforms.iter_mut().choose(&mut rng).unwrap();
     let candidates = t.find_candidates(&g, TransformDirection::Forward);
     if candidates.is_empty() {
         return;
     }
     let cand = candidates.iter().choose(&mut rng).unwrap();
     let mut new_g = g.clone();
-    if t.apply(&mut new_g, cand, TransformDirection::Forward).is_err() {
+    if t.apply(&mut new_g, cand, TransformDirection::Forward)
+        .is_err()
+    {
         return;
     }
     if let Err(e) = check_equivalence::validate_same_gate_fn(&g, &new_g) {
