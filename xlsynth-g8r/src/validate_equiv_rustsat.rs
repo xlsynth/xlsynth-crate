@@ -7,9 +7,10 @@ use crate::validate_equiv::{Ctx, EquivResult};
 
 use rustsat::instances::SatInstance;
 use rustsat::solvers::{Solve, SolveIncremental, SolverResult};
-use rustsat::types::{Lit, TernaryVal};
+use rustsat::types::{Assignment, Lit, TernaryVal};
 use rustsat_batsat::BasicSolver;
 use rustsat_cadical::{CaDiCaL, Config, Limit};
+use rustsat_minisat::core::Minisat;
 
 // Tseitin clauses for: output <=> a AND b
 fn add_tseitsin_and(inst: &mut SatInstance, a: Lit, b: Lit, output: Lit) {
@@ -152,28 +153,55 @@ pub fn check_equiv<'a>(a: &GateFn, b: &GateFn, _ctx: &mut Ctx<'a>) -> EquivResul
     // Solve under assumption diff
     let (cnf, _vmanager) = instance.into_cnf();
 
-    // Decide which backend to use: default is CaDiCaL for maximum power, but
-    // if `XLSYNTH_FAST_ORACLE=1` is set we switch to the lightweight pure-Rust
-    // BatSat solver which is often 10-100× faster on the tiny miters we build.
-    let fast = env::var("XLSYNTH_FAST_ORACLE").map_or(false, |v| v == "1");
+    // Decide which backend to use.
+    //   • default: CaDiCaL ("cadical")
+    //   • XLSYNTH_ORACLE_SOLVER=batsat  → pure-Rust BatSat (fast, no deps)
+    //   • XLSYNTH_ORACLE_SOLVER=minisat → MiniSat C++ backend (often faster)
+    //   • XLSYNTH_ORACLE_SOLVER=cadical → explicit CaDiCaL
+    let chosen = env::var("XLSYNTH_ORACLE_SOLVER").unwrap_or_else(|_| "cadical".into());
 
-    // Build, solve, and interpret the result with the chosen backend.
-    let sat_result = if fast {
-        let mut batsat = BasicSolver::default();
-        batsat.add_cnf(cnf).expect("add cnf");
-        batsat.solve_assumps(&[diff]).expect("solver")
-    } else {
-        let mut cadical = CaDiCaL::default();
-        let _ = cadical.set_configuration(Config::Plain);
-        let _ = cadical.set_limit(Limit::Preprocessing(0));
-        cadical.add_cnf(cnf).expect("add cnf");
-        cadical.solve_assumps(&[diff]).expect("solver")
+    let (sat_result, model_opt): (SolverResult, Option<Assignment>) = match chosen.as_str() {
+        "batsat" => {
+            let mut solver = BasicSolver::default();
+            solver.add_cnf(cnf).expect("add cnf");
+            let res = solver.solve_assumps(&[diff]).expect("solver");
+            let model = if matches!(res, SolverResult::Sat) {
+                Some(solver.full_solution().expect("model"))
+            } else {
+                None
+            };
+            (res, model)
+        }
+        "minisat" => {
+            let mut solver = Minisat::default();
+            solver.add_cnf(cnf).expect("add cnf");
+            let res = solver.solve_assumps(&[diff]).expect("solver");
+            let model = if matches!(res, SolverResult::Sat) {
+                Some(solver.full_solution().expect("model"))
+            } else {
+                None
+            };
+            (res, model)
+        }
+        "cadical" | _ => {
+            let mut solver = CaDiCaL::default();
+            let _ = solver.set_configuration(Config::Plain);
+            let _ = solver.set_limit(Limit::Preprocessing(0));
+            solver.add_cnf(cnf).expect("add cnf");
+            let res = solver.solve_assumps(&[diff]).expect("solver");
+            let model = if matches!(res, SolverResult::Sat) {
+                Some(solver.full_solution().expect("model"))
+            } else {
+                None
+            };
+            (res, model)
+        }
     };
 
     match sat_result {
         SolverResult::Unsat => EquivResult::Proved,
         SolverResult::Sat => {
-            let sol = cadical.full_solution().expect("model");
+            let sol = model_opt.expect("model missing");
             // Map assignment to counterexample
             let mut map = HashMap::new();
             for (i, inp) in a.inputs.iter().enumerate() {
