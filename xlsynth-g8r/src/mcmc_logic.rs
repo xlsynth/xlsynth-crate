@@ -20,7 +20,8 @@ use crate::gate_simd::{self, Vec256};
 use crate::get_summary_stats;
 use crate::ir2gate::{self, GatifyOptions};
 use crate::test_utils::{
-    load_bf16_add_sample, load_bf16_mul_sample, LoadedSample, Opt as SampleOpt,
+    load_bf16_add_sample, load_bf16_mul_sample, load_ripple_carry_adder_8b_sample, LoadedSample,
+    Opt as SampleOpt,
 };
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
@@ -681,18 +682,36 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
 
     if p_str.starts_with("sample://") {
         let sample_name = p_str.trim_start_matches("sample://");
-        let loaded_sample_res: Result<LoadedSample, anyhow::Error> = match sample_name {
-            "bf16_add" => Ok(load_bf16_add_sample(SampleOpt::Yes)),
-            "bf16_mul" => Ok(load_bf16_mul_sample(SampleOpt::Yes)),
+        match sample_name {
+            "bf16_add" => {
+                let loaded_sample = load_bf16_add_sample(SampleOpt::Yes);
+                let sample_cost = cost(&loaded_sample.gate_fn);
+                println!(
+                    "Sample '{}' loaded. Initial stats: nodes={}, depth={}",
+                    sample_name, sample_cost.nodes, sample_cost.depth
+                );
+                Ok(loaded_sample.gate_fn)
+            }
+            "bf16_mul" => {
+                let loaded_sample = load_bf16_mul_sample(SampleOpt::Yes);
+                let sample_cost = cost(&loaded_sample.gate_fn);
+                println!(
+                    "Sample '{}' loaded. Initial stats: nodes={}, depth={}",
+                    sample_name, sample_cost.nodes, sample_cost.depth
+                );
+                Ok(loaded_sample.gate_fn)
+            }
+            "ripple_carry_adder_8b" => {
+                let gfn = load_ripple_carry_adder_8b_sample();
+                let sample_cost = cost(&gfn);
+                println!(
+                    "Sample '{}' loaded. Initial stats: nodes={}, depth={}",
+                    sample_name, sample_cost.nodes, sample_cost.depth
+                );
+                Ok(gfn)
+            }
             _ => Err(anyhow::anyhow!("Unknown sample name: {}", sample_name)),
-        };
-        let loaded_sample = loaded_sample_res?;
-        let sample_cost = cost(&loaded_sample.gate_fn);
-        println!(
-            "Sample '{}' loaded. Initial stats: nodes={}, depth={}",
-            sample_name, sample_cost.nodes, sample_cost.depth
-        );
-        Ok(loaded_sample.gate_fn)
+        }
     } else {
         let path = p_generic.as_ref();
         match path.extension().and_then(|e| e.to_str()) {
