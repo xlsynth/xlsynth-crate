@@ -146,8 +146,11 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
     // Choose unique operand as inner_a; keep ordering deterministic.
     let unique_op = inner_a;
 
+    // Reject if pulling any of the inner operands (or the common op) upward
+    // would introduce a back-edge to `outer`.
     if node_reaches_target(&g.gates, common_op.node, outer)
-        || node_reaches_target(&g.gates, unique_op.node, outer)
+        || node_reaches_target(&g.gates, inner_a.node, outer)
+        || node_reaches_target(&g.gates, inner_b.node, outer)
     {
         return Err("unfactor_shared_and_primitive: would create cycle");
     }
