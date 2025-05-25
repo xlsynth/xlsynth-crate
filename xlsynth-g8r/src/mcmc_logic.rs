@@ -14,8 +14,8 @@ use rand::prelude::{Rng, SeedableRng, SliceRandom};
 use rand_pcg::Pcg64Mcg;
 
 // Imports from the xlsynth_g8r crate
-use crate::gate::GateFn; // Cost is now defined in this file
-use crate::gate_sim::{self, Collect};
+use crate::gate::GateFn;
+use crate::gate_simd::{self, Vec256};
 use crate::get_summary_stats;
 use crate::ir2gate::{self, GatifyOptions};
 use crate::test_utils::{
@@ -23,12 +23,12 @@ use crate::test_utils::{
 };
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
-use crate::validate_equiv::{self, Ctx as SatCtx, EquivResult};
+use crate::validate_equiv::Ctx as SatCtx;
 use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
+use core::simd::u64x4;
 use serde_json;
 use std::path::PathBuf;
-use xlsynth::IrBits;
 
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
@@ -169,32 +169,6 @@ impl Objective {
     }
 }
 
-/// Returns true if the outputs of lhs and rhs match for all random input
-/// vectors.
-fn fast_sim_equiv(
-    lhs: &GateFn,
-    rhs: &GateFn,
-    num_samples: usize,
-    rng: &mut impl rand::Rng,
-) -> bool {
-    if lhs.inputs.len() != rhs.inputs.len() || lhs.outputs.len() != rhs.outputs.len() {
-        return false;
-    }
-    for _ in 0..num_samples {
-        let inputs: Vec<IrBits> = lhs
-            .inputs
-            .iter()
-            .map(|input| crate::fuzz_utils::arbitrary_irbits(rng, input.bit_vector.get_bit_count()))
-            .collect();
-        let lhs_out = gate_sim::eval(lhs, &inputs, Collect::None).outputs;
-        let rhs_out = gate_sim::eval(rhs, &inputs, Collect::None).outputs;
-        if lhs_out != rhs_out {
-            return false;
-        }
-    }
-    true
-}
-
 /// Performs a single iteration of the MCMC process.
 #[allow(clippy::too_many_arguments)]
 pub fn mcmc_iteration(
@@ -207,6 +181,8 @@ pub fn mcmc_iteration(
     temp: f64,
     objective: Objective,
     paranoid: bool,
+    simd_inputs: &[Vec256],
+    baseline_outputs: &Vec<Vec256>,
 ) -> McmcIterationOutput {
     let mut iteration_best_gfn_updated = false;
 
@@ -279,7 +255,8 @@ pub fn mcmc_iteration(
                 true
             } else {
                 let sim_start = Instant::now();
-                let sim_equiv = fast_sim_equiv(&current_gfn, &candidate_gfn, 16, context.rng);
+                let candidate_out = gate_simd::eval(&candidate_gfn, simd_inputs).outputs;
+                let sim_equiv = *baseline_outputs == candidate_out;
                 let sim_time_micros = sim_start.elapsed().as_micros();
                 if !sim_equiv {
                     return McmcIterationOutput {
@@ -441,6 +418,14 @@ pub fn mcmc(
 
     let weights = build_transform_weights(&all_available_transforms, objective);
 
+    // Pre-construct a 256-wide random input batch for fast SIMD equivalence
+    // checking *before* we hand out a mutable borrow of `iteration_rng` to
+    // `mcmc_context`.
+    let simd_inputs = generate_simd_inputs(&original_gfn_for_check, &mut iteration_rng);
+
+    // Compute baseline outputs for the initial GateFn.
+    let mut baseline_outputs = gate_simd::eval(&original_gfn_for_check, &simd_inputs).outputs;
+
     let mut mcmc_context = McmcContext {
         rng: &mut iteration_rng,
         all_transforms: all_available_transforms,
@@ -513,14 +498,17 @@ pub fn mcmc(
             current_cost,
             &mut best_gfn,
             &mut best_cost,
-            &mut mcmc_context, // Pass context here
+            &mut mcmc_context,
             current_temp,
             objective,
             paranoid,
+            &simd_inputs,
+            &baseline_outputs,
         );
         log::trace!("MCMC iteration completed: {:?}", iterations_count);
 
-        current_gfn = iteration_output.output_gfn; // new current_gfn obtained from output
+        // Update current_gfn and baseline outputs depending on acceptance.
+        current_gfn = iteration_output.output_gfn;
         current_cost = iteration_output.output_cost;
         stats.total_oracle_time_micros += iteration_output.oracle_time_micros;
 
@@ -824,4 +812,33 @@ fn write_checkpoint(
         }
     }
     Ok(())
+}
+
+/// Generates a fixed set of 256-wide random inputs matching the bit-width of
+/// `gate_fn`'s declared inputs.
+fn generate_simd_inputs(gate_fn: &GateFn, rng: &mut impl rand::Rng) -> Vec<Vec256> {
+    const LANES: usize = 256;
+    let total_bits: usize = gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum();
+    let mut words_per_bit = vec![[0u64; 4]; total_bits];
+
+    for lane in 0..LANES {
+        let mut bit_cursor = 0;
+        for input in &gate_fn.inputs {
+            let rand_val =
+                crate::fuzz_utils::arbitrary_irbits(rng, input.bit_vector.get_bit_count());
+            for bit_idx in 0..input.bit_vector.get_bit_count() {
+                if rand_val.get_bit(bit_idx).unwrap() {
+                    let limb = lane / 64;
+                    let offset = lane % 64;
+                    words_per_bit[bit_cursor + bit_idx][limb] |= 1u64 << offset;
+                }
+            }
+            bit_cursor += input.bit_vector.get_bit_count();
+        }
+    }
+
+    words_per_bit
+        .into_iter()
+        .map(|w| Vec256(u64x4::from_array(w)))
+        .collect()
 }
