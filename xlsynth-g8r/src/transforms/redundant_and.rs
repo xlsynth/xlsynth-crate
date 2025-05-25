@@ -153,6 +153,11 @@ impl Transform for InsertRedundantAndTransform {
                     negated: false,
                 };
                 g.outputs[*output_idx].bit_vector.set_lsb(*bit_idx, new_op);
+                // Post-condition: wrapping output must not create cycles.
+                crate::topo::debug_assert_no_cycles(
+                    &g.gates,
+                    "InsertRedundantAndTransform::apply (OutputPortBit)",
+                );
                 Ok(())
             }
             TransformLocation::Operand(parent_ref, is_rhs) => {
@@ -189,6 +194,10 @@ impl Transform for InsertRedundantAndTransform {
                         } else {
                             *a = new_op;
                         }
+                        crate::topo::debug_assert_no_cycles(
+                            &g.gates,
+                            "InsertRedundantAndTransform::apply (Operand)",
+                        );
                         Ok(())
                     }
                     _ => unreachable!(), // Should have been caught above

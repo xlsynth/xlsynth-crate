@@ -150,12 +150,19 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         return Err("unfactor_shared_and_primitive: would create cycle");
     }
 
+    // Reject patterns that would create self-referential loops
+    if common_op.node == inner_ref || unique_op.node == inner_ref {
+        return Err("unfactor_shared_and_primitive: would create self-loop");
+    }
+
     let new_gate = AigNode::And2 {
         a: common_op,
         b: unique_op,
         tags: None,
     };
     let new_ref = AigRef { id: g.gates.len() };
+    // Extra safety: neither operand of the new gate may reference new_ref itself.
+    debug_assert!(common_op.node != new_ref && unique_op.node != new_ref);
     g.gates.push(new_gate);
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[inner_ref.id] {
@@ -347,7 +354,7 @@ impl Transform for UnfactorSharedAndTransform {
     }
 
     fn always_equivalent(&self) -> bool {
-        true
+        false
     }
 }
 
