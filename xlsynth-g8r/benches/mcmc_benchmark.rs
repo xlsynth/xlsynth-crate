@@ -87,7 +87,7 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                 current_cost,
                 mut best_gfn,
                 mut best_cost,
-                mut all_transforms,
+                all_transforms,
                 mut rng,
                 simd_inputs,
                 baseline_outputs,
