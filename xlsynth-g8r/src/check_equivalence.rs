@@ -15,13 +15,13 @@ pub fn check_equivalence_with_top(
     keep_temp_dir: bool,
 ) -> Result<(), String> {
     let tempdir = tempfile::tempdir().unwrap();
-    let path = if keep_temp_dir {
-        tempdir.into_path()
+    let dirpath = if keep_temp_dir {
+        tempdir.keep()
     } else {
         tempdir.path().to_path_buf()
     };
-    let orig_path = path.join("orig.ir");
-    let gate_path = path.join("gate.ir");
+    let orig_path = dirpath.join("orig.ir");
+    let gate_path = dirpath.join("gate.ir");
     std::fs::write(orig_path.clone(), orig_package).unwrap();
     std::fs::write(gate_path.clone(), gate_package).unwrap();
     let tools_dir_str =
