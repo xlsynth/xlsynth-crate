@@ -144,6 +144,41 @@ pub fn eval(gate_fn: &GateFn, inputs: &[Vec256]) -> GateSimdResult {
     GateSimdResult { outputs }
 }
 
+/// Evaluates `gate_fn` on `inputs` and returns the total Hamming distance
+/// between the produced outputs and `target_outputs`.
+///
+/// `inputs` and `target_outputs` must be batches of 256 samples flattened in
+/// the same format required by [`eval`]. Each output bit-vector in
+/// `target_outputs` corresponds to the matching output bit-vector produced by
+/// `gate_fn`.
+///
+/// # Panics
+/// Panics if `target_outputs.len()` does not match the number of output bits of
+/// `gate_fn`.
+pub fn eval_correctness_distance(
+    gate_fn: &GateFn,
+    inputs: &[Vec256],
+    target_outputs: &[Vec256],
+) -> usize {
+    let result = eval(gate_fn, inputs);
+    assert_eq!(
+        result.outputs.len(),
+        target_outputs.len(),
+        "mismatching number of output vectors"
+    );
+
+    let mut distance = 0usize;
+    for (got, want) in result.outputs.iter().zip(target_outputs.iter()) {
+        let got_words = got.to_array();
+        let want_words = want.to_array();
+        for (a, b) in got_words.iter().zip(want_words.iter()) {
+            distance += (a ^ b).count_ones() as usize;
+        }
+    }
+
+    distance
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +220,52 @@ mod tests {
         }
         let expected_vec = pack(&expected);
         assert_eq!(result.outputs[0], expected_vec);
+    }
+
+    #[test]
+    fn test_eval_correctness_distance() {
+        let mut gb_and = GateBuilder::new("and_fn".to_string(), GateBuilderOptions::opt());
+        let input_a = gb_and.add_input("a".to_string(), 1);
+        let input_b = gb_and.add_input("b".to_string(), 1);
+        let and_node = gb_and.add_and_vec(&input_a, &input_b);
+        gb_and.add_output("out".to_string(), and_node);
+        let gfn_and = gb_and.build();
+
+        let mut gb_passthrough = GateBuilder::new("a_fn".to_string(), GateBuilderOptions::opt());
+        let input_a_pt = gb_passthrough.add_input("a".to_string(), 1);
+        let _input_b_pt = gb_passthrough.add_input("b".to_string(), 1);
+        gb_passthrough.add_output("out".to_string(), input_a_pt.clone());
+        let gfn_a = gb_passthrough.build();
+
+        let mut rng = StdRng::seed_from_u64(123);
+        let mut a_samples = [false; 256];
+        let mut b_samples = [false; 256];
+        for i in 0..256 {
+            a_samples[i] = rng.gen();
+            b_samples[i] = rng.gen();
+        }
+
+        let simd_inputs = vec![pack(&a_samples), pack(&b_samples)];
+        let target_outputs = eval(&gfn_and, &simd_inputs).outputs;
+
+        // Distance to the correct gate should be zero.
+        assert_eq!(
+            eval_correctness_distance(&gfn_and, &simd_inputs, &target_outputs),
+            0
+        );
+
+        // Manually compute expected distance when using the passthrough gate.
+        let mut expected_distance = 0usize;
+        for i in 0..256 {
+            let correct = a_samples[i] & b_samples[i];
+            let cand = a_samples[i];
+            if correct != cand {
+                expected_distance += 1;
+            }
+        }
+        assert_eq!(
+            eval_correctness_distance(&gfn_a, &simd_inputs, &target_outputs),
+            expected_distance
+        );
     }
 }
