@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use libc;
 
+use atty::Stream;
+use colored::*;
+
 /// Returns the current resident-set size in MiB (Linux-only). On other
 /// platforms this always returns `None`.
 #[cfg(target_os = "linux")]
@@ -256,17 +259,54 @@ fn main() -> Result<()> {
     }
 
     let mut last_print = Instant::now();
+    let print_interval = Duration::from_secs(20); // Make global print less frequent
     for h in handles {
         while !h.is_finished() {
-            if last_print.elapsed() > Duration::from_secs(5) {
+            if last_print.elapsed() > print_interval {
                 let best_gfn = best.get();
                 let stats = get_summary_stats::get_summary_stats(&best_gfn);
                 let rss_mb = rss_megabytes().unwrap_or(0) as f64;
+                let best_cost = match cli.metric {
+                    Objective::Nodes => stats.live_nodes as usize,
+                    Objective::Depth => stats.deepest_path as usize,
+                    Objective::Product => stats.live_nodes * stats.deepest_path,
+                };
+                let improvement = if init_metric == 0 {
+                    0.0
+                } else {
+                    100.0 * (init_metric as f64 - best_cost as f64) / (init_metric as f64)
+                };
+                let (improvement_str, colorized_improvement) = if atty::is(Stream::Stdout) {
+                    if best_cost < init_metric {
+                        (
+                            format!("{:.2}%", improvement),
+                            format!("{:.2}%", improvement).green(),
+                        )
+                    } else if best_cost > init_metric {
+                        (
+                            format!("{:.2}%", improvement),
+                            format!("{:.2}%", improvement).red(),
+                        )
+                    } else {
+                        ("0.00%".to_string(), "0.00%".normal())
+                    }
+                } else {
+                    let s = format!("{:.2}%", improvement);
+                    (s.clone(), s.normal())
+                };
                 println!(
-                    "[mcmc] [main] interim global best: nodes={}, depth={}, rss={:.3} GiB",
+                    "[mcmc] [main] interim global best: nodes={}, depth={}, rss={:.3} GiB\n  original: nodes={}, depth={}, objective={}\n  global best: nodes={}, depth={}, objective={}\n  objective improvement: {} ({} mode)",
                     stats.live_nodes,
                     stats.deepest_path,
-                    rss_mb / 1024.0
+                    rss_mb / 1024.0,
+                    initial_stats.live_nodes,
+                    initial_stats.deepest_path,
+                    init_metric,
+                    stats.live_nodes,
+                    stats.deepest_path,
+                    best_cost,
+                    colorized_improvement,
+                    format!("{:?}", cli.metric)
                 );
                 last_print = Instant::now();
             }

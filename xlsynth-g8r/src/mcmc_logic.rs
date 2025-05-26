@@ -42,7 +42,7 @@ use std::path::PathBuf;
 
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
-const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 1;
+const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cost {
