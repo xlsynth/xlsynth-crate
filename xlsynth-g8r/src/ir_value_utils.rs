@@ -20,6 +20,9 @@ use xlsynth::{ir_value::IrBits, IrValue};
 /// assert_eq!(ir_bits.get_bit(3).unwrap(), false); // MSB
 /// ```
 pub fn ir_bits_from_lsb_is_0(bits: &[bool]) -> IrBits {
+    if bits.is_empty() {
+        return IrBits::make_ubits(0, 0).unwrap();
+    }
     let mut s: String = format!("bits[{}]:0b", bits.len());
     for b in bits.iter().rev() {
         s.push(if *b { '1' } else { '0' });
@@ -28,6 +31,9 @@ pub fn ir_bits_from_lsb_is_0(bits: &[bool]) -> IrBits {
 }
 
 pub fn ir_bits_from_bitvec_lsb_is_0(bv: &BitVec) -> IrBits {
+    if bv.is_empty() {
+        return IrBits::make_ubits(0, 0).unwrap();
+    }
     let mut s: String = format!("bits[{}]:0b", bv.len());
     for b in bv.iter().rev() {
         s.push(if *b { '1' } else { '0' });
@@ -36,6 +42,9 @@ pub fn ir_bits_from_bitvec_lsb_is_0(bv: &BitVec) -> IrBits {
 }
 
 pub fn ir_bits_from_bitvec_msb_is_0(bv: &BitVec) -> IrBits {
+    if bv.is_empty() {
+        return IrBits::make_ubits(0, 0).unwrap();
+    }
     let mut s: String = format!("bits[{}]:0b", bv.len());
     for b in bv.iter() {
         s.push(if *b { '1' } else { '0' });
@@ -46,6 +55,9 @@ pub fn ir_bits_from_bitvec_msb_is_0(bv: &BitVec) -> IrBits {
 /// Turns a boolean slice into an IR `Bits` value under the assumption that
 /// index 0 in the slice is the most significant bit (MSb).
 pub fn ir_bits_from_msb_is_0(bits: &[bool]) -> IrBits {
+    if bits.is_empty() {
+        return IrBits::make_ubits(0, 0).unwrap();
+    }
     let mut s: String = format!("bits[{}]:0b", bits.len());
     for b in bits {
         s.push(if *b { '1' } else { '0' });
@@ -170,5 +182,37 @@ mod tests {
             assert_eq!(ir.get_bit(99 - i).unwrap(), i % 2 == 0, "bit {}", 99 - i);
         }
         assert_eq!(ir.get_bit_count(), 100);
+    }
+
+    #[test]
+    fn test_ir_bits_from_lsb_is_0_zero_bits() {
+        let bits: [bool; 0] = [];
+        let ir = ir_bits_from_lsb_is_0(&bits);
+        assert_eq!(ir, IrBits::make_ubits(0, 0).unwrap());
+        assert_eq!(ir.get_bit_count(), 0);
+    }
+
+    #[test]
+    fn test_ir_bits_from_bitvec_lsb_is_0_zero_bits() {
+        let bv = BitVec::new();
+        let ir = ir_bits_from_bitvec_lsb_is_0(&bv);
+        assert_eq!(ir, IrBits::make_ubits(0, 0).unwrap());
+        assert_eq!(ir.get_bit_count(), 0);
+    }
+
+    #[test]
+    fn test_ir_bits_from_bitvec_msb_is_0_zero_bits() {
+        let bv = BitVec::new();
+        let ir = ir_bits_from_bitvec_msb_is_0(&bv);
+        assert_eq!(ir, IrBits::make_ubits(0, 0).unwrap());
+        assert_eq!(ir.get_bit_count(), 0);
+    }
+
+    #[test]
+    fn test_ir_bits_from_msb_is_0_zero_bits() {
+        let bits: [bool; 0] = [];
+        let ir = ir_bits_from_msb_is_0(&bits);
+        assert_eq!(ir, IrBits::make_ubits(0, 0).unwrap());
+        assert_eq!(ir.get_bit_count(), 0);
     }
 }
