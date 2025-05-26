@@ -11,7 +11,7 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
 slang-rs = "0.12.0"
-tempfile = "3.13"
+tempfile = "3.20"
 log = "0.4"
 env_logger = "0.11"
 xlsynth = { version = "0.0.148", path = "../xlsynth" }

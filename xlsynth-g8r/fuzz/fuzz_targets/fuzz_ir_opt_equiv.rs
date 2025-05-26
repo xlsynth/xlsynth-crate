@@ -53,7 +53,7 @@ fuzz_target!(|sample: FuzzSample| {
     let opt_ir = optimized_pkg.to_string();
     let top_fn_name = "fuzz_test";
     let ext_equiv =
-        check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name));
+        check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
     let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn);
     match ext_equiv {
         Ok(()) => {

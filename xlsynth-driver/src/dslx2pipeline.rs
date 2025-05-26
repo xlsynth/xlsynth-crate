@@ -65,9 +65,10 @@ fn dslx2pipeline(
         std::fs::write(&sv_path, &sv).unwrap();
 
         if let Some(_) = keep_temps {
+            let temp_dir_path = temp_dir.keep();
             eprintln!(
                 "Pipeline generation successful. Output written to: {}",
-                temp_dir.into_path().to_str().unwrap()
+                temp_dir_path.to_str().unwrap()
             );
         }
         println!("{}", sv);
