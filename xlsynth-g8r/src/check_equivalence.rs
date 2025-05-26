@@ -5,18 +5,23 @@ use std::time::Instant;
 use crate::{gate, gate2ir, xls_ir::ir};
 
 pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), String> {
-    check_equivalence_with_top(orig_package, gate_package, None)
+    check_equivalence_with_top(orig_package, gate_package, None, false)
 }
 
 pub fn check_equivalence_with_top(
     orig_package: &str,
     gate_package: &str,
     top_fn_name: Option<&str>,
+    keep_temp_dir: bool,
 ) -> Result<(), String> {
     let tempdir = tempfile::tempdir().unwrap();
-    let temp_path = tempdir.into_path(); // This prevents auto-deletion
-    let orig_path = temp_path.join("orig.ir");
-    let gate_path = temp_path.join("gate.ir");
+    let path = if keep_temp_dir {
+        tempdir.into_path()
+    } else {
+        tempdir.path().to_path_buf()
+    };
+    let orig_path = path.join("orig.ir");
+    let gate_path = path.join("gate.ir");
     std::fs::write(orig_path.clone(), orig_package).unwrap();
     std::fs::write(gate_path.clone(), gate_package).unwrap();
     let tools_dir_str =

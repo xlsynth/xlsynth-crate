@@ -19,6 +19,13 @@ use crate::gate::GateFn;
 use crate::gate_simd::{self, Vec256};
 use crate::get_summary_stats;
 use crate::ir2gate::{self, GatifyOptions};
+use crate::prove_gate_fn_equiv_common::EquivResult;
+
+#[cfg(not(any(feature = "with-z3-system", feature = "with-z3-built")))]
+use crate::check_equivalence::prove_same_gate_fn_via_ir;
+#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
+use crate::prove_gate_fn_equiv_z3::{self, prove_gate_fn_equiv as prove_gate_fn_equiv_z3};
+
 use crate::test_utils::{
     load_bf16_add_sample, load_bf16_mul_sample, load_ripple_carry_adder_8b_sample, Opt as SampleOpt,
 };
@@ -52,7 +59,20 @@ pub fn cost(g: &GateFn) -> Cost {
 
 /// Checks equivalence of two `GateFn`s using the external IR-based checker.
 pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> bool {
-    crate::check_equivalence::prove_same_gate_fn_via_ir(lhs, rhs).is_ok()
+    #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
+    {
+        let mut ctx = prove_gate_fn_equiv_z3::Ctx::new();
+        return matches!(
+            prove_gate_fn_equiv_z3(lhs, rhs, &mut ctx),
+            EquivResult::Proved
+        );
+    }
+
+    // If we don't have Z3 we do via IR equivalence.
+    #[cfg(not(any(feature = "with-z3-system", feature = "with-z3-built")))]
+    {
+        return prove_same_gate_fn_via_ir(lhs, rhs).is_ok();
+    }
 }
 
 /// Holds MCMC iteration statistics.
