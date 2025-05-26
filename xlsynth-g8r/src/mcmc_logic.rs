@@ -19,10 +19,12 @@ use crate::gate::GateFn;
 use crate::gate_simd::{self, Vec256};
 use crate::get_summary_stats;
 use crate::ir2gate::{self, GatifyOptions};
-use crate::prove_gate_fn_equiv_common::EquivResult;
 
 #[cfg(not(any(feature = "with-z3-system", feature = "with-z3-built")))]
 use crate::check_equivalence::prove_same_gate_fn_via_ir;
+
+#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
+use crate::prove_gate_fn_equiv_common::EquivResult;
 #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
 use crate::prove_gate_fn_equiv_z3::{self, prove_gate_fn_equiv as prove_gate_fn_equiv_z3};
 
