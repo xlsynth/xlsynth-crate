@@ -13,3 +13,13 @@ PRs that fail this check will not be accepted.
 ## Agent Guidance: xlsynth-g8r and Fuzz Targets
 
 If you are modifying code in the `xlsynth-g8r` crate, you **must** ensure that all related fuzz targets (such as those in `xlsynth-g8r/fuzz/fuzz_targets`) still build. CI will fail if any fuzz target does not build. Always check the build status of these fuzz targets after making changes to `xlsynth-g8r`.
+
+## License Compliance: SPDX Headers
+
+All source files must carry an Apache-2.0 SPDX license header (for example, `// SPDX-License-Identifier: Apache-2.0`). This is enforced by automated Rust tests (see `xlsynth-test-helpers/tests/spdx_test.rs`). If any file is missing the header, CI will fail and the pull request will not be accepted.
+
+To run only this check locally, you can execute:
+
+```bash
+cargo test -p xlsynth-test-helpers check_all_rust_files_for_spdx
+```
