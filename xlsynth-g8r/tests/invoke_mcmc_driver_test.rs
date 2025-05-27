@@ -8,7 +8,7 @@ fn test_invoke_mcmc_driver_with_sample() {
     let temp_dir = tempfile::tempdir().unwrap();
     let exe = env!("CARGO_BIN_EXE_mcmc-driver");
     let mut cmd = Command::new(exe);
-    cmd.arg("sample://ripple_carry_adder_8b")
+    cmd.arg("sample://ripple_carry_adder:8")
         .arg("-n")
         .arg("10")
         .arg("--paranoid")

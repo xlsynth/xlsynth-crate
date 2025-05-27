@@ -29,7 +29,7 @@ use crate::prove_gate_fn_equiv_common::EquivResult;
 use crate::prove_gate_fn_equiv_z3::{self, prove_gate_fn_equiv as prove_gate_fn_equiv_z3};
 
 use crate::test_utils::{
-    load_bf16_add_sample, load_bf16_mul_sample, load_ripple_carry_adder_8b_sample, Opt as SampleOpt,
+    load_bf16_add_sample, load_bf16_mul_sample, make_ripple_carry_adder, Opt as SampleOpt,
 };
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
@@ -710,8 +710,12 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
                 );
                 Ok(loaded_sample.gate_fn)
             }
-            "ripple_carry_adder_8b" => {
-                let gfn = load_ripple_carry_adder_8b_sample();
+            _ if sample_name.starts_with("ripple_carry_adder:") => {
+                let bits_str = sample_name.trim_start_matches("ripple_carry_adder:");
+                let bits: usize = bits_str.parse().map_err(|_| {
+                    anyhow::anyhow!("Invalid bit width '{}', expected integer", bits_str)
+                })?;
+                let gfn = make_ripple_carry_adder(bits);
                 let sample_cost = cost(&gfn);
                 println!(
                     "Sample '{}' loaded. Initial stats: nodes={}, depth={}",
