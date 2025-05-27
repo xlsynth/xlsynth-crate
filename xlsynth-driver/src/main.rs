@@ -194,6 +194,10 @@ impl AppExt for clap::Command {
             )
             .add_bool_arg("reset_asynchronous", "Reset is asynchronous")
             .add_bool_arg("reset_active_low", "Reset is active low")
+            .add_bool_arg(
+                "reset_data_path",
+                "Reset datapath registers as well as valid signals",
+            )
     }
 
     fn add_ir_top_arg(self, required: bool) -> Self {

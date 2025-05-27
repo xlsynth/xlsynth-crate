@@ -39,6 +39,7 @@ pub struct CodegenFlags {
     reset: Option<String>,
     reset_active_low: Option<bool>,
     reset_asynchronous: Option<bool>,
+    reset_data_path: Option<bool>,
     gate_format: Option<String>,
     assert_format: Option<String>,
 }
@@ -90,6 +91,9 @@ pub fn extract_codegen_flags(
         reset_asynchronous: matches
             .get_one::<String>("reset_asynchronous")
             .map(|s| s == "true"),
+        reset_data_path: matches
+            .get_one::<String>("reset_data_path")
+            .map(|s| s == "true"),
         gate_format,
         assert_format,
     }
@@ -134,6 +138,9 @@ pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
     }
     if let Some(reset_asynchronous) = codegen_flags.reset_asynchronous {
         pieces.push(format!("reset_asynchronous: {reset_asynchronous}"));
+    }
+    if let Some(reset_data_path) = codegen_flags.reset_data_path {
+        pieces.push(format!("reset_data_path: {reset_data_path}"));
     }
     if let Some(gate_format) = &codegen_flags.gate_format {
         pieces.push(format!("gate_format: {gate_format:?}"));
@@ -188,6 +195,9 @@ pub fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
     }
     if let Some(reset_asynchronous) = codegen_flags.reset_asynchronous {
         command.arg(format!("--reset_asynchronous={reset_asynchronous}"));
+    }
+    if let Some(reset_data_path) = codegen_flags.reset_data_path {
+        command.arg(format!("--reset_data_path={reset_data_path}"));
     }
     if let Some(gate_format) = &codegen_flags.gate_format {
         command.arg(format!("--gate_format={gate_format}"));
