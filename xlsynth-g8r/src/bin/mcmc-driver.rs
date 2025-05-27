@@ -276,7 +276,7 @@ fn main() -> Result<()> {
                 } else {
                     100.0 * (init_metric as f64 - best_cost as f64) / (init_metric as f64)
                 };
-                let (improvement_str, colorized_improvement) = if atty::is(Stream::Stdout) {
+                let (_improvement_str, colorized_improvement) = if atty::is(Stream::Stdout) {
                     if best_cost < init_metric {
                         (
                             format!("{:.2}%", improvement),
