@@ -477,6 +477,65 @@ fn test_dslx2pipeline_with_reset_signal() {
     }
 }
 
+#[test_case(true; "reset_datapath")]
+#[test_case(false; "no_reset_datapath")]
+fn test_dslx2pipeline_reset_data_path(reset_dp: bool) {
+    let _ = env_logger::try_init();
+    let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--flop_inputs=true")
+        .arg("--flop_outputs=true")
+        .arg("--input_valid_signal=input_valid")
+        .arg("--output_valid_signal=output_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=true")
+        .arg("--reset_asynchronous=false")
+        .arg(format!("--reset_data_path={reset_dp}"))
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+
+    let golden_name = if reset_dp {
+        "tests/test_dslx2pipeline_reset_data_path_true.golden.sv"
+    } else {
+        "tests/test_dslx2pipeline_reset_data_path_false.golden.sv"
+    };
+    let golden_path = std::path::Path::new(golden_name);
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
+        println!("INFO: Updating golden file: {}", golden_path.display());
+        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
+    } else {
+        let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
+        assert_eq!(
+            stdout, golden_sv,
+            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+}
+
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]
 fn test_ir2opt_subcommand(use_tool_path: bool) {
