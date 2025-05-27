@@ -29,6 +29,7 @@ pub mod ir2gate_utils;
 pub mod ir_equiv_boolector;
 pub mod ir_value_utils;
 pub mod liberty;
+pub mod match_and_rewrite;
 pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
 }
