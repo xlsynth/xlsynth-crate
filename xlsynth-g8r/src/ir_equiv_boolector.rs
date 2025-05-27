@@ -407,8 +407,7 @@ pub fn ir_fn_to_boolector(
                         } else {
                             val_bv.slice(val_width - 1, val_width - 1).repeat(val_width)
                         };
-                        let shifted_val_core_logic =
-                            shift_boolector(val_bv, shamt_bv, |x, y| x.sra(y));
+                        let shifted_val_core_logic = shift_boolector_signed(val_bv, shamt_bv);
 
                         cond_saturate.cond_bv(&saturated_val, &shifted_val_core_logic)
                     }
@@ -1144,6 +1143,41 @@ fn ir_value_to_bv(
     }
 }
 
+// Like `shift_boolector` but sign-extends `val` when it needs to grow to the
+// next power-of-two width.  This is required for arithmetic-right shifts so the
+// sign bit is preserved even after the temporary width increase.
+fn shift_boolector_signed(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>) -> BV<Rc<Btor>> {
+    let orig_width = val.get_width();
+    // Smallest power-of-two ≥ orig_width.
+    let mut pow2 = 1;
+    while pow2 < orig_width {
+        pow2 *= 2;
+    }
+    let mut k = (pow2 as f64).log2() as u32;
+    if k == 0 {
+        k = 1; // Boolector requires at least 1-bit shift amount.
+    }
+
+    // Sign-extend `val` to `pow2` bits if necessary so the sign bit occupies
+    // the high bit of the temporary vector.
+    let val_pow2 = if pow2 == orig_width {
+        val.clone()
+    } else {
+        val.sext(pow2 - orig_width)
+    };
+
+    // Bring `shamt` to `k` bits.
+    let shamt_k = match shamt.get_width().cmp(&k) {
+        std::cmp::Ordering::Equal => shamt.clone(),
+        std::cmp::Ordering::Less => shamt.uext(k - shamt.get_width()),
+        std::cmp::Ordering::Greater => shamt.slice(k - 1, 0),
+    };
+
+    let shifted = val_pow2.sra(&shamt_k);
+    // Slice back to original width.
+    shifted.slice(orig_width - 1, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1841,5 +1875,78 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
             .parse_fn()
             .unwrap();
         assert_eq!(prove_ir_fn_equiv(&f_shl, &f_id), EquivResult::Proved);
+    }
+
+    #[test]
+    fn test_shra_single_bit_by_one_identity() {
+        // For a 1-bit value, an arithmetic right shift by 1 should replicate the sign
+        // bit, which is the value itself. Therefore shra(x, 1) must be
+        // equivalent to identity(x).
+        let ir_shra = r#"fn shra1_one(x: bits[1] id=1) -> bits[1] {
+  one: bits[1] = literal(value=1, id=2)
+  ret shra.3: bits[1] = shra(x, one, id=3)
+}"#;
+        let ir_id = r#"fn id1(x: bits[1] id=1) -> bits[1] {
+  ret id.2: bits[1] = identity(x, id=2)
+}"#;
+        let f_shra = crate::xls_ir::ir_parser::Parser::new(ir_shra)
+            .parse_fn()
+            .unwrap();
+        let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
+            .parse_fn()
+            .unwrap();
+        assert_eq!(prove_ir_fn_equiv(&f_shra, &f_id), EquivResult::Proved);
+    }
+
+    /// From a fuzz_ir_opt_equiv minimized counter-example.
+    #[test]
+    fn test_fuzz_shra_failing_case_equiv() {
+        let ir_original = r#"package fuzz_pkg
+
+fn fuzz_test(input: bits[2] id=1) -> bits[1] {
+  shra.2: bits[2] = shra(input, input, id=2)
+  sign_ext.5: bits[5] = sign_ext(input, new_bit_count=5, id=5)
+  shra.3: bits[2] = shra(input, shra.2, id=3)
+  shra.7: bits[5] = shra(sign_ext.5, shra.3, id=7)
+  nor.4: bits[2] = nor(shra.2, shra.2, id=4)
+  shra.8: bits[5] = shra(shra.7, nor.4, id=8)
+  ule.11: bits[1] = ule(sign_ext.5, shra.7, id=11)
+  shra.10: bits[5] = shra(shra.8, shra.3, id=10)
+  one_hot.6: bits[3] = one_hot(shra.2, lsb_prio=true, id=6)
+  one_hot_sel.9: bits[2] = one_hot_sel(shra.2, cases=[shra.2, shra.2], id=9)
+  shra.12: bits[2] = shra(shra.3, shra.3, id=12)
+  ret shra.13: bits[1] = shra(ule.11, shra.10, id=13)
+}
+"#;
+
+        let ir_optimized = r#"package fuzz_pkg
+
+top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
+  shra.2: bits[2] = shra(input, input, id=2)
+  sign_ext.5: bits[5] = sign_ext(input, new_bit_count=5, id=5)
+  shra.3: bits[2] = shra(input, shra.2, id=3)
+  shra.7: bits[5] = shra(sign_ext.5, shra.3, id=7)
+  bit_slice.20: bits[2] = bit_slice(shra.7, start=0, width=2, id=20)
+  ret ule.21: bits[1] = ule(input, bit_slice.20, id=21)
+}
+"#;
+
+        let pkg_orig = crate::xls_ir::ir_parser::Parser::new(ir_original)
+            .parse_package()
+            .unwrap();
+        let pkg_opt = crate::xls_ir::ir_parser::Parser::new(ir_optimized)
+            .parse_package()
+            .unwrap();
+
+        let f_orig = pkg_orig.get_fn("fuzz_test").unwrap();
+        let f_opt = pkg_opt.get_fn("fuzz_test").unwrap();
+
+        let result = prove_ir_fn_equiv(f_orig, f_opt);
+        assert_eq!(
+            result,
+            EquivResult::Proved,
+            "Boolector disproved equivalence: {:?}",
+            result
+        );
     }
 }
