@@ -135,6 +135,142 @@ pub fn gatify_add_ripple_carry(
     (c_in, AigBitVector::from_lsb_is_index_0(&gates))
 }
 
+fn prefix_update(
+    p_i: AigOperand,
+    g_i: AigOperand,
+    p_k: AigOperand,
+    g_k: AigOperand,
+    gb: &mut GateBuilder,
+) -> (AigOperand, AigOperand) {
+    let and = gb.add_and_binary(p_i, g_k);
+    let g = gb.add_or_binary(g_i, and);
+    let p = gb.add_and_binary(p_i, p_k);
+    (p, g)
+}
+
+pub fn gatify_add_kogge_stone(
+    lhs: &AigBitVector,
+    rhs: &AigBitVector,
+    c_in: gate::AigOperand,
+    tag_prefix: Option<&str>,
+    g8_builder: &mut GateBuilder,
+) -> (gate::AigOperand, AigBitVector) {
+    assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
+    let bits = lhs.get_bit_count();
+    let mut xor_bits: Vec<AigOperand> = (0..bits)
+        .map(|i| g8_builder.add_xor_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
+        .collect();
+    let mut p: Vec<AigOperand> = xor_bits.clone();
+    let mut g: Vec<AigOperand> = (0..bits)
+        .map(|i| g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
+        .collect();
+    let mut step = 1;
+    while step < bits {
+        for i in step..bits {
+            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
+            p[i] = p_new;
+            g[i] = g_new;
+        }
+        step *= 2;
+    }
+    let mut carries = Vec::with_capacity(bits + 1);
+    carries.push(c_in);
+    for i in 0..bits {
+        let and = g8_builder.add_and_binary(p[i], c_in);
+        let carry = g8_builder.add_or_binary(g[i], and);
+        carries.push(carry);
+    }
+    let mut sum = Vec::with_capacity(bits);
+    for i in 0..bits {
+        let tmp = xor_bits[i];
+        let s = g8_builder.add_xor_binary(tmp, carries[i]);
+        if let Some(prefix) = tag_prefix {
+            g8_builder.add_tag(
+                s.node,
+                format!(
+                    "{}_kogge_stone_adder_{}_count_bit_{}",
+                    prefix,
+                    bits,
+                    bits - i - 1
+                ),
+            );
+        }
+        sum.push(s);
+    }
+    let c_out = carries[bits];
+    if let Some(prefix) = tag_prefix {
+        g8_builder.add_tag(c_out.node, format!("{}_kogge_stone_out", prefix));
+    }
+    (c_out, AigBitVector::from_lsb_is_index_0(&sum))
+}
+
+pub fn gatify_add_brent_kung(
+    lhs: &AigBitVector,
+    rhs: &AigBitVector,
+    c_in: gate::AigOperand,
+    tag_prefix: Option<&str>,
+    g8_builder: &mut GateBuilder,
+) -> (gate::AigOperand, AigBitVector) {
+    assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
+    let bits = lhs.get_bit_count();
+    let mut xor_bits: Vec<AigOperand> = (0..bits)
+        .map(|i| g8_builder.add_xor_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
+        .collect();
+    let mut p: Vec<AigOperand> = xor_bits.clone();
+    let mut g: Vec<AigOperand> = (0..bits)
+        .map(|i| g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
+        .collect();
+    let mut step = 1;
+    while step < bits {
+        let stride = step * 2;
+        for i in (stride - 1..bits).step_by(stride) {
+            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
+            p[i] = p_new;
+            g[i] = g_new;
+        }
+        step = stride;
+    }
+    step /= 2;
+    while step > 0 {
+        let stride = step * 2;
+        for i in (stride + step - 1..bits).step_by(stride) {
+            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
+            p[i] = p_new;
+            g[i] = g_new;
+        }
+        step /= 2;
+    }
+    let mut carries = Vec::with_capacity(bits + 1);
+    carries.push(c_in);
+    for i in 0..bits {
+        let and = g8_builder.add_and_binary(p[i], c_in);
+        let carry = g8_builder.add_or_binary(g[i], and);
+        carries.push(carry);
+    }
+    let mut sum = Vec::with_capacity(bits);
+    for i in 0..bits {
+        let tmp = xor_bits[i];
+        let s = g8_builder.add_xor_binary(tmp, carries[i]);
+        if let Some(prefix) = tag_prefix {
+            g8_builder.add_tag(
+                s.node,
+                format!(
+                    "{}_brent_kung_adder_{}_count_bit_{}",
+                    prefix,
+                    bits,
+                    bits - i - 1
+                ),
+            );
+        }
+        sum.push(s);
+    }
+    let c_out = carries[bits];
+    if let Some(prefix) = tag_prefix {
+        g8_builder.add_tag(c_out.node, format!("{}_brent_kung_out", prefix));
+    }
+    (c_out, AigBitVector::from_lsb_is_index_0(&sum))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -357,6 +493,28 @@ mod tests {
         carry_select_builder.build()
     }
 
+    fn make_kogge_stone(bits: usize) -> gate::GateFn {
+        let mut builder = GateBuilder::new("kogge_stone".to_string(), GateBuilderOptions::no_opt());
+        let lhs = builder.add_input("lhs".to_string(), bits);
+        let rhs = builder.add_input("rhs".to_string(), bits);
+        let c_in = builder.add_input("c_in".to_string(), 1).get_lsb(0).clone();
+        let (c_out, results) = gatify_add_kogge_stone(&lhs, &rhs, c_in, Some("ks"), &mut builder);
+        builder.add_output("c_out".to_string(), AigBitVector::from_bit(c_out));
+        builder.add_output("results".to_string(), results);
+        builder.build()
+    }
+
+    fn make_brent_kung(bits: usize) -> gate::GateFn {
+        let mut builder = GateBuilder::new("brent_kung".to_string(), GateBuilderOptions::no_opt());
+        let lhs = builder.add_input("lhs".to_string(), bits);
+        let rhs = builder.add_input("rhs".to_string(), bits);
+        let c_in = builder.add_input("c_in".to_string(), 1).get_lsb(0).clone();
+        let (c_out, results) = gatify_add_brent_kung(&lhs, &rhs, c_in, Some("bk"), &mut builder);
+        builder.add_output("c_out".to_string(), AigBitVector::from_bit(c_out));
+        builder.add_output("results".to_string(), results);
+        builder.build()
+    }
+
     #[test_case(1, &[1]; "1-bit 1-partition")]
     #[test_case(2, &[1,1]; "2-bit 2-partition")]
     #[test_case(3, &[1, 2]; "3-bit 2-partition")]
@@ -369,6 +527,36 @@ mod tests {
         let carry = make_carry_select(bits, carry_select_partitions);
         check_equivalence::prove_same_gate_fn_via_ir(&ripple, &carry)
             .expect("carry select and ripple carry should be equivalent");
+    }
+
+    #[test_case(1)]
+    #[test_case(2)]
+    #[test_case(3)]
+    #[test_case(4)]
+    #[test_case(5)]
+    #[test_case(6)]
+    #[test_case(7)]
+    #[test_case(8)]
+    fn test_gatify_add_kogge_stone(bits: usize) {
+        let ripple = make_ripple_carry(bits);
+        let ks = make_kogge_stone(bits);
+        check_equivalence::prove_same_gate_fn_via_ir(&ripple, &ks)
+            .expect("kogge stone and ripple carry should be equivalent");
+    }
+
+    #[test_case(1)]
+    #[test_case(2)]
+    #[test_case(3)]
+    #[test_case(4)]
+    #[test_case(5)]
+    #[test_case(6)]
+    #[test_case(7)]
+    #[test_case(8)]
+    fn test_gatify_add_brent_kung(bits: usize) {
+        let ripple = make_ripple_carry(bits);
+        let bk = make_brent_kung(bits);
+        check_equivalence::prove_same_gate_fn_via_ir(&ripple, &bk)
+            .expect("brent kung and ripple carry should be equivalent");
     }
 
     #[test_case(1)]
