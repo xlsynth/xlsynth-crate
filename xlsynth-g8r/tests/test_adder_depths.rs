@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use xlsynth_g8r::check_equivalence;
