@@ -210,11 +210,6 @@ pub fn make_ripple_carry_adder(bits: usize) -> GateFn {
     gb.build()
 }
 
-/// Returns an eight-bit ripple-carry adder sample as a `GateFn`.
-pub fn load_ripple_carry_adder_8b_sample() -> GateFn {
-    make_ripple_carry_adder(8)
-}
-
 pub struct TestGraph {
     pub g: GateFn,
     pub i0: AigOperand,
