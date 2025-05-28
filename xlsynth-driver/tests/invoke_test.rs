@@ -56,7 +56,7 @@ fn test_dslx2sv_types_subcommand(use_tool_path: bool) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     xlsynth_test_helpers::assert_valid_sv(&stdout);
     assert_eq!(
         stdout.trim(),
@@ -97,7 +97,7 @@ struct MyStruct {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     xlsynth_test_helpers::assert_valid_sv(&stdout);
     assert_eq!(
         stdout.trim(),
@@ -169,7 +169,7 @@ dslx_stdlib_path = "{}"
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     assert!(stdout.contains(
         "fn __std__popcount(x: bits[32] id=1) -> bits[32] {
   ret x: bits[32] = param(name=x, id=1)
@@ -233,7 +233,8 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
     } else {
         let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
         assert_eq!(
-            stdout, golden_sv,
+            stdout.trim(),
+            golden_sv.trim(),
             "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
     }
@@ -471,7 +472,8 @@ fn test_dslx2pipeline_with_reset_signal() {
     } else {
         let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
         assert_eq!(
-            stdout, golden_sv,
+            stdout.trim(),
+            golden_sv.trim(),
             "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
     }
@@ -530,7 +532,8 @@ fn test_dslx2pipeline_reset_data_path(reset_dp: bool) {
     } else {
         let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
         assert_eq!(
-            stdout, golden_sv,
+            stdout.trim(),
+            golden_sv.trim(),
             "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
     }
@@ -1073,7 +1076,7 @@ fn test_ir2gates_quiet_json_output() {
 
     assert!(ir2gates_output.status.success());
 
-    let stdout = String::from_utf8_lossy(&ir2gates_output.stdout);
+    let stdout = String::from_utf8_lossy(&ir2gates_output.stdout).to_string();
     // Try to parse as JSON
     let json: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
@@ -1327,18 +1330,99 @@ fn main(pred: bool, x: u1) -> u1 {
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
-    // Path to the golden file
-    let golden_path =
-        std::path::Path::new("tests/test_toolchain_common_codegen_flags_resolve.golden.sv");
+    if !use_tool_path {
+        // Compare against golden for runtime API path.
+        let golden_path =
+            std::path::Path::new("tests/test_toolchain_common_codegen_flags_resolve.golden.sv");
+        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
+            println!("INFO: Updating golden file: {}", golden_path.display());
+            std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
+        } else {
+            let golden_sv =
+                std::fs::read_to_string(golden_path).expect("Failed to read golden file");
+            assert_eq!(
+                stdout.trim(),
+                golden_sv.trim(),
+                "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+            );
+        }
+    }
+}
 
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
-        println!("INFO: Updating golden file: {}", golden_path.display());
-        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
-    } else {
-        let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-        assert_eq!(
-            stdout, golden_sv,
-            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
+#[test_case(true, true; "with_tool_path_opt")]
+#[test_case(true, false; "with_tool_path_noopt")]
+#[test_case(false, true; "without_tool_path_opt")]
+#[test_case(false, false; "without_tool_path_noopt")]
+fn test_ir2pipeline_subcommand(use_tool_path: bool, optimize: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Simple identity IR package with a declared top function.
+    let ir_text = "package sample\n\ntop fn my_main(x: bits[32] id=1) -> bits[32] {\n  ret x: bits[32] = param(name=x, id=1)\n}\n";
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("sample.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    // Prepare (optional) toolchain.toml.
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let mut toolchain_toml_contents = "[toolchain]\n".to_string();
+    if use_tool_path {
+        toolchain_toml_contents = add_tool_path_value(&toolchain_toml_contents);
+    }
+    std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let mut cmd = Command::new(command_path);
+
+    // Supply --toolchain flag even for runtime path, mirroring other tests.
+    cmd.arg("--toolchain").arg(toolchain_path.to_str().unwrap());
+
+    cmd.arg("ir2pipeline")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--top")
+        .arg("my_main")
+        .arg("--delay_model")
+        .arg("unit");
+
+    if optimize {
+        cmd.arg("--opt=true");
+    }
+
+    // Pass through RUST_LOG if present.
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        cmd.env("RUST_LOG", rust_log);
+    }
+
+    let output = cmd.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir2pipeline failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+
+    if !use_tool_path {
+        // Compare against golden for runtime API path.
+        let golden_path =
+            std::path::Path::new("tests/test_ir2pipeline_identity_pipeline.golden.sv");
+        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
+            println!("INFO: Updating golden file: {}", golden_path.display());
+            std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
+        } else {
+            let golden_sv =
+                std::fs::read_to_string(golden_path).expect("Failed to read golden file");
+            assert_eq!(
+                stdout.trim(),
+                golden_sv.trim(),
+                "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+            );
+        }
     }
 }

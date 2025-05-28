@@ -157,7 +157,7 @@ pub fn gatify_add_kogge_stone(
 ) -> (gate::AigOperand, AigBitVector) {
     assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
     let bits = lhs.get_bit_count();
-    let mut xor_bits: Vec<AigOperand> = (0..bits)
+    let xor_bits: Vec<AigOperand> = (0..bits)
         .map(|i| g8_builder.add_xor_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
         .collect();
     let mut p: Vec<AigOperand> = xor_bits.clone();
@@ -213,7 +213,7 @@ pub fn gatify_add_brent_kung(
 ) -> (gate::AigOperand, AigBitVector) {
     assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
     let bits = lhs.get_bit_count();
-    let mut xor_bits: Vec<AigOperand> = (0..bits)
+    let xor_bits: Vec<AigOperand> = (0..bits)
         .map(|i| g8_builder.add_xor_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
         .collect();
     let mut p: Vec<AigOperand> = xor_bits.clone();

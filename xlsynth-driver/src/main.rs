@@ -285,8 +285,11 @@ fn main() {
                         .index(1),
                 )
                 .add_delay_model_arg()
+                .add_ir_top_arg(false)
                 .add_codegen_args()
-                .add_pipeline_args(),
+                .add_pipeline_args()
+                .add_bool_arg("opt", "Optimize the IR before scheduling pipeline")
+                .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(
             clap::Command::new("ir2delayinfo")
@@ -422,20 +425,20 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
-                    clap::Arg::new("toggle_sample_count")
+                    Arg::new("toggle_sample_count")
                         .long("toggle-sample-count")
                         .value_name("N")
                         .help("If > 0, generate N random input samples and print toggle stats.")
                         .default_value("0")
-                        .action(clap::ArgAction::Set),
+                        .action(ArgAction::Set),
                 )
                 .arg(
-                    clap::Arg::new("toggle_sample_seed")
+                    Arg::new("toggle_sample_seed")
                         .long("toggle-seed")
                         .value_name("SEED")
                         .help("Seed for random toggle stimulus (default 0)")
                         .default_value("0")
-                        .action(clap::ArgAction::Set),
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(

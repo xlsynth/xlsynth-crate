@@ -42,3 +42,7 @@ has-boolector = ["xlsynth-g8r/has-boolector"]
 with-boolector-system = ["xlsynth-g8r/with-boolector-system", "has-boolector"]
 # Enables boolector support AND builds it from source
 with-boolector-built = ["xlsynth-g8r/with-boolector-built", "has-boolector"]
+# Enables z3 library support, defaulting to system linking
+with-z3-system = ["xlsynth-g8r/with-z3-system"]
+# Enables z3 library support AND builds it from source
+with-z3-built = ["xlsynth-g8r/with-z3-built"]
