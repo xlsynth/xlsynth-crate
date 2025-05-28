@@ -206,3 +206,25 @@ pub fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
         command.arg(format!("--assert_format={assert_format}"));
     }
 }
+
+/// Builds the textproto string for `SchedulingOptionsProto` given the delay
+/// model and pipeline specification.
+pub fn scheduling_options_proto(delay_model: &str, pipeline_spec: &PipelineSpec) -> String {
+    let mut lines = vec![format!("delay_model: \"{}\"", delay_model)];
+    match pipeline_spec {
+        PipelineSpec::Stages(stages) => lines.push(format!("pipeline_stages: {}", stages)),
+        PipelineSpec::ClockPeriodPs(clock_period_ps) => {
+            lines.push(format!("clock_period_ps: {}", clock_period_ps))
+        }
+    }
+    lines.join("\n")
+}
+
+/// Builds the textproto string for `CodegenFlagsProto` used by pipeline
+/// generation.
+pub fn pipeline_codegen_flags_proto(codegen_flags: &CodegenFlags) -> String {
+    format!(
+        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\n{}",
+        codegen_flags_to_textproto(codegen_flags)
+    )
+}

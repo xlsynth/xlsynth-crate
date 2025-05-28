@@ -3,8 +3,8 @@
 use clap::ArgMatches;
 
 use crate::common::{
-    codegen_flags_to_textproto, extract_codegen_flags, extract_pipeline_spec, CodegenFlags,
-    PipelineSpec,
+    extract_codegen_flags, extract_pipeline_spec, pipeline_codegen_flags_proto,
+    scheduling_options_proto, CodegenFlags, PipelineSpec,
 };
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_pipeline, run_opt_main};
@@ -114,23 +114,8 @@ fn ir2pipeline(
                 .expect("IR optimization should succeed");
         }
 
-        // Assemble scheduling options proto text.
-        let mut sched_opts_lines = vec![format!("delay_model: \"{}\"", delay_model)];
-        match pipeline_spec {
-            PipelineSpec::Stages(stages) => {
-                sched_opts_lines.push(format!("pipeline_stages: {}", stages))
-            }
-            PipelineSpec::ClockPeriodPs(clock_period_ps) => {
-                sched_opts_lines.push(format!("clock_period_ps: {}", clock_period_ps))
-            }
-        }
-        let scheduling_options_flags_proto = sched_opts_lines.join("\n");
-
-        // Assemble codegen flags proto text.
-        let codegen_flags_proto = format!(
-            "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\n{}",
-            codegen_flags_to_textproto(codegen_flags)
-        );
+        let scheduling_options_flags_proto = scheduling_options_proto(delay_model, pipeline_spec);
+        let codegen_flags_proto = pipeline_codegen_flags_proto(codegen_flags);
 
         let codegen_result = xlsynth::schedule_and_codegen(
             &ir_package,
