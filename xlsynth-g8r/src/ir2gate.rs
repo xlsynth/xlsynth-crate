@@ -11,8 +11,8 @@ use crate::xls_ir::ir_utils;
 use std::collections::HashMap;
 
 use crate::ir2gate_utils::{
-    gatify_add_ripple_carry, gatify_barrel_shifter, gatify_one_hot, gatify_one_hot_select,
-    Direction,
+    gatify_add_brent_kung, gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
+    gatify_one_hot, gatify_one_hot_select, Direction,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -895,7 +895,12 @@ fn flatten_literal_to_bits(
 
 /// Converts the contents of the given IR function to our "g8" representation
 /// which has gates and vectors of gates.
-fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) {
+fn gatify_internal(
+    f: &ir::Fn,
+    g8_builder: &mut GateBuilder,
+    env: &mut GateEnv,
+    options: &GatifyOptions,
+) {
     log::info!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
 
@@ -1350,13 +1355,29 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
                 let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
                 assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
-                let (_c_out, gates) = gatify_add_ripple_carry(
-                    &a_gate_refs,
-                    &b_gate_refs,
-                    g8_builder.get_false(),
-                    Some(&format!("add_{}", node.text_id)),
-                    g8_builder,
-                );
+                let (_c_out, gates) = match options.adder_mapping {
+                    crate::ir2gate_utils::AdderMapping::RippleCarry => gatify_add_ripple_carry(
+                        &a_gate_refs,
+                        &b_gate_refs,
+                        g8_builder.get_false(),
+                        Some(&format!("add_{}", node.text_id)),
+                        g8_builder,
+                    ),
+                    crate::ir2gate_utils::AdderMapping::BrentKung => gatify_add_brent_kung(
+                        &a_gate_refs,
+                        &b_gate_refs,
+                        g8_builder.get_false(),
+                        Some(&format!("add_{}", node.text_id)),
+                        g8_builder,
+                    ),
+                    crate::ir2gate_utils::AdderMapping::KoggeStone => gatify_add_kogge_stone(
+                        &a_gate_refs,
+                        &b_gate_refs,
+                        g8_builder.get_false(),
+                        Some(&format!("add_{}", node.text_id)),
+                        g8_builder,
+                    ),
+                };
                 assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
@@ -1365,13 +1386,29 @@ fn gatify_internal(f: &ir::Fn, g8_builder: &mut GateBuilder, env: &mut GateEnv) 
                 let b_gate_refs = env.get_bit_vector(*b).expect("sub rhs should be present");
                 assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
                 let b_complement = g8_builder.add_not_vec(&b_gate_refs);
-                let (_c_out, gates) = gatify_add_ripple_carry(
-                    &a_gate_refs,
-                    &b_complement,
-                    g8_builder.get_true(),
-                    Some(&format!("sub_{}", node.text_id)),
-                    g8_builder,
-                );
+                let (_c_out, gates) = match options.adder_mapping {
+                    crate::ir2gate_utils::AdderMapping::RippleCarry => gatify_add_ripple_carry(
+                        &a_gate_refs,
+                        &b_complement,
+                        g8_builder.get_true(),
+                        Some(&format!("sub_{}", node.text_id)),
+                        g8_builder,
+                    ),
+                    crate::ir2gate_utils::AdderMapping::BrentKung => gatify_add_brent_kung(
+                        &a_gate_refs,
+                        &b_complement,
+                        g8_builder.get_true(),
+                        Some(&format!("sub_{}", node.text_id)),
+                        g8_builder,
+                    ),
+                    crate::ir2gate_utils::AdderMapping::KoggeStone => gatify_add_kogge_stone(
+                        &a_gate_refs,
+                        &b_complement,
+                        g8_builder.get_true(),
+                        Some(&format!("sub_{}", node.text_id)),
+                        g8_builder,
+                    ),
+                };
                 let output_bit_count = node.ty.bit_count();
                 assert_eq!(gates.get_bit_count(), output_bit_count);
                 for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
@@ -1562,6 +1599,7 @@ pub struct GatifyOptions {
     pub fold: bool,
     pub hash: bool,
     pub check_equivalence: bool,
+    pub adder_mapping: crate::ir2gate_utils::AdderMapping,
 }
 
 // Type alias for the lowering map
@@ -1583,7 +1621,7 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String
         },
     );
     let mut env = GateEnv::new();
-    gatify_internal(f, &mut g8_builder, &mut env);
+    gatify_internal(f, &mut g8_builder, &mut env, &options);
     let gate_fn = g8_builder.build();
     log::debug!(
         "converted IR function to gate function:\n{}",
@@ -1630,6 +1668,7 @@ mod tests {
                 fold: false,
                 hash: false,
                 check_equivalence: false,
+                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             },
         )
         .unwrap();
@@ -1661,6 +1700,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 fold: true,               // Folding shouldn't affect this test
                 check_equivalence: false, // Not needed for this map check
                 hash: true,
+                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             },
         )
         .unwrap();
