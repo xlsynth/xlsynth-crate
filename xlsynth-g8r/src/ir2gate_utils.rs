@@ -10,6 +10,20 @@ use crate::gate::{self, AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gate_builder::ReductionKind;
 
+/// Selects the adder implementation to use when lowering addition operations.
+#[derive(Debug, Clone, Copy)]
+pub enum AdderMapping {
+    RippleCarry,
+    BrentKung,
+    KoggeStone,
+}
+
+impl Default for AdderMapping {
+    fn default() -> Self {
+        AdderMapping::BrentKung
+    }
+}
+
 /// Emits a carry-select adder for the given inputs.
 ///
 /// A carry-select adder specializes groups of bits on whether the carry-in to

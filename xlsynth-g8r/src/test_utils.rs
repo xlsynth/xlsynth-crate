@@ -133,6 +133,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
             fold: if opt == Opt::Yes { true } else { false },
             hash: if opt == Opt::Yes { true } else { false },
             check_equivalence: false,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
         },
     )
     .unwrap();
@@ -178,6 +179,7 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
             fold: if opt == Opt::Yes { true } else { false },
             hash: if opt == Opt::Yes { true } else { false },
             check_equivalence: false,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
         },
     )
     .unwrap();

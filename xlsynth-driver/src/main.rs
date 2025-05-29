@@ -219,6 +219,15 @@ impl AppExt for clap::Command {
         (self as clap::Command)
             .add_bool_arg("fold", "Fold the gate representation")
             .add_bool_arg("hash", "Hash the gate representation")
+            .arg(
+                clap::Arg::new("adder_mapping")
+                    .long("adder-mapping")
+                    .value_name("ADDER_MAPPING")
+                    .help("The adder mapping strategy to use (default: ripple-carry).")
+                    .value_parser(["ripple-carry", "kogge-stone"])
+                    .default_value("ripple-carry")
+                    .action(clap::ArgAction::Set),
+            )
             .add_bool_arg("fraig", "Run fraig optimization")
             .arg(
                 clap::Arg::new("fraig_max_iterations")
@@ -439,12 +448,13 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("ir2gates")
-                .about("Converts IR to gates")
+                .about("Converts IR to GateFn and emits it to stdout as JSON")
                 .arg(
-                    Arg::new("ir_input_file")
+                    clap::Arg::new("ir_input_file")
+                        .value_name("IR_INPUT_FILE")
                         .help("The input IR file")
                         .required(true)
-                        .index(1),
+                        .action(ArgAction::Set),
                 )
                 .add_bool_arg("quiet", "Quiet mode")
                 .add_ir2g8r_flags(),
