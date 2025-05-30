@@ -912,16 +912,27 @@ fn write_checkpoint(
                 false
             }
         };
-    if equiv_ok_sat != equiv_ok_external {
+    if equiv_ok_sat != equiv_ok_external || !equiv_ok_sat {
+        // Ensure we persist the disagreeing pair for offline triage.
+        if let Some(parent_dir) = g8r_path.parent() {
+            let dump_dir = parent_dir.join("equiv_failures");
+            let _ = std::fs::create_dir_all(&dump_dir);
+            let orig_dump = dump_dir.join(format!("orig_iter_{}.g8r", iter));
+            let cand_dump = dump_dir.join(format!("cand_iter_{}.g8r", iter));
+            let _ = std::fs::write(&orig_dump, original_gfn.to_string());
+            let _ = std::fs::write(&cand_dump, best_gfn.to_string());
+            eprintln!(
+                "[mcmc] Disagreeing GateFns dumped to {} and {}",
+                orig_dump.display(),
+                cand_dump.display()
+            );
+        }
+
         return Err(anyhow::anyhow!(
-            "[mcmc] ERROR: SAT oracle and external check_equivalence_with_top DISAGREE at checkpoint iter {}: SAT oracle: {}, external: {}",
-            iter, equiv_ok_sat, equiv_ok_external
-        ));
-    }
-    if !equiv_ok_sat {
-        return Err(anyhow::anyhow!(
-            "[mcmc] Equivalence failure during checkpoint at iteration {} (best_gfn not equivalent to original). Aborting.",
-            iter
+            "[mcmc] ERROR: Equivalence disagreement at iter {} (sat:{}, external:{})",
+            iter,
+            equiv_ok_sat,
+            equiv_ok_external
         ));
     }
     if let Err(e) = std::fs::write(g8r_path, best_gfn.to_string()) {
