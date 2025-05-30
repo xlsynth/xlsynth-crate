@@ -281,15 +281,16 @@ fn run_explore_exploit(
                         };
                         best_cl.try_update(metric_val, fraig_gfn);
 
-                        if chain_no != 0 {
-                            let global_best_cost = best_cl.cost.load(Ordering::SeqCst);
-                            if metric_val > global_best_cost + cfg_cl.initial_temperature as usize {
-                                local_gfn = best_cl.get();
-                                segment_temperature = cfg_cl.initial_temperature;
-                            } else {
-                                segment_temperature = base_temperature;
-                            }
+                        // All chains (including explorer) may jump to the
+                        // latest global best if they drift too far behind.
+                        let global_best_cost = best_cl.cost.load(Ordering::SeqCst);
+                        if metric_val > global_best_cost + cfg_cl.initial_temperature as usize {
+                            local_gfn = best_cl.get();
+                            // Next segment: explore with full temperature to
+                            // differentiate search direction.
+                            segment_temperature = cfg_cl.initial_temperature;
                         } else {
+                            // Otherwise revert to (or keep) the chain's base temperature.
                             segment_temperature = base_temperature;
                         }
                     }
