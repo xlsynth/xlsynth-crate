@@ -438,7 +438,8 @@ fn main() -> Result<()> {
                 }
                 let _ = h.join();
             }
-            if let Some(e) = error_flag.lock().unwrap().as_ref() {
+            let guard = error_flag.lock().unwrap();
+            if let Some(e) = guard.as_ref() {
                 eprintln!(
                     "[mcmc] ERROR: Aborting due to error in one of the chains: {}",
                     e
