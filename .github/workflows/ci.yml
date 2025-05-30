@@ -309,13 +309,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install pre-commit
 
-      - name: Run pre-commit
-        env:
-          SKIP: no-commit-to-branch
-        run: |
-          pre-commit install
-          pre-commit run --all-files
-
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -323,6 +316,13 @@ jobs:
           profile: minimal
           override: true
           components: clippy
+
+      - name: Run pre-commit
+        env:
+          SKIP: no-commit-to-branch
+        run: |
+          pre-commit install
+          pre-commit run --all-files
 
       - name: Test crate
         run: |
