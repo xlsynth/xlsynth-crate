@@ -228,16 +228,31 @@ fn run_explore_exploit(
             let mut local_gfn = start_gfn_cl;
             let mut remaining = cfg_cl.iters;
             let mut iter_offset: u64 = 0;
-            let base_temperature = if chain_no == 0 {
-                cfg_cl.initial_temperature
+            const MIN_TEMP_RATIO: f64 = 1e-5;
+
+            // Explorer gets 10× the user-supplied temperature and does *not* cool.
+            let explorer_temp = cfg_cl.initial_temperature * 10.0;
+
+            // Exploiters start at the user-supplied temperature and cool linearly
+            // w.r.t. the *global* iteration budget (cfg_cl.iters).
+            let base_temperature: f64 = if chain_no == 0 {
+                explorer_temp
             } else {
-                (cfg_cl.initial_temperature * 0.25).max(1e-3)
+                cfg_cl.initial_temperature
             };
 
-            let mut segment_temperature = base_temperature;
+            let mut segment_temperature: f64 = base_temperature;
 
             while remaining > 0 && running_cl.load(Ordering::SeqCst) {
                 let seg = std::cmp::min(cfg_cl.checkpoint_iters, remaining);
+
+                // Recompute segment_temperature for exploiters based on global progress
+                if chain_no != 0 {
+                    let progress_ratio = iter_offset as f64 / cfg_cl.iters as f64;
+                    let temp_now =
+                        cfg_cl.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMP_RATIO);
+                    segment_temperature = temp_now;
+                }
 
                 let options = McmcOptions {
                     sat_reset_interval: 20000,
@@ -291,7 +306,8 @@ fn run_explore_exploit(
                             segment_temperature = cfg_cl.initial_temperature;
                         } else {
                             // Otherwise revert to (or keep) the chain's base temperature.
-                            segment_temperature = base_temperature;
+                            segment_temperature = segment_temperature
+                                .max(MIN_TEMP_RATIO * cfg_cl.initial_temperature);
                         }
                     }
                     Err(e) => {
