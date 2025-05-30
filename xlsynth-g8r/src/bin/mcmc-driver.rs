@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use clap::Parser;
+use clap::ValueEnum;
 use num_cpus;
 use serde_json;
 use std::fs;
@@ -25,6 +26,12 @@ use libc;
 
 use atty::Stream;
 use colored::*;
+
+#[derive(ValueEnum, Debug, Clone)]
+enum ChainStrategy {
+    Independent,
+    ExploreExploit,
+}
 
 /// Returns the current resident-set size in MiB (Linux-only). On other
 /// platforms this always returns `None`.
@@ -106,6 +113,43 @@ struct CliArgs {
     /// Initial temperature for MCMC (default: 5.0)
     #[clap(long, value_parser, default_value_t = 5.0)]
     initial_temperature: f64,
+
+    /// Strategy for running multiple MCMC chains
+    #[clap(long, value_enum, default_value_t = ChainStrategy::Independent)]
+    chain_strategy: ChainStrategy,
+}
+
+fn run_chain_segment(
+    cfg: Arc<CliArgs>,
+    seed: u64,
+    start: GateFn,
+    running: Arc<AtomicBool>,
+    best: Arc<Best>,
+    chain_no: usize,
+    segment_iters: u64,
+    periodic_dump_dir: Option<PathBuf>,
+    progress_interval: u64,
+) -> Result<GateFn, anyhow::Error> {
+    let options = McmcOptions {
+        sat_reset_interval: 20000,
+        initial_temperature: cfg.initial_temperature,
+    };
+    mcmc(
+        start,
+        segment_iters,
+        seed,
+        running,
+        cfg.disabled_transforms.clone().unwrap_or_default(),
+        cfg.verbose || cfg.paranoid,
+        cfg.metric,
+        periodic_dump_dir,
+        cfg.paranoid,
+        0,
+        progress_interval,
+        Some(best),
+        Some(chain_no),
+        options,
+    )
 }
 
 fn run_chain(
@@ -118,26 +162,91 @@ fn run_chain(
     periodic_dump_dir: Option<PathBuf>,
     progress_interval: u64,
 ) -> Result<(), anyhow::Error> {
-    let options = McmcOptions {
-        sat_reset_interval: 20000, // or make this configurable
-        initial_temperature: cfg.initial_temperature,
-    };
-    mcmc(
-        start,
-        cfg.iters,
+    let gfn = run_chain_segment(
+        cfg.clone(),
         seed,
+        start,
         running,
-        cfg.disabled_transforms.clone().unwrap_or_default(),
-        cfg.verbose || cfg.paranoid,
-        cfg.metric,
+        best.clone(),
+        chain_no,
+        cfg.iters,
         periodic_dump_dir,
-        cfg.paranoid,
-        cfg.checkpoint_iters,
         progress_interval,
-        Some(best),
-        Some(chain_no),
-        options,
     )?;
+    let metric = match cfg.metric {
+        Objective::Nodes => cost(&gfn).nodes as usize,
+        Objective::Depth => cost(&gfn).depth as usize,
+        Objective::Product => cost(&gfn).nodes * cost(&gfn).depth,
+    };
+    best.try_update(metric, gfn);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_explore_exploit(
+    cfg: Arc<CliArgs>,
+    start_gfn: GateFn,
+    running: Arc<AtomicBool>,
+    best: Arc<Best>,
+    init_metric: usize,
+    output_dir: PathBuf,
+) -> Result<()> {
+    let chain_count = cfg.threads as usize;
+    let mut states = vec![start_gfn; chain_count];
+    let mut seeds: Vec<u64> = (0..chain_count).map(|i| cfg.seed ^ i as u64).collect();
+    let mut costs = vec![init_metric; chain_count];
+
+    let mut remaining = cfg.iters;
+    while remaining > 0 && running.load(Ordering::SeqCst) {
+        let seg = std::cmp::min(cfg.checkpoint_iters, remaining);
+        for i in 0..chain_count {
+            states[i] = run_chain_segment(
+                cfg.clone(),
+                seeds[i],
+                states[i].clone(),
+                running.clone(),
+                best.clone(),
+                i,
+                seg,
+                Some(output_dir.clone()),
+                cfg.progress_iters,
+            )?;
+            let c = cost(&states[i]);
+            costs[i] = match cfg.metric {
+                Objective::Nodes => c.nodes as usize,
+                Objective::Depth => c.depth as usize,
+                Objective::Product => c.nodes * c.depth,
+            };
+            seeds[i] = seeds[i].wrapping_add(1);
+        }
+        remaining -= seg;
+
+        let (best_idx, &best_cost) = costs.iter().enumerate().min_by_key(|(_, c)| *c).unwrap();
+        let best_gfn_cur = states[best_idx].clone();
+        best.try_update(best_cost, best_gfn_cur.clone());
+
+        for i in 0..chain_count {
+            if i != best_idx && costs[i] > best_cost + cfg.initial_temperature as usize {
+                states[i] = run_chain_segment(
+                    cfg.clone(),
+                    seeds[i],
+                    best_gfn_cur.clone(),
+                    running.clone(),
+                    best.clone(),
+                    i,
+                    1,
+                    Some(output_dir.clone()),
+                    0,
+                )?;
+                let c = cost(&states[i]);
+                costs[i] = match cfg.metric {
+                    Objective::Nodes => c.nodes as usize,
+                    Objective::Depth => c.depth as usize,
+                    Objective::Product => c.nodes * c.depth,
+                };
+            }
+        }
+    }
     Ok(())
 }
 
@@ -237,102 +346,117 @@ fn main() -> Result<()> {
 
     let best = Arc::new(Best::new(init_metric, start_gfn.clone()));
 
-    let mut handles = Vec::new();
-    use std::sync::Mutex;
-    let error_flag = Arc::new(Mutex::new(None));
-    for i in 0..cli.threads {
-        let cfg = cli.clone();
-        let running_cl = running.clone();
-        let best_cl = best.clone();
-        let start_cl = start_gfn.clone();
-        let seed_i = cli.seed ^ i as u64;
-        let error_flag_cl = error_flag.clone();
-        let output_dir_cl = output_dir.clone();
-        handles.push(std::thread::spawn(move || {
-            let progress_interval = cfg.progress_iters;
-            if let Err(e) = run_chain(
-                Arc::new(cfg),
-                seed_i,
-                start_cl,
-                running_cl.clone(),
-                best_cl,
-                i as usize,
-                Some(output_dir_cl.clone()),
-                progress_interval,
-            ) {
-                let mut guard = error_flag_cl.lock().unwrap();
-                *guard = Some(e);
-                running_cl.store(false, Ordering::SeqCst);
-            }
-        }));
-    }
-
-    let mut last_print = Instant::now();
-    let print_interval = Duration::from_secs(20); // Make global print less frequent
-    for h in handles {
-        while !h.is_finished() {
-            if last_print.elapsed() > print_interval {
-                let best_gfn = best.get();
-                let stats = get_summary_stats::get_summary_stats(&best_gfn);
-                let rss_mb = rss_megabytes().unwrap_or(0) as f64;
-                let best_cost = match cli.metric {
-                    Objective::Nodes => stats.live_nodes as usize,
-                    Objective::Depth => stats.deepest_path as usize,
-                    Objective::Product => stats.live_nodes * stats.deepest_path,
-                };
-                let improvement = if init_metric == 0 {
-                    0.0
-                } else {
-                    100.0 * (init_metric as f64 - best_cost as f64) / (init_metric as f64)
-                };
-                let (_improvement_str, colorized_improvement) = if atty::is(Stream::Stdout) {
-                    if best_cost < init_metric {
-                        (
-                            format!("{:.2}%", improvement),
-                            format!("{:.2}%", improvement).green(),
-                        )
-                    } else if best_cost > init_metric {
-                        (
-                            format!("{:.2}%", improvement),
-                            format!("{:.2}%", improvement).red(),
-                        )
-                    } else {
-                        ("0.00%".to_string(), "0.00%".normal())
+    match cli.chain_strategy {
+        ChainStrategy::Independent => {
+            let mut handles = Vec::new();
+            use std::sync::Mutex;
+            let error_flag = Arc::new(Mutex::new(None));
+            for i in 0..cli.threads {
+                let cfg = cli.clone();
+                let running_cl = running.clone();
+                let best_cl = best.clone();
+                let start_cl = start_gfn.clone();
+                let seed_i = cli.seed ^ i as u64;
+                let error_flag_cl = error_flag.clone();
+                let output_dir_cl = output_dir.clone();
+                handles.push(std::thread::spawn(move || {
+                    let progress_interval = cfg.progress_iters;
+                    if let Err(e) = run_chain(
+                        Arc::new(cfg),
+                        seed_i,
+                        start_cl,
+                        running_cl.clone(),
+                        best_cl,
+                        i as usize,
+                        Some(output_dir_cl.clone()),
+                        progress_interval,
+                    ) {
+                        let mut guard = error_flag_cl.lock().unwrap();
+                        *guard = Some(e);
+                        running_cl.store(false, Ordering::SeqCst);
                     }
-                } else {
-                    let s = format!("{:.2}%", improvement);
-                    (s.clone(), s.normal())
-                };
-                println!(
-                    "[mcmc] [main] interim global best: nodes={}, depth={}, rss={:.3} GiB\n  original: nodes={}, depth={}, objective={}\n  global best: nodes={}, depth={}, objective={}\n  objective improvement: {} ({} mode)",
-                    stats.live_nodes,
-                    stats.deepest_path,
-                    rss_mb / 1024.0,
-                    initial_stats.live_nodes,
-                    initial_stats.deepest_path,
-                    init_metric,
-                    stats.live_nodes,
-                    stats.deepest_path,
-                    best_cost,
-                    colorized_improvement,
-                    format!("{:?}", cli.metric)
+                }));
+            }
+
+            let mut last_print = Instant::now();
+            let print_interval = Duration::from_secs(20);
+            for h in handles {
+                while !h.is_finished() {
+                    if last_print.elapsed() > print_interval {
+                        let best_gfn = best.get();
+                        let stats = get_summary_stats::get_summary_stats(&best_gfn);
+                        let rss_mb = rss_megabytes().unwrap_or(0) as f64;
+                        let best_cost = match cli.metric {
+                            Objective::Nodes => stats.live_nodes as usize,
+                            Objective::Depth => stats.deepest_path as usize,
+                            Objective::Product => stats.live_nodes * stats.deepest_path,
+                        };
+                        let improvement = if init_metric == 0 {
+                            0.0
+                        } else {
+                            100.0 * (init_metric as f64 - best_cost as f64) / (init_metric as f64)
+                        };
+                        let (_improvement_str, colorized_improvement) = if atty::is(Stream::Stdout)
+                        {
+                            if best_cost < init_metric {
+                                (
+                                    format!("{:.2}%", improvement),
+                                    format!("{:.2}%", improvement).green(),
+                                )
+                            } else if best_cost > init_metric {
+                                (
+                                    format!("{:.2}%", improvement),
+                                    format!("{:.2}%", improvement).red(),
+                                )
+                            } else {
+                                ("0.00%".to_string(), "0.00%".normal())
+                            }
+                        } else {
+                            let s = format!("{:.2}%", improvement);
+                            (s.clone(), s.normal())
+                        };
+                        println!(
+                            "[mcmc] [main] interim global best: nodes={}, depth={}, rss={:.3} GiB\n  original: nodes={}, depth={}, objective={}\n  global best: nodes={}, depth={}, objective={}\n  objective improvement: {} ({} mode)",
+                            stats.live_nodes,
+                            stats.deepest_path,
+                            rss_mb / 1024.0,
+                            initial_stats.live_nodes,
+                            initial_stats.deepest_path,
+                            init_metric,
+                            stats.live_nodes,
+                            stats.deepest_path,
+                            best_cost,
+                            colorized_improvement,
+                            format!("{:?}", cli.metric)
+                        );
+                        last_print = Instant::now();
+                    }
+                    if error_flag.lock().unwrap().is_some() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let _ = h.join();
+            }
+            let guard = error_flag.lock().unwrap();
+            if let Some(e) = guard.as_ref() {
+                eprintln!(
+                    "[mcmc] ERROR: Aborting due to error in one of the chains: {}",
+                    e
                 );
-                last_print = Instant::now();
+                std::process::exit(1);
             }
-            // If any thread reported an error, break out early
-            if error_flag.lock().unwrap().is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
         }
-        let _ = h.join();
-    }
-    if let Some(e) = error_flag.lock().unwrap().as_ref() {
-        eprintln!(
-            "[mcmc] ERROR: Aborting due to error in one of the chains: {}",
-            e
-        );
-        std::process::exit(1);
+        ChainStrategy::ExploreExploit => {
+            run_explore_exploit(
+                Arc::new(cli.clone()),
+                start_gfn.clone(),
+                running.clone(),
+                best.clone(),
+                init_metric,
+                output_dir.clone(),
+            )?;
+        }
     }
 
     if !running.load(Ordering::SeqCst) {
