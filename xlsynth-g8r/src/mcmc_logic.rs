@@ -491,7 +491,7 @@ pub fn mcmc(
                         println!(
                             "[mcmc][verbose] c{:03}:i{:06}: About to apply {:?} ({:?}) at {:?}",
                             chain,
-                            iterations_count,
+                            options.start_iteration + iterations_count,
                             current_transform_kind,
                             direction,
                             chosen_location
@@ -499,26 +499,37 @@ pub fn mcmc(
                     } else {
                         println!(
                             "[mcmc][verbose] iter {}: About to apply {:?} ({:?}) at {:?}",
-                            iterations_count, current_transform_kind, direction, chosen_location
+                            options.start_iteration + iterations_count,
+                            current_transform_kind,
+                            direction,
+                            chosen_location
                         );
                     }
                 } else {
                     if let Some(chain) = chain_no {
                         println!(
                             "[mcmc][verbose] c{:03}:i{:06}: No candidates for {:?} ({:?})",
-                            chain, iterations_count, current_transform_kind, direction
+                            chain,
+                            options.start_iteration + iterations_count,
+                            current_transform_kind,
+                            direction
                         );
                     } else {
                         println!(
                             "[mcmc][verbose] iter {}: No candidates for {:?} ({:?})",
-                            iterations_count, current_transform_kind, direction
+                            options.start_iteration + iterations_count,
+                            current_transform_kind,
+                            direction
                         );
                     }
                 }
             }
         }
 
-        log::trace!("Starting MCMC iteration: {:?}", iterations_count);
+        log::trace!(
+            "Starting MCMC iteration: {:?}",
+            options.start_iteration + iterations_count
+        );
         let iteration_output = mcmc_iteration(
             current_gfn, // current_gfn is moved in
             current_cost,
@@ -531,7 +542,10 @@ pub fn mcmc(
             &simd_inputs,
             &baseline_outputs,
         );
-        log::trace!("MCMC iteration completed: {:?}", iterations_count);
+        log::trace!(
+            "MCMC iteration completed: {:?}",
+            options.start_iteration + iterations_count
+        );
 
         // Update current_gfn and baseline outputs depending on acceptance.
         current_gfn = iteration_output.output_gfn;
@@ -617,7 +631,7 @@ pub fn mcmc(
             if let Some(chain) = chain_no {
                 println!(
                     "[mcmc] c{:03}:i{:06} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/SIM/O/M): {}/{}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Avg Sim (ms): {:.3} | Accepted: {} ({})         ",
-                    chain, iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
+                    chain, options.start_iteration + iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
                     stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_sim_fail, stats.rejected_oracle, stats.rejected_metro,
                     stats.oracle_verified, avg_oracle_ms, avg_sim_ms,
                     stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
@@ -625,7 +639,7 @@ pub fn mcmc(
             } else {
                 println!(
                     "[mcmc] iter: {} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/SIM/O/M): {}/{}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Avg Sim (ms): {:.3} | Accepted: {} ({})         ",
-                    iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
+                    options.start_iteration + iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
                     stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_sim_fail, stats.rejected_oracle, stats.rejected_metro,
                     stats.oracle_verified, avg_oracle_ms, avg_sim_ms,
                     stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
@@ -657,7 +671,7 @@ pub fn mcmc(
                     {
                         let entry = json!({
                             "chain_number": chain_no.unwrap_or(0),
-                            "iterations": iterations_count,
+                            "iterations": options.start_iteration + iterations_count,
                             "current_depth": current_cost.depth,
                             "current_nodes": current_cost.nodes,
                             "proposed_samples_per_sec": proposed_per_sec,
@@ -681,18 +695,17 @@ pub fn mcmc(
                     } else {
                         String::new()
                     };
+                    let global_iter = options.start_iteration + iterations_count;
                     let g8r_path =
-                        dump_dir.join(format!("{}best_iter_{}.g8r", prefix, iterations_count));
-                    let stats_path = dump_dir.join(format!(
-                        "{}best_iter_{}.stats.json",
-                        prefix, iterations_count
-                    ));
+                        dump_dir.join(format!("{}best_iter_{}.g8r", prefix, global_iter));
+                    let stats_path =
+                        dump_dir.join(format!("{}best_iter_{}.stats.json", prefix, global_iter));
                     write_checkpoint(
                         &g8r_path,
                         &stats_path,
                         &original_gfn_for_check,
                         &best_gfn,
-                        iterations_count,
+                        global_iter,
                         "Iter checkpoint",
                     )?;
                 }
@@ -714,7 +727,7 @@ pub fn mcmc(
             &stats_path,
             &original_gfn_for_check,
             &best_gfn,
-            iterations_count,
+            options.start_iteration + iterations_count,
             "Final checkpoint",
         )?;
         if progress_interval > 0 {
@@ -740,7 +753,7 @@ pub fn mcmc(
                     options.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
                 let entry = json!({
                     "chain_number": chain_no.unwrap_or(0),
-                    "iterations": iterations_count,
+                    "iterations": options.start_iteration + iterations_count,
                     "current_depth": current_cost.depth,
                     "current_nodes": current_cost.nodes,
                     "proposed_samples_per_sec": proposed_per_sec,
@@ -874,6 +887,11 @@ pub fn build_transform_weights<
 pub struct McmcOptions {
     pub sat_reset_interval: u64,
     pub initial_temperature: f64,
+    /// If this mcmc() invocation is part of a longer run that was previously
+    /// paused (e.g. for replica exchange), `start_iteration` allows the caller
+    /// to indicate how many iterations have already been executed so that the
+    /// human-readable logs continue with a global index.
+    pub start_iteration: u64,
 }
 
 fn write_checkpoint(

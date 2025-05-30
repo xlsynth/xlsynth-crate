@@ -16,6 +16,7 @@ use tempfile::Builder;
 use xlsynth_g8r::gate::GateFn;
 use xlsynth_g8r::get_summary_stats::SummaryStats;
 
+use xlsynth_g8r::fraig::{fraig_optimize, IterationBounds};
 use xlsynth_g8r::get_summary_stats;
 use xlsynth_g8r::mcmc_logic::{cost, load_start, mcmc, Best, McmcOptions, Objective};
 
@@ -26,6 +27,8 @@ use libc;
 
 use atty::Stream;
 use colored::*;
+use rand::SeedableRng;
+use rand_pcg::Pcg64Mcg;
 
 #[derive(ValueEnum, Debug, Clone)]
 enum ChainStrategy {
@@ -129,11 +132,8 @@ fn run_chain_segment(
     segment_iters: u64,
     periodic_dump_dir: Option<PathBuf>,
     progress_interval: u64,
+    options: McmcOptions,
 ) -> Result<GateFn, anyhow::Error> {
-    let options = McmcOptions {
-        sat_reset_interval: 20000,
-        initial_temperature: cfg.initial_temperature,
-    };
     mcmc(
         start,
         segment_iters,
@@ -172,13 +172,30 @@ fn run_chain(
         cfg.iters,
         periodic_dump_dir,
         progress_interval,
+        McmcOptions {
+            sat_reset_interval: 20000,
+            initial_temperature: cfg.initial_temperature,
+            start_iteration: 0,
+        },
     )?;
-    let metric = match cfg.metric {
+    let metric_val = match cfg.metric {
         Objective::Nodes => cost(&gfn).nodes as usize,
         Objective::Depth => cost(&gfn).depth as usize,
         Objective::Product => cost(&gfn).nodes * cost(&gfn).depth,
     };
-    best.try_update(metric, gfn);
+    let fraig_gfn = {
+        let mut rng_f = Pcg64Mcg::seed_from_u64(seed);
+        match fraig_optimize(
+            &gfn,
+            64, // sample count
+            IterationBounds::MaxIterations(1),
+            &mut rng_f,
+        ) {
+            Ok((g, _conv, _stats)) => g,
+            Err(_e) => gfn.clone(),
+        }
+    };
+    best.try_update(metric_val, fraig_gfn);
     Ok(())
 }
 
@@ -192,60 +209,111 @@ fn run_explore_exploit(
     output_dir: PathBuf,
 ) -> Result<()> {
     let chain_count = cfg.threads as usize;
-    let mut states = vec![start_gfn; chain_count];
-    let mut seeds: Vec<u64> = (0..chain_count).map(|i| cfg.seed ^ i as u64).collect();
-    let mut costs = vec![init_metric; chain_count];
 
-    let mut remaining = cfg.iters;
-    while remaining > 0 && running.load(Ordering::SeqCst) {
-        let seg = std::cmp::min(cfg.checkpoint_iters, remaining);
-        for i in 0..chain_count {
-            states[i] = run_chain_segment(
-                cfg.clone(),
-                seeds[i],
-                states[i].clone(),
-                running.clone(),
-                best.clone(),
-                i,
-                seg,
-                Some(output_dir.clone()),
-                cfg.progress_iters,
-            )?;
-            let c = cost(&states[i]);
-            costs[i] = match cfg.metric {
-                Objective::Nodes => c.nodes as usize,
-                Objective::Depth => c.depth as usize,
-                Objective::Product => c.nodes * c.depth,
+    // Shared error flag so any thread panic/error stops all others.
+    use std::sync::Mutex;
+    let error_flag = Arc::new(Mutex::new(None));
+
+    let mut handles = Vec::with_capacity(chain_count);
+    for chain_no in 0..chain_count {
+        let cfg_cl = cfg.clone();
+        let running_cl = running.clone();
+        let best_cl = best.clone();
+        let error_flag_cl = error_flag.clone();
+        let output_dir_cl = output_dir.clone();
+        let start_gfn_cl = start_gfn.clone();
+        let seed = cfg.seed ^ chain_no as u64;
+
+        handles.push(std::thread::spawn(move || {
+            let mut local_gfn = start_gfn_cl;
+            let mut remaining = cfg_cl.iters;
+            let mut iter_offset: u64 = 0;
+            let base_temperature = if chain_no == 0 {
+                cfg_cl.initial_temperature
+            } else {
+                (cfg_cl.initial_temperature * 0.25).max(1e-3)
             };
-            seeds[i] = seeds[i].wrapping_add(1);
-        }
-        remaining -= seg;
 
-        let (best_idx, &best_cost) = costs.iter().enumerate().min_by_key(|(_, c)| *c).unwrap();
-        let best_gfn_cur = states[best_idx].clone();
-        best.try_update(best_cost, best_gfn_cur.clone());
+            let mut segment_temperature = base_temperature;
 
-        for i in 0..chain_count {
-            if i != best_idx && costs[i] > best_cost + cfg.initial_temperature as usize {
-                states[i] = run_chain_segment(
-                    cfg.clone(),
-                    seeds[i],
-                    best_gfn_cur.clone(),
-                    running.clone(),
-                    best.clone(),
-                    i,
-                    1,
-                    Some(output_dir.clone()),
-                    0,
-                )?;
-                let c = cost(&states[i]);
-                costs[i] = match cfg.metric {
-                    Objective::Nodes => c.nodes as usize,
-                    Objective::Depth => c.depth as usize,
-                    Objective::Product => c.nodes * c.depth,
+            while remaining > 0 && running_cl.load(Ordering::SeqCst) {
+                let seg = std::cmp::min(cfg_cl.checkpoint_iters, remaining);
+
+                let options = McmcOptions {
+                    sat_reset_interval: 20000,
+                    initial_temperature: segment_temperature,
+                    start_iteration: iter_offset,
                 };
+
+                match run_chain_segment(
+                    cfg_cl.clone(),
+                    seed.wrapping_add(iter_offset), // vary seed each segment
+                    local_gfn.clone(),
+                    running_cl.clone(),
+                    best_cl.clone(),
+                    chain_no,
+                    seg,
+                    Some(output_dir_cl.clone()),
+                    cfg_cl.progress_iters,
+                    options,
+                ) {
+                    Ok(new_gfn) => {
+                        local_gfn = new_gfn;
+                        let metric_val = match cfg_cl.metric {
+                            Objective::Nodes => cost(&local_gfn).nodes as usize,
+                            Objective::Depth => cost(&local_gfn).depth as usize,
+                            Objective::Product => {
+                                let cst = cost(&local_gfn);
+                                cst.nodes * cst.depth
+                            }
+                        };
+                        let fraig_gfn = {
+                            let mut rng_f = Pcg64Mcg::seed_from_u64(seed ^ iter_offset);
+                            match fraig_optimize(
+                                &local_gfn,
+                                64, // sample count
+                                IterationBounds::MaxIterations(1),
+                                &mut rng_f,
+                            ) {
+                                Ok((g, _conv, _stats)) => g,
+                                Err(_e) => local_gfn.clone(),
+                            }
+                        };
+                        best_cl.try_update(metric_val, fraig_gfn);
+
+                        if chain_no != 0 {
+                            let global_best_cost = best_cl.cost.load(Ordering::SeqCst);
+                            if metric_val > global_best_cost + cfg_cl.initial_temperature as usize {
+                                local_gfn = best_cl.get();
+                                segment_temperature = cfg_cl.initial_temperature;
+                            } else {
+                                segment_temperature = base_temperature;
+                            }
+                        } else {
+                            segment_temperature = base_temperature;
+                        }
+                    }
+                    Err(e) => {
+                        let mut guard = error_flag_cl.lock().unwrap();
+                        *guard = Some(e);
+                        running_cl.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
+
+                remaining -= seg;
+                iter_offset += seg;
             }
-        }
+        }));
+    }
+
+    // Join all threads, surface any errors.
+    for h in handles {
+        let _ = h.join();
+    }
+
+    if let Some(e) = error_flag.lock().unwrap().take() {
+        return Err(e);
     }
     Ok(())
 }
