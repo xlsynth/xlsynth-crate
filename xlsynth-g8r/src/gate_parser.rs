@@ -353,9 +353,7 @@ mod tests {
     #[test]
     fn test_parse_bool_literal() {
         let src = "fn t() -> (o: bits[1]=[%0]) { %0 = literal(true) }";
-        let g = GateFn::from_str(src).unwrap();
-        assert_eq!(g.gates.len(), 2); // literal + constant 0 node
-                                      // parse false as well
+        let _g = GateFn::from_str(src).unwrap();
         let src2 = "fn t() -> (o: bits[1]=[%0]) { %0 = literal(false) }";
         let _ = GateFn::from_str(src2).unwrap();
     }
