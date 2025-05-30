@@ -176,6 +176,7 @@ fn run_chain(
             sat_reset_interval: 20000,
             initial_temperature: cfg.initial_temperature,
             start_iteration: 0,
+            total_iters: Some(cfg.iters),
         },
     )?;
     let metric_val = match cfg.metric {
@@ -258,6 +259,7 @@ fn run_explore_exploit(
                     sat_reset_interval: 20000,
                     initial_temperature: segment_temperature,
                     start_iteration: iter_offset,
+                    total_iters: Some(cfg_cl.iters),
                 };
 
                 match run_chain_segment(

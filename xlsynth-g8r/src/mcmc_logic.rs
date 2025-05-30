@@ -466,7 +466,13 @@ pub fn mcmc(
     while running.load(Ordering::SeqCst) && iterations_count < max_iters {
         iterations_count += 1;
 
-        let progress_ratio = (iterations_count as f64) / (max_iters as f64);
+        let progress_ratio = match options.total_iters {
+            Some(total) => {
+                let done = options.start_iteration + iterations_count;
+                (done as f64) / (total as f64)
+            }
+            None => 0.0, // constant temperature – explorer chain
+        };
         let current_temp =
             options.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
 
@@ -892,6 +898,9 @@ pub struct McmcOptions {
     /// to indicate how many iterations have already been executed so that the
     /// human-readable logs continue with a global index.
     pub start_iteration: u64,
+    /// Total planned iterations for the *entire* run (across segments). If
+    /// `None`, temperature remains constant (no cooling).
+    pub total_iters: Option<u64>,
 }
 
 fn write_checkpoint(
