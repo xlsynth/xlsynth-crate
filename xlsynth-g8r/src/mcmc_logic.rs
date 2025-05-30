@@ -37,7 +37,8 @@ use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
 use core::simd::u64x4;
 use serde_json;
-use std::fs;
+use serde_json::json;
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
@@ -392,6 +393,7 @@ pub fn mcmc(
     periodic_dump_dir: Option<PathBuf>,
     paranoid: bool,
     checkpoint_interval: u64,
+    progress_interval: u64,
     shared_best: Option<Arc<Best>>,
     chain_no: Option<usize>,
     options: McmcOptions,
@@ -633,6 +635,41 @@ pub fn mcmc(
             last_print_time = Instant::now();
         }
 
+        if progress_interval > 0 {
+            if let Some(ref dump_dir) = periodic_dump_dir {
+                if iterations_count % progress_interval == 0 {
+                    let elapsed_secs = start_time.elapsed().as_secs_f64();
+                    let proposed_per_sec = if elapsed_secs > 0.0 {
+                        iterations_count as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
+                    let accepted_per_sec = if elapsed_secs > 0.0 {
+                        stats.accepted_overall as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
+                    let progress_path = dump_dir.join("progress.jsonl");
+                    if let Ok(mut f) = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(progress_path)
+                    {
+                        let entry = json!({
+                            "chain_number": chain_no.unwrap_or(0),
+                            "iterations": iterations_count,
+                            "current_depth": current_cost.depth,
+                            "current_nodes": current_cost.nodes,
+                            "proposed_samples_per_sec": proposed_per_sec,
+                            "accepted_samples_per_sec": accepted_per_sec,
+                            "temperature": current_temp,
+                        });
+                        let _ = writeln!(f, "{}", entry.to_string());
+                    }
+                }
+            }
+        }
+
         // Periodic dump of current best GateFn and its stats.
         if checkpoint_interval > 0 {
             if let Some(ref dump_dir) = periodic_dump_dir {
@@ -680,6 +717,39 @@ pub fn mcmc(
             iterations_count,
             "Final checkpoint",
         )?;
+        if progress_interval > 0 {
+            let progress_path = dump_dir.join("progress.jsonl");
+            if let Ok(mut f) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(progress_path)
+            {
+                let elapsed_secs = start_time.elapsed().as_secs_f64();
+                let proposed_per_sec = if elapsed_secs > 0.0 {
+                    iterations_count as f64 / elapsed_secs
+                } else {
+                    0.0
+                };
+                let accepted_per_sec = if elapsed_secs > 0.0 {
+                    stats.accepted_overall as f64 / elapsed_secs
+                } else {
+                    0.0
+                };
+                let progress_ratio = (iterations_count as f64) / (max_iters as f64);
+                let current_temp =
+                    options.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
+                let entry = json!({
+                    "chain_number": chain_no.unwrap_or(0),
+                    "iterations": iterations_count,
+                    "current_depth": current_cost.depth,
+                    "current_nodes": current_cost.nodes,
+                    "proposed_samples_per_sec": proposed_per_sec,
+                    "accepted_samples_per_sec": accepted_per_sec,
+                    "temperature": current_temp,
+                });
+                let _ = writeln!(f, "{}", entry.to_string());
+            }
+        }
     }
     Ok(best_gfn)
 }
