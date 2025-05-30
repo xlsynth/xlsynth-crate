@@ -11,6 +11,22 @@ impl ParseError {
     fn new(msg: String) -> Self {
         Self { msg }
     }
+
+    fn new_with_pos(msg: String, input: &str, pos: usize) -> Self {
+        let mut line = 1usize;
+        let mut col = 1usize;
+        for ch in input[..pos].chars() {
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        Self {
+            msg: format!("{} at line {}, column {}", msg, line, col),
+        }
+    }
 }
 
 impl std::fmt::Display for ParseError {
@@ -60,11 +76,15 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn err(&self, msg: &str) -> ParseError {
+        ParseError::new_with_pos(msg.to_string(), self.input, self.pos)
+    }
+
     fn drop_or_error(&mut self, tok: &str) -> Result<(), ParseError> {
         if self.try_drop(tok) {
             Ok(())
         } else {
-            Err(ParseError::new(format!(
+            Err(self.err(&format!(
                 "expected '{}' got '{}...'",
                 tok,
                 &self.rest()[..self.rest().len().min(tok.len())]
@@ -82,13 +102,10 @@ impl<'a> Parser<'a> {
                 result.push(c);
                 self.pos += c.len_utf8();
             } else {
-                return Err(ParseError::new(format!(
-                    "expected identifier start, got '{}'",
-                    c
-                )));
+                return Err(self.err(&format!("expected identifier start, got '{}'", c)));
             }
         } else {
-            return Err(ParseError::new("unexpected eof".to_string()));
+            return Err(self.err("unexpected eof"));
         }
         while let Some(c) = self.rest().chars().next() {
             if c.is_alphanumeric() || c == '_' {
@@ -113,7 +130,7 @@ impl<'a> Parser<'a> {
             }
         }
         if len == 0 {
-            return Err(ParseError::new("expected number".to_string()));
+            return Err(self.err("expected number"));
         }
         let num: usize = rest[..len].parse().unwrap();
         self.pos += len;
@@ -262,12 +279,20 @@ pub fn parse_gate_fn(text: &str) -> Result<GateFn, ParseError> {
                 nodes.insert(id, AigNode::And2 { a, b, tags });
                 continue;
             } else if p.try_drop("literal(") {
-                let value = p.parse_usize()?;
+                p.drop_ws();
+                let lit_val = if p.try_drop("true") {
+                    true
+                } else if p.try_drop("false") {
+                    false
+                } else {
+                    let value = p.parse_usize()?;
+                    value != 0
+                };
                 p.drop_or_error(")")?;
-                nodes.insert(id, AigNode::Literal(value != 0));
+                nodes.insert(id, AigNode::Literal(lit_val));
                 continue;
             } else {
-                return Err(ParseError::new("unknown node kind".to_string()));
+                return Err(p.err("unknown node kind"));
             }
         } else {
             let _name = p.parse_identifier()?;
@@ -320,6 +345,24 @@ mod tests {
     #[test]
     fn test_round_trip_simple() {
         let g = setup_simple_graph().g;
+        let text = g.to_string();
+        let parsed = GateFn::from_str(&text).unwrap();
+        assert!(structurally_equivalent(&g, &parsed));
+    }
+
+    #[test]
+    fn test_parse_bool_literal() {
+        let src = "fn t() -> (o: bits[1]=[%0]) { %0 = literal(true) }";
+        let _g = GateFn::from_str(src).unwrap();
+        let src2 = "fn t() -> (o: bits[1]=[%0]) { %0 = literal(false) }";
+        let _ = GateFn::from_str(src2).unwrap();
+    }
+
+    #[test]
+    fn test_round_trip_constant_replace_sample() {
+        use crate::test_utils::setup_graph_for_constant_replace;
+
+        let g = setup_graph_for_constant_replace().g;
         let text = g.to_string();
         let parsed = GateFn::from_str(&text).unwrap();
         assert!(structurally_equivalent(&g, &parsed));
