@@ -94,6 +94,11 @@ struct CliArgs {
     #[clap(long, value_parser, default_value_t = 5000)]
     checkpoint_iters: u64,
 
+    /// Iterations between progress updates written to progress.jsonl (0 to
+    /// disable).
+    #[clap(long, value_parser, default_value_t = 1000)]
+    progress_iters: u64,
+
     /// Number of parallel MCMC chains to run.
     #[clap(long, value_parser, default_value_t = num_cpus::get() as u64)]
     threads: u64,
@@ -111,6 +116,7 @@ fn run_chain(
     best: Arc<Best>,
     chain_no: usize,
     periodic_dump_dir: Option<PathBuf>,
+    progress_interval: u64,
 ) -> Result<(), anyhow::Error> {
     let options = McmcOptions {
         sat_reset_interval: 20000, // or make this configurable
@@ -127,6 +133,7 @@ fn run_chain(
         periodic_dump_dir,
         cfg.paranoid,
         cfg.checkpoint_iters,
+        progress_interval,
         Some(best),
         Some(chain_no),
         options,
@@ -242,6 +249,7 @@ fn main() -> Result<()> {
         let error_flag_cl = error_flag.clone();
         let output_dir_cl = output_dir.clone();
         handles.push(std::thread::spawn(move || {
+            let progress_interval = cfg.progress_iters;
             if let Err(e) = run_chain(
                 Arc::new(cfg),
                 seed_i,
@@ -249,7 +257,8 @@ fn main() -> Result<()> {
                 running_cl.clone(),
                 best_cl,
                 i as usize,
-                Some(output_dir_cl),
+                Some(output_dir_cl.clone()),
+                progress_interval,
             ) {
                 let mut guard = error_flag_cl.lock().unwrap();
                 *guard = Some(e);
