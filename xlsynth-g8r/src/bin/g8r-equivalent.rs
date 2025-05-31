@@ -29,10 +29,22 @@ struct Cli {
 }
 
 fn load_gfn(p: &PathBuf) -> anyhow::Result<GateFn> {
-    let txt = fs::read_to_string(p)
-        .with_context(|| format!("failed to read GateFn file {}", p.display()))?;
-    GateFn::from_str(&txt)
-        .map_err(|e| anyhow::anyhow!("failed to parse GateFn from {}: {}", p.display(), e))
+    let bytes =
+        fs::read(p).with_context(|| format!("failed to read GateFn file {}", p.display()))?;
+    if p.extension().map(|e| e == "g8rbin").unwrap_or(false) {
+        bincode::deserialize(&bytes).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to bincode-deserialize GateFn from {}: {}",
+                p.display(),
+                e
+            )
+        })
+    } else {
+        let txt = String::from_utf8(bytes)
+            .map_err(|e| anyhow::anyhow!("failed to decode utf8 from {}: {}", p.display(), e))?;
+        GateFn::from_str(&txt)
+            .map_err(|e| anyhow::anyhow!("failed to parse GateFn from {}: {}", p.display(), e))
+    }
 }
 
 fn main() {

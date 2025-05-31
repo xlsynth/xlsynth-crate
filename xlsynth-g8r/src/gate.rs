@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::ir_value_utils::ir_bits_from_bitvec_lsb_is_0;
@@ -9,12 +10,12 @@ use xlsynth::IrBits;
 use crate::topo::post_order_operands;
 use crate::xls_ir::ir;
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct AigRef {
     pub id: usize,
 }
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AigOperand {
     pub node: AigRef,
     pub negated: bool,
@@ -56,7 +57,7 @@ impl From<&AigRef> for AigOperand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AigNode {
     Input {
         name: String,
@@ -142,7 +143,7 @@ impl AigNode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AigBitVector {
     /// In this representation index 0 is the LSb, the last index is the MSb.
     operands: Vec<AigOperand>,
@@ -168,7 +169,7 @@ impl TryInto<AigOperand> for AigBitVector {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Split {
     pub msbs: AigBitVector,
     pub lsbs: AigBitVector,
@@ -306,7 +307,7 @@ fn io_to_string(name: &str, bit_vector: &AigBitVector) -> String {
 /// An input has a name (which should be unique among inputs/outputs) and a
 /// vector of gate references that make up this named entity; i.e. we have bit
 /// vectors for named inputs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Input {
     pub name: String,
     pub bit_vector: AigBitVector,
@@ -323,7 +324,7 @@ impl Input {
 }
 
 /// Similar to inputs, but references from the AIG can be negated.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Output {
     pub name: String,
     pub bit_vector: AigBitVector,
@@ -339,7 +340,7 @@ impl Output {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateFn {
     pub name: String,
     pub inputs: Vec<Input>,
