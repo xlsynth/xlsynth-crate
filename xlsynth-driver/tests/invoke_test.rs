@@ -1426,3 +1426,79 @@ fn test_ir2pipeline_subcommand(use_tool_path: bool, optimize: bool) {
         }
     }
 }
+
+#[test]
+fn test_ir2g8r_emits_all_outputs() {
+    // This test checks that ir2g8r emits the pretty GateFn to stdout,
+    // and writes both the .g8rbin and stats JSON files when requested.
+    let _ = env_logger::try_init();
+    // Use a simple DSLX function to generate IR
+    let dslx = "fn main(a: u4, b: u4) -> u4 { a & b }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("main.x");
+    let ir_path = temp_dir.path().join("main.ir");
+    let g8rbin_path = temp_dir.path().join("main.g8rbin");
+    let stats_path = temp_dir.path().join("main.stats.json");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    // Step 1: dslx2ir
+    let dslx2ir_output = std::process::Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+    assert!(
+        dslx2ir_output.status.success(),
+        "dslx2ir failed: {}",
+        String::from_utf8_lossy(&dslx2ir_output.stderr)
+    );
+    std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
+    // Step 2: ir2g8r
+    let ir2g8r_output = std::process::Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--fold=true")
+        .arg("--hash=true")
+        .arg("--fraig=true")
+        .arg("--bin-out")
+        .arg(g8rbin_path.to_str().unwrap())
+        .arg("--stats-out")
+        .arg(stats_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+    // Check stdout contains the pretty GateFn (should have 'fn __main__main(')
+    let stdout = String::from_utf8_lossy(&ir2g8r_output.stdout);
+    assert!(
+        stdout.contains("fn __main__main("),
+        "stdout did not contain pretty GateFn: {}",
+        stdout
+    );
+    // Check .g8rbin file exists and is non-empty
+    let g8rbin_data = std::fs::read(&g8rbin_path).expect(".g8rbin file not found");
+    assert!(!g8rbin_data.is_empty(), ".g8rbin file is empty");
+    // Check stats JSON file exists and contains expected keys
+    let stats_json = std::fs::read_to_string(&stats_path).expect("stats JSON file not found");
+    let stats: serde_json::Value =
+        serde_json::from_str(&stats_json).expect("stats JSON not valid JSON");
+    // Check for a few expected keys
+    assert!(
+        stats.get("live_nodes").is_some(),
+        "stats missing live_nodes"
+    );
+    assert!(
+        stats.get("deepest_path").is_some(),
+        "stats missing deepest_path"
+    );
+    assert!(
+        stats.get("fanout_histogram").is_some(),
+        "stats missing fanout_histogram"
+    );
+}
