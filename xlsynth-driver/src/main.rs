@@ -448,7 +448,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("ir2g8r")
-                .about("Converts IR to GateFn and emits it to stdout; optionally writes .g8rbin and stats")
+                .about("Converts IR to GateFn and emits it to stdout; optionally writes .g8rbin, netlist, and stats")
                 .arg(
                     clap::Arg::new("ir_input_file")
                         .help("The input IR file")
@@ -468,6 +468,13 @@ fn main() {
                         .long("stats-out")
                         .value_name("PATH")
                         .help("Path to write the JSON summary statistics")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("netlist_out")
+                        .long("netlist-out")
+                        .value_name("PATH")
+                        .help("Path to write the gate-level netlist (human-readable)")
                         .action(clap::ArgAction::Set),
                 )
         )

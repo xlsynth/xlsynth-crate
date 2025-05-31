@@ -9,6 +9,7 @@ use crate::toolchain_config::ToolchainConfig;
 use std::fs::File;
 use std::io::Write;
 use xlsynth_g8r::count_toggles;
+use xlsynth_g8r::emit_netlist;
 use xlsynth_g8r::fanout::fanout_histogram;
 use xlsynth_g8r::fuzz_utils::arbitrary_irbits;
 use xlsynth_g8r::get_summary_stats::get_gate_depth;
@@ -374,6 +375,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     };
     let bin_out = matches.get_one::<String>("bin_out");
     let stats_out = matches.get_one::<String>("stats_out");
+    let netlist_out = matches.get_one::<String>("netlist_out");
     let input_path = std::path::Path::new(input_file);
     let (gate_fn, stats) = ir_to_gatefn_with_stats(
         input_path,
@@ -402,5 +404,12 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         let mut f = File::create(stats_path).expect("Failed to create stats_out file");
         f.write_all(json.as_bytes())
             .expect("Failed to write stats_out file");
+    }
+    // If --netlist-out is given, write the gate-level netlist (human-readable)
+    if let Some(netlist_path) = netlist_out {
+        let netlist = emit_netlist::emit_netlist(&gate_fn.name, &gate_fn);
+        let mut f = File::create(netlist_path).expect("Failed to create netlist_out file");
+        f.write_all(netlist.as_bytes())
+            .expect("Failed to write netlist_out file");
     }
 }
