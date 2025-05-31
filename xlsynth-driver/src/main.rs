@@ -252,20 +252,20 @@ impl AppExt for clap::Command {
                     .action(clap::ArgAction::Set),
             )
             .arg(
-                clap::Arg::new("toggle_sample_count")
+                Arg::new("toggle_sample_count")
                     .long("toggle-sample-count")
                     .value_name("N")
                     .help("If > 0, generate N random input samples and print toggle stats.")
                     .default_value("0")
-                    .action(clap::ArgAction::Set),
+                    .action(ArgAction::Set),
             )
             .arg(
-                clap::Arg::new("toggle_sample_seed")
+                Arg::new("toggle_sample_seed")
                     .long("toggle-seed")
                     .value_name("SEED")
                     .help("Seed for random toggle stimulus (default 0)")
                     .default_value("0")
-                    .action(clap::ArgAction::Set),
+                    .action(ArgAction::Set),
             )
     }
 }
@@ -519,6 +519,24 @@ fn main() {
                         .action(ArgAction::Set),
                 )
         )
+        .subcommand(
+            clap::Command::new("g8r2v")
+                .about("Converts a .g8r or .g8rbin file to a .ugv netlist on stdout, optionally adding a clock port as the first input.")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("The input .g8r or .g8rbin file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("add_clk_port")
+                        .long("add-clk-port")
+                        .value_name("NAME")
+                        .help("Insert an (unused) clock port with this name as the first input; if given with no value, defaults to 'clk'")
+                        .num_args(0..=1)
+                        .require_equals(true),
+                )
+        )
         .get_matches();
 
     let mut toml_path: Option<String> = matches
@@ -590,6 +608,9 @@ fn main() {
         lib2proto::handle_lib2proto(matches);
     } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
         gv2ir::handle_gv2ir(matches);
+    } else if let Some(matches) = matches.subcommand_matches("g8r2v") {
+        // TODO: implement g8r2v handler
+        unimplemented!("g8r2v handler not yet implemented");
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {

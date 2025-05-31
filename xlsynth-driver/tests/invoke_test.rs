@@ -1508,3 +1508,104 @@ fn test_ir2g8r_emits_all_outputs() {
     let ugv_data = std::fs::read(&ugv_path).expect(".ugv file not found");
     assert!(!ugv_data.is_empty(), ".ugv file is empty");
 }
+
+#[test]
+fn test_g8r2v_add_clk_port_behavior() {
+    use std::io::Write;
+    use xlsynth_g8r::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
+    // Build a minimal GateFn with one input and one output
+    let mut gates = vec![
+        AigNode::Input {
+            name: "a".to_string(),
+            lsb_index: 0,
+        },
+        AigNode::And2 {
+            a: AigOperand {
+                node: AigRef { id: 0 },
+                negated: false,
+            },
+            b: AigOperand {
+                node: AigRef { id: 0 },
+                negated: false,
+            },
+            tags: None,
+        },
+    ];
+    let input = Input {
+        name: "a".to_string(),
+        bit_vector: AigBitVector::from_bit(AigOperand {
+            node: AigRef { id: 0 },
+            negated: false,
+        }),
+    };
+    let output = Output {
+        name: "y".to_string(),
+        bit_vector: AigBitVector::from_bit(AigOperand {
+            node: AigRef { id: 1 },
+            negated: false,
+        }),
+    };
+    let gate_fn = GateFn {
+        name: "testmod".to_string(),
+        inputs: vec![input],
+        outputs: vec![output],
+        gates,
+    };
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("test.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    // 1. No --add-clk-port: should not see clk in netlist
+    let output = std::process::Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "g8r2v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("clk"),
+        "netlist should not contain clk by default: {}",
+        stdout
+    );
+    // 2. --add-clk-port: should see clk as first input
+    let output = std::process::Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--add-clk-port")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "g8r2v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("clk"),
+        "netlist should contain clk as first input: {}",
+        stdout
+    );
+    // 3. --add-clk-port=foo: should see foo as first input
+    let output = std::process::Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--add-clk-port=foo")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "g8r2v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("foo"),
+        "netlist should contain foo as first input: {}",
+        stdout
+    );
+}
