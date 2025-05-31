@@ -925,12 +925,18 @@ fn write_checkpoint(
             let _ = std::fs::create_dir_all(&dump_dir);
             let orig_dump = dump_dir.join(format!("orig_iter_{}.g8r", iter));
             let cand_dump = dump_dir.join(format!("cand_iter_{}.g8r", iter));
+            let orig_bin_dump = dump_dir.join(format!("orig_iter_{}.g8rbin", iter));
+            let cand_bin_dump = dump_dir.join(format!("cand_iter_{}.g8rbin", iter));
             let _ = std::fs::write(&orig_dump, original_gfn.to_string());
             let _ = std::fs::write(&cand_dump, best_gfn.to_string());
+            let _ = std::fs::write(&orig_bin_dump, bincode::serialize(original_gfn).unwrap());
+            let _ = std::fs::write(&cand_bin_dump, bincode::serialize(best_gfn).unwrap());
             eprintln!(
-                "[mcmc] Disagreeing GateFns dumped to {} and {}",
+                "[mcmc] Disagreeing GateFns dumped to {} and {} (text), {} and {} (bincode)",
                 orig_dump.display(),
-                cand_dump.display()
+                cand_dump.display(),
+                orig_bin_dump.display(),
+                cand_bin_dump.display()
             );
         }
 
