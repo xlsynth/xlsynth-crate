@@ -12,6 +12,7 @@ pub mod check_equivalence;
 pub mod count_toggles;
 pub mod dce;
 pub mod emit_netlist;
+pub mod emitted_netlist_parser;
 pub mod fanout;
 pub mod find_structures;
 pub mod fraig;
