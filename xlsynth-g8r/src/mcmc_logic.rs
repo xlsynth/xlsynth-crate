@@ -37,9 +37,10 @@ use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
 use core::simd::u64x4;
 use serde_json;
-use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
 
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
@@ -463,6 +464,25 @@ pub fn mcmc(
     let mut iterations_count: u64 = 0;
     let mut last_print_time = Instant::now();
 
+    // Set up progress reporting channel and writer thread if needed
+    let (progress_tx, progress_rx) = mpsc::channel::<ProgressEntry>();
+    let writer_handle = if let Some(ref dump_dir) = periodic_dump_dir {
+        let progress_path = dump_dir.join("progress.jsonl");
+        Some(thread::spawn(move || {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(progress_path)
+                .expect("Failed to open progress.jsonl for writing");
+            for entry in progress_rx {
+                let json = serde_json::to_string(&entry).expect("serialize progress");
+                writeln!(f, "{}", json).expect("write progress");
+            }
+        }))
+    } else {
+        None
+    };
+
     while running.load(Ordering::SeqCst) && iterations_count < max_iters {
         iterations_count += 1;
 
@@ -656,7 +676,7 @@ pub fn mcmc(
         }
 
         if progress_interval > 0 {
-            if let Some(ref dump_dir) = periodic_dump_dir {
+            if let Some(_) = periodic_dump_dir {
                 if iterations_count % progress_interval == 0 {
                     let elapsed_secs = start_time.elapsed().as_secs_f64();
                     let proposed_per_sec = if elapsed_secs > 0.0 {
@@ -669,27 +689,20 @@ pub fn mcmc(
                     } else {
                         0.0
                     };
-                    let progress_path = dump_dir.join("progress.jsonl");
-                    if let Ok(mut f) = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(progress_path)
-                    {
-                        let entry = json!({
-                            "utc_time_secs": std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs(),
-                            "chain_number": chain_no.unwrap_or(0),
-                            "iterations": options.start_iteration + iterations_count,
-                            "current_depth": current_cost.depth,
-                            "current_nodes": current_cost.nodes,
-                            "proposed_samples_per_sec": proposed_per_sec,
-                            "accepted_samples_per_sec": accepted_per_sec,
-                            "temperature": current_temp,
-                        });
-                        let _ = writeln!(f, "{}", entry.to_string());
-                    }
+                    let progress_entry = ProgressEntry {
+                        utc_time_secs: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        chain_number: chain_no.unwrap_or(0),
+                        iterations: options.start_iteration + iterations_count,
+                        current_depth: current_cost.depth,
+                        current_nodes: current_cost.nodes,
+                        proposed_samples_per_sec: proposed_per_sec,
+                        accepted_samples_per_sec: accepted_per_sec,
+                        temperature: current_temp,
+                    };
+                    let _ = progress_tx.send(progress_entry);
                 }
             }
         }
@@ -741,42 +754,40 @@ pub fn mcmc(
             "Final checkpoint",
         )?;
         if progress_interval > 0 {
-            let progress_path = dump_dir.join("progress.jsonl");
-            if let Ok(mut f) = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(progress_path)
-            {
-                let elapsed_secs = start_time.elapsed().as_secs_f64();
-                let proposed_per_sec = if elapsed_secs > 0.0 {
-                    iterations_count as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
-                let accepted_per_sec = if elapsed_secs > 0.0 {
-                    stats.accepted_overall as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
-                let progress_ratio = (iterations_count as f64) / (max_iters as f64);
-                let current_temp =
-                    options.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
-                let entry = json!({
-                    "utc_time_secs": std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    "chain_number": chain_no.unwrap_or(0),
-                    "iterations": options.start_iteration + iterations_count,
-                    "current_depth": current_cost.depth,
-                    "current_nodes": current_cost.nodes,
-                    "proposed_samples_per_sec": proposed_per_sec,
-                    "accepted_samples_per_sec": accepted_per_sec,
-                    "temperature": current_temp,
-                });
-                let _ = writeln!(f, "{}", entry.to_string());
-            }
+            let elapsed_secs = start_time.elapsed().as_secs_f64();
+            let proposed_per_sec = if elapsed_secs > 0.0 {
+                iterations_count as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            let accepted_per_sec = if elapsed_secs > 0.0 {
+                stats.accepted_overall as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            let progress_ratio = (iterations_count as f64) / (max_iters as f64);
+            let current_temp =
+                options.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
+            let progress_entry = ProgressEntry {
+                utc_time_secs: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                chain_number: chain_no.unwrap_or(0),
+                iterations: options.start_iteration + iterations_count,
+                current_depth: current_cost.depth,
+                current_nodes: current_cost.nodes,
+                proposed_samples_per_sec: proposed_per_sec,
+                accepted_samples_per_sec: accepted_per_sec,
+                temperature: current_temp,
+            };
+            let _ = progress_tx.send(progress_entry);
         }
+    }
+    // Close the progress channel and join the writer thread if it was spawned
+    drop(progress_tx);
+    if let Some(handle) = writer_handle {
+        let _ = handle.join();
     }
     Ok(best_gfn)
 }
@@ -1035,4 +1046,16 @@ fn generate_simd_inputs(gate_fn: &GateFn, rng: &mut impl rand::Rng) -> Vec<Vec25
         .into_iter()
         .map(|w| Vec256(u64x4::from_array(w)))
         .collect()
+}
+
+#[derive(serde::Serialize)]
+struct ProgressEntry {
+    utc_time_secs: u64,
+    chain_number: usize,
+    iterations: u64,
+    current_depth: usize,
+    current_nodes: usize,
+    proposed_samples_per_sec: f64,
+    accepted_samples_per_sec: f64,
+    temperature: f64,
 }
