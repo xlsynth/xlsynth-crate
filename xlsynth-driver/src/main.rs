@@ -388,6 +388,14 @@ fn main() {
                 .add_bool_arg("quiet", "Quiet mode")
                 .add_bool_arg("fold", "Fold the gate representation")
                 .add_bool_arg("hash", "Hash the gate representation")
+                .arg(
+                    clap::Arg::new("adder_mapping")
+                        .long("adder-mapping")
+                        .value_name("MAPPING")
+                        .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
+                        .default_value("brent-kung")
+                        .help("Adder implementation to use"),
+                )
                 .add_bool_arg("fraig", "Run fraig optimization")
                 .arg(
                     clap::Arg::new("fraig_max_iterations")

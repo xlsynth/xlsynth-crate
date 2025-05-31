@@ -45,6 +45,7 @@ fuzz_target!(|sample: FuzzSample| {
             fold: false,
             hash: false,
             check_equivalence: true,
+            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
         },
     );
 
@@ -57,6 +58,7 @@ fuzz_target!(|sample: FuzzSample| {
             fold: true,
             hash: true,
             check_equivalence: true,
+            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
         },
     );
 

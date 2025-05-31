@@ -39,6 +39,7 @@ fn do_test_ir_conversion_with_top(
             fold: opt == Opt::Yes,
             check_equivalence: false,
             hash: opt == Opt::Yes,
+            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
         },
     )
     .unwrap();
