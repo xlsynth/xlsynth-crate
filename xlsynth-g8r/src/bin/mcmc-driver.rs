@@ -247,8 +247,11 @@ fn run_explore_exploit(
             while remaining > 0 && running_cl.load(Ordering::SeqCst) {
                 let seg = std::cmp::min(cfg_cl.checkpoint_iters, remaining);
 
-                // Recompute segment_temperature for exploiters based on global progress
-                if chain_no != 0 {
+                // Recompute segment_temperature based on role.
+                if chain_no == 0 {
+                    // Explorer: constant high temperature
+                    segment_temperature = explorer_temp;
+                } else {
                     let progress_ratio = iter_offset as f64 / cfg_cl.iters as f64;
                     let temp_now =
                         cfg_cl.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMP_RATIO);
@@ -305,11 +308,19 @@ fn run_explore_exploit(
                             local_gfn = best_cl.get();
                             // Next segment: explore with full temperature to
                             // differentiate search direction.
-                            segment_temperature = cfg_cl.initial_temperature;
+                            segment_temperature = if chain_no == 0 {
+                                explorer_temp
+                            } else {
+                                cfg_cl.initial_temperature
+                            };
                         } else {
                             // Otherwise revert to (or keep) the chain's base temperature.
-                            segment_temperature = segment_temperature
-                                .max(MIN_TEMP_RATIO * cfg_cl.initial_temperature);
+                            if chain_no != 0 {
+                                segment_temperature = segment_temperature
+                                    .max(MIN_TEMP_RATIO * cfg_cl.initial_temperature);
+                            } else {
+                                segment_temperature = explorer_temp;
+                            }
                         }
                     }
                     Err(e) => {

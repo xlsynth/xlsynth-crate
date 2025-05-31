@@ -50,11 +50,19 @@ pub fn check_equivalence_with_top(
     let output = command.output().unwrap();
     let elapsed = start.elapsed();
     if !output.status.success() {
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let err_kind = if stderr_str.contains("DEADLINE_EXCEEDED")
+            || stderr_str.contains("SIGINT")
+            || stderr_str.contains("interrupted")
+        {
+            "TimedOutOrInterrupted"
+        } else {
+            "SolverFailed"
+        };
         return Err(format!(
-            "check_ir_equivalence_main failed with retcode {}\nstdout: {:?}\nstderr: {:?}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            "{}: check_ir_equivalence_main failed with retcode {}\nstdout: {:?}\nstderr: {:?}",
+            err_kind, output.status, stdout_str, stderr_str
         ));
     }
     log::info!("check_equivalence_with_top; successful in {:?}", elapsed);
@@ -108,20 +116,114 @@ pub fn validate_same_fn(orig_fn: &ir::Fn, gate_fn: &gate::GateFn) -> Result<(), 
     result
 }
 
-pub fn prove_same_gate_fn_via_ir(lhs: &gate::GateFn, rhs: &gate::GateFn) -> Result<(), String> {
+/// Structured result for IR-level equivalence checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrCheckResult {
+    /// The two GateFns were proven equivalent.
+    Equivalent,
+    /// A concrete counter-example was found – they are *not* equivalent.
+    NotEquivalent,
+    /// The external solver timed out or was interrupted (SIGINT, etc.).
+    TimedOutOrInterrupted,
+    /// Some other infrastructure failure (I/O, missing tool etc.). Payload is
+    /// explanatory message.
+    OtherProcessError(String),
+}
+
+impl IrCheckResult {
+    pub fn is_equivalent(&self) -> bool {
+        matches!(self, IrCheckResult::Equivalent)
+    }
+}
+
+/// Run the external `check_ir_equivalence_main` tool and get a structured
+/// result. This is similar to the logic inside `check_equivalence_with_top`
+/// but returns an `IrCheckResult` instead of `Result<(), String>`.
+fn run_external_ir_tool(orig_pkg: &str, gate_pkg: &str) -> IrCheckResult {
+    let tempdir = tempfile::tempdir().unwrap();
+    let dirpath = tempdir.path();
+    let orig_path = dirpath.join("orig.ir");
+    let gate_path = dirpath.join("gate.ir");
+    if std::fs::write(&orig_path, orig_pkg).is_err() {
+        return IrCheckResult::OtherProcessError("failed to write orig temp file".to_string());
+    }
+    if std::fs::write(&gate_path, gate_pkg).is_err() {
+        return IrCheckResult::OtherProcessError("failed to write gate temp file".to_string());
+    }
+
+    let tools_dir = match std::env::var("XLSYNTH_TOOLS") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => {
+            return IrCheckResult::OtherProcessError("XLSYNTH_TOOLS env var not set".to_string())
+        }
+    };
+    let exe = tools_dir.join("check_ir_equivalence_main");
+    if !exe.exists() {
+        return IrCheckResult::OtherProcessError(format!(
+            "check_ir_equivalence_main not found in {}",
+            tools_dir.display()
+        ));
+    }
+
+    let output = std::process::Command::new(exe)
+        .arg("--alsologtostderr")
+        .arg(orig_path)
+        .arg(gate_path)
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => return IrCheckResult::OtherProcessError(format!("failed to spawn process: {e}")),
+    };
+
+    if output.status.success() {
+        return IrCheckResult::Equivalent;
+    }
+
+    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if stderr_str.contains("DEADLINE_EXCEEDED")
+        || stderr_str.contains("SIGINT")
+        || stderr_str.contains("interrupted")
+    {
+        return IrCheckResult::TimedOutOrInterrupted;
+    }
+
+    // Heuristic: if the tool reports a counterexample it usually exits 1 and prints
+    // something like "NOT EQUIVALENT" or "counterexample".
+    if stderr_str.to_lowercase().contains("not equivalent")
+        || stderr_str.to_lowercase().contains("counterexample")
+    {
+        return IrCheckResult::NotEquivalent;
+    }
+
+    IrCheckResult::OtherProcessError(format!("retcode {} stderr: {}", output.status, stderr_str))
+}
+
+/// Structured variant of `prove_same_gate_fn_via_ir`.
+pub fn prove_same_gate_fn_via_ir_status(lhs: &gate::GateFn, rhs: &gate::GateFn) -> IrCheckResult {
     let lhs_type = lhs.get_flat_type();
     let rhs_type = rhs.get_flat_type();
     if lhs_type != rhs_type {
-        return Err(format!("type mismatch: {:?} != {:?}", lhs_type, rhs_type));
+        return IrCheckResult::OtherProcessError("type mismatch".to_string());
     }
-    let lhs_ir_fn_text: xlsynth::IrPackage =
-        gate2ir::gate_fn_to_xlsynth_ir(lhs, "lhs", &lhs_type).unwrap();
-    let rhs_ir_fn_text: xlsynth::IrPackage =
-        gate2ir::gate_fn_to_xlsynth_ir(rhs, "rhs", &rhs_type).unwrap();
-    let lhs_ir_pkg_text: String = lhs_ir_fn_text.to_string();
-    let rhs_ir_pkg_text: String = rhs_ir_fn_text.to_string();
-    let result = check_equivalence(&lhs_ir_pkg_text, &rhs_ir_pkg_text);
-    result
+    let lhs_ir: xlsynth::IrPackage =
+        crate::gate2ir::gate_fn_to_xlsynth_ir(lhs, "lhs", &lhs_type).unwrap();
+    let rhs_ir: xlsynth::IrPackage =
+        crate::gate2ir::gate_fn_to_xlsynth_ir(rhs, "rhs", &rhs_type).unwrap();
+
+    run_external_ir_tool(&lhs_ir.to_string(), &rhs_ir.to_string())
+}
+
+/// Backwards-compatibility wrapper that preserves the original
+/// Result<(),String> behaviour used elsewhere in the codebase.
+pub fn prove_same_gate_fn_via_ir(lhs: &gate::GateFn, rhs: &gate::GateFn) -> Result<(), String> {
+    match prove_same_gate_fn_via_ir_status(lhs, rhs) {
+        IrCheckResult::Equivalent => Ok(()),
+        IrCheckResult::NotEquivalent => Err("not equivalent".to_string()),
+        IrCheckResult::TimedOutOrInterrupted => Err("TimedOutOrInterrupted".to_string()),
+        IrCheckResult::OtherProcessError(msg) => Err(msg),
+    }
 }
 
 #[cfg(test)]
