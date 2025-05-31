@@ -913,14 +913,11 @@ fn write_checkpoint(
 ) -> Result<()> {
     // Cross-check equivalence
     let equiv_ok_sat = oracle_equiv_sat(original_gfn, best_gfn);
-    let equiv_ok_external =
-        match crate::check_equivalence::prove_same_gate_fn_via_ir(original_gfn, best_gfn) {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("[mcmc] External check_equivalence_with_top failed: {}", e);
-                false
-            }
-        };
+    use crate::check_equivalence::{prove_same_gate_fn_via_ir_status, IrCheckResult};
+
+    let ir_status = prove_same_gate_fn_via_ir_status(original_gfn, best_gfn);
+    let equiv_ok_external = matches!(ir_status, IrCheckResult::Equivalent);
+
     if equiv_ok_sat != equiv_ok_external || !equiv_ok_sat {
         // Ensure we persist the disagreeing pair for offline triage.
         if let Some(parent_dir) = g8r_path.parent() {
@@ -943,6 +940,22 @@ fn write_checkpoint(
             equiv_ok_sat,
             equiv_ok_external
         ));
+    }
+    match ir_status {
+        IrCheckResult::Equivalent => {}
+        IrCheckResult::TimedOutOrInterrupted => {
+            eprintln!(
+                "[mcmc] Warning: External IR equivalence check timed out or was interrupted (iteration {}). Proceeding with SAT oracle result only.",
+                iter
+            );
+        }
+        IrCheckResult::OtherProcessError(ref msg) => {
+            eprintln!(
+                "[mcmc] Warning: External IR equivalence checker failed at iter {}: {}",
+                iter, msg
+            );
+        }
+        IrCheckResult::NotEquivalent => {}
     }
     if let Err(e) = std::fs::write(g8r_path, best_gfn.to_string()) {
         eprintln!(
