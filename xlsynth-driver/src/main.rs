@@ -55,6 +55,9 @@ use clap;
 use clap::{Arg, ArgAction};
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
+use std::io::{self, Write};
+use xlsynth_g8r::emit_netlist;
+use xlsynth_g8r::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 
 #[derive(Deserialize)]
 struct XlsynthToolchain {
@@ -252,20 +255,20 @@ impl AppExt for clap::Command {
                     .action(clap::ArgAction::Set),
             )
             .arg(
-                clap::Arg::new("toggle_sample_count")
+                Arg::new("toggle_sample_count")
                     .long("toggle-sample-count")
                     .value_name("N")
                     .help("If > 0, generate N random input samples and print toggle stats.")
                     .default_value("0")
-                    .action(clap::ArgAction::Set),
+                    .action(ArgAction::Set),
             )
             .arg(
-                clap::Arg::new("toggle_sample_seed")
+                Arg::new("toggle_sample_seed")
                     .long("toggle-seed")
                     .value_name("SEED")
                     .help("Seed for random toggle stimulus (default 0)")
                     .default_value("0")
-                    .action(clap::ArgAction::Set),
+                    .action(ArgAction::Set),
             )
     }
 }
@@ -519,6 +522,24 @@ fn main() {
                         .action(ArgAction::Set),
                 )
         )
+        .subcommand(
+            clap::Command::new("g8r2v")
+                .about("Converts a .g8r or .g8rbin file to a .ugv netlist on stdout, optionally adding a clock port as the first input.")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("The input .g8r or .g8rbin file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("add_clk_port")
+                        .long("add-clk-port")
+                        .value_name("NAME")
+                        .help("Insert an (unused) clock port with this name as the first input; if given with no value, defaults to 'clk'")
+                        .num_args(0..=1)
+                        .require_equals(true),
+                )
+        )
         .get_matches();
 
     let mut toml_path: Option<String> = matches
@@ -590,6 +611,76 @@ fn main() {
         lib2proto::handle_lib2proto(matches);
     } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
         gv2ir::handle_gv2ir(matches);
+    } else if let Some(matches) = matches.subcommand_matches("g8r2v") {
+        // Implementation for g8r2v
+        let input_file = matches.get_one::<String>("g8r_input_file").unwrap();
+        let add_clk_port = matches.get_many::<String>("add_clk_port");
+        // Try to load as text .g8r first, then as bincode .g8rbin
+        let gate_fn: GateFn = match std::fs::read_to_string(input_file) {
+            Ok(s) => match GateFn::from_str(&s) {
+                Ok(g) => g,
+                Err(_) => {
+                    // Try as bincode
+                    match std::fs::read(input_file) {
+                        Ok(bytes) => match bincode::deserialize(&bytes) {
+                            Ok(g) => g,
+                            Err(e) => {
+                                eprintln!("Failed to parse as .g8r or .g8rbin: {}", e);
+                                std::process::exit(1);
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("Failed to read input file: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            },
+            Err(_) => {
+                // Try as bincode
+                match std::fs::read(input_file) {
+                    Ok(bytes) => match bincode::deserialize(&bytes) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            eprintln!("Failed to parse as .g8r or .g8rbin: {}", e);
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to read input file: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        };
+        // Optionally add a clock port
+        let mut gate_fn = gate_fn;
+        let clk_port_name = if let Some(mut vals) = add_clk_port {
+            match vals.next() {
+                Some(s) => s.as_str(),
+                None => "clk",
+            }
+        } else {
+            ""
+        };
+        if !clk_port_name.is_empty() {
+            // Insert a new input at the start
+            let clk_input = Input {
+                name: clk_port_name.to_string(),
+                bit_vector: AigBitVector::from_bit(AigOperand {
+                    node: AigRef { id: 0 },
+                    negated: false,
+                }),
+            };
+            // Shift all existing input lsb_index by 1, and update their AigRef ids
+            // (for a single-bit clock, this is safe as a dummy input)
+            let mut new_inputs = vec![clk_input];
+            new_inputs.extend(gate_fn.inputs.into_iter());
+            gate_fn.inputs = new_inputs;
+        }
+        let netlist = emit_netlist::emit_netlist(&gate_fn.name, &gate_fn);
+        print!("{}", netlist);
+        io::stdout().flush().unwrap();
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {

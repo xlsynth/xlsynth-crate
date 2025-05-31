@@ -52,3 +52,28 @@ The command above leaves three artefacts:
 1. `my_module.g8r`   – human-readable GateFn (stdout redirection).
 1. `my_module.g8rbin` – compact bincode serialisation of the same GateFn.
 1. `my_module.stats.json` – structural summary statistics as JSON.
+
+### `g8r2v`: GateFn to gate-level netlist (Verilog-like)
+
+Converts a `.g8r` (text) or `.g8rbin` (bincode) file containing a gate-level `GateFn` to a `.ugv` netlist (human-readable, Verilog-like) on **stdout**.
+
+- By default, emits the netlist with the original GateFn inputs.
+- The `--add-clk-port[=NAME]` flag inserts an (unused) clock port as the first input:
+  - If omitted: no clock port is added.
+  - If given as `--add-clk-port` (no value): adds a port named `clk`.
+  - If given as `--add-clk-port=foo`: adds a port named `foo`.
+
+Example usage:
+
+```shell
+# No clock port
+xlsynth-driver g8r2v my_module.g8r > my_module.ugv
+
+# Add a clock port named 'clk'
+xlsynth-driver g8r2v my_module.g8r --add-clk-port > my_module.ugv
+
+# Add a clock port named 'myclk'
+xlsynth-driver g8r2v my_module.g8r --add-clk-port=myclk > my_module.ugv
+```
+
+The output is always written to stdout; redirect to a `.ugv` file as needed.
