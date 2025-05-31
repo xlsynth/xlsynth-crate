@@ -7,7 +7,6 @@ use crate::gate;
 use std::collections::HashMap;
 use xlsynth::vast;
 
-#[allow(dead_code)]
 pub fn emit_netlist(name: &str, gate_fn: &gate::GateFn) -> String {
     let mut file = vast::VastFile::new(vast::VastFileType::Verilog);
     let mut module = file.add_module(name);

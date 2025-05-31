@@ -1439,6 +1439,7 @@ fn test_ir2g8r_emits_all_outputs() {
     let ir_path = temp_dir.path().join("main.ir");
     let g8rbin_path = temp_dir.path().join("main.g8rbin");
     let stats_path = temp_dir.path().join("main.stats.json");
+    let ugv_path = temp_dir.path().join("main.ugv");
     std::fs::write(&dslx_path, dslx).unwrap();
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     // Step 1: dslx2ir
@@ -1467,6 +1468,8 @@ fn test_ir2g8r_emits_all_outputs() {
         .arg(g8rbin_path.to_str().unwrap())
         .arg("--stats-out")
         .arg(stats_path.to_str().unwrap())
+        .arg("--netlist-out")
+        .arg(ugv_path.to_str().unwrap())
         .output()
         .unwrap();
     assert!(
@@ -1501,4 +1504,7 @@ fn test_ir2g8r_emits_all_outputs() {
         stats.get("fanout_histogram").is_some(),
         "stats missing fanout_histogram"
     );
+    // Check .ugv file exists and is non-empty
+    let ugv_data = std::fs::read(&ugv_path).expect(".ugv file not found");
+    assert!(!ugv_data.is_empty(), ".ugv file is empty");
 }
