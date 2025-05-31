@@ -3,7 +3,9 @@
 //! Tests for invoking the xlsynth-driver CLI and its subcommands as a
 //! subprocess.
 
+use std::io::Write;
 use std::process::Command;
+use xlsynth_g8r::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 
 use test_case::test_case;
 
@@ -1511,10 +1513,8 @@ fn test_ir2g8r_emits_all_outputs() {
 
 #[test]
 fn test_g8r2v_add_clk_port_behavior() {
-    use std::io::Write;
-    use xlsynth_g8r::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
     // Build a minimal GateFn with one input and one output
-    let mut gates = vec![
+    let gates = vec![
         AigNode::Input {
             name: "a".to_string(),
             lsb_index: 0,
