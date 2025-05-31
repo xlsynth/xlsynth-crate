@@ -57,7 +57,7 @@ use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
 use std::io::{self, Write};
 use xlsynth_g8r::emit_netlist;
-use xlsynth_g8r::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
+use xlsynth_g8r::gate::{AigBitVector, AigOperand, AigRef, GateFn, Input};
 
 #[derive(Deserialize)]
 struct XlsynthToolchain {
@@ -539,6 +539,13 @@ fn main() {
                         .num_args(0..=1)
                         .require_equals(true),
                 )
+                .arg(
+                    clap::Arg::new("module_name")
+                        .long("module-name")
+                        .value_name("NAME")
+                        .help("Name of the generated module in the output netlist")
+                        .action(ArgAction::Set),
+                )
         )
         .get_matches();
 
@@ -678,7 +685,11 @@ fn main() {
             new_inputs.extend(gate_fn.inputs.into_iter());
             gate_fn.inputs = new_inputs;
         }
-        let netlist = emit_netlist::emit_netlist(&gate_fn.name, &gate_fn);
+        let module_name = matches
+            .get_one::<String>("module_name")
+            .map(|s| s.as_str())
+            .unwrap_or(&gate_fn.name);
+        let netlist = emit_netlist::emit_netlist(module_name, &gate_fn);
         print!("{}", netlist);
         io::stdout().flush().unwrap();
     } else if let Some(_matches) = matches.subcommand_matches("version") {

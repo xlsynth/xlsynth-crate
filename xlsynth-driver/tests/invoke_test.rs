@@ -3,7 +3,6 @@
 //! Tests for invoking the xlsynth-driver CLI and its subcommands as a
 //! subprocess.
 
-use std::io::Write;
 use std::process::Command;
 use xlsynth_g8r::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 
@@ -1616,6 +1615,94 @@ fn test_g8r2v_add_clk_port_behavior() {
     assert!(
         !stdout.contains("foo_0"),
         "clock port should not be suffixed with _0: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_g8r2v_module_name() {
+    // Build a minimal GateFn with one input and one output
+    let gates = vec![
+        AigNode::Input {
+            name: "a".to_string(),
+            lsb_index: 0,
+        },
+        AigNode::And2 {
+            a: AigOperand {
+                node: AigRef { id: 0 },
+                negated: false,
+            },
+            b: AigOperand {
+                node: AigRef { id: 0 },
+                negated: false,
+            },
+            tags: None,
+        },
+    ];
+    let input = Input {
+        name: "a".to_string(),
+        bit_vector: AigBitVector::from_bit(AigOperand {
+            node: AigRef { id: 0 },
+            negated: false,
+        }),
+    };
+    let output = Output {
+        name: "y".to_string(),
+        bit_vector: AigBitVector::from_bit(AigOperand {
+            node: AigRef { id: 1 },
+            negated: false,
+        }),
+    };
+    let gate_fn = GateFn {
+        name: "testmod".to_string(),
+        inputs: vec![input],
+        outputs: vec![output],
+        gates,
+    };
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("test.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // Default module name should be gate_fn.name
+    let output = std::process::Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "g8r2v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("module testmod("),
+        "netlist should use default module name: {}",
+        stdout
+    );
+
+    // Override module name
+    let output = std::process::Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--module-name=newmod")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "g8r2v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("module newmod("),
+        "netlist should use overridden module name: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("module testmod("),
+        "original module name should not appear when overridden: {}",
         stdout
     );
 }
