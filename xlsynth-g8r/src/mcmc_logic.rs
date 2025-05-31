@@ -676,6 +676,10 @@ pub fn mcmc(
                         .open(progress_path)
                     {
                         let entry = json!({
+                            "utc_time_secs": std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
                             "chain_number": chain_no.unwrap_or(0),
                             "iterations": options.start_iteration + iterations_count,
                             "current_depth": current_cost.depth,
@@ -758,6 +762,10 @@ pub fn mcmc(
                 let current_temp =
                     options.initial_temperature * (1.0 - progress_ratio).max(MIN_TEMPERATURE_RATIO);
                 let entry = json!({
+                    "utc_time_secs": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
                     "chain_number": chain_no.unwrap_or(0),
                     "iterations": options.start_iteration + iterations_count,
                     "current_depth": current_cost.depth,
