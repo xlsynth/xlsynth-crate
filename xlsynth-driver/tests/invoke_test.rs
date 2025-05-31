@@ -1590,6 +1590,11 @@ fn test_g8r2v_add_clk_port_behavior() {
         "netlist should contain clk as first input: {}",
         stdout
     );
+    assert!(
+        !stdout.contains("clk_0"),
+        "clock port should not be suffixed with _0: {}",
+        stdout
+    );
     // 3. --add-clk-port=foo: should see foo as first input
     let output = std::process::Command::new(command_path)
         .arg("g8r2v")
@@ -1606,6 +1611,11 @@ fn test_g8r2v_add_clk_port_behavior() {
     assert!(
         stdout.contains("foo"),
         "netlist should contain foo as first input: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("foo_0"),
+        "clock port should not be suffixed with _0: {}",
         stdout
     );
 }

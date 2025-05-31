@@ -16,8 +16,13 @@ pub fn emit_netlist(name: &str, gate_fn: &gate::GateFn) -> String {
 
     // Add all the inputs to the module.
     for input in gate_fn.inputs.iter() {
+        let bit_count = input.bit_vector.get_bit_count();
         for (i, bit) in input.bit_vector.iter_lsb_to_msb().enumerate() {
-            let name = format!("{}_{}", input.name, i);
+            let name = if bit_count == 1 {
+                input.name.clone()
+            } else {
+                format!("{}_{}", input.name, i)
+            };
             let logic_ref = module.add_input(name.as_str(), &bit_type);
             gate_ref_to_vast.insert(bit.node, logic_ref);
         }
@@ -27,8 +32,13 @@ pub fn emit_netlist(name: &str, gate_fn: &gate::GateFn) -> String {
 
     // Add all the outputs to the module.
     for output in gate_fn.outputs.iter() {
+        let bit_count = output.bit_vector.get_bit_count();
         for (i, bit) in output.bit_vector.iter_lsb_to_msb().enumerate() {
-            let name = format!("{}_{}", output.name, i);
+            let name = if bit_count == 1 {
+                output.name.clone()
+            } else {
+                format!("{}_{}", output.name, i)
+            };
             let logic_ref = module.add_output(name.as_str(), &bit_type);
             output_operand_to_logic_ref.insert(bit, logic_ref.clone());
         }
@@ -111,12 +121,12 @@ mod tests {
         assert_eq!(
             netlist,
             "module my_inverter(
-  input wire i_0,
-  output wire o_0
+  input wire i,
+  output wire o
 );
   wire G0;
   assign G0 = 1'b0;
-  assign o_0 = ~i_0;
+  assign o = ~i;
 endmodule
 "
         );
@@ -136,15 +146,15 @@ endmodule
         assert_eq!(
             netlist,
             "module my_and_gate(
-  input wire i_0,
-  input wire j_0,
-  output wire o_0
+  input wire i,
+  input wire j,
+  output wire o
 );
   wire G0;
   assign G0 = 1'b0;
   wire G3;
-  assign G3 = i_0 & j_0;
-  assign o_0 = G3;
+  assign G3 = i & j;
+  assign o = G3;
 endmodule
 "
         );
