@@ -68,6 +68,7 @@ trait AppExt {
     fn add_codegen_args(self) -> Self;
     fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
     fn add_ir_top_arg(self, required: bool) -> Self;
+    fn add_ir2g8r_flags(self) -> Self;
 }
 
 impl AppExt for clap::Command {
@@ -209,6 +210,63 @@ impl AppExt for clap::Command {
                 .required(required)
                 .action(ArgAction::Set),
         )
+    }
+
+    fn add_ir2g8r_flags(self) -> Self {
+        (self as clap::Command)
+            .add_bool_arg("fold", "Fold the gate representation")
+            .add_bool_arg("hash", "Hash the gate representation")
+            .add_bool_arg("fraig", "Run fraig optimization")
+            .arg(
+                clap::Arg::new("fraig_max_iterations")
+                    .long("fraig-max-iterations")
+                    .value_name("N")
+                    .help("Maximum number of iterations for fraig optimization")
+                    .action(clap::ArgAction::Set),
+            )
+            .arg(
+                clap::Arg::new("fraig_sim_samples")
+                    .long("fraig-sim-samples")
+                    .value_name("N")
+                    .help("Number of samples to use for fraig optimization")
+                    .action(clap::ArgAction::Set),
+            )
+            .add_bool_arg(
+                "compute_graph_logical_effort",
+                "Compute the graph logical effort worst case delay",
+            )
+            .arg(
+                clap::Arg::new("graph_logical_effort_beta1")
+                    .long("graph-logical-effort-beta1")
+                    .value_name("BETA1")
+                    .help("Beta1 value for graph logical effort computation (default 1.0)")
+                    .default_value("1.0")
+                    .action(clap::ArgAction::Set),
+            )
+            .arg(
+                clap::Arg::new("graph_logical_effort_beta2")
+                    .long("graph-logical-effort-beta2")
+                    .value_name("BETA2")
+                    .help("Beta2 value for graph logical effort computation (default 0.0)")
+                    .default_value("0.0")
+                    .action(clap::ArgAction::Set),
+            )
+            .arg(
+                clap::Arg::new("toggle_sample_count")
+                    .long("toggle-sample-count")
+                    .value_name("N")
+                    .help("If > 0, generate N random input samples and print toggle stats.")
+                    .default_value("0")
+                    .action(clap::ArgAction::Set),
+            )
+            .arg(
+                clap::Arg::new("toggle_sample_seed")
+                    .long("toggle-seed")
+                    .value_name("SEED")
+                    .help("Seed for random toggle stimulus (default 0)")
+                    .default_value("0")
+                    .action(clap::ArgAction::Set),
+            )
     }
 }
 
@@ -386,60 +444,32 @@ fn main() {
                         .index(1),
                 )
                 .add_bool_arg("quiet", "Quiet mode")
-                .add_bool_arg("fold", "Fold the gate representation")
-                .add_bool_arg("hash", "Hash the gate representation")
-                .add_bool_arg("fraig", "Run fraig optimization")
+                .add_ir2g8r_flags(),
+        )
+        .subcommand(
+            clap::Command::new("ir2g8r")
+                .about("Converts IR to GateFn and emits it to stdout; optionally writes .g8rbin and stats")
                 .arg(
-                    clap::Arg::new("fraig_max_iterations")
-                        .long("fraig-max-iterations")
-                        .value_name("N")
-                        .help("Maximum number of iterations for fraig optimization")
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir2g8r_flags()
+                .arg(
+                    clap::Arg::new("bin_out")
+                        .long("bin-out")
+                        .value_name("PATH")
+                        .help("Path to write the .g8rbin file")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
-                    clap::Arg::new("fraig_sim_samples")
-                        .long("fraig-sim-samples")
-                        .value_name("N")
-                        .help("Number of samples to use for fraig optimization")
+                    clap::Arg::new("stats_out")
+                        .long("stats-out")
+                        .value_name("PATH")
+                        .help("Path to write the JSON summary statistics")
                         .action(clap::ArgAction::Set),
                 )
-                .add_bool_arg(
-                    "compute_graph_logical_effort",
-                    "Compute the graph logical effort worst case delay",
-                )
-                // Beta parameters for the graph logical effort computation.
-                .arg(
-                    clap::Arg::new("graph_logical_effort_beta1")
-                        .long("graph-logical-effort-beta1")
-                        .value_name("BETA1")
-                        .help("Beta1 value for graph logical effort computation (default 1.0)")
-                        .default_value("1.0")
-                        .action(clap::ArgAction::Set),
-                )
-                .arg(
-                    clap::Arg::new("graph_logical_effort_beta2")
-                        .long("graph-logical-effort-beta2")
-                        .value_name("BETA2")
-                        .help("Beta2 value for graph logical effort computation (default 0.0)")
-                        .default_value("0.0")
-                        .action(clap::ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("toggle_sample_count")
-                        .long("toggle-sample-count")
-                        .value_name("N")
-                        .help("If > 0, generate N random input samples and print toggle stats.")
-                        .default_value("0")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("toggle_sample_seed")
-                        .long("toggle-seed")
-                        .value_name("SEED")
-                        .help("Seed for random toggle stimulus (default 0)")
-                        .default_value("0")
-                        .action(ArgAction::Set),
-                ),
         )
         .subcommand(
             clap::Command::new("lib2proto")
@@ -547,6 +577,8 @@ fn main() {
         ir_ged::handle_ir_ged(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
         ir2gates::handle_ir2gates(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir2g8r") {
+        ir2gates::handle_ir2g8r(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("lib2proto") {
         lib2proto::handle_lib2proto(matches);
     } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
