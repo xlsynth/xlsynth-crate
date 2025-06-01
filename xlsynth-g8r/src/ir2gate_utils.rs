@@ -24,6 +24,16 @@ impl Default for AdderMapping {
     }
 }
 
+impl std::fmt::Display for AdderMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdderMapping::RippleCarry => write!(f, "ripple-carry"),
+            AdderMapping::BrentKung => write!(f, "brent-kung"),
+            AdderMapping::KoggeStone => write!(f, "kogge-stone"),
+        }
+    }
+}
+
 /// Emits a carry-select adder for the given inputs.
 ///
 /// A carry-select adder specializes groups of bits on whether the carry-in to

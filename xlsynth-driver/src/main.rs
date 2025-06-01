@@ -53,11 +53,15 @@ mod tools;
 use crate::toolchain_config::ToolchainConfig;
 use clap;
 use clap::{Arg, ArgAction};
+use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
 use std::io::{self, Write};
 use xlsynth_g8r::emit_netlist;
 use xlsynth_g8r::gate::{AigBitVector, AigOperand, AigRef, GateFn, Input};
+
+static DEFAULT_ADDER_MAPPING: Lazy<String> =
+    Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
 
 #[derive(Deserialize)]
 struct XlsynthToolchain {
@@ -223,9 +227,9 @@ impl AppExt for clap::Command {
                 clap::Arg::new("adder_mapping")
                     .long("adder-mapping")
                     .value_name("ADDER_MAPPING")
-                    .help("The adder mapping strategy to use (default: ripple-carry).")
-                    .value_parser(["ripple-carry", "kogge-stone"])
-                    .default_value("ripple-carry")
+                    .help("The adder mapping strategy to use (default: brent-kung).")
+                    .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
+                    .default_value(DEFAULT_ADDER_MAPPING.as_str())
                     .action(clap::ArgAction::Set),
             )
             .add_bool_arg("fraig", "Run fraig optimization")

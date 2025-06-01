@@ -80,6 +80,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         .map(|s| s.as_str())
     {
         Some("ripple-carry") => AdderMapping::RippleCarry,
+        Some("brent-kung") => AdderMapping::BrentKung,
         Some("kogge-stone") => AdderMapping::KoggeStone,
         _ => AdderMapping::default(),
     };
