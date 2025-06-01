@@ -34,6 +34,8 @@ pub enum TransformKind {
     MergeFanout,
     FactorSharedAnd,
     UnfactorSharedAnd,
+    OutputNegateWithInputs,
+    ComplementAbsorb,
 }
 
 impl fmt::Display for TransformKind {
@@ -65,6 +67,8 @@ impl fmt::Display for TransformKind {
             TransformKind::MergeFanout => write!(f, "MergeFan"),
             TransformKind::FactorSharedAnd => write!(f, "FactorAnd"),
             TransformKind::UnfactorSharedAnd => write!(f, "UnfactorAnd"),
+            TransformKind::OutputNegateWithInputs => write!(f, "OutNegWithIn"),
+            TransformKind::ComplementAbsorb => write!(f, "ComplementAbsorb"),
         }
     }
 }

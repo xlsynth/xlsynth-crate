@@ -181,10 +181,14 @@ fn run_external_ir_tool(orig_pkg: &str, gate_pkg: &str) -> IrCheckResult {
     }
 
     let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
 
     if stderr_str.contains("DEADLINE_EXCEEDED")
         || stderr_str.contains("SIGINT")
         || stderr_str.contains("interrupted")
+        || stdout_str.contains("DEADLINE_EXCEEDED")
+        || stdout_str.contains("SIGINT")
+        || stdout_str.contains("interrupted")
     {
         return IrCheckResult::TimedOutOrInterrupted;
     }
@@ -193,11 +197,16 @@ fn run_external_ir_tool(orig_pkg: &str, gate_pkg: &str) -> IrCheckResult {
     // something like "NOT EQUIVALENT" or "counterexample".
     if stderr_str.to_lowercase().contains("not equivalent")
         || stderr_str.to_lowercase().contains("counterexample")
+        || stdout_str.to_lowercase().contains("not equivalent")
+        || stdout_str.to_lowercase().contains("counterexample")
     {
         return IrCheckResult::NotEquivalent;
     }
 
-    IrCheckResult::OtherProcessError(format!("retcode {} stderr: {}", output.status, stderr_str))
+    IrCheckResult::OtherProcessError(format!(
+        "retcode {} stderr: {} stdout: {}",
+        output.status, stderr_str, stdout_str
+    ))
 }
 
 /// Structured variant of `prove_same_gate_fn_via_ir`.

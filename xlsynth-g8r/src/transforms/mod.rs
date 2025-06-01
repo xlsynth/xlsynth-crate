@@ -2,6 +2,7 @@
 
 pub mod and_absorb;
 pub mod balance_and_tree;
+pub mod complement_absorb;
 pub mod double_negate;
 pub mod duplicate;
 pub mod factor_shared_and;
@@ -24,6 +25,7 @@ use crate::transforms::false_and::{InsertFalseAndTransform, RemoveFalseAndTransf
 use crate::transforms::rotate_and::{RotateAndLeftTransform, RotateAndRightTransform};
 use crate::transforms::true_and::{InsertTrueAndTransform, RemoveTrueAndTransform};
 use balance_and_tree::{BalanceAndTreeTransform, UnbalanceAndTreeTransform};
+use complement_absorb::ComplementAbsorbTransform;
 use double_negate::DoubleNegateTransform;
 use duplicate::{DuplicateGateTransform, UnduplicateGateTransform};
 use factor_shared_and::{FactorSharedAndTransform, UnfactorSharedAndTransform};
@@ -67,6 +69,7 @@ pub fn get_all_transforms() -> Vec<Box<dyn Transform>> {
         Box::new(MergeFanoutTransform::new()),
         Box::new(FactorSharedAndTransform::new()),
         Box::new(UnfactorSharedAndTransform::new()),
+        Box::new(ComplementAbsorbTransform::new()),
     ]
 }
 

@@ -938,8 +938,8 @@ fn write_checkpoint(
     let ir_status = prove_same_gate_fn_via_ir_status(original_gfn, best_gfn);
     let equiv_ok_external = matches!(ir_status, IrCheckResult::Equivalent);
 
-    if equiv_ok_sat != equiv_ok_external || !equiv_ok_sat {
-        // Ensure we persist the disagreeing pair for offline triage.
+    if equiv_ok_sat != equiv_ok_external {
+        // Disagreement between engines – dump and error.
         if let Some(parent_dir) = g8r_path.parent() {
             let dump_dir = parent_dir.join("equiv_failures");
             let _ = std::fs::create_dir_all(&dump_dir);
@@ -967,6 +967,17 @@ fn write_checkpoint(
             equiv_ok_external
         ));
     }
+
+    if !equiv_ok_sat {
+        // If every engine agrees the candidate is NOT equivalent we treat this as
+        // a critical correctness error – the MCMC acceptance logic should never
+        // promote such a GateFn to `best_gfn`.  Dump and raise.
+        anyhow::bail!(
+            "[mcmc] FATAL: best_gfn at iter {} proven NON-equivalent by both engines – indicates a bug in acceptance logic.",
+            iter
+        );
+    }
+
     match ir_status {
         IrCheckResult::Equivalent => {}
         IrCheckResult::TimedOutOrInterrupted => {
