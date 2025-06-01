@@ -4,7 +4,8 @@
 //! subprocess.
 
 use std::process::Command;
-use xlsynth_g8r::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
+use xlsynth_g8r::gate::AigBitVector;
+use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 
 use test_case::test_case;
 
@@ -1557,164 +1558,57 @@ fn test_ir2g8r_emits_all_outputs() {
 
 #[test]
 fn test_g8r2v_add_clk_port_behavior() {
-    // Build a minimal GateFn with one input and one output
-    let gates = vec![
-        AigNode::Input {
-            name: "a".to_string(),
-            lsb_index: 0,
-        },
-        AigNode::And2 {
-            a: AigOperand {
-                node: AigRef { id: 0 },
-                negated: false,
-            },
-            b: AigOperand {
-                node: AigRef { id: 0 },
-                negated: false,
-            },
-            tags: None,
-        },
-    ];
-    let input = Input {
-        name: "a".to_string(),
-        bit_vector: AigBitVector::from_bit(AigOperand {
-            node: AigRef { id: 0 },
-            negated: false,
-        }),
-    };
-    let output = Output {
-        name: "y".to_string(),
-        bit_vector: AigBitVector::from_bit(AigOperand {
-            node: AigRef { id: 1 },
-            negated: false,
-        }),
-    };
-    let gate_fn = GateFn {
-        name: "testmod".to_string(),
-        inputs: vec![input],
-        outputs: vec![output],
-        gates,
-    };
+    let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    // Create a simple AND gate y = a & a, which is effectively y = a
+    let y_val = g8_builder.add_and_binary(*a_val.get_lsb(0), *a_val.get_lsb(0));
+    g8_builder.add_output("y".to_string(), AigBitVector::from_bit(y_val));
+    let gate_fn = g8_builder.build();
+
     let temp_dir = tempfile::tempdir().unwrap();
-    let g8r_path = temp_dir.path().join("test.g8r");
+    let g8r_path = temp_dir.path().join("testmod.g8r");
     std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
-    // 1. No --add-clk-port: should not see clk in netlist
-    let output = std::process::Command::new(command_path)
-        .arg("g8r2v")
-        .arg(g8r_path.to_str().unwrap())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "g8r2v failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains("clk"),
-        "netlist should not contain clk by default: {}",
-        stdout
-    );
-    // 2. --add-clk-port: should see clk as first input
-    let output = std::process::Command::new(command_path)
+    let output = Command::new(command_path)
         .arg("g8r2v")
         .arg(g8r_path.to_str().unwrap())
         .arg("--add-clk-port")
+        .arg("clk")
         .output()
         .unwrap();
+
     assert!(
         output.status.success(),
-        "g8r2v failed: {}",
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("clk"),
-        "netlist should contain clk as first input: {}",
-        stdout
-    );
-    assert!(
-        !stdout.contains("clk_0"),
-        "clock port should not be suffixed with _0: {}",
-        stdout
-    );
-    // 3. --add-clk-port=foo: should see foo as first input
-    let output = std::process::Command::new(command_path)
-        .arg("g8r2v")
-        .arg(g8r_path.to_str().unwrap())
-        .arg("--add-clk-port=foo")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "g8r2v failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("foo"),
-        "netlist should contain foo as first input: {}",
-        stdout
-    );
-    assert!(
-        !stdout.contains("foo_0"),
-        "clock port should not be suffixed with _0: {}",
-        stdout
-    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+
+    let expected_netlist = "module testmod(\n  input wire clk,\n  input wire a,\n  output wire y\n);\n  wire G0;\n  wire G2;\n  assign G0 = 1'b0;\n  assign G2 = a & a;\n  assign y = G2;\nendmodule\n\n";
+    assert_eq!(netlist, expected_netlist);
 }
 
 #[test]
 fn test_g8r2v_module_name() {
-    // Build a minimal GateFn with one input and one output
-    let gates = vec![
-        AigNode::Input {
-            name: "a".to_string(),
-            lsb_index: 0,
-        },
-        AigNode::And2 {
-            a: AigOperand {
-                node: AigRef { id: 0 },
-                negated: false,
-            },
-            b: AigOperand {
-                node: AigRef { id: 0 },
-                negated: false,
-            },
-            tags: None,
-        },
-    ];
-    let input = Input {
-        name: "a".to_string(),
-        bit_vector: AigBitVector::from_bit(AigOperand {
-            node: AigRef { id: 0 },
-            negated: false,
-        }),
-    };
-    let output = Output {
-        name: "y".to_string(),
-        bit_vector: AigBitVector::from_bit(AigOperand {
-            node: AigRef { id: 1 },
-            negated: false,
-        }),
-    };
-    let gate_fn = GateFn {
-        name: "testmod".to_string(),
-        inputs: vec![input],
-        outputs: vec![output],
-        gates,
-    };
-    let temp_dir = tempfile::tempdir().unwrap();
-    let g8r_path = temp_dir.path().join("test.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
-    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let y_val = g8_builder.add_and_binary(*a_val.get_lsb(0), *a_val.get_lsb(0));
+    g8_builder.add_output("y".to_string(), AigBitVector::from_bit(y_val));
+    let gate_fn = g8_builder.build();
 
-    // Default module name should be gate_fn.name
-    let output = std::process::Command::new(command_path)
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
         .arg("g8r2v")
         .arg(g8r_path.to_str().unwrap())
         .output()
         .unwrap();
+
     assert!(
         output.status.success(),
         "g8r2v failed: {}",
@@ -1728,7 +1622,7 @@ fn test_g8r2v_module_name() {
     );
 
     // Override module name
-    let output = std::process::Command::new(command_path)
+    let output = Command::new(command_path)
         .arg("g8r2v")
         .arg(g8r_path.to_str().unwrap())
         .arg("--module-name=newmod")
@@ -1750,4 +1644,298 @@ fn test_g8r2v_module_name() {
         "original module name should not appear when overridden: {}",
         stdout
     );
+}
+
+#[test]
+fn test_g8r2v_flop_inputs_outputs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("my_flop_inv".to_string(), GateBuilderOptions::no_opt());
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    let o_val = g8_builder.add_not(*i_val.get_lsb(0));
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(o_val));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("my_flop_inv.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--flop-inputs")
+        .arg("--flop-outputs")
+        .arg("--add-clk-port")
+        .arg("clk")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+
+    let expected_netlist = r#"module my_flop_inv(
+  input wire clk,
+  input wire i,
+  output wire o
+);
+  reg p0_i;
+  reg p0_o;
+  wire G0;
+  wire o_comb;
+  assign G0 = 1'b0;
+  assign o_comb = ~p0_i;
+  always_ff @ (posedge clk) begin
+    p0_i <= i;
+    p0_o <= o_comb;
+  end
+  assign o = p0_o;
+endmodule
+
+"#;
+    assert_eq!(netlist, expected_netlist);
+}
+
+#[test]
+fn test_g8r2v_flop_inputs_only() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder =
+        GateBuilder::new("my_flop_inv_fi".to_string(), GateBuilderOptions::no_opt());
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    let o_val = g8_builder.add_not(*i_val.get_lsb(0));
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(o_val));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("my_flop_inv_fi.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--flop-inputs")
+        .arg("--add-clk-port")
+        .arg("clk")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+    let expected_netlist = r#"module my_flop_inv_fi(
+  input wire clk,
+  input wire i,
+  output wire o
+);
+  reg p0_i;
+  wire G0;
+  assign G0 = 1'b0;
+  assign o = ~p0_i;
+  always_ff @ (posedge clk) begin
+    p0_i <= i;
+  end
+endmodule
+
+"#;
+    assert_eq!(netlist, expected_netlist);
+}
+
+#[test]
+fn test_g8r2v_flop_outputs_only() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder =
+        GateBuilder::new("my_flop_inv_fo".to_string(), GateBuilderOptions::no_opt());
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    let o_val = g8_builder.add_not(*i_val.get_lsb(0));
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(o_val));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("my_flop_inv_fo.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--flop-outputs")
+        .arg("--add-clk-port")
+        .arg("clk")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+
+    let expected_netlist = r#"module my_flop_inv_fo(
+  input wire clk,
+  input wire i,
+  output wire o
+);
+  reg p0_o;
+  wire G0;
+  wire o_comb;
+  assign G0 = 1'b0;
+  assign o_comb = ~i;
+  always_ff @ (posedge clk) begin
+    p0_o <= o_comb;
+  end
+  assign o = p0_o;
+endmodule
+
+"#;
+    assert_eq!(netlist, expected_netlist);
+}
+
+#[test]
+fn test_g8r2v_flop_requires_clk_port_error() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("dummy".to_string(), GateBuilderOptions::no_opt());
+    // Add a dummy input and output to make it a valid, though minimal, GateFn
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(*i_val.get_lsb(0)));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("dummy.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--flop-inputs") // Enable flopping
+        // Missing --add-clk-port
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "Command should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used."
+        ),
+        "Stderr should contain the specific error message. Stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_g8r2v_flop_with_custom_clk_name() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new(
+        "my_custom_clk_inv".to_string(),
+        GateBuilderOptions::no_opt(),
+    );
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    let o_val = g8_builder.add_not(*i_val.get_lsb(0));
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(o_val));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("my_custom_clk_inv.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--flop-inputs")
+        .arg("--add-clk-port")
+        .arg("my_clk") // Custom clock name
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+
+    // Check for the custom clock name in the input port list
+    let expected_module_def = "module my_custom_clk_inv(\n  input wire my_clk,\n  input wire i,
+  output wire o
+);";
+    assert!(
+        netlist.contains(expected_module_def),
+        "Netlist module definition not as expected. Netlist:\n{}",
+        netlist
+    );
+
+    // Check that the always_ff block also uses the custom clock name
+    let expected_ff_block_sensitivity = "always_ff @ (posedge my_clk)";
+    assert!(
+        netlist.contains(expected_ff_block_sensitivity),
+        "Netlist should use custom clock in always_ff sensitivity list. Netlist:\n{}",
+        netlist
+    );
+}
+
+#[test]
+fn test_g8r2v_use_system_verilog() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("my_sv_inv".to_string(), GateBuilderOptions::no_opt());
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    let o_val = g8_builder.add_not(*i_val.get_lsb(0));
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(o_val));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("my_sv_inv.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2v")
+        .arg(g8r_path.to_str().unwrap())
+        .arg("--use-system-verilog")
+        // No flopping, so clock is not strictly needed by emit_netlist for file type choice,
+        // but if we were flopping, we would add --add-clk-port here.
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+    // At this stage, with VAST, the output might be identical for simple Verilog vs
+    // SV unless specific SV features are used by emit_netlist.
+    // We are mainly testing that the flag is accepted and the command runs.
+    let expected_netlist = r#"module my_sv_inv(
+  input wire i,
+  output wire o
+);
+  wire G0;
+  assign G0 = 1'b0;
+  assign o = ~i;
+endmodule
+
+"#;
+    // For now, we expect identical output. If emit_netlist starts emitting SV
+    // specific syntax, this expectation will need to change.
+    assert_eq!(netlist, expected_netlist);
 }

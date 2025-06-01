@@ -162,7 +162,14 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     }
 
     if options.emit_netlist {
-        let netlist = emit_netlist::emit_netlist(&ir_top.name, &gate_fn);
+        let netlist =
+            match emit_netlist::emit_netlist(&ir_top.name, &gate_fn, false, false, false, None) {
+                Ok(netlist) => netlist,
+                Err(e) => {
+                    eprintln!("Failed to emit netlist: {}", e);
+                    std::process::exit(1);
+                }
+            };
         println!("{}", netlist);
     }
 
