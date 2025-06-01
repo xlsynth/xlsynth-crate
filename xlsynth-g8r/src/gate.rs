@@ -15,7 +15,7 @@ pub struct AigRef {
     pub id: usize,
 }
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct AigOperand {
     pub node: AigRef,
     pub negated: bool,

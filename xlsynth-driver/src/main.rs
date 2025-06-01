@@ -38,6 +38,7 @@ mod common;
 mod dslx2ir;
 mod dslx2pipeline;
 mod dslx2sv_types;
+mod g8r2v;
 mod gv2ir;
 mod ir2delayinfo;
 mod ir2gates;
@@ -56,9 +57,6 @@ use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
-use std::io::{self, Write};
-use xlsynth_g8r::emit_netlist;
-use xlsynth_g8r::gate::{AigBitVector, AigOperand, AigRef, GateFn, Input};
 
 static DEFAULT_ADDER_MAPPING: Lazy<String> =
     Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
@@ -546,19 +544,35 @@ fn main() {
                         .index(1),
                 )
                 .arg(
-                    clap::Arg::new("add_clk_port")
+                    clap::Arg::new("add-clk-port")
                         .long("add-clk-port")
                         .value_name("NAME")
-                        .help("Insert an (unused) clock port with this name as the first input; if given with no value, defaults to 'clk'")
-                        .num_args(0..=1)
-                        .require_equals(true),
+                        .help("Name for the clock port. Mandatory if --flop-inputs or --flop-outputs is used. If specified without flopping, adds a clock port with this name.")
+                        .required(false),
                 )
                 .arg(
-                    clap::Arg::new("module_name")
+                    clap::Arg::new("flop-inputs")
+                        .long("flop-inputs")
+                        .help("Add a layer of flops for all inputs.")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("flop-outputs")
+                        .long("flop-outputs")
+                        .help("Add a layer of flops for all outputs.")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("use-system-verilog")
+                        .long("use-system-verilog")
+                        .help("Emit SystemVerilog instead of Verilog.")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("module-name")
                         .long("module-name")
-                        .value_name("NAME")
-                        .help("Name of the generated module in the output netlist")
-                        .action(ArgAction::Set),
+                        .value_name("MODULE_NAME")
+                        .help("Name of the generated module"),
                 )
         )
         .get_matches();
@@ -633,79 +647,9 @@ fn main() {
     } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
         gv2ir::handle_gv2ir(matches);
     } else if let Some(matches) = matches.subcommand_matches("g8r2v") {
-        // Implementation for g8r2v
-        let input_file = matches.get_one::<String>("g8r_input_file").unwrap();
-        let add_clk_port = matches.get_many::<String>("add_clk_port");
-        // Try to load as text .g8r first, then as bincode .g8rbin
-        let gate_fn: GateFn = match std::fs::read_to_string(input_file) {
-            Ok(s) => match GateFn::from_str(&s) {
-                Ok(g) => g,
-                Err(_) => {
-                    // Try as bincode
-                    match std::fs::read(input_file) {
-                        Ok(bytes) => match bincode::deserialize(&bytes) {
-                            Ok(g) => g,
-                            Err(e) => {
-                                eprintln!("Failed to parse as .g8r or .g8rbin: {}", e);
-                                std::process::exit(1);
-                            }
-                        },
-                        Err(e) => {
-                            eprintln!("Failed to read input file: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            },
-            Err(_) => {
-                // Try as bincode
-                match std::fs::read(input_file) {
-                    Ok(bytes) => match bincode::deserialize(&bytes) {
-                        Ok(g) => g,
-                        Err(e) => {
-                            eprintln!("Failed to parse as .g8r or .g8rbin: {}", e);
-                            std::process::exit(1);
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to read input file: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
-        };
-        // Optionally add a clock port
-        let mut gate_fn = gate_fn;
-        let clk_port_name = if let Some(mut vals) = add_clk_port {
-            match vals.next() {
-                Some(s) => s.as_str(),
-                None => "clk",
-            }
-        } else {
-            ""
-        };
-        if !clk_port_name.is_empty() {
-            // Insert a new input at the start
-            let clk_input = Input {
-                name: clk_port_name.to_string(),
-                bit_vector: AigBitVector::from_bit(AigOperand {
-                    node: AigRef { id: 0 },
-                    negated: false,
-                }),
-            };
-            // Shift all existing input lsb_index by 1, and update their AigRef ids
-            // (for a single-bit clock, this is safe as a dummy input)
-            let mut new_inputs = vec![clk_input];
-            new_inputs.extend(gate_fn.inputs.into_iter());
-            gate_fn.inputs = new_inputs;
+        if let Err(e) = g8r2v::handle_g8r2v(matches) {
+            report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
         }
-        let module_name = matches
-            .get_one::<String>("module_name")
-            .map(|s| s.as_str())
-            .unwrap_or(&gate_fn.name);
-        let netlist = emit_netlist::emit_netlist(module_name, &gate_fn);
-        print!("{}", netlist);
-        io::stdout().flush().unwrap();
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {

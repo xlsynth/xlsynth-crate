@@ -421,7 +421,14 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     }
     // If --netlist-out is given, write the gate-level netlist (human-readable)
     if let Some(netlist_path) = netlist_out {
-        let netlist = emit_netlist::emit_netlist(&gate_fn.name, &gate_fn);
+        let netlist =
+            match emit_netlist::emit_netlist(&gate_fn.name, &gate_fn, false, false, false, None) {
+                Ok(netlist) => netlist,
+                Err(e) => {
+                    eprintln!("Failed to emit netlist: {}", e);
+                    std::process::exit(1);
+                }
+            };
         let mut f = File::create(netlist_path).expect("Failed to create netlist_out file");
         f.write_all(netlist.as_bytes())
             .expect("Failed to write netlist_out file");
