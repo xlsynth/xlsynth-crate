@@ -1679,26 +1679,8 @@ fn test_g8r2v_flop_inputs_outputs() {
     );
     let netlist = String::from_utf8_lossy(&output.stdout);
 
-    let expected_netlist = r#"module my_flop_inv(
-  input wire clk,
-  input wire i,
-  output wire o
-);
-  reg p0_i;
-  reg p0_o;
-  wire G0;
-  wire o_comb;
-  assign G0 = 1'b0;
-  assign o_comb = ~p0_i;
-  always_ff @ (posedge clk) begin
-    p0_i <= i;
-    p0_o <= o_comb;
-  end
-  assign o = p0_o;
-endmodule
-
-"#;
-    assert_eq!(netlist, expected_netlist);
+    let expected_output = "module my_flop_inv(\n  input wire clk,\n  input wire i,\n  output wire o\n);\n  reg p0_i;\n  wire o_comb;\n  reg p0_o;\n  wire G0;\n  assign G0 = 1'b0;\n  assign o_comb = ~p0_i;\n  always_ff @ (posedge clk) begin\n    p0_i <= i;\n    p0_o <= o_comb;\n  end\n  assign o = p0_o;\nendmodule\n\n";
+    assert_eq!(netlist, expected_output);
 }
 
 #[test]
@@ -1783,24 +1765,8 @@ fn test_g8r2v_flop_outputs_only() {
     );
     let netlist = String::from_utf8_lossy(&output.stdout);
 
-    let expected_netlist = r#"module my_flop_inv_fo(
-  input wire clk,
-  input wire i,
-  output wire o
-);
-  reg p0_o;
-  wire G0;
-  wire o_comb;
-  assign G0 = 1'b0;
-  assign o_comb = ~i;
-  always_ff @ (posedge clk) begin
-    p0_o <= o_comb;
-  end
-  assign o = p0_o;
-endmodule
-
-"#;
-    assert_eq!(netlist, expected_netlist);
+    let expected_output = "module my_flop_inv_fo(\n  input wire clk,\n  input wire i,\n  output wire o\n);\n  wire o_comb;\n  reg p0_o;\n  wire G0;\n  assign G0 = 1'b0;\n  assign o_comb = ~i;\n  always_ff @ (posedge clk) begin\n    p0_o <= o_comb;\n  end\n  assign o = p0_o;\nendmodule\n\n";
+    assert_eq!(netlist, expected_output);
 }
 
 #[test]
