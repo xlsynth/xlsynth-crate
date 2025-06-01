@@ -553,34 +553,28 @@ mod tests {
             .expect("carry select and ripple carry should be equivalent");
     }
 
-    #[test_case(1)]
-    #[test_case(2)]
-    #[test_case(3)]
-    #[test_case(4)]
-    #[test_case(5)]
-    #[test_case(6)]
-    #[test_case(7)]
-    #[test_case(8)]
-    fn test_gatify_add_kogge_stone(bits: usize) {
-        let ripple = make_ripple_carry(bits);
-        let ks = make_kogge_stone(bits);
-        check_equivalence::prove_same_gate_fn_via_ir(&ripple, &ks)
-            .expect("kogge stone and ripple carry should be equivalent");
+    #[test]
+    fn test_gatify_add_kogge_stone_1_to_16() {
+        for bits in 1..=16 {
+            let ripple = make_ripple_carry(bits);
+            let ks = make_kogge_stone(bits);
+            check_equivalence::prove_same_gate_fn_via_ir(&ripple, &ks).expect(&format!(
+                "kogge stone and ripple carry should be equivalent for {} bits",
+                bits
+            ));
+        }
     }
 
-    #[test_case(1)]
-    #[test_case(2)]
-    #[test_case(3)]
-    #[test_case(4)]
-    #[test_case(5)]
-    #[test_case(6)]
-    #[test_case(7)]
-    #[test_case(8)]
-    fn test_gatify_add_brent_kung(bits: usize) {
-        let ripple = make_ripple_carry(bits);
-        let bk = make_brent_kung(bits);
-        check_equivalence::prove_same_gate_fn_via_ir(&ripple, &bk)
-            .expect("brent kung and ripple carry should be equivalent");
+    #[test]
+    fn test_gatify_add_brent_kung_1_to_16() {
+        for bits in 1..=16 {
+            let ripple = make_ripple_carry(bits);
+            let bk = make_brent_kung(bits);
+            check_equivalence::prove_same_gate_fn_via_ir(&ripple, &bk).expect(&format!(
+                "brent kung and ripple carry should be equivalent for {} bits",
+                bits
+            ));
+        }
     }
 
     #[test_case(1)]
