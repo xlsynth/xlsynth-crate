@@ -53,11 +53,15 @@ mod tools;
 use crate::toolchain_config::ToolchainConfig;
 use clap;
 use clap::{Arg, ArgAction};
+use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
 use std::io::{self, Write};
 use xlsynth_g8r::emit_netlist;
 use xlsynth_g8r::gate::{AigBitVector, AigOperand, AigRef, GateFn, Input};
+
+static DEFAULT_ADDER_MAPPING: Lazy<String> =
+    Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
 
 #[derive(Deserialize)]
 struct XlsynthToolchain {
@@ -219,6 +223,15 @@ impl AppExt for clap::Command {
         (self as clap::Command)
             .add_bool_arg("fold", "Fold the gate representation")
             .add_bool_arg("hash", "Hash the gate representation")
+            .arg(
+                clap::Arg::new("adder_mapping")
+                    .long("adder-mapping")
+                    .value_name("ADDER_MAPPING")
+                    .help("The adder mapping strategy to use (default: brent-kung).")
+                    .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
+                    .default_value(DEFAULT_ADDER_MAPPING.as_str())
+                    .action(clap::ArgAction::Set),
+            )
             .add_bool_arg("fraig", "Run fraig optimization")
             .arg(
                 clap::Arg::new("fraig_max_iterations")
@@ -439,12 +452,13 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("ir2gates")
-                .about("Converts IR to gates")
+                .about("Converts IR to GateFn and emits it to stdout as JSON")
                 .arg(
-                    Arg::new("ir_input_file")
+                    clap::Arg::new("ir_input_file")
+                        .value_name("IR_INPUT_FILE")
                         .help("The input IR file")
                         .required(true)
-                        .index(1),
+                        .action(ArgAction::Set),
                 )
                 .add_bool_arg("quiet", "Quiet mode")
                 .add_ir2g8r_flags(),

@@ -206,7 +206,6 @@ fn run_explore_exploit(
     start_gfn: GateFn,
     running: Arc<AtomicBool>,
     best: Arc<Best>,
-    init_metric: usize,
     output_dir: PathBuf,
 ) -> Result<()> {
     let chain_count = cfg.threads as usize;
@@ -234,15 +233,7 @@ fn run_explore_exploit(
             // Explorer gets 10× the user-supplied temperature and does *not* cool.
             let explorer_temp = cfg_cl.initial_temperature * 10.0;
 
-            // Exploiters start at the user-supplied temperature and cool linearly
-            // w.r.t. the *global* iteration budget (cfg_cl.iters).
-            let base_temperature: f64 = if chain_no == 0 {
-                explorer_temp
-            } else {
-                cfg_cl.initial_temperature
-            };
-
-            let mut segment_temperature: f64 = base_temperature;
+            let mut segment_temperature: f64;
 
             while remaining > 0 && running_cl.load(Ordering::SeqCst) {
                 let seg = std::cmp::min(cfg_cl.checkpoint_iters, remaining);
@@ -551,7 +542,6 @@ fn main() -> Result<()> {
                 start_gfn.clone(),
                 running.clone(),
                 best.clone(),
-                init_metric,
                 output_dir.clone(),
             )?;
         }

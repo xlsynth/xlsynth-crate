@@ -349,7 +349,7 @@ fn run_sequential_logic_test(use_system_verilog: bool) {
 
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
 
-    let mut always_block = if use_system_verilog {
+    let always_block = if use_system_verilog {
         module.add_always_ff(&[&posedge_clk]).unwrap()
     } else {
         module.add_always_at(&[&posedge_clk]).unwrap()

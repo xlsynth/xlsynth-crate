@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::liberty_proto::{Library, PinDirection};
 use crate::netlist::parse::{
-    Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
+    Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
 };
 use string_interner::symbol::SymbolU32;
 use string_interner::{backend::StringBackend, StringInterner};

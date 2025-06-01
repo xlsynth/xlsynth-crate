@@ -7,6 +7,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use xlsynth_g8r::{
     gate_builder::GateBuilderOptions,
     ir2gate,
+    ir2gate_utils::AdderMapping,
     test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
 };
 
@@ -26,6 +27,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
                 check_equivalence: false, // Not needed for benchmark
+                adder_mapping: AdderMapping::default(),
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -41,6 +43,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
                 check_equivalence: false, // Not needed for benchmark
+                adder_mapping: AdderMapping::default(),
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -56,6 +59,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
                 check_equivalence: false, // Not needed for benchmark
+                adder_mapping: AdderMapping::default(),
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -80,6 +84,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
                 check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -95,6 +100,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
                 check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -110,6 +116,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
                 check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })

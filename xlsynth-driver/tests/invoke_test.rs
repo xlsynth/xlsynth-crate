@@ -20,6 +20,51 @@ tool_path = \"{}\"",
     )
 }
 
+#[test]
+fn test_ir2gates_adder_mapping_flag() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = "fn main(a: u8, b: u8) -> u8 { a + b }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("main.x");
+    let ir_path = temp_dir.path().join("main.ir");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // dslx2ir
+    let dslx2ir_output = std::process::Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+    assert!(dslx2ir_output.status.success());
+    std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
+
+    fn run(driver: &str, ir: &std::path::Path, mapping: &str) -> serde_json::Value {
+        let out = std::process::Command::new(driver)
+            .arg("ir2gates")
+            .arg(ir.to_str().unwrap())
+            .arg("--quiet=true")
+            .arg(format!("--adder-mapping={}", mapping))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    let rc = run(command_path, &ir_path, "ripple-carry");
+    let bk = run(command_path, &ir_path, "brent-kung");
+    let ks = run(command_path, &ir_path, "kogge-stone");
+
+    assert_eq!(rc["deepest_path"], 22);
+    assert_eq!(bk["deepest_path"], 13);
+    assert_eq!(ks["deepest_path"], 17);
+}
+
 /// Simple test that converts a DSLX module with an enum into a SV definition.
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]

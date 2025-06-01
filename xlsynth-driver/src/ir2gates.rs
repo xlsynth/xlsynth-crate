@@ -14,6 +14,7 @@ use xlsynth_g8r::fanout::fanout_histogram;
 use xlsynth_g8r::fuzz_utils::arbitrary_irbits;
 use xlsynth_g8r::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::graph_logical_effort::{self, analyze_graph_logical_effort};
+use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::logical_effort::compute_logical_effort_min_delay;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::use_count::get_id_to_use_count;
@@ -23,6 +24,7 @@ fn ir2gates(
     quiet: bool,
     fold: bool,
     hash: bool,
+    adder_mapping: AdderMapping,
     fraig: bool,
     toggle_sample_count: usize,
     toggle_sample_seed: u64,
@@ -37,6 +39,7 @@ fn ir2gates(
         check_equivalence: false,
         fold,
         hash,
+        adder_mapping,
         fraig,
         quiet,
         emit_netlist: false,
@@ -71,6 +74,15 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("true") => true,
         Some("false") => false,
         _ => true, // default for hashing is true
+    };
+    let adder_mapping = match matches
+        .get_one::<String>("adder_mapping")
+        .map(|s| s.as_str())
+    {
+        Some("ripple-carry") => AdderMapping::RippleCarry,
+        Some("brent-kung") => AdderMapping::BrentKung,
+        Some("kogge-stone") => AdderMapping::KoggeStone,
+        _ => AdderMapping::default(),
     };
     let fraig = match matches.get_one::<String>("fraig").map(|s| s.as_str()) {
         Some("true") => true,
@@ -149,6 +161,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         quiet,
         fold,
         hash,
+        adder_mapping,
         fraig,
         toggle_sample_count,
         toggle_sample_seed,
@@ -200,6 +213,7 @@ fn ir_to_gatefn_with_stats(
         xlsynth_g8r::ir2gate::GatifyOptions {
             fold,
             hash,
+            adder_mapping: AdderMapping::default(),
             check_equivalence: false,
         },
     )

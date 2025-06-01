@@ -42,6 +42,7 @@ pub struct Options {
     pub check_equivalence: bool,
     pub fold: bool,
     pub hash: bool,
+    pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub fraig: bool,
 
     /// If not set, we fraig to convergence.
@@ -95,6 +96,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         ir2gate::GatifyOptions {
             fold: options.fold,
             hash: options.hash,
+            adder_mapping: options.adder_mapping,
             check_equivalence: false, // Check is done below if requested
         },
     )

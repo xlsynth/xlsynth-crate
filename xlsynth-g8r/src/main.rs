@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Parser;
+use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path::{process_ir_path, Options};
 
 /// Simple program to parse an XLS IR file and emit a Verilog netlist.
@@ -72,6 +73,7 @@ fn main() {
         check_equivalence: args.check_equivalence,
         fold: args.fold,
         hash: args.hash,
+        adder_mapping: AdderMapping::default(),
         fraig: args.fraig,
         emit_netlist: args.emit_netlist,
         quiet: args.emit_netlist,
