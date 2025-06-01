@@ -2,7 +2,8 @@
 
 #[cfg(test)]
 mod tests {
-    use xlsynth::{ir_value::*, vast::*};
+    use xlsynth::ir_value::*;
+    use xlsynth::vast::*;
 
     #[test]
     fn test_vast() {
@@ -29,13 +30,7 @@ mod tests {
         let assignment = file.make_continuous_assignment(&output.to_expr(), &slice.to_expr());
         module.add_member_continuous_assignment(assignment);
         let verilog = file.emit();
-        let want = "module my_module(
-  input wire [7:0] my_input,
-  output wire [3:0] my_output
-);
-  assign my_output = my_input[3:0];
-endmodule
-";
+        let want = "module my_module(\n  input wire [7:0] my_input,\n  output wire [3:0] my_output\n);\n  assign my_output = my_input[3:0];\nendmodule\n";
         assert_eq!(verilog, want);
     }
 
@@ -65,21 +60,7 @@ endmodule
         ));
 
         let verilog = file.emit();
-        let want = "module A(
-  output wire [7:0] bus
-);
-
-endmodule
-module B;
-  wire [7:0] bus;
-  A #(
-    .a_param(32'd42)
-  ) a_i (
-    .bus(bus),
-    .empty_thing()
-  );
-endmodule
-";
+        let want = "module A(\n  output wire [7:0] bus\n);\n\nendmodule\nmodule B;\n  wire [7:0] bus;\n  A #(\n    .a_param(32'd42)\n  ) a_i (\n    .bus(bus),\n    .empty_thing()\n  );\nendmodule\n";
         assert_eq!(verilog, want);
     }
 
@@ -110,11 +91,7 @@ endmodule
         let assignment = file.make_continuous_assignment(&wire.to_expr(), &literal);
         module.add_member_continuous_assignment(assignment);
         let verilog = file.emit();
-        let want = "module my_module;
-  wire [127:0] bus;
-  assign bus = 128'hffee_ddcc_bbaa_9988_7766_5544_3322_1100;
-endmodule
-";
+        let want = "module my_module;\n  wire [127:0] bus;\n  assign bus = 128'hffee_ddcc_bbaa_9988_7766_5544_3322_1100;\nendmodule\n";
         assert_eq!(verilog, want);
     }
 
@@ -127,12 +104,7 @@ endmodule
         let my_struct = file.make_extern_package_type("mypack", "mystruct_t");
         let input_type = file.make_packed_array_type(my_struct, &[2, 3, 4]);
         module.add_input("my_input", &input_type);
-        let want = "module my_module(
-  input mypack::mystruct_t [1:0][2:0][3:0] my_input
-);
-
-endmodule
-";
+        let want = "module my_module(\n  input mypack::mystruct_t [1:0][2:0][3:0] my_input\n);\n\nendmodule\n";
         assert_eq!(file.emit(), want);
     }
 
@@ -149,13 +121,7 @@ endmodule
         let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
         module.add_member_continuous_assignment(assignment);
         let verilog = file.emit();
-        let want = "module my_module(
-  input wire [7:0] my_input,
-  output wire [15:0] my_output
-);
-  assign my_output = {my_input, my_input};
-endmodule
-";
+        let want = "module my_module(\n  input wire [7:0] my_input,\n  output wire [15:0] my_output\n);\n  assign my_output = {my_input, my_input};\nendmodule\n";
         assert_eq!(verilog, want);
     }
 
@@ -163,14 +129,7 @@ endmodule
     /// on the LHS or RHS of an assign statement.
     #[test]
     fn test_slice_on_both_sides_of_assignment() {
-        let want = "module my_module;
-  wire [1:0][2:0][4:0] a;
-  wire [1:0] b;
-  wire [2:0] c;
-  assign a[1][2][3:4] = b[1:0];
-  assign a[3:4] = c[2:1];
-endmodule
-";
+        let want = "module my_module;\n  wire [1:0][2:0][4:0] a;\n  wire [1:0] b;\n  wire [2:0] c;\n  assign a[1][2][3:4] = b[1:0];\n  assign a[3:4] = c[2:1];\nendmodule\n";
 
         let mut file = VastFile::new(VastFileType::Verilog);
         let mut module = file.add_module("my_module");
@@ -217,13 +176,7 @@ endmodule
         let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
         module.add_member_continuous_assignment(assignment);
         let verilog = file.emit();
-        let want = "module my_module(
-  input wire [7:0] my_input,
-  output wire [8:0] my_output
-);
-  assign my_output = {my_input[0], my_input[7:0]};
-endmodule
-";
+        let want = "module my_module(\n  input wire [7:0] my_input,\n  output wire [8:0] my_output\n);\n  assign my_output = {my_input[0], my_input[7:0]};\nendmodule\n";
         assert_eq!(verilog, want);
     }
 
@@ -248,18 +201,12 @@ endmodule
             &or_reduce_input,   // 1 bit
             &xor_reduce_input,  // 1 bit
         ]);
-        let concat_type = file.make_bit_vector_type(8 + 8 + 1 + 1 + 1 + 1, false);
+        let concat_type = file.make_bit_vector_type(8 + 8 + 8 + 1 + 1 + 1 + 1, false);
         let output = module.add_output("my_output", &concat_type);
         let assignment = file.make_continuous_assignment(&output.to_expr(), &concat);
         module.add_member_continuous_assignment(assignment);
         let verilog = file.emit();
-        let want = "module my_module(
-  input wire [7:0] my_input,
-  output wire [19:0] my_output
-);
-  assign my_output = {~my_input, -my_input, ~my_input, !my_input, &my_input, |my_input, ^my_input};
-endmodule
-";
+        let want = "module my_module(\n  input wire [7:0] my_input,\n  output wire [27:0] my_output\n);\n  assign my_output = {~my_input, -my_input, ~my_input, !my_input, &my_input, |my_input, ^my_input};\nendmodule\n";
         assert_eq!(verilog, want);
     }
 
@@ -299,8 +246,8 @@ endmodule
         ];
         for (name, f, output_type) in functions {
             let wire = module.add_wire(name, output_type);
-            let rhs = f(&mut file, &lhs.to_expr(), &rhs.to_expr());
-            let assignment = file.make_continuous_assignment(&wire.to_expr(), &rhs);
+            let rhs_expr = f(&mut file, &lhs.to_expr(), &rhs.to_expr());
+            let assignment = file.make_continuous_assignment(&wire.to_expr(), &rhs_expr);
             module.add_member_continuous_assignment(assignment);
         }
 
@@ -376,15 +323,86 @@ endmodule
         let assignment = file.make_continuous_assignment(&output.to_expr(), &ternary);
         module.add_member_continuous_assignment(assignment);
         let verilog = file.emit();
-        let want = "module my_module(
-  input wire [7:0] selector,
-  input wire [7:0] on_true,
-  input wire [7:0] on_false,
-  output wire [7:0] my_output
-);
-  assign my_output = selector ? on_true : on_false;
-endmodule
-";
+        let want = "module my_module(\n  input wire [7:0] selector,\n  input wire [7:0] on_true,\n  input wire [7:0] on_false,\n  output wire [7:0] my_output\n);\n  assign my_output = selector ? on_true : on_false;\nendmodule\n";
         assert_eq!(verilog, want);
     }
+}
+
+fn run_sequential_logic_test(use_system_verilog: bool) {
+    use xlsynth::vast::*;
+    let mut file = VastFile::new(if use_system_verilog {
+        VastFileType::SystemVerilog
+    } else {
+        VastFileType::Verilog
+    });
+    let mut module = file.add_module("test_module");
+
+    let scalar_type = file.make_scalar_type();
+
+    let clk = module.add_input("clk", &scalar_type);
+    let pred = module.add_input("pred", &scalar_type);
+    let x = module.add_input("x", &scalar_type);
+    module.add_output("out", &scalar_type);
+
+    let p0_pred_reg = module.add_reg("p0_pred", &scalar_type).unwrap();
+    let p0_x_reg = module.add_reg("p0_x", &scalar_type).unwrap();
+
+    let posedge_clk = file.make_pos_edge(&clk.to_expr());
+
+    let mut always_block = if use_system_verilog {
+        module.add_always_ff(&[&posedge_clk]).unwrap()
+    } else {
+        module.add_always_at(&[&posedge_clk]).unwrap()
+    };
+
+    let mut stmt_block = always_block.get_statement_block();
+
+    stmt_block.add_nonblocking_assignment(&p0_pred_reg.to_expr(), &pred.to_expr());
+    stmt_block.add_nonblocking_assignment(&p0_x_reg.to_expr(), &x.to_expr());
+
+    let verilog = file.emit();
+
+    let want = if use_system_verilog {
+        r#"module test_module(
+  input wire clk,
+  input wire pred,
+  input wire x,
+  output wire out
+);
+  reg p0_pred;
+  reg p0_x;
+  always_ff @ (posedge clk) begin
+    p0_pred <= pred;
+    p0_x <= x;
+  end
+endmodule
+"#
+    } else {
+        r#"module test_module(
+  input wire clk,
+  input wire pred,
+  input wire x,
+  output wire out
+);
+  reg p0_pred;
+  reg p0_x;
+  always @ (posedge clk) begin
+    p0_pred <= pred;
+    p0_x <= x;
+  end
+endmodule
+"#
+    };
+
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_sequential_logic_system_verilog() {
+    run_sequential_logic_test(true);
+}
+
+#[test]
+fn test_sequential_logic_verilog() {
+    run_sequential_logic_test(false);
 }

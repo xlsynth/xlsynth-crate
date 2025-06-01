@@ -101,6 +101,21 @@ pub struct CVastIndexableExpression {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+#[repr(C)]
+pub struct CVastAlwaysBase {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastStatementBlock {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastStatement {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 // -- DSLX
 
 #[repr(C)]
@@ -563,8 +578,8 @@ extern "C" {
     pub fn xls_vast_verilog_file_make_ternary(
         f: *mut CVastFile,
         cond: *mut CVastExpression,
-        consequent: *mut CVastExpression,
-        alternate: *mut CVastExpression,
+        then_expr: *mut CVastExpression,
+        else_expr: *mut CVastExpression,
     ) -> *mut CVastExpression;
 
     pub fn xls_vast_verilog_file_make_instantiation(
@@ -1295,6 +1310,46 @@ extern "C" {
         builder: *mut CIrBuilderBase,
         value: *mut CIrBValue,
     ) -> *mut CIrType;
+
+    // New functions for sequential logic
+    pub fn xls_vast_verilog_module_add_always_ff(
+        m: *mut CVastModule,
+        sensitivity_list_elements: *mut *mut CVastExpression,
+        sensitivity_list_count: usize,
+        out_always_ff: *mut *mut CVastAlwaysBase,
+        error_out: *mut *mut ::std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_verilog_module_add_always_at(
+        m: *mut CVastModule,
+        sensitivity_list_elements: *mut *mut CVastExpression,
+        sensitivity_list_count: usize,
+        out_always_at: *mut *mut CVastAlwaysBase,
+        error_out: *mut *mut ::std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_verilog_module_add_reg(
+        m: *mut CVastModule,
+        name: *const ::std::os::raw::c_char,
+        type_: *mut CVastDataType,
+        out_reg_ref: *mut *mut CVastLogicRef,
+        error_out: *mut *mut ::std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_verilog_file_make_pos_edge(
+        f: *mut CVastFile,
+        signal_expr: *mut CVastExpression,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_verilog_file_make_nonblocking_assignment(
+        f: *mut CVastFile,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
+    pub fn xls_vast_always_base_get_statement_block(
+        always_base: *mut CVastAlwaysBase,
+    ) -> *mut CVastStatementBlock;
+    pub fn xls_vast_statement_block_add_nonblocking_assignment(
+        block: *mut CVastStatementBlock,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
