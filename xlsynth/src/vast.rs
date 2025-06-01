@@ -157,6 +157,21 @@ pub struct ContinuousAssignment {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+pub struct VastAlwaysBase {
+    inner: *mut sys::CVastAlwaysBase,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct VastStatementBlock {
+    inner: *mut sys::CVastStatementBlock,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct VastStatement {
+    inner: *mut sys::CVastStatement,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
 impl VastModule {
     pub fn add_input(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
         let c_name = CString::new(name).unwrap();
@@ -208,6 +223,113 @@ impl VastModule {
                 self.inner,
                 assignment.inner,
             )
+        }
+    }
+
+    pub fn add_reg(
+        &mut self,
+        name: &str,
+        data_type: &VastDataType,
+    ) -> Result<LogicRef, XlsynthError> {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let mut reg_ref_out: *mut sys::CVastLogicRef = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_verilog_module_add_reg(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+                &mut reg_ref_out,
+                &mut error_out,
+            )
+        };
+        if success {
+            Ok(LogicRef {
+                inner: reg_ref_out,
+                parent: self.parent.clone(),
+            })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    fn add_always_block(
+        &mut self,
+        sensitivity_list: &[&Expr],
+        is_ff: bool,
+    ) -> Result<VastAlwaysBase, XlsynthError> {
+        let _locked = self.parent.lock().unwrap();
+        let mut expr_ptrs: Vec<*mut sys::CVastExpression> =
+            sensitivity_list.iter().map(|expr| expr.inner).collect();
+        let mut always_base_out: *mut sys::CVastAlwaysBase = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = unsafe {
+            if is_ff {
+                sys::xls_vast_verilog_module_add_always_ff(
+                    self.inner,
+                    expr_ptrs.as_mut_ptr(),
+                    expr_ptrs.len(),
+                    &mut always_base_out,
+                    &mut error_out,
+                )
+            } else {
+                sys::xls_vast_verilog_module_add_always_at(
+                    self.inner,
+                    expr_ptrs.as_mut_ptr(),
+                    expr_ptrs.len(),
+                    &mut always_base_out,
+                    &mut error_out,
+                )
+            }
+        };
+        if success {
+            Ok(VastAlwaysBase {
+                inner: always_base_out,
+                parent: self.parent.clone(),
+            })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    pub fn add_always_ff(
+        &mut self,
+        sensitivity_list: &[&Expr],
+    ) -> Result<VastAlwaysBase, XlsynthError> {
+        self.add_always_block(sensitivity_list, true)
+    }
+
+    pub fn add_always_at(
+        &mut self,
+        sensitivity_list: &[&Expr],
+    ) -> Result<VastAlwaysBase, XlsynthError> {
+        self.add_always_block(sensitivity_list, false)
+    }
+}
+
+impl VastAlwaysBase {
+    pub fn get_statement_block(&self) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_always_base_get_statement_block(self.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
+impl VastStatementBlock {
+    pub fn add_nonblocking_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_statement_block_add_nonblocking_assignment(
+                self.inner, lhs.inner, rhs.inner,
+            )
+        };
+        VastStatement {
+            inner,
+            parent: self.parent.clone(),
         }
     }
 }
@@ -628,6 +750,26 @@ impl VastFile {
             sys::xls_vast_verilog_file_make_continuous_assignment(locked.0, lhs.inner, rhs.inner)
         };
         ContinuousAssignment {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_pos_edge(&mut self, expr: &Expr) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_file_make_pos_edge(locked.0, expr.inner) };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_nonblocking_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_nonblocking_assignment(locked.0, lhs.inner, rhs.inner)
+        };
+        VastStatement {
             inner,
             parent: self.ptr.clone(),
         }

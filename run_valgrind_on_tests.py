@@ -256,17 +256,17 @@ def run_subset_of_tests(
     for test in to_run:
         termcolor.cprint(f"  {test}", "green")
     if to_skip:
-        termcolor.cprint("Skipping tests:", "red")
+        termcolor.cprint("Skipping tests:", "blue")
         for test in to_skip:
-            termcolor.cprint(f"  {test}", "red")
+            termcolor.cprint(f"  {test}", "blue")
     else:
         termcolor.cprint("  No tests to skip", "green")
 
     expected_count = len(to_run)
     if not to_run:
-        termcolor.cprint("No tests to run", "red")
+        termcolor.cprint("No tests to run", "blue")
         if all_filtered_ok:
-            termcolor.cprint("All filtered tests are ok for this binary", "green")
+            termcolor.cprint("All filtered tests are ok for this binary", "blue")
             # Return success with 0 parsed, 0 expected
             return defaultdict(float), 0, 0
         else:
@@ -681,7 +681,7 @@ def submit_valgrind_tasks(
 
             if not individual_tests_to_run:
                 termcolor.cprint(
-                    f"  No tests left to run in {basename} after filtering.", "yellow"
+                    f"  No tests left to run in {basename} after filtering.", "blue"
                 )
                 return tasks  # Return empty dict if no tests to run
 
