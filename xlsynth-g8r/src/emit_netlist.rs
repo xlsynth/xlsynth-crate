@@ -14,14 +14,6 @@ struct RegDecl {
     logic_ref: vast::LogicRef,
 }
 
-#[derive(Clone)]
-struct WireInfo {
-    name: String,
-    rhs_expr: Option<Rc<vast::Expr>>, // For literals or pre-computed RHS
-    op_a: Option<gate::AigOperand>,   // For AND gates
-    op_b: Option<gate::AigOperand>,   // For AND gates
-}
-
 #[derive(Clone)] // vast::Expr is Clone, String is Clone
 struct FinalOutputAssignment {
     port_name: String,
@@ -67,14 +59,12 @@ struct NetlistEmitState {
     final_output_port_assignments: Vec<FinalOutputAssignment>,
     // Collects declarations for all registers (p0_ inputs/outputs).
     reg_decls: Vec<RegDecl>,
-    // Collects information needed to declare wires and their driving expressions (literals or AND
-    // gates).
-    wire_info_collector: Vec<WireInfo>,
+    // Collects (lhs_expr, rhs_expr, wire_name) for internal gates (literals/ANDs) for sorted
+    // emission.
+    internal_wire_assignments: Vec<(Rc<vast::Expr>, Rc<vast::Expr>, String)>,
     // Collects direct assignments to output ports (for non-flopped outputs) or intermediate _comb
     // wires.
     direct_output_assignments: Vec<DirectOutputAssignment>,
-    // Maps an AIG reference (for an internal gate like G0, G1) to its intended wire name.
-    aig_ref_to_wire_name: BTreeMap<gate::AigRef, String>,
 }
 
 impl NetlistEmitState {
@@ -85,9 +75,8 @@ impl NetlistEmitState {
             procedural_assignments: Vec::new(),
             final_output_port_assignments: Vec::new(),
             reg_decls: Vec::new(),
-            wire_info_collector: Vec::new(),
+            internal_wire_assignments: Vec::new(),
             direct_output_assignments: Vec::new(),
-            aig_ref_to_wire_name: BTreeMap::new(),
         }
     }
 }
@@ -156,12 +145,11 @@ fn generate_module_ports_and_registers(
 
             if config.flop_outputs {
                 let comb_wire_name = format!("{}_comb", base_name);
-                state.wire_info_collector.push(WireInfo {
-                    name: comb_wire_name.clone(),
-                    rhs_expr: None,
-                    op_a: None,
-                    op_b: None,
-                });
+                // Create the _comb wire directly and map it.
+                let comb_wire_ref = module.add_wire(&comb_wire_name, bit_type);
+                state
+                    .output_bit_to_combinational_target_ref
+                    .insert(*aig_bit_ref, comb_wire_ref);
 
                 let reg_name = format!("p0_{}", base_name);
                 let output_reg_ref = module.add_reg(reg_name.as_str(), bit_type).unwrap();
@@ -191,6 +179,8 @@ fn generate_internal_combinational_logic(
     config: &NetlistEmitConfig,
     state: &mut NetlistEmitState,
     file: &mut vast::VastFile,
+    module: &mut vast::VastModule,
+    bit_type: &vast::VastDataType,
 ) {
     for (idx, gate_node) in config.gate_fn.gates.iter().enumerate() {
         let current_gate_aig_ref = gate::AigRef { id: idx };
@@ -200,31 +190,67 @@ fn generate_internal_combinational_logic(
             }
             gate::AigNode::Literal(value) => {
                 let gate_name = format!("G{}", idx);
-                let value_str = if *value { "bits[1]:1" } else { "bits[1]:0" };
-                let literal_node = file
-                    .make_literal(value_str, &xlsynth::ir_value::IrFormatPreference::Binary)
-                    .unwrap();
-                state.wire_info_collector.push(WireInfo {
-                    name: gate_name.clone(),
-                    rhs_expr: Some(Rc::new(literal_node)),
-                    op_a: None,
-                    op_b: None,
-                });
+                let actual_wire_ref = module.add_wire(&gate_name, bit_type);
                 state
-                    .aig_ref_to_wire_name
-                    .insert(current_gate_aig_ref, gate_name);
+                    .gate_ref_to_vast_logic
+                    .insert(current_gate_aig_ref, actual_wire_ref.clone());
+
+                let lhs_expr = Rc::new(actual_wire_ref.to_expr());
+                let value_str = if *value { "bits[1]:1" } else { "bits[1]:0" };
+                let rhs_literal_expr = Rc::new(
+                    file.make_literal(value_str, &xlsynth::ir_value::IrFormatPreference::Binary)
+                        .unwrap(),
+                );
+                state
+                    .internal_wire_assignments
+                    .push((lhs_expr, rhs_literal_expr, gate_name));
             }
             gate::AigNode::And2 { a, b, tags: _tags } => {
                 let gate_name = format!("G{}", idx);
-                state.wire_info_collector.push(WireInfo {
-                    name: gate_name.clone(),
-                    rhs_expr: None,
-                    op_a: Some(*a),
-                    op_b: Some(*b),
-                });
+                let actual_wire_ref = module.add_wire(&gate_name, bit_type);
                 state
-                    .aig_ref_to_wire_name
-                    .insert(current_gate_aig_ref, gate_name);
+                    .gate_ref_to_vast_logic
+                    .insert(current_gate_aig_ref, actual_wire_ref.clone());
+
+                let lhs_expr = Rc::new(actual_wire_ref.to_expr());
+
+                let ref_a = state.gate_ref_to_vast_logic.get(&a.node).unwrap_or_else(|| {
+                    panic!(
+                        "Missing LogicRef for AND input a: {:?}. Node type: {:?}. Gate_fn.gates len: {}. Current gate being processed G{}",
+                        a.node,
+                        config.gate_fn.gates.get(a.node.id),
+                        config.gate_fn.gates.len(),
+                        idx,
+                    )
+                });
+                let ref_b = state.gate_ref_to_vast_logic.get(&b.node).unwrap_or_else(|| {
+                    panic!(
+                        "Missing LogicRef for AND input b: {:?}. Node type: {:?}. Gate_fn.gates len: {}. Current gate being processed G{}",
+                        b.node,
+                        config.gate_fn.gates.get(b.node.id),
+                        config.gate_fn.gates.len(),
+                        idx,
+                    )
+                });
+
+                let expr_a_base = ref_a.to_expr();
+                let expr_b_base = ref_b.to_expr();
+
+                let final_expr_a = if a.negated {
+                    file.make_not(&expr_a_base)
+                } else {
+                    expr_a_base
+                };
+                let final_expr_b = if b.negated {
+                    file.make_not(&expr_b_base)
+                } else {
+                    expr_b_base
+                };
+
+                let rhs_and_expr = Rc::new(file.make_bitwise_and(&final_expr_a, &final_expr_b));
+                state
+                    .internal_wire_assignments
+                    .push((lhs_expr, rhs_and_expr, gate_name));
             }
         }
     }
@@ -333,7 +359,7 @@ pub fn emit_netlist(
 
     let clk_input_ref =
         generate_module_ports_and_registers(&config, &mut state, &mut module, &bit_type);
-    generate_internal_combinational_logic(&config, &mut state, &mut file);
+    generate_internal_combinational_logic(&config, &mut state, &mut file, &mut module, &bit_type);
 
     // Phase 3: Deterministic Emission
     state.reg_decls.sort_by(|a, b| a.name.cmp(&b.name));
@@ -341,85 +367,14 @@ pub fn emit_netlist(
     // (e.g., comments).
 
     state
-        .wire_info_collector
-        .sort_by(|a, b| a.name.cmp(&b.name));
-    let mut wire_assignments_to_emit: Vec<(Rc<vast::Expr>, Rc<vast::Expr>)> = Vec::new();
-
-    for winfo in &state.wire_info_collector {
-        let actual_wire_ref = module.add_wire(&winfo.name, &bit_type);
-
-        if let Some(aig_ref) = state.aig_ref_to_wire_name.iter().find_map(|(key, val)| {
-            if val == &winfo.name {
-                Some(*key)
-            } else {
-                None
-            }
-        }) {
-            state
-                .gate_ref_to_vast_logic
-                .insert(aig_ref, actual_wire_ref.clone());
-        }
-
-        if winfo.name.ends_with("_comb") {
-            for output_spec in config.gate_fn.outputs.iter() {
-                let bit_count = output_spec.bit_vector.get_bit_count();
-                for (i, aig_bit_ref_in_output) in
-                    output_spec.bit_vector.iter_lsb_to_msb().enumerate()
-                {
-                    let base_output_name = if bit_count == 1 {
-                        output_spec.name.clone()
-                    } else {
-                        format!("{}_{}", output_spec.name, i)
-                    };
-                    if format!("{}_comb", base_output_name) == winfo.name {
-                        state
-                            .output_bit_to_combinational_target_ref
-                            .insert(*aig_bit_ref_in_output, actual_wire_ref.clone());
-                    }
-                }
-            }
-        }
-
-        let lhs_expr = Rc::new(actual_wire_ref.to_expr());
-
-        if let Some(ref rhs_literal_expr) = winfo.rhs_expr {
-            wire_assignments_to_emit.push((lhs_expr.clone(), rhs_literal_expr.clone()));
-        } else if let (Some(op_a), Some(op_b)) = (winfo.op_a, winfo.op_b) {
-            let ref_a = state
-                .gate_ref_to_vast_logic
-                .get(&op_a.node)
-                .unwrap_or_else(|| panic!("Missing LogicRef for AND input a: {:?}", op_a.node));
-            let ref_b = state
-                .gate_ref_to_vast_logic
-                .get(&op_b.node)
-                .unwrap_or_else(|| panic!("Missing LogicRef for AND input b: {:?}", op_b.node));
-
-            let expr_a_base = ref_a.to_expr();
-            let expr_b_base = ref_b.to_expr();
-
-            let final_expr_a = if op_a.negated {
-                file.make_not(&expr_a_base)
-            } else {
-                expr_a_base
-            };
-            let final_expr_b = if op_b.negated {
-                file.make_not(&expr_b_base)
-            } else {
-                expr_b_base
-            };
-
-            let rhs_and_expr = Rc::new(file.make_bitwise_and(&final_expr_a, &final_expr_b));
-            wire_assignments_to_emit.push((lhs_expr.clone(), rhs_and_expr));
-        }
+        .internal_wire_assignments
+        .sort_by(|a, b| a.2.cmp(&b.2)); // Sort by wire name
+    for (lhs_expr, rhs_expr, _wire_name) in &state.internal_wire_assignments {
+        module
+            .add_member_continuous_assignment(file.make_continuous_assignment(lhs_expr, rhs_expr));
     }
 
     connect_combinational_logic_to_outputs(&config, &mut state, &mut file);
-
-    for (lhs_expr, rhs_expr) in wire_assignments_to_emit {
-        module.add_member_continuous_assignment(
-            file.make_continuous_assignment(&lhs_expr, &rhs_expr),
-        );
-    }
 
     state
         .direct_output_assignments
@@ -580,9 +535,9 @@ endmodule
   output wire o
 );
   reg p0_i;
+  wire o_comb;
   reg p0_o;
   wire G0;
-  wire o_comb;
   assign G0 = 1'b0;
   assign o_comb = ~p0_i;
   always_ff @ (posedge clk) begin
