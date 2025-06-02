@@ -68,7 +68,7 @@ fn ir2pipeline(
             std::fs::write(&opt_ir_path, &opt_ir).unwrap();
             opt_ir_path
         } else {
-            // Just use the input file directly (no optimisation step).
+            // Just use the input file directly (no optimization step).
             input_file.to_path_buf()
         };
 

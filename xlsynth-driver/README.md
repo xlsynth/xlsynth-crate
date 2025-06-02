@@ -36,7 +36,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
 - Additional artifacts can be emitted with flags:
   - `--bin-out <PATH>` – write the GateFn as a binary **.g8rbin** file (bincode-encoded).
   - `--stats-out <PATH>` – write a JSON summary of structural statistics.
-- The same optimisation / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--toggle-sample-count`, …).
+- The same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--toggle-sample-count`, …).
 
 Example:
 

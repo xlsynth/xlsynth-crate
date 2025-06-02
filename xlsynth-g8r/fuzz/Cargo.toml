@@ -60,3 +60,9 @@ name = "fuzz_gate_transform_arbitrary"
 path = "fuzz_targets/fuzz_gate_transform_arbitrary.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_gate_fn_aiger_roundtrip"
+path = "fuzz_targets/fuzz_gate_fn_aiger_roundtrip.rs"
+test = false
+doc = false
