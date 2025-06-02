@@ -34,6 +34,8 @@ pub mod match_and_rewrite;
 pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
 }
+pub mod emit_aiger;
+pub mod load_aiger;
 pub mod logical_effort;
 pub mod mcmc_logic;
 pub mod netlist;
