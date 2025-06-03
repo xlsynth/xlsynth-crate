@@ -174,12 +174,12 @@ pub fn load_aiger(src: &str, opts: GateBuilderOptions) -> Result<LoadAigerResult
 
     // The remaining lines may be symbol table and comments – we parse symbols
     // later.  Gather them now.
-    let mut remaining_lines: Vec<&str> = lines.collect();
+    let remaining_lines: Vec<&str> = lines.collect();
 
     // ---- Helper: convert literal to operand -------------------------------
-    let mut lit_to_operand = |lit: u32,
-                              gb: &mut GateBuilder,
-                              var_map: &HashMap<u32, AigOperand>|
+    let lit_to_operand = |lit: u32,
+                          gb: &mut GateBuilder,
+                          var_map: &HashMap<u32, AigOperand>|
      -> Result<AigOperand, String> {
         let var = lit >> 1;
         let neg = (lit & 1) == 1;
