@@ -213,6 +213,7 @@ mod tests {
     use crate::assert_within;
     use crate::{
         check_equivalence,
+        gate_builder::GateBuilder,
         get_summary_stats::get_summary_stats,
         test_utils::{
             load_bf16_add_sample, load_bf16_mul_sample,
@@ -281,6 +282,9 @@ mod tests {
             .expect("fraig optimization should preserve equivalence");
         let check_equiv_elapsed = check_equiv_start.elapsed();
         eprintln!("{}: check_equiv took {:?}", name, check_equiv_elapsed);
+
+        // Ensure the optimized function still respects basic invariants.
+        optimized_fn.check_invariants_with_debug_assert();
 
         OptimizationResults {
             did_converge,
@@ -374,5 +378,38 @@ mod tests {
         // Outputs should be equivalent
         check_equivalence::prove_same_gate_fn_via_ir(&test_graph.g, &optimized_fn)
             .expect("fraig optimization should preserve equivalence");
+    }
+
+    #[test]
+    fn test_fraig_with_dead_equiv_node_no_panic() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        // Create a simple 1-bit AND gate that is live plus an identical dead gate.
+        let mut gb = GateBuilder::new("dead_redundant".to_string(), GateBuilderOptions::no_opt());
+        let in0 = gb.add_input("a".to_string(), 1);
+        let in1 = gb.add_input("b".to_string(), 1);
+        let a0 = *in0.get_lsb(0);
+        let b0 = *in1.get_lsb(0);
+
+        // Live gate used in the output.
+        let and_live = gb.add_and_binary(a0, b0);
+        // Identical gate that is *not* connected to any output.
+        let _and_dead = gb.add_and_binary(a0, b0);
+
+        gb.add_output("out".to_string(), and_live.into());
+
+        let gate_fn = gb.build();
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
+        let (optimized_fn, _did_conv, _stats) =
+            fraig_optimize(&gate_fn, 64, IterationBounds::ToConvergence, &mut rng)
+                .expect("fraig_optimize should not panic on dead redundant nodes");
+
+        // The optimized function must remain equivalent to the original.
+        crate::check_equivalence::prove_same_gate_fn_via_ir(&gate_fn, &optimized_fn)
+            .expect("optimized function should be equivalent to original");
+
+        // Ensure the optimized function still respects basic invariants.
+        optimized_fn.check_invariants_with_debug_assert();
     }
 }
