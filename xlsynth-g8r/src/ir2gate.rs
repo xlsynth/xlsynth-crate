@@ -1548,7 +1548,11 @@ fn gatify_internal(
             | ir::NodePayload::AfterAll(..)
             | ir::NodePayload::Trace { .. }
             | ir::NodePayload::Nil => {
-                // No incarnation in gates.
+                // These IR nodes manipulate tokens or have no semantic
+                // representation in gates. Map them to a zero-width bit
+                // vector so any subsequent references (e.g. via tuples) have
+                // a placeholder value.
+                env.add(node_ref, GateOrVec::BitVector(AigBitVector::zeros(0)));
             }
             ir::NodePayload::DynamicBitSlice { arg, start, width } => {
                 let arg_bits = env

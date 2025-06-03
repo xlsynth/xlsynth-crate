@@ -58,6 +58,27 @@ fn do_test_ir_conversion(ir_package_text: &str, opt: Opt) -> SummaryStats {
     do_test_ir_conversion_with_top(ir_package_text, opt, None)
 }
 
+/// Similar to `do_test_ir_conversion` but does not attempt to convert the
+/// resulting gate function back to IR for equivalence checking. This is useful
+/// for testing constructs (like `fail!` or `assert!`) that currently lack a
+/// reverse translation path.
+fn do_test_ir_conversion_no_equiv(ir_package_text: &str, opt: Opt) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let mut parser = ir_parser::Parser::new(&ir_package_text);
+    let ir_package = parser.parse_package().unwrap();
+    let ir_fn = ir_package.get_top().unwrap();
+    let _ = gatify(
+        &ir_fn,
+        GatifyOptions {
+            fold: opt == Opt::Yes,
+            check_equivalence: false,
+            hash: opt == Opt::Yes,
+            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
+        },
+    )
+    .unwrap();
+}
+
 #[test_case(1, Opt::No; "bit_count=1, fold=false")]
 #[test_case(1, Opt::Yes; "bit_count=1, fold=true")]
 #[test_case(2, Opt::No; "bit_count=2, fold=false")]
@@ -761,4 +782,37 @@ fn bf16_add(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
         assert_within!(stats.live_nodes as isize, 1292 as isize, 20 as isize);
         assert_within!(stats.deepest_path as isize, 130 as isize, 10 as isize);
     }
+}
+
+#[test_case(Opt::No; "fold=false")]
+#[test_case(Opt::Yes; "fold=true")]
+fn test_fail_macro_gatify(opt: Opt) {
+    let dslx = r#"fn top(x: bits[N]) -> bits[N] {
+        fail!("boom", x)
+    }"#;
+    let _ = env_logger::builder().is_test(true).try_init();
+    let module = format!("const N: u32 = u32:{};\n{}", 1, dslx);
+    let path = Path::new("sample.x");
+    let ir = xlsynth::convert_dslx_to_ir(&module, path, &xlsynth::DslxConvertOptions::default())
+        .unwrap();
+    let ir_package = &ir.ir;
+    let ir_text = ir_package.to_string();
+    do_test_ir_conversion_no_equiv(&ir_text, opt);
+}
+
+#[test_case(Opt::No; "fold=false")]
+#[test_case(Opt::Yes; "fold=true")]
+fn test_assert_macro_gatify(opt: Opt) {
+    let dslx = r#"fn top(x: bits[N]) -> bits[N] {
+        assert!(x == x, "must_equal");
+        x
+    }"#;
+    let _ = env_logger::builder().is_test(true).try_init();
+    let module = format!("const N: u32 = u32:{};\n{}", 1, dslx);
+    let path = Path::new("sample.x");
+    let ir = xlsynth::convert_dslx_to_ir(&module, path, &xlsynth::DslxConvertOptions::default())
+        .unwrap();
+    let ir_package = &ir.ir;
+    let ir_text = ir_package.to_string();
+    do_test_ir_conversion_no_equiv(&ir_text, opt);
 }
