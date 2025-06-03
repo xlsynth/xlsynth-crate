@@ -39,6 +39,7 @@ mod dslx2ir;
 mod dslx2pipeline;
 mod dslx2sv_types;
 mod g8r2v;
+mod g8r_equiv;
 mod gv2ir;
 mod ir2delayinfo;
 mod ir2gates;
@@ -575,6 +576,22 @@ fn main() {
                         .help("Name of the generated module"),
                 )
         )
+        .subcommand(
+            clap::Command::new("g8r-equiv")
+                .about("Checks if two GateFns are equivalent using available engines")
+                .arg(
+                    clap::Arg::new("lhs_g8r_file")
+                        .help("The left-hand side GateFn file (.g8r or .g8rbin)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("rhs_g8r_file")
+                        .help("The right-hand side GateFn file (.g8r or .g8rbin)")
+                        .required(true)
+                        .index(2),
+                )
+        )
         .get_matches();
 
     let mut toml_path: Option<String> = matches
@@ -650,6 +667,8 @@ fn main() {
         if let Err(e) = g8r2v::handle_g8r2v(matches) {
             report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
         }
+    } else if let Some(matches) = matches.subcommand_matches("g8r-equiv") {
+        g8r_equiv::handle_g8r_equiv(matches, &config);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {
