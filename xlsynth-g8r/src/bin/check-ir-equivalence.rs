@@ -138,6 +138,13 @@ fn main_has_boolector(args: Args) {
             std::process::exit(2);
         }
     }
+
+    // Exit with 0 when equivalent, 1 when non-equivalent.
+    if boolector_equiv {
+        std::process::exit(0);
+    } else {
+        std::process::exit(1);
+    }
 }
 
 fn main() {
