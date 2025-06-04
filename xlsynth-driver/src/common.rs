@@ -42,6 +42,8 @@ pub struct CodegenFlags {
     reset_data_path: Option<bool>,
     gate_format: Option<String>,
     assert_format: Option<String>,
+    output_schedule_path: Option<String>,
+    output_verilog_line_map_path: Option<String>,
 }
 
 /// Extracts flags that we pass to the "codegen" step of the process (i.e.
@@ -96,6 +98,12 @@ pub fn extract_codegen_flags(
             .map(|s| s == "true"),
         gate_format,
         assert_format,
+        output_schedule_path: matches
+            .get_one::<String>("output_schedule_path")
+            .map(|s| s.to_string()),
+        output_verilog_line_map_path: matches
+            .get_one::<String>("output_verilog_line_map_path")
+            .map(|s| s.to_string()),
     }
 }
 
@@ -147,6 +155,14 @@ pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
     }
     if let Some(assert_format) = &codegen_flags.assert_format {
         pieces.push(format!("assert_format: {assert_format:?}"));
+    }
+    if let Some(output_schedule_path) = &codegen_flags.output_schedule_path {
+        pieces.push(format!("output_schedule_path: \"{output_schedule_path}\""));
+    }
+    if let Some(output_verilog_line_map_path) = &codegen_flags.output_verilog_line_map_path {
+        pieces.push(format!(
+            "output_verilog_line_map_path: \"{output_verilog_line_map_path}\""
+        ));
     }
     pieces.push(format!("assertion_macro_names: \"ASSERT_ON\""));
     pieces.join("\n")
@@ -204,6 +220,16 @@ pub fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
     }
     if let Some(assert_format) = &codegen_flags.assert_format {
         command.arg(format!("--assert_format={assert_format}"));
+    }
+    if let Some(output_schedule_path) = &codegen_flags.output_schedule_path {
+        command
+            .arg("--output_schedule_path")
+            .arg(output_schedule_path);
+    }
+    if let Some(output_verilog_line_map_path) = &codegen_flags.output_verilog_line_map_path {
+        command
+            .arg("--output_verilog_line_map_path")
+            .arg(output_verilog_line_map_path);
     }
 }
 

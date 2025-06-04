@@ -205,6 +205,18 @@ impl AppExt for clap::Command {
                 "reset_data_path",
                 "Reset datapath registers as well as valid signals",
             )
+            .arg(
+                Arg::new("output_schedule_path")
+                    .long("output_schedule_path")
+                    .value_name("OUTPUT_SCHEDULE_PATH")
+                    .help("Write schedule proto text to this path"),
+            )
+            .arg(
+                Arg::new("output_verilog_line_map_path")
+                    .long("output_verilog_line_map_path")
+                    .value_name("OUTPUT_VERILOG_LINE_MAP_PATH")
+                    .help("Write Verilog line map textproto to this path"),
+            )
     }
 
     fn add_ir_top_arg(self, required: bool) -> Self {
