@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Parser;
+#[cfg(feature = "has-boolector")]
+use std::time::Instant;
 
 #[cfg(feature = "has-boolector")]
 use xlsynth_g8r::ir_equiv_boolector;
@@ -55,17 +57,25 @@ fn main_has_boolector(args: Args) {
         .unwrap_or_else(|| panic!("function '{}' not found in {}", args.top, args.ir2));
 
     // First run the Boolector-based equivalence prover.
+    let boolector_start = Instant::now();
     let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(f1, f2);
+    let boolector_elapsed = boolector_start.elapsed();
 
     // Convert Boolector result into a simple boolean for later comparison.
     let boolector_equiv = matches!(&boolector_result, ir_equiv_boolector::EquivResult::Proved);
 
     match &boolector_result {
         ir_equiv_boolector::EquivResult::Proved => {
-            println!("Equivalence result (boolector): PROVED");
+            println!(
+                "Equivalence result (boolector): PROVED (took {:?})",
+                boolector_elapsed
+            );
         }
         ir_equiv_boolector::EquivResult::Disproved(cex) => {
-            println!("Equivalence result (boolector): DISPROVED");
+            println!(
+                "Equivalence result (boolector): DISPROVED (took {:?})",
+                boolector_elapsed
+            );
             println!("Counterexample(s):");
             let values: Vec<_> = cex
                 .iter()
@@ -84,23 +94,37 @@ fn main_has_boolector(args: Args) {
     // xlsynth_g8r.
     let pkg1_ir = pkg1.to_string();
     let pkg2_ir = pkg2.to_string();
+    let external_start = Instant::now();
     let external_res = check_equivalence_with_top(&pkg1_ir, &pkg2_ir, Some(&args.top), false);
+    let external_elapsed = external_start.elapsed();
     let ext_equiv_opt: Option<bool> = match &external_res {
         Ok(_) => {
-            println!("Equivalence result (external): PROVED");
+            println!(
+                "Equivalence result (external): PROVED (took {:?})",
+                external_elapsed
+            );
             Some(true)
         }
         Err(msg) => {
             if msg.to_lowercase().contains("not equivalent") {
-                println!("Equivalence result (external): DISPROVED");
+                println!(
+                    "Equivalence result (external): DISPROVED (took {:?})",
+                    external_elapsed
+                );
                 Some(false)
             } else if msg.to_lowercase().contains("timedout")
                 || msg.to_lowercase().contains("interrupted")
             {
-                eprintln!("warning: external tool timed out or was interrupted; skipping consistency check");
+                eprintln!(
+                    "warning: external tool timed out or was interrupted after {:?}; skipping consistency check",
+                    external_elapsed
+                );
                 None
             } else {
-                eprintln!("warning: external tool error: {msg}");
+                eprintln!(
+                    "warning: external tool error after {:?}: {msg}",
+                    external_elapsed
+                );
                 None
             }
         }
