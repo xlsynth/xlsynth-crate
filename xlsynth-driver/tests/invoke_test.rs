@@ -1457,7 +1457,8 @@ fn test_ir2pipeline_subcommand(use_tool_path: bool, optimize: bool) {
 
     if !use_tool_path {
         // Compare against golden for runtime API path.
-        let golden_path = std::path::Path::new("tests/test_ir2combo_identity_combo.golden.sv");
+        let golden_path =
+            std::path::Path::new("tests/test_ir2pipeline_identity_pipeline.golden.sv");
         if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
             println!("INFO: Updating golden file: {}", golden_path.display());
             std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
