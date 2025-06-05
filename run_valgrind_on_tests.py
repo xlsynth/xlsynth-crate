@@ -135,7 +135,38 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             "graph_logical_effort::tests::test_graph_logical_effort_bf16_add",
             "graph_logical_effort::tests::test_graph_logical_effort_bf16_mul",
             "propose_equiv::tests::test_propose_equiv_simple_graph",
+            # Newly observed >300s cases
+            "ir2gate_utils::tests::test_gatify_add_kogge_stone_1_to_16",
+            "ir2gate_utils::tests::test_gatify_add_brent_kung_1_to_16",
+            "prove_gate_fn_equiv_varisat::tests::test_validate_equiv_bf16_mul",
+            "prove_gate_fn_equiv_varisat::tests::test_validate_equiv_bf16_add",
+        ],
+        "shard_test_cases": True,
+    },
+    "test_gate_transform_arbitrary": {
+        "filter_out": [
+            # Already existing list
         ]
+    },
+    # Newly added filters to reduce very long (>100s) test runs
+    "emit_netlist_integration_test": {
+        "filter_out": [
+            "test_emit_bf16_mul_with_flops",
+            "test_emit_bf16_add_with_flops",
+        ],
+        "all_filtered_ok": True,
+    },
+    "test_gatefn_serdes": {
+        "filter_out": [
+            "test_gatefn_bincode_roundtrip",
+        ],
+        "all_filtered_ok": True,
+    },
+    "test_adder_depths": {
+        "filter_out": [
+            "adder_depths",
+        ],
+        "all_filtered_ok": True,
     },
 }
 

@@ -49,6 +49,16 @@
    ...
 }
 {
+   protobuf_message_factory
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN6google8protobuf14MessageFactory29InternalRegisterGeneratedFileEPKNS0_8internal15DescriptorTableE
+   ...
+   fun:_dl_init
+   ...
+}
+{
    protobuf_descriptor_table
    Memcheck:Leak
    match-leak-kinds: possible
