@@ -78,6 +78,60 @@ xlsynth-driver g8r2v my_module.g8r --add-clk-port=myclk > my_module.ugv
 
 The output is always written to stdout; redirect to a `.ugv` file as needed.
 
+### `version`
+
+Prints the driver version string to **stdout**.
+
+### `dslx2pipeline`: DSLX to pipelined Verilog
+
+Translates a DSLX entry point to a pipelined SystemVerilog module.
+The resulting Verilog is printed on **stdout**.
+Diagnostic messages and the path to temporary files (when
+`--keep_temps=true`) are written to **stderr**.
+
+### `dslx2ir`: DSLX to IR
+
+Converts DSLX source code to the XLS IR. The IR text is emitted on **stdout**.
+DSLX warnings and errors appear on **stderr**.
+
+### `dslx2sv-types`: DSLX type definitions to SystemVerilog
+
+Generates SystemVerilog type declarations for the definitions in a DSLX file.
+The output is written to **stdout**.
+
+### `ir2opt`: optimize IR
+
+Runs the XLS optimizer on an IR file and prints the optimized IR to **stdout**.
+
+### `ir2pipeline`: IR to pipelined Verilog
+
+Produces a pipelined SystemVerilog design from an IR file. The generated code
+is printed to **stdout**. When `--keep_temps=true` the location of temporary
+files is reported on **stderr**.
+
+### `ir2delayinfo`
+
+Invokes the `delay_info_main` tool for an IR entry point. Delay information is
+printed to **stdout**; any tool errors are shown on **stderr**.
+
+### `ir-ged`
+
+Computes the graph edit distance between two IR functions. By default a line of
+text like `Distance: N` is written to **stdout**. If `--json=true` is provided,
+the result is emitted as JSON.
+
+### `ir2gates`: IR to GateFn statistics
+
+Maps an IR function to a gate-level representation and prints analysis
+statistics. With `--quiet=true` a JSON summary is written to **stdout**; without
+it a human-readable report is printed to **stdout**.
+
+### `g8r-equiv`
+
+Checks two GateFns for equivalence using available engines. A JSON report is
+written to **stdout** and the command exits with a non-zero status if any engine
+finds a counterexample. Errors are printed to **stderr**.
+
 ## Toolchain configuration (`xlsynth-toolchain.toml`)
 
 Several subcommands accept a `--toolchain` option that points at a
