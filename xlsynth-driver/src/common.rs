@@ -33,6 +33,7 @@ pub struct CodegenFlags {
     flop_inputs: Option<bool>,
     flop_outputs: Option<bool>,
     add_idle_output: Option<bool>,
+    add_invariant_assertions: Option<bool>,
     module_name: Option<String>,
     array_index_bounds_checking: Option<bool>,
     separate_lines: Option<bool>,
@@ -76,6 +77,9 @@ pub fn extract_codegen_flags(
             .map(|s| s == "true"),
         add_idle_output: matches
             .get_one::<String>("add_idle_output")
+            .map(|s| s == "true"),
+        add_invariant_assertions: matches
+            .get_one::<String>("add_invariant_assertions")
             .map(|s| s == "true"),
         module_name: matches
             .get_one::<String>("module_name")
@@ -126,6 +130,11 @@ pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
     }
     if let Some(add_idle_output) = codegen_flags.add_idle_output {
         pieces.push(format!("add_idle_output: {add_idle_output}"));
+    }
+    if let Some(add_invariant_assertions) = codegen_flags.add_invariant_assertions {
+        pieces.push(format!(
+            "add_invariant_assertions: {add_invariant_assertions}"
+        ));
     }
     if let Some(module_name) = &codegen_flags.module_name {
         pieces.push(format!("module_name: \"{module_name}\""));
@@ -191,6 +200,11 @@ pub fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
     }
     if let Some(add_idle_output) = codegen_flags.add_idle_output {
         command.arg(format!("--add_idle_output={add_idle_output}"));
+    }
+    if let Some(add_invariant_assertions) = codegen_flags.add_invariant_assertions {
+        command.arg(format!(
+            "--add_invariant_assertions={add_invariant_assertions}"
+        ));
     }
     if let Some(module_name) = &codegen_flags.module_name {
         command.arg("--module_name").arg(module_name);

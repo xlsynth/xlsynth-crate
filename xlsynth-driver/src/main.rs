@@ -187,6 +187,10 @@ impl AppExt for clap::Command {
                 "Whether to flop output ports (vs leaving combinational delay into the I/Os)",
             )
             .add_bool_arg("add_idle_output", "Add an idle output port")
+            .add_bool_arg(
+                "add_invariant_assertions",
+                "Add assertions for invariants in generated code",
+            )
             .add_bool_arg("array_index_bounds_checking", "Array index bounds checking")
             .add_bool_arg("separate_lines", "Separate lines in generated code")
             .add_bool_arg(
