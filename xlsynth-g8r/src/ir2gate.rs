@@ -334,6 +334,57 @@ fn gatify_div(
     }
 }
 
+fn gatify_umod(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
+    let bit_count = lhs_bits.get_bit_count();
+
+    let mut remainder = AigBitVector::zeros(bit_count);
+
+    for dividend_bit in lhs_bits.iter_msb_to_lsb() {
+        let mut shifted_ops = Vec::with_capacity(bit_count);
+        shifted_ops.push(*dividend_bit);
+        for i in 0..bit_count - 1 {
+            shifted_ops.push(*remainder.get_lsb(i));
+        }
+        let shifted = AigBitVector::from_lsb_is_index_0(&shifted_ops);
+
+        let ge = gatify_uge_via_bit_tests(gb, 0, &shifted, rhs_bits);
+        let rhs_comp = gb.add_not_vec(rhs_bits);
+        let (_c, diff) = gatify_add_ripple_carry(&shifted, &rhs_comp, gb.get_true(), None, gb);
+        remainder = gb.add_mux2_vec(&ge, &diff, &shifted);
+    }
+
+    let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
+    let zeros = AigBitVector::zeros(bit_count);
+    gb.add_mux2_vec(&divisor_zero, &zeros, &remainder)
+}
+
+fn gatify_mod(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    signedness: Signedness,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    match signedness {
+        Signedness::Unsigned => gatify_umod(lhs_bits, rhs_bits, gb),
+        Signedness::Signed => {
+            let lhs_abs = gatify_abs(lhs_bits, gb);
+            let rhs_abs = gatify_abs(rhs_bits, gb);
+            let unsigned = gatify_umod(&lhs_abs, &rhs_abs, gb);
+            let sign_a = lhs_bits.get_msb(0);
+            let negated = gatify_twos_complement(&unsigned, gb);
+            let signed_result = gb.add_mux2_vec(sign_a, &negated, &unsigned);
+            let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
+            let zeros = AigBitVector::zeros(lhs_bits.get_bit_count());
+            gb.add_mux2_vec(&divisor_zero, &zeros, &signed_result)
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn gatify_ugt_via_adder(
     gb: &mut GateBuilder,
@@ -1625,6 +1676,18 @@ fn gatify_internal(
                         Signedness::Unsigned
                     };
                 let gates = gatify_div(&lhs_bits, &rhs_bits, signedness, g8_builder);
+                env.add(node_ref, GateOrVec::BitVector(gates));
+            }
+            ir::NodePayload::Binop(ir::Binop::Umod | ir::Binop::Smod, lhs, rhs) => {
+                let lhs_bits = env.get_bit_vector(*lhs).expect("mod lhs should be present");
+                let rhs_bits = env.get_bit_vector(*rhs).expect("mod rhs should be present");
+                let signedness =
+                    if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smod, ..)) {
+                        Signedness::Signed
+                    } else {
+                        Signedness::Unsigned
+                    };
+                let gates = gatify_mod(&lhs_bits, &rhs_bits, signedness, g8_builder);
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
             ir::NodePayload::Assert { .. }
