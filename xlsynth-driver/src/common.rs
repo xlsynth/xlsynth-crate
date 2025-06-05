@@ -112,6 +112,10 @@ pub fn extract_codegen_flags(
 }
 
 pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
+    log::debug!(
+        "codegen_flags_to_textproto; codegen_flags: {:?}",
+        codegen_flags
+    );
     let mut pieces = vec![];
     if let Some(input_valid_signal) = &codegen_flags.input_valid_signal {
         pieces.push(format!("input_valid_signal: \"{input_valid_signal}\""));
