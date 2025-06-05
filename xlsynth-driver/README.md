@@ -77,3 +77,24 @@ xlsynth-driver g8r2v my_module.g8r --add-clk-port=myclk > my_module.ugv
 ```
 
 The output is always written to stdout; redirect to a `.ugv` file as needed.
+
+## Toolchain configuration (`xlsynth-toolchain.toml`)
+
+Several subcommands accept a `--toolchain` option that points at a
+`xlsynth-toolchain.toml` file. This TOML file contains a `[toolchain]` table
+describing where to find various XLS resources and optional defaults.  The
+supported fields are:
+
+- `dslx_stdlib_path` – path to the DSLX standard library.
+- `dslx_path` – array of additional search paths for DSLX modules.
+- `tool_path` – directory containing the XLS tools such as `codegen_main`.
+- `warnings_as_errors` – when `true`, treat DSLX warnings as hard errors.
+- `enable_warnings` – list of extra DSLX warning names to enable.
+- `disable_warnings` – list of DSLX warnings to suppress.
+- `gate_format` – template string to use for `gate!` macros.
+- `assert_format` – template string to use for `assert!` macros.
+- `use_system_verilog` – emit SystemVerilog rather than plain Verilog.
+
+Only the fields that are needed must be provided.  When the driver is invoked
+with `--toolchain <PATH>`, values in this table become the default for the
+corresponding command line options.
