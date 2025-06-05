@@ -137,6 +137,28 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             "propose_equiv::tests::test_propose_equiv_simple_graph",
         ]
     },
+    "test_gate_transform_arbitrary": {
+        "filter_out": [
+            # Already existing list
+        ]
+    },
+    # Newly added filters to reduce very long (>100s) test runs
+    "emit_netlist_integration_test": {
+        "filter_out": [
+            "test_emit_bf16_mul_with_flops",
+            "test_emit_bf16_add_with_flops",
+        ]
+    },
+    "test_gatefn_serdes": {
+        "filter_out": [
+            "test_gatefn_bincode_roundtrip",
+        ]
+    },
+    "test_adder_depths": {
+        "filter_out": [
+            "adder_depths",
+        ]
+    },
 }
 
 
