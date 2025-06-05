@@ -54,6 +54,7 @@ fn ir2pipeline(
 ) {
     log::info!("ir2pipeline");
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
+        log::info!("ir2pipeline: using tool path: {}", tool_path);
         // Temporary directory for any artifacts we create (optimized IR and generated
         // SV).
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -96,6 +97,7 @@ fn ir2pipeline(
 
         println!("{}", sv);
     } else {
+        log::info!("ir2pipeline: using runtime API");
         // -- Runtime API implementation (no external toolchain path) --
 
         // Read the IR text from the provided file.

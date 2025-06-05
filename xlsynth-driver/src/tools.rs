@@ -177,3 +177,42 @@ pub fn run_check_ir_equivalence_main(
     );
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
+
+pub fn run_codegen_combinational(
+    input_file: &std::path::Path,
+    delay_model: &str,
+    codegen_flags: &CodegenFlags,
+    tool_path: &str,
+) -> String {
+    log::info!("run_codegen_combinational");
+    let codegen_main_path = format!("{}/codegen_main", tool_path);
+    if !std::path::Path::new(&codegen_main_path).exists() {
+        eprintln!("codegen_main tool not found at: {}", codegen_main_path);
+        process::exit(1);
+    }
+
+    let mut command = Command::new(codegen_main_path);
+    command
+        .arg(input_file)
+        .arg("--delay_model")
+        .arg(delay_model)
+        .arg("--generator=combinational");
+
+    add_codegen_flags(&mut command, codegen_flags);
+
+    log::info!("Running command: {:?}", command);
+    let output = command
+        .output()
+        .expect("codegen_main (combinational) should succeed");
+
+    if !output.status.success() {
+        eprintln!(
+            "Combinational codegen failed with status: {}",
+            output.status
+        );
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        process::exit(1);
+    }
+
+    String::from_utf8_lossy(&output.stdout).to_string()
+}

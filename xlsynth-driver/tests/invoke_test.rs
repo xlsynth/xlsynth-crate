@@ -1905,3 +1905,76 @@ endmodule
     // specific syntax, this expectation will need to change.
     assert_eq!(netlist, expected_netlist);
 }
+
+// Checks that invariant assertions are only emitted when the
+// --add_invariant_assertions flag is enabled for combinational codegen.
+#[test_case(true; "with_invariant_assertions")]
+#[test_case(false; "without_invariant_assertions")]
+fn test_ir2combo_priority_sel_invariant(add_inv: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    log::info!("test_ir2combo_priority_sel_invariant (add_inv={})", add_inv);
+
+    // A simple IR package that contains a priority_sel. The selector is the
+    // constant one-hot value 0b01 so the optimizer can prove related
+    // invariants.
+    const PRIO_IR: &str = r#"package priority_sel_test
+
+top fn my_main() -> bits[32] {
+  literal.1: bits[2] = literal(value=1, id=1)
+  literal.2: bits[32] = literal(value=11, id=2)
+  literal.3: bits[32] = literal(value=22, id=3)
+  literal.4: bits[32] = literal(value=0, id=4)
+  ret priority_sel.5: bits[32] = priority_sel(literal.1, cases=[literal.2, literal.3], default=literal.4, id=5)
+}
+"#;
+
+    // Write the IR to a temporary file.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("priority_sel.ir");
+    std::fs::write(&ir_path, PRIO_IR).unwrap();
+
+    // Write out toolchain.toml so we get the external tool path.
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
+
+    // Prepare and run the ir2combo command.
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut cmd = std::process::Command::new(command_path);
+    cmd.arg("--toolchain").arg(toolchain_path.to_str().unwrap());
+
+    cmd.arg("ir2combo")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .arg("--delay_model")
+        .arg("unit")
+        .arg(format!("--add_invariant_assertions={}", add_inv))
+        .arg("--use_system_verilog=true");
+
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        cmd.env("RUST_LOG", rust_log);
+    }
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "ir2combo failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    log::debug!("ir2combo stdout:\n{}", stdout);
+    log::debug!(
+        "ir2combo stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let has_asserts = stdout.to_lowercase().contains("assert");
+    if add_inv {
+        assert!(has_asserts, "Expected invariant assertions to be present when --add_invariant_assertions=true, but none were found. stdout: {}", stdout);
+    } else {
+        assert!(!has_asserts, "Did not expect invariant assertions when --add_invariant_assertions=false, but some were found. stdout: {}", stdout);
+    }
+}

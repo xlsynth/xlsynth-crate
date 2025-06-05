@@ -41,6 +41,7 @@ mod dslx2sv_types;
 mod g8r2v;
 mod g8r_equiv;
 mod gv2ir;
+mod ir2combo;
 mod ir2delayinfo;
 mod ir2gates;
 mod ir2opt;
@@ -187,6 +188,10 @@ impl AppExt for clap::Command {
                 "Whether to flop output ports (vs leaving combinational delay into the I/Os)",
             )
             .add_bool_arg("add_idle_output", "Add an idle output port")
+            .add_bool_arg(
+                "add_invariant_assertions",
+                "Add assertions for invariants in generated code",
+            )
             .add_bool_arg("array_index_bounds_checking", "Array index bounds checking")
             .add_bool_arg("separate_lines", "Separate lines in generated code")
             .add_bool_arg(
@@ -374,6 +379,21 @@ fn main() {
                 .add_codegen_args()
                 .add_pipeline_args()
                 .add_bool_arg("opt", "Optimize the IR before scheduling pipeline")
+                .add_bool_arg("keep_temps", "Keep temporary files"),
+        )
+        .subcommand(
+            clap::Command::new("ir2combo")
+                .about("Converts IR to combinational SystemVerilog")
+                .arg(
+                    Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_delay_model_arg()
+                .add_ir_top_arg(false)
+                .add_codegen_args()
+                .add_bool_arg("opt", "Optimize the IR before codegen")
                 .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(
@@ -681,6 +701,8 @@ fn main() {
         }
     } else if let Some(matches) = matches.subcommand_matches("g8r-equiv") {
         g8r_equiv::handle_g8r_equiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir2combo") {
+        ir2combo::handle_ir2combo(matches, &config);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
         println!("{}", env!("CARGO_PKG_VERSION"));
     } else {
