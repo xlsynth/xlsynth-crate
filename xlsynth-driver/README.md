@@ -109,46 +109,67 @@ Produces a pipelined SystemVerilog design from an IR file. The generated code
 is printed to **stdout**. When `--keep_temps=true` the location of temporary
 files is reported on **stderr**.
 
+### `ir2combo`: IR to *combinational* SystemVerilog
+
+Similar to `ir2pipeline` but requests the *combinational* backend in `codegen_main`.
+Generates a single‐cycle (no pipeline registers) SystemVerilog module on **stdout**.
+All the usual code-gen flags (e.g., `--use_system_verilog`, `--add_invariant_assertions`,
+`--flop_inputs`, `--flop_outputs`, etc.) are supported.
+
+Example:
+
+```shell
+xlsynth-driver --toolchain=$HOME/xlsynth-toolchain.toml \
+  ir2combo my_design.opt.ir \
+  --top my_main \
+  --delay_model=unit \
+  --use_system_verilog=true > my_design.sv
+```
+
 ### `ir2delayinfo`
 
-Invokes the `delay_info_main` tool for an IR entry point. Delay information is
-printed to **stdout**; any tool errors are shown on **stderr**.
+Runs the `delay_info_main` tool for a given IR entry point and delay model.
+The produced delay-information proto text is written to **stdout**; any tool
+diagnostics appear on **stderr**.
 
 ### `ir-ged`
 
-Computes the graph edit distance between two IR functions. By default a line of
-text like `Distance: N` is written to **stdout**. If `--json=true` is provided,
-the result is emitted as JSON.
+Computes the Graph-Edit-Distance between two IR functions.  Without further
+flags a summary line like `Distance: N` is printed on **stdout**.  With
+`--json=true` the result is emitted as JSON.
 
 ### `ir2gates`: IR to GateFn statistics
 
-Maps an IR function to a gate-level representation and prints analysis
-statistics. With `--quiet=true` a JSON summary is written to **stdout**; without
-it a human-readable report is printed to **stdout**.
+Maps an IR function to a gate-level representation and prints structural
+statistics.  With `--quiet=true` a compact JSON summary is produced; otherwise
+the report is human-readable text.
 
 ### `g8r-equiv`
 
-Checks two GateFns for equivalence using available engines. A JSON report is
-written to **stdout** and the command exits with a non-zero status if any engine
-finds a counterexample. Errors are printed to **stderr**.
+Checks two GateFns for functional equivalence using the available engines.  A
+JSON report is written to **stdout**.  The command exits with a non-zero status
+if any engine finds a counter-example.  Errors are printed to **stderr**.
 
 ## Toolchain configuration (`xlsynth-toolchain.toml`)
 
 Several subcommands accept a `--toolchain` option that points at a
-`xlsynth-toolchain.toml` file. This TOML file contains a `[toolchain]` table
-describing where to find various XLS resources and optional defaults.  The
-supported fields are:
+`xlsynth-toolchain.toml` file.  This TOML file houses a `[toolchain]` table that
+specifies where the driver can find external XLS resources and supplies default
+values for certain flags.
 
-- `dslx_stdlib_path` – path to the DSLX standard library.
-- `dslx_path` – array of additional search paths for DSLX modules.
-- `tool_path` – directory containing the XLS tools such as `codegen_main`.
-- `warnings_as_errors` – when `true`, treat DSLX warnings as hard errors.
-- `enable_warnings` – list of extra DSLX warning names to enable.
-- `disable_warnings` – list of DSLX warnings to suppress.
-- `gate_format` – template string to use for `gate!` macros.
-- `assert_format` – template string to use for `assert!` macros.
-- `use_system_verilog` – emit SystemVerilog rather than plain Verilog.
+Supported fields:
 
-Only the fields that are needed must be provided.  When the driver is invoked
-with `--toolchain <PATH>`, values in this table become the default for the
-corresponding command line options.
+| Key | Purpose |
+|-----|---------|
+| `dslx_stdlib_path` | Path to the DSLX standard library. |
+| `dslx_path` | Array of extra search paths for DSLX modules. |
+| `tool_path` | Directory containing the XLS tools (`codegen_main`, `opt_main`, …). |
+| `warnings_as_errors` | Treat DSLX warnings as hard errors. |
+| `enable_warnings` / `disable_warnings` | Lists of DSLX warning names to enable / suppress. |
+| `gate_format` | Template string used for `gate!` macro expansion. |
+| `assert_format` | Template string used for `assert!` macro expansion. |
+| `use_system_verilog` | Emit SystemVerilog rather than plain Verilog. |
+
+Only the fields you need must be present.  When invoked with
+`--toolchain <FILE>` the driver uses these values as defaults for the
+corresponding command-line flags.
