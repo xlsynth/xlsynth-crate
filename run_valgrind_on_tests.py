@@ -147,17 +147,20 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
         "filter_out": [
             "test_emit_bf16_mul_with_flops",
             "test_emit_bf16_add_with_flops",
-        ]
+        ],
+        "all_filtered_ok": True,
     },
     "test_gatefn_serdes": {
         "filter_out": [
             "test_gatefn_bincode_roundtrip",
-        ]
+        ],
+        "all_filtered_ok": True,
     },
     "test_adder_depths": {
         "filter_out": [
             "adder_depths",
-        ]
+        ],
+        "all_filtered_ok": True,
     },
 }
 
