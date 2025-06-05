@@ -263,6 +263,77 @@ fn gatify_umul(
     result
 }
 
+fn gatify_twos_complement(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
+    let inverted = gb.add_not_vec(bits);
+    let one = gb.add_literal(&xlsynth::IrBits::make_ubits(bits.get_bit_count(), 1).unwrap());
+    let (_carry, sum) = gatify_add_ripple_carry(&inverted, &one, gb.get_false(), None, gb);
+    sum
+}
+
+fn gatify_abs(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
+    let sign = bits.get_msb(0);
+    let negated = gatify_twos_complement(bits, gb);
+    gb.add_mux2_vec(sign, &negated, bits)
+}
+
+fn gatify_udiv(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
+    let bit_count = lhs_bits.get_bit_count();
+
+    let mut remainder = AigBitVector::zeros(bit_count);
+    let mut quotient_bits = Vec::with_capacity(bit_count);
+
+    for dividend_bit in lhs_bits.iter_msb_to_lsb() {
+        let mut shifted_ops = Vec::with_capacity(bit_count);
+        shifted_ops.push(*dividend_bit);
+        for i in 0..bit_count - 1 {
+            shifted_ops.push(*remainder.get_lsb(i));
+        }
+        let shifted = AigBitVector::from_lsb_is_index_0(&shifted_ops);
+
+        let ge = gatify_uge_via_bit_tests(gb, 0, &shifted, rhs_bits);
+        let rhs_comp = gb.add_not_vec(rhs_bits);
+        let (_c, diff) = gatify_add_ripple_carry(&shifted, &rhs_comp, gb.get_true(), None, gb);
+        remainder = gb.add_mux2_vec(&ge, &diff, &shifted);
+        quotient_bits.push(ge);
+    }
+
+    quotient_bits.reverse();
+    let quotient = AigBitVector::from_lsb_is_index_0(&quotient_bits);
+
+    let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
+    let ones = gb.replicate(gb.get_true(), bit_count);
+    gb.add_mux2_vec(&divisor_zero, &ones, &quotient)
+}
+
+fn gatify_div(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    signedness: Signedness,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    match signedness {
+        Signedness::Unsigned => gatify_udiv(lhs_bits, rhs_bits, gb),
+        Signedness::Signed => {
+            let lhs_abs = gatify_abs(lhs_bits, gb);
+            let rhs_abs = gatify_abs(rhs_bits, gb);
+            let unsigned = gatify_udiv(&lhs_abs, &rhs_abs, gb);
+            let sign_a = lhs_bits.get_msb(0);
+            let sign_b = rhs_bits.get_msb(0);
+            let result_neg = gb.add_xor_binary(*sign_a, *sign_b);
+            let negated = gatify_twos_complement(&unsigned, gb);
+            let signed_result = gb.add_mux2_vec(&result_neg, &negated, &unsigned);
+            let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
+            let ones = gb.replicate(gb.get_true(), lhs_bits.get_bit_count());
+            gb.add_mux2_vec(&divisor_zero, &ones, &signed_result)
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn gatify_ugt_via_adder(
     gb: &mut GateBuilder,
@@ -1542,6 +1613,18 @@ fn gatify_internal(
                     signedness,
                     g8_builder,
                 );
+                env.add(node_ref, GateOrVec::BitVector(gates));
+            }
+            ir::NodePayload::Binop(ir::Binop::Udiv | ir::Binop::Sdiv, lhs, rhs) => {
+                let lhs_bits = env.get_bit_vector(*lhs).expect("div lhs should be present");
+                let rhs_bits = env.get_bit_vector(*rhs).expect("div rhs should be present");
+                let signedness =
+                    if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Sdiv, ..)) {
+                        Signedness::Signed
+                    } else {
+                        Signedness::Unsigned
+                    };
+                let gates = gatify_div(&lhs_bits, &rhs_bits, signedness, g8_builder);
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
             ir::NodePayload::Assert { .. }

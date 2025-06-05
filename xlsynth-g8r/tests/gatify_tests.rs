@@ -621,6 +621,30 @@ fn do_smul(lhs: bits[{lhs_bits}], rhs: bits[{rhs_bits}]) -> bits[{output_bits}] 
     );
 }
 
+#[test_matrix(
+    1..3,
+    [Opt::Yes, Opt::No]
+)]
+fn test_udiv_ir_to_gates(bit_count: u32, opt: Opt) {
+    do_test_ir_conversion(
+        &format!(
+            "package sample
+fn do_udiv(x: bits[{bit_count}], y: bits[{bit_count}]) -> bits[{bit_count}] {{
+    ret result: bits[{bit_count}] = udiv(x, y, id=3)
+}}",
+        ),
+        opt,
+    );
+}
+
+bit_count_test_cases!(test_sdiv_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        opt,
+        "fn do_sdiv(x: sN[N], y: sN[N]) -> sN[N] { if y == sN[N]:0 { x } else { x / y } }",
+    );
+});
+
 #[test_case(1, 2, Opt::Yes)]
 #[test_case(1, 2, Opt::No)]
 fn test_array_index_in_bounds_ir_to_gates(element_bits: u32, input_elements: u32, opt: Opt) {
