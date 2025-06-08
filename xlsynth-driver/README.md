@@ -99,6 +99,12 @@ DSLX warnings and errors appear on **stderr**.
 Generates SystemVerilog type declarations for the definitions in a DSLX file.
 The output is written to **stdout**.
 
+### `dslx-g8r-stats`: DSLX GateFn statistics
+
+Converts a DSLX entry point all the way to a gate-level representation and
+prints a JSON summary of structural statistics. It performs IR conversion,
+optimization, and gatification using either the toolchain or the runtime APIs.
+
 ### `ir2opt`: optimize IR
 
 Runs the XLS optimizer on an IR file and prints the optimized IR to **stdout**.

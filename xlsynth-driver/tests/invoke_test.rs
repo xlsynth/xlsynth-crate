@@ -1978,3 +1978,53 @@ top fn my_main() -> bits[32] {
         assert!(!has_asserts, "Did not expect invariant assertions when --add_invariant_assertions=false, but some were found. stdout: {}", stdout);
     }
 }
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
+fn test_dslx_g8r_stats_subcommand(use_tool_path: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dslx = "fn main(a: u1, b: u1) -> u1 { a & b }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("main.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml = "[toolchain]\n";
+    let toolchain_toml_contents = if use_tool_path {
+        add_tool_path_value(&toolchain_toml)
+    } else {
+        toolchain_toml.to_string()
+    };
+    std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut cmd = Command::new(command_path);
+    cmd.arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
+        .arg("dslx-g8r-stats")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main");
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        cmd.env("RUST_LOG", rust_log);
+    }
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
+    assert!(json.get("live_nodes").is_some(), "stats missing live_nodes");
+    assert!(
+        json.get("deepest_path").is_some(),
+        "stats missing deepest_path"
+    );
+    assert!(
+        json.get("fanout_histogram").is_some(),
+        "stats missing fanout_histogram"
+    );
+}

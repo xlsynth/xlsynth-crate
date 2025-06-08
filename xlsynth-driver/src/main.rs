@@ -38,6 +38,7 @@ mod common;
 mod dslx2ir;
 mod dslx2pipeline;
 mod dslx2sv_types;
+mod dslx_g8r_stats;
 mod g8r2v;
 mod g8r_equiv;
 mod gv2ir;
@@ -341,6 +342,11 @@ fn main() {
             clap::Command::new("dslx2sv-types")
                 .about("Converts DSLX type definitions to SystemVerilog")
                 .add_dslx_input_args(false),
+        )
+        .subcommand(
+            clap::Command::new("dslx-g8r-stats")
+                .about("Emit gate-level summary stats for a DSLX entry point")
+                .add_dslx_input_args(true),
         )
         // ir2opt subcommand requires a top symbol
         .subcommand(
@@ -681,6 +687,8 @@ fn main() {
         ir2pipeline::handle_ir2pipeline(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
         dslx2sv_types::handle_dslx2sv_types(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("dslx-g8r-stats") {
+        dslx_g8r_stats::handle_dslx_g8r_stats(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2delayinfo") {
         ir2delayinfo::handle_ir2delayinfo(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-equiv") {
