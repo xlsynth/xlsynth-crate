@@ -564,9 +564,12 @@ pub fn ir_fn_to_boolector(
                     _ => panic!("ArrayIndex: expected array type"),
                 };
                 let elem_width = element_type.bit_count() as u32;
-                // Build a chain of selects for each possible index value
+                // Build a chain of selects for each possible index value.
+                // Iterate from the highest index down so the default value for
+                // out-of-bounds accesses is the last array element, matching
+                // XLS semantics.
                 let mut result = None;
-                for i in 0..element_count {
+                for i in (0..element_count).rev() {
                     let high = ((i + 1) * elem_width as usize - 1) as u32;
                     let low = (i * elem_width as usize) as u32;
                     let elem = array_bv.slice(high, low);
@@ -1670,6 +1673,26 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
             .unwrap();
         let result = prove_ir_fn_equiv(&slice_f, &zero_f);
         assert_eq!(result, EquivResult::Proved);
+    }
+
+    #[test]
+    fn test_array_index_oob_returns_last_element() {
+        let ir_text = r#"fn f() -> bits[2] {
+  arr.1: bits[2][2] = literal(value=[bits[2]:1, bits[2]:0], id=1)
+  idx.2: bits[2] = literal(value=3, id=2)
+  ret index.3: bits[2] = array_index(arr.1, indices=[idx.2], id=3)
+}"#;
+
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let result = ir_fn_to_boolector(btor.clone(), &f, None);
+        let sat_result = btor.sat();
+        assert_eq!(sat_result, boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        assert_eq!(out, 0, "ArrayIndex OOB should return last element");
     }
 
     #[test]
