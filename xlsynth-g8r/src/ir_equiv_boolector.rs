@@ -311,8 +311,19 @@ pub fn ir_fn_to_boolector(
                     }
                     Binop::Umod => a_bv.urem(b_bv),
                     Binop::Smod => a_bv.srem(b_bv),
-                    Binop::Udiv => a_bv.udiv(b_bv),
-                    Binop::Sdiv => a_bv.sdiv(b_bv),
+                    Binop::Udiv | Binop::Sdiv => {
+                        let btor = a_bv.get_btor();
+                        let width = node.ty.bit_count() as u32;
+                        let zero = BV::zero(btor.clone(), width);
+                        let ones = BV::ones(btor.clone(), width);
+                        let div_res = match op {
+                            Binop::Udiv => a_bv.udiv(b_bv),
+                            Binop::Sdiv => a_bv.sdiv(b_bv),
+                            _ => unreachable!(),
+                        };
+                        let rhs_is_zero = b_bv._eq(&zero);
+                        rhs_is_zero.cond_bv(&ones, &div_res)
+                    }
                     Binop::Shll => {
                         let val_bv = env.get(a).expect("Shll arg must be present");
                         let shamt_bv = env.get(b).expect("Shll shamt must be present");
@@ -1565,6 +1576,43 @@ mod tests {
         // 1 shifted left by 1 with 1-bit width should produce 0
         let out = result.output.get_a_solution().as_u64().unwrap();
         assert_eq!(out, 0);
+    }
+
+    #[test]
+    fn test_udiv_by_zero_returns_ones() {
+        let ir_text = r#"fn f(x: bits[4] id=1) -> bits[4] {
+  zero: bits[4] = literal(value=0, id=2)
+  ret q: bits[4] = udiv(x, zero, id=3)
+ }"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let mut param_bvs = std::collections::HashMap::new();
+        param_bvs.insert("x".to_string(), BV::from_u64(btor.clone(), 5, 4));
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        assert_eq!(btor.sat(), boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        assert_eq!(out, 0xF, "udiv by zero should yield all ones");
+    }
+
+    #[test]
+    fn test_sdiv_by_zero_returns_ones() {
+        let ir_text = r#"fn f(x: bits[4] id=1) -> bits[4] {
+  zero: bits[4] = literal(value=0, id=2)
+  ret q: bits[4] = sdiv(x, zero, id=3)
+ }"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let btor = Rc::new(Btor::new());
+        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+        let mut param_bvs = std::collections::HashMap::new();
+        // 0xA is negative (-6) for 4-bit signed values.
+        param_bvs.insert("x".to_string(), BV::from_u64(btor.clone(), 0xA, 4));
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        assert_eq!(btor.sat(), boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        assert_eq!(out, 0xF, "sdiv by zero should yield all ones");
     }
 
     #[test]
