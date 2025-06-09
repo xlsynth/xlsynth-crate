@@ -48,6 +48,7 @@ mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
 mod ir_equiv;
+mod ir_fn_eval;
 mod ir_ged;
 mod lib2proto;
 mod report_cli_error;
@@ -630,6 +631,28 @@ fn main() {
                         .index(2),
                 )
         )
+        .subcommand(
+            clap::Command::new("ir-fn-eval")
+                .about("Interprets an IR function with the provided argument tuple")
+                .arg(
+                    clap::Arg::new("ir_file")
+                        .help("Path to the IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("entry_fn")
+                        .help("Name of the function to invoke")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    clap::Arg::new("arg_tuple")
+                        .help("Tuple of typed IR values for the function arguments")
+                        .required(true)
+                        .index(3),
+                )
+        )
         .get_matches();
 
     let mut toml_path: Option<String> = matches
@@ -707,6 +730,8 @@ fn main() {
         if let Err(e) = g8r2v::handle_g8r2v(matches) {
             report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
         }
+    } else if let Some(matches) = matches.subcommand_matches("ir-fn-eval") {
+        ir_fn_eval::handle_ir_fn_eval(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("g8r-equiv") {
         g8r_equiv::handle_g8r_equiv(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2combo") {
