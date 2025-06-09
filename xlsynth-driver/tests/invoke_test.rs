@@ -2028,3 +2028,28 @@ fn test_dslx_g8r_stats_subcommand(use_tool_path: bool) {
         "stats missing fanout_histogram"
     );
 }
+
+#[test]
+fn test_ir_fn_eval() {
+    let ir = "package test\n\nfn add(a: bits[32], b: bits[32]) -> bits[32] {\n  ret add.1: bits[32] = add(a, b)\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let ir_path = dir.path().join("add.ir");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("ir-fn-eval")
+        .arg(ir_path.to_str().unwrap())
+        .arg("add")
+        .arg("(bits[32]:1, bits[32]:2)")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[32]:3\n");
+}

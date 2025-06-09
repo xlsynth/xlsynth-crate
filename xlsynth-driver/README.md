@@ -150,6 +150,15 @@ Maps an IR function to a gate-level representation and prints structural
 statistics.  With `--quiet=true` a compact JSON summary is produced; otherwise
 the report is human-readable text.
 
+### `ir-fn-eval`
+
+Interprets an IR function with a tuple of typed argument values and prints the
+result. Example:
+
+```shell
+xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
+```
+
 ### `g8r-equiv`
 
 Checks two GateFns for functional equivalence using the available engines.  A
