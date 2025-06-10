@@ -40,3 +40,7 @@ harness = false
 [[bench]]
 name = "f32_add"
 harness = false
+
+[[bench]]
+name = "ir_value_bench"
+harness = false

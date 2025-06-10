@@ -326,39 +326,44 @@ impl IrValue {
     }
 
     pub fn to_i64(&self) -> Result<i64, XlsynthError> {
-        let string = self.to_string_fmt(IrFormatPreference::SignedDecimal)?;
-        let number = string.split(':').nth(1).expect("split success");
-        match number.parse::<i64>() {
-            Ok(i) => Ok(i),
-            Err(e) => Err(XlsynthError(format!(
-                "IrValue::to_i64() failed to parse i64 from string: {}",
-                e
-            ))),
+        let bits = self.to_bits()?;
+        let width = bits.get_bit_count();
+        if width > 64 {
+            return Err(XlsynthError(format!(
+                "IrValue::to_i64(): width {} exceeds 64 bits",
+                width
+            )));
         }
+        let unsigned = self.to_u64()?;
+        let shift = 64 - width;
+        Ok(((unsigned << shift) as i64) >> shift)
     }
 
     pub fn to_u64(&self) -> Result<u64, XlsynthError> {
-        let string = self.to_string_fmt(IrFormatPreference::UnsignedDecimal)?;
-        let number = string.split(':').nth(1).expect("split success");
-        match number.parse::<u64>() {
-            Ok(i) => Ok(i),
-            Err(e) => Err(XlsynthError(format!(
-                "IrValue::to_u64() failed to parse u64 from string: {}",
-                e
-            ))),
+        let bits = self.to_bits()?;
+        let width = bits.get_bit_count();
+        if width > 64 {
+            return Err(XlsynthError(format!(
+                "IrValue::to_u64(): width {} exceeds 64 bits",
+                width
+            )));
         }
+        let mut val: u64 = 0;
+        for idx in (0..width).rev() {
+            val = (val << 1) | bits.get_bit(idx)? as u64;
+        }
+        Ok(val)
     }
 
     pub fn to_u32(&self) -> Result<u32, XlsynthError> {
-        let string = self.to_string_fmt(IrFormatPreference::UnsignedDecimal)?;
-        let number = string.split(':').nth(1).expect("split success");
-        match number.parse::<u32>() {
-            Ok(i) => Ok(i),
-            Err(e) => Err(XlsynthError(format!(
-                "IrValue::to_u32() failed to parse u32 from string: {}",
-                e
-            ))),
+        let val = self.to_u64()?;
+        if val > u32::MAX as u64 {
+            return Err(XlsynthError(format!(
+                "IrValue::to_u32() value {} does not fit in u32",
+                val
+            )));
         }
+        Ok(val as u32)
     }
 
     /// Attempts to extract the bits contents underlying this value.
