@@ -16,6 +16,9 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v3
+        with:
+          # Fetch full history and all tags so gen_version_compat.py can inspect them.
+          fetch-depth: 0
 
       - name: Check version numbers
         run: python bump_version_numbers.py check
