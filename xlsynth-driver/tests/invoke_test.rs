@@ -2097,8 +2097,9 @@ fn test_tiv1_slice_oob_allows_compilation(use_tool_path: bool) {
     );
 }
 
+/// TODO(cdleary): 2025-06-10 This only works when there is a tool path
+/// available because the runtime APIs don't support specifying TIv2.
 #[test_case(true; "with_tool_path")]
-#[test_case(false; "without_tool_path")]
 fn test_tiv2_slice_oob_is_error(use_tool_path: bool) {
     let _ = env_logger::builder().is_test(true).try_init();
     // Same DSLX code as above.

@@ -24,6 +24,15 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
     let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
     let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
 
+    let type_inference_v2 = matches
+        .get_one::<String>("type_inference_v2")
+        .map(|s| s == "true");
+
+    if type_inference_v2 == Some(true) && tool_path.is_none() {
+        eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");
+        std::process::exit(1);
+    }
+
     let ir_text = if let Some(tool_path) = tool_path {
         let mut output = run_ir_converter_main(
             input_path,
@@ -33,6 +42,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
             tool_path,
             enable_warnings,
             disable_warnings,
+            type_inference_v2,
         );
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), &output).unwrap();
