@@ -86,6 +86,7 @@ pub fn run_ir_converter_main(
     tool_path: &str,
     enable_warnings: Option<&[String]>,
     disable_warnings: Option<&[String]>,
+    type_inference_v2: Option<bool>,
 ) -> String {
     log::info!(
         "run_ir_converter_main; enable_warnings: {:?}; disable_warnings: {:?}",
@@ -123,6 +124,11 @@ pub fn run_ir_converter_main(
         command
             .arg("--disable_warnings")
             .arg(disable_warnings.join(","));
+    }
+
+    // Pass through the experimental type inference flag if requested.
+    if let Some(true) = type_inference_v2 {
+        command.arg("--type_inference_v2");
     }
 
     log::info!("command: {:?}", command);

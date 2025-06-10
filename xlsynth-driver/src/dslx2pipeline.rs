@@ -20,6 +20,7 @@ fn dslx2pipeline(
     codegen_flags: &CodegenFlags,
     delay_model: &str,
     keep_temps: &Option<bool>,
+    type_inference_v2: Option<bool>,
     config: &Option<ToolchainConfig>,
 ) {
     log::info!("dslx2pipeline; config: {:?}", config);
@@ -46,6 +47,7 @@ fn dslx2pipeline(
             tool_path,
             enable_warnings,
             disable_warnings,
+            type_inference_v2,
         );
         let unopt_ir_path = temp_dir.path().join("unopt.ir");
         std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
@@ -145,7 +147,16 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
     let keep_temps = matches.get_one::<String>("keep_temps").map(|s| s == "true");
     let codegen_flags = extract_codegen_flags(matches, config.as_ref());
 
-    // Stub function for DSLX to SV conversion
+    // extract type_inference_v2 flag
+    let type_inference_v2 = match matches
+        .get_one::<String>("type_inference_v2")
+        .map(|s| s.as_str())
+    {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    };
+
     dslx2pipeline(
         input_path,
         top,
@@ -153,6 +164,7 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
         &codegen_flags,
         delay_model,
         &keep_temps,
+        type_inference_v2,
         config,
     );
 }
