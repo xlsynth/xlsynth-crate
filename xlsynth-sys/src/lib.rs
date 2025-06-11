@@ -1377,4 +1377,34 @@ extern "C" {
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
+
+/// Directory containing the libxls DSO.
+///
+/// *** DO NOT USE THIS VARIABLE FROM WITHIN YOUR build.rs ***
+///
+/// You might be tempted to write the following in your build.rs:
+///
+/// ```ignore
+/// // DO NOT DO THIS IN YOUR build.rs!!
+/// let dylib_dirpath = xlsynth_sys::XLS_DSO_PATH;
+/// // set rpath to dylib_dirpath or something.
+/// ```
+///
+/// The problem is that build.rs is compiled for host, whereas if you're setting
+/// an rpath (or something similar) you want to get the path from compiling
+/// xlsynth_sys for *target*.  In other words, the above will break
+/// cross-compilation.
+///
+/// Instead, your build.rs should get the path from an envvar which:
+///
+/// ```ignore
+/// // Do this from your build.rs instead.
+/// let dylib_path = std::env::var("DEP_XLSYNTH_DSO_PATH").unwrap();
+/// ```
+///
+/// More details are available at
+/// <https://doc.rust-lang.org/cargo/reference/build-script-examples.html#using-another-sys-crate>.
+///
+/// (If you use this envvar from your crate proper -- i.e. not from build.rs --
+/// then it's perfectly fine.)
 pub const XLS_DSO_PATH: &str = env!("XLS_DSO_PATH");

@@ -354,6 +354,7 @@ fn main() {
         );
         let dso_name = &dso_name[3..];
         println!("cargo:rustc-env=XLS_DSO_PATH={}", dso_path.display());
+        println!("cargo:DSO_PATH={}", dso_path.display());
         println!("cargo:rustc-env=DSLX_STDLIB_PATH={stdlib_path_string}");
         println!("cargo:rustc-link-search=native={}", dso_dir.display());
         println!("cargo:rustc-link-lib=dylib={dso_name}");
@@ -445,6 +446,7 @@ fn main() {
         let dso_name_str = dso_info.get_dso_name();
         println!("cargo:rustc-link-lib=dylib={dso_name_str}");
         println!("cargo:rustc-env=XLS_DSO_PATH={out_dir}");
+        println!("cargo:DSO_PATH={out_dir}");
         return;
     }
 
@@ -455,5 +457,15 @@ fn main() {
     println!("cargo:rustc-link-search=native={out_dir}");
     let dso_name_str = dso_info.get_dso_name();
     println!("cargo:rustc-link-lib=dylib={dso_name_str}");
+
+    // This is exposed as `xlsynth_sys::XLS_DSO_PATH` from rust via
+    // xlsynth-sys/src/lib.rs.  DO NOT USE THIS FROM WITHIN YOUR build.rs.  See
+    // the definition in lib.rs for an explanation.
     println!("cargo:rustc-env=XLS_DSO_PATH={out_dir}");
+
+    // Path to the directory containing the DSO.  This is the one you should use
+    // from build.rs.  The build.rs of a dependent crate can read this value via
+    // the DEP_XLSYNTH_DSO_PATH envvar.  See
+    // https://doc.rust-lang.org/cargo/reference/build-script-examples.html#using-another-sys-crate.
+    println!("cargo:DSO_PATH={out_dir}");
 }
