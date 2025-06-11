@@ -183,20 +183,41 @@ values for certain flags.
 
 Supported fields:
 
-| Key | Purpose |
-|-----|---------|
-| `dslx_stdlib_path` | Path to the DSLX standard library. |
-| `dslx_path` | Array of extra search paths for DSLX modules. |
-| `tool_path` | Directory containing the XLS tools (`codegen_main`, `opt_main`, …). |
-| `warnings_as_errors` | Treat DSLX warnings as hard errors. |
-| `enable_warnings` / `disable_warnings` | Lists of DSLX warning names to enable / suppress. |
-| `gate_format` | Template string used for `gate!` macro expansion. |
-| `assert_format` | Template string used for `assert!` macro expansion. |
-| `use_system_verilog` | Emit SystemVerilog rather than plain Verilog. |
+| Section      | Key                | Purpose |
+|--------------|--------------------|---------|
+| `[toolchain]`| `tool_path`        | Directory containing the XLS tools (`codegen_main`, `opt_main`, …). |
+| `[dslx]`     | `type_inference_v2`| If true, enables the experimental type inference v2 algorithm globally for all supported subcommands (unless overridden by a CLI flag). |
+| `[dslx]`     | `dslx_stdlib_path` | Path to the DSLX standard library. |
+| `[dslx]`     | `dslx_path`        | Array of extra search paths for DSLX modules. |
+| `[dslx]`     | `warnings_as_errors` | Treat DSLX warnings as hard errors. |
+| `[dslx]`     | `enable_warnings` / `disable_warnings` | Lists of DSLX warning names to enable / suppress. |
+| `[codegen]`  | `gate_format`      | Template string used for `gate!` macro expansion. |
+| `[codegen]`  | `assert_format`    | Template string used for `assert!` macro expansion. |
+| `[codegen]`  | `use_system_verilog` | Emit SystemVerilog rather than plain Verilog. |
 
 Only the fields you need must be present.  When invoked with
 `--toolchain <FILE>` the driver uses these values as defaults for the
 corresponding command-line flags.
+
+Example:
+
+```toml
+[toolchain]
+tool_path = "/path/to/xls/tools"
+
+[dslx]
+type_inference_v2 = true
+dslx_stdlib_path = "/path/to/dslx/stdlib"
+dslx_path = ["/path/to/extra1", "/path/to/extra2"]
+warnings_as_errors = true
+enable_warnings = ["foo", "bar"]
+disable_warnings = ["baz"]
+
+[codegen]
+gate_format = "..."
+assert_format = "..."
+use_system_verilog = true
+```
 
 ## Experimental `--type_inference_v2` Flag
 

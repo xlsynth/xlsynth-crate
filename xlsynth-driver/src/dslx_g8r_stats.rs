@@ -21,12 +21,21 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
     let dslx_path = dslx_path.as_deref();
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
-    let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
-    let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
+    let enable_warnings = config
+        .as_ref()
+        .and_then(|c| c.dslx.as_ref()?.enable_warnings.as_deref());
+    let disable_warnings = config
+        .as_ref()
+        .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
 
     let type_inference_v2 = matches
         .get_one::<String>("type_inference_v2")
-        .map(|s| s == "true");
+        .map(|s| s == "true")
+        .or_else(|| {
+            config
+                .as_ref()
+                .and_then(|c| c.dslx.as_ref()?.type_inference_v2)
+        });
 
     if type_inference_v2 == Some(true) && tool_path.is_none() {
         eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");

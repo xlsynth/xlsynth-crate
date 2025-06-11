@@ -106,8 +106,12 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
-    let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
-    let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
+    let enable_warnings = config
+        .as_ref()
+        .and_then(|c| c.dslx.as_ref()?.enable_warnings.as_deref());
+    let disable_warnings = config
+        .as_ref()
+        .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
 
     let opt = match matches.get_one::<String>("opt").map(|s| s.as_str()) {
         Some("true") => true,
@@ -121,7 +125,9 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     {
         Some("true") => Some(true),
         Some("false") => Some(false),
-        _ => None,
+        _ => config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.type_inference_v2),
     };
 
     dslx2ir(

@@ -54,7 +54,13 @@ pub fn extract_codegen_flags(
     toolchain_config: Option<&crate::toolchain_config::ToolchainConfig>,
 ) -> CodegenFlags {
     let (gate_format, assert_format) = if let Some(config) = toolchain_config {
-        (config.gate_format.clone(), config.assert_format.clone())
+        (
+            config.codegen.as_ref().and_then(|c| c.gate_format.clone()),
+            config
+                .codegen
+                .as_ref()
+                .and_then(|c| c.assert_format.clone()),
+        )
     } else {
         (None, None)
     };
@@ -68,7 +74,7 @@ pub fn extract_codegen_flags(
         use_system_verilog: matches
             .get_one::<String>("use_system_verilog")
             .map(|s| s == "true")
-            .or_else(|| toolchain_config.and_then(|c| c.use_system_verilog)),
+            .or_else(|| toolchain_config.and_then(|c| c.codegen.as_ref()?.use_system_verilog)),
         flop_inputs: matches
             .get_one::<String>("flop_inputs")
             .map(|s| s == "true"),

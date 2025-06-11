@@ -5,37 +5,26 @@ use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
 pub struct ToolchainConfig {
-    /// Path to the DSLX standard library.
-    pub dslx_stdlib_path: Option<String>,
-
-    /// Additional paths to use in the DSLX module search, i.e. as roots for
-    /// import statements.
-    pub dslx_path: Option<Vec<String>>,
-
     /// Directory path for the XLS toolset, e.g. codegen_main, opt_main, etc.
     pub tool_path: Option<String>,
+    pub dslx: Option<DslxConfig>,
+    pub codegen: Option<CodegenConfig>,
+}
 
-    /// Treat warnings as errors.
+#[derive(Deserialize, Debug)]
+pub struct DslxConfig {
+    pub type_inference_v2: Option<bool>,
+    pub dslx_stdlib_path: Option<String>,
+    pub dslx_path: Option<Vec<String>>,
     pub warnings_as_errors: Option<bool>,
-
-    /// Enable warnings (versus the default warning set) for the given list of
-    /// warning names.
-    ///
-    /// Enabling a warning that is already enabled in the default set is fine
-    /// and has no effect.
     pub enable_warnings: Option<Vec<String>>,
-
-    /// Disable warnings (versus the default warning set) for the given list of
-    /// warning names.
-    ///
-    /// Disabling a warning that is already disabled in the default set is fine
-    /// and has no effect.
     pub disable_warnings: Option<Vec<String>>,
+}
 
+#[derive(Deserialize, Debug)]
+pub struct CodegenConfig {
     pub gate_format: Option<String>,
-
     pub assert_format: Option<String>,
-
     pub use_system_verilog: Option<bool>,
 }
 
@@ -50,7 +39,10 @@ pub fn get_dslx_stdlib_path(
     if let Some(dslx_stdlib_path) = dslx_stdlib_path {
         Some(dslx_stdlib_path.to_string())
     } else if let Some(config) = config {
-        config.dslx_stdlib_path.clone()
+        config
+            .dslx
+            .as_ref()
+            .and_then(|d| d.dslx_stdlib_path.clone())
     } else {
         None
     }
@@ -64,7 +56,11 @@ pub fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> 
     if let Some(dslx_path) = dslx_path {
         Some(dslx_path.to_string())
     } else if let Some(config) = config {
-        let dslx_path = config.dslx_path.as_deref().unwrap_or(&[]);
+        let dslx_path = config
+            .dslx
+            .as_ref()
+            .and_then(|d| d.dslx_path.as_deref())
+            .unwrap_or(&[]);
         Some(dslx_path.join(";"))
     } else {
         None
