@@ -37,8 +37,8 @@ class TestBinaryConfig(TypedDict, total=False):
 TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
     "xlsynth": {"filter_out": ["bridge_builder"]},
     "ir_interpret_test": {
-        "filter_out": ["ir_interpret_array_values"],
-        "all_filtered_ok": True,
+        "shard_test_cases": True,
+        "filter_out": ["test_ir_interpret_array_values"],
     },
     "sample_usage": {
         "filter_out": [
@@ -810,7 +810,7 @@ def main() -> None:
         "--filter-to-run",
         type="string",
         default="",
-        help="Filter to run only the given executable substring",
+        help="Comma-separated substrings; only executables whose path contains any of them will be run",
     )
     parser.add_option(
         "--release",
@@ -825,6 +825,12 @@ def main() -> None:
         help="Pass --demangle=no to valgrind to disable symbol demangling.",
     )
     (opts, args) = parser.parse_args()
+
+    # Normalize the --filter-to-run option into a list of substrings.
+    # Empty entries (e.g., consecutive commas) are ignored.
+    filter_substrings: List[str] = [
+        s.strip() for s in opts.filter_to_run.split(",") if s.strip()
+    ]
 
     # Check if XLSYNTH_TOOLS environment variable is set.
     xlsynth_tools_path: Optional[str] = os.environ.get("XLSYNTH_TOOLS")
@@ -872,7 +878,8 @@ def main() -> None:
     for line in output.splitlines():
         # Check for the correct target directory
         if "Executable" in line and "(" in line and target_dir in line:
-            if opts.filter_to_run and opts.filter_to_run not in line:
+            # Apply executable filtering if requested.
+            if filter_substrings and not any(sub in line for sub in filter_substrings):
                 continue
             if "spdx" in line or any(
                 x in line for x in ["readme_test", "version_test"]
