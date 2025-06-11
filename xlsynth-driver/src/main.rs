@@ -330,13 +330,21 @@ fn main() {
                 .add_dslx_input_args(true)
                 .add_pipeline_args()
                 .add_codegen_args()
-                .add_bool_arg("keep_temps", "Keep temporary files"),
+                .add_bool_arg("keep_temps", "Keep temporary files")
+                .add_bool_arg(
+                    "type_inference_v2",
+                    "Enable the experimental type-inference v2 algorithm",
+                ),
         )
         .subcommand(
             clap::Command::new("dslx2ir")
                 .about("Converts DSLX to IR")
                 .add_dslx_input_args(true)
-                .add_bool_arg("opt", "Optimize the IR we emit as well"),
+                .add_bool_arg("opt", "Optimize the IR we emit as well")
+                .add_bool_arg(
+                    "type_inference_v2",
+                    "Enable the experimental type-inference v2 algorithm",
+                ),
         )
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
@@ -347,7 +355,11 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx-g8r-stats")
                 .about("Emit gate-level summary stats for a DSLX entry point")
-                .add_dslx_input_args(true),
+                .add_dslx_input_args(true)
+                .add_bool_arg(
+                    "type_inference_v2",
+                    "Enable the experimental type-inference v2 algorithm",
+                ),
         )
         // ir2opt subcommand requires a top symbol
         .subcommand(

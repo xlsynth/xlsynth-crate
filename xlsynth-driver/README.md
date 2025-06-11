@@ -89,10 +89,16 @@ The resulting Verilog is printed on **stdout**.
 Diagnostic messages and the path to temporary files (when
 `--keep_temps=true`) are written to **stderr**.
 
+- The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
+  **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
+
 ### `dslx2ir`: DSLX to IR
 
 Converts DSLX source code to the XLS IR. The IR text is emitted on **stdout**.
 DSLX warnings and errors appear on **stderr**.
+
+- The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
+  **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
 
 ### `dslx2sv-types`: DSLX type definitions to SystemVerilog
 
@@ -104,6 +110,9 @@ The output is written to **stdout**.
 Converts a DSLX entry point all the way to a gate-level representation and
 prints a JSON summary of structural statistics. It performs IR conversion,
 optimization, and gatification using either the toolchain or the runtime APIs.
+
+- The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
+  **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
 
 ### `ir2opt`: optimize IR
 
@@ -188,3 +197,41 @@ Supported fields:
 Only the fields you need must be present.  When invoked with
 `--toolchain <FILE>` the driver uses these values as defaults for the
 corresponding command-line flags.
+
+## Experimental `--type_inference_v2` Flag
+
+Some subcommands support an experimental flag:
+
+```
+--type_inference_v2
+```
+
+This flag enables the experimental type inference v2 algorithm for DSLX-to-IR and related conversions.
+**It is only supported when using the external toolchain (`--toolchain`).**
+If you request this flag without `--toolchain`, the driver will print an error and exit.
+
+### Supported Subcommands
+
+| Subcommand         | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
+|--------------------|:-------------------------------:|:-------------------------------:|:---------------------------------:|
+| `dslx2pipeline`    | Yes                             | Yes                             | Yes                              |
+| `dslx2ir`          | Yes                             | Yes                             | Yes                              |
+| `dslx-g8r-stats`   | Yes                             | Yes                             | Yes                              |
+| `dslx2sv-types`    | No                              | N/A                             | Yes                              |
+
+### Migration and Use
+
+The main benefit of this flag is that it enables an attempt at migrating `.x` files with **no associated source text changes** (e.g., that would change the position metadata in the resulting IR file).
+
+> **Note:**
+> This flag may be short-lived, as it will likely become the default mode when TIv1 is deleted.
+> However, it may assist with migration testing and validation during the transition period.
+
+**How to use:**
+
+```shell
+xlsynth-driver --toolchain=path/to/xlsynth-toolchain.toml dslx2ir \
+  --dslx_input_file my_module.x \
+  --dslx_top main \
+  --type_inference_v2=true
+```

@@ -24,6 +24,15 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
     let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
     let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
 
+    let type_inference_v2 = matches
+        .get_one::<String>("type_inference_v2")
+        .map(|s| s == "true");
+
+    if type_inference_v2 == Some(true) && tool_path.is_none() {
+        eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");
+        std::process::exit(1);
+    }
+
     let ir_text = if let Some(tool_path) = tool_path {
         let mut output = run_ir_converter_main(
             input_path,
@@ -33,12 +42,17 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
             tool_path,
             enable_warnings,
             disable_warnings,
+            type_inference_v2,
         );
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), &output).unwrap();
         output = run_opt_main(temp_file.path(), None, tool_path);
         output
     } else {
+        if type_inference_v2 == Some(true) {
+            eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");
+            std::process::exit(1);
+        }
         let dslx_contents = std::fs::read_to_string(input_path).expect("failed to read DSLX input");
         let stdlib_path = dslx_stdlib_path.map(|s| std::path::Path::new(s));
         let additional_paths: Vec<&std::path::Path> = dslx_path
