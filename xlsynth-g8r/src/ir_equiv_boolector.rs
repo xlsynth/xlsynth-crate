@@ -22,14 +22,30 @@ pub struct Ctx {
     btor: Rc<Btor>,
 }
 
+/// Whether a Boolector solver should be created with incremental (push/pop)
+/// capability enabled.
+enum Incremental {
+    Yes,
+    No,
+}
+
+/// Create a fresh `Btor` with model generation always enabled and incremental
+/// mode enabled iff `incremental == Incremental::Yes`.
+fn new_btor(incremental: Incremental) -> Rc<Btor> {
+    let btor = Rc::new(Btor::new());
+    btor.set_opt(BtorOption::ModelGen(ModelGen::All));
+    if matches!(incremental, Incremental::Yes) {
+        btor.set_opt(BtorOption::Incremental(true));
+    }
+    btor
+}
+
 impl Ctx {
     /// Creates a new Boolector solver context with model generation enabled
     /// and incremental solving turned on so clause learning can be reused
     /// across proofs.
     pub fn new() -> Self {
-        let btor = Rc::new(Btor::new());
-        btor.set_opt(BtorOption::ModelGen(ModelGen::All));
-        btor.set_opt(BtorOption::Incremental(true));
+        let btor = new_btor(Incremental::Yes);
         Self { btor }
     }
 }
@@ -992,6 +1008,7 @@ fn check_equiv_internal_with_btor(
     rhs: &Fn,
     flatten_aggregates: bool,
     btor: Rc<Btor>,
+    use_frame: bool, // whether to push/pop a solver frame
 ) -> EquivResult {
     // Helper to pretty-print a function signature
     fn signature_str(f: &Fn) -> String {
@@ -1056,7 +1073,9 @@ fn check_equiv_internal_with_btor(
             );
         }
     }
-    btor.push(1);
+    if use_frame {
+        btor.push(1);
+    }
     // Create shared parameter BVs for all parameters (by name)
     let mut param_bvs = HashMap::new();
     for param in &lhs.params {
@@ -1114,40 +1133,39 @@ fn check_equiv_internal_with_btor(
         }
         SolverResult::Unknown => panic!("Solver returned unknown result"),
     };
-    btor.pop(1);
+    if use_frame {
+        btor.pop(1);
+    }
     res
 }
 
 /// Standard equivalence check (no aggregate flattening)
 pub fn prove_ir_fn_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    let btor = Rc::new(Btor::new());
-    btor.set_opt(BtorOption::ModelGen(ModelGen::All));
-    check_equiv_internal_with_btor(lhs, rhs, false, btor)
+    let btor = new_btor(Incremental::No);
+    check_equiv_internal_with_btor(lhs, rhs, false, btor, false)
 }
 
 /// Equivalence check with tuple/array flattening
 pub fn prove_ir_equiv_flattened(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    let btor = Rc::new(Btor::new());
-    btor.set_opt(BtorOption::ModelGen(ModelGen::All));
-    check_equiv_internal_with_btor(lhs, rhs, true, btor)
+    let btor = new_btor(Incremental::No);
+    check_equiv_internal_with_btor(lhs, rhs, true, btor, false)
 }
 
 /// Equivalence check reusing the given solver context.
 pub fn prove_ir_fn_equiv_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
-    check_equiv_internal_with_btor(lhs, rhs, false, ctx.btor.clone())
+    check_equiv_internal_with_btor(lhs, rhs, false, ctx.btor.clone(), true)
 }
 
 /// Flattened equivalence check reusing the given solver context.
 pub fn prove_ir_equiv_flattened_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
-    check_equiv_internal_with_btor(lhs, rhs, true, ctx.btor.clone())
+    check_equiv_internal_with_btor(lhs, rhs, true, ctx.btor.clone(), true)
 }
 
 /// Internal helper that constructs a fresh solver and delegates to
 /// `check_equiv_internal_with_btor`.
 fn check_equiv_internal(lhs: &Fn, rhs: &Fn, flatten_aggregates: bool) -> EquivResult {
-    let btor = Rc::new(Btor::new());
-    btor.set_opt(BtorOption::ModelGen(ModelGen::All));
-    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, btor)
+    let btor = new_btor(Incremental::No);
+    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, btor, false)
 }
 
 fn shift_boolector<F>(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>, shift_op: F) -> BV<Rc<Btor>>
