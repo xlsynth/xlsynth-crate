@@ -309,8 +309,22 @@ pub fn ir_fn_to_boolector(
                             prod
                         }
                     }
-                    Binop::Umod => a_bv.urem(b_bv),
-                    Binop::Smod => a_bv.srem(b_bv),
+                    Binop::Umod => {
+                        let width = node.ty.bit_count() as u32;
+                        let zero = BV::zero(btor.clone(), width);
+                        let mod_res = a_bv.urem(b_bv);
+                        let rhs_is_zero = b_bv._eq(&zero);
+                        // XLS semantics: x % 0 == x
+                        rhs_is_zero.cond_bv(a_bv, &mod_res)
+                    }
+                    Binop::Smod => {
+                        let width = node.ty.bit_count() as u32;
+                        let zero = BV::zero(btor.clone(), width);
+                        let mod_res = a_bv.srem(b_bv);
+                        let rhs_is_zero = b_bv._eq(&zero);
+                        // XLS semantics: for signed modulus, dividend % 0 == 0.
+                        rhs_is_zero.cond_bv(&zero, &mod_res)
+                    }
                     Binop::Udiv | Binop::Sdiv => {
                         let btor = a_bv.get_btor();
                         let width = node.ty.bit_count() as u32;
@@ -2050,5 +2064,96 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
             "Expected functions to be equivalent after fix, got {:?}",
             result
         );
+    }
+
+    #[test]
+    fn test_umod_by_zero_returns_dividend() {
+        let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
+   ret umod.2: bits[8] = umod(x, x, id=2)
+ }"#;
+        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
+            .parse_fn()
+            .unwrap();
+        // Instantiate Boolector directly to evaluate.
+        let btor = std::rc::Rc::new(boolector::Btor::new());
+        btor.set_opt(boolector::option::BtorOption::ModelGen(
+            boolector::option::ModelGen::All,
+        ));
+        let mut param_bvs = std::collections::HashMap::new();
+        // Pick x = 0 case explicitly.
+        let x_val = 0u64;
+        let x_bv = boolector::BV::from_u64(btor.clone(), x_val, 8);
+        param_bvs.insert("x".to_string(), x_bv);
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        assert_eq!(btor.sat(), boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        // Expect output to equal dividend x (0).
+        assert_eq!(out, x_val);
+    }
+
+    #[test]
+    fn test_smod_by_zero_returns_dividend() {
+        let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
+   ret smod.2: bits[8] = smod(x, x, id=2)
+ }"#;
+        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
+            .parse_fn()
+            .unwrap();
+        let btor = std::rc::Rc::new(boolector::Btor::new());
+        btor.set_opt(boolector::option::BtorOption::ModelGen(
+            boolector::option::ModelGen::All,
+        ));
+        let mut param_bvs = std::collections::HashMap::new();
+        let x_val = 0u64; // divisor zero
+        let x_bv = boolector::BV::from_u64(btor.clone(), x_val, 8);
+        param_bvs.insert("x".to_string(), x_bv);
+        let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
+        assert_eq!(btor.sat(), boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        assert_eq!(out, 0);
+    }
+
+    #[test]
+    fn test_fuzz_ir_opt_equiv_regression_smod_by_zero() {
+        // Regression for fuzz case minimized-from-45a97b4d... focusing on smod
+        // behaviour.
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let orig_ir = r#"fn fuzz_test(input: bits[7] id=1) -> bits[7] {
+   literal.3: bits[7] = literal(value=108, id=3)
+   literal.2: bits[1] = literal(value=0, id=2)
+   ret smod.4: bits[7] = smod(literal.3, input, id=4)
+ }"#;
+
+        let opt_ir = r#"fn fuzz_test(input: bits[7] id=1) -> bits[7] {
+   bit_slice.29: bits[1] = bit_slice(input, start=6, width=1, id=29)
+   neg.17: bits[7] = neg(input, id=17)
+   literal.20: bits[7][12] = literal(value=[0, 108, 118, 122, 123, 124, 125, 126, 126, 126, 126, 127], id=20)
+   priority_sel.18: bits[7] = priority_sel(bit_slice.29, cases=[neg.17], default=input, id=18)
+   literal.30: bits[7] = literal(value=21, id=30)
+   array_index.21: bits[7] = array_index(literal.20, indices=[priority_sel.18], id=21)
+   ult.31: bits[1] = ult(priority_sel.18, literal.30, id=31)
+   bit_slice.51: bits[6] = bit_slice(array_index.21, start=0, width=6, id=51)
+   sign_ext.55: bits[6] = sign_ext(ult.31, new_bit_count=6, id=55)
+   and.53: bits[6] = and(bit_slice.51, sign_ext.55, id=53)
+   neg.49: bits[6] = neg(and.53, id=49)
+   priority_sel.46: bits[6] = priority_sel(bit_slice.29, cases=[neg.49], default=and.53, id=46)
+   literal.15: bits[7] = literal(value=0, id=15)
+   literal.3: bits[7] = literal(value=108, id=3)
+   smul.50: bits[7] = smul(priority_sel.46, input, id=50)
+   ne.43: bits[1] = ne(input, literal.15, id=43)
+   sub.8: bits[7] = sub(literal.3, smul.50, id=8)
+   sign_ext.40: bits[7] = sign_ext(ne.43, new_bit_count=7, id=40)
+   ret and.41: bits[7] = and(sub.8, sign_ext.40, id=41)
+ }"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(orig_ir)
+            .parse_fn()
+            .expect("parse lhs");
+        let rhs = crate::xls_ir::ir_parser::Parser::new(opt_ir)
+            .parse_fn()
+            .expect("parse rhs");
+        let result = prove_ir_fn_equiv(&lhs, &rhs);
+        assert_eq!(result, EquivResult::Proved);
     }
 }
