@@ -297,21 +297,6 @@ fn run_explore_exploit(
                         let global_best_cost = best_cl.cost.load(Ordering::SeqCst);
                         if metric_val > global_best_cost + cfg_cl.initial_temperature as usize {
                             local_gfn = best_cl.get();
-                            // Next segment: explore with full temperature to
-                            // differentiate search direction.
-                            segment_temperature = if chain_no == 0 {
-                                explorer_temp
-                            } else {
-                                cfg_cl.initial_temperature
-                            };
-                        } else {
-                            // Otherwise revert to (or keep) the chain's base temperature.
-                            if chain_no != 0 {
-                                segment_temperature = segment_temperature
-                                    .max(MIN_TEMP_RATIO * cfg_cl.initial_temperature);
-                            } else {
-                                segment_temperature = explorer_temp;
-                            }
                         }
                     }
                     Err(e) => {
