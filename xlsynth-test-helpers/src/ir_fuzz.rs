@@ -50,6 +50,12 @@ pub enum FuzzBinop {
     Add,
     Sub,
 
+    // division / modulus
+    Udiv,
+    Sdiv,
+    Umod,
+    Smod,
+
     Concat,
 }
 
@@ -251,6 +257,12 @@ pub fn generate_ir_fn(
                     FuzzBinop::Shrl => fn_builder.shrl(operand1, operand2, None),
                     FuzzBinop::Shra => fn_builder.shra(operand1, operand2, None),
                     FuzzBinop::Shll => fn_builder.shll(operand1, operand2, None),
+
+                    // division / modulus
+                    FuzzBinop::Udiv => fn_builder.udiv(operand1, operand2, None),
+                    FuzzBinop::Sdiv => fn_builder.sdiv(operand1, operand2, None),
+                    FuzzBinop::Umod => fn_builder.umod(operand1, operand2, None),
+                    FuzzBinop::Smod => fn_builder.smod(operand1, operand2, None),
 
                     FuzzBinop::Concat => fn_builder.concat(&[operand1, operand2], None),
                 };

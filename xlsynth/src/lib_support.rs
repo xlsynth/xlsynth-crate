@@ -1047,6 +1047,10 @@ impl_binary_ir_builder!(xls_function_builder_add_sgt, xls_builder_base_add_sgt);
 impl_binary_ir_builder!(xls_function_builder_add_sge, xls_builder_base_add_sge);
 impl_binary_ir_builder!(xls_function_builder_add_umul, xls_builder_base_add_umul);
 impl_binary_ir_builder!(xls_function_builder_add_smul, xls_builder_base_add_smul);
+impl_binary_ir_builder!(xls_function_builder_add_udiv, xls_builder_base_add_udiv);
+impl_binary_ir_builder!(xls_function_builder_add_sdiv, xls_builder_base_add_sdiv);
+impl_binary_ir_builder!(xls_function_builder_add_umod, xls_builder_base_add_umod);
+impl_binary_ir_builder!(xls_function_builder_add_smod, xls_builder_base_add_smod);
 
 macro_rules! impl_unary_ir_builder {
     ($fn_name:ident, $ffi_func:ident) => {

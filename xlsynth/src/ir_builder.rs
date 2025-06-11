@@ -106,6 +106,10 @@ impl FnBuilder {
     binary_op_method!(slt, xls_function_builder_add_slt);
     binary_op_method!(sge, xls_function_builder_add_sge);
     binary_op_method!(sgt, xls_function_builder_add_sgt);
+    binary_op_method!(udiv, xls_function_builder_add_udiv);
+    binary_op_method!(sdiv, xls_function_builder_add_sdiv);
+    binary_op_method!(umod, xls_function_builder_add_umod);
+    binary_op_method!(smod, xls_function_builder_add_smod);
     unary_op_method!(not, xls_function_builder_add_not);
     unary_op_method!(neg, xls_function_builder_add_negate);
     unary_op_method!(rev, xls_function_builder_add_reverse);
