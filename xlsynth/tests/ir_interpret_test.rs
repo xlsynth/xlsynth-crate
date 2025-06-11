@@ -47,3 +47,24 @@ fn test_ir_interpret_array_values() {
         "[[bits[32]:1, bits[32]:2], [bits[32]:1, bits[32]:2], [bits[32]:1, bits[32]:2]]"
     );
 }
+
+#[test]
+fn test_force_assert_fn() {
+    let ir = r#"package force_assert
+
+    fn force_assert_fn() -> () {
+        literal.1: bits[1] = literal(value=0, id=1)
+        after_all.2: token = after_all(id=2)
+        assert.3: token = assert(after_all.2, literal.1, message="Assertion failure via fail!", label="forced_assert", id=3)
+        ret result: () = tuple()
+    }
+"#;
+
+    let package = IrPackage::parse_ir(ir, None).unwrap();
+    let f = package.get_function("force_assert_fn").unwrap();
+    let jit = IrFunctionJit::new(&f).unwrap();
+
+    let result = jit.run(&[]).unwrap();
+    assert!(!result.assert_messages.is_empty());
+    assert!(result.assert_messages[0].contains("Assertion failure via fail!"));
+}

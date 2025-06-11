@@ -603,7 +603,10 @@ unsafe fn trace_messages_to_rust(
     trace_messages
 }
 
-unsafe fn c_strs_to_rust(c_strs: *mut *mut std::os::raw::c_char, count: usize) -> Vec<String> {
+pub(crate) unsafe fn c_strs_to_rust(
+    c_strs: *mut *mut std::os::raw::c_char,
+    count: usize,
+) -> Vec<String> {
     let mut result: Vec<String> = Vec::new();
     for i in 0..count {
         let xls_c_str: *mut std::os::raw::c_char = unsafe { *c_strs.wrapping_add(i) };
