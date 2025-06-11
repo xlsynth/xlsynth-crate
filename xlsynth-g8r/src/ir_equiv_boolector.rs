@@ -575,21 +575,34 @@ pub fn ir_fn_to_boolector(
                     _ => panic!("ArrayIndex: expected array type"),
                 };
                 let elem_width = element_type.bit_count() as u32;
-                // Build a chain of selects for each possible index value
-                let mut result = None;
-                for i in 0..element_count {
+
+                // XLS semantics: If the index is out-of-bounds the last element is returned. We
+                // implement this by starting the conditional chain with the *last* element as
+                // the default value and then walking the array indices from
+                // high to low.
+                assert!(
+                    element_count > 0,
+                    "ArrayIndex: array must have at least one element"
+                );
+                let mut result: Option<BV<Rc<Btor>>> = None;
+                for i in (0..element_count).rev() {
                     let high = ((i + 1) * elem_width as usize - 1) as u32;
                     let low = (i * elem_width as usize) as u32;
                     let elem = array_bv.slice(high, low);
+                    if result.is_none() {
+                        // First iteration (i == element_count-1): initialise with default (last
+                        // element).
+                        result = Some(elem);
+                        continue;
+                    }
                     let idx_val = BV::from_u64(array_bv.get_btor(), i as u64, index_bv.get_width());
                     let is_this = index_bv._eq(&idx_val);
-                    result = Some(if let Some(acc) = result {
-                        is_this.cond_bv(&elem, &acc)
-                    } else {
-                        elem
-                    });
+                    // is_this ? elem : acc (acc is the previously accumulated result). We clone
+                    // here because BV implements a cheap Rc clone.
+                    let acc = result.as_ref().unwrap().clone();
+                    result = Some(is_this.cond_bv(&elem, &acc));
                 }
-                result.expect("ArrayIndex: array must have at least one element")
+                result.expect("ArrayIndex: unable to build result")
             }
             NodePayload::ArrayUpdate {
                 array,
@@ -1994,6 +2007,47 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
             result,
             EquivResult::Proved,
             "Boolector disproved equivalence: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_fuzz_ir_opt_equiv_regression_array_index_oob() {
+        // Regression test for array_index out-of-bounds semantics.
+        // The original IR performs an unsigned divide. The optimized IR replaces this
+        // with a table lookup guarded by an ult comparison along with a
+        // sign-extension mask. Prior to fixing ArrayIndex conversion we
+        // incorrectly returned the *first* array element on OOB indices whereas
+        // XLS semantics require using the *last* element.
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let orig_ir = r#"fn fuzz_test(input: bits[7] id=1) -> bits[7] {
+  literal.3: bits[7] = literal(value=113, id=3)
+  smul.2: bits[7] = smul(input, input, id=2)
+  ret udiv.4: bits[7] = udiv(literal.3, input, id=4)
+}"#;
+
+        let opt_ir = r#"fn fuzz_test(input: bits[7] id=1) -> bits[7] {
+  literal.12: bits[7] = literal(value=114, id=12)
+  literal.7: bits[7][58] = literal(value=[127, 113, 56, 37, 28, 22, 18, 16, 14, 12, 11, 10, 9, 8, 8, 7, 7, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1], id=7)
+  ult.13: bits[1] = ult(input, literal.12, id=13)
+  array_index.8: bits[7] = array_index(literal.7, indices=[input], id=8)
+  sign_ext.14: bits[7] = sign_ext(ult.13, new_bit_count=7, id=14)
+  ret and.15: bits[7] = and(array_index.8, sign_ext.14, id=15)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(orig_ir)
+            .parse_fn()
+            .expect("Failed to parse original IR");
+        let rhs = crate::xls_ir::ir_parser::Parser::new(opt_ir)
+            .parse_fn()
+            .expect("Failed to parse optimized IR");
+
+        let result = prove_ir_fn_equiv(&lhs, &rhs);
+        assert_eq!(
+            result,
+            EquivResult::Proved,
+            "Expected functions to be equivalent after fix, got {:?}",
             result
         );
     }
