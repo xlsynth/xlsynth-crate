@@ -48,6 +48,7 @@ mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
 mod ir_equiv;
+mod ir_equiv_batch;
 mod ir_fn_eval;
 mod ir_ged;
 mod lib2proto;
@@ -474,6 +475,37 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("ir-equiv-batch")
+                .about("Checks equivalence for pairs of IR files using a shared Boolector context")
+                .arg(
+                    Arg::new("ir_files")
+                        .help("Pairs of IR files: lhs1 rhs1 lhs2 rhs2 ...")
+                        .required(true)
+                        .num_args(2..),
+                )
+                .add_ir_top_arg(false)
+                .arg(
+                    Arg::new("lhs_ir_top")
+                        .long("lhs_ir_top")
+                        .help("The top-level entry point for the left-hand side IR"),
+                )
+                .arg(
+                    Arg::new("rhs_ir_top")
+                        .long("rhs_ir_top")
+                        .help("The top-level entry point for the right-hand side IR"),
+                )
+                .add_bool_arg(
+                    "flatten_aggregates",
+                    "Flatten tuple and array types to bits for equivalence checking",
+                )
+                .arg(
+                    Arg::new("drop_params")
+                        .long("drop_params")
+                        .help("Comma-separated list of parameter names to drop from both functions before equivalence checking")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir-ged")
                 .about("Tells the Graph Edit Distance between two IR functions")
                 .arg(
@@ -728,6 +760,8 @@ fn main() {
         ir2delayinfo::handle_ir2delayinfo(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-equiv") {
         ir_equiv::handle_ir_equiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir-equiv-batch") {
+        ir_equiv_batch::handle_ir_equiv_batch(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-ged") {
         ir_ged::handle_ir_ged(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
