@@ -329,14 +329,39 @@ pub fn ir_fn_to_boolector(
                         let btor = a_bv.get_btor();
                         let width = node.ty.bit_count() as u32;
                         let zero = BV::zero(btor.clone(), width);
-                        let ones = BV::ones(btor.clone(), width);
+                        // For signed division the XLS semantics specify:
+                        //   if divisor == 0 then result is:
+                        //      max_positive  if dividend >= 0
+                        //      max_negative  if dividend < 0
+                        // For unsigned division the result is all-ones.
+                        // Pre-compute these fallback values.  Note that for
+                        // width == 1 the "max positive" and "max negative"
+                        // are both 1-bit wide and simply 0 and 1 respectively.
+                        let all_ones = BV::ones(btor.clone(), width);
+                        let (max_pos, max_neg) = if width == 1 {
+                            (BV::zero(btor.clone(), 1), BV::one(btor.clone(), 1))
+                        } else {
+                            let lsb_ones = BV::ones(btor.clone(), width - 1);
+                            let zero_msb = BV::zero(btor.clone(), 1);
+                            let one_msb = BV::one(btor.clone(), 1);
+                            let max_pos = zero_msb.concat(&lsb_ones);
+                            let max_neg = one_msb.concat(&BV::zero(btor.clone(), width - 1));
+                            (max_pos, max_neg)
+                        };
                         let div_res = match op {
                             Binop::Udiv => a_bv.udiv(b_bv),
                             Binop::Sdiv => a_bv.sdiv(b_bv),
                             _ => unreachable!(),
                         };
                         let rhs_is_zero = b_bv._eq(&zero);
-                        rhs_is_zero.cond_bv(&ones, &div_res)
+                        if matches!(op, Binop::Udiv) {
+                            rhs_is_zero.cond_bv(&all_ones, &div_res)
+                        } else {
+                            // Signed: choose max_neg or max_pos based on sign of dividend.
+                            let dividend_neg = a_bv.slice(width - 1, width - 1);
+                            let fallback = dividend_neg.cond_bv(&max_neg, &max_pos);
+                            rhs_is_zero.cond_bv(&fallback, &div_res)
+                        }
                     }
                     Binop::Shll => {
                         let val_bv = env.get(a).expect("Shll arg must be present");
@@ -1624,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sdiv_by_zero_returns_ones() {
+    fn test_sdiv_by_zero_returns_extrema() {
         let ir_text = r#"fn f(x: bits[4] id=1) -> bits[4] {
   zero: bits[4] = literal(value=0, id=2)
   ret q: bits[4] = sdiv(x, zero, id=3)
@@ -1639,7 +1664,35 @@ mod tests {
         let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
         assert_eq!(btor.sat(), boolector::SolverResult::Sat);
         let out = result.output.get_a_solution().as_u64().unwrap();
-        assert_eq!(out, 0xF, "sdiv by zero should yield all ones");
+        // Dividend is negative (-6); expect maximal negative value 0b1000 (0x8)
+        assert_eq!(
+            out, 0x8,
+            "sdiv by zero should yield max negative for negative dividend"
+        );
+    }
+
+    #[test]
+    fn test_sdiv_by_zero_positive_dividend() {
+        let ir_text = r#"fn f() -> bits[4] {
+   dividend: bits[4] = literal(value=6, id=1)
+   zero: bits[4] = literal(value=0, id=2)
+   ret q: bits[4] = sdiv(dividend, zero, id=3)
+ }"#;
+        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
+            .parse_fn()
+            .unwrap();
+        let btor = std::rc::Rc::new(boolector::Btor::new());
+        btor.set_opt(boolector::option::BtorOption::ModelGen(
+            boolector::option::ModelGen::All,
+        ));
+        let result = ir_fn_to_boolector(btor.clone(), &f, None);
+        assert_eq!(btor.sat(), boolector::SolverResult::Sat);
+        let out = result.output.get_a_solution().as_u64().unwrap();
+        // Positive dividend → max positive 0b0111 (0x7)
+        assert_eq!(
+            out, 0x7,
+            "sdiv by zero positive dividend should yield max positive"
+        );
     }
 
     #[test]
