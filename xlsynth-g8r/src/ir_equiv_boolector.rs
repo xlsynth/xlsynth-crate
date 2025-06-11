@@ -314,8 +314,8 @@ pub fn ir_fn_to_boolector(
                         let zero = BV::zero(btor.clone(), width);
                         let mod_res = a_bv.urem(b_bv);
                         let rhs_is_zero = b_bv._eq(&zero);
-                        // XLS semantics: x % 0 == x
-                        rhs_is_zero.cond_bv(a_bv, &mod_res)
+                        // XLS semantics: for unsigned modulus, dividend % 0 == 0.
+                        rhs_is_zero.cond_bv(&zero, &mod_res)
                     }
                     Binop::Smod => {
                         let width = node.ty.bit_count() as u32;
@@ -1449,7 +1449,7 @@ mod tests {
 
         let ir_recompose = r#"fn recompose(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
   one: bits[8] = literal(value=1, id=100)
-  y1: bits[8] = add(y, one, id=101)
+  y1: bits[8] = or(y, one, id=101)
   q: bits[8] = udiv(x, y1, id=3)
   r: bits[8] = umod(x, y1, id=4)
   prod: bits[8] = umul(q, y1, id=5)
@@ -2120,10 +2120,12 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
     }
 
     #[test]
-    fn test_umod_by_zero_returns_dividend() {
+    fn test_umod_by_zero_returns_zero() {
+        // Unsigned modulus by zero should yield 0 regardless of the dividend.
         let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
-   ret umod.2: bits[8] = umod(x, x, id=2)
- }"#;
+  zero: bits[8] = literal(value=0, id=2)
+  ret r: bits[8] = umod(x, zero, id=3)
+}"#;
         let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
             .parse_fn()
             .unwrap();
@@ -2133,19 +2135,19 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
             boolector::option::ModelGen::All,
         ));
         let mut param_bvs = std::collections::HashMap::new();
-        // Pick x = 0 case explicitly.
-        let x_val = 0u64;
+        // Pick a non-zero dividend to exercise the x % 0 path.
+        let x_val = 37u64;
         let x_bv = boolector::BV::from_u64(btor.clone(), x_val, 8);
         param_bvs.insert("x".to_string(), x_bv);
         let result = ir_fn_to_boolector(btor.clone(), &f, Some(&param_bvs));
         assert_eq!(btor.sat(), boolector::SolverResult::Sat);
         let out = result.output.get_a_solution().as_u64().unwrap();
-        // Expect output to equal dividend x (0).
-        assert_eq!(out, x_val);
+        // Expect output to be 0.
+        assert_eq!(out, 0);
     }
 
     #[test]
-    fn test_smod_by_zero_returns_dividend() {
+    fn test_smod_by_zero_returns_zero() {
         let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
    ret smod.2: bits[8] = smod(x, x, id=2)
  }"#;
