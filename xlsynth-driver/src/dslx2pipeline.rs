@@ -32,13 +32,21 @@ fn dslx2pipeline(
         log::info!("dslx2pipeline using tool path: {}", tool_path);
         let temp_dir = tempfile::TempDir::new().unwrap();
 
-        let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
-        let dslx_path_slice = config.as_ref().and_then(|c| c.dslx_path.as_deref());
+        let dslx_stdlib_path = config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.dslx_stdlib_path.as_deref());
+        let dslx_path_slice = config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.dslx_path.as_deref());
         let dslx_path = dslx_path_slice.map(|s| s.join(":"));
         let dslx_path_ref = dslx_path.as_ref().map(|s| s.as_str());
 
-        let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
-        let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
+        let enable_warnings = config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.enable_warnings.as_deref());
+        let disable_warnings = config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
         let unopt_ir = run_ir_converter_main(
             input_file,
             Some(dslx_top),
@@ -82,7 +90,9 @@ fn dslx2pipeline(
         log::info!("dslx2pipeline using runtime APIs");
         let dslx = std::fs::read_to_string(input_file).unwrap();
 
-        let dslx_path = config.as_ref().and_then(|c| c.dslx_path.as_deref());
+        let dslx_path = config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.dslx_path.as_deref());
         let dslx_path_vec = match dslx_path {
             Some(entries) => entries
                 .iter()
@@ -90,12 +100,18 @@ fn dslx2pipeline(
                 .collect::<Vec<_>>(),
             None => vec![],
         };
-        let dslx_stdlib_path = config.as_ref().and_then(|c| c.dslx_stdlib_path.as_deref());
-        let enable_warnings = config.as_ref().and_then(|c| c.enable_warnings.as_deref());
-        let disable_warnings = config.as_ref().and_then(|c| c.disable_warnings.as_deref());
+        let dslx_stdlib_path = config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.dslx_stdlib_path.as_deref());
+        let enable_warnings = config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.enable_warnings.as_deref());
+        let disable_warnings = config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
         let warnings_as_errors = config
             .as_ref()
-            .and_then(|c| c.warnings_as_errors)
+            .and_then(|c| c.dslx.as_ref()?.warnings_as_errors)
             .unwrap_or(DEFAULT_WARNINGS_AS_ERRORS);
         let convert_options = xlsynth::DslxConvertOptions {
             dslx_stdlib_path: dslx_stdlib_path.map(|p| std::path::Path::new(p)),
@@ -158,7 +174,9 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
     {
         Some("true") => Some(true),
         Some("false") => Some(false),
-        _ => None,
+        _ => config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.type_inference_v2),
     };
 
     dslx2pipeline(
