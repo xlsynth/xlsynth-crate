@@ -186,6 +186,8 @@ fn test_dslx2ir_with_toolchain_toml(use_tool_path: bool) {
     let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml = format!(
         r#"[toolchain]
+
+[toolchain.dslx]
 dslx_stdlib_path = "{}"
 "#,
         stdlib_dir.to_str().unwrap()
@@ -312,6 +314,8 @@ fn test_dslx2pipeline_with_redundant_match_arm(use_tool_path: bool) {
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = format!(
         r#"[toolchain]
+
+[toolchain.dslx]
 enable_warnings = ["already_exhaustive_match"]
 "#
     );
@@ -422,6 +426,8 @@ fn test_dslx2pipeline_with_unused_binding(use_tool_path: bool) {
     // Also use the tool path instead of the runtime APIs.
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = r#"[toolchain]
+
+[toolchain.dslx]
 disable_warnings = ["unused_definition", "empty_range_literal"]
 "#;
     let toolchain_toml_path = if use_tool_path {
@@ -675,6 +681,8 @@ fn main() -> u32 { a::A + b::B }",
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = format!(
         r#"[toolchain]
+
+[toolchain.dslx]
 dslx_path = ["{}", "{}"]
 "#,
         a_dir.to_str().unwrap(),
@@ -934,6 +942,8 @@ fn test_toolchain_picked_up_when_in_cwd_even_if_no_cmdline_flag(use_tool_path: b
     let dslx_stdlib_path_str = dslx_stdlib_path.to_str().unwrap();
     let toolchain_toml_contents = format!(
         r#"[toolchain]
+
+[toolchain.dslx]
 dslx_stdlib_path = "{}"
 "#,
         dslx_stdlib_path_str
@@ -1322,7 +1332,7 @@ fn test_toolchain_common_codegen_flags_resolve(use_tool_path: bool) {
 
     // Write out toolchain configuration.
     let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
-    let mut toolchain_toml_contents = "[toolchain]\n".to_string();
+    let mut toolchain_toml_contents = "[toolchain]\n\n[toolchain.codegen]\n".to_string();
     toolchain_toml_contents +=
         "gate_format = \"br_gate_buf gated_{output}(.in({input}), .out({output}))\"\n";
     toolchain_toml_contents += "assert_format = \"`BR_ASSERT({label}, {condition})\"\n";
