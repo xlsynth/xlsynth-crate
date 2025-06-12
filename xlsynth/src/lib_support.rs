@@ -612,11 +612,11 @@ pub(crate) unsafe fn c_strs_to_rust(
         let xls_c_str: *mut std::os::raw::c_char = unsafe { *c_strs.wrapping_add(i) };
         result.push(c_str_to_rust_no_dealloc(xls_c_str));
     }
-    // if !c_strs.is_null() && count > 0 {
-    //     unsafe {
-    //         xlsynth_sys::xls_c_strs_free(c_strs, count);
-    //     }
-    // }
+    if !c_strs.is_null() && count > 0 {
+        unsafe {
+            xlsynth_sys::xls_c_strs_free(c_strs, count);
+        }
+    }
     result
 }
 
