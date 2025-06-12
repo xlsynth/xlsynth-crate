@@ -20,6 +20,7 @@ pub struct IrFnBoolectorResult {
 /// Solver context that can be reused across multiple equivalence checks.
 pub struct Ctx {
     btor: Rc<Btor>,
+    params: HashMap<String, BV<Rc<Btor>>>,
 }
 
 /// Whether a Boolector solver should be created with incremental (push/pop)
@@ -44,9 +45,13 @@ impl Ctx {
     /// Creates a new Boolector solver context with model generation enabled
     /// and incremental solving turned on so clause learning can be reused
     /// across proofs.
-    pub fn new() -> Self {
+    pub fn new(params: &[(String, u32)]) -> Self {
         let btor = new_btor(Incremental::Yes);
-        Self { btor }
+        let mut m = HashMap::new();
+        for (name, w) in params {
+            m.insert(name.clone(), BV::new(btor.clone(), *w, Some(name)));
+        }
+        Self { btor, params: m }
     }
 }
 
@@ -1007,7 +1012,7 @@ fn check_equiv_internal_with_btor(
     lhs: &Fn,
     rhs: &Fn,
     flatten_aggregates: bool,
-    btor: Rc<Btor>,
+    ctx: &Ctx,
     use_frame: bool, // whether to push/pop a solver frame
 ) -> EquivResult {
     // Helper to pretty-print a function signature
@@ -1074,17 +1079,25 @@ fn check_equiv_internal_with_btor(
         }
     }
     if use_frame {
-        btor.push(1);
+        ctx.btor.push(1);
     }
-    // Create shared parameter BVs for all parameters (by name)
+    // Create param BVs adjusted from the context's root parameters
     let mut param_bvs = HashMap::new();
     for param in &lhs.params {
+        let root = ctx
+            .params
+            .get(&param.name)
+            .expect("parameter BV missing from context");
         let width = param.ty.bit_count() as u32;
-        let bv = BV::new(btor.clone(), width, Some(&param.name));
+        let bv = match root.get_width().cmp(&width) {
+            std::cmp::Ordering::Equal => root.clone(),
+            std::cmp::Ordering::Greater => root.slice(width - 1, 0),
+            std::cmp::Ordering::Less => root.uext(width - root.get_width()),
+        };
         param_bvs.insert(param.name.clone(), bv);
     }
-    let lhs_result = ir_fn_to_boolector(btor.clone(), lhs, Some(&param_bvs));
-    let rhs_result = ir_fn_to_boolector(btor.clone(), rhs, Some(&param_bvs));
+    let lhs_result = ir_fn_to_boolector(ctx.btor.clone(), lhs, Some(&param_bvs));
+    let rhs_result = ir_fn_to_boolector(ctx.btor.clone(), rhs, Some(&param_bvs));
     // Flatten outputs if needed
     let lhs_out = if flatten_aggregates {
         flatten_bv(&lhs_result.output, &lhs.ret_ty)
@@ -1099,7 +1112,7 @@ fn check_equiv_internal_with_btor(
     // Assert that outputs are not equal (look for a counterexample)
     let diff = lhs_out._ne(&rhs_out);
     diff.assert();
-    let sat_result = btor.sat();
+    let sat_result = ctx.btor.sat();
     let res = match sat_result {
         SolverResult::Unsat => EquivResult::Proved,
         SolverResult::Sat => {
@@ -1134,38 +1147,53 @@ fn check_equiv_internal_with_btor(
         SolverResult::Unknown => panic!("Solver returned unknown result"),
     };
     if use_frame {
-        btor.pop(1);
+        ctx.btor.pop(1);
     }
     res
 }
 
 /// Standard equivalence check (no aggregate flattening)
 pub fn prove_ir_fn_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    let btor = new_btor(Incremental::No);
-    check_equiv_internal_with_btor(lhs, rhs, false, btor, false)
+    let params: Vec<(String, u32)> = lhs
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
+        .collect();
+    let ctx = Ctx::new(&params);
+    check_equiv_internal_with_btor(lhs, rhs, false, &ctx, false)
 }
 
 /// Equivalence check with tuple/array flattening
 pub fn prove_ir_equiv_flattened(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    let btor = new_btor(Incremental::No);
-    check_equiv_internal_with_btor(lhs, rhs, true, btor, false)
+    let params: Vec<(String, u32)> = lhs
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
+        .collect();
+    let ctx = Ctx::new(&params);
+    check_equiv_internal_with_btor(lhs, rhs, true, &ctx, false)
 }
 
 /// Equivalence check reusing the given solver context.
 pub fn prove_ir_fn_equiv_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
-    check_equiv_internal_with_btor(lhs, rhs, false, ctx.btor.clone(), true)
+    check_equiv_internal_with_btor(lhs, rhs, false, ctx, true)
 }
 
 /// Flattened equivalence check reusing the given solver context.
 pub fn prove_ir_equiv_flattened_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
-    check_equiv_internal_with_btor(lhs, rhs, true, ctx.btor.clone(), true)
+    check_equiv_internal_with_btor(lhs, rhs, true, ctx, true)
 }
 
 /// Internal helper that constructs a fresh solver and delegates to
 /// `check_equiv_internal_with_btor`.
 fn check_equiv_internal(lhs: &Fn, rhs: &Fn, flatten_aggregates: bool) -> EquivResult {
-    let btor = new_btor(Incremental::No);
-    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, btor, false)
+    let params: Vec<(String, u32)> = lhs
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
+        .collect();
+    let ctx = Ctx::new(&params);
+    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, &ctx, false)
 }
 
 fn shift_boolector<F>(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>, shift_op: F) -> BV<Rc<Btor>>
