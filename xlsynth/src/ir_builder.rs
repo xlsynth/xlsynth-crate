@@ -10,12 +10,11 @@ use crate::IrValue;
 use crate::XlsynthError;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
 
 #[derive(Clone)]
 pub struct BValue {
-    ptr: Arc<RwLock<BValuePtr>>,
+    ptr: Arc<BValuePtr>,
 }
 
 pub struct FnBuilder {
@@ -27,12 +26,7 @@ macro_rules! binary_op_method {
     ($name:ident, $lib_fn:ident) => {
         pub fn $name(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
             let fn_builder_guard = self.fn_builder.write().unwrap();
-            let bvalue_ptr = lib_support::$lib_fn(
-                fn_builder_guard,
-                a.ptr.read().unwrap(),
-                b.ptr.read().unwrap(),
-                name,
-            );
+            let bvalue_ptr = lib_support::$lib_fn(fn_builder_guard, &a.ptr, &b.ptr, name);
             BValue { ptr: bvalue_ptr }
         }
     };
@@ -42,7 +36,7 @@ macro_rules! unary_op_method {
     ($name:ident, $lib_fn:ident) => {
         pub fn $name(&mut self, a: &BValue, name: Option<&str>) -> BValue {
             let fn_builder_guard = self.fn_builder.write().unwrap();
-            let bvalue_ptr = lib_support::$lib_fn(fn_builder_guard, a.ptr.read().unwrap(), name);
+            let bvalue_ptr = lib_support::$lib_fn(fn_builder_guard, &a.ptr, name);
             BValue { ptr: bvalue_ptr }
         }
     };
@@ -67,7 +61,7 @@ impl FnBuilder {
     ) -> Result<IrFunction, XlsynthError> {
         let package_guard: RwLockWriteGuard<IrPackagePtr> = self.package.write().unwrap();
         let builder_guard: RwLockWriteGuard<IrFnBuilderPtr> = self.fn_builder.write().unwrap();
-        let return_value_guard: RwLockReadGuard<BValuePtr> = return_value.ptr.read().unwrap();
+        let return_value_guard = &return_value.ptr;
         lib_support::xls_function_builder_build_with_return_value(
             &self.package,
             package_guard,
@@ -126,7 +120,7 @@ impl FnBuilder {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_sign_extend(
             fn_builder_guard,
-            value.ptr.read().unwrap(),
+            &value.ptr,
             new_bit_count as i64,
             name,
         );
@@ -142,7 +136,7 @@ impl FnBuilder {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_zero_extend(
             fn_builder_guard,
-            value.ptr.read().unwrap(),
+            &value.ptr,
             new_bit_count as i64,
             name,
         );
@@ -157,12 +151,12 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let value_guard: RwLockReadGuard<BValuePtr> = value.ptr.read().unwrap();
-        let start_guard: RwLockReadGuard<BValuePtr> = start.ptr.read().unwrap();
+        let value_guard = &value.ptr;
+        let start_guard = &start.ptr;
         let bvalue_ptr = lib_support::xls_function_builder_add_dynamic_bit_slice(
             fn_builder_guard,
-            value_guard,
-            start_guard,
+            &value_guard,
+            &start_guard,
             width,
             name,
         );
@@ -177,10 +171,10 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let value_guard: RwLockReadGuard<BValuePtr> = value.ptr.read().unwrap();
+        let value_guard = &value.ptr.clone();
         let bvalue_ptr = lib_support::xls_function_builder_add_bit_slice(
             fn_builder_guard,
-            value_guard,
+            &value_guard,
             start,
             width,
             name,
@@ -196,14 +190,14 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let value_guard: RwLockReadGuard<BValuePtr> = value.ptr.read().unwrap();
-        let start_guard: RwLockReadGuard<BValuePtr> = start.ptr.read().unwrap();
-        let update_guard: RwLockReadGuard<BValuePtr> = update.ptr.read().unwrap();
+        let value_guard = &value.ptr;
+        let start_guard = &start.ptr;
+        let update_guard = &update.ptr;
         let bvalue_ptr = lib_support::xls_function_builder_add_bit_slice_update(
             fn_builder_guard,
-            value_guard,
-            start_guard,
-            update_guard,
+            &value_guard,
+            &start_guard,
+            &update_guard,
             name,
         );
         BValue { ptr: bvalue_ptr }
@@ -211,25 +205,23 @@ impl FnBuilder {
 
     pub fn concat(&mut self, args: &[&BValue], name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let args_locks: Vec<RwLockReadGuard<BValuePtr>> =
-            args.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let args_ptrs: Vec<&Arc<BValuePtr>> = args.iter().map(|v| &v.ptr).collect();
         let bvalue_ptr =
-            lib_support::xls_function_builder_add_concat(fn_builder_guard, &args_locks, name);
+            lib_support::xls_function_builder_add_concat(fn_builder_guard, &args_ptrs, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn tuple(&mut self, elements: &[&BValue], name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let elements_locks: Vec<RwLockReadGuard<BValuePtr>> =
-            elements.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let elements_ptrs: Vec<&Arc<BValuePtr>> = elements.iter().map(|v| &v.ptr).collect();
         let bvalue_ptr =
-            lib_support::xls_function_builder_add_tuple(fn_builder_guard, &elements_locks, name);
+            lib_support::xls_function_builder_add_tuple(fn_builder_guard, &elements_ptrs, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn tuple_index(&mut self, tuple: &BValue, index: u64, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let tuple_guard: RwLockReadGuard<BValuePtr> = tuple.ptr.read().unwrap();
+        let tuple_guard = &tuple.ptr;
         let bvalue_ptr = lib_support::xls_function_builder_add_tuple_index(
             fn_builder_guard,
             tuple_guard,
@@ -241,23 +233,15 @@ impl FnBuilder {
 
     pub fn umul(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_umul(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_umul(fn_builder_guard, &a.ptr, &b.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn smul(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_smul(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_smul(fn_builder_guard, &a.ptr, &b.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
@@ -268,12 +252,11 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let elements_locks: Vec<RwLockReadGuard<BValuePtr>> =
-            elements.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let elements_ptrs: Vec<&Arc<BValuePtr>> = elements.iter().map(|v| &v.ptr).collect();
         let bvalue_ptr = lib_support::xls_function_builder_add_array(
             fn_builder_guard,
             element_type,
-            &elements_locks,
+            &elements_ptrs,
             name,
         );
         BValue { ptr: bvalue_ptr }
@@ -281,8 +264,8 @@ impl FnBuilder {
 
     pub fn array_index(&mut self, array: &BValue, index: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
-        let index_guard: RwLockReadGuard<BValuePtr> = index.ptr.read().unwrap();
+        let array_guard = &array.ptr;
+        let index_guard = &index.ptr;
         let bvalue_ptr = lib_support::xls_function_builder_add_array_index_multi(
             fn_builder_guard,
             array_guard,
@@ -295,11 +278,10 @@ impl FnBuilder {
 
     pub fn array_concat(&mut self, arrays: &[&BValue], name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let arrays_guards: Vec<RwLockReadGuard<BValuePtr>> =
-            arrays.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let arrays_ptrs: Vec<&Arc<BValuePtr>> = arrays.iter().map(|v| &v.ptr).collect();
         let bvalue_ptr = lib_support::xls_function_builder_add_array_concat(
             fn_builder_guard,
-            &arrays_guards,
+            &arrays_ptrs,
             name,
         );
         BValue { ptr: bvalue_ptr }
@@ -313,8 +295,8 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
-        let start_guard: RwLockReadGuard<BValuePtr> = start.ptr.read().unwrap();
+        let array_guard = &array.ptr;
+        let start_guard = &start.ptr;
         let bvalue_ptr = lib_support::xls_function_builder_add_array_slice(
             fn_builder_guard,
             array_guard,
@@ -333,9 +315,9 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
-        let update_value_guard: RwLockReadGuard<BValuePtr> = update_value.ptr.read().unwrap();
-        let index_guard: RwLockReadGuard<BValuePtr> = index.ptr.read().unwrap();
+        let array_guard = &array.ptr;
+        let update_value_guard = &update_value.ptr;
+        let index_guard = &index.ptr;
         let bvalue_ptr = lib_support::xls_function_builder_add_array_update(
             fn_builder_guard,
             array_guard,
@@ -349,96 +331,62 @@ impl FnBuilder {
 
     pub fn shra(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_shra(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_shra(fn_builder_guard, &a.ptr, &b.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn shrl(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_shrl(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_shrl(fn_builder_guard, &a.ptr, &b.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn shll(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_shll(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_shll(fn_builder_guard, &a.ptr, &b.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn nor(&mut self, a: &BValue, b: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_nor(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            b.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_nor(fn_builder_guard, &a.ptr, &b.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn clz(&mut self, a: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_clz(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr = lib_support::xls_function_builder_add_clz(fn_builder_guard, &a.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn ctz(&mut self, a: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_ctz(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr = lib_support::xls_function_builder_add_ctz(fn_builder_guard, &a.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn encode(&mut self, a: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_encode(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_encode(fn_builder_guard, &a.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn decode(&mut self, a: &BValue, width: Option<u64>, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_decode(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            width,
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_decode(fn_builder_guard, &a.ptr, width, name);
         BValue { ptr: bvalue_ptr }
     }
 
     pub fn identity(&mut self, a: &BValue, name: Option<&str>) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let bvalue_ptr = lib_support::xls_function_builder_add_identity(
-            fn_builder_guard,
-            a.ptr.read().unwrap(),
-            name,
-        );
+        let bvalue_ptr =
+            lib_support::xls_function_builder_add_identity(fn_builder_guard, &a.ptr, name);
         BValue { ptr: bvalue_ptr }
     }
 
@@ -450,10 +398,9 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let selector_guard: RwLockReadGuard<BValuePtr> = selector.ptr.read().unwrap();
-        let cases_guards: Vec<RwLockReadGuard<BValuePtr>> =
-            cases.iter().map(|v| v.ptr.read().unwrap()).collect();
-        let default_value_guard: RwLockReadGuard<BValuePtr> = default_value.ptr.read().unwrap();
+        let selector_guard = &selector.ptr;
+        let cases_guards: Vec<&Arc<BValuePtr>> = cases.iter().map(|v| &v.ptr).collect();
+        let default_value_guard = &default_value.ptr;
         let bvalue_ptr = lib_support::xls_function_builder_add_select(
             fn_builder_guard,
             selector_guard,
@@ -472,10 +419,9 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let selector_guard: RwLockReadGuard<BValuePtr> = selector.ptr.read().unwrap();
-        let cases_guards: Vec<RwLockReadGuard<BValuePtr>> =
-            cases.iter().map(|v| v.ptr.read().unwrap()).collect();
-        let default_value_guard: RwLockReadGuard<BValuePtr> = default_value.ptr.read().unwrap();
+        let selector_guard = &selector.ptr;
+        let cases_guards: Vec<&Arc<BValuePtr>> = cases.iter().map(|v| &v.ptr).collect();
+        let default_value_guard = &default_value.ptr;
         let bvalue_ptr = lib_support::xls_function_builder_add_priority_select(
             fn_builder_guard,
             selector_guard,
@@ -493,9 +439,8 @@ impl FnBuilder {
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
-        let selector_guard: RwLockReadGuard<BValuePtr> = selector.ptr.read().unwrap();
-        let cases_guards: Vec<RwLockReadGuard<BValuePtr>> =
-            cases.iter().map(|v| v.ptr.read().unwrap()).collect();
+        let selector_guard = &selector.ptr;
+        let cases_guards: Vec<&Arc<BValuePtr>> = cases.iter().map(|v| &v.ptr).collect();
         let bvalue_ptr = lib_support::xls_function_builder_add_one_hot_select(
             fn_builder_guard,
             selector_guard,
@@ -509,7 +454,7 @@ impl FnBuilder {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let bvalue_ptr = lib_support::xls_function_builder_add_one_hot(
             fn_builder_guard,
-            input.ptr.read().unwrap(),
+            &input.ptr,
             lsb_is_priority,
             name,
         );
@@ -524,7 +469,7 @@ impl FnBuilder {
 
     pub fn get_type(&self, value: &BValue) -> Option<IrType> {
         let fn_builder_guard = self.fn_builder.read().unwrap();
-        lib_support::xls_function_builder_get_type(fn_builder_guard, value.ptr.read().unwrap())
+        lib_support::xls_function_builder_get_type(fn_builder_guard, &value.ptr)
     }
 }
 
