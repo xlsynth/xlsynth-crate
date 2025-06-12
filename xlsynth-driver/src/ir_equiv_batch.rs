@@ -2,6 +2,7 @@
 
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
+use std::time::Instant;
 
 #[cfg(feature = "has-boolector")]
 use xlsynth_g8r::ir_equiv_boolector::{self, Ctx};
@@ -22,6 +23,7 @@ fn run_check_with_ctx(
     drop_params: &[String],
     ctx: &Ctx,
 ) -> bool {
+    let start = Instant::now();
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
         Ok(pkg) => pkg,
         Err(e) => {
@@ -69,13 +71,29 @@ fn run_check_with_ctx(
     } else {
         xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv_with_ctx(&lhs_fn, &rhs_fn, ctx)
     };
+    let duration = start.elapsed();
     match result {
         EquivResult::Proved => {
-            println!("success: Boolector proved equivalence");
+            println!(
+                "success: Boolector proved equivalence for {}:{} vs {}:{} (in {:?})",
+                lhs_path.display(),
+                lhs_fn.name,
+                rhs_path.display(),
+                rhs_fn.name,
+                duration
+            );
             true
         }
         EquivResult::Disproved(cex) => {
-            println!("failure: Boolector found counterexample: {:?}", cex);
+            println!(
+                "failure: Boolector found counterexample for {}:{} vs {}:{}: {:?} (in {:?})",
+                lhs_path.display(),
+                lhs_fn.name,
+                rhs_path.display(),
+                rhs_fn.name,
+                cex,
+                duration
+            );
             false
         }
     }
@@ -121,6 +139,10 @@ pub fn handle_ir_equiv_batch(matches: &ArgMatches, _config: &Option<ToolchainCon
             .get_one::<String>("drop_params")
             .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
             .unwrap_or_else(Vec::new);
+        let stop_on_failure = matches
+            .get_one::<String>("stop_on_failure")
+            .map(|s| s == "true")
+            .unwrap_or(false);
         let ctx = Ctx::new();
         let mut all_equiv = true;
         for pair in files.chunks(2) {
@@ -137,6 +159,9 @@ pub fn handle_ir_equiv_batch(matches: &ArgMatches, _config: &Option<ToolchainCon
             );
             if !ok {
                 all_equiv = false;
+                if stop_on_failure {
+                    std::process::exit(1);
+                }
             }
         }
         if all_equiv {
