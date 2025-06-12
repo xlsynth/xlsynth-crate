@@ -143,7 +143,35 @@ pub fn handle_ir_equiv_batch(matches: &ArgMatches, _config: &Option<ToolchainCon
             .get_one::<String>("stop_on_failure")
             .map(|s| s == "true")
             .unwrap_or(false);
-        let ctx = Ctx::new();
+        // Determine maximum parameter widths across all functions so the
+        // Boolector context can reuse variables.
+        let mut param_widths: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        for pair in files.chunks(2) {
+            let lhs_pkg = ir_parser::parse_path_to_package(std::path::Path::new(&pair[0]))
+                .expect("Failed to parse lhs IR file while gathering params");
+            let rhs_pkg = ir_parser::parse_path_to_package(std::path::Path::new(&pair[1]))
+                .expect("Failed to parse rhs IR file while gathering params");
+            let lhs_fn = if let Some(top_name) = lhs_top {
+                lhs_pkg.get_fn(top_name).cloned().unwrap()
+            } else {
+                lhs_pkg.get_top().cloned().unwrap()
+            };
+            let rhs_fn = if let Some(top_name) = rhs_top {
+                rhs_pkg.get_fn(top_name).cloned().unwrap()
+            } else {
+                rhs_pkg.get_top().cloned().unwrap()
+            };
+            for p in lhs_fn.params.iter().chain(rhs_fn.params.iter()) {
+                let w = p.ty.bit_count() as u32;
+                param_widths
+                    .entry(p.name.clone())
+                    .and_modify(|e| *e = (*e).max(w))
+                    .or_insert(w);
+            }
+        }
+        let param_list: Vec<(String, u32)> = param_widths.into_iter().collect();
+        let ctx = Ctx::new(&param_list);
         let mut all_equiv = true;
         for pair in files.chunks(2) {
             let lhs_path = std::path::Path::new(&pair[0]);
