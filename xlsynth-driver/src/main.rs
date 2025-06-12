@@ -503,6 +503,10 @@ fn main() {
                         .long("drop_params")
                         .help("Comma-separated list of parameter names to drop from both functions before equivalence checking")
                         .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "stop_on_failure",
+                    "Stop processing further pairs on first failure",
                 ),
         )
         .subcommand(
