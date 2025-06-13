@@ -128,8 +128,10 @@ mod tests {
         // Validate generated SV.
         xlsynth_test_helpers::assert_valid_sv(&result);
 
-        let golden_path = std::path::Path::new("tests/goldens/mul_add_pipeline.sv");
+        let golden_path = std::path::Path::new("tests/goldens/mul_add_pipeline.golden.sv");
         if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+            std::fs::write(golden_path, &result).expect("write golden");
+        } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
             std::fs::write(golden_path, &result).expect("write golden");
         } else {
             let want = std::fs::read_to_string(golden_path).expect("read golden");
@@ -146,8 +148,10 @@ mod tests {
         let dslx = "struct S { a: u32, b: u32 }\nfn foo_cycle0(s: S) -> S { s }\nfn foo_cycle1(s: S) -> u32 { s.a + s.b }";
         let result = stitch_pipeline(dslx, Path::new("test.x"), "foo", true, None).unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
-        let golden_path = std::path::Path::new("tests/goldens/foo_pipeline.sv");
+        let golden_path = std::path::Path::new("tests/goldens/foo_pipeline.golden.sv");
         if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+            std::fs::write(golden_path, &result).expect("write golden");
+        } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
             std::fs::write(golden_path, &result).expect("write golden");
         } else {
             let want = std::fs::read_to_string(golden_path).expect("read golden");
@@ -164,8 +168,10 @@ mod tests {
         let dslx = "fn one_cycle0(x: u32, y: u32) -> u32 { x + y }";
         let result = stitch_pipeline(dslx, Path::new("test.x"), "one", true, None).unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
-        let golden_path = std::path::Path::new("tests/goldens/one_pipeline.sv");
+        let golden_path = std::path::Path::new("tests/goldens/one_pipeline.golden.sv");
         if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+            std::fs::write(golden_path, &result).expect("write golden");
+        } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
             std::fs::write(golden_path, &result).expect("write golden");
         } else {
             let want = std::fs::read_to_string(golden_path).expect("read golden");
