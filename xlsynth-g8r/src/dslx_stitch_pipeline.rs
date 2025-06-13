@@ -16,29 +16,48 @@ pub fn stitch_pipeline(
     dslx: &str,
     path: &Path,
     top: &str,
+    use_system_verilog: bool,
+    explicit_stages: Option<&[String]>,
 ) -> Result<String, xlsynth::XlsynthError> {
     let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
     let ir = conv.ir;
 
     // Discover stage functions.
-    let mut stages: Vec<String> = Vec::new();
-    for i in 0.. {
-        let fn_name = format!("{top}_cycle{i}");
-        let mangled = match mangle_dslx_name(path.file_stem().unwrap().to_str().unwrap(), &fn_name)
-        {
-            Ok(v) => v,
-            Err(_) => break,
-        };
-        if ir.get_function(&mangled).is_err() {
-            break;
+    let mut stages: Vec<(String, String)> = Vec::new();
+    if let Some(names) = explicit_stages {
+        for name in names {
+            let mangled = mangle_dslx_name(path.file_stem().unwrap().to_str().unwrap(), name)?;
+            if ir.get_function(&mangled).is_err() {
+                return Err(xlsynth::XlsynthError(format!(
+                    "stage {name} (mangled {mangled}) not found in IR"
+                )));
+            }
+            stages.push((name.clone(), mangled));
         }
-        stages.push(fn_name);
+    } else {
+        for i in 0.. {
+            let fn_name = format!("{top}_cycle{i}");
+            let mangled =
+                match mangle_dslx_name(path.file_stem().unwrap().to_str().unwrap(), &fn_name) {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+            if ir.get_function(&mangled).is_err() {
+                break;
+            }
+            stages.push((fn_name, mangled));
+        }
     }
     if stages.is_empty() {
         return Err(xlsynth::XlsynthError("no pipeline stages found".into()));
     }
 
-    let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::SystemVerilog);
+    let file_type = if use_system_verilog {
+        xlsynth::vast::VastFileType::SystemVerilog
+    } else {
+        xlsynth::vast::VastFileType::Verilog
+    };
+    let mut file = xlsynth::vast::VastFile::new(file_type);
     let bit_type = file.make_bit_vector_type(32, false);
 
     let mut wrapper = file.add_module(&format!("{top}_pipeline"));
@@ -50,8 +69,8 @@ pub fn stitch_pipeline(
     let mut prev_wire = Some(wrapper.add_wire("stage0_out", &bit_type));
 
     let mut sv_modules = Vec::new();
-    for (idx, stage) in stages.iter().enumerate() {
-        let opt = optimize_ir(&ir, stage)?;
+    for (idx, (stage_unmangled, stage_mangled)) in stages.iter().enumerate() {
+        let opt = optimize_ir(&ir, stage_mangled)?;
         let sched = "delay_model: \"unit\"\npipeline_stages: 1";
         let flop_inputs = "flop_inputs: true";
         let flop_outputs = if idx + 1 == stages.len() {
@@ -60,12 +79,12 @@ pub fn stitch_pipeline(
             "flop_outputs: false"
         };
         let codegen = format!(
-            "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nmodule_name: \"{stage}\"\n{flop_inputs}\n{flop_outputs}"
+            "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nmodule_name: \"{stage_unmangled}\"\nuse_system_verilog: {use_system_verilog}\n{flop_inputs}\n{flop_outputs}"
         );
         let result = schedule_and_codegen(&opt, sched, &codegen)?;
         sv_modules.push(result.get_verilog_text()?);
 
-        let instance_name = format!("{stage}_i");
+        let instance_name = format!("{stage_unmangled}_i");
         let output_wire = if idx + 1 == stages.len() {
             wrapper.add_wire("final_out", &bit_type)
         } else {
@@ -78,7 +97,7 @@ pub fn stitch_pipeline(
         let out_e = output_wire.to_expr();
         let conns = [Some(&clk_e), Some(&x_e), Some(&y_e), Some(&out_e)];
         wrapper.add_member_instantiation(file.make_instantiation(
-            stage,
+            stage_unmangled,
             &instance_name,
             &[],
             &[],
@@ -99,22 +118,62 @@ pub fn stitch_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
+    use xlsynth_test_helpers;
 
     #[test]
     fn test_stitch_pipeline_tuple() {
         let dslx = "fn mul_add_cycle0(x: u32, y: u32, z: u32) -> (u32, u32) { (x * y, z) }\nfn mul_add_cycle1(partial: u32, z: u32) -> u32 { partial + z }";
-        let result = stitch_pipeline(dslx, Path::new("test.x"), "mul_add").unwrap();
-        assert!(result.contains("mul_add_cycle0"));
-        assert!(result.contains("mul_add_cycle1"));
-        assert!(result.contains("mul_add_pipeline"));
+        let result = stitch_pipeline(dslx, Path::new("test.x"), "mul_add", true, None).unwrap();
+        // Validate generated SV.
+        xlsynth_test_helpers::assert_valid_sv(&result);
+
+        let golden_path = std::path::Path::new("tests/goldens/mul_add_pipeline.sv");
+        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+            std::fs::write(golden_path, &result).expect("write golden");
+        } else {
+            let want = std::fs::read_to_string(golden_path).expect("read golden");
+            assert_eq!(
+                result.trim(),
+                want.trim(),
+                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+            );
+        }
     }
 
     #[test]
     fn test_stitch_pipeline_struct() {
         let dslx = "struct S { a: u32, b: u32 }\nfn foo_cycle0(s: S) -> S { s }\nfn foo_cycle1(s: S) -> u32 { s.a + s.b }";
-        let result = stitch_pipeline(dslx, Path::new("test.x"), "foo").unwrap();
-        assert!(result.contains("foo_cycle0"));
-        assert!(result.contains("foo_cycle1"));
-        assert!(result.contains("foo_pipeline"));
+        let result = stitch_pipeline(dslx, Path::new("test.x"), "foo", true, None).unwrap();
+        xlsynth_test_helpers::assert_valid_sv(&result);
+        let golden_path = std::path::Path::new("tests/goldens/foo_pipeline.sv");
+        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+            std::fs::write(golden_path, &result).expect("write golden");
+        } else {
+            let want = std::fs::read_to_string(golden_path).expect("read golden");
+            assert_eq!(
+                result.trim(),
+                want.trim(),
+                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+            );
+        }
+    }
+
+    #[test]
+    fn test_stitch_pipeline_single_stage() {
+        let dslx = "fn one_cycle0(x: u32, y: u32) -> u32 { x + y }";
+        let result = stitch_pipeline(dslx, Path::new("test.x"), "one", true, None).unwrap();
+        xlsynth_test_helpers::assert_valid_sv(&result);
+        let golden_path = std::path::Path::new("tests/goldens/one_pipeline.sv");
+        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+            std::fs::write(golden_path, &result).expect("write golden");
+        } else {
+            let want = std::fs::read_to_string(golden_path).expect("read golden");
+            assert_eq!(
+                result.trim(),
+                want.trim(),
+                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+            );
+        }
     }
 }

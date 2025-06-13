@@ -341,7 +341,18 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx-stitch-pipeline")
                 .about("Stitches DSLX pipeline stages")
-                .add_dslx_input_args(true),
+                .add_dslx_input_args(true)
+                .add_bool_arg(
+                    "use_system_verilog",
+                    "Whether to emit SystemVerilog (default true; set to false for plain Verilog)",
+                )
+                .arg(
+                    Arg::new("stages")
+                        .long("stages")
+                        .value_name("CSV")
+                        .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
+                        .action(ArgAction::Set),
+                ),
         )
         .subcommand(
             clap::Command::new("dslx2ir")
