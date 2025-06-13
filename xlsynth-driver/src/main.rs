@@ -39,6 +39,7 @@ mod dslx2ir;
 mod dslx2pipeline;
 mod dslx2sv_types;
 mod dslx_g8r_stats;
+mod dslx_stitch_pipeline;
 mod g8r2v;
 mod g8r_equiv;
 mod gv2ir;
@@ -336,6 +337,11 @@ fn main() {
                     "type_inference_v2",
                     "Enable the experimental type-inference v2 algorithm",
                 ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-stitch-pipeline")
+                .about("Stitches DSLX pipeline stages")
+                .add_dslx_input_args(true),
         )
         .subcommand(
             clap::Command::new("dslx2ir")
@@ -750,6 +756,8 @@ fn main() {
 
     if let Some(matches) = matches.subcommand_matches("dslx2pipeline") {
         dslx2pipeline::handle_dslx2pipeline(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("dslx-stitch-pipeline") {
+        dslx_stitch_pipeline::handle_dslx_stitch_pipeline(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2ir") {
         dslx2ir::handle_dslx2ir(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2opt") {
