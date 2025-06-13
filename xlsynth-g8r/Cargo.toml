@@ -102,3 +102,7 @@ harness = false
 [[bench]]
 name = "sim_vs_simd_bench"
 harness = false
+
+[[bench]]
+name = "toggle_count_bench"
+harness = false
