@@ -5,12 +5,15 @@
 //! way to observe the memory-usage and runtime improvements of the streaming
 //! implementation introduced in PR #XXX.
 
+use bitvec::vec::BitVec;
 use criterion::{criterion_group, criterion_main, Criterion};
 use rand::RngCore;
 use xlsynth::IrBits;
-use bitvec::vec::BitVec;
-use xlsynth_g8r::{count_toggles, gate_sim::{eval, Collect}};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
+use xlsynth_g8r::{
+    count_toggles,
+    gate_sim::{eval, Collect},
+};
 
 /// Number of input vectors in the batch.  Large enough to show a difference
 /// between the old and new algorithms but still quick to run inside CI.
@@ -47,7 +50,7 @@ fn bench_count_toggles(c: &mut Criterion) {
 
     // Benchmark the current (streaming) implementation.
     c.bench_function("count_toggles_stream", |b| {
-        b.iter(|| count_toggles(&gate_fn, &batch))
+        b.iter(|| count_toggles::count_toggles(&gate_fn, &batch))
     });
 
     // Benchmark a faithful re-implementation of the legacy algorithm that kept
