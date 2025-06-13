@@ -26,12 +26,11 @@ module one_cycle0(
   assign out = p1_add_10;
 endmodule
 module one_pipeline(
-  input wire [31:0] clk,
+  input wire clk,
   input wire [31:0] x,
   input wire [31:0] y,
   output wire [31:0] out
 );
-  wire [31:0] stage0_out;
   wire [31:0] final_out;
   one_cycle0 one_cycle0_i (
     .clk(clk),

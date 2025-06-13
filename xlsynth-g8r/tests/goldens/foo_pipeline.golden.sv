@@ -42,24 +42,20 @@ module foo_cycle1(
   assign out = p1_add_11;
 endmodule
 module foo_pipeline(
-  input wire [31:0] clk,
-  input wire [31:0] x,
-  input wire [31:0] y,
+  input wire clk,
+  input wire [63:0] s,
   output wire [31:0] out
 );
-  wire [31:0] stage0_out;
-  wire [31:0] stage1_out;
+  wire [63:0] stage0_out;
   foo_cycle0 foo_cycle0_i (
     .clk(clk),
-    .x(x),
-    .y(y),
-    .out(stage1_out)
+    .s(s),
+    .out(stage0_out)
   );
   wire [31:0] final_out;
   foo_cycle1 foo_cycle1_i (
     .clk(clk),
-    .x(x),
-    .y(y),
+    .s(stage0_out),
     .out(final_out)
   );
   assign out = final_out;

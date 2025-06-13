@@ -61,24 +61,25 @@ module mul_add_cycle1(
   assign out = p1_add_15;
 endmodule
 module mul_add_pipeline(
-  input wire [31:0] clk,
+  input wire clk,
   input wire [31:0] x,
   input wire [31:0] y,
+  input wire [31:0] z,
   output wire [31:0] out
 );
-  wire [31:0] stage0_out;
-  wire [31:0] stage1_out;
+  wire [63:0] stage0_out;
   mul_add_cycle0 mul_add_cycle0_i (
     .clk(clk),
     .x(x),
     .y(y),
-    .out(stage1_out)
+    .z(z),
+    .out(stage0_out)
   );
   wire [31:0] final_out;
   mul_add_cycle1 mul_add_cycle1_i (
     .clk(clk),
-    .x(x),
-    .y(y),
+    .partial(stage0_out[63:32]),
+    .z(stage0_out[31:0]),
     .out(final_out)
   );
   assign out = final_out;
