@@ -35,106 +35,110 @@ pub struct ToggleStats {
 /// ToggleStats: gate_output_toggles, gate_input_toggles, primary_input_toggles,
 /// primary_output_toggles
 pub fn count_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> ToggleStats {
-    assert!(
-        batch_inputs.len() >= 2,
-        "Need at least two input vectors to count toggles"
-    );
-    // Debug: print first 3 input vectors
-    for (i, input_vec) in batch_inputs.iter().take(3).enumerate() {
-        log::debug!("batch_inputs[{}]: {:?}", i, input_vec);
-    }
-    // Run eval for each input vector, collect all_values (gate outputs)
-    let mut all_values_vec: Vec<BitVec> = Vec::with_capacity(batch_inputs.len());
-    for input_vec in batch_inputs {
-        let result = eval(gate_fn, input_vec, Collect::AllWithInputs);
-        let all_values = result
-            .all_values
-            .expect("Collect::All should produce all_values");
-        all_values_vec.push(all_values);
-    }
+    // We need at least one transition (two vectors) to count toggles.
+    assert!(batch_inputs.len() >= 2, "Need at least two input vectors to count toggles");
 
-    // For each consecutive pair, count toggles at all gate outputs (AND2 nodes
-    // only)
+    // Pre-computed, per-circuit data that is reused for every transition.
+
+    // Indices of AND2 nodes – we only count toggles on these for the
+    // `gate_output_toggles` metric.
     let and2_indices: Vec<usize> = gate_fn
         .gates
         .iter()
         .enumerate()
-        .filter_map(|(idx, gate)| {
-            if matches!(gate, crate::gate::AigNode::And2 { .. }) {
-                Some(idx)
-            } else {
-                None
-            }
+        .filter_map(|(idx, gate)| if matches!(gate, crate::gate::AigNode::And2 { .. }) {
+            Some(idx)
+        } else {
+            None
         })
         .collect();
-    let mut gate_output_toggles = 0;
-    for pair in all_values_vec.windows(2) {
-        let (prev, next) = (&pair[0], &pair[1]);
-        for &idx in &and2_indices {
-            if prev[idx] != next[idx] {
-                gate_output_toggles += 1;
-            }
-        }
-    }
-    // For each consecutive pair, count toggles at all gate inputs
-    let mut gate_input_toggles = 0;
-    // For each gate in the circuit
-    for (gate_idx, gate) in gate_fn.gates.iter().enumerate() {
-        // For each input operand to the gate
-        for operand in gate.get_operands() {
-            // For the first 3 transitions, print the values
-            for (trans_idx, pair) in all_values_vec.windows(2).enumerate() {
-                let (prev, next) = (&pair[0], &pair[1]);
-                let prev_val = prev[operand.node.id] ^ operand.negated;
-                let next_val = next[operand.node.id] ^ operand.negated;
-                if trans_idx < 3 {
-                    log::debug!(
-                        "Gate {} operand {}: prev={} next={} (toggle={})",
-                        gate_idx,
-                        operand.node.id,
-                        prev_val,
-                        next_val,
-                        prev_val != next_val
-                    );
-                }
-                if prev_val != next_val {
-                    gate_input_toggles += 1;
-                }
-            }
-        }
-    }
-    // Count bit toggles in the raw batch input vectors (primary inputs)
-    let mut primary_input_toggles = 0;
-    for pair in batch_inputs.windows(2) {
-        let (prev, next) = (&pair[0], &pair[1]);
-        assert_eq!(prev.len(), next.len());
-        for (prev_bits, next_bits) in prev.iter().zip(next.iter()) {
-            assert_eq!(prev_bits.get_bit_count(), next_bits.get_bit_count());
-            for i in 0..prev_bits.get_bit_count() {
-                let a = prev_bits.get_bit(i).unwrap();
-                let b = next_bits.get_bit(i).unwrap();
-                if a != b {
-                    primary_input_toggles += 1;
-                }
-            }
-        }
-    }
-    // Count toggles at the circuit's output pins only
-    let mut primary_output_toggles = 0;
-    // For each output bit in the circuit
+
+    // For gate-input toggle counting we need, for every gate, the set of its
+    // input operands.  Collect these once so we don't need to re-create the
+    // vectors for every transition.
+    let gate_operands: Vec<Vec<crate::gate::AigOperand>> = gate_fn
+        .gates
+        .iter()
+        .map(|gate| gate.get_operands())
+        .collect();
+
+    // Flatten all output bit indices; the set is typically small.
     let output_bit_indices: Vec<usize> = gate_fn
         .outputs
         .iter()
         .flat_map(|output| output.bit_vector.iter_lsb_to_msb().map(|bit| bit.node.id))
         .collect();
-    for pair in all_values_vec.windows(2) {
-        let (prev, next) = (&pair[0], &pair[1]);
+
+    // Accumulators for every transition (prev → curr).
+    let mut gate_output_toggles = 0;
+    let mut gate_input_toggles = 0;
+    let mut primary_input_toggles = 0;
+    let mut primary_output_toggles = 0;
+
+    // Evaluate the very first stimulus so we have a baseline to diff against.
+    let mut prev_inputs: &Vec<IrBits> = &batch_inputs[0];
+    let mut prev_all_values: BitVec = eval(gate_fn, prev_inputs, Collect::AllWithInputs)
+        .all_values
+        .expect("Collect::AllWithInputs should produce all_values");
+
+    // Main loop – walk over every transition (prev → curr).
+    for (transition_idx, curr_inputs) in batch_inputs.iter().enumerate().skip(1) {
+        let curr_all_values: BitVec = eval(gate_fn, curr_inputs, Collect::AllWithInputs)
+            .all_values
+            .expect("Collect::AllWithInputs should produce all_values");
+
+        // Gate output toggles (AND2 only).
+        for &idx in &and2_indices {
+            if prev_all_values[idx] != curr_all_values[idx] {
+                gate_output_toggles += 1;
+            }
+        }
+
+        // Gate input toggles.
+        for (gate_idx, operands) in gate_operands.iter().enumerate() {
+            for operand in operands {
+                let prev_val = prev_all_values[operand.node.id] ^ operand.negated;
+                let curr_val = curr_all_values[operand.node.id] ^ operand.negated;
+                if transition_idx < 3 {
+                    // Retain existing debug behaviour for the first few transitions.
+                    log::debug!(
+                        "Gate {} operand {}: prev={} curr={} (toggle={})",
+                        gate_idx,
+                        operand.node.id,
+                        prev_val,
+                        curr_val,
+                        prev_val != curr_val
+                    );
+                }
+                if prev_val != curr_val {
+                    gate_input_toggles += 1;
+                }
+            }
+        }
+
+        // Primary-input toggles: compare raw stimulus vectors.
+        assert_eq!(prev_inputs.len(), curr_inputs.len());
+        for (prev_bits, curr_bits) in prev_inputs.iter().zip(curr_inputs.iter()) {
+            assert_eq!(prev_bits.get_bit_count(), curr_bits.get_bit_count());
+            for i in 0..prev_bits.get_bit_count() {
+                if prev_bits.get_bit(i).unwrap() != curr_bits.get_bit(i).unwrap() {
+                    primary_input_toggles += 1;
+                }
+            }
+        }
+
+        // Primary-output toggles – subset of all simulated values.
         for &idx in &output_bit_indices {
-            if prev[idx] != next[idx] {
+            if prev_all_values[idx] != curr_all_values[idx] {
                 primary_output_toggles += 1;
             }
         }
+
+        // Advance the sliding window.
+        prev_inputs = curr_inputs;
+        prev_all_values = curr_all_values;
     }
+
     ToggleStats {
         gate_output_toggles,
         gate_input_toggles,
