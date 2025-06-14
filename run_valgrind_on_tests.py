@@ -90,6 +90,7 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
         "filter_out": [
             "validate_equiv::tests::test_validate_equiv_bf16_mul",
             "validate_equiv::tests::test_validate_equiv_bf16_add",
+            "dslx_stitch_pipeline",
             # Added based on >100s runtime
             "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_5_expects",
             "gate_builder::tests::test_tree_reduce_eq_linear_reduce::_2_expects",

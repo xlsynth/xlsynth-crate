@@ -1097,3 +1097,46 @@ impl_unary_ir_builder!(
     xls_function_builder_add_identity,
     xls_builder_base_add_identity
 );
+
+pub(crate) fn xls_function_type_param_count(t: *mut xlsynth_sys::CIrFunctionType) -> i64 {
+    unsafe { xlsynth_sys::xls_function_type_get_param_count(t) }
+}
+
+pub(crate) fn xls_function_type_get_param_type(
+    t: *mut xlsynth_sys::CIrFunctionType,
+    index: usize,
+) -> Result<crate::ir_package::IrType, XlsynthError> {
+    let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut type_out: *mut xlsynth_sys::CIrType = std::ptr::null_mut();
+    let success = unsafe {
+        xlsynth_sys::xls_function_type_get_param_type(t, index, &mut error_out, &mut type_out)
+    };
+    if success {
+        Ok(crate::ir_package::IrType { ptr: type_out })
+    } else {
+        Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+    }
+}
+
+pub(crate) fn xls_function_type_get_return_type(
+    t: *mut xlsynth_sys::CIrFunctionType,
+) -> crate::ir_package::IrType {
+    let ptr = unsafe { xlsynth_sys::xls_function_type_get_return_type(t) };
+    crate::ir_package::IrType { ptr }
+}
+
+pub(crate) fn xls_function_get_param_name(
+    f: *mut xlsynth_sys::CIrFunction,
+    index: usize,
+) -> Result<String, XlsynthError> {
+    let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut name_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let success = unsafe {
+        xlsynth_sys::xls_function_get_param_name(f, index, &mut error_out, &mut name_out)
+    };
+    if success {
+        Ok(unsafe { c_str_to_rust(name_out) })
+    } else {
+        Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+    }
+}

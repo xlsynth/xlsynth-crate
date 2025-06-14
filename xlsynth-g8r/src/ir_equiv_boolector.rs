@@ -27,6 +27,7 @@ pub struct Ctx {
 /// capability enabled.
 enum Incremental {
     Yes,
+    #[allow(dead_code)]
     No,
 }
 
@@ -1182,18 +1183,6 @@ pub fn prove_ir_fn_equiv_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult 
 /// Flattened equivalence check reusing the given solver context.
 pub fn prove_ir_equiv_flattened_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
     check_equiv_internal_with_btor(lhs, rhs, true, ctx, true)
-}
-
-/// Internal helper that constructs a fresh solver and delegates to
-/// `check_equiv_internal_with_btor`.
-fn check_equiv_internal(lhs: &Fn, rhs: &Fn, flatten_aggregates: bool) -> EquivResult {
-    let params: Vec<(String, u32)> = lhs
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
-        .collect();
-    let ctx = Ctx::new(&params);
-    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, &ctx, false)
 }
 
 fn shift_boolector<F>(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>, shift_op: F) -> BV<Rc<Btor>>

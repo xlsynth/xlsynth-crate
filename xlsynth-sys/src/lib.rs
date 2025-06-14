@@ -1374,6 +1374,24 @@ extern "C" {
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
+
+    pub fn xls_function_type_get_param_count(fty: *mut CIrFunctionType) -> i64;
+
+    pub fn xls_function_type_get_param_type(
+        fty: *mut CIrFunctionType,
+        index: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        param_type_out: *mut *mut CIrType,
+    ) -> bool;
+
+    pub fn xls_function_type_get_return_type(fty: *mut CIrFunctionType) -> *mut CIrType;
+
+    pub fn xls_function_get_param_name(
+        function: *mut CIrFunction,
+        index: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        name_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
