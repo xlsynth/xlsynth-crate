@@ -8,11 +8,13 @@ use xlsynth::{
     convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen, DslxConvertOptions,
 };
 
+use crate::verilog_version::VerilogVersion;
+
 /// Immutable configuration passed around while stitching a pipeline.
 #[derive(Clone)]
 struct PipelineCfg<'a> {
     ir: &'a xlsynth::ir_package::IrPackage,
-    use_system_verilog: bool,
+    verilog_version: VerilogVersion,
 }
 
 /// One port in a stage module (flattened).
@@ -122,7 +124,7 @@ fn make_stage_info(
     let codegen = format!(
         "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nmodule_name: \"{stage}\"\nuse_system_verilog: {sv}\n{fi}\n{fo}",
         stage = stage_name_unmangled,
-        sv = cfg.use_system_verilog,
+        sv = cfg.verilog_version.is_system_verilog(),
         fi = flop_inputs,
         fo = flop_outputs
     );
@@ -149,7 +151,7 @@ pub fn stitch_pipeline(
     dslx: &str,
     path: &Path,
     top: &str,
-    use_system_verilog: bool,
+    verilog_version: VerilogVersion,
     explicit_stages: Option<&[String]>,
 ) -> Result<String, xlsynth::XlsynthError> {
     let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
@@ -157,7 +159,7 @@ pub fn stitch_pipeline(
 
     let cfg = PipelineCfg {
         ir: &ir,
-        use_system_verilog,
+        verilog_version,
     };
 
     let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
@@ -175,10 +177,9 @@ pub fn stitch_pipeline(
     }
 
     // Build the wrapper using VAST.
-    let file_type = if use_system_verilog {
-        xlsynth::vast::VastFileType::SystemVerilog
-    } else {
-        xlsynth::vast::VastFileType::Verilog
+    let file_type = match cfg.verilog_version {
+        VerilogVersion::SystemVerilog => xlsynth::vast::VastFileType::SystemVerilog,
+        VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
     };
     let mut file = xlsynth::vast::VastFile::new(file_type);
 
@@ -356,7 +357,14 @@ mod tests {
     #[test]
     fn test_stitch_pipeline_tuple() {
         let dslx = "fn mul_add_cycle0(x: u32, y: u32, z: u32) -> (u32, u32) { (x * y, z) }\nfn mul_add_cycle1(partial: u32, z: u32) -> u32 { partial + z }";
-        let result = stitch_pipeline(dslx, Path::new("test.x"), "mul_add", true, None).unwrap();
+        let result = stitch_pipeline(
+            dslx,
+            Path::new("test.x"),
+            "mul_add",
+            VerilogVersion::SystemVerilog,
+            None,
+        )
+        .unwrap();
         // Validate generated SV.
         xlsynth_test_helpers::assert_valid_sv(&result);
 
@@ -378,7 +386,14 @@ mod tests {
     #[test]
     fn test_stitch_pipeline_struct() {
         let dslx = "struct S { a: u32, b: u32 }\nfn foo_cycle0(s: S) -> S { s }\nfn foo_cycle1(s: S) -> u32 { s.a + s.b }";
-        let result = stitch_pipeline(dslx, Path::new("test.x"), "foo", true, None).unwrap();
+        let result = stitch_pipeline(
+            dslx,
+            Path::new("test.x"),
+            "foo",
+            VerilogVersion::SystemVerilog,
+            None,
+        )
+        .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
 
         let golden_path = std::path::Path::new("tests/goldens/foo_pipeline.golden.sv");
@@ -399,7 +414,14 @@ mod tests {
     #[test]
     fn test_stitch_pipeline_single_stage() {
         let dslx = "fn one_cycle0(x: u32, y: u32) -> u32 { x + y }";
-        let result = stitch_pipeline(dslx, Path::new("test.x"), "one", true, None).unwrap();
+        let result = stitch_pipeline(
+            dslx,
+            Path::new("test.x"),
+            "one",
+            VerilogVersion::SystemVerilog,
+            None,
+        )
+        .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
 
         let golden_path = std::path::Path::new("tests/goldens/one_pipeline.golden.sv");

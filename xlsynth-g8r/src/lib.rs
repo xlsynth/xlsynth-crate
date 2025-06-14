@@ -32,6 +32,7 @@ pub mod ir_equiv_boolector;
 pub mod ir_value_utils;
 pub mod liberty;
 pub mod match_and_rewrite;
+pub mod verilog_version;
 pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
 }
