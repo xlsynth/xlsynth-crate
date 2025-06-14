@@ -170,3 +170,21 @@
    fun:_ZN6google8protobuf8internal12ExtensionSet21RegisterEnumExtensionEPKNS0_11MessageLiteEihbbPKj
    ...
 }
+{
+   area_model_registry
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_GLOBAL__sub_I_area_model_*
+   ...
+   fun:_dl_init
+   ...
+}
+{
+   sv_keywords_registry
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:_ZN3xls21SystemVerilogKeywords*
+   ...
+}
