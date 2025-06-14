@@ -8,68 +8,74 @@ use xlsynth::{
     convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen, DslxConvertOptions,
 };
 
-/// Generates SystemVerilog for pipeline stages `top_cycle0`, `top_cycle1`, ...
-/// in `dslx` and stitches them together into a wrapper module.
-///
-/// The resulting SystemVerilog contains the stage modules followed by a wrapper
-/// module named `<top>_pipeline` that instantiates each stage.
-pub fn stitch_pipeline(
-    dslx: &str,
-    path: &Path,
-    top: &str,
+/// Immutable configuration passed around while stitching a pipeline.
+#[derive(Clone)]
+struct PipelineCfg<'a> {
+    ir: &'a xlsynth::ir_package::IrPackage,
+    top: &'a str,
     use_system_verilog: bool,
-    explicit_stages: Option<&[String]>,
-) -> Result<String, xlsynth::XlsynthError> {
-    // Helper struct that describes one port on a generated SV module.
-    #[derive(Debug, Clone)]
-    struct Port {
-        name: String,
-        is_input: bool, // true = input, false = output
-        width: u32,     // 1 for scalar
-    }
+}
 
-    // Helper to build the port list for a stage directly from the IR.
-    fn build_ports_from_ir(
-        func: &xlsynth::ir_package::IrFunction,
-        fty: &xlsynth::ir_package::IrFunctionType,
-    ) -> Result<(Vec<Port>, u32), xlsynth::XlsynthError> {
-        let mut ports = Vec::<Port>::new();
-        // Clock is always first.
+/// One port in a stage module (flattened).
+#[derive(Debug, Clone)]
+struct Port {
+    name: String,
+    is_input: bool,
+    width: u32,
+}
+
+/// Information derived for each stage that the wrapper needs.
+#[derive(Debug, Clone)]
+struct StageInfo {
+    sv_text: String,
+    ports: Vec<Port>,
+    output_width: u32,
+}
+
+fn build_ports_from_ir(
+    func: &xlsynth::ir_package::IrFunction,
+    fty: &xlsynth::ir_package::IrFunctionType,
+) -> Result<(Vec<Port>, u32), xlsynth::XlsynthError> {
+    // 1. Clock
+    let mut ports = vec![Port {
+        name: "clk".to_string(),
+        is_input: true,
+        width: 1,
+    }];
+
+    // 2. Formal parameters (flattened widths)
+    for i in 0..fty.param_count() {
+        let name = func.param_name(i)?;
+        let ty = fty.param_type(i)?;
         ports.push(Port {
-            name: "clk".to_string(),
+            name,
             is_input: true,
-            width: 1,
+            width: ty.get_flat_bit_count() as u32,
         });
-
-        let param_cnt = fty.param_count();
-        for i in 0..param_cnt {
-            let name = func.param_name(i)?;
-            let ty = fty.param_type(i)?;
-            let width = ty.get_flat_bit_count() as u32;
-            ports.push(Port {
-                name,
-                is_input: true,
-                width,
-            });
-        }
-
-        let ret_ty = fty.return_type();
-        let ret_width = ret_ty.get_flat_bit_count() as u32;
-        ports.push(Port {
-            name: "out".to_string(),
-            is_input: false,
-            width: ret_width,
-        });
-
-        Ok((ports, ret_width))
     }
 
-    let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
-    let ir = conv.ir;
+    // 3. Return value -> `out` port
+    let ret_ty = fty.return_type();
+    let ret_width = ret_ty.get_flat_bit_count() as u32;
+    ports.push(Port {
+        name: "out".into(),
+        is_input: false,
+        width: ret_width,
+    });
 
-    // Discover stage functions.
-    let mut stages: Vec<(String, String)> = Vec::new();
-    if let Some(names) = explicit_stages {
+    Ok((ports, ret_width))
+}
+
+/// Collect user-specified or auto-discovered stage names and their mangled IR
+/// names.
+fn discover_stage_names(
+    ir: &xlsynth::ir_package::IrPackage,
+    path: &std::path::Path,
+    top: &str,
+    explicit: Option<&[String]>,
+) -> Result<Vec<(String, String)>, xlsynth::XlsynthError> {
+    let mut stages = Vec::new();
+    if let Some(names) = explicit {
         for name in names {
             let mangled = mangle_dslx_name(path.file_stem().unwrap().to_str().unwrap(), name)?;
             if ir.get_function(&mangled).is_err() {
@@ -96,38 +102,78 @@ pub fn stitch_pipeline(
     if stages.is_empty() {
         return Err(xlsynth::XlsynthError("no pipeline stages found".into()));
     }
+    Ok(stages)
+}
+
+/// Run XLS optimise + schedule + codegen for a stage and gather `StageInfo`.
+fn make_stage_info(
+    cfg: &PipelineCfg,
+    stage_name_unmangled: &str,
+    stage_mangled: &str,
+    is_last: bool,
+) -> Result<StageInfo, xlsynth::XlsynthError> {
+    let opt = optimize_ir(cfg.ir, stage_mangled)?;
+    let sched = "delay_model: \"unit\"\npipeline_stages: 1";
+    let flop_inputs = "flop_inputs: true";
+    let flop_outputs = if is_last {
+        "flop_outputs: true"
+    } else {
+        "flop_outputs: false"
+    };
+    let codegen = format!(
+        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nmodule_name: \"{stage}\"\nuse_system_verilog: {sv}\n{fi}\n{fo}",
+        stage = stage_name_unmangled,
+        sv = cfg.use_system_verilog,
+        fi = flop_inputs,
+        fo = flop_outputs
+    );
+    let result = schedule_and_codegen(&opt, sched, &codegen)?;
+    let sv_text = result.get_verilog_text()?;
+
+    let func = cfg.ir.get_function(stage_mangled)?;
+    let fty = func.get_type()?;
+    let (ports, output_width) = build_ports_from_ir(&func, &fty)?;
+
+    Ok(StageInfo {
+        sv_text,
+        ports,
+        output_width,
+    })
+}
+
+/// Generates SystemVerilog for pipeline stages `top_cycle0`, `top_cycle1`, ...
+/// in `dslx` and stitches them together into a wrapper module.
+///
+/// The resulting SystemVerilog contains the stage modules followed by a wrapper
+/// module named `<top>_pipeline` that instantiates each stage.
+pub fn stitch_pipeline(
+    dslx: &str,
+    path: &Path,
+    top: &str,
+    use_system_verilog: bool,
+    explicit_stages: Option<&[String]>,
+) -> Result<String, xlsynth::XlsynthError> {
+    let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
+    let ir = conv.ir;
+
+    let cfg = PipelineCfg {
+        ir: &ir,
+        top,
+        use_system_verilog,
+    };
+
+    let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
 
     // For each stage run codegen immediately so we can parse its port list.
-    struct StageInfo {
-        sv_text: String,
-        ports: Vec<Port>,
-        output_width: u32,
-    }
-
-    let mut stage_infos: Vec<StageInfo> = Vec::new();
-    for (idx, (_stage_unmangled, stage_mangled)) in stages.iter().enumerate() {
-        let opt = optimize_ir(&ir, stage_mangled)?;
-        let sched = "delay_model: \"unit\"\npipeline_stages: 1";
-        let flop_inputs = "flop_inputs: true";
-        let flop_outputs = if idx + 1 == stages.len() {
-            "flop_outputs: true"
-        } else {
-            "flop_outputs: false"
-        };
-        let codegen = format!(
-            "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nmodule_name: \"{}\"\nuse_system_verilog: {}\n{}\n{}",
-            stages[idx].0, use_system_verilog, flop_inputs, flop_outputs
-        );
-        let result = schedule_and_codegen(&opt, sched, &codegen)?;
-        let sv_text = result.get_verilog_text()?;
-        let func = ir.get_function(&stage_mangled)?;
-        let fty = func.get_type()?;
-        let (ports, output_width) = build_ports_from_ir(&func, &fty)?;
-        stage_infos.push(StageInfo {
-            sv_text,
-            ports,
-            output_width,
-        });
+    let mut stage_infos = Vec::with_capacity(stages.len());
+    for (idx, (stage_unmangled, stage_mangled)) in stages.iter().enumerate() {
+        let info = make_stage_info(
+            &cfg,
+            stage_unmangled,
+            stage_mangled,
+            idx + 1 == stages.len(),
+        )?;
+        stage_infos.push(info);
     }
 
     // Build the wrapper using VAST.
