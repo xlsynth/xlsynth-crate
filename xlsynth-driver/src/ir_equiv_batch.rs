@@ -2,10 +2,9 @@
 
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
-use std::time::Instant;
 
 #[cfg(feature = "has-boolector")]
-use xlsynth_g8r::ir_equiv_boolector::{self, Ctx};
+use xlsynth_g8r::ir_equiv_boolector::Ctx;
 #[cfg(feature = "has-boolector")]
 use xlsynth_g8r::xls_ir::ir_parser;
 
@@ -23,7 +22,7 @@ fn run_check_with_ctx(
     drop_params: &[String],
     ctx: &Ctx,
 ) -> bool {
-    let start = Instant::now();
+    let start = std::time::Instant::now();
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
         Ok(pkg) => pkg,
         Err(e) => {
@@ -102,6 +101,7 @@ fn run_check_with_ctx(
 pub fn handle_ir_equiv_batch(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     #[cfg(not(feature = "has-boolector"))]
     {
+        std::hint::black_box(matches);
         eprintln!("error: ir-equiv-batch requires --features=with-boolector-built or --features=with-boolector-system");
         std::process::exit(1);
     }
