@@ -28,62 +28,40 @@ pub fn stitch_pipeline(
         width: u32,     // 1 for scalar
     }
 
-    // Very small / forgiving parser for the port list that appears at the top
-    // of a generated SV module. We only need name, dir, and width.
-    fn parse_sv_module_ports(module_sv: &str) -> Vec<Port> {
+    // Helper to build the port list for a stage directly from the IR.
+    fn build_ports_from_ir(
+        func: &xlsynth::ir_package::IrFunction,
+        fty: &xlsynth::ir_package::IrFunctionType,
+    ) -> Result<(Vec<Port>, u32), xlsynth::XlsynthError> {
         let mut ports = Vec::<Port>::new();
-        // Iterate over lines after the "module ...(" line until we hit ");".
-        let mut in_header = false;
-        for line in module_sv.lines() {
-            if !in_header {
-                if line.trim_start().starts_with("module ") {
-                    in_header = true;
-                }
-                continue;
-            }
-            let l = line.trim();
-            if l.starts_with(");") || l.starts_with(")") {
-                break;
-            }
-            // Remove trailing comma if any.
-            let l = l.trim_end_matches(',').trim();
-            let mut tokens = l.split_whitespace();
-            let dir = match tokens.next() {
-                Some("input") => true,
-                Some("output") => false,
-                _ => continue, // skip unknown line
-            };
-            // Optional "wire"/"reg" etc.
-            let mut tok = tokens.next().unwrap_or("");
-            if tok == "wire" || tok == "reg" {
-                // skip it and take next
-                tok = tokens.next().unwrap_or("");
-            }
+        // Clock is always first.
+        ports.push(Port {
+            name: "clk".to_string(),
+            is_input: true,
+            width: 1,
+        });
 
-            // Width spec or name
-            let (width, name_start_token) = if tok.starts_with('[') {
-                // Expect format [hi:lo]
-                let width_spec = tok.trim_start_matches('[').trim_end_matches(']');
-                let mut parts = width_spec.split(':');
-                let hi: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
-                let lo: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
-                let width = hi - lo + 1;
-                (width, tokens.next().unwrap_or(""))
-            } else {
-                (1u32, tok)
-            };
-            if name_start_token.is_empty() {
-                continue;
-            }
-            // Strip possible trailing comma (already done) or parentheses
-            let name = name_start_token.trim_matches(&[')', ';'][..]).to_string();
+        let param_cnt = fty.param_count();
+        for i in 0..param_cnt {
+            let name = func.param_name(i)?;
+            let ty = fty.param_type(i)?;
+            let width = ty.get_flat_bit_count() as u32;
             ports.push(Port {
                 name,
-                is_input: dir,
+                is_input: true,
                 width,
             });
         }
-        ports
+
+        let ret_ty = fty.return_type();
+        let ret_width = ret_ty.get_flat_bit_count() as u32;
+        ports.push(Port {
+            name: "out".to_string(),
+            is_input: false,
+            width: ret_width,
+        });
+
+        Ok((ports, ret_width))
     }
 
     let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
@@ -142,14 +120,9 @@ pub fn stitch_pipeline(
         );
         let result = schedule_and_codegen(&opt, sched, &codegen)?;
         let sv_text = result.get_verilog_text()?;
-        let ports = parse_sv_module_ports(&sv_text);
-
-        // Output width is width of port named "out" (direction output)
-        let output_width = ports
-            .iter()
-            .find(|p| !p.is_input && p.name == "out")
-            .expect("stage should have output port 'out'")
-            .width;
+        let func = ir.get_function(&stage_mangled)?;
+        let fty = func.get_type()?;
+        let (ports, output_width) = build_ports_from_ir(&func, &fty)?;
         stage_infos.push(StageInfo {
             sv_text,
             ports,
@@ -204,11 +177,9 @@ pub fn stitch_pipeline(
     // Wires and instantiations
     let mut prev_wire: Option<xlsynth::vast::LogicRef> = None;
     let mut prev_width: u32 = 0;
-    let mut sv_modules: Vec<String> = Vec::new();
 
     for (idx, stage_info) in stage_infos.iter().enumerate() {
         let stage_unmangled = &stages[idx].0;
-        sv_modules.push(stage_info.sv_text.clone());
 
         // Determine output wire for this stage
         let output_width = stage_info.output_width;

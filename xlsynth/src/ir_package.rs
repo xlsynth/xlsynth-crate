@@ -180,6 +180,23 @@ impl std::fmt::Display for IrFunctionType {
     }
 }
 
+impl IrFunctionType {
+    /// Returns the number of parameters in this function type.
+    pub fn param_count(&self) -> usize {
+        lib_support::xls_function_type_param_count(self.ptr) as usize
+    }
+
+    /// Returns the type of the `i`th parameter.
+    pub fn param_type(&self, index: usize) -> Result<IrType, XlsynthError> {
+        lib_support::xls_function_type_get_param_type(self.ptr, index)
+    }
+
+    /// Returns the return type of the function.
+    pub fn return_type(&self) -> IrType {
+        lib_support::xls_function_type_get_return_type(self.ptr)
+    }
+}
+
 pub struct IrFunction {
     pub(crate) parent: Arc<RwLock<IrPackagePtr>>,
     pub(crate) ptr: *mut CIrFunction,
@@ -201,6 +218,11 @@ impl IrFunction {
     pub fn get_type(&self) -> Result<IrFunctionType, XlsynthError> {
         let package_write_guard: RwLockWriteGuard<IrPackagePtr> = self.parent.write().unwrap();
         xls_function_get_type(&package_write_guard, self.ptr)
+    }
+
+    /// Returns the name of the `i`th parameter to this function.
+    pub fn param_name(&self, index: usize) -> Result<String, XlsynthError> {
+        lib_support::xls_function_get_param_name(self.ptr, index)
     }
 }
 
