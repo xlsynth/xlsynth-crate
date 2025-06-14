@@ -12,7 +12,6 @@ use xlsynth::{
 #[derive(Clone)]
 struct PipelineCfg<'a> {
     ir: &'a xlsynth::ir_package::IrPackage,
-    top: &'a str,
     use_system_verilog: bool,
 }
 
@@ -158,7 +157,6 @@ pub fn stitch_pipeline(
 
     let cfg = PipelineCfg {
         ir: &ir,
-        top,
         use_system_verilog,
     };
 

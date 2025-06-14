@@ -10,7 +10,6 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, _config: &Option<Toolch
     let top = matches.get_one::<String>("dslx_top").unwrap();
     let dslx = std::fs::read_to_string(input).unwrap_or_else(|e| {
         report_cli_error_and_exit("could not read DSLX input", Some(&e.to_string()), vec![]);
-        unreachable!()
     });
     let use_system_verilog = matches
         .get_one::<String>("use_system_verilog")
