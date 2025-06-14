@@ -733,13 +733,8 @@ fn f(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
         let result = builder.add(&a, &b, None);
         let f = builder.build_with_return_value(&result).unwrap();
 
-        let result = f
-            .interpret(&[
-                IrValue::make_ubits(32, 1).unwrap(),
-                IrValue::make_ubits(32, 2).unwrap(),
-            ])
-            .unwrap();
-        assert_eq!(result, IrValue::make_ubits(32, 3).unwrap());
+        let result = f.interpret(&[IrValue::u32(1), IrValue::u32(2)]).unwrap();
+        assert_eq!(result, IrValue::u32(3));
     }
 
     #[test]

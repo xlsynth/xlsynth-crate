@@ -52,7 +52,7 @@ fn flatten(param: &BValue, ty: &ir::Type, fb: &mut FnBuilder) -> BValue {
         }) => {
             let mut elements = Vec::new();
             for i in 0..*element_count {
-                let index = fb.literal(&IrValue::make_ubits(32, i as u64).unwrap(), None);
+                let index = fb.literal(&IrValue::u32(i as u32), None);
                 let element = fb.array_index(param, &index, None);
                 elements.push(flatten(&element, element_type, fb));
             }
