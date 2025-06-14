@@ -14,7 +14,7 @@ fn sample() -> Result<IrValue, XlsynthError> {
     let package: IrPackage = converted.ir;
     let mangled = xlsynth::mangle_dslx_name("sample", "id")?;
     let f: IrFunction = package.get_function(&mangled)?;
-    let mol: IrValue = IrValue::make_ubits(32, 42)?;
+    let mol: IrValue = IrValue::u32(42);
 
     // Use the IR interpreter.
     let interp_result: IrValue = f.interpret(&[mol.clone()])?;
@@ -28,7 +28,7 @@ fn sample() -> Result<IrValue, XlsynthError> {
 }
 
 fn main() {
-    assert_eq!(sample().unwrap(), IrValue::make_ubits(32, 42).unwrap());
+    assert_eq!(sample().unwrap(), IrValue::u32(42));
 }
 ```
 
