@@ -126,6 +126,11 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -238,6 +243,11 @@ jobs:
           mv protoc-*.zip /tmp/
           protoc --version
 
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
       - name: Install libc++ from llvm-18
         run: |
           export DEBIAN_FRONTEND=noninteractive
@@ -304,6 +314,11 @@ jobs:
           sudo mv protoc-*.zip /tmp/
           protoc --version
 
+      - name: Install Icarus Verilog
+        run: |
+          brew update
+          brew install icarus-verilog
+
       - name: Set up Python + pre-commit
         run: |
           python -m pip install --upgrade pip
@@ -361,6 +376,21 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
+      - name: Build & install Icarus Verilog from source
+        run: |
+          dnf groupinstall -y "Development Tools"
+          # gperf lives in the Powertools (a.k.a. CodeReady Builder) repo - make sure it is enabled
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools
+          dnf install -y git autoconf bison flex gperf readline-devel zlib-devel which
+          git clone --depth 1 https://github.com/steveicarus/iverilog.git /tmp/iverilog
+          cd /tmp/iverilog
+          sh autoconf.sh
+          ./configure --prefix=/usr
+          make -j$(nproc)
+          make install
+          cd ..
+
       - name: Set up dependencies
         run: |
           dnf install -y gcc openssl-devel libffi-devel make curl --nobest
@@ -417,6 +447,11 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
       - name: Install libc++ from llvm-18
         run: |
           sudo apt-get update
@@ -431,6 +466,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y valgrind libz3-dev
+
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
 
       - name: Download xlsynth binaries
         env:

@@ -4,6 +4,7 @@
 //! given gates.
 
 use crate::gate;
+use crate::verilog_version::VerilogVersion;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use xlsynth::vast;
@@ -317,12 +318,12 @@ fn generate_sequential_block(
     }
 }
 
-pub fn emit_netlist(
+pub fn emit_netlist_with_version(
     name: &str,
     gate_fn: &gate::GateFn,
     flop_inputs: bool,
     flop_outputs: bool,
-    use_system_verilog: bool,
+    version: VerilogVersion,
     clk_name: Option<String>,
 ) -> Result<String, String> {
     if (flop_inputs || flop_outputs) && clk_name.is_none() {
@@ -340,7 +341,7 @@ pub fn emit_netlist(
         }
     }
 
-    let file_type = if use_system_verilog {
+    let file_type = if version.is_system_verilog() {
         vast::VastFileType::SystemVerilog
     } else {
         vast::VastFileType::Verilog
@@ -444,6 +445,23 @@ pub fn emit_netlist(
     }
 
     Ok(file.emit())
+}
+
+/// Backwards-compatibility wrapper: accepts the old `use_system_verilog` bool.
+pub fn emit_netlist(
+    name: &str,
+    gate_fn: &gate::GateFn,
+    flop_inputs: bool,
+    flop_outputs: bool,
+    use_system_verilog: bool,
+    clk_name: Option<String>,
+) -> Result<String, String> {
+    let version = if use_system_verilog {
+        VerilogVersion::SystemVerilog
+    } else {
+        VerilogVersion::Verilog
+    };
+    emit_netlist_with_version(name, gate_fn, flop_inputs, flop_outputs, version, clk_name)
 }
 
 #[cfg(test)]

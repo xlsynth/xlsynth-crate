@@ -3,6 +3,7 @@
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
+use xlsynth_g8r::verilog_version::VerilogVersion;
 
 /// Handles the `dslx-stitch-pipeline` subcommand.
 pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
@@ -15,6 +16,11 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, _config: &Option<Toolch
         .get_one::<String>("use_system_verilog")
         .map(|s| s == "true")
         .unwrap_or(true);
+    let verilog_version = if use_system_verilog {
+        VerilogVersion::SystemVerilog
+    } else {
+        VerilogVersion::Verilog
+    };
 
     let stage_list: Option<Vec<String>> = matches
         .get_one::<String>("stages")
@@ -23,7 +29,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, _config: &Option<Toolch
         &dslx,
         std::path::Path::new(input),
         top,
-        use_system_verilog,
+        verilog_version,
         stage_list.as_ref().map(|v| v.as_slice()),
     ) {
         Ok(sv) => println!("{}", sv),
