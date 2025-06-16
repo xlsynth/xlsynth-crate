@@ -376,9 +376,20 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
-      - name: Install Icarus Verilog
+      - name: Build & install Icarus Verilog from source
         run: |
-          dnf install -y iverilog
+          dnf groupinstall -y "Development Tools"
+          # gperf lives in the Powertools (a.k.a. CodeReady Builder) repo - make sure it is enabled
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools
+          dnf install -y git autoconf bison flex gperf readline-devel zlib-devel which
+          git clone --depth 1 https://github.com/steveicarus/iverilog.git /tmp/iverilog
+          cd /tmp/iverilog
+          sh autoconf.sh
+          ./configure --prefix=/usr
+          make -j$(nproc)
+          make install
+          cd ..
 
       - name: Set up dependencies
         run: |
