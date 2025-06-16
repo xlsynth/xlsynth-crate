@@ -2158,3 +2158,63 @@ fn test_tiv2_slice_oob_is_error(use_tool_path: bool) {
         stderr
     );
 }
+
+#[test]
+fn test_simulate_simple_pipeline() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Binary function so we can exercise multiple input ports.
+    let dslx = "fn main(a: u32, b: u32) -> u32 { a + b }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--flop_inputs=true")
+        .arg("--flop_outputs=true")
+        .arg("--input_valid_signal=input_valid")
+        .arg("--output_valid_signal=output_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=true")
+        .arg("--reset_asynchronous=false")
+        .arg("--reset_data_path=true")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pipeline_sv = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&pipeline_sv);
+    println!(
+        "PIPELINE:\n{}",
+        pipeline_sv.lines().take(8).collect::<Vec<_>>().join("\n")
+    );
+
+    use xlsynth::IrBits;
+    let inputs = vec![("a", IrBits::u32(5)), ("b", IrBits::u32(6))];
+    let expected = IrBits::u32(11);
+    let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse(
+        &pipeline_sv,
+        "__my_module__main",
+        &inputs,
+        &expected,
+        1,
+    )
+    .expect("simulation succeeds");
+    assert!(vcd.contains("$var"));
+}
