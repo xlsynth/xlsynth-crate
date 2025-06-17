@@ -31,3 +31,6 @@ All tools, and especially the `xlsynth-driver` subcommands, are expected to prod
 ## Style
 
 Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.
+
+Avoid `use` statements inside local function scopes; place all imports at the
+module level (or at the top of a `mod tests` section) for clarity.

@@ -4,6 +4,7 @@
 //! subprocess.
 
 use std::process::Command;
+use xlsynth::IrBits;
 use xlsynth_g8r::gate::AigBitVector;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 
@@ -2205,7 +2206,6 @@ fn test_simulate_simple_pipeline() {
         pipeline_sv.lines().take(8).collect::<Vec<_>>().join("\n")
     );
 
-    use xlsynth::IrBits;
     let inputs = vec![("a", IrBits::u32(5)), ("b", IrBits::u32(6))];
     let expected = IrBits::u32(11);
     let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse(
