@@ -1051,16 +1051,7 @@ fn check_equiv_internal_with_btor(
         );
     } else {
         assert_eq!(lhs.ret_ty, rhs.ret_ty, "Return types must match");
-        // Check for duplicate parameter names
-        let mut seen = std::collections::HashSet::new();
-        for param in &lhs.params {
-            assert!(
-                seen.insert(&param.name),
-                "Duplicate parameter name '{}' in lhs.params",
-                param.name
-            );
-        }
-        // Check that parameter lists are identical (name, type, order)
+        // Only the parameter types and ordering must be identical for equivalence.
         assert_eq!(
             lhs.params.len(),
             rhs.params.len(),
@@ -1068,14 +1059,9 @@ fn check_equiv_internal_with_btor(
         );
         for (l, r) in lhs.params.iter().zip(rhs.params.iter()) {
             assert_eq!(
-                l.name, r.name,
-                "Parameter name mismatch: {} vs {}",
-                l.name, r.name
-            );
-            assert_eq!(
                 l.ty, r.ty,
-                "Parameter type mismatch for {}: {:?} vs {:?}",
-                l.name, l.ty, r.ty
+                "Parameter type mismatch for {} vs {}: {:?} vs {:?}",
+                l.name, r.name, l.ty, r.ty
             );
         }
     }
@@ -1437,6 +1423,21 @@ mod tests {
   ret identity.3: bits[1] = identity(x, id=3)
 }"#;
         assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_equiv_param_names_differ() {
+        let lhs_ir = r#"fn lhs(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  ret add.3: bits[8] = add(a, b, id=3)
+}"#;
+        let rhs_ir = r#"fn rhs(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret add.3: bits[8] = add(x, y, id=3)
+}"#;
+
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
+        let result = prove_ir_fn_equiv(&lhs, &rhs);
+        assert_eq!(result, EquivResult::Proved);
     }
 
     #[test]
