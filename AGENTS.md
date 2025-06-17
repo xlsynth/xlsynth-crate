@@ -30,4 +30,4 @@ All tools, and especially the `xlsynth-driver` subcommands, are expected to prod
 
 ## Style
 
-Prefer using raw string syntax (`r#"..."#`) for multi-line SystemVerilog testbench strings to avoid needless escaping.
+Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.

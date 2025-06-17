@@ -2200,7 +2200,7 @@ fn test_simulate_simple_pipeline() {
 
     let pipeline_sv = String::from_utf8_lossy(&output.stdout).to_string();
     xlsynth_test_helpers::assert_valid_sv(&pipeline_sv);
-    println!(
+    log::info!(
         "PIPELINE:\n{}",
         pipeline_sv.lines().take(8).collect::<Vec<_>>().join("\n")
     );
