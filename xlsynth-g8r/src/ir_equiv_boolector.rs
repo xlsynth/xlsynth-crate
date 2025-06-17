@@ -1051,16 +1051,7 @@ fn check_equiv_internal_with_btor(
         );
     } else {
         assert_eq!(lhs.ret_ty, rhs.ret_ty, "Return types must match");
-        // Check for duplicate parameter names
-        let mut seen = std::collections::HashSet::new();
-        for param in &lhs.params {
-            assert!(
-                seen.insert(&param.name),
-                "Duplicate parameter name '{}' in lhs.params",
-                param.name
-            );
-        }
-        // Check that parameter lists are identical (name, type, order)
+        // Check that parameter lists are identical in type and order
         assert_eq!(
             lhs.params.len(),
             rhs.params.len(),
@@ -1068,37 +1059,36 @@ fn check_equiv_internal_with_btor(
         );
         for (l, r) in lhs.params.iter().zip(rhs.params.iter()) {
             assert_eq!(
-                l.name, r.name,
-                "Parameter name mismatch: {} vs {}",
-                l.name, r.name
-            );
-            assert_eq!(
                 l.ty, r.ty,
-                "Parameter type mismatch for {}: {:?} vs {:?}",
-                l.name, l.ty, r.ty
+                "Parameter type mismatch for {} vs {}: {:?} vs {:?}",
+                l.name, r.name, l.ty, r.ty
             );
         }
     }
     if use_frame {
         ctx.btor.push(1);
     }
-    // Create param BVs adjusted from the context's root parameters
-    let mut param_bvs = HashMap::new();
-    for param in &lhs.params {
+    // Create param BVs adjusted from the context's root parameters. Use lhs
+    // names for the context but map BVs to the parameter names of each
+    // function individually.
+    let mut lhs_param_bvs = HashMap::new();
+    let mut rhs_param_bvs = HashMap::new();
+    for (l, r) in lhs.params.iter().zip(rhs.params.iter()) {
         let root = ctx
             .params
-            .get(&param.name)
+            .get(&l.name)
             .expect("parameter BV missing from context");
-        let width = param.ty.bit_count() as u32;
+        let width = l.ty.bit_count() as u32;
         let bv = match root.get_width().cmp(&width) {
             std::cmp::Ordering::Equal => root.clone(),
             std::cmp::Ordering::Greater => root.slice(width - 1, 0),
             std::cmp::Ordering::Less => root.uext(width - root.get_width()),
         };
-        param_bvs.insert(param.name.clone(), bv);
+        lhs_param_bvs.insert(l.name.clone(), bv.clone());
+        rhs_param_bvs.insert(r.name.clone(), bv);
     }
-    let lhs_result = ir_fn_to_boolector(ctx.btor.clone(), lhs, Some(&param_bvs));
-    let rhs_result = ir_fn_to_boolector(ctx.btor.clone(), rhs, Some(&param_bvs));
+    let lhs_result = ir_fn_to_boolector(ctx.btor.clone(), lhs, Some(&lhs_param_bvs));
+    let rhs_result = ir_fn_to_boolector(ctx.btor.clone(), rhs, Some(&rhs_param_bvs));
     // Flatten outputs if needed
     let lhs_out = if flatten_aggregates {
         flatten_bv(&lhs_result.output, &lhs.ret_ty)
@@ -1120,7 +1110,7 @@ fn check_equiv_internal_with_btor(
             // Extract input assignments from the model
             let mut counterexample = Vec::new();
             for param in &lhs.params {
-                let bv = param_bvs.get(&param.name).unwrap();
+                let bv = lhs_param_bvs.get(&param.name).unwrap();
                 let width = bv.get_width() as usize;
                 // Assert SAT before retrieving model
                 assert_eq!(
@@ -1373,6 +1363,21 @@ mod tests {
   ret sgt.3: bits[1] = sgt(x, y, id=3)
 }"#;
         assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_equiv_different_param_names() {
+        let lhs_ir = r#"fn lhs(x: bits[8] id=1) -> bits[8] {
+  ret sum: bits[8] = add(x, x, id=2)
+}"#;
+        let rhs_ir = r#"fn rhs(y: bits[8] id=1) -> bits[8] {
+  ret sum: bits[8] = add(y, y, id=2)
+}"#;
+
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
+
+        assert_eq!(prove_ir_fn_equiv(&lhs, &rhs), EquivResult::Proved);
     }
 
     #[test]
