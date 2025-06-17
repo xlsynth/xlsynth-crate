@@ -27,3 +27,10 @@ cargo test -p xlsynth-test-helpers check_all_rust_files_for_spdx
 ## Deterministic Output
 
 All tools, and especially the `xlsynth-driver` subcommands, are expected to produce deterministic output. This is critical for test stability and reproducibility. While hash maps (`HashMap`) can be used internally for performance, they must not cause observable run-to-run nondeterminism in any output (e.g., emitted Verilog, SystemVerilog, or other netlists). If the order of items in a map affects output, a stably ordered map (such as `BTreeMap`) or explicit sorting should be used before emitting output.
+
+## Style
+
+Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.
+
+Avoid `use` statements inside local function scopes; place all imports at the
+module level (or at the top of a `mod tests` section) for clarity.

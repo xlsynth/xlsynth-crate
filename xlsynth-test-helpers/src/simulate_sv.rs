@@ -15,6 +15,7 @@ use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
 use crate::assert_valid_sv::FlistEntry;
+use xlsynth::IrBits;
 
 /// Error type returned by [`simulate_sv_flist`] when the simulation cannot be
 /// performed.
@@ -232,6 +233,95 @@ pub fn simulate_sv_flist(
     let vcd = std::fs::read_to_string(&vcd_path).map_err(SimulateSvError::Io)?;
 
     Ok(vcd)
+}
+
+/// Simulates a pipeline design by pulsing its `input_valid` signal for a single
+/// clock cycle and verifying that `output_valid` is asserted exactly
+/// `latency` cycles later with the provided expected value. The pipeline is
+/// assumed to use a low-active synchronous reset named `rst` and to have the
+/// following ports: `clk`, `rst`, `input_valid`, `x`, `output_valid`, and
+/// `out`.
+pub fn simulate_pipeline_single_pulse(
+    pipeline_sv: &str,
+    module_name: &str,
+    inputs: &[(&str, IrBits)],
+    expected_output: &IrBits,
+    latency: usize,
+) -> Result<String, SimulateSvError> {
+    use xlsynth::ir_value::IrFormatPreference;
+
+    let mut reg_decls = String::new();
+    let mut port_conns = Vec::new();
+    let mut assign_values = String::new();
+
+    for (name, value) in inputs {
+        let width = value.get_bit_count() - 1;
+        let hex = value
+            .to_string_fmt(IrFormatPreference::Hex, false)
+            .trim_start_matches("0x")
+            .to_string();
+        reg_decls.push_str(&format!("  reg [{width}:0] {name} = 0;\n"));
+        port_conns.push(format!(".{name}({name})"));
+        assign_values.push_str(&format!(
+            "    {name} = {width_plus_one}'h{hex};\n",
+            width_plus_one = width + 1
+        ));
+    }
+
+    let ports = port_conns.join(", ");
+
+    let out_width_minus_one = expected_output.get_bit_count() - 1;
+    let out_width_minus_one_plus_one = out_width_minus_one + 1;
+    let exp_hex = expected_output
+        .to_string_fmt(IrFormatPreference::Hex, false)
+        .trim_start_matches("0x")
+        .to_string();
+
+    let tb = format!(
+        r#"`timescale 1ns/1ps
+module tb;
+  reg clk = 0;
+  always #5 clk = ~clk;
+  reg rst = 0;
+  reg input_valid = 0;
+{reg_decls}  wire output_valid;
+  wire [{out_width_minus_one}:0] out;
+  {module_name} dut(.clk(clk), .rst(rst), .input_valid(input_valid), {ports}, .output_valid(output_valid), .out(out));
+  integer i;
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars(0, tb);
+    rst = 0;
+    for (i = 0; i < 2; i = i + 1) @(posedge clk);
+    rst = 1;
+    @(posedge clk);
+{assign_values}    input_valid = 1;
+    @(posedge clk);
+    input_valid = 0;
+    for (i = 0; i < {latency}; i = i + 1) @(posedge clk);
+    #1;
+    if (output_valid !== 1'b1) $fatal(1, "output_valid not asserted");
+    if (out !== {out_width_minus_one_plus_one}'h{exp_hex}) $fatal(1, "unexpected output");
+    @(posedge clk);
+    #1;
+    if (output_valid !== 1'b0) $fatal(1, "output_valid did not deassert");
+    $finish;
+  end
+endmodule"#
+    );
+
+    let files = vec![
+        FlistEntry {
+            filename: "dut.sv".into(),
+            contents: pipeline_sv.to_string(),
+        },
+        FlistEntry {
+            filename: "tb.sv".into(),
+            contents: tb,
+        },
+    ];
+
+    simulate_sv_flist(&files, "tb", "dump.vcd")
 }
 
 #[cfg(test)]
