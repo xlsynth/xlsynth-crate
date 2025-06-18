@@ -489,6 +489,15 @@ fn main() {
                         .long("drop_params")
                         .help("Comma-separated list of parameter names to drop from both functions before equivalence checking")
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("parallelism_strategy")
+                        .long("parallelism-strategy")
+                        .value_name("STRATEGY")
+                        .help("Parallelism strategy when using Boolector")
+                        .value_parser(["single-threaded", "output-bits"])
+                        .default_value("single-threaded")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(

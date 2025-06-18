@@ -9,6 +9,10 @@ use boolector::{Btor, SolverResult, BV};
 use log::debug;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use xlsynth::IrBits;
 
 /// Result of converting an XLS IR function to Boolector logic.
@@ -1012,7 +1016,7 @@ pub fn flatten_type(ty: &crate::xls_ir::ir::Type) -> usize {
 fn check_equiv_internal_with_btor(
     lhs: &Fn,
     rhs: &Fn,
-    flatten_aggregates: bool,
+    _flatten_aggregates: bool,
     ctx: &Ctx,
     use_frame: bool, // whether to push/pop a solver frame
 ) -> EquivResult {
@@ -1028,7 +1032,7 @@ fn check_equiv_internal_with_btor(
     }
     log::info!("LHS signature: {}", signature_str(lhs));
     log::info!("RHS signature: {}", signature_str(rhs));
-    if flatten_aggregates {
+    if _flatten_aggregates {
         // Flatten parameter types
         let lhs_param_flat: Vec<usize> = lhs.params.iter().map(|p| flatten_type(&p.ty)).collect();
         let rhs_param_flat: Vec<usize> = rhs.params.iter().map(|p| flatten_type(&p.ty)).collect();
@@ -1090,12 +1094,12 @@ fn check_equiv_internal_with_btor(
     let lhs_result = ir_fn_to_boolector(ctx.btor.clone(), lhs, Some(&lhs_param_bvs));
     let rhs_result = ir_fn_to_boolector(ctx.btor.clone(), rhs, Some(&rhs_param_bvs));
     // Flatten outputs if needed
-    let lhs_out = if flatten_aggregates {
+    let lhs_out = if _flatten_aggregates {
         flatten_bv(&lhs_result.output, &lhs.ret_ty)
     } else {
         lhs_result.output.clone()
     };
-    let rhs_out = if flatten_aggregates {
+    let rhs_out = if _flatten_aggregates {
         flatten_bv(&rhs_result.output, &rhs.ret_ty)
     } else {
         rhs_result.output.clone()
@@ -1309,6 +1313,98 @@ fn shift_boolector_signed(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>) -> BV<Rc<Bto
     let shifted = val_pow2.sra(&shamt_k);
     // Slice back to original width.
     shifted.slice(orig_width - 1, 0)
+}
+
+// Uses a parallel strategy to prove equivalence by splitting on each output
+// bit.
+pub fn prove_ir_fn_equiv_output_bits_parallel(
+    lhs: &Fn,
+    rhs: &Fn,
+    _flatten_aggregates: bool,
+) -> EquivResult {
+    // Ensure both functions return the same bit width.
+    let width = lhs.ret_ty.bit_count();
+    assert_eq!(width, rhs.ret_ty.bit_count(), "Return widths must match");
+
+    // Helper to create a variant of `f` that returns just a single bit of the
+    // original return value at position `bit`.
+    fn make_bit_fn(f: &Fn, bit: usize) -> Fn {
+        use crate::xls_ir::ir::{Node, NodePayload, NodeRef, Type};
+
+        let mut nf = f.clone();
+        let ret = nf.ret_node_ref.expect("ret node");
+        let slice_ref = NodeRef {
+            index: nf.nodes.len(),
+        };
+        nf.nodes.push(Node {
+            text_id: nf.nodes.len(),
+            name: None,
+            ty: Type::Bits(1),
+            payload: NodePayload::BitSlice {
+                arg: ret,
+                start: bit,
+                width: 1,
+            },
+        });
+        nf.ret_node_ref = Some(slice_ref);
+        nf.ret_ty = Type::Bits(1);
+        nf
+    }
+
+    let found = Arc::new(AtomicBool::new(false));
+    let cex = Arc::new(Mutex::new(None));
+    let next = Arc::new(AtomicUsize::new(0));
+    let threads = num_cpus::get();
+    let mut handles = Vec::new();
+
+    for thread_no in 0..std::cmp::min(width, threads) {
+        let lhs_cl = lhs.clone();
+        let rhs_cl = rhs.clone();
+        let found_cl = found.clone();
+        let cex_cl = cex.clone();
+        let next_cl = next.clone();
+        let handle = std::thread::spawn(move || loop {
+            if found_cl.load(Ordering::SeqCst) {
+                break;
+            }
+            let i = next_cl.fetch_add(1, Ordering::SeqCst);
+            if i >= width {
+                break;
+            }
+            log::debug!("thread {} checking bit {}", thread_no, i);
+            let lf = make_bit_fn(&lhs_cl, i);
+            let rf = make_bit_fn(&rhs_cl, i);
+            // Use flattened equivalence for the per-bit functions regardless of the
+            // caller-supplied setting. Each per-bit variant always returns a
+            // single bits value, but the slice is taken out of a (potentially
+            // aggregate) original return value. Flattening guarantees
+            // consistent bit ordering between the two functions.
+            let res = prove_ir_equiv_flattened(&lf, &rf);
+            log::debug!("thread {} checking bit {} result: {:?}", thread_no, i, res);
+            if let EquivResult::Disproved(bits) = res {
+                found_cl.store(true, Ordering::SeqCst);
+                *cex_cl.lock().unwrap() = Some(bits);
+                break;
+            }
+        });
+        handles.push(handle);
+    }
+
+    for (i, h) in handles.into_iter().enumerate() {
+        log::debug!("joining on handle {}", i);
+        h.join().unwrap();
+    }
+
+    let maybe_bits = {
+        let mut guard = cex.lock().unwrap();
+        guard.take()
+    };
+
+    if let Some(bits) = maybe_bits {
+        EquivResult::Disproved(bits)
+    } else {
+        EquivResult::Proved
+    }
 }
 
 #[cfg(test)]

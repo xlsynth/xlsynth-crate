@@ -10,6 +10,25 @@ use xlsynth_g8r::ir_equiv_boolector;
 #[cfg(feature = "has-boolector")]
 use xlsynth_g8r::xls_ir::ir_parser;
 
+#[cfg(feature = "has-boolector")]
+#[derive(Clone, Copy)]
+enum ParallelismStrategy {
+    SingleThreaded,
+    OutputBits,
+}
+
+#[cfg(feature = "has-boolector")]
+impl std::str::FromStr for ParallelismStrategy {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "single-threaded" => Ok(Self::SingleThreaded),
+            "output-bits" => Ok(Self::OutputBits),
+            _ => Err(format!("invalid parallelism strategy: {}", s)),
+        }
+    }
+}
+
 const SUBCOMMAND: &str = "ir-equiv";
 
 fn ir_equiv(
@@ -73,6 +92,7 @@ fn run_boolector_equiv_check(
     rhs_top: Option<&str>,
     flatten_aggregates: bool,
     drop_params: &[String],
+    strategy: ParallelismStrategy,
 ) -> ! {
     // Parse both IR files to xls_ir::ir::Package
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
@@ -119,12 +139,23 @@ fn run_boolector_equiv_check(
     let rhs_fn = rhs_fn
         .drop_params(drop_params)
         .expect("Dropped parameter is used in the function body!");
-    // Run Boolector equivalence check
-    let result = if flatten_aggregates {
-        xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lhs_fn, &rhs_fn)
-    } else {
-        xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn)
+    let result = match strategy {
+        ParallelismStrategy::SingleThreaded => {
+            if flatten_aggregates {
+                xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lhs_fn, &rhs_fn)
+            } else {
+                xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn)
+            }
+        }
+        ParallelismStrategy::OutputBits => {
+            xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
+                &lhs_fn,
+                &rhs_fn,
+                flatten_aggregates,
+            )
+        }
     };
+
     match result {
         ir_equiv_boolector::EquivResult::Proved => {
             println!("success: Boolector proved equivalence");
@@ -192,6 +223,10 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 .get_one::<String>("drop_params")
                 .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
                 .unwrap_or_else(Vec::new);
+            let strategy = matches
+                .get_one::<String>("parallelism_strategy")
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(ParallelismStrategy::SingleThreaded);
 
             log::info!("run_boolector_equiv_check");
             run_boolector_equiv_check(
@@ -201,6 +236,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 rhs_top,
                 flatten_aggregates,
                 &drop_params,
+                strategy,
             );
             unreachable!();
         }
