@@ -10,6 +10,25 @@ use xlsynth_g8r::ir_equiv_boolector;
 #[cfg(feature = "has-boolector")]
 use xlsynth_g8r::xls_ir::ir_parser;
 
+#[cfg(feature = "has-boolector")]
+#[derive(Clone, Copy)]
+enum ParallelismStrategy {
+    SingleThreaded,
+    OutputBits,
+}
+
+#[cfg(feature = "has-boolector")]
+impl std::str::FromStr for ParallelismStrategy {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "single-threaded" => Ok(Self::SingleThreaded),
+            "output-bits" => Ok(Self::OutputBits),
+            _ => Err(format!("invalid parallelism strategy: {}", s)),
+        }
+    }
+}
+
 const SUBCOMMAND: &str = "ir-equiv";
 
 fn ir_equiv(
@@ -73,6 +92,7 @@ fn run_boolector_equiv_check(
     rhs_top: Option<&str>,
     flatten_aggregates: bool,
     drop_params: &[String],
+    strategy: ParallelismStrategy,
 ) -> ! {
     // Parse both IR files to xls_ir::ir::Package
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
@@ -119,20 +139,101 @@ fn run_boolector_equiv_check(
     let rhs_fn = rhs_fn
         .drop_params(drop_params)
         .expect("Dropped parameter is used in the function body!");
-    // Run Boolector equivalence check
-    let result = if flatten_aggregates {
-        xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lhs_fn, &rhs_fn)
-    } else {
-        xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn)
-    };
-    match result {
-        ir_equiv_boolector::EquivResult::Proved => {
-            println!("success: Boolector proved equivalence");
-            std::process::exit(0);
+    match strategy {
+        ParallelismStrategy::SingleThreaded => {
+            let result = if flatten_aggregates {
+                xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lhs_fn, &rhs_fn)
+            } else {
+                xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn)
+            };
+            match result {
+                ir_equiv_boolector::EquivResult::Proved => {
+                    println!("success: Boolector proved equivalence");
+                    std::process::exit(0);
+                }
+                ir_equiv_boolector::EquivResult::Disproved(cex) => {
+                    println!("failure: Boolector found counterexample: {:?}", cex);
+                    std::process::exit(1);
+                }
+            }
         }
-        ir_equiv_boolector::EquivResult::Disproved(cex) => {
-            println!("failure: Boolector found counterexample: {:?}", cex);
-            std::process::exit(1);
+        ParallelismStrategy::OutputBits => {
+            use std::sync::{
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+                Arc, Mutex,
+            };
+            let width = lhs_fn.ret_ty.bit_count();
+            assert_eq!(width, rhs_fn.ret_ty.bit_count(), "Return widths must match");
+
+            fn make_bit_fn(
+                f: &xlsynth_g8r::xls_ir::ir::Fn,
+                bit: usize,
+            ) -> xlsynth_g8r::xls_ir::ir::Fn {
+                use xlsynth_g8r::xls_ir::ir::{Fn as IrFn, Node, NodePayload, NodeRef, Type};
+                let mut nf = f.clone();
+                let ret = nf.ret_node_ref.expect("ret node");
+                let slice_ref = NodeRef {
+                    index: nf.nodes.len(),
+                };
+                nf.nodes.push(Node {
+                    text_id: nf.nodes.len(),
+                    name: None,
+                    ty: Type::Bits(1),
+                    payload: NodePayload::BitSlice {
+                        arg: ret,
+                        start: bit,
+                        width: 1,
+                    },
+                });
+                nf.ret_node_ref = Some(slice_ref);
+                nf.ret_ty = Type::Bits(1);
+                nf
+            }
+
+            let found = Arc::new(AtomicBool::new(false));
+            let cex = Arc::new(Mutex::new(None));
+            let next = Arc::new(AtomicUsize::new(0));
+            let threads = num_cpus::get();
+            let mut handles = Vec::new();
+            for _ in 0..threads {
+                let lhs_cl = lhs_fn.clone();
+                let rhs_cl = rhs_fn.clone();
+                let found_cl = found.clone();
+                let cex_cl = cex.clone();
+                let next_cl = next.clone();
+                let handle = std::thread::spawn(move || loop {
+                    if found_cl.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let i = next_cl.fetch_add(1, Ordering::SeqCst);
+                    if i >= width {
+                        break;
+                    }
+                    let lf = make_bit_fn(&lhs_cl, i);
+                    let rf = make_bit_fn(&rhs_cl, i);
+                    let res = if flatten_aggregates {
+                        xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lf, &rf)
+                    } else {
+                        xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lf, &rf)
+                    };
+                    if let ir_equiv_boolector::EquivResult::Disproved(bits) = res {
+                        found_cl.store(true, Ordering::SeqCst);
+                        *cex_cl.lock().unwrap() = Some(bits);
+                        break;
+                    }
+                });
+                handles.push(handle);
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+            if let Some(cex) = cex.lock().unwrap().take() {
+                println!("failure: Boolector found counterexample: {:?}", cex);
+                std::process::exit(1);
+            } else {
+                println!("success: Boolector proved equivalence");
+                std::process::exit(0);
+            }
         }
     }
 }
@@ -192,6 +293,10 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 .get_one::<String>("drop_params")
                 .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
                 .unwrap_or_else(Vec::new);
+            let strategy = matches
+                .get_one::<String>("parallelism_strategy")
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(ParallelismStrategy::SingleThreaded);
 
             log::info!("run_boolector_equiv_check");
             run_boolector_equiv_check(
@@ -201,6 +306,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 rhs_top,
                 flatten_aggregates,
                 &drop_params,
+                strategy,
             );
             unreachable!();
         }

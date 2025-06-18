@@ -1324,6 +1324,74 @@ fn test_irequiv_subcommand_boolector_different_top_entry_points() {
     assert!(stdout.contains("Boolector proved equivalence"));
 }
 
+// Test Boolector parallelism strategy output-bits
+#[cfg(feature = "has-boolector")]
+#[test]
+fn test_irequiv_boolector_output_bits_strategy() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let lhs_dslx = r#"import std;
+pub fn main(x: u8, y: u8) -> (u8, u8) { (x / y, x % y) }"#;
+    let rhs_dslx = r#"import std;
+pub fn main(x: u8, y: u8) -> (u8, u8) { std::iterative_div_mod<u32:8, u32:8>(x, y) }"#;
+
+    let lhs_x = temp_dir.path().join("lhs.x");
+    let rhs_x = temp_dir.path().join("rhs.x");
+    std::fs::write(&lhs_x, lhs_dslx).unwrap();
+    std::fs::write(&rhs_x, rhs_dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let lhs_ir = temp_dir.path().join("lhs.ir");
+    let out = Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(lhs_x.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    std::fs::write(&lhs_ir, &out.stdout).unwrap();
+
+    let rhs_ir = temp_dir.path().join("rhs.ir");
+    let out = Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(rhs_x.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    std::fs::write(&rhs_ir, &out.stdout).unwrap();
+
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg("--boolector=true")
+        .arg(lhs_ir.to_str().unwrap())
+        .arg(rhs_ir.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--parallelism-strategy=output-bits")
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
+    assert!(output.status.success());
+    assert!(stdout.contains("Boolector proved equivalence"));
+}
+
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]
 fn test_toolchain_common_codegen_flags_resolve(use_tool_path: bool) {
