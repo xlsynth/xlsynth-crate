@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-driver"
-version = "0.0.157"
+version = "0.0.159"
 edition = "2021"
 
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
@@ -11,8 +11,8 @@ documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.0.157" }
-xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.0.157" }
+xlsynth = { path = "../xlsynth", version = "0.0.159" }
+xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.0.159" }
 clap = "4.5.21"
 tempfile = "3.20"
 toml = "0.8.19"
