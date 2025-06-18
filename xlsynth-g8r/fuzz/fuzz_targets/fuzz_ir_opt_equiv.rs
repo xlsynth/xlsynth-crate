@@ -55,35 +55,41 @@ fuzz_target!(|sample: FuzzSample| {
     let ext_equiv =
         check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
     let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn);
+    let output_bit_count = orig_fn.ret_ty.bit_count();
+    let parallel_result = if output_bit_count <= 64 {
+        Some(ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(orig_fn, opt_fn, false))
+    } else {
+        None
+    };
     match ext_equiv {
         Ok(()) => {
             // External tool says equivalent, Boolector should agree
-            match boolector_result {
-                ir_equiv_boolector::EquivResult::Proved => (),
-                ir_equiv_boolector::EquivResult::Disproved(cex) => {
+            match (boolector_result, parallel_result) {
+                (ir_equiv_boolector::EquivResult::Proved, Some(ir_equiv_boolector::EquivResult::Proved)) | (ir_equiv_boolector::EquivResult::Proved, None) => (),
+                (ir_equiv_boolector::EquivResult::Disproved(cex), _) | (_, Some(ir_equiv_boolector::EquivResult::Disproved(cex))) => {
                     log::info!("==== IR disagreement detected ====");
                     log::info!("Original IR:\n{}", orig_ir);
                     log::info!("Optimized IR:\n{}", opt_ir);
                     panic!(
-                        "Disagreement: external tool says equivalent, Boolector disproves: {:?}",
+                        "Disagreement: external tool says equivalent, Boolector or parallel disproves: {:?}",
                         cex
                     );
                 }
             }
         }
         Err(ext_err) => {
-            // External tool says not equivalent, check Boolector
-            match boolector_result {
-                ir_equiv_boolector::EquivResult::Proved => {
+            // External tool says not equivalent, check Boolector and parallel
+            match (boolector_result, parallel_result) {
+                (ir_equiv_boolector::EquivResult::Proved, _) | (_, Some(ir_equiv_boolector::EquivResult::Proved)) | (ir_equiv_boolector::EquivResult::Proved, None) => {
                     log::info!("==== IR disagreement detected ====");
                     log::info!("Original IR:\n{}", orig_ir);
                     log::info!("Optimized IR:\n{}", opt_ir);
                     panic!(
-                        "Disagreement: external tool says NOT equivalent, Boolector proves equivalence. External error: {}",
+                        "Disagreement: external tool says NOT equivalent, but Boolector or parallel proves equivalence. External error: {}",
                         ext_err
                     );
                 }
-                ir_equiv_boolector::EquivResult::Disproved(_cex) => (), // Both agree not equivalent
+                (ir_equiv_boolector::EquivResult::Disproved(_), Some(ir_equiv_boolector::EquivResult::Disproved(_))) | (ir_equiv_boolector::EquivResult::Disproved(_), None) => (), // All agree not equivalent
             }
         }
     }
