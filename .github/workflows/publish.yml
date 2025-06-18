@@ -53,6 +53,11 @@ jobs:
           sudo mv protoc-*.zip /tmp/
           protoc --version
 
+      - name: Install Icarus Verilog
+        run: |
+          brew update
+          brew install icarus-verilog
+
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
