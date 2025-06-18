@@ -139,101 +139,31 @@ fn run_boolector_equiv_check(
     let rhs_fn = rhs_fn
         .drop_params(drop_params)
         .expect("Dropped parameter is used in the function body!");
-    match strategy {
+    let result = match strategy {
         ParallelismStrategy::SingleThreaded => {
-            let result = if flatten_aggregates {
+            if flatten_aggregates {
                 xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lhs_fn, &rhs_fn)
             } else {
                 xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn)
-            };
-            match result {
-                ir_equiv_boolector::EquivResult::Proved => {
-                    println!("success: Boolector proved equivalence");
-                    std::process::exit(0);
-                }
-                ir_equiv_boolector::EquivResult::Disproved(cex) => {
-                    println!("failure: Boolector found counterexample: {:?}", cex);
-                    std::process::exit(1);
-                }
             }
         }
         ParallelismStrategy::OutputBits => {
-            use std::sync::{
-                atomic::{AtomicBool, AtomicUsize, Ordering},
-                Arc, Mutex,
-            };
-            let width = lhs_fn.ret_ty.bit_count();
-            assert_eq!(width, rhs_fn.ret_ty.bit_count(), "Return widths must match");
+            xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
+                &lhs_fn,
+                &rhs_fn,
+                flatten_aggregates,
+            )
+        }
+    };
 
-            fn make_bit_fn(
-                f: &xlsynth_g8r::xls_ir::ir::Fn,
-                bit: usize,
-            ) -> xlsynth_g8r::xls_ir::ir::Fn {
-                use xlsynth_g8r::xls_ir::ir::{Fn as IrFn, Node, NodePayload, NodeRef, Type};
-                let mut nf = f.clone();
-                let ret = nf.ret_node_ref.expect("ret node");
-                let slice_ref = NodeRef {
-                    index: nf.nodes.len(),
-                };
-                nf.nodes.push(Node {
-                    text_id: nf.nodes.len(),
-                    name: None,
-                    ty: Type::Bits(1),
-                    payload: NodePayload::BitSlice {
-                        arg: ret,
-                        start: bit,
-                        width: 1,
-                    },
-                });
-                nf.ret_node_ref = Some(slice_ref);
-                nf.ret_ty = Type::Bits(1);
-                nf
-            }
-
-            let found = Arc::new(AtomicBool::new(false));
-            let cex = Arc::new(Mutex::new(None));
-            let next = Arc::new(AtomicUsize::new(0));
-            let threads = num_cpus::get();
-            let mut handles = Vec::new();
-            for _ in 0..threads {
-                let lhs_cl = lhs_fn.clone();
-                let rhs_cl = rhs_fn.clone();
-                let found_cl = found.clone();
-                let cex_cl = cex.clone();
-                let next_cl = next.clone();
-                let handle = std::thread::spawn(move || loop {
-                    if found_cl.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let i = next_cl.fetch_add(1, Ordering::SeqCst);
-                    if i >= width {
-                        break;
-                    }
-                    let lf = make_bit_fn(&lhs_cl, i);
-                    let rf = make_bit_fn(&rhs_cl, i);
-                    let res = if flatten_aggregates {
-                        xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lf, &rf)
-                    } else {
-                        xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lf, &rf)
-                    };
-                    if let ir_equiv_boolector::EquivResult::Disproved(bits) = res {
-                        found_cl.store(true, Ordering::SeqCst);
-                        *cex_cl.lock().unwrap() = Some(bits);
-                        break;
-                    }
-                });
-                handles.push(handle);
-            }
-            for h in handles {
-                h.join().unwrap();
-            }
-            if let Some(cex) = cex.lock().unwrap().take() {
-                println!("failure: Boolector found counterexample: {:?}", cex);
-                std::process::exit(1);
-            } else {
-                println!("success: Boolector proved equivalence");
-                std::process::exit(0);
-            }
+    match result {
+        ir_equiv_boolector::EquivResult::Proved => {
+            println!("success: Boolector proved equivalence");
+            std::process::exit(0);
+        }
+        ir_equiv_boolector::EquivResult::Disproved(cex) => {
+            println!("failure: Boolector found counterexample: {:?}", cex);
+            std::process::exit(1);
         }
     }
 }

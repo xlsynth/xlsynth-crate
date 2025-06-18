@@ -15,7 +15,6 @@ use crate::{
 };
 
 pub struct IrBits {
-    #[allow(dead_code)]
     pub(crate) ptr: *mut CIrBits,
 }
 
@@ -179,6 +178,17 @@ impl std::fmt::Display for IrBits {
         )
     }
 }
+
+// SAFETY: `IrBits` is a thin wrapper around a raw pointer to an immutable
+// FFI object managed by the underlying XLS library. The pointer value itself
+// may be freely transferred across thread boundaries so long as the
+// underlying object is not concurrently mutated through other avenues. The
+// XLS C API does not provide any mutation operations that would violate this
+// assumption for the usage patterns within xlsynth, so it is sound to mark
+// `IrBits` as `Send` and `Sync`.
+
+unsafe impl Send for IrBits {}
+unsafe impl Sync for IrBits {}
 
 impl std::ops::Add for IrBits {
     type Output = Self;

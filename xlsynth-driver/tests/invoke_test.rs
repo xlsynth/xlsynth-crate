@@ -1334,7 +1334,7 @@ fn test_irequiv_boolector_output_bits_strategy() {
     let lhs_dslx = r#"import std;
 pub fn main(x: u8, y: u8) -> (u8, u8) { (x / y, x % y) }"#;
     let rhs_dslx = r#"import std;
-pub fn main(x: u8, y: u8) -> (u8, u8) { std::iterative_div_mod<u32:8, u32:8>(x, y) }"#;
+pub fn main(x: u8, y: u8) -> (u8, u8) { if y == u8:0 { (all_ones!<u8>(), zero!<u8>()) } else { std::iterative_div_mod<u32:8, u32:8>(x, y) } }"#;
 
     let lhs_x = temp_dir.path().join("lhs.x");
     let rhs_x = temp_dir.path().join("rhs.x");
@@ -1350,6 +1350,7 @@ pub fn main(x: u8, y: u8) -> (u8, u8) { std::iterative_div_mod<u32:8, u32:8>(x, 
         .arg(lhs_x.to_str().unwrap())
         .arg("--dslx_top")
         .arg("main")
+        .arg("--opt=true")
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -1362,15 +1363,38 @@ pub fn main(x: u8, y: u8) -> (u8, u8) { std::iterative_div_mod<u32:8, u32:8>(x, 
         .arg(rhs_x.to_str().unwrap())
         .arg("--dslx_top")
         .arg("main")
+        .arg("--opt=true")
         .output()
         .unwrap();
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "dslx2ir failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     std::fs::write(&rhs_ir, &out.stdout).unwrap();
 
     let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
 
+    // First, check that single-threaded Boolector proves equivalence for these IRs.
+    let output_single = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg("--boolector=true")
+        .arg(lhs_ir.to_str().unwrap())
+        .arg(rhs_ir.to_str().unwrap())
+        .output()
+        .expect("xlsynth-driver should succeed (single-threaded)");
+    let stdout_single = String::from_utf8_lossy(&output_single.stdout);
+    let stderr_single = String::from_utf8_lossy(&output_single.stderr);
+    log::info!("stdout (single-threaded): {}", stdout_single);
+    log::info!("stderr (single-threaded): {}", stderr_single);
+    assert!(output_single.status.success());
+    assert!(stdout_single.contains("Boolector proved equivalence"));
+
+    // Now check the parallelism strategy (output-bits).
     let output = Command::new(command_path)
         .arg("--toolchain")
         .arg(toolchain_toml_path.to_str().unwrap())
@@ -1378,8 +1402,6 @@ pub fn main(x: u8, y: u8) -> (u8, u8) { std::iterative_div_mod<u32:8, u32:8>(x, 
         .arg("--boolector=true")
         .arg(lhs_ir.to_str().unwrap())
         .arg(rhs_ir.to_str().unwrap())
-        .arg("--top")
-        .arg("main")
         .arg("--parallelism-strategy=output-bits")
         .output()
         .expect("xlsynth-driver should succeed");
