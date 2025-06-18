@@ -1407,6 +1407,91 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
     }
 }
 
+/// Prove equivalence by case-splitting on a single input bit (0 / 1) chosen by
+/// `split_input_index` and `split_input_bit_index`.
+///
+/// TODO: pick the maximal-fan-out bit in a wrapper.
+/// TODO: divide-and-conquer dynamically on more and more bits.
+pub fn prove_ir_fn_equiv_split_input_bit(
+    lhs: &Fn,
+    rhs: &Fn,
+    split_input_index: usize,
+    split_input_bit_index: usize,
+) -> EquivResult {
+    // If there are no parameters, fall back to the standard prover. No need to
+    // panic here.
+    if lhs.params.is_empty() || rhs.params.is_empty() {
+        return prove_ir_fn_equiv(lhs, rhs);
+    }
+    assert_eq!(
+        lhs.params.len(),
+        rhs.params.len(),
+        "Parameter count mismatch"
+    );
+    assert!(
+        split_input_index < lhs.params.len(),
+        "split_input_index out of bounds, num params: {}, split_input_index: {}",
+        lhs.params.len(),
+        split_input_index
+    );
+    assert!(
+        split_input_bit_index < lhs.params[split_input_index].ty.bit_count(),
+        "split_input_bit_index out of bounds, param width: {}, split_input_bit_index: {}",
+        lhs.params[split_input_index].ty.bit_count(),
+        split_input_bit_index
+    );
+
+    let split_param = &lhs.params[split_input_index];
+    let split_width = split_param.ty.bit_count() as u32;
+
+    log::info!(
+        "[input-bit-split] Splitting on parameter '{}' (width {}), bit index {}",
+        split_param.name,
+        split_width,
+        split_input_bit_index
+    );
+
+    let params: Vec<(String, u32)> = lhs
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
+        .collect();
+    let ctx = Ctx::new(&params);
+
+    // Helper closure to run one branch under an assumption.
+    let run_branch = |bit_value: u64| -> EquivResult {
+        ctx.btor.push(1);
+        let root_bv = ctx
+            .params
+            .get(&split_param.name)
+            .expect("missing split param in Ctx");
+        let bit_bv = root_bv.slice(split_input_bit_index as u32, split_input_bit_index as u32);
+        let val_bv = BV::from_u64(ctx.btor.clone(), bit_value, 1);
+        // In the discussion we said assume, but here we actually use assert as we are
+        // proving unsatisfiability. Let F be the formula we are proving
+        // unsatisfiability of. We want to make sure that
+        // 1. !F /\ (x = 0)
+        // 2. !F /\ (x = 1)
+        // are both unsatisfiable.
+        bit_bv._eq(&val_bv).assert();
+
+        let res =
+            check_equiv_internal_with_btor(lhs, rhs, false, &ctx, /* use_frame= */ false);
+        ctx.btor.pop(1);
+        res
+    };
+
+    let res0 = run_branch(0);
+    if let EquivResult::Disproved(_) = res0 {
+        return res0;
+    }
+    let res1 = run_branch(1);
+    if let EquivResult::Disproved(_) = res1 {
+        return res1;
+    }
+    EquivResult::Proved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

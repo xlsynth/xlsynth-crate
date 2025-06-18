@@ -495,7 +495,7 @@ fn main() {
                         .long("parallelism-strategy")
                         .value_name("STRATEGY")
                         .help("Parallelism strategy when using Boolector")
-                        .value_parser(["single-threaded", "output-bits"])
+                        .value_parser(["single-threaded", "output-bits", "input-bit-split"])
                         .default_value("single-threaded")
                         .action(ArgAction::Set),
                 ),
