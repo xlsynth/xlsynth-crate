@@ -170,9 +170,27 @@ flags a summary line like `Distance: N` is printed on **stdout**.  With
 
 ### `ir2gates`: IR to GateFn statistics
 
-Maps an IR function to a gate-level representation and prints structural
-statistics.  With `--quiet=true` a compact JSON summary is produced; otherwise
-the report is human-readable text.
+Maps an IR function to a gate-level representation and prints a structural
+statistics report.  By default the report is human-readable text.  With
+`--quiet=true` the summary is emitted as JSON instead.  The optional
+`--output_json=<PATH>` flag writes the same JSON summary to a file regardless of
+the quiet setting.
+
+Supported flags include the common gate-optimization controls:
+
+- `--fold` – fold the gate representation (default `true`).
+- `--hash` – hash-cons the gate representation (default `true`).
+- `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
+  topology.
+- `--fraig` – run fraig optimization (default `true`).
+- `--fraig-max-iterations=<N>` – maximum FRAIG iterations.
+- `--fraig-sim-samples=<N>` – number of random samples for FRAIG.
+- `--toggle-sample-count=<N>` – if non-zero, generate `N` random samples and
+  report toggle statistics.
+- `--toggle-seed=<SEED>` – seed for toggle sampling (default `0`).
+- `--compute-graph-logical-effort` – compute graph logical effort statistics.
+- `--graph-logical-effort-beta1=<BETA1>` / `--graph-logical-effort-beta2=<BETA2>`
+  – parameters for graph logical effort analysis.
 
 ### `ir-fn-eval`
 

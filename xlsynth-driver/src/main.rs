@@ -573,6 +573,13 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg("quiet", "Quiet mode")
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON summary to PATH")
+                        .action(clap::ArgAction::Set),
+                )
                 .add_ir2g8r_flags(),
         )
         .subcommand(
