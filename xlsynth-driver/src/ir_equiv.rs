@@ -15,6 +15,7 @@ use xlsynth_g8r::xls_ir::ir_parser;
 enum ParallelismStrategy {
     SingleThreaded,
     OutputBits,
+    InputBitSplit,
 }
 
 #[cfg(feature = "has-boolector")]
@@ -24,6 +25,7 @@ impl std::str::FromStr for ParallelismStrategy {
         match s {
             "single-threaded" => Ok(Self::SingleThreaded),
             "output-bits" => Ok(Self::OutputBits),
+            "input-bit-split" => Ok(Self::InputBitSplit),
             _ => Err(format!("invalid parallelism strategy: {}", s)),
         }
     }
@@ -152,6 +154,14 @@ fn run_boolector_equiv_check(
                 &lhs_fn,
                 &rhs_fn,
                 flatten_aggregates,
+            )
+        }
+        // Split on the first parameter and the first bit for now.
+        // TODO: introduce better heuristics like picking the maximal-fan-out bit or
+        // divide-and-conquer dynamically on more and more bits.
+        ParallelismStrategy::InputBitSplit => {
+            xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv_split_input_bit(
+                &lhs_fn, &rhs_fn, 0, 0,
             )
         }
     };
