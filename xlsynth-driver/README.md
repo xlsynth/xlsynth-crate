@@ -1,7 +1,22 @@
 # `xlsynth-driver` command line interface
 
-The `xlsynth-driver` binary is a "driver program" for various XLS/xlsynth tools and functionality
-behind a single unified command line interface. It is organized into subcommands.
+The `xlsynth-driver` binary is a "driver program" for various XLS/xlsynth tools and functionality behind a single unified command line interface. It is organized into subcommands.
+
+## Example Usage
+
+While developing you can invoke the driver with `cargo run`. The example below
+assumes a toolchain configuration file at `$HOME/xlsynth-toolchain.toml`:
+
+```shell
+cargo run -p xlsynth-driver -- --toolchain=$HOME/xlsynth-toolchain.toml \
+    dslx2ir ../sample-usage/src/sample.x
+cargo run -p xlsynth-driver -- --toolchain=$HOME/xlsynth-toolchain.toml \
+    dslx2pipeline ../sample-usage/src/sample.x add1 \
+    --delay_model=asap7 --pipeline_stages=2
+cargo run -p xlsynth-driver -- dslx2sv-types ../tests/structure_zoo.x
+```
+
+For a full list of options, run `xlsynth-driver <subcommand> --help`.
 
 ## Subcommands
 
@@ -11,7 +26,7 @@ Proves two IR functions to be equivalent or provides a counterexample to their e
 
 ### `lib2proto`: liberty files to proto
 
-Liberty files can be unweildy and large in their textual form -- this command reformats the data
+Liberty files can be unwieldy and large in their textual form -- this command reformats the data
 for streamlined querying, e.g. by the `gv2ir` subcommand.
 
 ```shell
@@ -47,7 +62,7 @@ xlsynth-driver ir2g8r my_module.opt.ir \
   --stats-out my_module.stats.json > my_module.g8r
 ```
 
-The command above leaves three artefacts:
+The command above leaves three artifacts:
 
 1. `my_module.g8r`   – human-readable GateFn (stdout redirection).
 1. `my_module.g8rbin` – compact bincode serialisation of the same GateFn.
