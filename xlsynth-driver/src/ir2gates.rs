@@ -33,6 +33,7 @@ fn ir2gates(
     graph_logical_effort_beta2: f64,
     fraig_max_iterations: Option<usize>,
     fraig_sim_samples: Option<usize>,
+    output_json: Option<&std::path::Path>,
 ) {
     log::info!("ir2gates");
     let options = process_ir_path::Options {
@@ -55,6 +56,12 @@ fn ir2gates(
     if quiet {
         serde_json::to_writer(std::io::stdout(), &stats).unwrap();
         println!();
+    }
+    if let Some(path) = output_json {
+        let file = File::create(path)
+            .unwrap_or_else(|e| panic!("Failed to create {}: {}", path.display(), e));
+        serde_json::to_writer_pretty(file, &stats)
+            .unwrap_or_else(|e| panic!("Failed to write JSON: {}", e));
     }
 }
 
@@ -155,6 +162,8 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         None => None,
     };
 
+    let output_json = matches.get_one::<String>("output_json");
+
     let input_path = std::path::Path::new(input_file);
     ir2gates(
         input_path,
@@ -170,6 +179,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         graph_logical_effort_beta2,
         fraig_max_iterations,
         fraig_sim_samples,
+        output_json.map(|s| std::path::Path::new(s)),
     );
 }
 

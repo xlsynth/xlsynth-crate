@@ -1231,6 +1231,51 @@ fn test_ir2gates_quiet_json_output_no_toggle() {
     );
 }
 
+#[test]
+fn test_ir2gates_output_json_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dslx = "fn main(a: u32, b: u32) -> u32 { a & b }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("main.x");
+    let ir_path = temp_dir.path().join("main.ir");
+    let json_path = temp_dir.path().join("stats.json");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // dslx2ir
+    let dslx2ir_output = std::process::Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+    assert!(dslx2ir_output.status.success());
+    std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
+
+    // ir2gates with output_json
+    let mut command = std::process::Command::new(command_path);
+    command
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap())
+        .arg(format!("--output_json={}", json_path.display()));
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        command.env("RUST_LOG", rust_log);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    // stdout should contain text, not JSON
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Deepest path"));
+    // parse JSON file
+    let json_content = std::fs::read_to_string(&json_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&json_content).unwrap();
+    assert_eq!(json["deepest_path"], 2);
+    assert_eq!(json["live_nodes"], 96);
+}
+
 // Test for ir-equiv subcommand using Boolector
 #[cfg(feature = "has-boolector")]
 #[test]
