@@ -398,7 +398,7 @@ jobs:
           sh autoconf.sh
           ./configure --prefix=/usr
           make -j$(nproc)
-          sudo make install
+          make install
           cd ..
 
       - name: Set up dependencies
