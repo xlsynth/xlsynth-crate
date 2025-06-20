@@ -129,7 +129,16 @@ jobs:
       - name: Install Icarus Verilog
         run: |
           sudo apt-get update
-          sudo apt-get install -y iverilog
+          sudo apt-get install -y --no-install-recommends git autoconf bison flex gperf libreadline-dev zlib1g-dev build-essential
+          git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
+          cd /tmp/iverilog
+          git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
+          sh autoconf.sh
+          ./configure --prefix=/usr
+          make -j$(nproc)
+          sudo make install
+          cd ..
+          iverilog -V
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -383,8 +392,9 @@ jobs:
           dnf install -y dnf-plugins-core
           dnf config-manager --set-enabled powertools
           dnf install -y git autoconf bison flex gperf readline-devel zlib-devel which
-          git clone --depth 1 https://github.com/steveicarus/iverilog.git /tmp/iverilog
+          git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
           cd /tmp/iverilog
+          git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
           sh autoconf.sh
           ./configure --prefix=/usr
           make -j$(nproc)
@@ -450,7 +460,16 @@ jobs:
       - name: Install Icarus Verilog
         run: |
           sudo apt-get update
-          sudo apt-get install -y iverilog
+          sudo apt-get install -y --no-install-recommends git autoconf bison flex gperf libreadline-dev zlib1g-dev build-essential
+          git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
+          cd /tmp/iverilog
+          git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
+          sh autoconf.sh
+          ./configure --prefix=/usr
+          make -j$(nproc)
+          sudo make install
+          cd ..
+          iverilog -V
 
       - name: Install libc++ from llvm-18
         run: |
@@ -466,11 +485,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y valgrind libz3-dev
-
-      - name: Install Icarus Verilog
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y iverilog
 
       - name: Download xlsynth binaries
         env:
