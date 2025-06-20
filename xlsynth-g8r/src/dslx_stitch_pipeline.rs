@@ -692,20 +692,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_stitch_pipeline_with_valid_sim() {
-        let _ = env_logger::builder().is_test(true).try_init();
+    fn verilog_for_foo_pipeline_with_valid() -> String {
         let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
-        let result = stitch_pipeline_with_valid(
+        stitch_pipeline_with_valid(
             dslx,
             Path::new("test.x"),
             "foo",
             VerilogVersion::SystemVerilog,
             None,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn test_stitch_pipeline_with_valid() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let result = verilog_for_foo_pipeline_with_valid();
         xlsynth_test_helpers::assert_valid_sv(&result);
 
+        // Golden file check
+        let golden_path = std::path::Path::new("tests/goldens/foo_pipeline_with_valid.golden.sv");
+        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+            std::fs::write(golden_path, &result).expect("write golden");
+        } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+            std::fs::write(golden_path, &result).expect("write golden");
+        } else {
+            let want = std::fs::read_to_string(golden_path).expect("read golden");
+            assert_eq!(
+                result.trim(),
+                want.trim(),
+                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+            );
+        }
+
+        // Simulation check
         let inputs = vec![("x", IrBits::u32(5))];
         let expected = IrBits::u32(8);
         let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse(
