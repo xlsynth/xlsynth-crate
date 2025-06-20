@@ -221,7 +221,7 @@ pub fn stitch_pipeline(
                                                // this function (until we emit the file) by storing them in this Vec.
     let mut dynamic_types: Vec<xlsynth::vast::VastDataType> = Vec::new();
 
-    let mut wrapper = file.add_module(&format!("{top}_pipeline"));
+    let mut wrapper = file.add_module(top);
     let clk_port = wrapper.add_input("clk", &scalar_type);
 
     // Input ports come from first stage inputs excluding clk.
@@ -421,7 +421,7 @@ pub fn stitch_pipeline_with_valid(
     let scalar_type = file.make_scalar_type();
     let mut dynamic_types: Vec<xlsynth::vast::VastDataType> = Vec::new();
 
-    let mut wrapper = file.add_module(&format!("{top}_pipeline"));
+    let mut wrapper = file.add_module(top);
     let clk_port = wrapper.add_input("clk", &scalar_type);
     let rst_port = wrapper.add_input("rst", &scalar_type);
     let input_valid_port = wrapper.add_input("input_valid", &scalar_type);
@@ -621,7 +621,7 @@ mod tests {
         // Validate generated SV.
         xlsynth_test_helpers::assert_valid_sv(&result);
 
-        let golden_path = std::path::Path::new("tests/goldens/mul_add_pipeline.golden.sv");
+        let golden_path = std::path::Path::new("tests/goldens/mul_add.golden.sv");
         if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
             std::fs::write(golden_path, &result).expect("write golden");
         } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
@@ -649,7 +649,7 @@ mod tests {
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
 
-        let golden_path = std::path::Path::new("tests/goldens/foo_pipeline.golden.sv");
+        let golden_path = std::path::Path::new("tests/goldens/foo.golden.sv");
         if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
             std::fs::write(golden_path, &result).expect("write golden");
         } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
@@ -677,7 +677,7 @@ mod tests {
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
 
-        let golden_path = std::path::Path::new("tests/goldens/one_pipeline.golden.sv");
+        let golden_path = std::path::Path::new("tests/goldens/one.golden.sv");
         if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
             std::fs::write(golden_path, &result).expect("write golden");
         } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
@@ -711,7 +711,7 @@ mod tests {
         xlsynth_test_helpers::assert_valid_sv(&result);
 
         // Golden file check
-        let golden_path = std::path::Path::new("tests/goldens/foo_pipeline_with_valid.golden.sv");
+        let golden_path = std::path::Path::new("tests/goldens/foo_with_valid.golden.sv");
         if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
             std::fs::write(golden_path, &result).expect("write golden");
         } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
@@ -729,11 +729,7 @@ mod tests {
         let inputs = vec![("x", IrBits::u32(5))];
         let expected = IrBits::u32(8);
         let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse(
-            &result,
-            "foo_pipeline",
-            &inputs,
-            &expected,
-            2,
+            &result, "foo", &inputs, &expected, 2,
         )
         .expect("simulation succeeds");
         assert!(vcd.contains("$var"));
