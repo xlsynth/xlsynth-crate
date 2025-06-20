@@ -129,15 +129,15 @@ jobs:
       - name: Install Icarus Verilog
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y --no-install-recommends git autoconf bison flex gperf readline-dev zlib1g-dev build-essential
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git autoconf bison flex gperf readline-dev zlib1g-dev build-essential
           git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
           cd /tmp/iverilog
           git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
           sh autoconf.sh
           ./configure --prefix=/usr
           make -j$(nproc)
-          make install
+          sudo make install
           cd ..
           iverilog -V
 
@@ -399,7 +399,7 @@ jobs:
           sh autoconf.sh
           ./configure --prefix=/usr
           make -j$(nproc)
-          make install
+          sudo make install
           cd ..
 
       - name: Set up dependencies
