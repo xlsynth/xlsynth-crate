@@ -128,8 +128,15 @@ jobs:
 
       - name: Install Icarus Verilog
         run: |
+          export DEBIAN_FRONTEND=noninteractive
+          # First, remove any existing iverilog.
+          sudo apt-get remove -y iverilog
+          echo "--- Verifying removal ---"
+          iverilog -V || echo "iverilog not found, as expected."
+          # Now, install build dependencies.
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git autoconf bison flex gperf libreadline-dev zlib1g-dev build-essential
+          # And build from source.
           git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
           cd /tmp/iverilog
           git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
@@ -137,7 +144,10 @@ jobs:
           ./configure --prefix=/usr
           make -j$(nproc)
           sudo make install
+          sudo ldconfig
           cd ..
+          echo "--- Verifying installation ---"
+          which iverilog
           iverilog -V
 
       - name: Set up Rust
@@ -254,8 +264,27 @@ jobs:
 
       - name: Install Icarus Verilog
         run: |
+          export DEBIAN_FRONTEND=noninteractive
+          # First, remove any existing iverilog.
+          sudo apt-get remove -y iverilog
+          echo "--- Verifying removal ---"
+          iverilog -V || echo "iverilog not found, as expected."
+          # Now, install build dependencies.
           sudo apt-get update
-          sudo apt-get install -y iverilog
+          sudo apt-get install -y --no-install-recommends git autoconf bison flex gperf libreadline-dev zlib1g-dev build-essential
+          # And build from source.
+          git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
+          cd /tmp/iverilog
+          git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
+          sh autoconf.sh
+          ./configure --prefix=/usr
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+          cd ..
+          echo "--- Verifying installation ---"
+          which iverilog
+          iverilog -V
 
       - name: Install libc++ from llvm-18
         run: |
