@@ -312,6 +312,16 @@ bit_count_test_cases!(test_array_index_to_gates, |input_bits: u32,
     );
 });
 
+bit_count_test_cases!(test_array_index_multidim_to_gates, |input_bits: u32,
+                                                           opt: Opt|
+ -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        opt,
+        "fn do_array_index_multidim(a: uN[N][N], i: u32, j: u32) -> uN[N] { a[i][j] }",
+    );
+});
+
 bit_count_test_cases!(test_dslx_array_to_gates, |input_bits: u32,
                                                  opt: Opt|
  -> () {

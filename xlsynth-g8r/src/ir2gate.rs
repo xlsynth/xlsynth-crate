@@ -1066,24 +1066,39 @@ fn gatify_internal(
                 indices,
                 assumed_in_bounds,
             } => {
-                if indices.len() != 1 {
-                    todo!();
-                }
-                let index = indices[0];
-                let array_ty = match f.get_node_ty(*array) {
+                assert!(
+                    !indices.is_empty(),
+                    "Array index must have at least one index"
+                );
+
+                let mut array_ty = match f.get_node_ty(*array) {
                     ir::Type::Array(array_ty_data) => array_ty_data,
                     other => panic!("Expected array type for array_index, got {:?}", other),
                 };
-                let array_bits = env.get_bit_vector(*array).unwrap();
-                let index_bits = env.get_bit_vector(index).unwrap();
-                let result = gatify_array_index(
-                    g8_builder,
-                    array_ty,
-                    &array_bits,
-                    &index_bits,
-                    *assumed_in_bounds,
-                );
-                env.add(node_ref, GateOrVec::BitVector(result));
+                let mut array_bits = env.get_bit_vector(*array).unwrap();
+
+                for (i, index_node) in indices.iter().enumerate() {
+                    let index_bits = env.get_bit_vector(*index_node).unwrap();
+                    array_bits = gatify_array_index(
+                        g8_builder,
+                        array_ty,
+                        &array_bits,
+                        &index_bits,
+                        *assumed_in_bounds,
+                    );
+                    if i + 1 < indices.len() {
+                        array_ty = match array_ty.element_type.as_ref() {
+                            ir::Type::Array(next_ty) => next_ty,
+                            other => panic!(
+                                "Expected array type for index dimension {}, got {:?}",
+                                i + 1,
+                                other
+                            ),
+                        };
+                    }
+                }
+
+                env.add(node_ref, GateOrVec::BitVector(array_bits));
             }
             ir::NodePayload::Array(members) => {
                 // Similar to Tuple: flatten all members into a bit vector.
