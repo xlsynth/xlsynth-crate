@@ -127,6 +127,11 @@ pub enum FuzzOp {
         start: FuzzOperand,
         width: u8,
     },
+    BitSliceUpdate {
+        value: FuzzOperand,
+        start: FuzzOperand,
+        update: FuzzOperand,
+    },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -147,6 +152,7 @@ pub enum FuzzOpFlat {
     UMul,
     SMul,
     DynamicBitSlice,
+    BitSliceUpdate,
 }
 
 /// Flattened opcode-only version of FuzzOp so we can ensure we select among all
@@ -170,6 +176,7 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
         FuzzOp::UMul { .. } => FuzzOpFlat::UMul,
         FuzzOp::SMul { .. } => FuzzOpFlat::SMul,
         FuzzOp::DynamicBitSlice { .. } => FuzzOpFlat::DynamicBitSlice,
+        FuzzOp::BitSliceUpdate { .. } => FuzzOpFlat::BitSliceUpdate,
     }
 }
 
@@ -399,6 +406,17 @@ pub fn generate_ir_fn(
                 let node = fn_builder.dynamic_bit_slice(arg, start, width as u64, None);
                 available_nodes.push(node);
             }
+            FuzzOp::BitSliceUpdate {
+                value,
+                start,
+                update,
+            } => {
+                let value_bv = &available_nodes[(value.index as usize) % available_nodes.len()];
+                let start_bv = &available_nodes[(start.index as usize) % available_nodes.len()];
+                let update_bv = &available_nodes[(update.index as usize) % available_nodes.len()];
+                let node = fn_builder.bit_slice_update(value_bv, start_bv, update_bv, None);
+                available_nodes.push(node);
+            }
         }
     }
     // Set the last node as the return value
@@ -588,6 +606,17 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                         arg: FuzzOperand { index: arg },
                         start: FuzzOperand { index: start },
                         width,
+                    });
+                }
+                FuzzOpFlat::BitSliceUpdate => {
+                    // BitSliceUpdate op: sample three valid indices.
+                    let value_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let start_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let update_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    ops.push(FuzzOp::BitSliceUpdate {
+                        value: FuzzOperand { index: value_idx },
+                        start: FuzzOperand { index: start_idx },
+                        update: FuzzOperand { index: update_idx },
                     });
                 }
             }
