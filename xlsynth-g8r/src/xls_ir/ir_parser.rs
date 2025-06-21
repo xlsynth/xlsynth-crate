@@ -1418,6 +1418,23 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     }
 
     #[test]
+    fn test_parse_cover_node_with_pos() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut node_env = IrNodeEnv::new();
+        node_env.add(Some("and".to_string()), 7, ir::NodeRef { index: 7 });
+        let input = "cover.8: () = cover(and.7, label=\"x_less_than_0\", id=8, pos=[(2,42,30)])";
+        let mut parser = Parser::new(input);
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert_eq!(
+            node.payload,
+            ir::NodePayload::Cover {
+                predicate: ir::NodeRef { index: 7 },
+                label: "x_less_than_0".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn test_parse_nested_tuple_type() {
         let input = "((bits[1], (bits[6], bits[1]), bits[3])[3], bits[3], bits[1])";
         let mut parser = Parser::new(input);
