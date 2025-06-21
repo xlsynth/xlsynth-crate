@@ -1,33 +1,29 @@
 module foo_cycle0(
-  input wire clk,
   input wire [31:0] x,
   output wire [31:0] out
 );
-  // ===== Pipe stage 0:
-  wire [31:0] p0_literal_5_comb;
-  wire [31:0] p0_add_6_comb;
-  assign p0_literal_5_comb = 32'h0000_0001;
-  assign p0_add_6_comb = x + p0_literal_5_comb;
-  assign out = p0_add_6_comb;
+  wire [31:0] literal_5;
+  wire [31:0] add_6;
+  assign literal_5 = 32'h0000_0001;
+  assign add_6 = x + literal_5;
+  assign out = add_6;
 endmodule
 
 module foo_cycle1(
-  input wire clk,
   input wire [31:0] y,
   output wire [31:0] out
 );
-  // ===== Pipe stage 0:
-  wire [30:0] p0_bit_slice_17_comb;
-  wire [30:0] p0_literal_18_comb;
-  wire [30:0] p0_add_19_comb;
-  wire p0_bit_slice_20_comb;
-  wire [31:0] p0_concat_21_comb;
-  assign p0_bit_slice_17_comb = y[31:1];
-  assign p0_literal_18_comb = 31'h0000_0001;
-  assign p0_add_19_comb = p0_bit_slice_17_comb + p0_literal_18_comb;
-  assign p0_bit_slice_20_comb = y[0];
-  assign p0_concat_21_comb = {p0_add_19_comb, p0_bit_slice_20_comb};
-  assign out = p0_concat_21_comb;
+  wire [30:0] bit_slice_17;
+  wire [30:0] literal_18;
+  wire [30:0] add_19;
+  wire bit_slice_20;
+  wire [31:0] concat_21;
+  assign bit_slice_17 = y[31:1];
+  assign literal_18 = 31'h0000_0001;
+  assign add_19 = bit_slice_17 + literal_18;
+  assign bit_slice_20 = y[0];
+  assign concat_21 = {add_19, bit_slice_20};
+  assign out = concat_21;
 endmodule
 module foo(
   input wire clk,
@@ -45,7 +41,6 @@ module foo(
   end
   wire [31:0] stage0_out_comb;
   foo_cycle0 foo_cycle0_i (
-    .clk(clk),
     .x(p0_x),
     .out(stage0_out_comb)
   );
@@ -57,7 +52,6 @@ module foo(
   end
   wire [31:0] stage1_out_comb;
   foo_cycle1 foo_cycle1_i (
-    .clk(clk),
     .y(p1_out),
     .out(stage1_out_comb)
   );

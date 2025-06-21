@@ -133,7 +133,8 @@ fn make_stage_info(
 
     let func = cfg.ir.get_function(stage_mangled)?;
     let fty = func.get_type()?;
-    let (ports, output_width) = build_ports_from_ir(&func, &fty)?;
+    let (mut ports, output_width) = build_ports_from_ir(&func, &fty)?;
+    ports.retain(|p| p.name != "clk");
 
     Ok(StageInfo {
         sv_text,
@@ -152,14 +153,11 @@ fn make_stage_info_comb(
 ) -> Result<StageInfo, xlsynth::XlsynthError> {
     let opt = optimize_ir(cfg.ir, stage_mangled)?;
     let sched = "delay_model: \"unit\"\npipeline_stages: 1";
-    let flop_inputs = "flop_inputs: false";
-    let flop_outputs = "flop_outputs: false";
+    // Use the XLS "combinational" generator so the resulting module has *no* clock.
     let codegen = format!(
-        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nmodule_name: \"{stage}\"\nuse_system_verilog: {sv}\n{fi}\n{fo}",
+        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_COMBINATIONAL\nmodule_name: \"{stage}\"\nuse_system_verilog: {sv}",
         stage = stage_name_unmangled,
         sv = cfg.verilog_version.is_system_verilog(),
-        fi = flop_inputs,
-        fo = flop_outputs,
     );
     let result = schedule_and_codegen(&opt, sched, &codegen)?;
     let sv_text = result.get_verilog_text()?;
@@ -221,8 +219,21 @@ pub fn stitch_pipeline(
                                                // this function (until we emit the file) by storing them in this Vec.
     let mut dynamic_types: Vec<xlsynth::vast::VastDataType> = Vec::new();
 
+    // Determine if the stage modules require a clock port (only true when they
+    // were generated with the pipeline generator). When we switch to the
+    // combinational generator the clock port disappears and we omit it from
+    // the wrapper.
+    let stage_has_clk = stage_infos[0]
+        .ports
+        .iter()
+        .any(|p| p.name == "clk" && p.is_input);
+
     let mut wrapper = file.add_module(top);
-    let clk_port = wrapper.add_input("clk", &scalar_type);
+    let clk_port_opt: Option<xlsynth::vast::LogicRef> = if stage_has_clk {
+        Some(wrapper.add_input("clk", &scalar_type))
+    } else {
+        None
+    };
 
     // Input ports come from first stage inputs excluding clk.
     let first_stage_ports = &stage_infos[0].ports;
@@ -275,7 +286,12 @@ pub fn stitch_pipeline(
         let output_wire = wrapper.add_wire(&output_wire_name, out_dt_stage_ref);
 
         // Build connection names and expressions in order they appear in port list.
-        let conn_port_names: Vec<&str> = stage_info.ports.iter().map(|p| p.name.as_str()).collect();
+        let conn_port_names: Vec<&str> = stage_info
+            .ports
+            .iter()
+            .filter(|p| p.name != "clk")
+            .map(|p| p.name.as_str())
+            .collect();
 
         // Keep expression objects alive.
         let mut temp_exprs: Vec<xlsynth::vast::Expr> = Vec::new();
@@ -287,11 +303,13 @@ pub fn stitch_pipeline(
         // For multi-input slicing we accumulate cursor.
         let mut bit_cursor: u32 = 0;
 
-        for port in &stage_info.ports {
+        for port in stage_info
+            .ports
+            .iter()
+            .filter(|p| !(p.name == "clk" && clk_port_opt.is_none()))
+        {
             if port.name == "clk" {
-                let e = clk_port.to_expr();
-                temp_exprs.push(e);
-                conn_expr_indices.push(Some(temp_exprs.len() - 1));
+                // Skip; combinational stage modules have no clock port.
                 continue;
             }
 
@@ -501,7 +519,12 @@ pub fn stitch_pipeline_with_valid(
         };
         let output_wire = wrapper.add_wire(&format!("stage{}_out_comb", idx), out_dt_stage_ref);
 
-        let conn_port_names: Vec<&str> = stage_info.ports.iter().map(|p| p.name.as_str()).collect();
+        let conn_port_names: Vec<&str> = stage_info
+            .ports
+            .iter()
+            .filter(|p| p.name != "clk")
+            .map(|p| p.name.as_str())
+            .collect();
         let mut temp_exprs: Vec<xlsynth::vast::Expr> = Vec::new();
         let mut conn_expr_indices: Vec<Option<usize>> = Vec::new();
 
@@ -509,9 +532,7 @@ pub fn stitch_pipeline_with_valid(
         let mut bit_cursor: u32 = 0;
         for port in &stage_info.ports {
             if port.name == "clk" {
-                let e = clk_port.to_expr();
-                temp_exprs.push(e);
-                conn_expr_indices.push(Some(temp_exprs.len() - 1));
+                // Skip; combinational stage modules have no clock port.
                 continue;
             }
             if !port.is_input {
