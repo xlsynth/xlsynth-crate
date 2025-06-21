@@ -396,6 +396,14 @@ bit_count_test_cases!(test_dynamic_bit_slice, |input_bits: u32, opt: Opt| -> () 
     );
 });
 
+bit_count_test_cases!(test_bit_slice_update, |input_bits: u32, opt: Opt| -> () {
+    do_test_dslx_conversion(
+        input_bits,
+        opt,
+        "fn do_bit_slice_update(x: uN[N], i: uN[N], u: uN[N]) -> uN[N] { bit_slice_update(x, i, u) }",
+    );
+});
+
 bit_count_test_cases!(test_shra_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
