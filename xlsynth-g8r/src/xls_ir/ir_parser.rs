@@ -781,6 +781,7 @@ impl Parser {
                         self.rest()
                     )));
                 }
+                self.maybe_drop_pos_attribute()?;
                 (
                     ir::NodePayload::Cover { predicate, label },
                     maybe_id.unwrap(),
