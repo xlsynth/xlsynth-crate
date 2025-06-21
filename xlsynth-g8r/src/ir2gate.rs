@@ -1737,12 +1737,26 @@ fn gatify_internal(
                 let arg_width = arg_bits.get_bit_count();
                 let update_width = update_bits.get_bit_count();
 
-                let ones = g8_builder.replicate(g8_builder.get_true(), update_width);
-                let ones_ext = if arg_width > update_width {
-                    let zeros = AigBitVector::zeros(arg_width - update_width);
-                    AigBitVector::concat(zeros, ones)
+                // Effective number of bits that can be written into `arg_bits`.
+                // Any portion of `update_bits` that would extend beyond the
+                // destination width is silently truncated (mirrors XLS
+                // semantics).
+                let effective_update_width = std::cmp::min(update_width, arg_width);
+
+                // -----------------------------------------------------------------
+                // Build the write mask (ones shifted by `start`).
+                // -----------------------------------------------------------------
+                let ones_effective =
+                    g8_builder.replicate(g8_builder.get_true(), effective_update_width);
+
+                // Extend the mask to the full destination width by prepending zeros
+                // (MSBs) so the LSbs align with the slice we intend to write.
+                let zeros_high_count = arg_width - effective_update_width;
+                let ones_ext = if zeros_high_count == 0 {
+                    ones_effective.clone()
                 } else {
-                    ones
+                    let zeros = AigBitVector::zeros(zeros_high_count);
+                    AigBitVector::concat(zeros, ones_effective)
                 };
 
                 let mask = gatify_barrel_shifter(
@@ -1753,11 +1767,22 @@ fn gatify_internal(
                     g8_builder,
                 );
 
-                let update_ext = if arg_width > update_width {
-                    let zeros = AigBitVector::zeros(arg_width - update_width);
-                    AigBitVector::concat(zeros, update_bits.clone())
+                // -----------------------------------------------------------------
+                // Prepare the update value (truncate or zero-extend to dest width),
+                // then shift it into position.
+                // -----------------------------------------------------------------
+                let update_trim = if update_width > effective_update_width {
+                    // Take only the LSbs that fit into the destination.
+                    update_bits.get_lsb_slice(0, effective_update_width)
                 } else {
                     update_bits.clone()
+                };
+
+                let update_ext = if zeros_high_count == 0 {
+                    update_trim.clone()
+                } else {
+                    let zeros = AigBitVector::zeros(zeros_high_count);
+                    AigBitVector::concat(zeros, update_trim)
                 };
 
                 let update_shifted = gatify_barrel_shifter(
@@ -1768,10 +1793,14 @@ fn gatify_internal(
                     g8_builder,
                 );
 
+                // -----------------------------------------------------------------
+                // Combine original value with the updated slice.
+                // -----------------------------------------------------------------
                 let mask_not = g8_builder.add_not_vec(&mask);
                 let cleared = g8_builder.add_and_vec(&arg_bits, &mask_not);
                 let inserted = g8_builder.add_and_vec(&update_shifted, &mask);
                 let result_bits = g8_builder.add_or_vec(&cleared, &inserted);
+
                 env.add(node_ref, GateOrVec::BitVector(result_bits));
             }
             _ => {

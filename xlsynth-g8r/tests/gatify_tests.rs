@@ -872,3 +872,21 @@ fn test_assert_macro_gatify(opt: Opt) {
     let ir_text = ir_package.to_string();
     do_test_ir_conversion_no_equiv(&ir_text, opt);
 }
+
+#[test]
+fn test_bit_slice_update_width_truncates_update() {
+    // Regression IR that previously caused a panic: update value wider than the
+    // destination bits. Now we expect successful lowering and semantic
+    // equivalence.
+    let ir_text = "package fuzz_test
+fn fuzz_test(input: bits[7]) -> bits[1] {
+  literal.2: bits[1] = literal(value=0, id=2)
+  ret bit_slice_update.3: bits[1] = bit_slice_update(literal.2, input, input)
+}
+";
+
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Use existing helper to convert and validate equivalence.
+    do_test_ir_conversion(ir_text, Opt::No);
+}
