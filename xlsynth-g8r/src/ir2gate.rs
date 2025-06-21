@@ -1719,6 +1719,90 @@ fn gatify_internal(
                 assert_eq!(result_bits.get_bit_count(), *width);
                 env.add(node_ref, GateOrVec::BitVector(result_bits));
             }
+            ir::NodePayload::BitSliceUpdate {
+                arg,
+                start,
+                update_value,
+            } => {
+                let arg_bits = env
+                    .get_bit_vector(*arg)
+                    .expect("BitSliceUpdate arg should be present");
+                let start_bits = env
+                    .get_bit_vector(*start)
+                    .expect("BitSliceUpdate start should be present");
+                let update_bits = env
+                    .get_bit_vector(*update_value)
+                    .expect("BitSliceUpdate value should be present");
+
+                let arg_width = arg_bits.get_bit_count();
+                let update_width = update_bits.get_bit_count();
+
+                // Effective number of bits that can be written into `arg_bits`.
+                // Any portion of `update_bits` that would extend beyond the
+                // destination width is silently truncated (mirrors XLS
+                // semantics).
+                let effective_update_width = std::cmp::min(update_width, arg_width);
+
+                // -----------------------------------------------------------------
+                // Build the write mask (ones shifted by `start`).
+                // -----------------------------------------------------------------
+                let ones_effective =
+                    g8_builder.replicate(g8_builder.get_true(), effective_update_width);
+
+                // Extend the mask to the full destination width by prepending zeros
+                // (MSBs) so the LSbs align with the slice we intend to write.
+                let zeros_high_count = arg_width - effective_update_width;
+                let ones_ext = if zeros_high_count == 0 {
+                    ones_effective.clone()
+                } else {
+                    let zeros = AigBitVector::zeros(zeros_high_count);
+                    AigBitVector::concat(zeros, ones_effective)
+                };
+
+                let mask = gatify_barrel_shifter(
+                    &ones_ext,
+                    &start_bits,
+                    Direction::Left,
+                    &format!("bit_slice_update_mask_{}", node.text_id),
+                    g8_builder,
+                );
+
+                // -----------------------------------------------------------------
+                // Prepare the update value (truncate or zero-extend to dest width),
+                // then shift it into position.
+                // -----------------------------------------------------------------
+                let update_trim = if update_width > effective_update_width {
+                    // Take only the LSbs that fit into the destination.
+                    update_bits.get_lsb_slice(0, effective_update_width)
+                } else {
+                    update_bits.clone()
+                };
+
+                let update_ext = if zeros_high_count == 0 {
+                    update_trim.clone()
+                } else {
+                    let zeros = AigBitVector::zeros(zeros_high_count);
+                    AigBitVector::concat(zeros, update_trim)
+                };
+
+                let update_shifted = gatify_barrel_shifter(
+                    &update_ext,
+                    &start_bits,
+                    Direction::Left,
+                    &format!("bit_slice_update_value_{}", node.text_id),
+                    g8_builder,
+                );
+
+                // -----------------------------------------------------------------
+                // Combine original value with the updated slice.
+                // -----------------------------------------------------------------
+                let mask_not = g8_builder.add_not_vec(&mask);
+                let cleared = g8_builder.add_and_vec(&arg_bits, &mask_not);
+                let inserted = g8_builder.add_and_vec(&update_shifted, &mask);
+                let result_bits = g8_builder.add_or_vec(&cleared, &inserted);
+
+                env.add(node_ref, GateOrVec::BitVector(result_bits));
+            }
             _ => {
                 todo!("Unsupported node payload {:?}", payload);
             }
