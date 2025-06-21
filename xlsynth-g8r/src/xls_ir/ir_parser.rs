@@ -845,6 +845,7 @@ impl Parser {
                         self.rest_of_line()
                     )));
                 }
+                self.maybe_drop_pos_attribute()?;
                 (ir::NodePayload::AfterAll(operands), maybe_id.unwrap())
             }
             "invoke" => {
@@ -1372,6 +1373,20 @@ fn bar(x: bits[8] id=3) -> bits[8] {
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
         println!("{:?}", node);
+    }
+
+    #[test]
+    fn test_parse_after_all_node_with_pos() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut node_env = IrNodeEnv::new();
+        node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
+        let input = "after_all.19: token = after_all(trace.17, id=19, pos=[(1,1,1)])";
+        let mut parser = Parser::new(input);
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert_eq!(
+            node.payload,
+            ir::NodePayload::AfterAll(vec![ir::NodeRef { index: 17 }])
+        );
     }
 
     #[test]
