@@ -207,6 +207,40 @@ Checks two GateFns for functional equivalence using the available engines.  A
 JSON report is written to **stdout**.  The command exits with a non-zero status
 if any engine finds a counter-example.  Errors are printed to **stderr**.
 
+### `dslx-stitch-pipeline`: Stitch DSLX pipeline stages
+
+Takes a collection of `*_cycleN` pipeline‐stage functions in a DSLX file (e.g. `foo_cycle0`, `foo_cycle1`, …) and:
+
+1. Generates Verilog/SystemVerilog for **each** stage function.
+1. Emits a wrapper module named `<top>_pipeline` that instantiates the stages and wires them together to form the complete pipeline.
+
+The generated text is written to **stdout**; diagnostic messages appear on **stderr**.
+
+Supported flags:
+
+- `--use_system_verilog=<BOOL>` – emit SystemVerilog when `true` *(default)* or plain Verilog when `false`.
+- `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<top>_cycleN` functions).
+
+The usual DSLX-related options (`--dslx_input_file`, `--dslx_top`, `--dslx_path`, `--dslx_stdlib_path`, `--warnings_as_errors`) are also accepted.
+
+Additional semantics:
+
+- `--dslx_top=<NAME>` specifies the *logical* pipeline prefix.  Stage
+  functions are expected to be named `<NAME>_cycle0`, `<NAME>_cycle1`, … (or
+  be provided explicitly via `--stages`).  A DSLX function named exactly
+  `<NAME>` is **ignored** by this command – only the `_cycleN` stage functions
+  participate in stitching.  When `--stages` is supplied the prefix is only
+  used for the wrapper module name and **not** for stage discovery.
+
+Example:
+
+```shell
+xlsynth-driver dslx-stitch-pipeline \
+  --dslx_input_file my_design.x \
+  --dslx_top foo \
+  --stages=foo_cycle0,foo_cycle1,foo_cycle2 > foo_pipeline.sv
+```
+
 ## Toolchain configuration (`xlsynth-toolchain.toml`)
 
 Several subcommands accept a `--toolchain` option that points at a
