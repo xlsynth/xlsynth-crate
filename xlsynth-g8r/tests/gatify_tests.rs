@@ -890,3 +890,16 @@ fn fuzz_test(input: bits[7]) -> bits[1] {
     // Use existing helper to convert and validate equivalence.
     do_test_ir_conversion(ir_text, Opt::No);
 }
+
+#[test_case(65, 4, Opt::No; "in65_out4_fold_no")]
+#[test_case(65, 4, Opt::Yes; "in65_out4_fold_yes")]
+#[test_case(96, 4, Opt::No; "in96_out4_fold_no")]
+#[test_case(96, 4, Opt::Yes; "in96_out4_fold_yes")]
+fn test_decode_wide_input_ir_to_gates(input_bits: u32, output_bits: u32, opt: Opt) {
+    do_test_ir_conversion(
+        &format!(
+            "package sample\nfn do_decode_wide(x: bits[{input_bits}]) -> bits[{output_bits}] {{\n    ret result: bits[{output_bits}] = decode(x, width={output_bits}, id=2)\n}}"
+        ),
+        opt,
+    );
+}

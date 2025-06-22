@@ -785,7 +785,16 @@ fn gatify_encode(
         // For each input bit, check if the j-th bit of its index is `1`. That means
         // it contributes to the jth output bit.
         for i in 0..input_bit_count {
-            if ((i >> j) & 1) == 1 {
+            // Shifting by an amount >= width of usize is UB in Rust. If that
+            // happens we know the result would be zero, so we can avoid the
+            // shift entirely.
+            let bit_set = if j < usize::BITS as usize {
+                ((i >> j) & 1) == 1
+            } else {
+                false
+            };
+
+            if bit_set {
                 or_candidates.push(arg_bits.get_lsb(i).clone());
             }
         }
@@ -808,6 +817,12 @@ fn gatify_decode(
     let input_count = arg_bits.get_bit_count();
 
     let mut outputs = Vec::with_capacity(output_bit_count);
+    log::debug!(
+        "gatify_decode: input_count: {}, output_bit_count: {}",
+        input_count,
+        output_bit_count
+    );
+
     // For every possible output value...
     for i in 0..output_bit_count {
         let mut terms = Vec::with_capacity(input_count);
@@ -815,7 +830,14 @@ fn gatify_decode(
         // inversion.
         for j in 0..input_count {
             let bit = arg_bits.get_lsb(j);
-            if ((i >> j) & 1) == 1 {
+            // Avoid shifting by more than the width of `usize`.
+            let bit_set = if j < usize::BITS as usize {
+                ((i >> j) & 1) == 1
+            } else {
+                false
+            };
+
+            if bit_set {
                 terms.push(bit.clone());
             } else {
                 terms.push(gb.add_not(*bit));
