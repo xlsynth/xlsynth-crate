@@ -106,6 +106,46 @@ fn discover_stage_names(
     Ok(stages)
 }
 
+/// Ensure adjacent stage signatures dovetail correctly.
+fn verify_stage_signatures(
+    ir: &xlsynth::ir_package::IrPackage,
+    stages: &[(String, String)],
+) -> Result<(), xlsynth::XlsynthError> {
+    for pair in stages.windows(2) {
+        let (prev_name, prev_mangled) = &pair[0];
+        let (next_name, next_mangled) = &pair[1];
+
+        let prev_fn = ir.get_function(prev_mangled)?;
+        let prev_ty = prev_fn.get_type()?;
+        let prev_ret = prev_ty.return_type();
+        let prev_ret_str = format!("{}", prev_ret);
+
+        let next_fn = ir.get_function(next_mangled)?;
+        let next_ty = next_fn.get_type()?;
+        let next_param_str = if next_ty.param_count() == 1 {
+            format!("{}", next_ty.param_type(0)?)
+        } else {
+            let mut parts = Vec::new();
+            for i in 0..next_ty.param_count() {
+                parts.push(format!("{}", next_ty.param_type(i)?));
+            }
+            format!("({})", parts.join(", "))
+        };
+
+        if prev_ret_str != next_param_str {
+            return Err(xlsynth::XlsynthError(format!(
+                "output type of stage '{}' ({}) does not match input{} of stage '{}' ({})",
+                prev_name,
+                prev_ret_str,
+                if next_ty.param_count() == 1 { "" } else { "s" },
+                next_name,
+                next_param_str
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Run XLS optimise + schedule + codegen for a stage and gather `StageInfo`.
 fn make_stage_info(
     cfg: &PipelineCfg,
@@ -194,6 +234,7 @@ pub fn stitch_pipeline(
     };
 
     let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
+    verify_stage_signatures(&ir, &stages)?;
 
     // For each stage run codegen immediately so we can parse its port list.
     let mut stage_infos = Vec::with_capacity(stages.len());
@@ -419,6 +460,7 @@ pub fn stitch_pipeline_with_valid(
     };
 
     let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
+    verify_stage_signatures(&ir, &stages)?;
 
     let mut stage_infos = Vec::with_capacity(stages.len());
     for (stage_unmangled, stage_mangled) in &stages {
@@ -754,5 +796,21 @@ mod tests {
         )
         .expect("simulation succeeds");
         assert!(vcd.contains("$var"));
+    }
+
+    #[test]
+    fn test_stitch_pipeline_signature_mismatch() {
+        let dslx = r#"fn foo_cycle0(x: u32, y: u64) -> (u32, u64) { (x, y) }
+fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
+        let result = stitch_pipeline(
+            dslx,
+            Path::new("test.x"),
+            "foo",
+            VerilogVersion::SystemVerilog,
+            None,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().0;
+        assert!(err.contains("does not match"), "unexpected error: {}", err);
     }
 }

@@ -2353,3 +2353,32 @@ fn test_simulate_simple_pipeline() {
     .expect("simulation succeeds");
     assert!(vcd.contains("$var"));
 }
+
+#[test]
+fn test_dslx_stitch_pipeline_signature_mismatch() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"fn foo_cycle0(x: u32, y: u64) -> (u32, u64) { (x, y) }
+fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "command should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not match"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
