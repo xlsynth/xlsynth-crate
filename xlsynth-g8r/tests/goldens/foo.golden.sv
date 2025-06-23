@@ -1,59 +1,48 @@
 module foo_cycle0(
-  input wire clk,
   input wire [63:0] s,
   output wire [63:0] out
 );
-  // ===== Pipe stage 0:
-
-  // Registers for pipe stage 0:
-  reg [63:0] p0_s;
-  always_ff @ (posedge clk) begin
-    p0_s <= s;
-  end
-  assign out = p0_s;
+  assign out = s;
 endmodule
 
 module foo_cycle1(
+  input wire [63:0] s,
+  output wire [31:0] out
+);
+  wire [31:0] s_a;
+  wire [31:0] s_b;
+  wire [31:0] add_9;
+  assign s_a = s[63:32];
+  assign s_b = s[31:0];
+  assign add_9 = s_a + s_b;
+  assign out = add_9;
+endmodule
+module foo(
   input wire clk,
   input wire [63:0] s,
   output wire [31:0] out
 );
-  // ===== Pipe stage 0:
-
-  // Registers for pipe stage 0:
   reg [63:0] p0_s;
   always_ff @ (posedge clk) begin
     p0_s <= s;
   end
-
-  // ===== Pipe stage 1:
-  wire [31:0] p1_s_a_comb;
-  wire [31:0] p1_s_b_comb;
-  wire [31:0] p1_add_11_comb;
-  assign p1_s_a_comb = p0_s[63:32];
-  assign p1_s_b_comb = p0_s[31:0];
-  assign p1_add_11_comb = p1_s_a_comb + p1_s_b_comb;
-
-  // Registers for pipe stage 1:
-  reg [31:0] p1_add_11;
-  always_ff @ (posedge clk) begin
-    p1_add_11 <= p1_add_11_comb;
-  end
-  assign out = p1_add_11;
-endmodule
-module foo(
-  input wire [63:0] s,
-  output wire [31:0] out
-);
-  wire [63:0] stage0_out;
+  wire [63:0] p1_next;
   foo_cycle0 foo_cycle0_i (
-    .s(s),
-    .out(stage0_out)
+    .s(p0_s),
+    .out(p1_next)
   );
-  wire [31:0] final_out;
+  reg [63:0] p1;
+  always_ff @ (posedge clk) begin
+    p1 <= p1_next;
+  end
+  wire [31:0] p2_next;
   foo_cycle1 foo_cycle1_i (
-    .s(stage0_out),
-    .out(final_out)
+    .s(p1),
+    .out(p2_next)
   );
-  assign out = final_out;
+  reg [31:0] p2;
+  always_ff @ (posedge clk) begin
+    p2 <= p2_next;
+  end
+  assign out = p2;
 endmodule

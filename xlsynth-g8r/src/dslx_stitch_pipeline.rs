@@ -204,7 +204,10 @@ fn make_stage_info_comb(
 
     let func = cfg.ir.get_function(stage_mangled)?;
     let fty = func.get_type()?;
-    let (ports, output_width) = build_ports_from_ir(&func, &fty)?;
+    let (mut ports, output_width) = build_ports_from_ir(&func, &fty)?;
+    // Combinational modules do not have a clock port, so drop it from
+    // the discovered port list to simplify downstream handling.
+    ports.retain(|p| p.name != "clk");
 
     Ok(StageInfo {
         sv_text,
@@ -237,14 +240,11 @@ pub fn stitch_pipeline(
     verify_stage_signatures(&ir, &stages)?;
 
     // For each stage run codegen immediately so we can parse its port list.
+    // Use the combinational generator so the emitted modules have no clock
+    // port; this simplifies the stitching wrapper logic.
     let mut stage_infos = Vec::with_capacity(stages.len());
-    for (idx, (stage_unmangled, stage_mangled)) in stages.iter().enumerate() {
-        let info = make_stage_info(
-            &cfg,
-            stage_unmangled,
-            stage_mangled,
-            idx + 1 == stages.len(),
-        )?;
+    for (stage_unmangled, stage_mangled) in &stages {
+        let info = make_stage_info_comb(&cfg, stage_unmangled, stage_mangled, false)?;
         stage_infos.push(info);
     }
 
@@ -260,25 +260,17 @@ pub fn stitch_pipeline(
                                                // this function (until we emit the file) by storing them in this Vec.
     let mut dynamic_types: Vec<xlsynth::vast::VastDataType> = Vec::new();
 
-    // Determine if the stage modules require a clock port (only true when they
-    // were generated with the pipeline generator). When we switch to the
-    // combinational generator the clock port disappears and we omit it from
-    // the wrapper.
-    let stage_has_clk = stage_infos[0]
-        .ports
-        .iter()
-        .any(|p| p.name == "clk" && p.is_input);
-
+    // Create the wrapper module. Stage modules generated via the
+    // combinational generator have no clock ports, but the wrapper needs a
+    // clock to drive the pipeline flops it inserts between stages.
     let mut wrapper = file.add_module(top);
-    let clk_port_opt: Option<xlsynth::vast::LogicRef> = if stage_has_clk {
-        Some(wrapper.add_input("clk", &scalar_type))
-    } else {
-        None
-    };
+    let clk_port = wrapper.add_input("clk", &scalar_type);
 
-    // Input ports come from first stage inputs excluding clk.
+    // Input ports come from first stage inputs excluding clk. These are also
+    // captured into the initial pipeline registers named `p0_<port>`.
     let first_stage_ports = &stage_infos[0].ports;
     let mut wrapper_inputs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
+    let mut p0_regs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
     for p in first_stage_ports
         .iter()
         .filter(|p| p.is_input && p.name != "clk")
@@ -292,6 +284,24 @@ pub fn stitch_pipeline(
         };
         let lr = wrapper.add_input(&p.name, dt_ref);
         wrapper_inputs.insert(p.name.clone(), lr);
+        let reg = wrapper.add_reg(&format!("p0_{}", p.name), dt_ref).unwrap();
+        p0_regs.insert(p.name.clone(), reg);
+    }
+
+    let posedge_clk = file.make_pos_edge(&clk_port.to_expr());
+    let always_p0 = if cfg.verilog_version.is_system_verilog() {
+        wrapper.add_always_ff(&[&posedge_clk]).unwrap()
+    } else {
+        wrapper.add_always_at(&[&posedge_clk]).unwrap()
+    };
+    let mut sb0 = always_p0.get_statement_block();
+    // Iterate in a deterministic order to ensure stable Verilog output.
+    let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
+    p0_names.sort();
+    for name in p0_names {
+        let reg = p0_regs.get(&name).unwrap();
+        let src = wrapper_inputs.get(&name).unwrap();
+        sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
     }
 
     // Output port derived from final stage out width
@@ -304,8 +314,10 @@ pub fn stitch_pipeline(
     };
     let out_port = wrapper.add_output("out", out_dt_ref);
 
-    // Wires and instantiations
-    let mut prev_wire: Option<xlsynth::vast::LogicRef> = None;
+    // Stage processing: instantiate each combinational stage and insert a
+    // pipeline register capturing its output. The register names follow the
+    // convention `p<N>` while the combinational result is `p<N>_next`.
+    let mut prev_reg: Option<xlsynth::vast::LogicRef> = None;
     let mut prev_width: u32 = 0;
 
     for (idx, stage_info) in stage_infos.iter().enumerate() {
@@ -319,12 +331,7 @@ pub fn stitch_pipeline(
             dynamic_types.push(file.make_bit_vector_type(output_width as i64, false));
             dynamic_types.last().unwrap()
         };
-        let output_wire_name = if idx + 1 == stage_infos.len() {
-            "final_out".to_string()
-        } else {
-            format!("stage{}_out", idx)
-        };
-        let output_wire = wrapper.add_wire(&output_wire_name, out_dt_stage_ref);
+        let output_wire = wrapper.add_wire(&format!("p{}_next", idx + 1), out_dt_stage_ref);
 
         // Build connection names and expressions in order they appear in port list.
         let conn_port_names: Vec<&str> = stage_info
@@ -339,21 +346,12 @@ pub fn stitch_pipeline(
         let mut conn_expr_indices: Vec<Option<usize>> = Vec::new();
 
         // For slicing we need prev output indexable expr.
-        let prev_indexable = prev_wire.as_ref().map(|w| w.to_indexable_expr());
+        let prev_indexable = prev_reg.as_ref().map(|w| w.to_indexable_expr());
 
         // For multi-input slicing we accumulate cursor.
         let mut bit_cursor: u32 = 0;
 
-        for port in stage_info
-            .ports
-            .iter()
-            .filter(|p| !(p.name == "clk" && clk_port_opt.is_none()))
-        {
-            if port.name == "clk" {
-                // Skip; combinational stage modules have no clock port.
-                continue;
-            }
-
+        for port in stage_info.ports.iter().filter(|p| p.name != "clk") {
             if !port.is_input {
                 // Output port: connect the wire we just created.
                 let e = output_wire.to_expr();
@@ -364,13 +362,12 @@ pub fn stitch_pipeline(
 
             // Input port (non-clk)
             if idx == 0 {
-                // Connect from wrapper input ports.
-                if let Some(lr) = wrapper_inputs.get(&port.name) {
-                    let e = lr.to_expr();
+                // Connect from the input pipeline registers.
+                if let Some(reg) = p0_regs.get(&port.name) {
+                    let e = reg.to_expr();
                     temp_exprs.push(e);
                     conn_expr_indices.push(Some(temp_exprs.len() - 1));
                 } else {
-                    // Should not happen.
                     conn_expr_indices.push(None);
                 }
             } else {
@@ -384,7 +381,7 @@ pub fn stitch_pipeline(
                     && port.width == prev_width
                 {
                     // Whole vector passthrough.
-                    let e = prev_wire.as_ref().unwrap().to_expr();
+                    let e = prev_reg.as_ref().unwrap().to_expr();
                     temp_exprs.push(e);
                     conn_expr_indices.push(Some(temp_exprs.len() - 1));
                 } else {
@@ -419,14 +416,26 @@ pub fn stitch_pipeline(
             &conn_exprs,
         ));
 
-        prev_wire = Some(output_wire);
+        // Create the pipeline register that captures this stage's output.
+        let out_reg = wrapper
+            .add_reg(&format!("p{}", idx + 1), out_dt_stage_ref)
+            .unwrap();
+        let always = if cfg.verilog_version.is_system_verilog() {
+            wrapper.add_always_ff(&[&posedge_clk]).unwrap()
+        } else {
+            wrapper.add_always_at(&[&posedge_clk]).unwrap()
+        };
+        let mut sb = always.get_statement_block();
+        sb.add_nonblocking_assignment(&out_reg.to_expr(), &output_wire.to_expr());
+
+        prev_reg = Some(out_reg);
         prev_width = output_width;
     }
 
-    // Assign wrapper.out = final_out
-    if let Some(final_wire) = &prev_wire {
+    // Assign wrapper.out = last pipeline register
+    if let Some(final_reg) = &prev_reg {
         wrapper.add_member_continuous_assignment(
-            file.make_continuous_assignment(&out_port.to_expr(), &final_wire.to_expr()),
+            file.make_continuous_assignment(&out_port.to_expr(), &final_reg.to_expr()),
         );
     }
 
@@ -536,8 +545,12 @@ pub fn stitch_pipeline_with_valid(
         wrapper.add_always_at(&[&posedge_clk]).unwrap()
     };
     let mut sb0 = always_p0.get_statement_block();
-    for (name, reg) in &p0_regs {
-        let src = wrapper_inputs.get(name).unwrap();
+    // Iterate in a deterministic order to ensure stable Verilog output.
+    let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
+    p0_names.sort();
+    for name in p0_names {
+        let reg = p0_regs.get(&name).unwrap();
+        let src = wrapper_inputs.get(&name).unwrap();
         sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
     }
     let zero = file

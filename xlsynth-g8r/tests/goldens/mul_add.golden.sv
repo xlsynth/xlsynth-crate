@@ -1,5 +1,4 @@
 module mul_add_cycle0(
-  input wire clk,
   input wire [31:0] x,
   input wire [31:0] y,
   input wire [31:0] z,
@@ -12,10 +11,29 @@ module mul_add_cycle0(
     end
   endfunction
   // lint_on MULTIPLY
+  wire [31:0] umul_9;
+  wire [63:0] tuple_10;
+  assign umul_9 = umul32b_32b_x_32b(x, y);
+  assign tuple_10 = {umul_9, z};
+  assign out = tuple_10;
+endmodule
 
-  // ===== Pipe stage 0:
-
-  // Registers for pipe stage 0:
+module mul_add_cycle1(
+  input wire [31:0] partial,
+  input wire [31:0] z,
+  output wire [31:0] out
+);
+  wire [31:0] add_11;
+  assign add_11 = partial + z;
+  assign out = add_11;
+endmodule
+module mul_add(
+  input wire clk,
+  input wire [31:0] x,
+  input wire [31:0] y,
+  input wire [31:0] z,
+  output wire [31:0] out
+);
   reg [31:0] p0_x;
   reg [31:0] p0_y;
   reg [31:0] p0_z;
@@ -24,60 +42,26 @@ module mul_add_cycle0(
     p0_y <= y;
     p0_z <= z;
   end
-
-  // ===== Pipe stage 1:
-  wire [31:0] p1_umul_15_comb;
-  wire [63:0] p1_tuple_16_comb;
-  assign p1_umul_15_comb = umul32b_32b_x_32b(p0_x, p0_y);
-  assign p1_tuple_16_comb = {p1_umul_15_comb, p0_z};
-  assign out = p1_tuple_16_comb;
-endmodule
-
-module mul_add_cycle1(
-  input wire clk,
-  input wire [31:0] partial,
-  input wire [31:0] z,
-  output wire [31:0] out
-);
-  // ===== Pipe stage 0:
-
-  // Registers for pipe stage 0:
-  reg [31:0] p0_partial;
-  reg [31:0] p0_z;
-  always_ff @ (posedge clk) begin
-    p0_partial <= partial;
-    p0_z <= z;
-  end
-
-  // ===== Pipe stage 1:
-  wire [31:0] p1_add_15_comb;
-  assign p1_add_15_comb = p0_partial + p0_z;
-
-  // Registers for pipe stage 1:
-  reg [31:0] p1_add_15;
-  always_ff @ (posedge clk) begin
-    p1_add_15 <= p1_add_15_comb;
-  end
-  assign out = p1_add_15;
-endmodule
-module mul_add(
-  input wire [31:0] x,
-  input wire [31:0] y,
-  input wire [31:0] z,
-  output wire [31:0] out
-);
-  wire [63:0] stage0_out;
+  wire [63:0] p1_next;
   mul_add_cycle0 mul_add_cycle0_i (
-    .x(x),
-    .y(y),
-    .z(z),
-    .out(stage0_out)
+    .x(p0_x),
+    .y(p0_y),
+    .z(p0_z),
+    .out(p1_next)
   );
-  wire [31:0] final_out;
+  reg [63:0] p1;
+  always_ff @ (posedge clk) begin
+    p1 <= p1_next;
+  end
+  wire [31:0] p2_next;
   mul_add_cycle1 mul_add_cycle1_i (
-    .partial(stage0_out[63:32]),
-    .z(stage0_out[31:0]),
-    .out(final_out)
+    .partial(p1[63:32]),
+    .z(p1[31:0]),
+    .out(p2_next)
   );
-  assign out = final_out;
+  reg [31:0] p2;
+  always_ff @ (posedge clk) begin
+    p2 <= p2_next;
+  end
+  assign out = p2;
 endmodule

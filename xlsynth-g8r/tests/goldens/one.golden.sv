@@ -1,40 +1,33 @@
 module one_cycle0(
+  input wire [31:0] x,
+  input wire [31:0] y,
+  output wire [31:0] out
+);
+  wire [31:0] add_6;
+  assign add_6 = x + y;
+  assign out = add_6;
+endmodule
+module one(
   input wire clk,
   input wire [31:0] x,
   input wire [31:0] y,
   output wire [31:0] out
 );
-  // ===== Pipe stage 0:
-
-  // Registers for pipe stage 0:
   reg [31:0] p0_x;
   reg [31:0] p0_y;
   always_ff @ (posedge clk) begin
     p0_x <= x;
     p0_y <= y;
   end
-
-  // ===== Pipe stage 1:
-  wire [31:0] p1_add_10_comb;
-  assign p1_add_10_comb = p0_x + p0_y;
-
-  // Registers for pipe stage 1:
-  reg [31:0] p1_add_10;
-  always_ff @ (posedge clk) begin
-    p1_add_10 <= p1_add_10_comb;
-  end
-  assign out = p1_add_10;
-endmodule
-module one(
-  input wire [31:0] x,
-  input wire [31:0] y,
-  output wire [31:0] out
-);
-  wire [31:0] final_out;
+  wire [31:0] p1_next;
   one_cycle0 one_cycle0_i (
-    .x(x),
-    .y(y),
-    .out(final_out)
+    .x(p0_x),
+    .y(p0_y),
+    .out(p1_next)
   );
-  assign out = final_out;
+  reg [31:0] p1;
+  always_ff @ (posedge clk) begin
+    p1 <= p1_next;
+  end
+  assign out = p1;
 endmodule
