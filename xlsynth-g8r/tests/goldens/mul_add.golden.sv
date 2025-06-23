@@ -39,8 +39,8 @@ module mul_add(
   reg [31:0] p0_z;
   always_ff @ (posedge clk) begin
     p0_x <= x;
-    p0_z <= z;
     p0_y <= y;
+    p0_z <= z;
   end
   wire [63:0] p1_next;
   mul_add_cycle0 mul_add_cycle0_i (

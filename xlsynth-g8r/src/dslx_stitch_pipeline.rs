@@ -295,8 +295,12 @@ pub fn stitch_pipeline(
         wrapper.add_always_at(&[&posedge_clk]).unwrap()
     };
     let mut sb0 = always_p0.get_statement_block();
-    for (name, reg) in &p0_regs {
-        let src = wrapper_inputs.get(name).unwrap();
+    // Iterate in a deterministic order to ensure stable Verilog output.
+    let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
+    p0_names.sort();
+    for name in p0_names {
+        let reg = p0_regs.get(&name).unwrap();
+        let src = wrapper_inputs.get(&name).unwrap();
         sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
     }
 
@@ -541,8 +545,12 @@ pub fn stitch_pipeline_with_valid(
         wrapper.add_always_at(&[&posedge_clk]).unwrap()
     };
     let mut sb0 = always_p0.get_statement_block();
-    for (name, reg) in &p0_regs {
-        let src = wrapper_inputs.get(name).unwrap();
+    // Iterate in a deterministic order to ensure stable Verilog output.
+    let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
+    p0_names.sort();
+    for name in p0_names {
+        let reg = p0_regs.get(&name).unwrap();
+        let src = wrapper_inputs.get(&name).unwrap();
         sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
     }
     let zero = file

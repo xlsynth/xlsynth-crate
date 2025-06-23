@@ -16,8 +16,8 @@ module one(
   reg [31:0] p0_x;
   reg [31:0] p0_y;
   always_ff @ (posedge clk) begin
-    p0_y <= y;
     p0_x <= x;
+    p0_y <= y;
   end
   wire [31:0] p1_next;
   one_cycle0 one_cycle0_i (
