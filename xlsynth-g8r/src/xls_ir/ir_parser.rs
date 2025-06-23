@@ -152,14 +152,41 @@ impl Parser {
     fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
         self.drop_whitespace();
         let mut number = String::new();
-        while let Some(c) = self.peekc() {
-            if c.is_digit(10) {
-                number.push(c);
-                self.popc();
-            } else {
-                break;
+
+        // Handle radix prefixes.
+        if self.peek_is("0x") || self.peek_is("0X") {
+            number.push(self.popc().unwrap());
+            number.push(self.popc().unwrap());
+            while let Some(c) = self.peekc() {
+                if c.is_ascii_hexdigit() {
+                    number.push(c);
+                    self.popc();
+                } else {
+                    break;
+                }
+            }
+        } else if self.peek_is("0b") || self.peek_is("0B") {
+            number.push(self.popc().unwrap());
+            number.push(self.popc().unwrap());
+            while let Some(c) = self.peekc() {
+                if c == '0' || c == '1' {
+                    number.push(c);
+                    self.popc();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            while let Some(c) = self.peekc() {
+                if c.is_ascii_digit() {
+                    number.push(c);
+                    self.popc();
+                } else {
+                    break;
+                }
             }
         }
+
         if number.is_empty() {
             Err(ParseError::new(format!(
                 "expected number in {}; rest_of_line: {:?}",
@@ -1267,6 +1294,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlsynth::ir_value::IrFormatPreference;
 
     #[test]
     fn test_parse_simple_fn() {
@@ -1330,6 +1358,68 @@ fn bar(x: bits[8] id=3) -> bits[8] {
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut IrNodeEnv::new()).unwrap();
         println!("{:?}", node);
+    }
+
+    #[test]
+    fn test_parse_hex_literal_node() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = "literal.1: bits[8] = literal(value=0x2a, id=1)";
+        let mut parser = Parser::new(input);
+        let node = parser.parse_node(&mut IrNodeEnv::new()).unwrap();
+        if let ir::NodePayload::Literal(value) = node.payload {
+            assert_eq!(
+                value.to_string_fmt(IrFormatPreference::Hex).unwrap(),
+                "bits[8]:0x2a"
+            );
+        } else {
+            panic!("expected literal node");
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_via_xls_parser() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = r#"package t
+
+fn foo() -> (bits[8], bits[8], bits[8]) {
+  literal.1: bits[8] = literal(value=0x2a, id=1)
+  literal.2: bits[8] = literal(value=0b1100, id=2)
+  literal.3: bits[8] = literal(value=5, id=3)
+  ret tuple.4: (bits[8], bits[8], bits[8]) = tuple(literal.1, literal.2, literal.3, id=4)
+}
+"#;
+
+        let cxx_pkg = xlsynth::IrPackage::parse_ir(input, None).unwrap();
+        let formatted = cxx_pkg.to_string();
+
+        let mut parser = Parser::new(&formatted);
+        let pkg = parser.parse_package().unwrap();
+
+        let f = pkg.get_fn("foo").unwrap();
+        if let ir::NodePayload::Literal(v) = &f.nodes[1].payload {
+            assert_eq!(
+                v.to_string_fmt(IrFormatPreference::Hex).unwrap(),
+                "bits[8]:0x2a"
+            );
+        } else {
+            panic!("expected literal");
+        }
+        if let ir::NodePayload::Literal(v) = &f.nodes[2].payload {
+            assert_eq!(
+                v.to_string_fmt(IrFormatPreference::Binary).unwrap(),
+                "bits[8]:0b1100"
+            );
+        } else {
+            panic!("expected literal");
+        }
+        if let ir::NodePayload::Literal(v) = &f.nodes[3].payload {
+            assert_eq!(
+                v.to_string_fmt(IrFormatPreference::Default).unwrap(),
+                "bits[8]:5"
+            );
+        } else {
+            panic!("expected literal");
+        }
     }
 
     #[test]
