@@ -1,0 +1,27 @@
+== Op frequencies:
+     3 :: get_param() -> bits[1]
+     1 :: identity(bits[1]) -> bits[1]
+     1 :: nil() -> ()
+     1 :: priority_sel(bits[1], bits[1], bits[1]) -> bits[1]
+== Fraig convergence: Yes(0)
+== Deepest path (3):
+     6 :: And2(~Ref(4), ~Ref(5))
+          tags: priority_sel_4_output_bit_0
+          source: bar.x:3:1 foo.x:2:1
+          uses: 1
+     4 :: And2(Ref(1), Ref(2))
+          uses: 1
+     1 :: Input(sel[0])
+          uses: 2
+== Logical effort deepest path min delay: 6.6667 (FO4 units)
+Gate Depth Histogram (Bucketed by 5):
+Depth   0 -   4 | ██████████████████████████████████████████████████ |    6
+== Live node count: 6
+== Structures:
+  2 :: x0
+  1 :: AND(not(AND(x0,x1)),not(AND(not(x2),x3)))
+  1 :: AND(not(x0),x1)
+  1 :: AND(x0,x1)
+== Fanout histogram:
+  1: 4
+  2: 1
