@@ -86,3 +86,27 @@ top fn pack_unpack(input: (bits[1], bits[8], bits[23]) id=1) -> (bits[1], bits[8
         "Output does not contain expected 'Deepest path' indication"
     );
 }
+
+#[test]
+fn test_deepest_path_source_display() {
+    let ir = "package pos_pkg\nfile_number 0 \"foo.x\"\n\n\
+top fn main() -> bits[32] {\n  ret literal.1: bits[32] = literal(value=1, id=1, pos=[(0,0,0)])\n}\n";
+    let mut temp_file = tempfile::Builder::new().suffix(".ir").tempfile().unwrap();
+    write!(temp_file, "{}", ir).unwrap();
+    let temp_path = temp_file.into_temp_path();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_g8r"))
+        .arg(temp_path.to_str().unwrap())
+        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("stdout: {}", stdout);
+
+    assert!(
+        output.status.success(),
+        "g8r binary did not exit successfully"
+    );
+    assert!(stdout.contains("source:"), "Deepest path source not shown");
+}
