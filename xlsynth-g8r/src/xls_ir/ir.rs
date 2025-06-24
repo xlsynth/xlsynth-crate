@@ -1001,12 +1001,29 @@ impl FileTable {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pos {
+    pub fileno: usize,
+    pub lineno: usize,
+    pub colno: usize,
+}
+
+impl Pos {
+    pub fn to_human_string(&self, file_table: &FileTable) -> Option<String> {
+        let path = file_table.id_to_path.get(&self.fileno)?;
+        Some(format!("{}:{}:{}", path, self.lineno + 1, self.colno + 1))
+    }
+}
+
+pub type PosData = Vec<Pos>;
+
 #[derive(Debug)]
 pub struct Package {
     pub name: String,
     pub file_table: FileTable,
     pub fns: Vec<Fn>,
     pub top_name: Option<String>,
+    pub node_pos: Option<HashMap<usize, PosData>>,
 }
 
 impl Package {

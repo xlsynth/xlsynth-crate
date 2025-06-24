@@ -4,6 +4,7 @@
 
 use crate::xls_ir::ir::{self, operator_to_nary_op, ArrayTypeData, FileTable};
 use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
+use std::collections::HashMap;
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
     let file_content = std::fs::read_to_string(path)
@@ -44,13 +45,21 @@ impl FileTable {
 pub struct Parser {
     chars: Vec<char>,
     offset: usize,
+    retain_pos: bool,
+    node_pos: HashMap<usize, ir::PosData>,
 }
 
 impl Parser {
     pub fn new(input: &str) -> Self {
+        Self::new_with_pos(input, false)
+    }
+
+    pub fn new_with_pos(input: &str, retain_pos: bool) -> Self {
         Self {
             chars: input.chars().collect(),
             offset: 0,
+            retain_pos,
+            node_pos: HashMap::new(),
         }
     }
 
@@ -530,7 +539,6 @@ impl Parser {
                 self.rest()
             )));
         }
-        self.maybe_drop_pos_attribute()?;
         Ok(members)
     }
 
@@ -577,9 +585,7 @@ impl Parser {
                         "expected id for array_update; rest: {:?}",
                         self.rest()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::ArrayUpdate {
                         array,
                         value,
@@ -604,9 +610,7 @@ impl Parser {
                         "expected id for dynamic_bit_slice; rest: {:?}",
                         self.rest()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::DynamicBitSlice {
                         arg: arg_node,
                         start: start_node,
@@ -639,9 +643,7 @@ impl Parser {
                         "expected id for array_index; rest: {:?}",
                         self.rest()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::ArrayIndex {
                         array,
                         indices,
@@ -664,9 +666,7 @@ impl Parser {
                         "expected id for tuple_index; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::TupleIndex { tuple, index },
                     maybe_id.unwrap(),
                 )
@@ -685,9 +685,7 @@ impl Parser {
                         "expected id for sign_ext; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::SignExt { arg, new_bit_count },
                     maybe_id.unwrap(),
                 )
@@ -728,9 +726,7 @@ impl Parser {
                         "expected id for bit_slice; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::BitSlice { arg, start, width },
                     maybe_id.unwrap(),
                 )
@@ -752,9 +748,7 @@ impl Parser {
                         "expected id for bit_slice_update; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::BitSliceUpdate {
                         arg,
                         start,
@@ -781,9 +775,7 @@ impl Parser {
                         "expected id for assert; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::Assert {
                         token,
                         activate,
@@ -807,9 +799,7 @@ impl Parser {
                         "expected id for cover; rest_of_line: {:?}",
                         self.rest()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::Cover { predicate, label },
                     maybe_id.unwrap(),
                 )
@@ -836,9 +826,7 @@ impl Parser {
                         "expected id for trace; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::Trace {
                         token,
                         activated,
@@ -871,9 +859,7 @@ impl Parser {
                         "expected id for after_all; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (ir::NodePayload::AfterAll(operands), maybe_id.unwrap())
+                }                (ir::NodePayload::AfterAll(operands), maybe_id.unwrap())
             }
             "invoke" => {
                 // This is a variadic operands that puts the variadic node refs at the top level
@@ -902,9 +888,7 @@ impl Parser {
                         "expected id for invoke; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::Invoke { to_apply, operands },
                     maybe_id.unwrap(),
                 )
@@ -941,9 +925,7 @@ impl Parser {
                         "expected id for literal; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (ir::NodePayload::Literal(value), maybe_id.unwrap())
+                }                (ir::NodePayload::Literal(value), maybe_id.unwrap())
             }
             "shll" | "shrl" | "shra"
             // weak arithmetic ops
@@ -973,9 +955,7 @@ impl Parser {
                         "expected id for binop; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (ir::NodePayload::Binop(binop, lhs, rhs), maybe_id.unwrap())
+                }                (ir::NodePayload::Binop(binop, lhs, rhs), maybe_id.unwrap())
             }
             "not" | "neg" | "identity" | "reverse" | "or_reduce" | "and_reduce" | "xor_reduce" => {
                 let operand = self.parse_node_ref(&node_env, "unop operand")?;
@@ -989,9 +969,7 @@ impl Parser {
                         "expected id for not; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                let unop = ir::operator_to_unop(operator.as_str()).unwrap();
+                }                let unop = ir::operator_to_unop(operator.as_str()).unwrap();
                 (ir::NodePayload::Unop(unop, operand), maybe_id.unwrap())
             }
             "decode" => {
@@ -1008,9 +986,7 @@ impl Parser {
                         "expected id for decode; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (ir::NodePayload::Decode { arg, width }, maybe_id.unwrap())
+                }                (ir::NodePayload::Decode { arg, width }, maybe_id.unwrap())
             }
             "encode" => {
                 let arg = self.parse_node_ref(&node_env, "encode arg")?;
@@ -1024,9 +1000,7 @@ impl Parser {
                         "expected id for encode; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (ir::NodePayload::Encode { arg }, maybe_id.unwrap())
+                }                (ir::NodePayload::Encode { arg }, maybe_id.unwrap())
             }
             "one_hot" => {
                 let arg = self.parse_node_ref(&node_env, "one_hot arg")?;
@@ -1042,9 +1016,7 @@ impl Parser {
                         "expected id for one_hot; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (ir::NodePayload::OneHot { arg, lsb_prio }, maybe_id.unwrap())
+                }                (ir::NodePayload::OneHot { arg, lsb_prio }, maybe_id.unwrap())
             }
             "sel" => {
                 let selector = self.parse_node_ref(&node_env, "sel selector")?;
@@ -1066,9 +1038,7 @@ impl Parser {
                         "expected id for sel; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::Sel {
                         selector,
                         cases,
@@ -1100,9 +1070,7 @@ impl Parser {
                         "expected id for priority_sel; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::PrioritySel {
                         selector,
                         cases,
@@ -1125,9 +1093,7 @@ impl Parser {
                         "expected id for one_hot_sel; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }
-                self.maybe_drop_pos_attribute()?;
-                (
+                }                (
                     ir::NodePayload::OneHotSel { selector, cases },
                     maybe_id.unwrap(),
                 )
@@ -1149,10 +1115,26 @@ impl Parser {
             }
         };
 
+        let pos_attr = self.maybe_drop_pos_attribute()?;
         self.drop_or_error_with_ctx(
             ")",
             &format!("end of node: {:?} operator: {:?}", name_or_id, operator),
         )?;
+
+        if self.retain_pos {
+            if let Some(p) = pos_attr {
+                self.node_pos.insert(
+                    id,
+                    p.into_iter()
+                        .map(|(f, l, c)| ir::Pos {
+                            fileno: f,
+                            lineno: l,
+                            colno: c,
+                        })
+                        .collect(),
+                );
+            }
+        }
 
         Ok(ir::Node {
             text_id: id,
@@ -1287,6 +1269,11 @@ impl Parser {
             file_table,
             fns,
             top_name,
+            node_pos: if self.retain_pos {
+                Some(std::mem::take(&mut self.node_pos))
+            } else {
+                None
+            },
         })
     }
 }
@@ -1792,5 +1779,38 @@ top fn main(t: token id=1) -> token {
         } else {
             panic!("Expected GetParam node payload");
         }
+    }
+
+    #[test]
+    fn test_package_pos_retention() {
+        let ir = r#"package pos_pkg
+file_number 0 "a.x"
+file_number 1 "b.x"
+
+top fn main() -> bits[32] {
+  ret literal.1: bits[32] = literal(value=1, id=1, pos=[(0,0,0), (1,1,1)])
+}
+"#;
+        let mut parser = Parser::new_with_pos(ir, true);
+        let pkg = parser.parse_package().unwrap();
+        let pos_map = pkg.node_pos.as_ref().unwrap();
+        let data = pos_map.get(&1).unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(
+            data[0].to_human_string(&pkg.file_table).as_deref(),
+            Some("a.x:1:1")
+        );
+        assert_eq!(
+            data[1].to_human_string(&pkg.file_table).as_deref(),
+            Some("b.x:2:2")
+        );
+    }
+
+    #[test]
+    fn test_package_no_pos() {
+        let ir = "package nopos\n\nfn main() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1)\n}\n";
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        assert!(pkg.node_pos.is_none());
     }
 }
