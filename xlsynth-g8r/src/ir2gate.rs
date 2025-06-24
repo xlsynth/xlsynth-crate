@@ -617,6 +617,7 @@ pub fn gatify_scmp(
     rhs_bits: &AigBitVector,
     cmp_kind: CmpKind,
     or_eq: bool,
+    adder_mapping: crate::ir2gate_utils::AdderMapping,
 ) -> AigOperand {
     assert_eq!(
         lhs_bits.get_bit_count(),
@@ -660,13 +661,29 @@ pub fn gatify_scmp(
     } else {
         // For multi-bit signed comparisons, compute diff = a - b = a + (not b) + 1.
         let b_complement = gb.add_not_vec(rhs_bits);
-        let (_carry, diff) = gatify_add_ripple_carry(
-            lhs_bits,
-            &b_complement,
-            gb.get_true(),
-            Some(&format!("scmp_{}", text_id)),
-            gb,
-        );
+        let (_carry, diff) = match adder_mapping {
+            crate::ir2gate_utils::AdderMapping::RippleCarry => gatify_add_ripple_carry(
+                lhs_bits,
+                &b_complement,
+                gb.get_true(),
+                Some(&format!("scmp_{}", text_id)),
+                gb,
+            ),
+            crate::ir2gate_utils::AdderMapping::BrentKung => gatify_add_brent_kung(
+                lhs_bits,
+                &b_complement,
+                gb.get_true(),
+                Some(&format!("scmp_{}", text_id)),
+                gb,
+            ),
+            crate::ir2gate_utils::AdderMapping::KoggeStone => gatify_add_kogge_stone(
+                lhs_bits,
+                &b_complement,
+                gb.get_true(),
+                Some(&format!("scmp_{}", text_id)),
+                gb,
+            ),
+        };
         let a_msb = lhs_bits.get_msb(0);
         let b_msb = rhs_bits.get_msb(0);
         let diff_msb = diff.get_msb(0);
@@ -1341,6 +1358,7 @@ fn gatify_internal(
                     &b_bits,
                     CmpKind::Gt,
                     false,
+                    options.adder_mapping,
                 );
                 g8_builder.add_tag(gate.node, format!("sgt_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
@@ -1355,6 +1373,7 @@ fn gatify_internal(
                     &b_bits,
                     CmpKind::Gt,
                     true,
+                    options.adder_mapping,
                 );
                 g8_builder.add_tag(gate.node, format!("sge_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
@@ -1369,6 +1388,7 @@ fn gatify_internal(
                     &b_bits,
                     CmpKind::Lt,
                     false,
+                    options.adder_mapping,
                 );
                 g8_builder.add_tag(gate.node, format!("slt_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
@@ -1383,6 +1403,7 @@ fn gatify_internal(
                     &b_bits,
                     CmpKind::Lt,
                     true,
+                    options.adder_mapping,
                 );
                 g8_builder.add_tag(gate.node, format!("sle_{}", node.text_id));
                 env.add(node_ref, GateOrVec::Gate(gate));
