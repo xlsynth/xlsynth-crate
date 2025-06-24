@@ -70,7 +70,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
-    let mut parser = ir_parser::Parser::new(&file_content);
+    let mut parser = ir_parser::Parser::new_with_pos(&file_content, true);
     let ir_package = parser.parse_package().unwrap_or_else(|err| {
         eprintln!("Error encountered parsing XLS IR package: {:?}", err);
         std::process::exit(1);
@@ -102,6 +102,25 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     )
     .unwrap();
     let mut gate_fn = gatify_output.gate_fn;
+
+    // Map each gate reference back to the IR node positions, if available.
+    let mut gate_to_sources: HashMap<usize, Vec<String>> = HashMap::new();
+    if let Some(pos_map) = ir_package.node_pos.as_ref() {
+        for (node_ref, bit_vec) in gatify_output.lowering_map.iter() {
+            if let Some(pos_data) = pos_map.get(&node_ref.index) {
+                let sources: Vec<String> = pos_data
+                    .iter()
+                    .filter_map(|p| p.to_human_string(&ir_package.file_table))
+                    .collect();
+                for operand in bit_vec.iter_lsb_to_msb() {
+                    gate_to_sources
+                        .entry(operand.node.id)
+                        .or_default()
+                        .extend(sources.clone());
+                }
+            }
+        }
+    }
     // Prepare to capture fraig statistics if enabled
     let mut fraig_did_converge: Option<DidConverge> = None;
     let mut fraig_iteration_stats: Option<Vec<FraigIterationStat>> = None;
@@ -141,7 +160,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         }
         let (optimized_fn, did_converge, iteration_stats) = fraig_result.unwrap();
         if !options.quiet {
-            println!("Fraig convergence: {:?}", did_converge);
+            println!("== Fraig convergence: {:?}", did_converge);
         }
         gate_fn = optimized_fn;
         // Capture fraig results for JSON
@@ -243,12 +262,29 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
 
     println!("== Deepest path ({}):", depth_stats.deepest_path.len());
     for gate_ref in depth_stats.deepest_path.iter() {
-        // Access gates via the gate_fn reference
         let gate: &gate::AigNode = &gate_fn.gates[gate_ref.id];
+        println!("  {:4} :: {}", gate_ref.id, format_aig_node(gate));
+        let mut printed_detail = false;
+        if let Some(tags) = match gate {
+            gate::AigNode::And2 { tags, .. } => tags.as_ref(),
+            _ => None,
+        } {
+            if !tags.is_empty() {
+                println!("          tags: {}", tags.join(", "));
+                printed_detail = true;
+            }
+        }
+        if let Some(srcs) = gate_to_sources.get(&gate_ref.id) {
+            if !srcs.is_empty() {
+                let mut unique = srcs.clone();
+                unique.sort();
+                unique.dedup();
+                println!("          source: {}", unique.join(" "));
+                printed_detail = true;
+            }
+        }
         println!(
-            "  {:4} :: {:?} :: uses: {}",
-            gate_ref.id,
-            gate,
+            "          uses: {}",
             id_to_use_count.get(&gate_ref).unwrap_or(&0)
         );
     }
@@ -336,6 +372,26 @@ where
     ((x + y - T::one()) / y) * y
 }
 
+fn format_aig_operand(op: &gate::AigOperand) -> String {
+    if op.negated {
+        format!("~Ref({})", op.node.id)
+    } else {
+        format!("Ref({})", op.node.id)
+    }
+}
+
+fn format_aig_node(node: &gate::AigNode) -> String {
+    match node {
+        gate::AigNode::Input { name, lsb_index } => {
+            format!("Input({}[{}])", name, lsb_index)
+        }
+        gate::AigNode::Literal(v) => format!("Literal({})", v),
+        gate::AigNode::And2 { a, b, .. } => {
+            format!("And2({}, {})", format_aig_operand(a), format_aig_operand(b))
+        }
+    }
+}
+
 // Add back print_op_freqs if missing
 fn collect_op_frequencies(f: &ir::Fn) -> HashMap<String, usize> {
     let mut op_freqs = HashMap::new();
@@ -348,7 +404,7 @@ fn collect_op_frequencies(f: &ir::Fn) -> HashMap<String, usize> {
 
 fn print_op_freqs(ir_top: &ir::Fn) {
     let op_freqs = collect_op_frequencies(&ir_top);
-    println!("Op frequencies:");
+    println!("== Op frequencies:");
     let mut op_freqs_vec: Vec<_> = op_freqs.iter().collect();
     op_freqs_vec.sort_by(|(op_a, count_a), (op_b, count_b)| {
         count_b.cmp(count_a).then_with(|| op_a.cmp(op_b))
