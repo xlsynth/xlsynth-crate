@@ -81,7 +81,8 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
 
             // For golden comparison files (i.e. ones we compare to literally for code
             // generation facilities) we don't require SPDX identifiers.
-            if path.as_os_str().to_str().unwrap().ends_with(".golden.sv") {
+            let path_str = path.as_os_str().to_str().unwrap();
+            if path_str.ends_with(".golden.sv") || path_str.ends_with(".golden.txt") {
                 continue;
             }
 
@@ -145,6 +146,16 @@ fn check_all_rust_files_for_spdx() {
     let metadata = MetadataCommand::new().exec().unwrap();
     let workspace_dir = metadata.workspace_root;
     let missing_spdx_files = find_missing_spdx_files(workspace_dir.as_std_path());
+    if !missing_spdx_files.is_empty() {
+        eprintln!(
+            "\nSummary of files missing SPDX identifiers ({}):",
+            missing_spdx_files.len()
+        );
+        for path in &missing_spdx_files {
+            eprintln!("  - {}", path.display());
+        }
+        eprintln!("\n");
+    }
     assert!(
         missing_spdx_files.is_empty(),
         "The following files are missing SPDX identifiers: {:?}",
