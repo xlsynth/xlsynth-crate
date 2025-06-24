@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::ir2gate_utils::{
     gatify_add_brent_kung, gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
-    gatify_one_hot, gatify_one_hot_select, Direction,
+    gatify_one_hot, gatify_one_hot_select, AdderMapping, Direction,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -615,6 +615,7 @@ pub fn gatify_scmp(
     text_id: usize,
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
+    adder_mapping: AdderMapping,
     cmp_kind: CmpKind,
     or_eq: bool,
 ) -> AigOperand {
@@ -660,13 +661,29 @@ pub fn gatify_scmp(
     } else {
         // For multi-bit signed comparisons, compute diff = a - b = a + (not b) + 1.
         let b_complement = gb.add_not_vec(rhs_bits);
-        let (_carry, diff) = gatify_add_ripple_carry(
-            lhs_bits,
-            &b_complement,
-            gb.get_true(),
-            Some(&format!("scmp_{}", text_id)),
-            gb,
-        );
+        let (_carry, diff) = match adder_mapping {
+            AdderMapping::RippleCarry => gatify_add_ripple_carry(
+                lhs_bits,
+                &b_complement,
+                gb.get_true(),
+                Some(&format!("scmp_{}", text_id)),
+                gb,
+            ),
+            AdderMapping::BrentKung => gatify_add_brent_kung(
+                lhs_bits,
+                &b_complement,
+                gb.get_true(),
+                Some(&format!("scmp_{}", text_id)),
+                gb,
+            ),
+            AdderMapping::KoggeStone => gatify_add_kogge_stone(
+                lhs_bits,
+                &b_complement,
+                gb.get_true(),
+                Some(&format!("scmp_{}", text_id)),
+                gb,
+            ),
+        };
         let a_msb = lhs_bits.get_msb(0);
         let b_msb = rhs_bits.get_msb(0);
         let diff_msb = diff.get_msb(0);
@@ -1339,6 +1356,7 @@ fn gatify_internal(
                     node.text_id,
                     &a_bits,
                     &b_bits,
+                    options.adder_mapping,
                     CmpKind::Gt,
                     false,
                 );
@@ -1353,6 +1371,7 @@ fn gatify_internal(
                     node.text_id,
                     &a_bits,
                     &b_bits,
+                    options.adder_mapping,
                     CmpKind::Gt,
                     true,
                 );
@@ -1367,6 +1386,7 @@ fn gatify_internal(
                     node.text_id,
                     &a_bits,
                     &b_bits,
+                    options.adder_mapping,
                     CmpKind::Lt,
                     false,
                 );
@@ -1381,6 +1401,7 @@ fn gatify_internal(
                     node.text_id,
                     &a_bits,
                     &b_bits,
+                    options.adder_mapping,
                     CmpKind::Lt,
                     true,
                 );
