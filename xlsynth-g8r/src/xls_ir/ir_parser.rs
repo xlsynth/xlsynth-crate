@@ -4,7 +4,6 @@
 
 use crate::xls_ir::ir::{self, operator_to_nary_op, ArrayTypeData, FileTable};
 use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
-use std::collections::HashMap;
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
     let file_content = std::fs::read_to_string(path)
@@ -45,7 +44,6 @@ impl FileTable {
 pub struct Parser {
     chars: Vec<char>,
     offset: usize,
-    node_pos: HashMap<usize, ir::PosData>,
 }
 
 impl Parser {
@@ -53,7 +51,6 @@ impl Parser {
         Self {
             chars: input.chars().collect(),
             offset: 0,
-            node_pos: HashMap::new(),
         }
     }
 
@@ -1121,18 +1118,15 @@ impl Parser {
             &format!("end of node: {:?} operator: {:?}", name_or_id, operator),
         )?;
 
-        if let Some(p) = pos_attr {
-            self.node_pos.insert(
-                id,
-                p.into_iter()
-                    .map(|(f, l, c)| ir::Pos {
-                        fileno: f,
-                        lineno: l,
-                        colno: c,
-                    })
-                    .collect(),
-            );
-        }
+        let pos_data = pos_attr.map(|p| {
+            p.into_iter()
+                .map(|(f, l, c)| ir::Pos {
+                    fileno: f,
+                    lineno: l,
+                    colno: c,
+                })
+                .collect()
+        });
 
         Ok(ir::Node {
             text_id: id,
@@ -1142,6 +1136,7 @@ impl Parser {
             },
             ty: node_ty,
             payload,
+            pos: pos_data,
         })
     }
 
@@ -1157,6 +1152,7 @@ impl Parser {
             name: Some(param.name.clone()),
             ty: param.ty.clone(),
             payload: ir::NodePayload::GetParam(param.id),
+            pos: None,
         };
         let node_ref = ir::NodeRef { index: nodes.len() };
         node_env.add(Some(param.name.clone()), node.text_id, node_ref);
@@ -1181,6 +1177,7 @@ impl Parser {
             name: Some("reserved_zero_node".to_string()),
             ty: ir::Type::nil(),
             payload: ir::NodePayload::Nil,
+            pos: None,
         }];
 
         let mut node_env = IrNodeEnv::new();
@@ -1267,7 +1264,6 @@ impl Parser {
             file_table,
             fns,
             top_name,
-            node_pos: Some(std::mem::take(&mut self.node_pos)),
         })
     }
 }
@@ -1814,8 +1810,8 @@ top fn main() -> bits[32] {
 "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let pos_map = pkg.node_pos.as_ref().unwrap();
-        let data = pos_map.get(&1).unwrap();
+        let main_fn = pkg.get_top().unwrap();
+        let data = main_fn.nodes[1].pos.as_ref().unwrap();
         assert_eq!(data.len(), 2);
         assert_eq!(
             data[0].to_human_string(&pkg.file_table).as_deref(),
@@ -1832,6 +1828,7 @@ top fn main() -> bits[32] {
         let ir = "package nopos\n\nfn main() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1, pos=[(0,0,0)])\n}\n";
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        assert!(pkg.node_pos.is_some());
+        let main_fn = pkg.get_top().unwrap();
+        assert!(main_fn.nodes[1].pos.is_some());
     }
 }
