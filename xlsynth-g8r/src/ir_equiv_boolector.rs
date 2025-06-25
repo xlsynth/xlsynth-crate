@@ -1609,7 +1609,10 @@ mod tests {
         let g = ir_parser::Parser::new(ir_text_g).parse_fn().unwrap();
         let result = prove_ir_fn_equiv(&f, &g);
         match result {
-            EquivResult::Disproved(ref cex) => {
+            EquivResult::Disproved {
+                inputs: ref cex,
+                outputs: _,
+            } => {
                 assert_eq!(cex.len(), 1);
                 let bits = &cex[0];
                 assert_eq!(bits.get_bit_count(), 8);
@@ -1746,7 +1749,10 @@ mod tests {
         let result = prove_ir_fn_equiv(&f, &g);
         match result {
             EquivResult::Proved => (),
-            EquivResult::Disproved(_) => panic!("Expected Proved, got Disproved"),
+            EquivResult::Disproved {
+                inputs: _,
+                outputs: _,
+            } => panic!("Expected Proved, got Disproved"),
         }
     }
 
