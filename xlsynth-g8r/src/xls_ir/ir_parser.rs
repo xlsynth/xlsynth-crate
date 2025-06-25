@@ -170,6 +170,8 @@ impl Parser {
                 if c.is_ascii_hexdigit() {
                     number.push(c);
                     self.popc();
+                } else if c == '_' {
+                    self.popc();
                 } else {
                     break;
                 }
@@ -181,6 +183,8 @@ impl Parser {
                 if c == '0' || c == '1' {
                     number.push(c);
                     self.popc();
+                } else if c == '_' {
+                    self.popc();
                 } else {
                     break;
                 }
@@ -189,6 +193,8 @@ impl Parser {
             while let Some(c) = self.peekc() {
                 if c.is_ascii_digit() {
                     number.push(c);
+                    self.popc();
+                } else if c == '_' {
                     self.popc();
                 } else {
                     break;
@@ -1357,6 +1363,33 @@ fn bar(x: bits[8] id=3) -> bits[8] {
             assert_eq!(
                 value.to_string_fmt(IrFormatPreference::Hex).unwrap(),
                 "bits[8]:0x2a"
+            );
+        } else {
+            panic!("expected literal node");
+        }
+    }
+
+    #[test]
+    fn test_parse_hex_literal_with_underscores() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let ir = r#"package underscore
+
+fn foo() -> bits[65] {
+  ret literal.1: bits[65] = literal(value=0x1_ffff_ffff_ffff_fffe, id=1)
+}
+"#;
+
+        // Verify the C++ parser accepts this IR.
+        let _pkg = xlsynth::IrPackage::parse_ir(ir, None).unwrap();
+
+        // Verify the Rust parser accepts the same IR and parses the literal correctly.
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        let f = pkg.get_fn("foo").unwrap();
+        if let ir::NodePayload::Literal(v) = &f.nodes[1].payload {
+            assert_eq!(
+                v.to_string_fmt(IrFormatPreference::Hex).unwrap(),
+                "bits[65]:0x1_ffff_ffff_ffff_fffe"
             );
         } else {
             panic!("expected literal node");
