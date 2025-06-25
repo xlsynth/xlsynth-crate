@@ -1018,6 +1018,25 @@ pub fn flatten_type(ty: &crate::xls_ir::ir::Type) -> usize {
     }
 }
 
+// Helper: convert a Boolector BV model solution to IrBits in LSB-first (bit0 is
+// LSB) order.
+fn bv_solution_to_ir_bits(bv: &BV<Rc<Btor>>) -> IrBits {
+    // Retrieve the concrete value from the solver model.
+    let width = bv.get_width() as usize;
+    let solution = bv.get_a_solution();
+    let disamb = solution.disambiguate();
+    let bitstr = disamb.as_01x_str();
+    let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
+    if bits.len() != width {
+        log::trace!(
+            "[bv_solution_to_ir_bits] Solution width mismatch: expected {}, got {}",
+            width,
+            bits.len()
+        );
+    }
+    crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits)
+}
+
 /// Checks equivalence of two IR functions using Boolector.
 /// Only supports literal-only, zero-parameter functions for now.
 fn check_equiv_internal_with_btor(
@@ -1122,31 +1141,12 @@ fn check_equiv_internal_with_btor(
             let mut counterexample = Vec::new();
             for param in &lhs.params {
                 let bv = lhs_param_bvs.get(&param.name).unwrap();
-                let width = bv.get_width() as usize;
-                let solution = bv.get_a_solution();
-                let disamb = solution.disambiguate();
-                let bitstr = disamb.as_01x_str();
-                let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
-                if bits.len() != width {
-                    log::trace!(
-                        "[ir_fn_to_boolector] Solution width mismatch for param: name={}, expected width={}, got {}",
-                        param.name, width, bits.len()
-                    );
-                }
-                let ir_bits = crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits);
+                let ir_bits = bv_solution_to_ir_bits(bv);
                 counterexample.push(ir_bits);
             }
             // Extract outputs for lhs and rhs
-            let lhs_solution = lhs_out.get_a_solution();
-            let lhs_disamb = lhs_solution.disambiguate();
-            let lhs_bitstr = lhs_disamb.as_01x_str();
-            let lhs_bits: Vec<bool> = lhs_bitstr.chars().rev().map(|c| c == '1').collect();
-            let lhs_ir_bits = crate::ir_value_utils::ir_bits_from_lsb_is_0(&lhs_bits);
-            let rhs_solution = rhs_out.get_a_solution();
-            let rhs_disamb = rhs_solution.disambiguate();
-            let rhs_bitstr = rhs_disamb.as_01x_str();
-            let rhs_bits: Vec<bool> = rhs_bitstr.chars().rev().map(|c| c == '1').collect();
-            let rhs_ir_bits = crate::ir_value_utils::ir_bits_from_lsb_is_0(&rhs_bits);
+            let lhs_ir_bits = bv_solution_to_ir_bits(&lhs_out);
+            let rhs_ir_bits = bv_solution_to_ir_bits(&rhs_out);
             EquivResult::Disproved {
                 inputs: counterexample,
                 outputs: (lhs_ir_bits, rhs_ir_bits),
