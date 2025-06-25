@@ -45,20 +45,14 @@ impl FileTable {
 pub struct Parser {
     chars: Vec<char>,
     offset: usize,
-    retain_pos: bool,
     node_pos: HashMap<usize, ir::PosData>,
 }
 
 impl Parser {
     pub fn new(input: &str) -> Self {
-        Self::new_with_pos(input, false)
-    }
-
-    pub fn new_with_pos(input: &str, retain_pos: bool) -> Self {
         Self {
             chars: input.chars().collect(),
             offset: 0,
-            retain_pos,
             node_pos: HashMap::new(),
         }
     }
@@ -1127,19 +1121,17 @@ impl Parser {
             &format!("end of node: {:?} operator: {:?}", name_or_id, operator),
         )?;
 
-        if self.retain_pos {
-            if let Some(p) = pos_attr {
-                self.node_pos.insert(
-                    id,
-                    p.into_iter()
-                        .map(|(f, l, c)| ir::Pos {
-                            fileno: f,
-                            lineno: l,
-                            colno: c,
-                        })
-                        .collect(),
-                );
-            }
+        if let Some(p) = pos_attr {
+            self.node_pos.insert(
+                id,
+                p.into_iter()
+                    .map(|(f, l, c)| ir::Pos {
+                        fileno: f,
+                        lineno: l,
+                        colno: c,
+                    })
+                    .collect(),
+            );
         }
 
         Ok(ir::Node {
@@ -1275,11 +1267,7 @@ impl Parser {
             file_table,
             fns,
             top_name,
-            node_pos: if self.retain_pos {
-                Some(std::mem::take(&mut self.node_pos))
-            } else {
-                None
-            },
+            node_pos: Some(std::mem::take(&mut self.node_pos)),
         })
     }
 }
@@ -1824,7 +1812,7 @@ top fn main() -> bits[32] {
   ret literal.1: bits[32] = literal(value=1, id=1, pos=[(0,0,0), (1,1,1)])
 }
 "#;
-        let mut parser = Parser::new_with_pos(ir, true);
+        let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
         let pos_map = pkg.node_pos.as_ref().unwrap();
         let data = pos_map.get(&1).unwrap();
@@ -1840,10 +1828,10 @@ top fn main() -> bits[32] {
     }
 
     #[test]
-    fn test_package_no_pos() {
-        let ir = "package nopos\n\nfn main() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1)\n}\n";
+    fn test_package_collects_pos() {
+        let ir = "package nopos\n\nfn main() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1, pos=[(0,0,0)])\n}\n";
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        assert!(pkg.node_pos.is_none());
+        assert!(pkg.node_pos.is_some());
     }
 }
