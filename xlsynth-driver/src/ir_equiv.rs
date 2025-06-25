@@ -171,8 +171,13 @@ fn run_boolector_equiv_check(
             println!("success: Boolector proved equivalence");
             std::process::exit(0);
         }
-        ir_equiv_boolector::EquivResult::Disproved(cex) => {
+        ir_equiv_boolector::EquivResult::Disproved {
+            inputs: cex,
+            outputs: (lhs_bits, rhs_bits),
+        } => {
             println!("failure: Boolector found counterexample: {:?}", cex);
+            println!("    output LHS: {:?}", lhs_bits);
+            println!("    output RHS: {:?}", rhs_bits);
             std::process::exit(1);
         }
     }

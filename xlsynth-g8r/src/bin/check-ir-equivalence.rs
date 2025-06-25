@@ -71,12 +71,15 @@ fn main_has_boolector(args: Args) {
                 boolector_elapsed
             );
         }
-        ir_equiv_boolector::EquivResult::Disproved(cex) => {
+        ir_equiv_boolector::EquivResult::Disproved {
+            inputs: cex,
+            outputs: (lhs_out_bits, rhs_out_bits),
+        } => {
             println!(
                 "Equivalence result (boolector): DISPROVED (took {:?})",
                 boolector_elapsed
             );
-            println!("Counterexample(s):");
+            println!("Counterexample inputs:");
             let values: Vec<_> = cex
                 .iter()
                 .zip(&f1.params)
@@ -87,6 +90,11 @@ fn main_has_boolector(args: Args) {
             } else {
                 println!("  {:?}", values);
             }
+            // Report outputs for the counterexample
+            let lhs_val = ir_value_from_bits_with_type(&lhs_out_bits, &f1.ret_ty);
+            let rhs_val = ir_value_from_bits_with_type(&rhs_out_bits, &f2.ret_ty);
+            println!("Output LHS: {}", lhs_val);
+            println!("Output RHS: {}", rhs_val);
         }
     }
 

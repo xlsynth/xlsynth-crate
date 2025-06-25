@@ -975,7 +975,14 @@ pub fn ir_fn_to_boolector(
 #[derive(Debug, PartialEq, Eq)]
 pub enum EquivResult {
     Proved,
-    Disproved(Vec<IrBits>), // Counterexample input
+    /// Counterexample with inputs that distinguish the two functions,
+    /// along with the corresponding outputs from the lhs and rhs functions.
+    Disproved {
+        /// Counterexample input assignments.
+        inputs: Vec<IrBits>,
+        /// Counterexample outputs for lhs and rhs functions.
+        outputs: (IrBits, IrBits),
+    },
 }
 
 /// Helper to flatten a BV output (tuple) to a single BV
@@ -1009,6 +1016,25 @@ pub fn flatten_type(ty: &crate::xls_ir::ir::Type) -> usize {
         crate::xls_ir::ir::Type::Array(arr) => flatten_type(&arr.element_type) * arr.element_count,
         _ => unimplemented!("flatten_type for {:?}", ty),
     }
+}
+
+// Helper: convert a Boolector BV model solution to IrBits in LSB-first (bit0 is
+// LSB) order.
+fn bv_solution_to_ir_bits(bv: &BV<Rc<Btor>>) -> IrBits {
+    // Retrieve the concrete value from the solver model.
+    let width = bv.get_width() as usize;
+    let solution = bv.get_a_solution();
+    let disamb = solution.disambiguate();
+    let bitstr = disamb.as_01x_str();
+    let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
+    if bits.len() != width {
+        log::trace!(
+            "[bv_solution_to_ir_bits] Solution width mismatch: expected {}, got {}",
+            width,
+            bits.len()
+        );
+    }
+    crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits)
 }
 
 /// Checks equivalence of two IR functions using Boolector.
@@ -1115,29 +1141,16 @@ fn check_equiv_internal_with_btor(
             let mut counterexample = Vec::new();
             for param in &lhs.params {
                 let bv = lhs_param_bvs.get(&param.name).unwrap();
-                let width = bv.get_width() as usize;
-                // Assert SAT before retrieving model
-                assert_eq!(
-                    sat_result,
-                    SolverResult::Sat,
-                    "Expected SAT before retrieving model for param '{}', got {:?}",
-                    param.name,
-                    sat_result
-                );
-                let solution = bv.get_a_solution();
-                let disamb = solution.disambiguate();
-                let bitstr = disamb.as_01x_str();
-                let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
-                if bits.len() != width {
-                    log::trace!(
-                        "[ir_fn_to_boolector] Solution width mismatch for param: name={}, expected width={}, got {}",
-                        param.name, width, bits.len()
-                    );
-                }
-                let ir_bits = crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits);
+                let ir_bits = bv_solution_to_ir_bits(bv);
                 counterexample.push(ir_bits);
             }
-            EquivResult::Disproved(counterexample)
+            // Extract outputs for lhs and rhs
+            let lhs_ir_bits = bv_solution_to_ir_bits(&lhs_out);
+            let rhs_ir_bits = bv_solution_to_ir_bits(&rhs_out);
+            EquivResult::Disproved {
+                inputs: counterexample,
+                outputs: (lhs_ir_bits, rhs_ir_bits),
+            }
         }
         SolverResult::Unknown => panic!("Solver returned unknown result"),
     };
@@ -1353,7 +1366,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
     }
 
     let found = Arc::new(AtomicBool::new(false));
-    let cex = Arc::new(Mutex::new(None));
+    let cex: Arc<Mutex<Option<(Vec<IrBits>, (IrBits, IrBits))>>> = Arc::new(Mutex::new(None));
     let next = Arc::new(AtomicUsize::new(0));
     let threads = num_cpus::get();
     let mut handles = Vec::new();
@@ -1382,9 +1395,13 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
             // consistent bit ordering between the two functions.
             let res = prove_ir_equiv_flattened(&lf, &rf);
             log::debug!("thread {} checking bit {} result: {:?}", thread_no, i, res);
-            if let EquivResult::Disproved(bits) = res {
+            if let EquivResult::Disproved {
+                inputs: bits,
+                outputs,
+            } = res
+            {
                 found_cl.store(true, Ordering::SeqCst);
-                *cex_cl.lock().unwrap() = Some(bits);
+                *cex_cl.lock().unwrap() = Some((bits, outputs));
                 break;
             }
         });
@@ -1401,8 +1418,8 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
         guard.take()
     };
 
-    if let Some(bits) = maybe_bits {
-        EquivResult::Disproved(bits)
+    if let Some((inputs, outputs)) = maybe_bits {
+        EquivResult::Disproved { inputs, outputs }
     } else {
         EquivResult::Proved
     }
@@ -1483,11 +1500,11 @@ pub fn prove_ir_fn_equiv_split_input_bit(
     };
 
     let res0 = run_branch(0);
-    if let EquivResult::Disproved(_) = res0 {
+    if let EquivResult::Disproved { .. } = res0 {
         return res0;
     }
     let res1 = run_branch(1);
-    if let EquivResult::Disproved(_) = res1 {
+    if let EquivResult::Disproved { .. } = res1 {
         return res1;
     }
     EquivResult::Proved
@@ -1592,7 +1609,10 @@ mod tests {
         let g = ir_parser::Parser::new(ir_text_g).parse_fn().unwrap();
         let result = prove_ir_fn_equiv(&f, &g);
         match result {
-            EquivResult::Disproved(ref cex) => {
+            EquivResult::Disproved {
+                inputs: ref cex,
+                outputs: _,
+            } => {
                 assert_eq!(cex.len(), 1);
                 let bits = &cex[0];
                 assert_eq!(bits.get_bit_count(), 8);
@@ -1729,7 +1749,10 @@ mod tests {
         let result = prove_ir_fn_equiv(&f, &g);
         match result {
             EquivResult::Proved => (),
-            EquivResult::Disproved(_) => panic!("Expected Proved, got Disproved"),
+            EquivResult::Disproved {
+                inputs: _,
+                outputs: _,
+            } => panic!("Expected Proved, got Disproved"),
         }
     }
 

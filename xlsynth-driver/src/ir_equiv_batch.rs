@@ -83,7 +83,10 @@ fn run_check_with_ctx(
             );
             true
         }
-        EquivResult::Disproved(cex) => {
+        EquivResult::Disproved {
+            inputs: cex,
+            outputs: (lhs_bits, rhs_bits),
+        } => {
             println!(
                 "failure: Boolector found counterexample for {}:{} vs {}:{}: {:?} (in {:?})",
                 lhs_path.display(),
@@ -93,6 +96,8 @@ fn run_check_with_ctx(
                 cex,
                 duration
             );
+            println!("    output lhs: {:?}", lhs_bits);
+            println!("    output rhs: {:?}", rhs_bits);
             false
         }
     }
