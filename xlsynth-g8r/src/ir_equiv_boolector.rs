@@ -1345,6 +1345,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
                 start: bit,
                 width: 1,
             },
+            pos: None,
         });
         nf.ret_node_ref = Some(slice_ref);
         nf.ret_ty = Type::Bits(1);

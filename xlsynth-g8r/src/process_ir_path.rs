@@ -105,19 +105,17 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
 
     // Map each gate reference back to the IR node positions, if available.
     let mut gate_to_sources: HashMap<usize, Vec<String>> = HashMap::new();
-    if let Some(pos_map) = ir_package.node_pos.as_ref() {
-        for (node_ref, bit_vec) in gatify_output.lowering_map.iter() {
-            if let Some(pos_data) = pos_map.get(&node_ref.index) {
-                let sources: Vec<String> = pos_data
-                    .iter()
-                    .filter_map(|p| p.to_human_string(&ir_package.file_table))
-                    .collect();
-                for operand in bit_vec.iter_lsb_to_msb() {
-                    gate_to_sources
-                        .entry(operand.node.id)
-                        .or_default()
-                        .extend(sources.clone());
-                }
+    for (node_ref, bit_vec) in gatify_output.lowering_map.iter() {
+        if let Some(pos_data) = ir_top.get_node(*node_ref).pos.as_ref() {
+            let sources: Vec<String> = pos_data
+                .iter()
+                .filter_map(|p| p.to_human_string(&ir_package.file_table))
+                .collect();
+            for operand in bit_vec.iter_lsb_to_msb() {
+                gate_to_sources
+                    .entry(operand.node.id)
+                    .or_default()
+                    .extend(sources.clone());
             }
         }
     }

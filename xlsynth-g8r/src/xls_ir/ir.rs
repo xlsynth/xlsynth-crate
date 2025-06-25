@@ -752,6 +752,7 @@ pub struct Node {
     pub name: Option<String>,
     pub ty: Type,
     pub payload: NodePayload,
+    pub pos: Option<PosData>,
 }
 
 impl Node {
@@ -1023,7 +1024,6 @@ pub struct Package {
     pub file_table: FileTable,
     pub fns: Vec<Fn>,
     pub top_name: Option<String>,
-    pub node_pos: Option<HashMap<usize, PosData>>,
 }
 
 impl Package {
