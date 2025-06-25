@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Tests that invoke the `g8r` binary.
+
 use std::io::Write;
 use std::process::Command;
 
@@ -35,7 +37,7 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let golden_path = std::path::Path::new("tests/goldens/invoke_ir2gates.golden.txt");
+    let golden_path = std::path::Path::new("tests/goldens/g8r_invoke_ir2gates.golden.txt");
     if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
         println!("INFO: Updating golden file: {}", golden_path.display());
         std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
