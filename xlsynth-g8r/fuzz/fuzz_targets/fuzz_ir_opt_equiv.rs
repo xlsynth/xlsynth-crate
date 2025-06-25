@@ -65,8 +65,10 @@ fuzz_target!(|sample: FuzzSample| {
         Ok(()) => {
             // External tool says equivalent, Boolector should agree
             match (boolector_result, parallel_result) {
-                (ir_equiv_boolector::EquivResult::Proved, Some(ir_equiv_boolector::EquivResult::Proved)) | (ir_equiv_boolector::EquivResult::Proved, None) => (),
-                (ir_equiv_boolector::EquivResult::Disproved(cex), _) | (_, Some(ir_equiv_boolector::EquivResult::Disproved(cex))) => {
+            (ir_equiv_boolector::EquivResult::Proved, Some(ir_equiv_boolector::EquivResult::Proved))
+            | (ir_equiv_boolector::EquivResult::Proved, None) => (),
+            (ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. }, _)
+            | (_, Some(ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. })) => {
                     log::info!("==== IR disagreement detected ====");
                     log::info!("Original IR:\n{}", orig_ir);
                     log::info!("Optimized IR:\n{}", opt_ir);
@@ -80,7 +82,9 @@ fuzz_target!(|sample: FuzzSample| {
         Err(ext_err) => {
             // External tool says not equivalent, check Boolector and parallel
             match (boolector_result, parallel_result) {
-                (ir_equiv_boolector::EquivResult::Proved, _) | (_, Some(ir_equiv_boolector::EquivResult::Proved)) | (ir_equiv_boolector::EquivResult::Proved, None) => {
+                (ir_equiv_boolector::EquivResult::Proved, _)
+                | (_, Some(ir_equiv_boolector::EquivResult::Proved))
+                | (ir_equiv_boolector::EquivResult::Proved, None) => {
                     log::info!("==== IR disagreement detected ====");
                     log::info!("Original IR:\n{}", orig_ir);
                     log::info!("Optimized IR:\n{}", opt_ir);
@@ -89,7 +93,8 @@ fuzz_target!(|sample: FuzzSample| {
                         ext_err
                     );
                 }
-                (ir_equiv_boolector::EquivResult::Disproved(_), Some(ir_equiv_boolector::EquivResult::Disproved(_))) | (ir_equiv_boolector::EquivResult::Disproved(_), None) => (), // All agree not equivalent
+                (ir_equiv_boolector::EquivResult::Disproved { .. }, Some(ir_equiv_boolector::EquivResult::Disproved { .. }))
+                | (ir_equiv_boolector::EquivResult::Disproved { .. }, None) => (), // All agree not equivalent
             }
         }
     }
