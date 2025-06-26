@@ -2,7 +2,8 @@
 
 #![cfg(feature = "has-boolector")]
 
-use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
+use crate::ir_value_utils::ir_value_from_bits_with_type;
+use crate::xls_ir::ir::{Fn, NodePayload, NodeRef, Type};
 use crate::xls_ir::ir_utils::get_topological;
 use boolector::option::{BtorOption, ModelGen};
 use boolector::{BV, Btor, SolverResult};
@@ -14,6 +15,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use xlsynth::IrBits;
+use xlsynth::IrValue;
 
 /// Result of converting an XLS IR function to Boolector logic.
 pub struct IrFnBoolectorResult {
@@ -985,10 +987,12 @@ pub enum EquivResult {
     /// Counterexample with inputs that distinguish the two functions,
     /// along with the corresponding outputs from the lhs and rhs functions.
     Disproved {
-        /// Counterexample input assignments.
-        inputs: Vec<IrBits>,
-        /// Counterexample outputs for lhs and rhs functions.
-        outputs: (IrBits, IrBits),
+        /// Counterexample input assignments, reconstructed as structured IR
+        /// values.
+        inputs: Vec<IrValue>,
+        /// Counterexample outputs for lhs and rhs functions, reconstructed as
+        /// structured IR values.
+        outputs: (IrValue, IrValue),
     },
 }
 
@@ -1042,6 +1046,13 @@ fn bv_solution_to_ir_bits(bv: &BV<Rc<Btor>>) -> IrBits {
         );
     }
     crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits)
+}
+
+/// Helper: convert a Boolector BV model solution to a typed IRValue using the
+/// given IR type.
+fn bv_solution_to_ir_value(bv: &BV<Rc<Btor>>, ty: &Type) -> IrValue {
+    let bits = bv_solution_to_ir_bits(bv);
+    ir_value_from_bits_with_type(&bits, ty)
 }
 
 /// Checks equivalence of two IR functions using Boolector.
@@ -1144,19 +1155,18 @@ fn check_equiv_internal_with_btor(
     let res = match sat_result {
         SolverResult::Unsat => EquivResult::Proved,
         SolverResult::Sat => {
-            // Extract input assignments from the model
+            // Extract input assignments from the model and reconstruct typed IR values.
             let mut counterexample = Vec::new();
             for param in &lhs.params {
                 let bv = lhs_param_bvs.get(&param.name).unwrap();
-                let ir_bits = bv_solution_to_ir_bits(bv);
-                counterexample.push(ir_bits);
+                counterexample.push(bv_solution_to_ir_value(bv, &param.ty));
             }
-            // Extract outputs for lhs and rhs
-            let lhs_ir_bits = bv_solution_to_ir_bits(&lhs_out);
-            let rhs_ir_bits = bv_solution_to_ir_bits(&rhs_out);
+            // Extract outputs for lhs and rhs and reconstruct typed IR values.
+            let lhs_val = bv_solution_to_ir_value(&lhs_out, &lhs.ret_ty);
+            let rhs_val = bv_solution_to_ir_value(&rhs_out, &lhs.ret_ty);
             EquivResult::Disproved {
                 inputs: counterexample,
-                outputs: (lhs_ir_bits, rhs_ir_bits),
+                outputs: (lhs_val, rhs_val),
             }
         }
         SolverResult::Unknown => panic!("Solver returned unknown result"),
@@ -1373,7 +1383,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
     }
 
     let found = Arc::new(AtomicBool::new(false));
-    let cex: Arc<Mutex<Option<(Vec<IrBits>, (IrBits, IrBits))>>> = Arc::new(Mutex::new(None));
+    let cex: Arc<Mutex<Option<(Vec<IrValue>, (IrValue, IrValue))>>> = Arc::new(Mutex::new(None));
     let next = Arc::new(AtomicUsize::new(0));
     let threads = num_cpus::get();
     let mut handles = Vec::new();
@@ -1403,13 +1413,10 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
                 // consistent bit ordering between the two functions.
                 let res = prove_ir_equiv_flattened(&lf, &rf);
                 log::debug!("thread {} checking bit {} result: {:?}", thread_no, i, res);
-                if let EquivResult::Disproved {
-                    inputs: bits,
-                    outputs,
-                } = res
-                {
+                if let EquivResult::Disproved { inputs, outputs } = res {
+                    // Inputs and outputs are already typed IR values.
                     found_cl.store(true, Ordering::SeqCst);
-                    *cex_cl.lock().unwrap() = Some((bits, outputs));
+                    *cex_cl.lock().unwrap() = Some((inputs, outputs));
                     break;
                 }
             }
@@ -1422,12 +1429,12 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
         h.join().unwrap();
     }
 
-    let maybe_bits = {
+    let maybe_cex = {
         let mut guard = cex.lock().unwrap();
         guard.take()
     };
 
-    if let Some((inputs, outputs)) = maybe_bits {
+    if let Some((inputs, outputs)) = maybe_cex {
         EquivResult::Disproved { inputs, outputs }
     } else {
         EquivResult::Proved
@@ -1623,16 +1630,10 @@ mod tests {
                 outputs: _,
             } => {
                 assert_eq!(cex.len(), 1);
-                let bits = &cex[0];
-                assert_eq!(bits.get_bit_count(), 8);
+                let val = &cex[0];
+                assert_eq!(val.bit_count().unwrap(), 8);
                 // Should be 42
-                let mut value = 0u64;
-                for i in 0..8 {
-                    if bits.get_bit(i).unwrap() {
-                        value |= 1 << i;
-                    }
-                }
-                assert_eq!(value, 42);
+                assert_eq!(val.to_u64().unwrap(), 42);
             }
             _ => panic!("Expected Disproved with counterexample"),
         }
