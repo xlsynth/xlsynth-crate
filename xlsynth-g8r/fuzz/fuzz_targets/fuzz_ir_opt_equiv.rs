@@ -54,10 +54,12 @@ fuzz_target!(|sample: FuzzSample| {
     let top_fn_name = "fuzz_test";
     let ext_equiv =
         check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
-    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn);
+    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn, false);
     let output_bit_count = orig_fn.ret_ty.bit_count();
     let parallel_result = if output_bit_count <= 64 {
-        Some(ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(orig_fn, opt_fn, false))
+        Some(ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
+            orig_fn, opt_fn, false,
+        ))
     } else {
         None
     };
@@ -65,10 +67,13 @@ fuzz_target!(|sample: FuzzSample| {
         Ok(()) => {
             // External tool says equivalent, Boolector should agree
             match (boolector_result, parallel_result) {
-            (ir_equiv_boolector::EquivResult::Proved, Some(ir_equiv_boolector::EquivResult::Proved))
-            | (ir_equiv_boolector::EquivResult::Proved, None) => (),
-            (ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. }, _)
-            | (_, Some(ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. })) => {
+                (
+                    ir_equiv_boolector::EquivResult::Proved,
+                    Some(ir_equiv_boolector::EquivResult::Proved),
+                )
+                | (ir_equiv_boolector::EquivResult::Proved, None) => (),
+                (ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. }, _)
+                | (_, Some(ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. })) => {
                     log::info!("==== IR disagreement detected ====");
                     log::info!("Original IR:\n{}", orig_ir);
                     log::info!("Optimized IR:\n{}", opt_ir);
@@ -93,8 +98,11 @@ fuzz_target!(|sample: FuzzSample| {
                         ext_err
                     );
                 }
-                (ir_equiv_boolector::EquivResult::Disproved { .. }, Some(ir_equiv_boolector::EquivResult::Disproved { .. }))
-                | (ir_equiv_boolector::EquivResult::Disproved { .. }, None) => (), // All agree not equivalent
+                (
+                    ir_equiv_boolector::EquivResult::Disproved { .. },
+                    Some(ir_equiv_boolector::EquivResult::Disproved { .. }),
+                )
+                | (ir_equiv_boolector::EquivResult::Disproved { .. }, None) => (), /* All agree not equivalent */
             }
         }
     }

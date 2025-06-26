@@ -55,7 +55,7 @@ fn main_has_boolector(args: Args) {
 
     // First run the Boolector-based equivalence prover.
     let boolector_start = Instant::now();
-    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(f1, f2);
+    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(f1, f2, false);
     let boolector_elapsed = boolector_start.elapsed();
 
     // Convert Boolector result into a simple boolean for later comparison.
