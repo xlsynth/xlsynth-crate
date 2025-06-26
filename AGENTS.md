@@ -41,3 +41,11 @@ When adding a **new** `xlsynth-driver` subcommand you **must** add a correspondi
 section to `xlsynth-driver/README.md` that follows the style of the existing
 entries (name, short description, flag list, example usage, etc.). Pull requests
 that introduce a command without updating the README are subject to rejection.
+
+## Test
+
+For changes related to boolector, you should test with
+
+```bash
+cargo test --features with-boolector-built --workspace
+```
