@@ -169,6 +169,10 @@ jobs:
           echo "ldconfig -p | grep boolector:"
           ldconfig -p | grep boolector || echo "libboolector.so not found in ldconfig!"
 
+      - name: Install Z3 binary
+        run: |
+          sudo apt-get install -y z3
+
       - name: Test crate
         env:
           BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
@@ -184,7 +188,7 @@ jobs:
             ls -l /usr/lib | grep boolector || true
             exit 1
           fi
-          cargo test --features with-boolector-system,with-z3-system --workspace
+          cargo test --features with-boolector-system,with-z3-system,with-easy-smt,with-z3-binary-test --workspace
 
       - name: Ensure benches compile
         env:
@@ -370,6 +374,10 @@ jobs:
           override: true
           components: clippy
 
+      - name: Install Z3 binary
+        run: |
+          brew install z3
+
       - name: Run pre-commit
         env:
           SKIP: no-commit-to-branch
@@ -380,7 +388,7 @@ jobs:
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-built,with-z3-built --workspace
+          cargo test --features with-boolector-built,with-z3-built,with-easy-smt,with-z3-binary-test --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
