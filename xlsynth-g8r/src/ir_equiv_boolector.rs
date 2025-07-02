@@ -1281,14 +1281,23 @@ fn ir_value_to_bv(
             result
         }
         crate::xls_ir::ir::Type::Tuple(types) => {
+            // Keep element-0 as the most-significant slice to match the
+            // ordering used by the `tuple` IR node and by
+            // `tuple_get_flat_bit_slice_for_index`.
             let elements = ir_value
                 .get_elements()
                 .expect("Tuple literal must have elements");
-            let mut bvs = Vec::new();
-            for (elem, elem_ty) in elements.iter().rev().zip(types.iter().rev()) {
+            assert_eq!(elements.len(), types.len());
+
+            let mut bvs = Vec::with_capacity(elements.len());
+            // Iterate in *forward* order so that element-0 is processed first
+            // and will end up in the MSB position after successive concats.
+            for (elem, elem_ty) in elements.iter().zip(types.iter()) {
                 let bv = ir_value_to_bv(btor.clone(), elem, elem_ty);
                 bvs.push(bv);
             }
+
+            // Concatenate, keeping accumulated value as MSBs.
             let mut result = bvs[0].clone();
             for bv in bvs.iter().skip(1) {
                 result = result.concat(bv);
@@ -2506,5 +2515,66 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
             .expect("parse rhs");
         let result = prove_ir_fn_equiv(&lhs, &rhs, false);
         assert_eq!(result, EquivResult::Proved);
+    }
+
+    #[test]
+    fn test_tuple_literal_vs_constructed_inconsistent() {
+        // Two functions that should be equivalent: one returns a tuple literal, the
+        // other constructs the same tuple with the `tuple` operator.  If tuple
+        // encoding is consistent the prover should return `Proved`.  The
+        // current implementation is inconsistent, therefore we expect
+        // `Disproved` which reveals the bug.
+        let lhs_ir = r#"fn lhs() -> (bits[8], bits[4]) {
+  ret lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> (bits[8], bits[4]) {
+  lit0: bits[8] = literal(value=0x12, id=1)
+  lit1: bits[4] = literal(value=0x4, id=2)
+  ret tup: (bits[8], bits[4]) = tuple(lit0, lit1, id=3)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert_eq!(
+            result,
+            super::EquivResult::Proved,
+            "Tuple literal vs constructed should be equivalent; failing reveals bug in tuple encoding"
+        );
+    }
+
+    #[test]
+    fn test_tuple_index_on_literal_inconsistent() {
+        // The first element of (0x12, 0x4) is 0x12.  With consistent tuple encoding,
+        // the two functions below should be equivalent.  Inconsistent encoding
+        // causes the prover to find a spurious difference.
+        let lhs_ir = r#"fn lhs() -> bits[8] {
+  lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+  ret idx0: bits[8] = tuple_index(lit_tuple, index=0, id=2)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[8] {
+  ret lit: bits[8] = literal(value=0x12, id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert_eq!(
+            result,
+            super::EquivResult::Proved,
+            "Tuple index on literal should produce equivalent values; failing reveals bug in tuple encoding"
+        );
     }
 }
