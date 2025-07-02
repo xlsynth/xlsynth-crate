@@ -29,6 +29,7 @@ z3 = { version = "0.12", optional = true }
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
 boolector = { version = "0.4.3", optional = true }
+easy-smt = { version = "0.3.1", optional = true }
 prost = "0.12.6"
 prost-types = "0.12.6"
 prost-reflect = { version = "0.12.0", features = ["text-format"] }
@@ -63,10 +64,15 @@ prost-build = "0.12"
 [features]
 default = []
 has-boolector = []
+has-easy-smt = []
 with-boolector-system = ["dep:boolector", "has-boolector"]
 with-boolector-built = ["dep:boolector", "boolector/vendor-lgl", "has-boolector"]
 with-z3-system = ["dep:z3"]
 with-z3-built = ["dep:z3", "z3/static-link-z3"]
+with-easy-smt = ["dep:easy-smt", "has-easy-smt"]
+with-boolector-binary-test = ["with-easy-smt"]
+with-bitwuzla-binary-test = ["with-easy-smt"]
+with-z3-binary-test = ["with-easy-smt"]
 
 [lib]
 name = "xlsynth_g8r"
