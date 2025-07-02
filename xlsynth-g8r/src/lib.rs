@@ -13,6 +13,7 @@ pub mod dce;
 pub mod dslx_stitch_pipeline;
 pub mod emit_netlist;
 pub mod emitted_netlist_parser;
+pub mod equiv;
 pub mod fanout;
 pub mod find_structures;
 pub mod fraig;

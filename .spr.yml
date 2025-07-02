@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+
+githubRepoOwner: xlsynth
+githubRepoName: xlsynth-crate
+githubHost: github.com
+githubRemote: origin
+githubBranch: main
+requireChecks: true
+requireApproval: true
+mergeMethod: rebase
+mergeQueue: false
+forceFetchTags: false
+showPrTitlesInStack: false
+branchPushIndividually: false
