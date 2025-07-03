@@ -19,6 +19,53 @@ pub trait Solver: Sized {
     fn new(config: &Self::Config) -> io::Result<Self>;
     fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Rep>>;
     fn numerical(&mut self, width: usize, value: u64) -> BitVec<Self::Rep>;
+    fn zero(&mut self, width: usize) -> BitVec<Self::Rep> {
+        self.numerical(width, 0)
+    }
+    fn one(&mut self, width: usize) -> BitVec<Self::Rep> {
+        self.numerical(width, 1)
+    }
+    fn all_ones(&mut self, width: usize) -> BitVec<Self::Rep> {
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
+        let mut str = "#b".to_string();
+        str.push_str(&"1".repeat(width));
+        self.from_raw_str(width, &str)
+    }
+    fn signed_max_value(&mut self, width: usize) -> BitVec<Self::Rep> {
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
+        if width == 1 {
+            return self.zero(1);
+        }
+        let mut str = "#b0".to_string();
+        str.push_str(&"1".repeat(width - 1));
+        self.from_raw_str(width, &str)
+    }
+    fn signed_min_value(&mut self, width: usize) -> BitVec<Self::Rep> {
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
+        if width == 1 {
+            return self.one(1);
+        }
+        let mut str = "#b1".to_string();
+        str.push_str(&"0".repeat(width - 1));
+        self.from_raw_str(width, &str)
+    }
+    fn sign_bit(&mut self, bit_vec: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        match bit_vec.clone() {
+            BitVec::BitVec { width, .. } => {
+                if width == 0 {
+                    return BitVec::ZeroWidth;
+                }
+                self.slice(bit_vec, width - 1, 1)
+            }
+            BitVec::ZeroWidth => panic!("sign_bit: bit_vec is zero-width"),
+        }
+    }
     fn true_bv(&mut self) -> BitVec<Self::Rep> {
         self.numerical(1, 1)
     }
@@ -142,6 +189,241 @@ pub trait Solver: Sized {
         let cond = self.ult(lhs, rhs);
         self.ite(&cond, lhs, rhs)
     }
+    fn is_zero(&mut self, bit_vec: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        let zero = self.zero(bit_vec.get_width());
+        self.eq(bit_vec, &zero)
+    }
+    fn is_one(&mut self, bit_vec: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        let one = self.one(bit_vec.get_width());
+        self.eq(bit_vec, &one)
+    }
+    fn is_all_ones(&mut self, bit_vec: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        let all_ones = self.all_ones(bit_vec.get_width());
+        self.eq(bit_vec, &all_ones)
+    }
+    fn is_signed_max_value(&mut self, bit_vec: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        let signed_max_value = self.signed_max_value(bit_vec.get_width());
+        self.eq(bit_vec, &signed_max_value)
+    }
+    fn is_signed_min_value(&mut self, bit_vec: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        let signed_min_value = self.signed_min_value(bit_vec.get_width());
+        self.eq(bit_vec, &signed_min_value)
+    }
+    fn xls_div(
+        &mut self,
+        lhs: &BitVec<Self::Rep>,
+        rhs: &BitVec<Self::Rep>,
+        signed: bool,
+    ) -> BitVec<Self::Rep> {
+        // Implements XLS semantics for unsigned division with division-by-zero
+        // handling. When the divisor (b) is zero, XLS specifies that the result
+        // should be all ones. For zero-width values the result is also zero-width.
+
+        let width = lhs.get_width();
+        assert_eq!(
+            width,
+            rhs.get_width(),
+            "LHS and RHS must have the same width"
+        );
+
+        // Zero-width values carry through.
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
+
+        // For signed division the XLS semantics specify:
+        //   if divisor == 0 then result is:
+        //      max_positive  if dividend >= 0
+        //      max_negative  if dividend < 0
+        // For unsigned division the result is all-ones.
+        // Pre-compute these fallback values.  Note that for
+        // width == 1 the "max positive" and "max negative"
+        // are both 1-bit wide and simply 0 and 1 respectively.
+
+        let div_res = if signed {
+            self.sdiv(lhs, rhs)
+        } else {
+            self.udiv(lhs, rhs)
+        };
+        let rhs_is_zero = self.is_zero(rhs);
+        let all_ones = self.all_ones(width);
+        let max_positive = self.signed_max_value(width);
+        let max_negative = self.signed_min_value(width);
+        if signed {
+            let sign_bit = self.sign_bit(lhs);
+            let fallback = self.ite(&sign_bit, &max_negative, &max_positive);
+            self.ite(&rhs_is_zero, &fallback, &div_res)
+        } else {
+            self.ite(&rhs_is_zero, &all_ones, &div_res)
+        }
+    }
+
+    fn xls_sdiv(&mut self, lhs: &BitVec<Self::Rep>, rhs: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        self.xls_div(lhs, rhs, true)
+    }
+    fn xls_udiv(&mut self, lhs: &BitVec<Self::Rep>, rhs: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        self.xls_div(lhs, rhs, false)
+    }
+
+    fn xls_mod(
+        &mut self,
+        lhs: &BitVec<Self::Rep>,
+        rhs: &BitVec<Self::Rep>,
+        signed: bool,
+    ) -> BitVec<Self::Rep> {
+        let width = lhs.get_width();
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
+        assert_eq!(
+            width,
+            rhs.get_width(),
+            "LHS and RHS must have the same width"
+        );
+        let rhs_is_zero = self.is_zero(rhs);
+        let mod_res = if signed {
+            self.srem(lhs, rhs)
+        } else {
+            self.urem(lhs, rhs)
+        };
+        let zero = self.zero(width);
+        self.ite(&rhs_is_zero, &zero, &mod_res)
+    }
+
+    fn xls_smod(&mut self, lhs: &BitVec<Self::Rep>, rhs: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        self.xls_mod(lhs, rhs, true)
+    }
+    fn xls_umod(&mut self, lhs: &BitVec<Self::Rep>, rhs: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        self.xls_mod(lhs, rhs, false)
+    }
+
+    fn fit_width(
+        &mut self,
+        bv: &BitVec<Self::Rep>,
+        output_width: usize,
+        signed: bool,
+    ) -> BitVec<Self::Rep> {
+        if bv.get_width() < output_width {
+            if signed {
+                self.sign_extend_to(bv, output_width)
+            } else {
+                self.zero_extend_to(&bv, output_width)
+            }
+        } else if bv.get_width() > output_width {
+            self.slice(&bv, 0, output_width)
+        } else {
+            bv.clone()
+        }
+    }
+
+    fn signed_fit_width(
+        &mut self,
+        bv: &BitVec<Self::Rep>,
+        output_width: usize,
+    ) -> BitVec<Self::Rep> {
+        self.fit_width(bv, output_width, true)
+    }
+
+    fn unsigned_fit_width(
+        &mut self,
+        bv: &BitVec<Self::Rep>,
+        output_width: usize,
+    ) -> BitVec<Self::Rep> {
+        self.fit_width(bv, output_width, false)
+    }
+
+    fn xls_arbitrary_width_mul(
+        &mut self,
+        lhs: &BitVec<Self::Rep>,
+        rhs: &BitVec<Self::Rep>,
+        signed: bool,
+        output_width: usize,
+    ) -> BitVec<Self::Rep> {
+        let lhs_fit = self.fit_width(lhs, output_width, signed);
+        let rhs_fit = self.fit_width(rhs, output_width, signed);
+        self.mul(&lhs_fit, &rhs_fit)
+    }
+
+    fn xls_arbitrary_width_smul(
+        &mut self,
+        lhs: &BitVec<Self::Rep>,
+        rhs: &BitVec<Self::Rep>,
+        output_width: usize,
+    ) -> BitVec<Self::Rep> {
+        self.xls_arbitrary_width_mul(lhs, rhs, true, output_width)
+    }
+
+    fn xls_arbitrary_width_umul(
+        &mut self,
+        lhs: &BitVec<Self::Rep>,
+        rhs: &BitVec<Self::Rep>,
+        output_width: usize,
+    ) -> BitVec<Self::Rep> {
+        self.xls_arbitrary_width_mul(lhs, rhs, false, output_width)
+    }
+
+    fn xls_shift(
+        &mut self,
+        operand: &BitVec<Self::Rep>,
+        shift_amount: &BitVec<Self::Rep>,
+        left_shift: bool,
+        arithmetic_shift: bool,
+    ) -> BitVec<Self::Rep> {
+        let width = operand.get_width();
+        let shift_amount_width = shift_amount.get_width();
+        let max_shift_amount = if shift_amount_width >= usize::BITS as usize {
+            usize::MAX
+        } else {
+            (1 << shift_amount_width) - 1
+        };
+        let shift_amount_fit = self.fit_width(shift_amount, width, false);
+        let shifted = if left_shift {
+            self.shl(operand, &shift_amount_fit)
+        } else if arithmetic_shift {
+            self.ashr(operand, &shift_amount_fit)
+        } else {
+            self.lshr(operand, &shift_amount_fit)
+        };
+        if max_shift_amount <= width {
+            shifted
+        } else {
+            let width_bv = self.numerical(shift_amount_width, width as u64);
+            let saturated = self.uge(shift_amount, &width_bv);
+            let zero = self.zero(width);
+            let fallback = if arithmetic_shift && !left_shift {
+                let sign_bit = self.sign_bit(operand);
+                let all_ones = self.all_ones(width);
+                self.ite(&sign_bit, &all_ones, &zero)
+            } else {
+                zero
+            };
+            self.ite(&saturated, &fallback, &shifted)
+        }
+    }
+
+    fn xls_shll(
+        &mut self,
+        operand: &BitVec<Self::Rep>,
+        shift_amount: &BitVec<Self::Rep>,
+    ) -> BitVec<Self::Rep> {
+        self.xls_shift(operand, shift_amount, true, false)
+    }
+
+    fn xls_shra(
+        &mut self,
+        operand: &BitVec<Self::Rep>,
+        shift_amount: &BitVec<Self::Rep>,
+    ) -> BitVec<Self::Rep> {
+        self.xls_shift(operand, shift_amount, false, true)
+    }
+
+    fn xls_shrl(
+        &mut self,
+        operand: &BitVec<Self::Rep>,
+        shift_amount: &BitVec<Self::Rep>,
+    ) -> BitVec<Self::Rep> {
+        self.xls_shift(operand, shift_amount, false, false)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +479,48 @@ pub mod test_utils {
             solver.get_value(&a, &ir::Type::Bits(16)).unwrap(),
             IrValue::make_ubits(16, 0xedca).unwrap()
         );
+    }
+
+    pub fn test_constants<S: Solver>(solver: &mut S) {
+        let zero = solver.zero(128);
+        let one = solver.one(128);
+        let all_ones = solver.all_ones(128);
+        let minus_one = solver.sub(&zero, &one);
+        let signed_max_value = solver.signed_max_value(128);
+        let signed_min_value = solver.signed_min_value(128);
+        let two = solver.numerical(128, 2);
+        let minus_two = solver.mul(&signed_max_value, &two);
+        let zero_alt = solver.add(&minus_two, &two);
+        let minus_one_alt = solver.add(&signed_max_value, &signed_min_value);
+        assert_solver_eq(solver, &all_ones, &minus_one);
+        assert_solver_eq(solver, &zero, &zero_alt);
+        assert_solver_eq(solver, &minus_one, &minus_one_alt);
+
+        let is_zero = solver.is_zero(&zero);
+        let is_one = solver.is_one(&one);
+        let is_all_ones = solver.is_all_ones(&all_ones);
+        let is_signed_max_value = solver.is_signed_max_value(&signed_max_value);
+        let is_signed_min_value = solver.is_signed_min_value(&signed_min_value);
+        let true_bv = solver.true_bv();
+        assert_solver_eq(solver, &is_zero, &true_bv);
+        assert_solver_eq(solver, &is_one, &true_bv);
+        assert_solver_eq(solver, &is_all_ones, &true_bv);
+        assert_solver_eq(solver, &is_signed_max_value, &true_bv);
+        assert_solver_eq(solver, &is_signed_min_value, &true_bv);
+    }
+
+    pub fn test_sign_bit<S: Solver>(solver: &mut S) {
+        let neg = solver.numerical(16, 0x8000);
+        let zero = solver.zero(16);
+        let pos = solver.numerical(16, 0x7fff);
+        let neg_sign_bit = solver.sign_bit(&neg);
+        let zero_sign_bit = solver.sign_bit(&zero);
+        let pos_sign_bit = solver.sign_bit(&pos);
+        let true_bv = solver.true_bv();
+        let false_bv = solver.false_bv();
+        assert_solver_eq(solver, &neg_sign_bit, &true_bv);
+        assert_solver_eq(solver, &zero_sign_bit, &false_bv);
+        assert_solver_eq(solver, &pos_sign_bit, &false_bv);
     }
 
     pub fn test_extract<S: Solver>(solver: &mut S) {
@@ -311,19 +635,19 @@ pub mod test_utils {
     //  • `$out_val`     – literal value expected from the operation.
     // -----------------------------------------------------------------------
     #[macro_export]
-    macro_rules! test_solver_binary {
+    macro_rules! test_solver_binary_arbitrary_width {
         ($fn_name:ident,
          $solver:expr,
          $op:ident,
-         $in_w:expr,  $in_val1:expr, $in_val2:expr,
+         $in_w1:expr,  $in_val1:expr, $in_w2:expr, $in_val2:expr,
          $out_w:expr, $out_val:expr $(,)?
         ) => {
             #[test]
             fn $fn_name() {
                 // Arrange
                 let mut solver = $solver;
-                let operand1 = solver.numerical($in_w, $in_val1);
-                let operand2 = solver.numerical($in_w, $in_val2);
+                let operand1 = solver.numerical($in_w1, $in_val1);
+                let operand2 = solver.numerical($in_w2, $in_val2);
 
                 // Act
                 let actual = solver.$op(&operand1, &operand2);
@@ -336,6 +660,20 @@ pub mod test_utils {
                     &expected,
                 );
             }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_solver_binary {
+        ($fn_name:ident,
+         $solver:expr,
+         $op:ident,
+         $in_w:expr,  $in_val1:expr, $in_val2:expr,
+         $out_w:expr, $out_val:expr $(,)?
+        ) => {
+            crate::test_solver_binary_arbitrary_width!(
+                $fn_name, $solver, $op, $in_w, $in_val1, $in_w, $in_val2, $out_w, $out_val
+            );
         };
     }
 
@@ -438,6 +776,35 @@ pub mod test_utils {
             }
         };
     }
+
+    #[macro_export]
+    macro_rules! test_solver_binary_arbitrary_width_mul {
+        ($fn_name:ident,
+         $solver:expr,
+         $op:ident,
+         $in_w1:expr,  $in_val1:expr, $in_w2:expr, $in_val2:expr,
+         $out_w:expr, $out_val:expr
+        ) => {
+            #[test]
+            fn $fn_name() {
+                // Arrange
+                let mut solver = $solver;
+                let operand1 = solver.numerical($in_w1, $in_val1);
+                let operand2 = solver.numerical($in_w2, $in_val2);
+
+                // Act
+                let actual = solver.$op(&operand1, &operand2, $out_w);
+                let expected = solver.numerical($out_w, $out_val);
+
+                // Assert (via the common helper already in the file)
+                crate::equiv::solver_interface::test_utils::assert_solver_eq(
+                    &mut solver,
+                    &actual,
+                    &expected,
+                );
+            }
+        };
+    }
 }
 
 #[macro_export]
@@ -500,6 +867,18 @@ macro_rules! test_solver {
                     xlsynth::IrValue::make_ubits(5, 0b01010).unwrap(),
                 ])
             );
+
+            #[test]
+            fn test_constants() {
+                let mut solver = $solver;
+                test_utils::test_constants(&mut solver);
+            }
+
+            #[test]
+            fn test_sign_bit() {
+                let mut solver = $solver;
+                test_utils::test_sign_bit(&mut solver);
+            }
 
             #[test]
             fn test_extract() {
@@ -889,6 +1268,405 @@ macro_rules! test_solver {
             crate::test_solver_cmp_zero_width!(test_sgt_zero_width, $solver, sgt, Solver::false_bv);
             crate::test_solver_cmp_zero_width!(test_ult_zero_width, $solver, ult, Solver::false_bv);
             crate::test_solver_cmp_zero_width!(test_ugt_zero_width, $solver, ugt, Solver::false_bv);
+
+            // xls_sdiv
+            crate::test_solver_binary!(
+                test_xls_sdiv_signed_pos_pos,
+                $solver,
+                xls_sdiv,
+                8,
+                0x5A,
+                0x07,
+                8,
+                0x0C
+            );
+            crate::test_solver_binary!(
+                test_xls_sdiv_signed_neg_pos,
+                $solver,
+                xls_sdiv,
+                8,
+                0xBC,
+                0x07,
+                8,
+                0xF7
+            );
+            crate::test_solver_binary!(
+                test_xls_sdiv_signed_pos_neg,
+                $solver,
+                xls_sdiv,
+                8,
+                0x5A,
+                0xF9,
+                8,
+                0xF4
+            );
+            crate::test_solver_binary!(
+                test_xls_sdiv_signed_neg_neg,
+                $solver,
+                xls_sdiv,
+                8,
+                0xBC,
+                0xF9,
+                8,
+                0x09
+            );
+            crate::test_solver_binary!(
+                test_xls_sdiv_signed_pos_zero,
+                $solver,
+                xls_sdiv,
+                8,
+                0x5A,
+                0x00,
+                8,
+                0x7F
+            );
+            crate::test_solver_binary!(
+                test_xls_sdiv_signed_neg_zero,
+                $solver,
+                xls_sdiv,
+                8,
+                0xBC,
+                0x00,
+                8,
+                0x80
+            );
+            crate::test_solver_binary!(
+                test_xls_sdiv_signed_zero_zero,
+                $solver,
+                xls_sdiv,
+                8,
+                0x00,
+                0x00,
+                8,
+                0x7F
+            );
+            // xls_udiv
+            crate::test_solver_binary!(
+                test_xls_udiv_non_zero,
+                $solver,
+                xls_udiv,
+                8,
+                0xBC,
+                0x07,
+                8,
+                0x1A
+            );
+            crate::test_solver_binary!(
+                test_xls_udiv_zero,
+                $solver,
+                xls_udiv,
+                8,
+                0xBC,
+                0x00,
+                8,
+                0xFF
+            );
+            // xls_smod
+            crate::test_solver_binary!(
+                test_xls_smod_signed_pos_pos,
+                $solver,
+                xls_smod,
+                8,
+                0x5A,
+                0x07,
+                8,
+                0x06
+            );
+            crate::test_solver_binary!(
+                test_xls_smod_signed_neg_pos,
+                $solver,
+                xls_smod,
+                8,
+                0xBC,
+                0x07,
+                8,
+                0xFB
+            );
+            crate::test_solver_binary!(
+                test_xls_smod_signed_pos_neg,
+                $solver,
+                xls_smod,
+                8,
+                0x5A,
+                0xF9,
+                8,
+                0x6
+            );
+            crate::test_solver_binary!(
+                test_xls_smod_signed_neg_neg,
+                $solver,
+                xls_smod,
+                8,
+                0xBC,
+                0xF9,
+                8,
+                0xFB
+            );
+            crate::test_solver_binary!(
+                test_xls_smod_signed_pos_zero,
+                $solver,
+                xls_smod,
+                8,
+                0x5A,
+                0x00,
+                8,
+                0x00
+            );
+            crate::test_solver_binary!(
+                test_xls_smod_signed_neg_zero,
+                $solver,
+                xls_smod,
+                8,
+                0xBC,
+                0x00,
+                8,
+                0x00
+            );
+            crate::test_solver_binary!(
+                test_xls_smod_signed_zero_zero,
+                $solver,
+                xls_smod,
+                8,
+                0x00,
+                0x00,
+                8,
+                0x00
+            );
+            // xls_umod
+            crate::test_solver_binary!(
+                test_xls_umod_non_zero,
+                $solver,
+                xls_umod,
+                8,
+                0xBC,
+                0x07,
+                8,
+                0x06
+            );
+            crate::test_solver_binary!(
+                test_xls_umod_zero,
+                $solver,
+                xls_umod,
+                8,
+                0xBC,
+                0x00,
+                8,
+                0x00
+            );
+
+            // xls_arbitrary_width_mul
+            crate::test_solver_binary_arbitrary_width_mul!(
+                test_xls_arbitrary_width_smul,
+                $solver,
+                xls_arbitrary_width_smul,
+                4,
+                0x7,
+                8,
+                0xBA,
+                12,
+                0xE16
+            );
+            crate::test_solver_binary_arbitrary_width_mul!(
+                test_xls_arbitrary_width_umul,
+                $solver,
+                xls_arbitrary_width_umul,
+                4,
+                0x7,
+                8,
+                0xBA,
+                12,
+                0x516
+            );
+
+            // xls_shll
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shll_inbound,
+                $solver,
+                xls_shll,
+                16,
+                0x9abc,
+                8,
+                4,
+                16,
+                0xabc0
+            );
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shll_exact_width,
+                $solver,
+                xls_shll,
+                16,
+                0x9abf,
+                8,
+                16,
+                16,
+                0x0000
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shll_outbound,
+                $solver,
+                xls_shll,
+                16,
+                0x9abf,
+                8,
+                17,
+                16,
+                0x0000
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shll_small_shift_bit_width,
+                $solver,
+                xls_shll,
+                16,
+                0x9abf,
+                4,
+                4,
+                16,
+                0xabf0
+            );
+
+            // xls_shrl
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shrl_inbound,
+                $solver,
+                xls_shrl,
+                16,
+                0x9abc,
+                8,
+                4,
+                16,
+                0x09ab
+            );
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shrl_exact_width,
+                $solver,
+                xls_shrl,
+                16,
+                0x9abf,
+                8,
+                16,
+                16,
+                0x0000
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shrl_outbound,
+                $solver,
+                xls_shrl,
+                16,
+                0x9abf,
+                8,
+                17,
+                16,
+                0x0000
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shrl_small_shift_bit_width,
+                $solver,
+                xls_shrl,
+                16,
+                0x9abf,
+                4,
+                4,
+                16,
+                0x09ab
+            );
+            // xls_shra
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shra_negative_inbound,
+                $solver,
+                xls_shra,
+                16,
+                0x9abc,
+                8,
+                4,
+                16,
+                0xf9ab
+            );
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shra_negative_exact_width,
+                $solver,
+                xls_shra,
+                16,
+                0x9abf,
+                8,
+                16,
+                16,
+                0xffff
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shra_negative_outbound,
+                $solver,
+                xls_shra,
+                16,
+                0x9abf,
+                8,
+                17,
+                16,
+                0xffff
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shra_negative_small_shift_bit_width,
+                $solver,
+                xls_shra,
+                16,
+                0x9abf,
+                4,
+                4,
+                16,
+                0xf9ab
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shra_positive_inbound,
+                $solver,
+                xls_shra,
+                16,
+                0x7abf,
+                8,
+                4,
+                16,
+                0x07ab
+            );
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shra_positive_exact_width,
+                $solver,
+                xls_shra,
+                16,
+                0x7abf,
+                8,
+                16,
+                16,
+                0x0000
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shra_positive_outbound,
+                $solver,
+                xls_shra,
+                16,
+                0x7abf,
+                8,
+                17,
+                16,
+                0x0000
+            );
+
+            crate::test_solver_binary_arbitrary_width!(
+                test_xls_shra_positive_small_shift_bit_width,
+                $solver,
+                xls_shra,
+                16,
+                0x7abf,
+                4,
+                4,
+                16,
+                0x07ab
+            );
         }
     };
 }
