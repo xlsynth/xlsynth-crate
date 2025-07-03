@@ -282,6 +282,43 @@ pub fn ir_to_smt<'a, S: Solver>(
                     bitvec: solver.extract(&tuple_bv.bitvec, high, low),
                 }
             }
+            NodePayload::Binop(op, lhs, rhs) => {
+                let l = env.get(lhs).unwrap().clone();
+                let r = env.get(rhs).unwrap().clone();
+                let result_width = node.ty.bit_count();
+                let rep = match op {
+                    ir::Binop::Add => solver.add(&l.bitvec, &r.bitvec),
+                    ir::Binop::Sub => solver.sub(&l.bitvec, &r.bitvec),
+                    ir::Binop::Shll => solver.xls_shll(&l.bitvec, &r.bitvec),
+                    ir::Binop::Shrl => solver.xls_shrl(&l.bitvec, &r.bitvec),
+                    ir::Binop::Shra => solver.xls_shra(&l.bitvec, &r.bitvec),
+                    ir::Binop::Eq => solver.eq(&l.bitvec, &r.bitvec),
+                    ir::Binop::Ne => solver.ne(&l.bitvec, &r.bitvec),
+                    ir::Binop::Uge => solver.uge(&l.bitvec, &r.bitvec),
+                    ir::Binop::Ugt => solver.ugt(&l.bitvec, &r.bitvec),
+                    ir::Binop::Ult => solver.ult(&l.bitvec, &r.bitvec),
+                    ir::Binop::Ule => solver.ule(&l.bitvec, &r.bitvec),
+                    ir::Binop::Sgt => solver.sgt(&l.bitvec, &r.bitvec),
+                    ir::Binop::Sge => solver.sge(&l.bitvec, &r.bitvec),
+                    ir::Binop::Slt => solver.slt(&l.bitvec, &r.bitvec),
+                    ir::Binop::Sle => solver.sle(&l.bitvec, &r.bitvec),
+                    ir::Binop::Umul => {
+                        solver.xls_arbitrary_width_umul(&l.bitvec, &r.bitvec, result_width)
+                    }
+                    ir::Binop::Smul => {
+                        solver.xls_arbitrary_width_smul(&l.bitvec, &r.bitvec, result_width)
+                    }
+                    ir::Binop::Sdiv => solver.xls_sdiv(&l.bitvec, &r.bitvec),
+                    ir::Binop::Udiv => solver.xls_udiv(&l.bitvec, &r.bitvec),
+                    ir::Binop::Umod => solver.xls_umod(&l.bitvec, &r.bitvec),
+                    ir::Binop::Smod => solver.xls_smod(&l.bitvec, &r.bitvec),
+                    _ => panic!("Unsupported binop: {:?}", op),
+                };
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: rep,
+                }
+            }
             NodePayload::Unop(op, arg) => {
                 let a = env.get(&arg).unwrap().clone();
                 let rep = match op {
@@ -798,6 +835,162 @@ mod test_utils {
     }
 
     #[macro_export]
+    macro_rules! test_binop_base {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $binop_xls_name:expr,
+            $expected:expr, $lhs_width:expr, $rhs_width:expr, $result_width:expr) => {
+            #[test]
+            fn $fn_name() {
+                let lhs_width_str = $lhs_width.to_string();
+                let rhs_width_str = $rhs_width.to_string();
+                let ir_text = format!(
+                    r#"fn f(x: bits[{}], y: bits[{}]) -> bits[{}] {{
+                    ret get_param.1: bits[{}] = {}(x, y, id=1)
+                }}"#,
+                    lhs_width_str, rhs_width_str, $result_width, $result_width, $binop_xls_name
+                );
+                let mut parser = crate::xls_ir::ir_parser::Parser::new(&ir_text);
+                let f = parser.parse_fn().unwrap();
+                let mut solver = <$solver_type>::new($solver_config).unwrap();
+                let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+                let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
+                let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
+                let y = fn_inputs.inputs.get("y").unwrap().bitvec.clone();
+                let expected = $expected(&mut solver, x, y);
+                crate::equiv::solver_interface::test_utils::assert_solver_eq(
+                    &mut solver,
+                    &smt_fn.output.bitvec,
+                    &expected,
+                );
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_binop_simple {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $binop_xls_name:expr, $binop:ident,
+            $lhs_width:expr, $rhs_width:expr, $result_width:expr) => {
+            crate::test_binop_base!(
+                $fn_name,
+                $solver_type,
+                $solver_config,
+                $binop_xls_name,
+                |solver: &mut $solver_type, x, y| { solver.$binop(&x, &y) },
+                $lhs_width,
+                $rhs_width,
+                $result_width
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_all_binops {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_binop_simple!(test_add, $solver_type, $solver_config, "add", add, 8, 8, 8);
+            crate::test_binop_simple!(test_sub, $solver_type, $solver_config, "sub", sub, 8, 8, 8);
+            crate::test_binop_simple!(test_eq, $solver_type, $solver_config, "eq", eq, 8, 8, 1);
+            crate::test_binop_simple!(test_ne, $solver_type, $solver_config, "ne", ne, 8, 8, 1);
+            crate::test_binop_simple!(test_uge, $solver_type, $solver_config, "uge", uge, 8, 8, 1);
+            crate::test_binop_simple!(test_ugt, $solver_type, $solver_config, "ugt", ugt, 8, 8, 1);
+            crate::test_binop_simple!(test_ult, $solver_type, $solver_config, "ult", ult, 8, 8, 1);
+            crate::test_binop_simple!(test_ule, $solver_type, $solver_config, "ule", ule, 8, 8, 1);
+            crate::test_binop_simple!(test_sgt, $solver_type, $solver_config, "sgt", sgt, 8, 8, 1);
+            crate::test_binop_simple!(test_sge, $solver_type, $solver_config, "sge", sge, 8, 8, 1);
+            crate::test_binop_simple!(test_slt, $solver_type, $solver_config, "slt", slt, 8, 8, 1);
+            crate::test_binop_simple!(test_sle, $solver_type, $solver_config, "sle", sle, 8, 8, 1);
+            crate::test_binop_simple!(
+                test_xls_shll,
+                $solver_type,
+                $solver_config,
+                "shll",
+                xls_shll,
+                8,
+                4,
+                8
+            );
+            crate::test_binop_simple!(
+                test_xls_shrl,
+                $solver_type,
+                $solver_config,
+                "shrl",
+                xls_shrl,
+                8,
+                4,
+                8
+            );
+            crate::test_binop_simple!(
+                test_xls_shra,
+                $solver_type,
+                $solver_config,
+                "shra",
+                xls_shra,
+                8,
+                4,
+                8
+            );
+            crate::test_binop_base!(
+                test_xls_umul,
+                $solver_type,
+                $solver_config,
+                "umul",
+                |solver: &mut $solver_type, x, y| { solver.xls_arbitrary_width_umul(&x, &y, 16) },
+                8,
+                12,
+                16
+            );
+            crate::test_binop_base!(
+                test_xls_smul,
+                $solver_type,
+                $solver_config,
+                "smul",
+                |solver: &mut $solver_type, x, y| { solver.xls_arbitrary_width_smul(&x, &y, 16) },
+                8,
+                12,
+                16
+            );
+            crate::test_binop_simple!(
+                test_xls_udiv,
+                $solver_type,
+                $solver_config,
+                "udiv",
+                xls_udiv,
+                8,
+                8,
+                8
+            );
+            crate::test_binop_simple!(
+                test_xls_sdiv,
+                $solver_type,
+                $solver_config,
+                "sdiv",
+                xls_sdiv,
+                8,
+                8,
+                8
+            );
+            crate::test_binop_simple!(
+                test_xls_umod,
+                $solver_type,
+                $solver_config,
+                "umod",
+                xls_umod,
+                8,
+                8,
+                8
+            );
+            crate::test_binop_simple!(
+                test_xls_smod,
+                $solver_type,
+                $solver_config,
+                "smod",
+                xls_smod,
+                8,
+                8,
+                8
+            );
+        };
+    }
+
+    #[macro_export]
     macro_rules! test_ir_tuple_index {
         ($solver_type:ty, $solver_config:expr) => {
             crate::assert_smt_fn_eq!(
@@ -1131,6 +1324,7 @@ macro_rules! test_with_solver {
             crate::test_ir_value_tuple!($solver_type, $solver_config);
             crate::test_ir_tuple!($solver_type, $solver_config);
             crate::test_ir_value_token!($solver_type, $solver_config);
+            crate::test_all_binops!($solver_type, $solver_config);
             crate::test_all_unops!($solver_type, $solver_config);
             crate::test_ir_tuple_index!($solver_type, $solver_config);
             crate::test_ir_tuple_index_literal!($solver_type, $solver_config);
