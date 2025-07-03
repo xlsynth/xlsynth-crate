@@ -215,6 +215,19 @@ impl<'a, S: Solver> SmtFn<'a, S> {
         let mut env: HashMap<NodeRef, IRTypedBitVec<'a, S>> = HashMap::new();
         for nr in topo {
             let node = &inputs.fn_ref.nodes[nr.index];
+            fn get_num_indexable_elements<'a, S: Solver>(
+                index: &IRTypedBitVec<'a, S>,
+                num_elements: usize,
+            ) -> usize {
+                assert!(num_elements > 0, "select: no values to select from");
+                let index_width = index.bitvec.get_width();
+                let max_indexable_elements = if index_width >= usize::BITS as usize {
+                    usize::MAX
+                } else {
+                    1 << index_width
+                };
+                max_indexable_elements.min(num_elements)
+            }
             let exp: IRTypedBitVec<'a, S> = match &node.payload {
                 NodePayload::Nil => continue,
                 NodePayload::GetParam(pid) => {
@@ -223,6 +236,43 @@ impl<'a, S: Solver> SmtFn<'a, S> {
                         sym.clone()
                     } else {
                         panic!("Param not found: {}", p.name);
+                    }
+                }
+                NodePayload::Tuple(elems) => {
+                    let mut bv = BitVec::ZeroWidth;
+                    for elem in elems {
+                        let elem_bv = env.get(elem).expect("Tuple element must be present");
+                        bv = solver.concat(bv, elem_bv.bitvec.clone());
+                    }
+                    IRTypedBitVec {
+                        ir_type: &node.ty,
+                        bitvec: bv,
+                    }
+                }
+                NodePayload::Array(elems) => {
+                    let mut bv = BitVec::ZeroWidth;
+                    for elem in elems {
+                        let elem_bv = env.get(elem).expect("Array element must be present");
+                        bv = solver.concat(elem_bv.bitvec.clone(), bv);
+                    }
+                    IRTypedBitVec {
+                        ir_type: &node.ty,
+                        bitvec: bv,
+                    }
+                }
+                NodePayload::TupleIndex { tuple, index } => {
+                    let tuple_bv = env.get(tuple).expect("Tuple operand must be present");
+                    let tuple_ty = inputs.fn_ref.get_node_ty(*tuple);
+                    let slice = tuple_ty
+                        .tuple_get_flat_bit_slice_for_index(*index)
+                        .expect("TupleIndex: not a tuple type");
+                    let width = slice.limit - slice.start;
+                    assert!(width > 0, "TupleIndex: width must be > 0");
+                    let high = (slice.limit - 1) as i32;
+                    let low = slice.start as i32;
+                    IRTypedBitVec {
+                        ir_type: &node.ty,
+                        bitvec: solver.extract(tuple_bv.bitvec.clone(), high, low),
                     }
                 }
                 NodePayload::Unop(op, arg) => {
@@ -242,6 +292,153 @@ impl<'a, S: Solver> SmtFn<'a, S> {
                     }
                 }
                 NodePayload::Literal(v) => IRTypedBitVec::ir_value_to_bv(solver, v, &node.ty),
+                NodePayload::ArrayUpdate {
+                    array,
+                    value,
+                    indices,
+                } => {
+                    // Recursively build an updated array value that reflects
+                    // `array[indices] = value` semantics.
+
+                    fn array_update_recursive<'a, S: Solver>(
+                        solver: &mut S,
+                        array_val: &IRTypedBitVec<'a, S>,
+                        indices: &[&IRTypedBitVec<'a, S>],
+                        new_value: &IRTypedBitVec<'a, S>,
+                    ) -> IRTypedBitVec<'a, S> {
+                        // If we have consumed all indices, replace the entire value.
+                        if indices.is_empty() {
+                            return new_value.clone();
+                        }
+
+                        // Expect an array at this level.
+                        let (elem_ty, elem_cnt) = match array_val.ir_type {
+                            ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                            _ => panic!(
+                                "ArrayUpdate: expected array type, found {:?}",
+                                array_val.ir_type
+                            ),
+                        };
+
+                        // Width for extracting each element slice.
+                        let elem_bits = elem_ty.bit_count() as i32;
+
+                        // Precompute index comparison helpers.
+                        let index_bv = indices[0];
+                        let index_width = index_bv.bitvec.get_width();
+
+                        // Iterate over elements, build updated slice.
+                        let mut concatenated = BitVec::ZeroWidth;
+                        for i in (0..elem_cnt as i32).rev() {
+                            // Extract original slice.
+                            let high = (i + 1) * elem_bits - 1;
+                            let low = i * elem_bits;
+                            let orig_slice = solver.extract(array_val.bitvec.clone(), high, low);
+
+                            // Recursively update child if this is the selected index.
+                            let updated_child = array_update_recursive(
+                                solver,
+                                &IRTypedBitVec {
+                                    ir_type: elem_ty,
+                                    bitvec: orig_slice.clone(),
+                                },
+                                &indices[1..],
+                                new_value,
+                            );
+
+                            // cond = (indices[0] == i)
+                            let idx_val = solver.numerical(index_width, i as u64);
+                            let cond = solver.eq(index_bv.bitvec.clone(), idx_val);
+
+                            let selected_slice = solver.ite(cond, updated_child.bitvec, orig_slice);
+
+                            concatenated = solver.concat(concatenated, selected_slice);
+                        }
+
+                        IRTypedBitVec {
+                            ir_type: array_val.ir_type,
+                            bitvec: concatenated,
+                        }
+                    }
+
+                    let base_array = env.get(array).expect("Array BV must be present");
+                    let new_val = env.get(value).expect("Update value BV must be present");
+                    let index_bvs: Vec<&IRTypedBitVec<'_, S>> = indices
+                        .iter()
+                        .map(|i| env.get(i).expect("Index BV must be present"))
+                        .collect();
+
+                    array_update_recursive(solver, base_array, &index_bvs, new_val)
+                }
+                NodePayload::ArrayIndex { array, indices, .. } => {
+                    /// Build a value that corresponds to
+                    /// `array_val[indices...]`.
+                    fn array_index_recursive<'a, S: Solver>(
+                        solver: &mut S,
+                        array_val: &IRTypedBitVec<'a, S>,
+                        indices: &[&IRTypedBitVec<'a, S>],
+                    ) -> IRTypedBitVec<'a, S> {
+                        // Base-case: no further indices → return the current value.
+                        if indices.is_empty() {
+                            return array_val.clone();
+                        }
+
+                        // The value must be an array; retrieve element type / count.
+                        let (elem_ty, elem_cnt) = match array_val.ir_type {
+                            ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                            _ => panic!(
+                                "ArrayIndex: expected array type, found {:?}",
+                                array_val.ir_type
+                            ),
+                        };
+
+                        // Recursively compute each element after applying the *tail* indices.
+                        let elem_bit_width = elem_ty.bit_count() as i32;
+                        let children: Vec<IRTypedBitVec<'a, S>> = (0..elem_cnt as i32)
+                            .map(|i| {
+                                let high = (i + 1) * elem_bit_width - 1;
+                                let low = i * elem_bit_width;
+                                let slice = solver.extract(array_val.bitvec.clone(), high, low);
+                                array_index_recursive(
+                                    solver,
+                                    &IRTypedBitVec {
+                                        ir_type: elem_ty,
+                                        bitvec: slice,
+                                    },
+                                    &indices[1..],
+                                )
+                            })
+                            .collect();
+
+                        // Build a chain of `ite` expressions that selects the requested
+                        // element, falling back to the last element for OOB indices (XLS
+                        // semantics).
+                        let index_bv = indices[0];
+                        let max_selectable = get_num_indexable_elements(index_bv, children.len());
+                        let index_width = index_bv.bitvec.get_width();
+
+                        let mut result = children[max_selectable - 1].bitvec.clone();
+                        for i in (0..max_selectable - 1).rev() {
+                            let idx_val = solver.numerical(index_width, i as u64);
+                            let cond = solver.eq(index_bv.bitvec.clone(), idx_val);
+                            result = solver.ite(cond, children[i].bitvec.clone(), result);
+                        }
+
+                        IRTypedBitVec {
+                            ir_type: elem_ty,
+                            bitvec: result,
+                        }
+                    }
+
+                    // Gather the index bit-vectors in evaluation order.
+                    let base_array = env.get(array).expect("Array BV must be present");
+                    let index_bvs: Vec<&IRTypedBitVec<'_, S>> = indices
+                        .iter()
+                        .map(|i| env.get(i).expect("Index BV must be present"))
+                        .collect();
+
+                    array_index_recursive(solver, base_array, &index_bvs)
+                }
                 _ => panic!("Not implemented for {:?}", node.payload),
             };
             env.insert(nr, exp);
@@ -570,6 +767,257 @@ mod test_utils {
     }
 
     #[macro_export]
+    macro_rules! test_ir_tuple_index {
+        ($solver:expr, $solver_type:ty) => {
+            crate::assert_smt_fn_eq!(
+                test_ir_tuple_index,
+                $solver,
+                r#"fn f(input: (bits[8], bits[4])) -> bits[8] {
+                    ret tuple_index.1: bits[8] = tuple_index(input, index=0, id=1)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<$solver_type>| {
+                    let tuple = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    solver.extract(tuple, 11, 4)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_tuple_index_literal {
+        ($solver:expr, $solver_type:ty) => {
+            crate::assert_smt_fn_eq!(
+                test_ir_tuple_index_literal,
+                $solver,
+                r#"fn f() -> bits[8] {
+                    literal.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+                    ret tuple_index.1: bits[8] = tuple_index(literal.1, index=0, id=1)
+                }"#,
+                |solver: &mut $solver_type, _: &FnInputs<$solver_type>| {
+                    solver.from_raw_str(8, "#x12")
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_tuple_reverse {
+        ($solver:expr, $solver_type:ty) => {
+            crate::assert_smt_fn_eq!(
+                test_ir_tuple_reverse,
+                $solver,
+                r#"fn f(a: (bits[8], bits[4])) -> (bits[4], bits[8]) {
+                    tuple_index.3: bits[4] = tuple_index(a, index=1, id=3)
+                    tuple_index.5: bits[8] = tuple_index(a, index=0, id=5)
+                    ret tuple.6: (bits[4], bits[8]) = tuple(tuple_index.3, tuple_index.5, id=6)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<$solver_type>| {
+                    let tuple = inputs.inputs.get("a").unwrap().bitvec.clone();
+                    let tuple_0 = solver.extract(tuple.clone(), 11, 4);
+                    let tuple_1 = solver.extract(tuple, 3, 0);
+                    solver.concat(tuple_1, tuple_0)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_tuple_flattened {
+        ($solver:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_ir_tuple_flattened,
+                $solver,
+                r#"fn f() -> (bits[8], bits[4]) {
+                    ret tuple.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+                }"#,
+                r#"fn g() -> bits[12] {
+                    ret tuple.1: bits[12] = literal(value=0x124, id=1)
+                }"#,
+                true,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_tuple_literal_vs_constructed {
+        ($solver:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_tuple_literal_vs_constructed,
+                $solver,
+                r#"fn lhs() -> (bits[8], bits[4]) {
+                    ret lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+                }"#,
+                r#"fn rhs() -> (bits[8], bits[4]) {
+                    lit0: bits[8] = literal(value=0x12, id=1)
+                    lit1: bits[4] = literal(value=0x4, id=2)
+                    ret tup: (bits[8], bits[4]) = tuple(lit0, lit1, id=3)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_tuple_index_on_literal {
+        ($solver:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_tuple_index_on_literal,
+                $solver,
+                r#"fn f() -> bits[8] {
+                    lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+                    ret idx0: bits[8] = tuple_index(lit_tuple, index=0, id=2)
+                }"#,
+                r#"fn g() -> bits[8] {
+                    ret lit: bits[8] = literal(value=0x12, id=1)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_array_index_base {
+        ($fn_name:ident, $solver:expr, $solver_type:ty, $index:expr, $expected_low:expr) => {
+            crate::assert_smt_fn_eq!(
+                $fn_name,
+                $solver,
+                r#"fn f(input: bits[8][4] id=1) -> bits[8] {
+                    literal.4: bits[3] = literal(value="#.to_string() + $index + r#", id=4)
+                    ret array_index.5: bits[8] = array_index(input, indices=[literal.4], assumed_in_bounds=true, id=5)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<$solver_type>| {
+                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    solver.extract(array, $expected_low + 7, $expected_low)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_array_index {
+        ($solver:expr, $solver_type:ty) => {
+            crate::test_ir_array_index_base!(test_ir_array_index_0, $solver, $solver_type, "0", 0);
+            crate::test_ir_array_index_base!(test_ir_array_index_1, $solver, $solver_type, "1", 8);
+            crate::test_ir_array_index_base!(test_ir_array_index_2, $solver, $solver_type, "2", 16);
+            crate::test_ir_array_index_base!(test_ir_array_index_3, $solver, $solver_type, "3", 24);
+            crate::test_ir_array_index_base!(
+                test_ir_array_index_out_of_bounds,
+                $solver,
+                $solver_type,
+                "4",
+                24
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_array_index_multi_level {
+        ($solver:expr, $solver_type:ty) => {
+            crate::assert_smt_fn_eq!(
+                test_ir_array_index_multi_level,
+                $solver,
+                r#"fn f(input: bits[8][4][2] id=1) -> bits[8] {
+                    literal.4: bits[2] = literal(value=1, id=4)
+                    ret array_index.6: bits[8] = array_index(input, indices=[literal.4], assumed_in_bounds=true, id=6)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<$solver_type>| {
+                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    solver.extract(array, 63, 32)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_array_index_deep_multi_level {
+        ($solver:expr, $solver_type:ty) => {
+            crate::assert_smt_fn_eq!(
+                test_ir_array_index_deep_multi_level,
+                $solver,
+                r#"fn f(input: bits[8][4][2] id=1) -> bits[8] {
+                    literal.4: bits[2] = literal(value=1, id=4)
+                    literal.5: bits[2] = literal(value=0, id=5)
+                    ret array_index.6: bits[8] = array_index(input, indices=[literal.4, literal.5], assumed_in_bounds=true, id=6)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<$solver_type>| {
+                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    solver.extract(array, 39, 32)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_array_update_inbound_value {
+        ($solver:expr, $solver_type:ty) => {
+            crate::assert_smt_fn_eq!(
+                test_array_update_elem0_value,
+                $solver,
+                r#"fn f(input: bits[4][4] id=1, val: bits[4] id=2) -> bits[4][4] {
+                    lit: bits[2] = literal(value=1, id=3)
+                    ret upd: bits[4][4] = array_update(input, val, indices=[lit], id=4)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<$solver_type>| {
+                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    let val = inputs.inputs.get("val").unwrap().bitvec.clone();
+                    let pre = solver.extract(array.clone(), 3, 0);
+                    let with_mid = solver.concat(val, pre);
+                    let post = solver.extract(array, 15, 8);
+                    solver.concat(post, with_mid)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_array_update_nested {
+        ($solver:expr, $solver_type:ty) => {
+            crate::assert_smt_fn_eq!(
+                test_array_update_nested,
+                $solver,
+                r#"fn lhs(input: bits[8][4][4] id=1, val: bits[8][4] id=2) -> bits[8][4][4] {
+                    idx0: bits[2] = literal(value=1, id=3)
+                    ret upd: bits[8][4][4] = array_update(input, val, indices=[idx0], id=5)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<$solver_type>| {
+                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    let val = inputs.inputs.get("val").unwrap().bitvec.clone();
+                    let pre = solver.extract(array.clone(), 31, 0);
+                    let with_mid = solver.concat(val, pre);
+                    let post = solver.extract(array, 127, 64);
+                    solver.concat(post, with_mid)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_array_update_deep_nested {
+        ($solver:expr, $solver_type:ty) => {
+            crate::assert_smt_fn_eq!(
+                test_array_update_deep_nested,
+                $solver,
+                r#"fn lhs(input: bits[8][2][2] id=1, val: bits[8] id=2) -> bits[8][2][2] {
+                    idx0: bits[2] = literal(value=1, id=3)
+                    idx1: bits[2] = literal(value=0, id=4)
+                    ret upd: bits[8][2][2] = array_update(input, val, indices=[idx0, idx1], id=5)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<$solver_type>| {
+                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    let val = inputs.inputs.get("val").unwrap().bitvec.clone();
+                    let pre = solver.extract(array.clone(), 15, 0);
+                    let with_mid = solver.concat(val, pre);
+                    let post = solver.extract(array, 31, 24);
+                    solver.concat(post, with_mid)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
     macro_rules! test_prove_fn_equiv {
         ($solver:expr) => {
             crate::test_assert_fn_equiv_to_self!(
@@ -615,6 +1063,18 @@ macro_rules! test_with_solver {
             crate::test_ir_tuple!($solver, $solver_type);
             crate::test_ir_value_token!($solver, $solver_type);
             crate::test_all_unops!($solver, $solver_type);
+            crate::test_ir_tuple_index!($solver, $solver_type);
+            crate::test_ir_tuple_index_literal!($solver, $solver_type);
+            crate::test_ir_tuple_reverse!($solver, $solver_type);
+            crate::test_ir_tuple_flattened!($solver);
+            crate::test_tuple_literal_vs_constructed!($solver);
+            crate::test_tuple_index_on_literal!($solver);
+            crate::test_ir_array_index!($solver, $solver_type);
+            crate::test_ir_array_index_multi_level!($solver, $solver_type);
+            crate::test_ir_array_index_deep_multi_level!($solver, $solver_type);
+            crate::test_array_update_inbound_value!($solver, $solver_type);
+            crate::test_array_update_nested!($solver, $solver_type);
+            crate::test_array_update_deep_nested!($solver, $solver_type);
             crate::test_prove_fn_equiv!($solver);
             crate::test_prove_fn_inequiv!($solver);
         }
