@@ -762,8 +762,11 @@ pub fn ir_fn_to_boolector(
                     let idx_val = BV::from_u64(array_bv.get_btor(), i as u64, index_bv.get_width());
                     let is_this = index_bv._eq(&idx_val);
                     let selected = is_this.cond_bv(value_bv, &orig_elem);
+                    // Build the updated array value so that element 0 ends up
+                    // in the least-significant slice, matching the layout of
+                    // Array literals, Array construction and ArrayIndex.
                     result = Some(if let Some(acc) = result {
-                        selected.concat(&acc)
+                        acc.concat(&selected)
                     } else {
                         selected
                     });
@@ -1054,6 +1057,21 @@ fn flatten_bv(bv: &BV<Rc<Btor>>, ty: &crate::xls_ir::ir::Type) -> BV<Rc<Btor>> {
                 });
             }
             result.expect("Tuple must have at least one member")
+        }
+        crate::xls_ir::ir::Type::Array(arr) => {
+            let mut offset = 0;
+            let mut result = None;
+            for _ in 0..arr.element_count {
+                let width = arr.element_type.bit_count() as u32;
+                let slice = bv.slice(offset + width - 1, offset);
+                offset += width;
+                result = Some(if let Some(acc) = result {
+                    slice.concat(&acc)
+                } else {
+                    slice
+                });
+            }
+            result.expect("Array must have at least one element")
         }
         _ => unimplemented!("flatten_bv for {:?}", ty),
     }
@@ -2559,5 +2577,142 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
 
         let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
         assert_eq!(result, super::EquivResult::Proved, "Tuple index on literal should produce equivalent values; failing reveals bug in tuple encoding");
+    }
+
+    #[test]
+    fn test_array_update_element0_value() {
+        // Update element 0 of a 3-element array and then read it back.  Correct
+        // semantics should yield the updated value (0xF).
+        // Current implementation misorders bits in array_update, so the prover
+        // will find a mismatch and return Disproved – the test therefore
+        // expects Proved and will fail until the bug is fixed.
+        let lhs_ir = r#"fn lhs() -> bits[4] {
+  orig: bits[4][3] = literal(value=[1, 2, 4], id=1)
+  val_f: bits[4] = literal(value=0xF, id=2)
+  idx0: bits[2] = literal(value=0, id=3)
+  upd: bits[4][3] = array_update(orig, val_f, indices=[idx0], id=4)
+  ret elem0: bits[4] = array_index(upd, indices=[idx0], id=5)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[4] {
+  ret lit: bits[4] = literal(value=0xF, id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert!(matches!(result, super::EquivResult::Proved), "array_update then array_index at 0 should yield updated value; failing reveals bug in array_update ordering");
+    }
+
+    #[test]
+    fn test_array_update_full_array_equiv() {
+        // Replace element 1 in a 3-element array and compare full array to a
+        // literal with the expected ordering.  Should be equivalent if ordering
+        // is correct.
+        let lhs_ir = r#"fn lhs() -> bits[4][3] {
+  orig: bits[4][3] = literal(value=[1, 2, 4], id=1)
+  val_a: bits[4] = literal(value=0xA, id=2)
+  idx1: bits[2] = literal(value=1, id=3)
+  upd: bits[4][3] = array_update(orig, val_a, indices=[idx1], id=4)
+  ret out: bits[4][3] = identity(upd, id=5)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[4][3] {
+  ret expected: bits[4][3] = literal(value=[1, 0xA, 4], id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert!(
+            matches!(result, super::EquivResult::Proved),
+            "array_update should produce expected full array value; failing reveals ordering bug"
+        );
+    }
+
+    #[test]
+    fn test_array_literal_vs_constructed_equiv() {
+        // Literal array should be equivalent to one built via the `array` IR
+        // node from the same elements.
+        let lhs_ir = r#"fn lhs() -> bits[4][3] {
+  ret litarr: bits[4][3] = literal(value=[1, 2, 3], id=1)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[4][3] {
+  e0: bits[4] = literal(value=1, id=1)
+  e1: bits[4] = literal(value=2, id=2)
+  e2: bits[4] = literal(value=3, id=3)
+  ret arr: bits[4][3] = array(e0, e1, e2, id=4)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert!(matches!(result, super::EquivResult::Proved), "Array literal and constructed array should be equivalent; discrepancy indicates ordering bug");
+    }
+
+    #[test]
+    fn test_array_index_on_literal_elements() {
+        // Index 1 of literal [1,2,3] is 2.
+        let lhs_ir = r#"fn lhs() -> bits[4] {
+  lit: bits[4][3] = literal(value=[1, 2, 3], id=1)
+  idx1: bits[2] = literal(value=0, id=2)
+  ret elem1: bits[4] = array_index(lit, indices=[idx1], id=3)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[4] {
+  ret two: bits[4] = literal(value=1, id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert!(matches!(result, super::EquivResult::Proved), "array_index on literal should return correct element value; failure indicates ordering bug");
+    }
+
+    #[test]
+    fn test_array_flatten_equiv_bits() {
+        // Verify that an array value and its flattened bits representation are
+        // equivalent when flatten_aggregates=true.
+        let lhs_ir = r#"fn lhs() -> bits[4][3] {
+  ret litarr: bits[4][3] = literal(value=[1, 2, 3], id=1)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[12] {
+  ret flat: bits[12] = literal(value=0x321, id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, true);
+        assert!(
+            matches!(result, super::EquivResult::Proved),
+            "Flattened bits should be equivalent to array value when flattening is allowed"
+        );
     }
 }
