@@ -336,6 +336,18 @@ pub fn ir_to_smt<'a, S: Solver>(
                 }
             }
             NodePayload::Literal(v) => ir_value_to_bv(solver, v, &node.ty),
+            NodePayload::ZeroExt { arg, new_bit_count }
+            | NodePayload::SignExt { arg, new_bit_count } => {
+                let arg_bv = env
+                    .get(arg)
+                    .expect("ZeroExt/SignExt argument must be present");
+                let to_width = *new_bit_count;
+                let signed = matches!(node.payload, NodePayload::SignExt { .. });
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: solver.extend_to(&arg_bv.bitvec, to_width, signed),
+                }
+            }
             NodePayload::ArrayUpdate {
                 array,
                 value,
@@ -1278,6 +1290,30 @@ mod test_utils {
     }
 
     #[macro_export]
+    macro_rules! test_extend {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $extend_width:expr, $signed:expr) => {
+            crate::assert_smt_fn_eq!(
+                $fn_name,
+                $solver_type,
+                $solver_config,
+                format!(
+                    r#"fn f(x: bits[8]) -> bits[{}] {{
+                    ret get_param.1: bits[{}] = {}(x, new_bit_count={}, id=1)
+                }}"#,
+                    $extend_width,
+                    $extend_width,
+                    if $signed { "sign_ext" } else { "zero_ext" },
+                    $extend_width,
+                ),
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let x = inputs.inputs.get("x").unwrap().bitvec.clone();
+                    solver.extend_to(&x, $extend_width, $signed)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
     macro_rules! test_prove_fn_equiv {
         ($solver_type:ty, $solver_config:expr) => {
             crate::test_assert_fn_equiv_to_self!(
@@ -1340,6 +1376,8 @@ macro_rules! test_with_solver {
             crate::test_array_update_deep_nested!($solver_type, $solver_config);
             crate::test_prove_fn_equiv!($solver_type, $solver_config);
             crate::test_prove_fn_inequiv!($solver_type, $solver_config);
+            crate::test_extend!(test_extend_zero, $solver_type, $solver_config, 16, false);
+            crate::test_extend!(test_extend_sign, $solver_type, $solver_config, 16, true);
         }
     };
 }
