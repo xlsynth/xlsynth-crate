@@ -5,7 +5,7 @@ use xlsynth::IrValue;
 use crate::{
     equiv::solver_interface::{BitVec, Response, Solver},
     xls_ir::{
-        ir::{self, NodePayload, NodeRef, Unop},
+        ir::{self, NaryOp, NodePayload, NodeRef, Unop},
         ir_utils::get_topological,
     },
 };
@@ -571,6 +571,24 @@ pub fn ir_to_smt<'a, S: Solver>(
             NodePayload::AfterAll(_) => {
                 // AfterAll is a no-op for Boolector; do not insert a BV (like Nil)
                 continue;
+            }
+            NodePayload::Nary(op, elems) => {
+                let elems_bvs: Vec<&BitVec<S::Rep>> = elems
+                    .iter()
+                    .map(|e| &(env.get(e).expect("Nary operand must be present").bitvec))
+                    .collect();
+                let bvs = match op {
+                    NaryOp::Concat => solver.concat_many(elems_bvs),
+                    NaryOp::And => solver.and_many(elems_bvs),
+                    NaryOp::Nor => solver.nor_many(elems_bvs),
+                    NaryOp::Or => solver.or_many(elems_bvs),
+                    NaryOp::Xor => solver.xor_many(elems_bvs),
+                    NaryOp::Nand => solver.nand_many(elems_bvs),
+                };
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: bvs,
+                }
             }
             NodePayload::Invoke { .. } => {
                 // TODO: add support for Invoke
@@ -1623,6 +1641,79 @@ mod test_utils {
             );
         };
     }
+
+    // --------------------------------------------------------------
+    // Nary operation test helpers (Concat/And/Or/Xor/Nor/Nand)
+    // --------------------------------------------------------------
+    #[macro_export]
+    macro_rules! test_nary_base {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $op_name:expr, $builder:expr) => {
+            crate::assert_smt_fn_eq!(
+                $fn_name,
+                $solver_type,
+                $solver_config,
+                concat!(
+                    "fn f(a: bits[4], b: bits[4], c: bits[4]) -> bits[4] {\n    ret nary.1: bits[4] = ",
+                    $op_name,
+                    "(a, b, c, id=1)\n}"
+                ),
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let a = inputs.inputs.get("a").unwrap().bitvec.clone();
+                    let b = inputs.inputs.get("b").unwrap().bitvec.clone();
+                    let c = inputs.inputs.get("c").unwrap().bitvec.clone();
+                    $builder(solver, a, b, c)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_all_nary {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_nary_base!(
+                test_concat_nary,
+                $solver_type,
+                $solver_config,
+                "concat",
+                |s: &mut $solver_type, a, b, c| { s.concat_many(vec![&a, &b, &c]) }
+            );
+            crate::test_nary_base!(
+                test_and_nary,
+                $solver_type,
+                $solver_config,
+                "and",
+                |s: &mut $solver_type, a, b, c| { s.and_many(vec![&a, &b, &c]) }
+            );
+            crate::test_nary_base!(
+                test_or_nary,
+                $solver_type,
+                $solver_config,
+                "or",
+                |s: &mut $solver_type, a, b, c| { s.or_many(vec![&a, &b, &c]) }
+            );
+            crate::test_nary_base!(
+                test_xor_nary,
+                $solver_type,
+                $solver_config,
+                "xor",
+                |s: &mut $solver_type, a, b, c| { s.xor_many(vec![&a, &b, &c]) }
+            );
+            crate::test_nary_base!(
+                test_nor_nary,
+                $solver_type,
+                $solver_config,
+                "nor",
+                |s: &mut $solver_type, a, b, c| { s.nor_many(vec![&a, &b, &c]) }
+            );
+            crate::test_nary_base!(
+                test_nand_nary,
+                $solver_type,
+                $solver_config,
+                "nand",
+                |s: &mut $solver_type, a, b, c| { s.nand_many(vec![&a, &b, &c]) }
+            );
+        };
+    }
 }
 
 macro_rules! test_with_solver {
@@ -1662,6 +1753,7 @@ macro_rules! test_with_solver {
             crate::test_bit_slice_update_middle!($solver_type, $solver_config);
             crate::test_bit_slice_update_end!($solver_type, $solver_config);
             crate::test_bit_slice_update_beyond_end!($solver_type, $solver_config);
+            crate::test_all_nary!($solver_type, $solver_config);
         }
     };
 }
