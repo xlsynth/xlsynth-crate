@@ -497,6 +497,70 @@ pub fn ir_to_smt<'a, S: Solver>(
 
                 array_index_recursive(solver, base_array, &index_bvs)
             }
+            NodePayload::DynamicBitSlice { arg, start, width } => {
+                let arg_bv = env.get(arg).expect("DynamicBitSlice arg must be present");
+                let start_bv = env
+                    .get(start)
+                    .expect("DynamicBitSlice start must be present");
+                assert!(*width > 0, "DynamicBitSlice: width must be > 0");
+                assert!(
+                    *width <= arg_bv.bitvec.get_width(),
+                    "DynamicBitSlice: width must be <= arg width"
+                );
+
+                let shifted = solver.xls_shrl(&arg_bv.bitvec, &start_bv.bitvec);
+                let shifted_ext = if *width > start_bv.bitvec.get_width() {
+                    solver.extend_to(&shifted, *width, false)
+                } else {
+                    shifted
+                };
+                let extracted = solver.slice(&shifted_ext, 0, *width);
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: extracted,
+                }
+            }
+            NodePayload::BitSlice { arg, start, width } => {
+                let arg_bv = env.get(arg).expect("BitSlice arg must be present");
+                assert!(
+                    *start + *width <= arg_bv.bitvec.get_width(),
+                    "BitSlice: start + width must be <= arg width"
+                );
+                let extracted = solver.slice(&arg_bv.bitvec, *start, *width);
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: extracted,
+                }
+            }
+            NodePayload::BitSliceUpdate {
+                arg,
+                start,
+                update_value,
+            } => {
+                let arg_bv = env.get(arg).expect("BitSliceUpdate arg must be present");
+                let start_bv = env
+                    .get(start)
+                    .expect("BitSliceUpdate start must be present");
+                let update_bv = env
+                    .get(update_value)
+                    .expect("BitSliceUpdate update_value must be present");
+                let arg_width = arg_bv.bitvec.get_width();
+                let update_width = update_bv.bitvec.get_width();
+                let max_width = arg_width.max(update_width);
+                let arg_ext = solver.extend_to(&arg_bv.bitvec, max_width, false);
+                let update_ext = solver.extend_to(&update_bv.bitvec, max_width, false);
+                let ones = solver.all_ones(update_width);
+                let ones_ext = solver.extend_to(&ones, max_width, false);
+                let update_shifted = solver.xls_shll(&update_ext, &start_bv.bitvec);
+                let ones_shifted = solver.xls_shll(&ones_ext, &start_bv.bitvec);
+                let negated_ones_shifted = solver.not(&ones_shifted);
+                let cleared_orig = solver.and(&arg_ext, &negated_ones_shifted);
+                let combined = solver.or(&cleared_orig, &update_shifted);
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: solver.slice(&combined, 0, arg_width),
+                }
+            }
             _ => panic!("Not implemented for {:?}", node.payload),
         };
         env.insert(nr, exp);
@@ -1316,6 +1380,261 @@ mod test_utils {
     }
 
     #[macro_export]
+    macro_rules! test_dynamic_bit_slice_base {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $start:expr, $width:expr) => {
+            crate::assert_smt_fn_eq!(
+                $fn_name,
+                $solver_type,
+                $solver_config,
+                format!(r#"fn f(input: bits[8]) -> bits[{}] {{
+                    start: bits[4] = literal(value={}, id=2)
+                    ret get_param.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
+                }}"#, $width, $start, $width, $width),
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    let needed_width = $start + $width;
+                    let input_ext = if needed_width > input.get_width() {
+                        solver.extend_to(&input, needed_width, false)
+                    } else {
+                        input
+                    };
+                    solver.slice(&input_ext, $start, $width)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_dynamic_bit_slice {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_dynamic_bit_slice_base!(
+                test_dynamic_bit_slice_0_4,
+                $solver_type,
+                $solver_config,
+                0,
+                4
+            );
+            crate::test_dynamic_bit_slice_base!(
+                test_dynamic_bit_slice_5_4,
+                $solver_type,
+                $solver_config,
+                5,
+                4
+            );
+            crate::test_dynamic_bit_slice_base!(
+                test_dynamic_bit_slice_0_8,
+                $solver_type,
+                $solver_config,
+                0,
+                8
+            );
+            crate::test_dynamic_bit_slice_base!(
+                test_dynamic_bit_slice_5_8,
+                $solver_type,
+                $solver_config,
+                5,
+                8
+            );
+            crate::test_dynamic_bit_slice_base!(
+                test_dynamic_bit_slice_10_4,
+                $solver_type,
+                $solver_config,
+                10,
+                4
+            );
+            crate::test_dynamic_bit_slice_base!(
+                test_dynamic_bit_slice_10_8,
+                $solver_type,
+                $solver_config,
+                10,
+                8
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_bit_slice_base {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $start:expr, $width:expr) => {
+            crate::test_ir_fn_equiv!(
+                $fn_name,
+                $solver_type,
+                $solver_config,
+                &format!(r#"fn f(input: bits[8]) -> bits[{}] {{
+                    ret get_param.1: bits[{}] = bit_slice(input, start={}, width={}, id=1)
+                }}"#, $width, $width, $start, $width),
+                &format!(r#"fn f(input: bits[8]) -> bits[{}] {{
+                    start: bits[4] = literal(value={}, id=2)
+                    ret get_param.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
+                }}"#, $width, $start, $width, $width),
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_bit_slice {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_bit_slice_base!(test_bit_slice_0_4, $solver_type, $solver_config, 0, 4);
+            crate::test_bit_slice_base!(test_bit_slice_5_4, $solver_type, $solver_config, 5, 3);
+            crate::test_bit_slice_base!(test_bit_slice_0_8, $solver_type, $solver_config, 0, 8);
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_bit_slice_update_zero {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::assert_smt_fn_eq!(
+                test_bit_slice_update_zero,
+                $solver_type,
+                $solver_config,
+                r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
+                    start: bits[4] = literal(value=0, id=2)
+                    ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
+                    let input_upper = solver.slice(&input, 4, 4);
+                    let updated = solver.concat(&input_upper, &slice);
+                    updated
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_bit_slice_update_middle {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::assert_smt_fn_eq!(
+                test_bit_slice_update_middle,
+                $solver_type,
+                $solver_config,
+                r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
+                    start: bits[4] = literal(value=1, id=2)
+                    ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
+                    let input_lower = solver.slice(&input, 0, 1);
+                    let input_upper = solver.slice(&input, 5, 3);
+                    let updated = solver.concat(&slice, &input_lower);
+                    let updated = solver.concat(&input_upper, &updated);
+                    updated
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_bit_slice_update_end {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::assert_smt_fn_eq!(
+                test_bit_slice_update_end,
+                $solver_type,
+                $solver_config,
+                r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
+                    start: bits[4] = literal(value=4, id=2)
+                    ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
+                    let input_lower = solver.slice(&input, 0, 4);
+                    let updated = solver.concat(&slice, &input_lower);
+                    updated
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_bit_slice_update_beyond_end {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::assert_smt_fn_eq!(
+                test_bit_slice_update_beyond_end,
+                $solver_type,
+                $solver_config,
+                r#"fn f(input: bits[8], slice: bits[10]) -> bits[8] {
+                    start: bits[4] = literal(value=4, id=2)
+                    ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
+                }"#,
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                    let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
+                    let input_lower = solver.slice(&input, 0, 4);
+                    let slice_extracted = solver.slice(&slice, 0, 4);
+                    let updated = solver.concat(&slice_extracted, &input_lower);
+                    updated
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_bit_slice_update_wider_update_value {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_bit_slice_update_wider_update_value,
+                $solver_type,
+                $solver_config,
+                r#"fn f(input: bits[7] id=1) -> bits[5] {
+                    slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
+                    ret upd.3: bits[5] = bit_slice_update(slice.2, input, input, id=3)
+                }"#,
+                r#"fn f(input: bits[7] id=1) -> bits[5] {
+                    slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
+                    ret upd.3: bits[5] = bit_slice_update(slice.2, input, input, id=3)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_bit_slice_update_large_update_value {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::assert_smt_fn_eq!(
+                test_bit_slice_update_large_update_value,
+                $solver_type,
+                $solver_config,
+                r#"fn f() -> bits[32] {
+                    operand: bits[32] = literal(value=0xABCD1234, id=1)
+                    start: bits[5] = literal(value=4, id=2)
+                    upd_val: bits[80] = literal(value=0xFFFFFFFFFFFFFFFFFFF, id=3)
+                    ret r: bits[32] = bit_slice_update(operand, start, upd_val, id=4)
+                }"#,
+                |solver: &mut $solver_type, _: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    solver.from_raw_str(32, "#xFFFFFFF4")
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob,
+                $solver_type,
+                $solver_config,
+                r#"fn fuzz_test(input: bits[8] id=1) -> bits[8] {
+                    literal_255: bits[8] = literal(value=255, id=3)
+                    bsu1: bits[8] = bit_slice_update(input, input, input, id=2)
+                    ret bsu2: bits[8] = bit_slice_update(literal_255, literal_255, bsu1, id=4)
+                }"#,
+                r#"fn fuzz_test(input: bits[8] id=1) -> bits[8] {
+                    ret literal_255: bits[8] = literal(value=255, id=3)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    #[macro_export]
     macro_rules! test_prove_fn_equiv {
         ($solver_type:ty, $solver_config:expr) => {
             crate::test_assert_fn_equiv_to_self!(
@@ -1380,6 +1699,18 @@ macro_rules! test_with_solver {
             crate::test_prove_fn_inequiv!($solver_type, $solver_config);
             crate::test_extend!(test_extend_zero, $solver_type, $solver_config, 16, false);
             crate::test_extend!(test_extend_sign, $solver_type, $solver_config, 16, true);
+            crate::test_dynamic_bit_slice!($solver_type, $solver_config);
+            crate::test_bit_slice!($solver_type, $solver_config);
+            crate::test_bit_slice_update_zero!($solver_type, $solver_config);
+            crate::test_bit_slice_update_middle!($solver_type, $solver_config);
+            crate::test_bit_slice_update_end!($solver_type, $solver_config);
+            crate::test_bit_slice_update_beyond_end!($solver_type, $solver_config);
+            crate::test_bit_slice_update_wider_update_value!($solver_type, $solver_config);
+            crate::test_bit_slice_update_large_update_value!($solver_type, $solver_config);
+            crate::test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob!(
+                $solver_type,
+                $solver_config
+            );
         }
     };
 }
