@@ -13,6 +13,27 @@ pub enum Response {
     Unknown,
 }
 
+// Generic helper: left-fold a vector with a binary operator implemented by the
+// solver.
+fn reduce_many<S: Solver, F>(
+    solver: &mut S,
+    bvs: Vec<&BitVec<S::Term>>,
+    mut op: F,
+) -> BitVec<S::Term>
+where
+    F: FnMut(&mut S, &BitVec<S::Term>, &BitVec<S::Term>) -> BitVec<S::Term>,
+{
+    let mut iter = bvs.into_iter();
+    let mut acc = iter
+        .next()
+        .expect("*_many called with empty vector")
+        .clone();
+    for bv in iter {
+        acc = op(solver, &acc, bv);
+    }
+    acc
+}
+
 pub trait Solver: Sized {
     type Term: Clone;
     type Config: Send + Sync;
@@ -208,6 +229,26 @@ pub trait Solver: Sized {
     fn is_signed_min_value(&mut self, bit_vec: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let signed_min_value = self.signed_min_value(bit_vec.get_width());
         self.eq(bit_vec, &signed_min_value)
+    }
+    fn concat_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
+        reduce_many(self, bvs, Self::concat)
+    }
+    fn and_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
+        reduce_many(self, bvs, Self::and)
+    }
+    fn xor_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
+        reduce_many(self, bvs, Self::xor)
+    }
+    fn nor_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
+        let or_result = reduce_many(self, bvs, Self::or);
+        self.not(&or_result)
+    }
+    fn or_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
+        reduce_many(self, bvs, Self::or)
+    }
+    fn nand_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
+        let and_result = reduce_many(self, bvs, Self::and);
+        self.not(&and_result)
     }
     fn xls_div(
         &mut self,
@@ -832,6 +873,30 @@ pub mod test_utils {
             }
         };
     }
+    // -------------------------------------------------------------------
+    // Variadic helper ( *_many ) test macro
+    // -------------------------------------------------------------------
+    #[macro_export]
+    macro_rules! test_solver_many {
+    ($fn_name:ident,
+     $solver:expr,
+     $method:ident,
+     $w:expr,
+     [$($val:expr),+ $(,)?],
+     $wr:expr,
+     $expected:expr $(,)?
+    ) => {
+        #[test]
+        fn $fn_name() {
+            let mut solver = $solver;
+            let vec_vals: Vec<_> = vec![ $( solver.numerical($w, $val) ),+ ];
+            let vec_refs: Vec<_> = vec_vals.iter().map(|bv| bv).collect();
+            let actual = solver.$method(vec_refs);
+            let expected = solver.numerical($wr, $expected);
+            crate::equiv::solver_interface::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
+        }
+    };
+}
 }
 
 #[cfg(test)]
@@ -1694,6 +1759,62 @@ macro_rules! test_solver {
                 4,
                 16,
                 0x07ab
+            );
+
+            // ----- *_many helpers -----
+            crate::test_solver_many!(
+                test_concat_many,
+                $solver,
+                concat_many,
+                4,
+                [0x1, 0x2, 0x3],
+                12,
+                0x123
+            );
+            crate::test_solver_many!(
+                test_and_many,
+                $solver,
+                and_many,
+                8,
+                [0x0F, 0x33, 0x55],
+                8,
+                0x01
+            );
+            crate::test_solver_many!(
+                test_or_many,
+                $solver,
+                or_many,
+                8,
+                [0x0F, 0x33, 0x55],
+                8,
+                0x7F
+            );
+            crate::test_solver_many!(
+                test_xor_many,
+                $solver,
+                xor_many,
+                8,
+                [0x0F, 0x33, 0x55],
+                8,
+                0x69
+            );
+            crate::test_solver_many!(
+                test_nor_many,
+                $solver,
+                nor_many,
+                8,
+                [0x0F, 0x33, 0x55],
+                8,
+                0x80
+            );
+            crate::test_solver_many!(
+                test_nand_many,
+                $solver,
+                nand_many,
+                8,
+                [0x0F, 0x33, 0x55],
+                8,
+                0xFE
             );
         }
     };
