@@ -561,6 +561,27 @@ pub fn ir_to_smt<'a, S: Solver>(
                     bitvec: solver.slice(&combined, 0, arg_width),
                 }
             }
+            NodePayload::Assert { .. } => {
+                // TODO: Turn Assert into a proof objective in Boolector.
+                // For now, treat as a no-op (like Nil/AfterAll).
+                continue;
+            }
+            NodePayload::Trace { .. } => {
+                // Trace has no effect on value computation
+                continue;
+            }
+            NodePayload::AfterAll(_) => {
+                // AfterAll is a no-op for Boolector; do not insert a BV (like Nil)
+                continue;
+            }
+            NodePayload::Invoke { .. } => {
+                // TODO: add support for Invoke
+                panic!("Invoke not supported in Boolector conversion");
+            }
+            NodePayload::Cover { .. } => {
+                // Cover statements do not contribute to value computation
+                continue;
+            }
             _ => panic!("Not implemented for {:?}", node.payload),
         };
         env.insert(nr, exp);
