@@ -596,6 +596,27 @@ pub fn ir_to_smt<'a, S: Solver>(
                 // TODO: add support for Invoke
                 panic!("Invoke not supported in Boolector conversion");
             }
+            NodePayload::OneHot { arg, lsb_prio } => {
+                let a = env.get(arg).expect("OneHot arg must be present").clone();
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: solver.xls_one_hot(&a.bitvec, *lsb_prio),
+                }
+            }
+            NodePayload::Decode { arg, width } => {
+                let a = env.get(arg).expect("Decode arg must be present").clone();
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: solver.xls_decode(&a.bitvec, *width),
+                }
+            }
+            NodePayload::Encode { arg } => {
+                let a = env.get(arg).expect("Encode arg must be present").clone();
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: solver.xls_encode(&a.bitvec),
+                }
+            }
             NodePayload::Cover { .. } => {
                 // Cover statements do not contribute to value computation
                 continue;
@@ -1716,6 +1737,78 @@ mod test_utils {
             );
         };
     }
+
+    #[macro_export]
+    macro_rules! test_ir_decode_base {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $in_width:expr, $out_width:expr) => {
+            crate::assert_smt_fn_eq!(
+                $fn_name,
+                $solver_type,
+                $solver_config,
+                format!(
+                    r#"fn f(x: bits[{iw}]) -> bits[{ow}] {{
+    ret d.1: bits[{ow}] = decode(x, width={ow}, id=1)
+}}"#,
+                    iw = $in_width,
+                    ow = $out_width
+                ),
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let x = inputs.inputs.get("x").unwrap().bitvec.clone();
+                    solver.xls_decode(&x, $out_width)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_encode_base {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $in_width:expr, $out_width:expr) => {
+            crate::assert_smt_fn_eq!(
+                $fn_name,
+                $solver_type,
+                $solver_config,
+                format!(
+                    r#"fn f(x: bits[{iw}]) -> bits[{ow}] {{
+                        ret e.1: bits[{ow}] = encode(x, id=1)
+                    }}"#,
+                    iw = $in_width,
+                    ow = $out_width
+                ),
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let x = inputs.inputs.get("x").unwrap().bitvec.clone();
+                    solver.xls_encode(&x)
+                }
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ir_one_hot_base {
+        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $prio:expr) => {
+            crate::assert_smt_fn_eq!(
+                $fn_name,
+                $solver_type,
+                $solver_config,
+                if $prio {
+                    r#"fn f(x: bits[16]) -> bits[16] {
+                        ret oh.1: bits[16] = one_hot(x, lsb_prio=true, id=1)
+                    }"#
+                } else {
+                    r#"fn f(x: bits[16]) -> bits[16] {
+                        ret oh.1: bits[16] = one_hot(x, lsb_prio=false, id=1)
+                    }"#
+                },
+                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Rep>| {
+                    let x = inputs.inputs.get("x").unwrap().bitvec.clone();
+                    if $prio {
+                        solver.xls_one_hot_lsb_prio(&x)
+                    } else {
+                        solver.xls_one_hot_msb_prio(&x)
+                    }
+                }
+            );
+        };
+    }
 }
 
 macro_rules! test_with_solver {
@@ -1756,6 +1849,17 @@ macro_rules! test_with_solver {
             crate::test_bit_slice_update_end!($solver_type, $solver_config);
             crate::test_bit_slice_update_beyond_end!($solver_type, $solver_config);
             crate::test_all_nary!($solver_type, $solver_config);
+            crate::test_ir_decode_base!(test_ir_decode_0, $solver_type, $solver_config, 8, 8);
+            crate::test_ir_decode_base!(test_ir_decode_1, $solver_type, $solver_config, 8, 16);
+            crate::test_ir_encode_base!(test_ir_encode_0, $solver_type, $solver_config, 8, 3);
+            crate::test_ir_encode_base!(test_ir_encode_1, $solver_type, $solver_config, 16, 4);
+            crate::test_ir_one_hot_base!(test_ir_one_hot_true, $solver_type, $solver_config, true);
+            crate::test_ir_one_hot_base!(
+                test_ir_one_hot_false,
+                $solver_type,
+                $solver_config,
+                false
+            );
         }
     };
 }
