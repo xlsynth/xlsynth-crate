@@ -461,6 +461,86 @@ pub trait Solver: Sized {
     ) -> BitVec<Self::Rep> {
         self.xls_shift(operand, shift_amount, false, false)
     }
+
+    fn xls_one_hot(&mut self, arg: &BitVec<Self::Rep>, lsb_prio: bool) -> BitVec<Self::Rep> {
+        if lsb_prio {
+            let neg = self.neg(&arg);
+            let one_hot = self.and(&arg, &neg);
+            one_hot
+        } else {
+            let width = arg.get_width();
+            let mut shift_amount_bits = 1;
+            let mut shift_amount = 1;
+            let mut result = arg.clone();
+            while shift_amount < width {
+                let shift_amount_bv = self.numerical(shift_amount_bits, shift_amount as u64);
+                let shifted_result = self.xls_shrl(&result, &shift_amount_bv);
+                result = self.or(&result, &shifted_result);
+                shift_amount *= 2;
+                shift_amount_bits += 1;
+            }
+            let one = self.one(1);
+            let shifted_result = self.xls_shrl(&result, &one);
+            let flipped_shifted_result = self.not(&shifted_result);
+            self.and(&flipped_shifted_result, &result)
+        }
+    }
+
+    fn xls_one_hot_lsb_prio(&mut self, arg: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        self.xls_one_hot(arg, true)
+    }
+
+    fn xls_one_hot_msb_prio(&mut self, arg: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        self.xls_one_hot(arg, false)
+    }
+
+    // --------------------------------------------------------------------
+    // XLS decode/encode helpers
+    // --------------------------------------------------------------------
+    fn xls_decode(
+        &mut self,
+        operand: &BitVec<Self::Rep>,
+        result_width: usize,
+    ) -> BitVec<Self::Rep> {
+        // Zero-width result: propagate.
+        if result_width == 0 {
+            return BitVec::ZeroWidth;
+        }
+
+        // A one-hot decode is simply `1 << operand` with XLS semantics: if the
+        // shift amount is ≥ result_width the helper already returns 0, matching
+        // the required saturation behaviour.
+
+        let one = self.one(result_width);
+        self.xls_shll(&one, operand)
+    }
+
+    fn xls_encode(&mut self, operand: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+        let n_bits = operand.get_width();
+        // Compute ceil(log2(n_bits)).  For n_bits <= 1 the result is zero-width.
+        let result_width = if n_bits <= 1 {
+            0
+        } else {
+            (usize::BITS as usize) - ((n_bits - 1).leading_zeros() as usize)
+        };
+
+        if result_width == 0 {
+            return BitVec::ZeroWidth;
+        }
+
+        let zero_vec = self.zero(result_width);
+        let mut parts: Vec<BitVec<Self::Rep>> = Vec::with_capacity(n_bits.max(1));
+
+        for idx in 0..n_bits {
+            // Extract the bit at position idx (LSB == 0).
+            let bit_i = self.slice(operand, idx, 1); // 1-bit condition
+            let idx_const = self.numerical(result_width, idx as u64);
+            let selected = self.ite(&bit_i, &idx_const, &zero_vec);
+            parts.push(selected);
+        }
+
+        self.or_many(parts.iter().collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1783,6 +1863,157 @@ macro_rules! test_solver {
                 [0x0F, 0x33, 0x55],
                 8,
                 0xFE
+            );
+
+            crate::test_solver_unary!(
+                test_xls_one_hot_lsb,
+                $solver,
+                xls_one_hot_lsb_prio,
+                16,
+                0x0560,
+                16,
+                0x0020
+            );
+            crate::test_solver_unary!(
+                test_xls_one_hot_lsb_lsb_set,
+                $solver,
+                xls_one_hot_lsb_prio,
+                16,
+                0x0001,
+                16,
+                0x0001
+            );
+            crate::test_solver_unary!(
+                test_xls_one_hot_lsb_msb_set,
+                $solver,
+                xls_one_hot_lsb_prio,
+                16,
+                0x8000,
+                16,
+                0x8000
+            );
+            crate::test_solver_unary!(
+                test_xls_one_hot_lsb_zero,
+                $solver,
+                xls_one_hot_lsb_prio,
+                16,
+                0x0000,
+                16,
+                0x0000
+            );
+            crate::test_solver_unary!(
+                test_xls_one_hot_lsb_all_set,
+                $solver,
+                xls_one_hot_lsb_prio,
+                16,
+                0xFFFF,
+                16,
+                0x0001
+            );
+
+            crate::test_solver_unary!(
+                test_xls_one_hot_msb,
+                $solver,
+                xls_one_hot_msb_prio,
+                16,
+                0x0560,
+                16,
+                0x0400
+            );
+            crate::test_solver_unary!(
+                test_xls_one_hot_msb_lsb_set,
+                $solver,
+                xls_one_hot_msb_prio,
+                16,
+                0x0001,
+                16,
+                0x0001
+            );
+            crate::test_solver_unary!(
+                test_xls_one_hot_msb_msb_set,
+                $solver,
+                xls_one_hot_msb_prio,
+                16,
+                0x8000,
+                16,
+                0x8000
+            );
+            crate::test_solver_unary!(
+                test_xls_one_hot_msb_zero,
+                $solver,
+                xls_one_hot_msb_prio,
+                16,
+                0x0000,
+                16,
+                0x0000
+            );
+            crate::test_solver_unary!(
+                test_xls_one_hot_msb_all_set,
+                $solver,
+                xls_one_hot_msb_prio,
+                16,
+                0xFFFF,
+                16,
+                0x8000
+            );
+
+            // ------------------------------------------------------------------
+            // xls_decode tests
+            // ------------------------------------------------------------------
+            crate::test_solver_decode!(test_xls_decode_basic, $solver, 8, 0x05, 16, 0x0020);
+            crate::test_solver_decode!(test_xls_decode_zero, $solver, 8, 0x00, 16, 0x0001);
+            crate::test_solver_decode!(test_xls_decode_overflow, $solver, 8, 0x0A, 8, 0x00);
+
+            // ------------------------------------------------------------------
+            // xls_encode tests
+            // ------------------------------------------------------------------
+            crate::test_solver_encode!(test_xls_encode_single_hot, $solver, 8, 0x20, 3, 0x05);
+            crate::test_solver_encode!(test_xls_encode_multiple_hot, $solver, 16, 0x0028, 4, 0x07);
+            crate::test_solver_encode!(test_xls_encode_zero, $solver, 16, 0x0000, 4, 0x00);
+        }
+    };
+}
+
+// -------------------------------------------------------------------
+// Decode / Encode test macros
+// -------------------------------------------------------------------
+#[macro_export]
+macro_rules! test_solver_decode {
+    ($fn_name:ident,
+     $solver:expr,
+     $in_w:expr, $in_val:expr,
+     $out_w:expr, $out_val:expr $(,)?) => {
+        #[test]
+        fn $fn_name() {
+            let mut solver = $solver;
+            let operand = solver.numerical($in_w, $in_val);
+            let actual = solver.xls_decode(&operand, $out_w);
+            let expected = solver.numerical($out_w, $out_val);
+            crate::equiv::solver_interface::test_utils::assert_solver_eq(
+                &mut solver,
+                &actual,
+                &expected,
+            );
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! test_solver_encode {
+    ($fn_name:ident,
+     $solver:expr,
+     $in_w:expr, $in_val:expr,
+     $out_w:expr, $out_val:expr $(,)?) => {
+        #[test]
+        fn $fn_name() {
+            let mut solver = $solver;
+            let operand = solver.numerical($in_w, $in_val);
+            let actual = solver.xls_encode(&operand);
+            let expected = solver.numerical($out_w, $out_val);
+            crate::equiv::solver_interface::test_utils::assert_solver_eq(
+                &mut solver,
+                &actual,
+                &expected,
             );
         }
     };
