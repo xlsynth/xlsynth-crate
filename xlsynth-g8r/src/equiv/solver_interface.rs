@@ -598,6 +598,18 @@ pub mod test_utils {
         );
     }
 
+    pub fn test_numerical_long<S: Solver>(solver: &mut S) {
+        let a = solver.declare("a", 128).unwrap();
+        let b = solver.numerical(128, 0xfedca);
+        let eq_constraint = solver.eq(&a, &b);
+        solver.assert(&eq_constraint).unwrap();
+        assert_eq!(solver.check().unwrap(), Response::Sat);
+        assert_eq!(
+            solver.get_value(&a, &ir::Type::Bits(128)).unwrap(),
+            IrValue::make_ubits(128, 0xfedca).unwrap()
+        );
+    }
+
     pub fn test_constants<S: Solver>(solver: &mut S) {
         let zero = solver.zero(128);
         let one = solver.one(128);
@@ -973,6 +985,12 @@ macro_rules! test_solver {
             fn test_numerical_outbound() {
                 let mut solver = $solver;
                 test_utils::test_numerical_outbound(&mut solver);
+            }
+
+            #[test]
+            fn test_numerical_long() {
+                let mut solver = $solver;
+                test_utils::test_numerical_long(&mut solver);
             }
 
             crate::test_get_value!(
