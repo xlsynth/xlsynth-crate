@@ -2277,3 +2277,10 @@ test_with_solver!(
     crate::equiv::easy_smt_backend::EasySmtSolver,
     &crate::equiv::easy_smt_backend::EasySmtConfig::z3()
 );
+
+#[cfg(feature = "with-bitwuzla-built")]
+test_with_solver!(
+    bitwuzla_built_tests,
+    crate::equiv::bitwuzla_backend::Bitwuzla,
+    &crate::equiv::bitwuzla_backend::BitwuzlaOptions::new()
+);
