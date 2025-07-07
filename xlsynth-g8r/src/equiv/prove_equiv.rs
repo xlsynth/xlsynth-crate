@@ -621,7 +621,117 @@ pub fn ir_to_smt<'a, S: Solver>(
                 // Cover statements do not contribute to value computation
                 continue;
             }
-            _ => panic!("Not implemented for {:?}", node.payload),
+            NodePayload::Sel {
+                selector,
+                cases,
+                default,
+            } => {
+                let sel_bv = env.get(selector).expect("Sel selector BV");
+                let width = sel_bv.bitvec.get_width();
+                let addr_space = if width >= usize::BITS as usize {
+                    usize::MAX
+                } else {
+                    1usize << width
+                };
+
+                // ---------------- Validation -------------------------------------------------
+                assert!(!cases.is_empty(), "Sel: must have at least one case");
+                let case_count = cases.len();
+                assert!(
+                    case_count <= addr_space,
+                    "Sel: too many cases for selector width"
+                );
+
+                // XLS rule: default iff selector width does NOT cover all cases.
+                if case_count == addr_space {
+                    assert!(
+                        default.is_none(),
+                        "Sel: default forbidden when selector covers all cases"
+                    );
+                } else {
+                    assert!(
+                        default.is_some(),
+                        "Sel: default required when selector may overflow"
+                    );
+                }
+
+                // ---------------- Initial accumulator & loop ------------------------------
+                // Gather all case bit-vectors once.
+                let mut case_bvs: Vec<_> = cases
+                    .iter()
+                    .map(|r| env.get(r).unwrap().bitvec.clone())
+                    .collect();
+
+                // Determine starting accumulator.
+                let mut result_bv = if let Some(def_ref) = default {
+                    env.get(def_ref).unwrap().bitvec.clone()
+                } else {
+                    assert!(
+                        case_bvs.len() >= 2,
+                        "Sel without default must have ≥2 cases"
+                    );
+                    case_bvs.pop().unwrap() // O(1) pop from back
+                };
+
+                // Iterate remaining cases from highest to 0, building the ITE chain.
+                for idx in (0..case_bvs.len()).rev() {
+                    let case_bv = case_bvs[idx].clone();
+                    let idx_const = solver.numerical(width, idx as u64);
+                    let cond = solver.eq(&sel_bv.bitvec, &idx_const);
+                    result_bv = solver.ite(&cond, &case_bv, &result_bv);
+                }
+
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: result_bv,
+                }
+            }
+            NodePayload::OneHotSel { selector, cases } => {
+                let sel_bv = env.get(selector).expect("OneHotSel selector");
+                let zero_t = solver.zero(env.get(&cases[0]).unwrap().bitvec.get_width());
+                let result_bv = cases.iter().enumerate().fold(
+                    solver.zero(zero_t.get_width()),
+                    |acc, (idx, case_ref)| {
+                        let bit = solver.slice(&sel_bv.bitvec, idx, 1);
+                        let case_bv = env.get(case_ref).unwrap().bitvec.clone();
+                        let selected = solver.ite(&bit, &case_bv, &zero_t);
+                        solver.or(&acc, &selected)
+                    },
+                );
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: result_bv,
+                }
+            }
+            NodePayload::PrioritySel {
+                selector,
+                cases,
+                default,
+            } => {
+                let sel_bv = env.get(selector).expect("PrioritySel selector");
+                let def_bv = env
+                    .get(
+                        default
+                            .as_ref()
+                            .expect("PrioritySel currently requires default"),
+                    )
+                    .unwrap()
+                    .bitvec
+                    .clone();
+                let result_bv = cases
+                    .iter()
+                    .enumerate()
+                    .rev() // highest idx first, so last evaluated has higher priority
+                    .fold(def_bv, |acc, (idx, case_ref)| {
+                        let bit = solver.slice(&sel_bv.bitvec, idx, 1);
+                        let case_bv = env.get(case_ref).unwrap().bitvec.clone();
+                        solver.ite(&bit, &case_bv, &acc)
+                    });
+                IRTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: result_bv,
+                }
+            }
         };
         env.insert(nr, exp);
     }
@@ -1871,6 +1981,184 @@ mod test_utils {
             );
         };
     }
+
+    // ----------------------------
+    // Sel / OneHotSel / PrioritySel tests
+    // ----------------------------
+
+    // sel basic: selector in range (bits[2]=1) -> second case
+    #[macro_export]
+    macro_rules! test_sel_basic {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_sel_basic,
+                $solver_type,
+                $solver_config,
+                r#"fn f() -> bits[4] {
+                    selidx: bits[2] = literal(value=1, id=10)
+                    a: bits[4] = literal(value=10, id=11)
+                    b: bits[4] = literal(value=11, id=12)
+                    c: bits[4] = literal(value=12, id=13)
+                    d: bits[4] = literal(value=13, id=14)
+                    ret s: bits[4] = sel(selidx, cases=[a, b, c, d], id=15)
+                }"#,
+                r#"fn g() -> bits[4] {
+                    ret k: bits[4] = literal(value=11, id=1)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    // sel default path: selector out of range chooses default
+    #[macro_export]
+    macro_rules! test_sel_default {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_sel_default,
+                $solver_type,
+                $solver_config,
+                r#"fn f() -> bits[4] {
+                    selidx: bits[2] = literal(value=3, id=10)
+                    a: bits[4] = literal(value=10, id=11)
+                    b: bits[4] = literal(value=11, id=12)
+                    c: bits[4] = literal(value=12, id=13)
+                    def: bits[4] = literal(value=15, id=14)
+                    ret s: bits[4] = sel(selidx, cases=[a, b, c], default=def, id=15)
+                }"#,
+                r#"fn g() -> bits[4] {
+                    ret k: bits[4] = literal(value=15, id=1)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_sel_missing_default_panics {
+        ($solver_type:ty, $solver_config:expr) => {
+            // Invalid Sel spec tests (expect panic)
+            #[should_panic]
+            #[test]
+            fn test_sel_missing_default_panics() {
+                let ir = r#"fn bad() -> bits[4] {
+                    idx: bits[2] = literal(value=3, id=1)
+                    a: bits[4] = literal(value=1, id=2)
+                    b: bits[4] = literal(value=2, id=3)
+                    c: bits[4] = literal(value=3, id=4)
+                    ret s: bits[4] = sel(idx, cases=[a, b, c], id=5)
+                }"#;
+                let f = crate::xls_ir::ir_parser::Parser::new(ir)
+                    .parse_fn()
+                    .unwrap();
+                let mut solver = <$solver_type>::new($solver_config).unwrap();
+                let inputs = get_fn_inputs(&mut solver, &f, None);
+                // Should panic during conversion due to missing default
+                let _ = ir_to_smt(&mut solver, &inputs);
+            }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_sel_unexpected_default_panics {
+        ($solver_type:ty, $solver_config:expr) => {
+            #[should_panic]
+            #[test]
+            fn test_sel_unexpected_default_panics() {
+                let ir = r#"fn bad() -> bits[4] {
+                    idx: bits[2] = literal(value=1, id=1)
+                    a: bits[4] = literal(value=1, id=2)
+                    b: bits[4] = literal(value=2, id=3)
+                    c: bits[4] = literal(value=3, id=4)
+                    d: bits[4] = literal(value=4, id=5)
+                    def: bits[4] = literal(value=5, id=6)
+                    ret s: bits[4] = sel(idx, cases=[a,b,c,d], default=def, id=7)
+                }"#;
+                let f = crate::xls_ir::ir_parser::Parser::new(ir)
+                    .parse_fn()
+                    .unwrap();
+                let mut solver = <$solver_type>::new($solver_config).unwrap();
+                let inputs = get_fn_inputs(&mut solver, &f, None);
+                let _ = ir_to_smt(&mut solver, &inputs);
+            }
+        };
+    }
+
+    // one_hot_sel: multiple bits
+    #[macro_export]
+    macro_rules! test_one_hot_sel_multi {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_one_hot_sel_multi,
+                $solver_type,
+                $solver_config,
+                r#"fn f() -> bits[4] {
+                    sel: bits[3] = literal(value=3, id=1)
+                    c0: bits[4] = literal(value=1, id=2)
+                    c1: bits[4] = literal(value=2, id=3)
+                    c2: bits[4] = literal(value=4, id=4)
+                    ret o: bits[4] = one_hot_sel(sel, cases=[c0, c1, c2], id=5)
+                }"#,
+                r#"fn g() -> bits[4] {
+                    ret lit: bits[4] = literal(value=3, id=1)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    // priority_sel: multiple bits -> lowest index wins
+    #[macro_export]
+    macro_rules! test_priority_sel_multi {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_priority_sel_multi,
+                $solver_type,
+                $solver_config,
+                r#"fn f() -> bits[4] {
+                    sel: bits[3] = literal(value=5, id=1)
+                    c0: bits[4] = literal(value=1, id=2)
+                    c1: bits[4] = literal(value=2, id=3)
+                    c2: bits[4] = literal(value=4, id=4)
+                    def: bits[4] = literal(value=8, id=5)
+                    ret o: bits[4] = priority_sel(sel, cases=[c0, c1, c2], default=def, id=6)
+                }"#,
+                r#"fn g() -> bits[4] {
+                    ret lit: bits[4] = literal(value=1, id=1)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
+
+    // priority_sel: no bits set selects default
+    #[macro_export]
+    macro_rules! test_priority_sel_default {
+        ($solver_type:ty, $solver_config:expr) => {
+            crate::test_ir_fn_equiv!(
+                test_priority_sel_default,
+                $solver_type,
+                $solver_config,
+                r#"fn f() -> bits[4] {
+                    sel: bits[3] = literal(value=0, id=1)
+                    c0: bits[4] = literal(value=1, id=2)
+                    c1: bits[4] = literal(value=2, id=3)
+                    c2: bits[4] = literal(value=4, id=4)
+                    def: bits[4] = literal(value=8, id=5)
+                    ret o: bits[4] = priority_sel(sel, cases=[c0, c1, c2], default=def, id=6)
+                }"#,
+                r#"fn g() -> bits[4] {
+                    ret lit: bits[4] = literal(value=8, id=1)
+                }"#,
+                false,
+                EquivResult::Proved
+            );
+        };
+    }
 }
 
 macro_rules! test_with_solver {
@@ -1928,6 +2216,13 @@ macro_rules! test_with_solver {
                 $solver_config,
                 false
             );
+            crate::test_sel_basic!($solver_type, $solver_config);
+            crate::test_sel_default!($solver_type, $solver_config);
+            crate::test_sel_missing_default_panics!($solver_type, $solver_config);
+            crate::test_sel_unexpected_default_panics!($solver_type, $solver_config);
+            crate::test_one_hot_sel_multi!($solver_type, $solver_config);
+            crate::test_priority_sel_multi!($solver_type, $solver_config);
+            crate::test_priority_sel_default!($solver_type, $solver_config);
         }
     };
 }
