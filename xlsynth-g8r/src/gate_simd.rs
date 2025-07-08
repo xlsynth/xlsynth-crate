@@ -34,11 +34,7 @@ impl Vec256 {
 
     #[inline]
     pub fn apply_neg(self, negated: bool) -> Self {
-        if negated {
-            !self
-        } else {
-            self
-        }
+        if negated { !self } else { self }
     }
 
     /// Packs 256 boolean samples into a `Vec256`.
@@ -183,7 +179,7 @@ pub fn eval_correctness_distance(
 mod tests {
     use super::*;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     /// Packs an array of `bool` into a `Vec256` – thin wrapper over
     /// `Vec256::from_samples` for test ergonomics.
@@ -205,8 +201,8 @@ mod tests {
         let mut a_samples = [false; 256];
         let mut b_samples = [false; 256];
         for i in 0..256 {
-            a_samples[i] = rng.gen();
-            b_samples[i] = rng.gen();
+            a_samples[i] = rng.r#gen();
+            b_samples[i] = rng.r#gen();
         }
 
         let simd_inputs = vec![pack(&a_samples), pack(&b_samples)];
@@ -241,8 +237,8 @@ mod tests {
         let mut a_samples = [false; 256];
         let mut b_samples = [false; 256];
         for i in 0..256 {
-            a_samples[i] = rng.gen();
-            b_samples[i] = rng.gen();
+            a_samples[i] = rng.r#gen();
+            b_samples[i] = rng.r#gen();
         }
 
         let simd_inputs = vec![pack(&a_samples), pack(&b_samples)];

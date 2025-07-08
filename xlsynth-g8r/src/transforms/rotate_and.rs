@@ -6,7 +6,7 @@ use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
 use crate::use_count::get_id_to_use_count;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 // --- Primitives ---
 
@@ -33,7 +33,9 @@ pub fn rotate_and_right_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &
     // Ensure that `right_op_of_outer` does NOT (transitively) depend on
     // `inner_ref`.
     if node_reaches_target(&g.gates, right_op_of_outer.node, inner_ref) {
-        return Err("rotate_and_right_primitive: right operand depends on inner; rotation would create a cycle");
+        return Err(
+            "rotate_and_right_primitive: right operand depends on inner; rotation would create a cycle",
+        );
     }
 
     let use_counts = get_id_to_use_count(g);
@@ -91,7 +93,9 @@ pub fn rotate_and_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
 
     // Ensure that `left_op_of_outer` does NOT (transitively) depend on `inner_ref`.
     if node_reaches_target(&g.gates, left_op_of_outer.node, inner_ref) {
-        return Err("rotate_and_left_primitive: left operand depends on inner; rotation would create a cycle");
+        return Err(
+            "rotate_and_left_primitive: left operand depends on inner; rotation would create a cycle",
+        );
     }
 
     let use_counts = get_id_to_use_count(g);
@@ -181,7 +185,9 @@ impl Transform for RotateAndRightTransform {
     ) -> Result<()> {
         if direction == TransformDirection::Backward {
             // This could call rotate_and_left_primitive
-            return Err(anyhow!("Backward direction not supported directly by RotateAndRightTransform, use RotateAndLeftTransform"));
+            return Err(anyhow!(
+                "Backward direction not supported directly by RotateAndRightTransform, use RotateAndLeftTransform"
+            ));
         }
         match candidate_location {
             TransformLocation::Node(target_ref) => {
@@ -252,7 +258,9 @@ impl Transform for RotateAndLeftTransform {
     ) -> Result<()> {
         if direction == TransformDirection::Backward {
             // This could call rotate_and_right_primitive
-            return Err(anyhow!("Backward direction not supported directly by RotateAndLeftTransform, use RotateAndRightTransform"));
+            return Err(anyhow!(
+                "Backward direction not supported directly by RotateAndLeftTransform, use RotateAndRightTransform"
+            ));
         }
         match candidate_location {
             TransformLocation::Node(target_ref) => {

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use xlsynth::IrBits;
 use xlsynth_g8r::gate_sim::{self, Collect};
-use xlsynth_g8r::test_utils::{load_bf16_mul_sample, Opt, BF16_TOTAL_BITS};
+use xlsynth_g8r::test_utils::{BF16_TOTAL_BITS, Opt, load_bf16_mul_sample};
 
 /// Benchmarks the gate simulation of bf16 multiplication using fixed zero
 /// inputs.

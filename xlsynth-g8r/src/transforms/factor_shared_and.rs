@@ -7,7 +7,7 @@ use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
 use crate::use_count::get_id_to_use_count;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Collapses `((a & b) & (a & c))` into `(a & (b & c))`.
 ///
@@ -143,7 +143,9 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
     let same_node_diff_pol =
         |x: AigOperand| x.node == common_op.node && x.negated != common_op.negated;
     if same_node_diff_pol(inner_a) || same_node_diff_pol(inner_b) {
-        return Err("unfactor_shared_and_primitive: polarity mismatch between common operand and inner gate");
+        return Err(
+            "unfactor_shared_and_primitive: polarity mismatch between common operand and inner gate",
+        );
     }
 
     // Choose the inner operand that is *not* the common operand so the two

@@ -154,7 +154,7 @@ fn run_external_ir_tool(orig_pkg: &str, gate_pkg: &str) -> IrCheckResult {
     let tools_dir = match std::env::var("XLSYNTH_TOOLS") {
         Ok(p) => std::path::PathBuf::from(p),
         Err(_) => {
-            return IrCheckResult::OtherProcessError("XLSYNTH_TOOLS env var not set".to_string())
+            return IrCheckResult::OtherProcessError("XLSYNTH_TOOLS env var not set".to_string());
         }
     };
     let exe = tools_dir.join("check_ir_equivalence_main");

@@ -4,7 +4,7 @@ use crate::gate::GateFn;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Primitive: swaps two output bits in a `GateFn`.
 pub fn swap_output_bits_primitive(

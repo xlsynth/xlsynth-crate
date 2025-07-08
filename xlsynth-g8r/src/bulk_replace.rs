@@ -392,7 +392,7 @@ mod tests {
     use crate::{
         check_equivalence,
         gate_builder::GateBuilderOptions,
-        get_summary_stats::{get_summary_stats, SummaryStats},
+        get_summary_stats::{SummaryStats, get_summary_stats},
         test_utils::{
             setup_graph_for_constant_replace, setup_graph_with_more_redundancies,
             setup_graph_with_redundancies, setup_invalid_graph_with_cycle,

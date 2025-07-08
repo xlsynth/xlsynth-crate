@@ -8,7 +8,7 @@ use crate::xls_ir::ir::Package as CrateIrPackage;
 use crate::xls_ir::ir_parser;
 use half::bf16;
 use std::path::Path;
-use xlsynth::{mangle_dslx_name, IrBits, IrFunction, IrPackage, IrValue};
+use xlsynth::{IrBits, IrFunction, IrPackage, IrValue, mangle_dslx_name};
 
 // BF16 Constants
 pub const BF16_EXPONENT_BITS: usize = 8;
@@ -578,8 +578,8 @@ pub struct TestGraphPaddedEqualDepthOppositePolarity {
     pub n2: AigOperand,
 }
 
-pub fn setup_padded_graph_with_equal_depth_opposite_polarity(
-) -> TestGraphPaddedEqualDepthOppositePolarity {
+pub fn setup_padded_graph_with_equal_depth_opposite_polarity()
+-> TestGraphPaddedEqualDepthOppositePolarity {
     let mut gb = GateBuilder::new(
         "padded_equal_depth_opposite_polarity".to_string(),
         GateBuilderOptions::no_opt(),
@@ -645,7 +645,9 @@ mod tests {
     #[test]
     fn test_invalid_graph_with_cycle_fails_validation() {
         if !cfg!(debug_assertions) {
-            eprintln!("skipping test_invalid_graph_with_cycle_fails_validation: debug_assertions not enabled");
+            eprintln!(
+                "skipping test_invalid_graph_with_cycle_fails_validation: debug_assertions not enabled"
+            );
             return;
         }
         let test_graph = setup_invalid_graph_with_cycle();

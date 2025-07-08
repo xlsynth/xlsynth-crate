@@ -11,8 +11,8 @@ use crate::xls_ir::ir_utils;
 use std::collections::HashMap;
 
 use crate::ir2gate_utils::{
-    gatify_add_brent_kung, gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
-    gatify_one_hot, gatify_one_hot_select, AdderMapping, Direction,
+    AdderMapping, Direction, gatify_add_brent_kung, gatify_add_kogge_stone,
+    gatify_add_ripple_carry, gatify_barrel_shifter, gatify_one_hot, gatify_one_hot_select,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -89,7 +89,11 @@ fn gatify_priority_sel(
     // As we process cases we track whether any prior case had been selected.
     let mut any_prior_selected = gb.get_false();
     for (i, case_bits) in cases.iter().enumerate() {
-        assert_eq!(case_bits.get_bit_count(), output_bit_count, "all cases of the priority select must have the same bit count which is the same as the output bit count");
+        assert_eq!(
+            case_bits.get_bit_count(),
+            output_bit_count,
+            "all cases of the priority select must have the same bit count which is the same as the output bit count"
+        );
         let this_wants_selected = selector_bits.get_lsb(i).clone();
         let no_prior_selected = gb.add_not(any_prior_selected);
         let this_selected = gb.add_and_binary(this_wants_selected, no_prior_selected);
@@ -708,11 +712,7 @@ pub fn gatify_scmp(
             CmpKind::Gt => {
                 let lt_or_eq = gb.add_or_binary(lt, eq);
                 let gt = gb.add_not(lt_or_eq);
-                if or_eq {
-                    gb.add_or_binary(gt, eq)
-                } else {
-                    gt
-                }
+                if or_eq { gb.add_or_binary(gt, eq) } else { gt }
             }
         }
     }
@@ -1946,7 +1946,7 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String
 #[cfg(test)]
 mod tests {
     use crate::xls_ir::ir;
-    use crate::{ir2gate::gatify, ir2gate::GatifyOptions, xls_ir::ir_parser};
+    use crate::{ir2gate::GatifyOptions, ir2gate::gatify, xls_ir::ir_parser};
 
     #[test]
     fn test_gatify_array_literal_flattening() {
@@ -2008,7 +2008,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 not_node_ref = Some(ir::NodeRef { index: i });
                 param_ref = Some(*operand);
                 break; // Assuming only one 'Not' operation in this simple test
-                       // case
+                // case
             }
         }
 

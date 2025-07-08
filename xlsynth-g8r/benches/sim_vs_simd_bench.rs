@@ -3,13 +3,13 @@
 
 //! Benchmarks scalar vs SIMD gate evaluators on the bf16_add circuit.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use xlsynth::IrBits;
 use xlsynth_g8r::{
     gate_sim::{self, Collect},
     gate_simd,
-    test_utils::{load_bf16_add_sample, Opt},
+    test_utils::{Opt, load_bf16_add_sample},
 };
 
 /// Number of samples that the SIMD evaluator expects (one per bit lane).
@@ -28,8 +28,8 @@ fn prepare_inputs() -> (Vec<[IrBits; 2]>, Vec<xlsynth_g8r::gate_simd::Vec256>) {
     let mut bit_accumulators = vec![[0u64; 4]; 32]; // 32 input bits → 4×64-bit limbs
 
     for lane in 0..BATCH {
-        let x: u16 = rng.gen();
-        let y: u16 = rng.gen();
+        let x: u16 = rng.r#gen();
+        let y: u16 = rng.r#gen();
 
         let x_bits = IrBits::make_ubits(16, x as u64).unwrap();
         let y_bits = IrBits::make_ubits(16, y as u64).unwrap();

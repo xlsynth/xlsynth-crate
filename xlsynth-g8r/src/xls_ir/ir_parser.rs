@@ -2,7 +2,7 @@
 
 //! Parser for XLS IR (just functions for the time being).
 
-use crate::xls_ir::ir::{self, operator_to_nary_op, ArrayTypeData, FileTable};
+use crate::xls_ir::ir::{self, ArrayTypeData, FileTable, operator_to_nary_op};
 use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
@@ -483,7 +483,7 @@ impl Parser {
                 }
                 Ok(xlsynth::IrValue::make_array(&values).unwrap())
             }
-            ir::Type::Tuple(ref element_tys) => {
+            ir::Type::Tuple(element_tys) => {
                 self.drop_or_error("(")?;
                 let mut values = Vec::new();
                 for (i, element_ty) in element_tys.iter().enumerate() {
@@ -501,7 +501,7 @@ impl Parser {
                     "cannot parse value with type: {}; rest: {:?}",
                     ty,
                     self.rest()
-                )))
+                )));
             }
         }
     }

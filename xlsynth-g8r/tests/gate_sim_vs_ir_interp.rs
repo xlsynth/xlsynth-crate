@@ -15,8 +15,8 @@ use xlsynth_g8r::gate::AigRef;
 use xlsynth_g8r::gate_sim::{self, Collect};
 use xlsynth_g8r::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::test_utils::{
-    flat_ir_bits_to_ir_value_bf16, ir_value_bf16_to_flat_ir_bits, load_bf16_mul_sample, make_bf16,
-    Opt,
+    Opt, flat_ir_bits_to_ir_value_bf16, ir_value_bf16_to_flat_ir_bits, load_bf16_mul_sample,
+    make_bf16,
 };
 use xlsynth_g8r::use_count::get_id_to_use_count;
 
@@ -57,8 +57,8 @@ fn test_bf16_mul_random() {
     let mut rng = rand::thread_rng();
 
     for i in 0..256 {
-        let f0_bits: u16 = rng.gen();
-        let f1_bits: u16 = rng.gen();
+        let f0_bits: u16 = rng.r#gen();
+        let f1_bits: u16 = rng.r#gen();
 
         let f0_bf16 = bf16::from_bits(f0_bits);
         let f1_bf16 = bf16::from_bits(f1_bits);

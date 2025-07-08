@@ -4,7 +4,7 @@ use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Creates a new AND gate that ANDs the given operand with the constant TRUE.
 ///
@@ -194,7 +194,7 @@ impl Transform for InsertTrueAndTransform {
                         return Err(anyhow!(
                             "Operand parent_ref {:?} is not an And2 gate",
                             parent_ref
-                        ))
+                        ));
                     }
                 };
                 if operand_to_wrap.node.id == 0 {
@@ -451,10 +451,12 @@ mod tests {
         let candidate_loc = TransformLocation::Operand(and_gate_op.node, true);
         let result = transform.apply(&mut g, &candidate_loc, TransformDirection::Forward);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Attempted to wrap a constant operand"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Attempted to wrap a constant operand")
+        );
     }
 
     #[test]
@@ -477,9 +479,11 @@ mod tests {
         // 2. Operand for and_gate_op's LHS (i0)
         // *NOT* Operand for and_gate_op's RHS (const_false_op)
         assert_eq!(candidates.len(), 2);
-        assert!(candidates
-            .iter()
-            .any(|loc| matches!(loc, TransformLocation::OutputPortBit { .. })));
+        assert!(
+            candidates
+                .iter()
+                .any(|loc| matches!(loc, TransformLocation::OutputPortBit { .. }))
+        );
         assert!(candidates.iter().any(|loc| match loc {
             TransformLocation::Operand(parent_ref, is_rhs) =>
                 parent_ref.id == and_gate_op.node.id && !*is_rhs, // Should be LHS (i0)

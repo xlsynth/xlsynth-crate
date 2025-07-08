@@ -4,7 +4,7 @@ use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Primitive: Applies double negation to an operand `op`.
 /// `op.node` MUST be an And2 gate.
@@ -145,7 +145,7 @@ impl Transform for DoubleNegateTransform {
                         return Err(anyhow!(
                             "Operand location parent_ref {:?} is not an And2 gate internally",
                             parent_ref
-                        ))
+                        ));
                     }
                 };
 
@@ -349,7 +349,7 @@ mod tests {
             node: AigRef { id: 1 },
             negated: false,
         }; // Targeting the input node
-           // This should panic because do_double_negate expects an And2 gate
+        // This should panic because do_double_negate expects an And2 gate
         test_do_double_negate_primitive_direct(&mut gates_vec, op_on_input).unwrap();
     }
 
@@ -361,7 +361,7 @@ mod tests {
             node: AigRef { id: 100 },
             negated: false,
         }; // ID 100 is out of bounds
-           // This should panic
+        // This should panic
         test_do_double_negate_primitive_direct(&mut gates_vec, op_out_of_bounds).unwrap();
     }
 }

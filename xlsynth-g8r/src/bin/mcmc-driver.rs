@@ -10,15 +10,15 @@ use serde_json;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::Builder;
 use xlsynth_g8r::gate::GateFn;
 use xlsynth_g8r::get_summary_stats::SummaryStats;
 
-use xlsynth_g8r::fraig::{fraig_optimize, IterationBounds};
+use xlsynth_g8r::fraig::{IterationBounds, fraig_optimize};
 use xlsynth_g8r::get_summary_stats;
-use xlsynth_g8r::mcmc_logic::{cost, load_start, mcmc, Best, McmcOptions, Objective};
+use xlsynth_g8r::mcmc_logic::{Best, McmcOptions, Objective, cost, load_start, mcmc};
 
 use std::time::{Duration, Instant};
 

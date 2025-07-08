@@ -13,7 +13,7 @@ use crate::netlist::parse::{
     Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
 };
 use string_interner::symbol::SymbolU32;
-use string_interner::{backend::StringBackend, StringInterner};
+use string_interner::{StringInterner, backend::StringBackend};
 
 /// A specific integrity problem found during checking.
 #[derive(Debug, PartialEq, Eq)]

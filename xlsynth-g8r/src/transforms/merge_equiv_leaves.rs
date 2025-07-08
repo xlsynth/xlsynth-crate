@@ -6,7 +6,7 @@ use crate::transforms::rewire_operand::rewire_operand_primitive;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 #[derive(Debug)]
 pub struct MergeEquivLeavesTransform;
@@ -70,7 +70,7 @@ impl Transform for MergeEquivLeavesTransform {
                 return Err(anyhow!(
                     "Invalid location type for MergeEquivLeavesTransform: {:?}",
                     candidate_location
-                ))
+                ));
             }
         };
         if parent.id >= g.gates.len() {

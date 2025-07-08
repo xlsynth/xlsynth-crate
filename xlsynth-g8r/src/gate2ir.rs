@@ -279,7 +279,7 @@ pub fn gate_fn_to_xlsynth_ir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ir2gate::gatify, ir2gate::GatifyOptions, xls_ir::ir_parser};
+    use crate::{ir2gate::GatifyOptions, ir2gate::gatify, xls_ir::ir_parser};
 
     #[test]
     fn test_gate_fn_to_ir_one_and_gate() {

@@ -6,7 +6,7 @@ use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
 use crate::use_count::get_id_to_use_count;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Primitive for collapsing `((a & b) & a)` into `(a & b)`.
 ///

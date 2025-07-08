@@ -1,7 +1,7 @@
 [package]
 name = "xlsynth-g8r"
 version = "0.0.164"
-edition = "2021"
+edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "XLS IR to gate mapping"
 license = "Apache-2.0"

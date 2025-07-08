@@ -4,7 +4,7 @@ use crate::gate::{AigNode, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Primitive that toggles the negation flag on one operand of an `And2` gate.
 ///
@@ -123,9 +123,10 @@ mod tests {
         let mut g = gb.build();
         let t = ToggleOperandNegationTransform::new();
         let invalid = TransformLocation::Node(AigRef { id: 0 });
-        assert!(t
-            .apply(&mut g, &invalid, TransformDirection::Forward)
-            .is_err());
+        assert!(
+            t.apply(&mut g, &invalid, TransformDirection::Forward)
+                .is_err()
+        );
     }
 
     #[test]

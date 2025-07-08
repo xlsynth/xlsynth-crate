@@ -167,7 +167,9 @@ fn main() {
 
     #[cfg(not(feature = "has-boolector"))]
     {
-        eprintln!("error: check-ir-equivalence requires --features=with-boolector-built or --features=with-boolector-system");
+        eprintln!(
+            "error: check-ir-equivalence requires --features=with-boolector-built or --features=with-boolector-system"
+        );
         std::process::exit(1);
     }
 }

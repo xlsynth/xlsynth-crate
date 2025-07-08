@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gate::GateFn;
-use crate::gate_sim::{eval, Collect};
+use crate::gate_sim::{Collect, eval};
 use bitvec::vec::BitVec;
 use serde::Serialize;
 use xlsynth::IrBits;
@@ -227,7 +227,10 @@ mod tests {
         let stats = count_toggles(&gate_fn, &batch_inputs);
         println!(
             "and_reduce_4: gate_output_toggles = {}, gate_input_toggles = {}, primary_input_toggles = {}, primary_output_toggles = {}",
-            stats.gate_output_toggles, stats.gate_input_toggles, stats.primary_input_toggles, stats.primary_output_toggles
+            stats.gate_output_toggles,
+            stats.gate_input_toggles,
+            stats.primary_input_toggles,
+            stats.primary_output_toggles
         );
 
         // Note: The AND function masks many toggles — a toggle on one input does not
@@ -254,7 +257,7 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::test_utils::{ir_value_bf16_to_flat_ir_bits, load_bf16_add_sample, make_bf16, Opt};
+    use crate::test_utils::{Opt, ir_value_bf16_to_flat_ir_bits, load_bf16_add_sample, make_bf16};
     use half::bf16;
     use rand::{Rng, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
@@ -269,8 +272,8 @@ mod integration_tests {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
         let mut batch_inputs = Vec::with_capacity(1000);
         for _ in 0..1000 {
-            let a = bf16::from_f32(rng.gen::<f32>());
-            let b = bf16::from_f32(rng.gen::<f32>());
+            let a = bf16::from_f32(rng.r#gen::<f32>());
+            let b = bf16::from_f32(rng.r#gen::<f32>());
             let a_bits = ir_value_bf16_to_flat_ir_bits(&make_bf16(a));
             let b_bits = ir_value_bf16_to_flat_ir_bits(&make_bf16(b));
             batch_inputs.push(vec![a_bits.clone(), b_bits.clone()]);
@@ -280,7 +283,10 @@ mod integration_tests {
         let stats = count_toggles(gate_fn, &batch_inputs);
         println!(
             "bf16 adder: gate_output_toggles = {}, gate_input_toggles = {}, primary_input_toggles = {}, primary_output_toggles = {}",
-            stats.gate_output_toggles, stats.gate_input_toggles, stats.primary_input_toggles, stats.primary_output_toggles
+            stats.gate_output_toggles,
+            stats.gate_input_toggles,
+            stats.primary_input_toggles,
+            stats.primary_output_toggles
         );
         assert!(
             stats.gate_output_toggles > 0,
@@ -310,8 +316,8 @@ mod integration_tests {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
         let mut batch_inputs = Vec::with_capacity(1000);
         for _ in 0..1000 {
-            let a = bf16::from_f32(rng.gen::<f32>());
-            let b = bf16::from_f32(rng.gen::<f32>());
+            let a = bf16::from_f32(rng.r#gen::<f32>());
+            let b = bf16::from_f32(rng.r#gen::<f32>());
             let a_bits = ir_value_bf16_to_flat_ir_bits(&make_bf16(a));
             let b_bits = ir_value_bf16_to_flat_ir_bits(&make_bf16(b));
             batch_inputs.push(vec![a_bits.clone(), b_bits.clone()]);
@@ -320,7 +326,10 @@ mod integration_tests {
         let stats = count_toggles(gate_fn, &batch_inputs);
         println!(
             "bf16 mul: gate_output_toggles = {}, gate_input_toggles = {}, primary_input_toggles = {}, primary_output_toggles = {}",
-            stats.gate_output_toggles, stats.gate_input_toggles, stats.primary_input_toggles, stats.primary_output_toggles
+            stats.gate_output_toggles,
+            stats.gate_input_toggles,
+            stats.primary_input_toggles,
+            stats.primary_output_toggles
         );
         assert!(
             stats.gate_output_toggles > 0,
