@@ -832,12 +832,27 @@ pub fn ir_fn_to_boolector(
                 let inserted = update_shifted.and(&mask);
                 let combined = cleared.or(&inserted);
 
-                // Slice back down if we widened arg.
-                if arg_width == max_width {
-                    combined
+                // Detect start index >= arg_width → no update (spec: ignore out-of-bounds).
+                // Build a predicate: start_bv >= arg_width ? 1 : 0.
+                let cmp_width = std::cmp::max(start_bv.get_width(), 1);
+                let width_const = BV::from_u64(btor.clone(), arg_width as u64, cmp_width);
+                let start_ext_for_cmp = match start_bv.get_width().cmp(&cmp_width) {
+                    std::cmp::Ordering::Equal => start_bv.clone(),
+                    std::cmp::Ordering::Less => start_bv.uext(cmp_width - start_bv.get_width()),
+                    std::cmp::Ordering::Greater => start_bv.slice(cmp_width - 1, 0),
+                };
+                let oob = start_ext_for_cmp.ugte(&width_const); // 1-bit BV
+
+                // Choose arg_bv when out-of-bounds, else combined value.
+                let selected = if arg_width == max_width {
+                    oob.cond_bv(&arg_bv, &combined)
                 } else {
-                    combined.slice(arg_width - 1, 0)
-                }
+                    // Need operands of same width for cond_bv.
+                    let combined_sliced = combined.slice(arg_width - 1, 0);
+                    oob.cond_bv(&arg_bv, &combined_sliced)
+                };
+
+                selected
             }
             NodePayload::Trace { .. } => {
                 // Trace has no effect on value computation
@@ -2573,5 +2588,30 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
         ));
         let res = super::ir_fn_to_boolector(btor.clone(), &f, None);
         assert_eq!(res.output.get_width(), 32);
+    }
+
+    #[test]
+    fn test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob() {
+        // Matches minimized-from-e11bf74e... fuzz sample.
+        let orig_ir = r#"fn fuzz_test(input: bits[8] id=1) -> bits[8] {
+  literal_255: bits[8] = literal(value=255, id=3)
+  bsu1: bits[8] = bit_slice_update(input, input, input, id=2)
+  ret bsu2: bits[8] = bit_slice_update(literal_255, literal_255, bsu1, id=4)
+}"#;
+        let opt_ir = r#"fn fuzz_test(input: bits[8] id=1) -> bits[8] {
+  ret literal_255: bits[8] = literal(value=255, id=3)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(orig_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(opt_ir)
+            .parse_fn()
+            .unwrap();
+
+        assert_eq!(
+            super::prove_ir_fn_equiv(&lhs, &rhs),
+            super::EquivResult::Proved
+        );
     }
 }
