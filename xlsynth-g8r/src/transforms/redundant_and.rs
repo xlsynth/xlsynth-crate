@@ -4,7 +4,7 @@ use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Creates a new AND gate that feeds the given operand twice.
 ///
@@ -179,7 +179,7 @@ impl Transform for InsertRedundantAndTransform {
                         return Err(anyhow!(
                             "Operand parent_ref {:?} is not an And2 gate",
                             parent_ref
-                        ))
+                        ));
                     }
                 };
                 let new_and_ref = insert_redundant_and_primitive(g, operand_to_wrap);
@@ -236,7 +236,7 @@ impl Transform for RemoveRedundantAndTransform {
     ) -> Vec<TransformLocation> {
         if direction == TransformDirection::Backward {
             return Vec::new(); // Or delegate to
-                               // InsertRedundantAnd.find_candidates
+            // InsertRedundantAnd.find_candidates
         }
         g.gates
             .iter()

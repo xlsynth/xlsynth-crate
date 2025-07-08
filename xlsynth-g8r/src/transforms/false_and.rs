@@ -4,7 +4,7 @@ use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Creates a new AND gate of the form `AND(x, !x)`, which always evaluates
 /// to false. The new gate is appended to the list of gates and returned.
@@ -52,9 +52,7 @@ pub fn remove_false_and_primitive(g: &mut GateFn, node: AigRef) -> Result<(), &'
 
     for gate in &mut g.gates {
         if let AigNode::And2 {
-            a: ref mut op_a,
-            b: ref mut op_b,
-            ..
+            a: op_a, b: op_b, ..
         } = gate
         {
             if op_a.node == node {

@@ -509,7 +509,9 @@ mod tests {
         let result = term.emit_formula_term(&mut gb, &input_map, &context);
         assert!(result.is_err());
         if let Err(e) = result {
-            assert!(e.contains("Input 'B' not found in map for cell 'test_cell_missing_input' (formula: \"A * B\")"));
+            assert!(e.contains(
+                "Input 'B' not found in map for cell 'test_cell_missing_input' (formula: \"A * B\")"
+            ));
             assert!(e.contains("Available inputs: [\"A\"]"));
             assert!(e.contains("Required by formula: [\"B\"]"));
         }

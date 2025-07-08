@@ -10,7 +10,7 @@ pub fn arbitrary_irbits<R: rand::Rng>(rng: &mut R, width: usize) -> IrBits {
         return IrBits::make_ubits(0, 0).unwrap();
     }
     if width <= 64 {
-        let value = rng.gen::<u64>();
+        let value = rng.r#gen::<u64>();
         let value_masked = value & ((1u64 << width) - 1);
         // Unwrapping is safe since we masked the value to fit in the width.
         IrBits::make_ubits(width, value_masked).unwrap()

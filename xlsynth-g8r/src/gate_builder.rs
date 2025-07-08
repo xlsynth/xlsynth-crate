@@ -749,7 +749,7 @@ impl GateBuilder {
         let xors = self.add_xor_vec(a, b);
         assert_eq!(xors.get_bit_count(), a.get_bit_count());
         self.add_or_reduce(&xors, reduction_kind) // or-reduce to see if any bit
-                                                  // was different
+        // was different
     }
 
     /// Returns true if the given AigRef is in-bounds for this builder.
@@ -767,7 +767,7 @@ impl GateBuilder {
 mod tests {
     use crate::{
         check_equivalence,
-        get_summary_stats::{get_summary_stats, SummaryStats},
+        get_summary_stats::{SummaryStats, get_summary_stats},
     };
 
     use super::*;

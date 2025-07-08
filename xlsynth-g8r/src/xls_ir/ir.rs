@@ -2,9 +2,9 @@
 
 #![allow(unused)]
 
-use std::collections::{hash_map::OccupiedError, HashMap};
+use std::collections::{HashMap, hash_map::OccupiedError};
 
-use xlsynth::{ir_value::IrFormatPreference, IrValue};
+use xlsynth::{IrValue, ir_value::IrFormatPreference};
 
 use crate::xls_ir::ir_utils::operands;
 

@@ -427,10 +427,10 @@ mod tests {
 
     use crate::{
         gate::GateFn,
-        propose_equiv::{propose_equivalence_classes, EquivNode},
+        propose_equiv::{EquivNode, propose_equivalence_classes},
         test_utils::{
-            load_bf16_add_sample, load_bf16_mul_sample, setup_graph_with_redundancies,
-            setup_partially_equiv_graph, Opt,
+            Opt, load_bf16_add_sample, load_bf16_mul_sample, setup_graph_with_redundancies,
+            setup_partially_equiv_graph,
         },
     };
 

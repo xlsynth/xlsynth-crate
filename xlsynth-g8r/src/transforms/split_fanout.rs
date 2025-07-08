@@ -6,7 +6,7 @@ use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
 use crate::use_count::get_id_to_use_count;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Primitive that duplicates `parent` and rewires one fanout edge to the
 /// duplicate. `child` must reference `parent` as one of its operands.

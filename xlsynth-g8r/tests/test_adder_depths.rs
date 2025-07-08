@@ -3,7 +3,7 @@
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::fraig::{fraig_optimize, IterationBounds};
+use xlsynth_g8r::fraig::{IterationBounds, fraig_optimize};
 use xlsynth_g8r::gate::{AigBitVector, GateFn};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::get_summary_stats::get_gate_depth;

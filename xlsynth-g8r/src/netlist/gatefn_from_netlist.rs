@@ -11,7 +11,7 @@ use crate::netlist::parse::{Net, NetIndex, NetlistModule};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use string_interner::symbol::SymbolU32;
-use string_interner::{backend::StringBackend, StringInterner};
+use string_interner::{StringInterner, backend::StringBackend};
 
 fn build_cell_formula_map(
     liberty_lib: &Library,
@@ -115,7 +115,8 @@ fn process_instance_outputs(
                         AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); width])
                     });
                     if (*bit as usize) >= width {
-                        panic!("Bit-select out of range for output net '{}' (width {}) in instance '{}' port '{}', net_idx={:?}, bit={}",
+                        panic!(
+                            "Bit-select out of range for output net '{}' (width {}) in instance '{}' port '{}', net_idx={:?}, bit={}",
                             interner.resolve(nets[net_idx.0].name).unwrap(),
                             width,
                             inst_name,
@@ -236,7 +237,10 @@ pub fn project_gatefn_from_netlist_and_liberty(
             }
         }
         if !processed_any && !unprocessed.is_empty() {
-            return Err(format!("Could not resolve all instance dependencies (possible cycle or missing driver). Remaining instances: {}", unprocessed.len()));
+            return Err(format!(
+                "Could not resolve all instance dependencies (possible cycle or missing driver). Remaining instances: {}",
+                unprocessed.len()
+            ));
         }
     }
     for port in &module.ports {
@@ -491,7 +495,11 @@ fn handle_dff_identity_override(
                                     net_to_bv.insert(*q_netidx, bv);
                                 }
                                 crate::netlist::parse::NetRef::Literal(_) => {
-                                    log::warn!("DFF identity override: Q output as literal not supported for cell '{}' instance '{}'", type_name, inst_name);
+                                    log::warn!(
+                                        "DFF identity override: Q output as literal not supported for cell '{}' instance '{}'",
+                                        type_name,
+                                        inst_name
+                                    );
                                 }
                             }
                         }
@@ -506,7 +514,12 @@ fn handle_dff_identity_override(
                 return true;
             }
             _ => {
-                log::warn!("DFF identity override: unexpected D/Q pin mapping for cell '{}' instance '{}' output '{}'", type_name, inst_name, port_name);
+                log::warn!(
+                    "DFF identity override: unexpected D/Q pin mapping for cell '{}' instance '{}' output '{}'",
+                    type_name,
+                    inst_name,
+                    port_name
+                );
             }
         }
     } else {
@@ -525,7 +538,7 @@ mod tests {
     use crate::netlist::parse::{
         Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
-    use string_interner::{backend::StringBackend, StringInterner};
+    use string_interner::{StringInterner, backend::StringBackend};
 
     #[test]
     fn test_inverter_projection() {

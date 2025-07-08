@@ -5,13 +5,13 @@
 use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 use crate::xls_ir::ir_utils::get_topological;
 use boolector::option::{BtorOption, ModelGen};
-use boolector::{Btor, SolverResult, BV};
+use boolector::{BV, Btor, SolverResult};
 use log::debug;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use xlsynth::IrBits;
 
@@ -855,7 +855,12 @@ pub fn ir_fn_to_boolector(
                 // be > 0 based on XLS semantics for encode. For example,
                 // encode(bits[1]) should yield bits[1] (out_width=1).
                 // If somehow out_width became 0, the logic would produce a 0-width BV.
-                assert!(out_width > 0 || (input_width == 1 && out_width ==0), "Encode: output_width M should generally be > 0 if input_width N > 0. Found M={} for N={}", out_width, input_width);
+                assert!(
+                    out_width > 0 || (input_width == 1 && out_width == 0),
+                    "Encode: output_width M should generally be > 0 if input_width N > 0. Found M={} for N={}",
+                    out_width,
+                    input_width
+                );
 
                 let btor_ctx = arg_bv.get_btor();
 
@@ -967,7 +972,9 @@ pub fn ir_fn_to_boolector(
     if let Some(bv) = env.remove(&ret_node_ref) {
         IrFnBoolectorResult { output: bv, inputs }
     } else {
-        panic!("Cannot return Nil node from ir_fn_to_boolector: Boolector does not support 0-width bitvectors");
+        panic!(
+            "Cannot return Nil node from ir_fn_to_boolector: Boolector does not support 0-width bitvectors"
+        );
     }
 }
 
@@ -1377,32 +1384,34 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
         let found_cl = found.clone();
         let cex_cl = cex.clone();
         let next_cl = next.clone();
-        let handle = std::thread::spawn(move || loop {
-            if found_cl.load(Ordering::SeqCst) {
-                break;
-            }
-            let i = next_cl.fetch_add(1, Ordering::SeqCst);
-            if i >= width {
-                break;
-            }
-            log::debug!("thread {} checking bit {}", thread_no, i);
-            let lf = make_bit_fn(&lhs_cl, i);
-            let rf = make_bit_fn(&rhs_cl, i);
-            // Use flattened equivalence for the per-bit functions regardless of the
-            // caller-supplied setting. Each per-bit variant always returns a
-            // single bits value, but the slice is taken out of a (potentially
-            // aggregate) original return value. Flattening guarantees
-            // consistent bit ordering between the two functions.
-            let res = prove_ir_equiv_flattened(&lf, &rf);
-            log::debug!("thread {} checking bit {} result: {:?}", thread_no, i, res);
-            if let EquivResult::Disproved {
-                inputs: bits,
-                outputs,
-            } = res
-            {
-                found_cl.store(true, Ordering::SeqCst);
-                *cex_cl.lock().unwrap() = Some((bits, outputs));
-                break;
+        let handle = std::thread::spawn(move || {
+            loop {
+                if found_cl.load(Ordering::SeqCst) {
+                    break;
+                }
+                let i = next_cl.fetch_add(1, Ordering::SeqCst);
+                if i >= width {
+                    break;
+                }
+                log::debug!("thread {} checking bit {}", thread_no, i);
+                let lf = make_bit_fn(&lhs_cl, i);
+                let rf = make_bit_fn(&rhs_cl, i);
+                // Use flattened equivalence for the per-bit functions regardless of the
+                // caller-supplied setting. Each per-bit variant always returns a
+                // single bits value, but the slice is taken out of a (potentially
+                // aggregate) original return value. Flattening guarantees
+                // consistent bit ordering between the two functions.
+                let res = prove_ir_equiv_flattened(&lf, &rf);
+                log::debug!("thread {} checking bit {} result: {:?}", thread_no, i, res);
+                if let EquivResult::Disproved {
+                    inputs: bits,
+                    outputs,
+                } = res
+                {
+                    found_cl.store(true, Ordering::SeqCst);
+                    *cex_cl.lock().unwrap() = Some((bits, outputs));
+                    break;
+                }
             }
         });
         handles.push(handle);
@@ -1513,7 +1522,7 @@ pub fn prove_ir_fn_equiv_split_input_bit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt};
+    use crate::test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample};
     use crate::xls_ir::ir::{ArrayTypeData, Type};
     use crate::xls_ir::ir_parser;
     use boolector::Btor;

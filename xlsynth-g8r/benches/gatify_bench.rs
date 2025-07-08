@@ -3,12 +3,12 @@
 //! Benchmarks for gatifying the bfloat16 multiply function with various options
 //! enabled.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use xlsynth_g8r::{
     gate_builder::GateBuilderOptions,
     ir2gate,
     ir2gate_utils::AdderMapping,
-    test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
+    test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample},
 };
 
 fn gatify_bf16_mul_benchmark(c: &mut Criterion) {

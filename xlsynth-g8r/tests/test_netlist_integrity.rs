@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::liberty_proto::{Cell, Library, Pin, PinDirection};
-use xlsynth_g8r::netlist::integrity::{check_module, IntegrityFinding, IntegritySummary};
+use xlsynth_g8r::netlist::integrity::{IntegrityFinding, IntegritySummary, check_module};
 use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
 fn build_simple_lib() -> Library {

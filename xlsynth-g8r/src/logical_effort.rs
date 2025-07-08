@@ -78,7 +78,7 @@ mod tests {
     use crate::{
         assert_within,
         gate_builder::{GateBuilder, GateBuilderOptions},
-        test_utils::{load_bf16_add_sample, load_bf16_mul_sample, Opt},
+        test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample},
     };
 
     use super::*;

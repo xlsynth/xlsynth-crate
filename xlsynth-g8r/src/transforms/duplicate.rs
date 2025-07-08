@@ -5,7 +5,7 @@ use crate::topo::topo_sort_refs;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
 
@@ -321,7 +321,10 @@ impl Transform for UnduplicateGateTransform {
                         }
                         Ok(())
                     } else {
-                        Err(anyhow!("No suitable gate found to merge with {:?}. It might be unique or an error occurred.", potential_kill_ref))
+                        Err(anyhow!(
+                            "No suitable gate found to merge with {:?}. It might be unique or an error occurred.",
+                            potential_kill_ref
+                        ))
                     }
                 }
                 _ => Err(anyhow!(
@@ -439,12 +442,16 @@ mod tests {
             2,
             "Expected two candidates for unduplication (and1, and2)"
         );
-        assert!(candidates
-            .iter()
-            .any(|loc| matches!(loc, TransformLocation::Node(r) if *r == and1_ref)));
-        assert!(candidates
-            .iter()
-            .any(|loc| matches!(loc, TransformLocation::Node(r) if *r == and2_ref)));
+        assert!(
+            candidates
+                .iter()
+                .any(|loc| matches!(loc, TransformLocation::Node(r) if *r == and1_ref))
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|loc| matches!(loc, TransformLocation::Node(r) if *r == and2_ref))
+        );
 
         let kill_loc = TransformLocation::Node(and2_ref);
         transform

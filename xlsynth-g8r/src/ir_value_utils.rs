@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use bitvec::vec::BitVec;
-use xlsynth::{ir_value::IrBits, IrValue};
+use xlsynth::{IrValue, ir_value::IrBits};
 
 /// Converts a `&[bool]` slice into an IR `Bits` value.
 ///

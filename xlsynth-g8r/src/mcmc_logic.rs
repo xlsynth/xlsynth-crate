@@ -29,7 +29,7 @@ use crate::prove_gate_fn_equiv_common::EquivResult;
 use crate::prove_gate_fn_equiv_z3::{self, prove_gate_fn_equiv as prove_gate_fn_equiv_z3};
 
 use crate::test_utils::{
-    load_bf16_add_sample, load_bf16_mul_sample, make_ripple_carry_adder, Opt as SampleOpt,
+    Opt as SampleOpt, load_bf16_add_sample, load_bf16_mul_sample, make_ripple_carry_adder,
 };
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
@@ -229,7 +229,7 @@ pub fn mcmc_iteration(
     let chosen_transform = &mut context.all_transforms[chosen_transform_idx];
     let current_transform_kind = chosen_transform.kind();
 
-    let direction = if context.rng.gen::<bool>() {
+    let direction = if context.rng.r#gen::<bool>() {
         TransformDirection::Forward
     } else {
         TransformDirection::Backward
@@ -331,7 +331,7 @@ pub fn mcmc_iteration(
                 let new_metric = objective.metric(&new_candidate_cost) as f64;
                 let better = new_metric < curr_metric;
                 let accept_prob = ((curr_metric - new_metric) / temp).exp();
-                let metropolis = context.rng.gen::<f64>() < accept_prob;
+                let metropolis = context.rng.r#gen::<f64>() < accept_prob;
 
                 if better || metropolis {
                     if new_candidate_cost < *best_cost {
@@ -505,7 +505,7 @@ pub fn mcmc(
                     .gen_range(0..mcmc_context.all_transforms.len());
                 let chosen_transform = &mut mcmc_context.all_transforms[chosen_transform_idx];
                 let current_transform_kind = chosen_transform.kind();
-                let direction = if mcmc_context.rng.gen::<bool>() {
+                let direction = if mcmc_context.rng.r#gen::<bool>() {
                     TransformDirection::Forward
                 } else {
                     TransformDirection::Backward
@@ -602,8 +602,7 @@ pub fn mcmc(
                 if paranoid && iteration_output.transform_always_equivalent {
                     panic!(
                         "[mcmc] equivalence failure for always-equivalent transform at iteration {}; transform: {:?} should always be equivalent",
-                        iterations_count,
-                        iteration_output.transform
+                        iterations_count, iteration_output.transform
                     );
                 }
             }
@@ -657,18 +656,53 @@ pub fn mcmc(
             if let Some(chain) = chain_no {
                 println!(
                     "[mcmc] c{:03}:i{:06} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/SIM/O/M): {}/{}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Avg Sim (ms): {:.3} | Accepted: {} ({})         ",
-                    chain, options.start_iteration + iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
-                    stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_sim_fail, stats.rejected_oracle, stats.rejected_metro,
-                    stats.oracle_verified, avg_oracle_ms, avg_sim_ms,
-                    stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
+                    chain,
+                    options.start_iteration + iterations_count,
+                    best_cost.nodes,
+                    best_cost.depth,
+                    current_cost.nodes,
+                    current_cost.depth,
+                    current_temp,
+                    samples_per_sec,
+                    stats.rejected_apply_fail,
+                    stats.rejected_candidate_fail,
+                    stats.rejected_sim_fail,
+                    stats.rejected_oracle,
+                    stats.rejected_metro,
+                    stats.oracle_verified,
+                    avg_oracle_ms,
+                    avg_sim_ms,
+                    stats.accepted_overall,
+                    if accepted_edits_str.is_empty() {
+                        "-"
+                    } else {
+                        &accepted_edits_str
+                    },
                 );
             } else {
                 println!(
                     "[mcmc] iter: {} | Best: (n={}, d={}) | Cur: (n={}, d={}) | Temp: {:.2e} | Samples/s: {:.2} | Rejected (AF/CF/SIM/O/M): {}/{}/{}/{}/{} | Oracle Ok: {} | Avg Oracle (ms): {:.3} | Avg Sim (ms): {:.3} | Accepted: {} ({})         ",
-                    options.start_iteration + iterations_count, best_cost.nodes, best_cost.depth, current_cost.nodes, current_cost.depth, current_temp, samples_per_sec,
-                    stats.rejected_apply_fail, stats.rejected_candidate_fail, stats.rejected_sim_fail, stats.rejected_oracle, stats.rejected_metro,
-                    stats.oracle_verified, avg_oracle_ms, avg_sim_ms,
-                    stats.accepted_overall, if accepted_edits_str.is_empty() { "-" } else { &accepted_edits_str },
+                    options.start_iteration + iterations_count,
+                    best_cost.nodes,
+                    best_cost.depth,
+                    current_cost.nodes,
+                    current_cost.depth,
+                    current_temp,
+                    samples_per_sec,
+                    stats.rejected_apply_fail,
+                    stats.rejected_candidate_fail,
+                    stats.rejected_sim_fail,
+                    stats.rejected_oracle,
+                    stats.rejected_metro,
+                    stats.oracle_verified,
+                    avg_oracle_ms,
+                    avg_sim_ms,
+                    stats.accepted_overall,
+                    if accepted_edits_str.is_empty() {
+                        "-"
+                    } else {
+                        &accepted_edits_str
+                    },
                 );
             }
             let _ = std::io::stdout().flush();
@@ -933,7 +967,7 @@ fn write_checkpoint(
 ) -> Result<()> {
     // Cross-check equivalence
     let equiv_ok_sat = oracle_equiv_sat(original_gfn, best_gfn);
-    use crate::check_equivalence::{prove_same_gate_fn_via_ir_status, IrCheckResult};
+    use crate::check_equivalence::{IrCheckResult, prove_same_gate_fn_via_ir_status};
 
     let ir_status = prove_same_gate_fn_via_ir_status(original_gfn, best_gfn);
     let equiv_ok_external = matches!(ir_status, IrCheckResult::Equivalent);

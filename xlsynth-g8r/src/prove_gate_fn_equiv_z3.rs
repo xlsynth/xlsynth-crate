@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use crate::gate::{AigNode, AigRef, GateFn};
 use crate::prove_gate_fn_equiv_common::EquivResult;
 use z3::{
-    ast::{Ast, Bool},
     Config, Context, SatResult, Solver,
+    ast::{Ast, Bool},
 };
 
 use xlsynth::IrBits;

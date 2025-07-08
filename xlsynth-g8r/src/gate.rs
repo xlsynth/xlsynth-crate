@@ -31,11 +31,7 @@ impl AigOperand {
     }
 
     pub fn non_negated(&self) -> Option<AigRef> {
-        if self.negated {
-            None
-        } else {
-            Some(self.node)
-        }
+        if self.negated { None } else { Some(self.node) }
     }
 }
 
@@ -162,7 +158,10 @@ impl TryInto<AigOperand> for AigBitVector {
 
     fn try_into(self) -> Result<AigOperand, Self::Error> {
         if self.operands.len() != 1 {
-            Err(format!("expected a single operand for AigBitVector::try_into<AigOperand>(), but got {} operands", self.operands.len()))
+            Err(format!(
+                "expected a single operand for AigBitVector::try_into<AigOperand>(), but got {} operands",
+                self.operands.len()
+            ))
         } else {
             Ok(self.operands[0])
         }

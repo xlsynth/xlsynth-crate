@@ -5,7 +5,7 @@ use crate::topo::reaches_target as node_reaches_target;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use rand::Rng;
 
 /// Primitive: rewires one operand of an `And2` gate to `new_op`.
@@ -61,7 +61,7 @@ impl Transform for RewireOperandTransform {
                     node: AigRef {
                         id: rng.gen_range(0..g.gates.len()),
                     },
-                    negated: rng.gen(),
+                    negated: rng.r#gen(),
                 };
                 cands.push(TransformLocation::OperandReplacement {
                     parent,
@@ -73,7 +73,7 @@ impl Transform for RewireOperandTransform {
                     node: AigRef {
                         id: rng.gen_range(0..g.gates.len()),
                     },
-                    negated: rng.gen(),
+                    negated: rng.r#gen(),
                 };
                 cands.push(TransformLocation::OperandReplacement {
                     parent,
@@ -103,7 +103,7 @@ impl Transform for RewireOperandTransform {
                 return Err(anyhow!(
                     "Invalid candidate location for RewireOperandTransform: {:?}",
                     candidate_location
-                ))
+                ));
             }
         };
         let target_op = if direction == TransformDirection::Forward {

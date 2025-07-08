@@ -4,7 +4,7 @@ use crate::gate::{AigBitVector, AigOperand, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Primitive: Inverts a single bit in one of the primary output ports.
 /// Also inverts the `negated` attribute on the corresponding `AigOperand`.
@@ -172,9 +172,11 @@ mod tests {
         let mut g = gb.build();
         let transform = ToggleOutputBitTransform::new();
         let invalid_loc = TransformLocation::Node(AigRef { id: 0 });
-        assert!(transform
-            .apply(&mut g, &invalid_loc, TransformDirection::Forward)
-            .is_err());
+        assert!(
+            transform
+                .apply(&mut g, &invalid_loc, TransformDirection::Forward)
+                .is_err()
+        );
     }
 
     #[test]

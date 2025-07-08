@@ -415,7 +415,10 @@ pub fn emit_netlist_with_version(
                             rhs_expr: Rc::new(comb_wire_logic_ref.to_expr()),
                         });
                     } else {
-                        panic!("Could not find combinational target LogicRef for AigOperand {:?} (driving output for reg {}) to create procedural assignment.", aig_bit_ref_output_driver, reg_name);
+                        panic!(
+                            "Could not find combinational target LogicRef for AigOperand {:?} (driving output for reg {}) to create procedural assignment.",
+                            aig_bit_ref_output_driver, reg_name
+                        );
                     }
                 }
             }

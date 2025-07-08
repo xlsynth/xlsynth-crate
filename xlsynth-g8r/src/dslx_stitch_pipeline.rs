@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use xlsynth::{
-    convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen, DslxConvertOptions,
+    DslxConvertOptions, convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen,
 };
 
 use crate::verilog_version::VerilogVersion;
@@ -256,8 +256,8 @@ pub fn stitch_pipeline(
     let mut file = xlsynth::vast::VastFile::new(file_type);
 
     let scalar_type = file.make_scalar_type(); // 1-bit default
-                                               // Keep any dynamically created VAST data types alive for the lifetime of
-                                               // this function (until we emit the file) by storing them in this Vec.
+    // Keep any dynamically created VAST data types alive for the lifetime of
+    // this function (until we emit the file) by storing them in this Vec.
     let mut dynamic_types: Vec<xlsynth::vast::VastDataType> = Vec::new();
 
     // Create the wrapper module. Stage modules generated via the

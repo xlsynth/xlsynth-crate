@@ -4,7 +4,7 @@ use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Primitive: complements the negation on both operands of `node` and all
 /// fanouts of `node`.
@@ -139,8 +139,9 @@ mod tests {
         let mut g = gb.build();
         let t = PushNegationTransform::new();
         let invalid = TransformLocation::Operand(AigRef { id: 0 }, false);
-        assert!(t
-            .apply(&mut g, &invalid, TransformDirection::Forward)
-            .is_err());
+        assert!(
+            t.apply(&mut g, &invalid, TransformDirection::Forward)
+                .is_err()
+        );
     }
 }

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![feature(map_try_insert)]
-#![feature(let_chains)]
 #![feature(custom_test_frameworks)]
 #![feature(portable_simd)]
 

@@ -4,7 +4,7 @@
 
 use std::io::{BufReader, Read};
 use string_interner::symbol::SymbolU32;
-use string_interner::{backend::StringBackend, StringInterner};
+use string_interner::{StringInterner, backend::StringBackend};
 use xlsynth::IrBits;
 
 pub type PortId = SymbolU32;
@@ -342,7 +342,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 };
                 if self.peekc() == Some('\'') {
                     self.popc(); // consume '
-                                 // Now parse base and value as a string until whitespace or '*' or ')'
+                    // Now parse base and value as a string until whitespace or '*' or ')'
                     let mut base_and_value = String::new();
                     while let Some(c) = self.peekc() {
                         if c.is_whitespace() || c == '*' || c == ')' {
@@ -434,7 +434,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                         start,
                         limit: self.pos,
                     },
-                ))
+                ));
             }
         };
         // Skip whitespace
@@ -563,7 +563,7 @@ impl<R: Read + 'static> TokenScanner<R> {
             };
             if self.peekc() == Some('\'') {
                 self.popc(); // consume '
-                             // Now parse base and value as a string until whitespace or punctuation
+                // Now parse base and value as a string until whitespace or punctuation
                 let mut base_and_value = String::new();
                 while let Some(c) = self.peekc() {
                     if c.is_whitespace() || c == ')' || c == ';' || c == ',' {
@@ -807,7 +807,7 @@ impl<R: Read + 'static> Parser<R> {
                 return Err(ScanError {
                     message: "expected identifier for module name".to_string(),
                     span: name_tok.span,
-                })
+                });
             }
         };
         // Expect '('
@@ -851,7 +851,7 @@ impl<R: Read + 'static> Parser<R> {
                     return Err(ScanError {
                         message: format!("unexpected token in port list: {:?}", t.payload),
                         span: t.span,
-                    })
+                    });
                 }
             }
         }
@@ -964,7 +964,7 @@ impl<R: Read + 'static> Parser<R> {
                         return Err(ScanError {
                             message: "expected integer for msb".to_string(),
                             span: msb_tok.span,
-                        })
+                        });
                     }
                 };
                 let colon_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -995,7 +995,7 @@ impl<R: Read + 'static> Parser<R> {
                         return Err(ScanError {
                             message: "expected integer for lsb".to_string(),
                             span: lsb_tok.span,
-                        })
+                        });
                     }
                 };
                 let cbrack_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -1030,7 +1030,7 @@ impl<R: Read + 'static> Parser<R> {
                     return Err(ScanError {
                         message: "expected identifier in port decl".to_string(),
                         span: t.span,
-                    })
+                    });
                 }
             };
             ports.push(NetlistPort {
@@ -1100,7 +1100,7 @@ impl<R: Read + 'static> Parser<R> {
                         return Err(ScanError {
                             message: "expected integer for msb".to_string(),
                             span: msb_tok.span,
-                        })
+                        });
                     }
                 };
                 let colon_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -1131,7 +1131,7 @@ impl<R: Read + 'static> Parser<R> {
                         return Err(ScanError {
                             message: "expected integer for lsb".to_string(),
                             span: lsb_tok.span,
-                        })
+                        });
                     }
                 };
                 let cbrack_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -1231,7 +1231,7 @@ impl<R: Read + 'static> Parser<R> {
                 return Err(ScanError {
                     message: "expected identifier for type name".to_string(),
                     span: type_tok.span,
-                })
+                });
             }
         };
         // Skip comments/annotations before instance name
@@ -1316,7 +1316,7 @@ impl<R: Read + 'static> Parser<R> {
                     return Err(ScanError {
                         message: "expected identifier for port name".to_string(),
                         span: port_tok.span,
-                    })
+                    });
                 }
             };
             // Expect '('
@@ -1456,7 +1456,7 @@ impl<R: Read + 'static> Parser<R> {
                     return Err(ScanError {
                         message: "expected identifier for net name".to_string(),
                         span: net_tok.span,
-                    })
+                    });
                 }
             };
             // Expect ')'

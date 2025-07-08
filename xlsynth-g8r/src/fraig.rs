@@ -19,9 +19,9 @@ use std::{collections::HashSet, error::Error};
 use xlsynth::IrBits;
 
 use crate::{
-    bulk_replace::bulk_replace, bulk_replace::SubstitutionMap, gate::AigOperand, gate::AigRef,
+    bulk_replace::SubstitutionMap, bulk_replace::bulk_replace, gate::AigOperand, gate::AigRef,
     gate::GateFn, gate_builder::GateBuilderOptions, get_summary_stats::get_gate_depth,
-    propose_equiv::propose_equivalence_classes, propose_equiv::EquivNode,
+    propose_equiv::EquivNode, propose_equiv::propose_equivalence_classes,
     prove_gate_fn_equiv_varisat::validate_equivalence_classes,
 };
 
@@ -216,9 +216,8 @@ mod tests {
         gate_builder::GateBuilder,
         get_summary_stats::get_summary_stats,
         test_utils::{
-            load_bf16_add_sample, load_bf16_mul_sample,
-            setup_padded_graph_with_equal_depth_opposite_polarity, Opt, DEPTH_TOLERANCE,
-            NODE_TOLERANCE,
+            DEPTH_TOLERANCE, NODE_TOLERANCE, Opt, load_bf16_add_sample, load_bf16_mul_sample,
+            setup_padded_graph_with_equal_depth_opposite_polarity,
         },
     };
     use rand::SeedableRng;

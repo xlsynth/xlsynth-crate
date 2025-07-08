@@ -2,14 +2,14 @@
 #![feature(portable_simd)]
 
 use core::simd::u64x4;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use rand::prelude::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::time::Duration;
 use xlsynth_g8r::gate_simd::{self, Vec256};
 use xlsynth_g8r::mcmc_logic::{
-    build_transform_weights, cost, load_start, mcmc_iteration, McmcContext, McmcIterationOutput,
-    Objective,
+    McmcContext, McmcIterationOutput, Objective, build_transform_weights, cost, load_start,
+    mcmc_iteration,
 };
 use xlsynth_g8r::transforms::get_all_transforms;
 
