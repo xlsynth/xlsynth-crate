@@ -3,14 +3,14 @@
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
+use xlsynth_g8r::equiv::solver_interface::Solver;
 
-#[cfg(feature = "has-boolector")]
-use xlsynth_g8r::ir_equiv_boolector;
-
-#[cfg(feature = "has-boolector")]
+use xlsynth_g8r::equiv::prove_equiv::{
+    prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
+    EquivResult,
+};
 use xlsynth_g8r::xls_ir::ir_parser;
 
-#[cfg(feature = "has-boolector")]
 #[derive(Clone, Copy)]
 enum ParallelismStrategy {
     SingleThreaded,
@@ -18,7 +18,7 @@ enum ParallelismStrategy {
     InputBitSplit,
 }
 
-#[cfg(feature = "has-boolector")]
+#[cfg(feature = "has-easy-smt")]
 impl std::str::FromStr for ParallelismStrategy {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -27,6 +27,35 @@ impl std::str::FromStr for ParallelismStrategy {
             "output-bits" => Ok(Self::OutputBits),
             "input-bit-split" => Ok(Self::InputBitSplit),
             _ => Err(format!("invalid parallelism strategy: {}", s)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SolverChoice {
+    #[cfg(feature = "has-easy-smt")]
+    Z3,
+    #[cfg(feature = "has-easy-smt")]
+    Bitwuzla,
+    #[cfg(feature = "has-easy-smt")]
+    Boolector,
+    #[cfg(feature = "has-bitwuzla")]
+    BitwuzlaStatic,
+}
+
+impl std::str::FromStr for SolverChoice {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            #[cfg(feature = "has-easy-smt")]
+            "z3" => Ok(Self::Z3),
+            #[cfg(feature = "has-easy-smt")]
+            "bitwuzla" => Ok(Self::Bitwuzla),
+            #[cfg(feature = "has-easy-smt")]
+            "boolector" => Ok(Self::Boolector),
+            #[cfg(feature = "has-bitwuzla")]
+            "bitwuzla-static" => Ok(Self::BitwuzlaStatic),
+            _ => Err(format!("invalid solver: {}", s)),
         }
     }
 }
@@ -86,8 +115,7 @@ fn ir_equiv(
     }
 }
 
-#[cfg(feature = "has-boolector")]
-fn run_boolector_equiv_check(
+fn run_easy_smt_equiv_check<S: Solver>(
     lhs_path: &std::path::Path,
     rhs_path: &std::path::Path,
     lhs_top: Option<&str>,
@@ -95,6 +123,7 @@ fn run_boolector_equiv_check(
     flatten_aggregates: bool,
     drop_params: &[String],
     strategy: ParallelismStrategy,
+    solver_config: &S::Config,
 ) -> ! {
     // Parse both IR files to xls_ir::ir::Package
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
@@ -141,41 +170,42 @@ fn run_boolector_equiv_check(
     let rhs_fn = rhs_fn
         .drop_params(drop_params)
         .expect("Dropped parameter is used in the function body!");
+    let start_time = std::time::Instant::now();
     let result = match strategy {
         ParallelismStrategy::SingleThreaded => {
-            xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn, flatten_aggregates)
+            prove_ir_fn_equiv::<S>(solver_config, &lhs_fn, &rhs_fn, flatten_aggregates)
         }
-        ParallelismStrategy::OutputBits => {
-            xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
-                &lhs_fn,
-                &rhs_fn,
-                flatten_aggregates,
-            )
-        }
+        ParallelismStrategy::OutputBits => prove_ir_fn_equiv_output_bits_parallel::<S>(
+            solver_config,
+            &lhs_fn,
+            &rhs_fn,
+            flatten_aggregates,
+        ),
         // Split on the first parameter and the first bit for now.
         // TODO: introduce better heuristics like picking the maximal-fan-out bit or
         // divide-and-conquer dynamically on more and more bits.
-        ParallelismStrategy::InputBitSplit => {
-            xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv_split_input_bit(
-                &lhs_fn,
-                &rhs_fn,
-                0,
-                0,
-                flatten_aggregates,
-            )
-        }
+        ParallelismStrategy::InputBitSplit => prove_ir_fn_equiv_split_input_bit::<S>(
+            solver_config,
+            &lhs_fn,
+            &rhs_fn,
+            0,
+            0,
+            flatten_aggregates,
+        ),
     };
+    let end_time = std::time::Instant::now();
+    println!("Time taken: {:?}", end_time.duration_since(start_time));
 
     match result {
-        ir_equiv_boolector::EquivResult::Proved => {
-            println!("success: Boolector proved equivalence");
+        EquivResult::Proved => {
+            println!("success: Solver proved equivalence");
             std::process::exit(0);
         }
-        ir_equiv_boolector::EquivResult::Disproved {
+        EquivResult::Disproved {
             inputs: cex,
             outputs: (lhs_bits, rhs_bits),
         } => {
-            println!("failure: Boolector found counterexample: {:?}", cex);
+            println!("failure: Solver found counterexample: {:?}", cex);
             println!("    output LHS: {:?}", lhs_bits);
             println!("    output RHS: {:?}", rhs_bits);
             std::process::exit(1);
@@ -216,18 +246,18 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     let lhs_path = std::path::Path::new(lhs);
     let rhs_path = std::path::Path::new(rhs);
 
-    let use_boolector = matches
-        .get_one::<String>("boolector")
-        .map(|s| s == "true")
-        .unwrap_or(false);
-    if use_boolector {
+    let solver: Option<SolverChoice> = matches
+        .get_one::<String>("solver")
+        .map(|s| s.parse().unwrap());
+    if let Some(solver) = solver {
         // If the feature is not enabled, error out.
-        #[cfg(not(feature = "has-boolector"))]
+        #[cfg(not(feature = "has-easy-smt"))]
         {
-            eprintln!("Error: --boolector requested but this binary was not built with the has-boolector feature (enabled by with-boolector-system or with-boolector-built).");
+            eprintln!("Error: --solver requested but this binary was not built with the has-easy-smt feature (enabled by with-easy-smt).");
             std::process::exit(1);
         }
-        #[cfg(feature = "has-boolector")]
+
+        #[cfg(feature = "has-easy-smt")]
         #[allow(unreachable_code)]
         {
             let flatten_aggregates = matches
@@ -242,17 +272,47 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 .get_one::<String>("parallelism_strategy")
                 .map(|s| s.parse().unwrap())
                 .unwrap_or(ParallelismStrategy::SingleThreaded);
+            match solver {
+                #[cfg(feature = "has-easy-smt")]
+                SolverChoice::Z3 | SolverChoice::Bitwuzla | SolverChoice::Boolector => {
+                    use xlsynth_g8r::equiv::easy_smt_backend::{EasySMTConfig, EasySMTSolver};
+                    let solver_config = match solver {
+                        SolverChoice::Z3 => EasySMTConfig::z3(),
+                        SolverChoice::Bitwuzla => EasySMTConfig {
+                            ..EasySMTConfig::bitwuzla()
+                        },
+                        SolverChoice::Boolector => EasySMTConfig::boolector(),
+                        _ => unreachable!(),
+                    };
+                    log::info!("run_easy_smt_equiv_check");
+                    run_easy_smt_equiv_check::<EasySMTSolver>(
+                        lhs_path,
+                        rhs_path,
+                        lhs_top,
+                        rhs_top,
+                        flatten_aggregates,
+                        &drop_params,
+                        strategy,
+                        &solver_config,
+                    );
+                }
+                #[cfg(feature = "has-bitwuzla")]
+                SolverChoice::BitwuzlaStatic => {
+                    use xlsynth_g8r::equiv::bitwuzla_backend::BitwuzlaSolver;
 
-            log::info!("run_boolector_equiv_check");
-            run_boolector_equiv_check(
-                lhs_path,
-                rhs_path,
-                lhs_top,
-                rhs_top,
-                flatten_aggregates,
-                &drop_params,
-                strategy,
-            );
+                    log::info!("run_easy_smt_equiv_check");
+                    run_easy_smt_equiv_check::<BitwuzlaSolver>(
+                        lhs_path,
+                        rhs_path,
+                        lhs_top,
+                        rhs_top,
+                        flatten_aggregates,
+                        &drop_params,
+                        strategy,
+                        (),
+                    );
+                }
+            }
             unreachable!();
         }
     }
