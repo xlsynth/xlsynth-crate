@@ -792,23 +792,52 @@ pub fn ir_fn_to_boolector(
                 let update_bv = env
                     .get(update_value)
                     .expect("BitSliceUpdate value must be present");
-                let width = update_bv.get_width();
-                let ones = BV::from_u64(btor.clone(), (1u64 << width) - 1, width);
-                let ones_ext = if arg_bv.get_width() > width {
-                    ones.uext(arg_bv.get_width() - width)
+
+                // Unify widths to avoid Boolector width-mismatch aborts. The XLS semantics
+                // allow `update_value` (M bits) to be either narrower or wider
+                // than `operand` (N bits); any portion that falls outside 0..N
+                // is simply ignored.  We therefore widen both operands to a
+                // common width so the bit-level masking logic works uniformly.
+                let arg_width = arg_bv.get_width();
+                let upd_width = update_bv.get_width();
+                let max_width = arg_width.max(upd_width);
+
+                // Zero-extend operands to the common width.
+                let arg_ext = if arg_width < max_width {
+                    arg_bv.uext(max_width - arg_width)
                 } else {
-                    ones.clone()
+                    arg_bv.clone()
                 };
-                let mask = shift_boolector(&ones_ext, start_bv, |x, y| x.sll(y));
-                let update_ext = if arg_bv.get_width() > update_bv.get_width() {
-                    update_bv.uext(arg_bv.get_width() - update_bv.get_width())
+                let update_ext = if upd_width < max_width {
+                    update_bv.uext(max_width - upd_width)
                 } else {
                     update_bv.clone()
                 };
+
+                // Create a mask of `upd_width` ones and extend to `max_width`.
+                // Use BV::ones to support widths > 64 without relying on host integer ranges.
+                let ones = BV::ones(btor.clone(), upd_width);
+                let ones_ext = if max_width > upd_width {
+                    ones.uext(max_width - upd_width)
+                } else {
+                    ones.clone()
+                };
+
+                // Shift mask and update value into position.
+                let mask = shift_boolector(&ones_ext, start_bv, |x, y| x.sll(y));
                 let update_shifted = shift_boolector(&update_ext, start_bv, |x, y| x.sll(y));
-                let cleared = arg_bv.and(&mask.not());
+
+                // Clear the update window in the original arg then OR in shifted update value.
+                let cleared = arg_ext.and(&mask.not());
                 let inserted = update_shifted.and(&mask);
-                cleared.or(&inserted)
+                let combined = cleared.or(&inserted);
+
+                // Slice back down if we widened arg.
+                if arg_width == max_width {
+                    combined
+                } else {
+                    combined.slice(arg_width - 1, 0)
+                }
             }
             NodePayload::Trace { .. } => {
                 // Trace has no effect on value computation
@@ -2509,5 +2538,40 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
             .expect("parse rhs");
         let result = prove_ir_fn_equiv(&lhs, &rhs);
         assert_eq!(result, EquivResult::Proved);
+    }
+
+    #[test]
+    fn test_bit_slice_update_wider_update_value() {
+        // Regression test for a fuzz case where the update_value is wider than the
+        // slice being updated. Previously this caused Boolector to abort due to a
+        // width mismatch. The updated conversion logic should handle the width
+        // discrepancy safely and prove self-equivalence.
+        let ir_text = r#"fn f(input: bits[7] id=1) -> bits[5] {
+  slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
+  ret upd.3: bits[5] = bit_slice_update(slice.2, input, input, id=3)
+}"#;
+        assert_fn_equiv_to_self(ir_text);
+    }
+
+    #[test]
+    fn test_bit_slice_update_large_update_value() {
+        // update_value is 80 bits, operand is 32 bits. Only lower bits should be used.
+        let ir_text = r#"fn g() -> bits[32] {
+  operand: bits[32] = literal(value=0xABCD1234, id=1)
+  start: bits[5] = literal(value=4, id=2) // update starts at bit 4
+  upd_val: bits[80] = literal(value=0xFFFFFFFFFFFFFFFFFFF, id=3) // 80 ones
+  ret r: bits[32] = bit_slice_update(operand, start, upd_val, id=4)
+}"#;
+
+        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
+            .parse_fn()
+            .unwrap();
+        // Evaluate through Boolector; ensure no panic and width is 32.
+        let btor = std::rc::Rc::new(boolector::Btor::new());
+        btor.set_opt(boolector::option::BtorOption::ModelGen(
+            boolector::option::ModelGen::All,
+        ));
+        let res = super::ir_fn_to_boolector(btor.clone(), &f, None);
+        assert_eq!(res.output.get_width(), 32);
     }
 }
