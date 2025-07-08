@@ -3,7 +3,10 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
+#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::ir_equiv_boolector;
+#[cfg(feature = "has-easy-smt")]
+use xlsynth_g8r::ir_equiv_easy_smt;
 use xlsynth_g8r::xls_ir::ir_parser;
 use xlsynth_test_helpers::ir_fuzz::{generate_ir_fn, FuzzSample};
 
@@ -54,7 +57,10 @@ fuzz_target!(|sample: FuzzSample| {
     let top_fn_name = "fuzz_test";
     let ext_equiv =
         check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
-    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn, false);
+    #[cfg(feature = "has-boolector")]
+    let result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn, false);
+    #[cfg(feature = "has-easy-smt")]
+    let result = ir_equiv_easy_smt::prove_ir_fn_equiv(orig_fn, opt_fn, false);
     let output_bit_count = orig_fn.ret_ty.bit_count();
     let parallel_result = if output_bit_count <= 64 {
         Some(ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
@@ -66,7 +72,7 @@ fuzz_target!(|sample: FuzzSample| {
     match ext_equiv {
         Ok(()) => {
             // External tool says equivalent, Boolector should agree
-            match (boolector_result, parallel_result) {
+        match (result, parallel_result) {
                 (
                     ir_equiv_boolector::EquivResult::Proved,
                     Some(ir_equiv_boolector::EquivResult::Proved),
@@ -86,7 +92,7 @@ fuzz_target!(|sample: FuzzSample| {
         }
         Err(ext_err) => {
             // External tool says not equivalent, check Boolector and parallel
-            match (boolector_result, parallel_result) {
+            match (result, parallel_result) {
                 (ir_equiv_boolector::EquivResult::Proved, _)
                 | (_, Some(ir_equiv_boolector::EquivResult::Proved))
                 | (ir_equiv_boolector::EquivResult::Proved, None) => {
