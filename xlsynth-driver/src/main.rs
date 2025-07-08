@@ -475,9 +475,23 @@ fn main() {
                         .long("rhs_ir_top")
                         .help("The top-level entry point for the right-hand side IR"),
                 )
-                .add_bool_arg(
-                    "boolector",
-                    "Use Boolector for equivalence checking (requires --features=with-boolector-built or --features=with-boolector-system)",
+                .arg(
+                    Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
+                        .value_parser([
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector",
+                            #[cfg(feature = "has-bitwuzla")]
+                            "bitwuzla-static",
+                        ])
+                        .default_value("bitwuzla")
+                        .action(ArgAction::Set),
                 )
                 .add_bool_arg(
                     "flatten_aggregates",
@@ -493,7 +507,7 @@ fn main() {
                     Arg::new("parallelism_strategy")
                         .long("parallelism-strategy")
                         .value_name("STRATEGY")
-                        .help("Parallelism strategy when using Boolector")
+                        .help("Parallelism strategy")
                         .value_parser(["single-threaded", "output-bits", "input-bit-split"])
                         .default_value("single-threaded")
                         .action(ArgAction::Set),

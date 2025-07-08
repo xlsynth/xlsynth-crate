@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use xlsynth::IrValue;
 
@@ -743,7 +745,7 @@ pub fn ir_to_smt<'a, S: Solver>(
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum EquivResult {
     Proved,
     Disproved {
@@ -797,6 +799,179 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
 ) -> EquivResult {
     let mut solver = S::new(solver_config).unwrap();
     check_fn_equiv_internal(&mut solver, lhs, rhs, allow_flatten)
+}
+
+// Add parallel equivalence-checking strategies that were previously only
+// implemented in the Boolector-specific backend.  These generic versions work
+// with any `Solver` implementation by accepting a factory closure that can
+// create fresh solver instances on demand.
+
+/// Helper: create a variant of `f` that returns only the single output bit at
+/// position `bit`.
+fn make_bit_fn(f: &ir::Fn, bit: usize) -> ir::Fn {
+    use crate::xls_ir::ir::{Node, NodePayload, NodeRef, Type};
+
+    let mut nf = f.clone();
+    let ret_ref = nf.ret_node_ref.expect("Function must have a return node");
+    let slice_ref = NodeRef {
+        index: nf.nodes.len(),
+    };
+    nf.nodes.push(Node {
+        text_id: nf.nodes.len(),
+        name: None,
+        ty: Type::Bits(1),
+        payload: NodePayload::BitSlice {
+            arg: ret_ref,
+            start: bit,
+            width: 1,
+        },
+        pos: None,
+    });
+    nf.ret_node_ref = Some(slice_ref);
+    nf.ret_ty = Type::Bits(1);
+    nf
+}
+
+/// Prove equivalence by splitting on each output bit in parallel.
+/// `solver_factory` must be able to create an independent solver instance for
+/// each spawned thread.
+pub fn prove_ir_fn_equiv_output_bits_parallel<S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ir::Fn,
+    rhs: &ir::Fn,
+    allow_flatten: bool,
+) -> EquivResult {
+    let width = lhs.ret_ty.bit_count();
+    assert_eq!(width, rhs.ret_ty.bit_count(), "Return widths must match");
+    if width == 0 {
+        // Zero-width values – fall back to the standard equivalence prover because
+        // there is no bit to split on.
+        return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, allow_flatten);
+    }
+
+    let found = Arc::new(AtomicBool::new(false));
+    let counterexample: Arc<Mutex<Option<EquivResult>>> = Arc::new(Mutex::new(None));
+    let next_bit = Arc::new(AtomicUsize::new(0));
+
+    let thread_cnt = std::cmp::min(width, num_cpus::get());
+
+    std::thread::scope(|scope| {
+        for _ in 0..thread_cnt {
+            let lhs_cl = lhs.clone();
+            let rhs_cl = rhs.clone();
+            let found_cl = found.clone();
+            let cex_cl = counterexample.clone();
+            let next_cl = next_bit.clone();
+
+            scope.spawn(move || {
+                loop {
+                    if found_cl.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let idx = next_cl.fetch_add(1, Ordering::SeqCst);
+                    if idx >= width {
+                        break;
+                    }
+
+                    let lf = make_bit_fn(&lhs_cl, idx);
+                    let rf = make_bit_fn(&rhs_cl, idx);
+                    let res = prove_ir_fn_equiv::<S>(solver_config, &lf, &rf, allow_flatten);
+                    if let EquivResult::Disproved { .. } = &res {
+                        let mut guard = cex_cl.lock().unwrap();
+                        *guard = Some(res.clone());
+                        found_cl.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    let maybe_cex = {
+        let mut guard = counterexample.lock().unwrap();
+        guard.take()
+    };
+    if let Some(res) = maybe_cex {
+        res
+    } else {
+        EquivResult::Proved
+    }
+}
+
+/// Prove equivalence by case-splitting on a single input bit value (0 / 1).
+/// `split_input_index` selects the parameter to split on and
+/// `split_input_bit_index` selects the bit inside that parameter.
+pub fn prove_ir_fn_equiv_split_input_bit<S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ir::Fn,
+    rhs: &ir::Fn,
+    split_input_index: usize,
+    split_input_bit_index: usize,
+    allow_flatten: bool,
+) -> EquivResult {
+    if lhs.params.is_empty() || rhs.params.is_empty() {
+        return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, allow_flatten);
+    }
+
+    assert_eq!(
+        lhs.params.len(),
+        rhs.params.len(),
+        "Parameter count mismatch"
+    );
+    assert!(
+        split_input_index < lhs.params.len(),
+        "split_input_index out of bounds"
+    );
+    assert!(
+        split_input_bit_index < lhs.params[split_input_index].ty.bit_count(),
+        "split_input_bit_index out of bounds"
+    );
+
+    for bit_val in 0..=1u64 {
+        let mut solver = S::new(solver_config.clone()).unwrap();
+        // Build aligned SMT representations first so we can assert the bit-constraint.
+        let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs, Some("lhs"));
+        let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs, Some("rhs"));
+        let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
+        let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs);
+        let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs);
+
+        // Locate the chosen parameter on the LHS side.
+        let param_name = &lhs.params[split_input_index].name;
+        let param_bv = aligned
+            .lhs
+            .inputs
+            .get(param_name)
+            .expect("Parameter BV missing")
+            .bitvec
+            .clone();
+        let bit_bv = solver.slice(&param_bv, split_input_bit_index, 1);
+        let val_bv = solver.numerical(1, bit_val);
+        let eq_bv = solver.eq(&bit_bv, &val_bv);
+        solver.assert(&eq_bv).unwrap();
+
+        // Assert outputs differ.
+        let diff = solver.ne(&smt_lhs.output.bitvec, &smt_rhs.output.bitvec);
+        solver.assert(&diff).unwrap();
+
+        match solver.check().unwrap() {
+            Response::Sat => {
+                let mut get_val = |irbv: &IRTypedBitVec<'_, S::Rep>| -> IrValue {
+                    solver.get_value(&irbv.bitvec, &irbv.ir_type).unwrap()
+                };
+                return EquivResult::Disproved {
+                    inputs: smt_lhs.inputs.iter().map(|i| get_val(i)).collect(),
+                    outputs: (get_val(&smt_lhs.output), get_val(&smt_rhs.output)),
+                };
+            }
+            Response::Unsat => {
+                // Continue to next bit value
+            }
+            Response::Unknown => panic!("Solver returned unknown result"),
+        }
+    }
+
+    EquivResult::Proved
 }
 
 mod test_utils {

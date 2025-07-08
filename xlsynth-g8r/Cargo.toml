@@ -29,6 +29,7 @@ z3 = { version = "0.12", optional = true }
 rand_xoshiro = "0.6"
 num-traits = "0.2.19"
 boolector = { version = "0.4.3", optional = true }
+boolector-sys = { version = "0.7.2", optional = true }
 easy-smt = { version = "0.3.1", optional = true }
 prost = "0.12.6"
 prost-types = "0.12.6"
@@ -67,8 +68,8 @@ default = []
 has-boolector = []
 has-bitwuzla = []
 has-easy-smt = []
-with-boolector-system = ["dep:boolector", "has-boolector"]
-with-boolector-built = ["dep:boolector", "boolector/vendor-lgl", "has-boolector"]
+with-boolector-system = ["dep:boolector", "dep:boolector-sys", "has-boolector"]
+with-boolector-built = ["dep:boolector", "dep:boolector-sys", "boolector/vendor-lgl", "has-boolector"]
 with-z3-system = ["dep:z3"]
 with-z3-built = ["dep:z3", "z3/static-link-z3"]
 with-easy-smt = ["dep:easy-smt", "has-easy-smt"]
