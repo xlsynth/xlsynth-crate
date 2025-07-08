@@ -3,9 +3,10 @@
 #![cfg(feature = "has-easy-smt")]
 
 use std::{
+    collections::{HashMap, HashSet},
     io,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use easy_smt::{Context, ContextBuilder, SExpr};
@@ -99,17 +100,65 @@ impl EasySMTConfig {
 pub struct EasySMTSolver {
     context: Arc<Mutex<Context>>,
     solver_fn: SolverFn,
+    next_name_index: usize,
+    term_cache: HashMap<String, SExpr>,
+    reverse_cache: HashMap<SExpr, String>,
 }
 
 impl EasySMTSolver {
-    fn bool_to(&self, context: &Context, value: SExpr) -> BitVec<SExpr> {
+    fn get_next_available_name(&mut self) -> String {
+        let mut name = format!("t{}", self.next_name_index);
+        while self.term_cache.contains_key(&name) {
+            self.next_name_index += 1;
+            name = format!("t{}", self.next_name_index);
+        }
+        name
+    }
+    fn cache_term(
+        &mut self,
+        bit_vec: BitVec<SExpr>,
+        context: &mut MutexGuard<Context>,
+    ) -> BitVec<SExpr> {
+        let rep = match bit_vec {
+            BitVec::BitVec { rep, .. } => rep.clone(),
+            BitVec::ZeroWidth => {
+                return bit_vec;
+            }
+        };
+        if rep.is_atom() {
+            return bit_vec;
+        }
+        if self.reverse_cache.contains_key(&rep) {
+            let name = self.reverse_cache.get(&rep).unwrap();
+            return BitVec::BitVec {
+                width: bit_vec.get_width(),
+                rep: context.atom(name),
+            };
+        }
+        let name = self.get_next_available_name();
+        self.term_cache.insert(name.clone(), rep.clone());
+        let bv_sort = context.bit_vec_sort(context.numeral(bit_vec.get_width()));
+        let new_expr = context
+            .define_const(name.clone(), bv_sort, rep.clone())
+            .unwrap();
+        self.reverse_cache.insert(rep.clone(), name.clone());
+        self.reverse_cache.insert(new_expr.clone(), name.clone());
         BitVec::BitVec {
-            width: 1,
-            rep: context.ite(value, context.binary(1, 1), context.binary(1, 0)),
+            width: bit_vec.get_width(),
+            rep: new_expr,
         }
     }
+    fn bool_to(&mut self, context: &mut MutexGuard<Context>, value: SExpr) -> BitVec<SExpr> {
+        self.cache_term(
+            BitVec::BitVec {
+                width: 1,
+                rep: context.ite(value, context.binary(1, 1), context.binary(1, 0)),
+            },
+            context,
+        )
+    }
 
-    fn bv_to_bool(&self, context: &Context, value: &BitVec<SExpr>) -> SExpr {
+    fn bv_to_bool(&mut self, context: &Context, value: &BitVec<SExpr>) -> SExpr {
         match value {
             BitVec::BitVec { rep, width: 1 } => context.eq(rep.clone(), context.binary(1, 1)),
             _ => panic!(
@@ -119,23 +168,24 @@ impl EasySMTSolver {
         }
     }
 
-    fn unary_op<F>(&self, bit_vec: &BitVec<SExpr>, op: F) -> BitVec<SExpr>
+    fn unary_op<F>(&mut self, bit_vec: &BitVec<SExpr>, op: F) -> BitVec<SExpr>
     where
         F: Fn(&Context, SExpr) -> SExpr,
     {
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
-        match bit_vec {
+        let mut context = shared.lock().unwrap();
+        let bv = match bit_vec {
             BitVec::BitVec { width, rep } => BitVec::BitVec {
                 width: *width,
                 rep: op(&context, rep.clone()),
             },
             BitVec::ZeroWidth => BitVec::ZeroWidth,
-        }
+        };
+        self.cache_term(bv, &mut context)
     }
 
     fn bin_bool_op<F>(
-        &self,
+        &mut self,
         lhs: &BitVec<SExpr>,
         rhs: &BitVec<SExpr>,
         op: F,
@@ -145,42 +195,48 @@ impl EasySMTSolver {
         F: Fn(&Context, SExpr, SExpr) -> SExpr,
     {
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         match (lhs, rhs) {
             (BitVec::BitVec { width: w1, rep: r1 }, BitVec::BitVec { width: w2, rep: r2 }) => {
                 assert_eq!(w1, w2, "Bitvector width mismatch");
-                self.bool_to(&context, op(&context, r1.clone(), r2.clone()))
+                let res = op(&context, r1.clone(), r2.clone());
+                self.bool_to(&mut context, res)
             }
-            (BitVec::ZeroWidth, BitVec::ZeroWidth) => zero_width_result,
+            (BitVec::ZeroWidth, BitVec::ZeroWidth) => {
+                self.cache_term(zero_width_result, &mut context)
+            }
             _ => panic!("Bitvector width mismatch"),
         }
     }
 
-    fn bin_op<F>(&self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>, op: F) -> BitVec<SExpr>
+    fn bin_op<F>(&mut self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>, op: F) -> BitVec<SExpr>
     where
         F: Fn(&Context, SExpr, SExpr) -> SExpr,
     {
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         match (lhs, rhs) {
             (BitVec::BitVec { width: w1, rep: r1 }, BitVec::BitVec { width: w2, rep: r2 }) => {
                 assert_eq!(w1, w2, "Bitvector width mismatch");
-                BitVec::BitVec {
-                    width: *w1,
-                    rep: op(&context, r1.clone(), r2.clone()),
-                }
+                self.cache_term(
+                    BitVec::BitVec {
+                        width: *w1,
+                        rep: op(&context, r1.clone(), r2.clone()),
+                    },
+                    &mut context,
+                )
             }
             (BitVec::ZeroWidth, BitVec::ZeroWidth) => BitVec::ZeroWidth,
             _ => panic!("Bitvector width mismatch"),
         }
     }
 
-    fn reduce<F>(&self, bit_vec: &BitVec<SExpr>, op: F) -> BitVec<SExpr>
+    fn reduce<F>(&mut self, bit_vec: &BitVec<SExpr>, op: F) -> BitVec<SExpr>
     where
         F: Fn(&Context, SExpr, SExpr) -> SExpr,
     {
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         match bit_vec {
             BitVec::BitVec { width, rep } => {
                 let mut res = context.extract(0, 0, rep.clone());
@@ -188,7 +244,7 @@ impl EasySMTSolver {
                     let bit = context.extract(i as i32, i as i32, rep.clone());
                     res = op(&context, res.clone(), bit);
                 }
-                BitVec::BitVec { width: 1, rep: res }
+                self.cache_term(BitVec::BitVec { width: 1, rep: res }, &mut context)
             }
             BitVec::ZeroWidth => panic!("Cannot reduce zero-width bitvector"),
         }
@@ -209,6 +265,9 @@ impl Solver for EasySMTSolver {
         Ok(EasySMTSolver {
             context: Arc::new(Mutex::new(context)),
             solver_fn: config.solver_fn.clone(),
+            next_name_index: 0,
+            term_cache: HashMap::new(),
+            reverse_cache: HashMap::new(),
         })
     }
 
@@ -221,29 +280,31 @@ impl Solver for EasySMTSolver {
         let width_numeral = context.numeral(width as i64);
         let sort = context.bit_vec_sort(width_numeral);
         let rep = context.declare_const(name, sort)?;
-        let ret = BitVec::BitVec { width, rep };
-        Ok(ret)
+        Ok(self.cache_term(BitVec::BitVec { width, rep }, &mut context))
     }
 
     fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<SExpr> {
         assert!(width > 0, "Width must be positive");
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         if width < 64 {
             value &= (1 << width) - 1;
         }
         let rep = context.binary(width, value);
-        BitVec::BitVec { width, rep }
+        self.cache_term(BitVec::BitVec { width, rep }, &mut context)
     }
 
     fn from_raw_str(&mut self, width: usize, value: &str) -> BitVec<SExpr> {
         assert!(width > 0, "Width must be positive");
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
-        BitVec::BitVec {
-            width,
-            rep: context.atom(value),
-        }
+        let mut context = shared.lock().unwrap();
+        self.cache_term(
+            BitVec::BitVec {
+                width,
+                rep: context.atom(value),
+            },
+            &mut context,
+        )
     }
 
     fn get_value(
@@ -287,7 +348,7 @@ impl Solver for EasySMTSolver {
             return BitVec::ZeroWidth;
         }
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         match bit_vec {
             BitVec::BitVec { width, rep } => {
                 assert!(
@@ -304,10 +365,13 @@ impl Solver for EasySMTSolver {
                 );
                 assert!(low >= 0, "Invalid bit slice: low = {}", low);
                 let new_width = high - low + 1;
-                BitVec::BitVec {
-                    width: new_width as usize,
-                    rep: context.extract(high, low, rep.clone()),
-                }
+                self.cache_term(
+                    BitVec::BitVec {
+                        width: new_width as usize,
+                        rep: context.extract(high, low, rep.clone()),
+                    },
+                    &mut context,
+                )
             }
             BitVec::ZeroWidth => panic!("Cannot extract from zero-width bitvector"),
         }
@@ -323,7 +387,7 @@ impl Solver for EasySMTSolver {
 
     fn reverse(&mut self, bit_vec: &BitVec<SExpr>) -> BitVec<SExpr> {
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         match bit_vec {
             BitVec::BitVec { width, rep } => {
                 let mut res = context.extract(0, 0, rep.clone());
@@ -331,10 +395,13 @@ impl Solver for EasySMTSolver {
                     let bit = context.extract(i as i32, i as i32, rep.clone());
                     res = context.concat(res, bit);
                 }
-                BitVec::BitVec {
-                    width: *width,
-                    rep: res,
-                }
+                self.cache_term(
+                    BitVec::BitVec {
+                        width: *width,
+                        rep: res,
+                    },
+                    &mut context,
+                )
             }
             BitVec::ZeroWidth => BitVec::ZeroWidth,
         }
@@ -394,14 +461,16 @@ impl Solver for EasySMTSolver {
 
     fn concat(&mut self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>) -> BitVec<SExpr> {
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         match (&lhs, &rhs) {
-            (BitVec::BitVec { width: w1, rep: r1 }, BitVec::BitVec { width: w2, rep: r2 }) => {
-                BitVec::BitVec {
-                    width: w1 + w2,
-                    rep: context.concat(r1.clone(), r2.clone()),
-                }
-            }
+            (BitVec::BitVec { width: w1, rep: r1 }, BitVec::BitVec { width: w2, rep: r2 }) => self
+                .cache_term(
+                    BitVec::BitVec {
+                        width: w1 + w2,
+                        rep: context.concat(r1.clone(), r2.clone()),
+                    },
+                    &mut context,
+                ),
             (BitVec::ZeroWidth, _) => rhs.clone(),
             (_, BitVec::ZeroWidth) => lhs.clone(),
         }
@@ -434,7 +503,7 @@ impl Solver for EasySMTSolver {
         signed: bool,
     ) -> BitVec<SExpr> {
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         match bit_vec {
             BitVec::BitVec { width, rep } => {
                 if extend_width == 0 {
@@ -453,10 +522,13 @@ impl Solver for EasySMTSolver {
                     ]),
                     rep.clone(),
                 ]);
-                BitVec::BitVec {
-                    width: width + extend_width,
-                    rep: extend_rep,
-                }
+                self.cache_term(
+                    BitVec::BitVec {
+                        width: width + extend_width,
+                        rep: extend_rep,
+                    },
+                    &mut context,
+                )
             }
             BitVec::ZeroWidth => panic!("Cannot extend zero-width bitvector"),
         }
@@ -469,7 +541,7 @@ impl Solver for EasySMTSolver {
         else_: &BitVec<SExpr>,
     ) -> BitVec<SExpr> {
         let shared = Arc::clone(&self.context);
-        let context = shared.lock().unwrap();
+        let mut context = shared.lock().unwrap();
         match (lhs.clone(), then, else_) {
             (
                 BitVec::BitVec { width: w1, rep: _ },
@@ -478,10 +550,14 @@ impl Solver for EasySMTSolver {
             ) => {
                 assert_eq!(w1, 1, "Condition must be 1-bit");
                 assert_eq!(w2, w3, "Then and else must have the same width");
-                BitVec::BitVec {
-                    width: *w2,
-                    rep: context.ite(self.bv_to_bool(&context, lhs), r2.clone(), r3.clone()),
-                }
+                let condition = self.bv_to_bool(&context, lhs);
+                self.cache_term(
+                    BitVec::BitVec {
+                        width: *w2,
+                        rep: context.ite(condition, r2.clone(), r3.clone()),
+                    },
+                    &mut context,
+                )
             }
             (BitVec::BitVec { width: w1, rep: _ }, BitVec::ZeroWidth, BitVec::ZeroWidth) => {
                 assert_eq!(w1, 1, "Condition must be 1-bit");
@@ -574,10 +650,112 @@ impl Solver for EasySMTSolver {
     fn render(&mut self, bit_vec: &BitVec<SExpr>) -> String {
         let shared = Arc::clone(&self.context);
         let context = shared.lock().unwrap();
-        match bit_vec.get_rep() {
-            None => "<zero-width>".to_string(),
-            Some(rep) => context.display(rep.clone()).to_string(),
+
+        // Handle zero-width values first.
+        let rep = match bit_vec.get_rep() {
+            None => return "<zero-width>".to_string(),
+            Some(r) => r.clone(),
+        };
+
+        // We can only build the pretty `let` representation if the final
+        // expression is an atom that refers to an entry in our term cache.
+        let final_name_opt = context.get_atom(rep);
+        let final_name = match final_name_opt {
+            Some(name) if self.term_cache.contains_key(name) => name.to_string(),
+            // Fallback: display the raw S-expr as before.
+            _ => return context.display(rep).to_string(),
+        };
+
+        // ------------------------------------------------------------------
+        // Collect all term-cache names that the final expression transitively
+        // depends on.  We perform a DFS and record the names in post-order so
+        // that we obtain a topological ordering (dependencies before uses).
+        // ------------------------------------------------------------------
+
+        // Small helper to recursively gather atom names referenced in an SExpr.
+        fn gather_names(
+            expr: SExpr,
+            ctx: &Context,
+            term_cache: &HashMap<String, SExpr>,
+            out: &mut Vec<String>,
+        ) {
+            if expr.is_atom() {
+                if let Some(atom) = ctx.get_atom(expr) {
+                    if term_cache.contains_key(atom) {
+                        out.push(atom.to_string());
+                    }
+                }
+            } else if expr.is_list() {
+                if let Some(children) = ctx.get_list(expr) {
+                    for &child in children {
+                        gather_names(child, ctx, term_cache, out);
+                    }
+                }
+            }
         }
+
+        // Recursive DFS for topological sort.
+        fn dfs(
+            name: &str,
+            ctx: &Context,
+            term_cache: &HashMap<String, SExpr>,
+            visited: &mut HashSet<String>,
+            order: &mut Vec<String>,
+        ) {
+            if !visited.insert(name.to_string()) {
+                return; // already processed
+            }
+
+            let expr = match term_cache.get(name) {
+                Some(e) => *e,
+                None => return,
+            };
+
+            let mut deps = Vec::new();
+            gather_names(expr, ctx, term_cache, &mut deps);
+            for dep in deps {
+                dfs(&dep, ctx, term_cache, visited, order);
+            }
+
+            order.push(name.to_string());
+        }
+
+        let mut visited = HashSet::new();
+        let mut order = Vec::new();
+        dfs(
+            &final_name,
+            &context,
+            &self.term_cache,
+            &mut visited,
+            &mut order,
+        );
+
+        // Ensure the root term itself is included in the bindings (it will
+        // also be referenced as the final expression, which is harmless and
+        // matches typical SMT-LIB pretty-printing patterns).
+
+        // ------------------------------------------------------------------
+        // Build the `(let …)` s-expression string.
+        // ------------------------------------------------------------------
+        let mut result = String::from("(let\n");
+
+        for name in &order {
+            if let Some(expr) = self.term_cache.get(name) {
+                let expr_str = context.display(*expr).to_string();
+                result.push_str("  ((");
+                result.push_str(name);
+                result.push(' ');
+                result.push_str(&expr_str);
+                result.push_str("))\n");
+            }
+        }
+
+        // Final expression (the name of the root term)
+        result.push_str("  ");
+        result.push_str(&final_name);
+        result.push_str("\n)");
+
+        result
     }
 }
 
