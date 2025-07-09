@@ -7,7 +7,11 @@ use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
 use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtSolver, EasySmtConfig};
-use xlsynth_g8r::equiv::prove_equiv::{prove_ir_fn_equiv, EquivResult};
+use xlsynth_g8r::equiv::prove_equiv::{
+    prove_ir_fn_equiv,
+    prove_ir_fn_equiv_output_bits_parallel,
+    EquivResult,
+};
 use xlsynth_g8r::xls_ir::ir_parser;
 use xlsynth_test_helpers::ir_fuzz::{generate_ir_fn, FuzzSample};
 
@@ -116,5 +120,16 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let z3_result = prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::z3(), orig_fn, opt_fn, false);
         validate_equiv_result(ext_equiv.clone(), z3_result, "Z3 binary", &orig_ir, &opt_ir);
+    }
+
+    let output_bit_count = orig_fn.ret_ty.bit_count();
+    if output_bit_count <= 64 {
+        let bitwuzla_parallel_result = prove_ir_fn_equiv_output_bits_parallel::<Bitwuzla>(
+            &BitwuzlaOptions::new(),
+            orig_fn,
+            opt_fn,
+            false,
+        );
+        validate_equiv_result(ext_equiv, bitwuzla_parallel_result, "Bitwuzla-parallel", &orig_ir, &opt_ir);
     }
 });
