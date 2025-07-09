@@ -68,21 +68,52 @@ impl Parser {
     }
 
     fn at_eof(&mut self) -> bool {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         self.offset >= self.chars.len()
     }
 
-    fn drop_whitespace(&mut self) {
-        loop {
-            if let Some(c) = self.peekc() {
-                if c.is_whitespace() {
-                    self.dropc().unwrap();
-                } else {
-                    // non-whitespace so we break
+    /// Drops a "//" style comment if one is present at the current
+    /// offset. Returns `true` if a comment was found and removed, `false`
+    /// otherwise.
+    fn drop_comment(&mut self) -> bool {
+        if self.peek_is("//") {
+            // Consume the two '/' characters.
+            self.dropc().unwrap();
+            self.dropc().unwrap();
+            // Skip until end of line or EOF.
+            while let Some(c) = self.peekc() {
+                self.dropc().unwrap();
+                if c == '\n' {
                     break;
                 }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Repeatedly removes whitespace and "//" comments so that parsing can
+    /// resume at the next significant token.
+    fn drop_whitespace_and_comments(&mut self) {
+        loop {
+            // First remove any leading whitespace.
+            self.drop_whitespace();
+            // Then, if a comment follows, remove it and iterate to drop any
+            // whitespace that may come after the comment's terminating newline.
+            if !self.drop_comment() {
+                break;
+            }
+        }
+    }
+
+    fn drop_whitespace(&mut self) {
+        // Consume consecutive whitespace characters.
+        while let Some(c) = self.peekc() {
+            if c.is_whitespace() {
+                // Safe to unwrap because we just peeked a character.
+                self.dropc().unwrap();
             } else {
-                // EOF
                 break;
             }
         }
@@ -107,7 +138,7 @@ impl Parser {
     }
 
     fn pop_identifier_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         let mut identifier = String::new();
         while let Some(c) = self.peekc() {
             if identifier.is_empty() {
@@ -135,7 +166,7 @@ impl Parser {
     }
 
     fn pop_string_or_error(&mut self) -> Result<String, ParseError> {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         self.drop_or_error("\"")?;
         let mut string = String::new();
         while let Some(c) = self.peekc() {
@@ -150,7 +181,7 @@ impl Parser {
     }
 
     fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         let mut number = String::new();
 
         // Handle radix prefixes.
@@ -232,7 +263,7 @@ impl Parser {
     }
 
     fn try_drop(&mut self, s: &str) -> bool {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         if self.peek_is(s) {
             self.offset += s.len();
             true
@@ -242,7 +273,7 @@ impl Parser {
     }
 
     fn drop_or_error_with_ctx(&mut self, s: &str, ctx: &str) -> Result<(), ParseError> {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         if self.try_drop(s) {
             Ok(())
         } else {
@@ -256,7 +287,7 @@ impl Parser {
     }
 
     fn drop_or_error(&mut self, s: &str) -> Result<(), ParseError> {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         if self.try_drop(s) {
             Ok(())
         } else {
@@ -269,7 +300,7 @@ impl Parser {
     }
 
     pub fn parse_type(&mut self) -> Result<ir::Type, ParseError> {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         let ty: ir::Type = if self.try_drop("(") {
             let mut members = Vec::new();
             while !self.try_drop(")") {
@@ -316,7 +347,7 @@ impl Parser {
         let name = self.pop_identifier_or_error("parameter")?;
         self.drop_or_error(":")?;
         let ty = self.parse_type()?;
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         let raw_id: usize = if self.peek_is("id=") {
             self.parse_id_attribute()?
         } else {
@@ -386,7 +417,7 @@ impl Parser {
     }
 
     fn parse_string_attribute(&mut self, attr_name: &str) -> Result<String, ParseError> {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         self.drop_or_error(attr_name)?;
         self.drop_or_error("=")?;
         self.pop_string_or_error()
@@ -416,7 +447,7 @@ impl Parser {
     fn maybe_drop_pos_attribute(
         &mut self,
     ) -> Result<Option<Vec<(usize, usize, usize)>>, ParseError> {
-        self.drop_whitespace();
+        self.drop_whitespace_and_comments();
         if !self.try_drop(", pos=") {
             return Ok(None);
         }
@@ -514,7 +545,7 @@ impl Parser {
     ) -> Result<Vec<ir::NodeRef>, ParseError> {
         let mut members = Vec::new();
         loop {
-            self.drop_whitespace();
+            self.drop_whitespace_and_comments();
             if self.peek_is("id=") {
                 break;
             }
@@ -838,7 +869,7 @@ impl Parser {
                 // level instead of in an attribute.
                 let mut operands = Vec::new();
                 loop {
-                    self.drop_whitespace();
+                    self.drop_whitespace_and_comments();
                     if self.peek_is(")") || self.peek_is("id=") {
                         break;
                     }
@@ -863,7 +894,7 @@ impl Parser {
                 // instead of in an attribute.
                 let mut operands = Vec::new();
                 loop {
-                    self.drop_whitespace();
+                    self.drop_whitespace_and_comments();
                     if self.peek_is(")") || self.peek_is("to_apply=") {
                         break;
                     }
@@ -1023,7 +1054,7 @@ impl Parser {
                 if self.try_drop(", default=") {
                     default = Some(self.parse_node_ref(&node_env, "sel default node ref")?);
                 }
-                self.drop_whitespace();
+                self.drop_whitespace_and_comments();
                 if self.peek_is(", id=") {
                     self.drop_or_error(",")?;
                     let id_attr = self.parse_id_attribute()?;
@@ -1050,7 +1081,7 @@ impl Parser {
                 let cases =
                     self.parse_node_ref_array_attribute("cases", &node_env, "priority_sel cases")?;
                 self.drop_or_error(",")?;
-                self.drop_whitespace();
+                self.drop_whitespace_and_comments();
                 let default = if self.peek_is("default=") {
                     self.drop_or_error("default=")?;
                     Some(self.parse_node_ref(&node_env, "priority_sel default")?)
@@ -1830,5 +1861,16 @@ top fn main() -> bits[32] {
         let pkg = parser.parse_package().unwrap();
         let main_fn = pkg.get_top().unwrap();
         assert!(main_fn.nodes[1].pos.is_some());
+    }
+
+    #[test]
+    fn test_parse_with_line_comments() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let ir = "package cmt_pkg // package comment\n\nfn main() -> bits[8] { // function comment\n  // This literal should be parsed correctly.\n  ret literal.1: bits[8] = literal(value=42, id=1) // trailing comment\n}\n";
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        assert_eq!(pkg.name, "cmt_pkg");
+        let main_fn = pkg.get_fn("main").unwrap();
+        assert_eq!(main_fn.ret_ty.to_string(), "bits[8]");
     }
 }
