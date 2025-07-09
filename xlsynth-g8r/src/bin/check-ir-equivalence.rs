@@ -8,9 +8,6 @@ use std::time::Instant;
 use xlsynth_g8r::ir_equiv_boolector;
 
 #[cfg(feature = "has-boolector")]
-use xlsynth_g8r::ir_value_utils::ir_value_from_bits_with_type;
-
-#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::xls_ir::ir::Package;
 
 #[cfg(feature = "has-boolector")]
@@ -58,7 +55,7 @@ fn main_has_boolector(args: Args) {
 
     // First run the Boolector-based equivalence prover.
     let boolector_start = Instant::now();
-    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(f1, f2);
+    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(f1, f2, false);
     let boolector_elapsed = boolector_start.elapsed();
 
     // Convert Boolector result into a simple boolean for later comparison.
@@ -73,26 +70,20 @@ fn main_has_boolector(args: Args) {
         }
         ir_equiv_boolector::EquivResult::Disproved {
             inputs: cex,
-            outputs: (lhs_out_bits, rhs_out_bits),
+            outputs: (lhs_val, rhs_val),
         } => {
             println!(
                 "Equivalence result (boolector): DISPROVED (took {:?})",
                 boolector_elapsed
             );
             println!("Counterexample inputs:");
-            let values: Vec<_> = cex
-                .iter()
-                .zip(&f1.params)
-                .map(|(bits, param)| ir_value_from_bits_with_type(bits, &param.ty))
-                .collect();
+            let values: Vec<_> = cex.iter().cloned().collect();
             if values.len() == 1 {
                 println!("  {}", values[0]);
             } else {
                 println!("  {:?}", values);
             }
             // Report outputs for the counterexample
-            let lhs_val = ir_value_from_bits_with_type(&lhs_out_bits, &f1.ret_ty);
-            let rhs_val = ir_value_from_bits_with_type(&rhs_out_bits, &f2.ret_ty);
             println!("Output LHS: {}", lhs_val);
             println!("Output RHS: {}", rhs_val);
         }

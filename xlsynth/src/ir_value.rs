@@ -434,6 +434,10 @@ impl std::cmp::PartialEq for IrValue {
     }
 }
 
+// `Eq` is safe because XLS values are immutable and `xls_value_eq` defines a
+// proper equivalence relation.
+impl Eq for IrValue {}
+
 impl std::fmt::Display for IrValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

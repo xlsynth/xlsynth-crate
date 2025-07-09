@@ -2,7 +2,8 @@
 
 #![cfg(feature = "has-boolector")]
 
-use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
+use crate::ir_value_utils::ir_value_from_bits_with_type;
+use crate::xls_ir::ir::{Fn, NodePayload, NodeRef, Type};
 use crate::xls_ir::ir_utils::get_topological;
 use boolector::option::{BtorOption, ModelGen};
 use boolector::{BV, Btor, SolverResult};
@@ -14,6 +15,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use xlsynth::IrBits;
+use xlsynth::IrValue;
 
 /// Result of converting an XLS IR function to Boolector logic.
 pub struct IrFnBoolectorResult {
@@ -24,7 +26,9 @@ pub struct IrFnBoolectorResult {
 /// Solver context that can be reused across multiple equivalence checks.
 pub struct Ctx {
     btor: Rc<Btor>,
-    params: HashMap<String, BV<Rc<Btor>>>,
+    lhs_params: HashMap<String, BV<Rc<Btor>>>,
+    rhs_params: HashMap<String, BV<Rc<Btor>>>,
+    flattened_params: Option<BV<Rc<Btor>>>,
 }
 
 /// Whether a Boolector solver should be created with incremental (push/pop)
@@ -50,13 +54,58 @@ impl Ctx {
     /// Creates a new Boolector solver context with model generation enabled
     /// and incremental solving turned on so clause learning can be reused
     /// across proofs.
-    pub fn new(params: &[(String, u32)]) -> Self {
+    pub fn new(lhs: &Fn, rhs: &Fn) -> Self {
         let btor = new_btor(Incremental::Yes);
-        let mut m = HashMap::new();
-        for (name, w) in params {
-            m.insert(name.clone(), BV::new(btor.clone(), *w, Some(name)));
+        let collect_param_bit_widths = |params: &[crate::xls_ir::ir::Param]| {
+            params
+                .iter()
+                .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
+                .collect()
+        };
+        let lhs_params_bit_widths: Vec<(String, u32)> = collect_param_bit_widths(&lhs.params);
+        let rhs_params_bit_widths: Vec<(String, u32)> = collect_param_bit_widths(&rhs.params);
+        let lhs_params_total_width = lhs_params_bit_widths.iter().map(|(_, w)| *w).sum::<u32>();
+        let rhs_params_total_width = rhs_params_bit_widths.iter().map(|(_, w)| *w).sum::<u32>();
+        assert_eq!(
+            lhs_params_total_width, rhs_params_total_width,
+            "LHS and RHS must have the same number of bits"
+        );
+        if lhs_params_total_width == 0 {
+            return Self {
+                btor,
+                lhs_params: HashMap::new(),
+                rhs_params: HashMap::new(),
+                flattened_params: None,
+            };
         }
-        Self { btor, params: m }
+        let flattened_params = BV::new(
+            btor.clone(),
+            lhs_params_total_width,
+            Some("flattened_params"),
+        );
+        // split the flattened params by the bit widths of the lhs and rhs params
+        // Low should be the last high in each iteration
+        fn split_params<'a>(
+            param_bit_widths: impl IntoIterator<Item = (String, u32)>,
+            bv: &BV<Rc<Btor>>,
+        ) -> HashMap<String, BV<Rc<Btor>>> {
+            let mut params = HashMap::new();
+            let mut low = 0;
+            for (name, width) in param_bit_widths {
+                params.insert(name.clone(), bv.slice(low + width - 1, low));
+                low += width;
+            }
+            params
+        }
+
+        let lhs_params = split_params(lhs_params_bit_widths, &flattened_params);
+        let rhs_params = split_params(rhs_params_bit_widths, &flattened_params);
+        Self {
+            btor,
+            lhs_params,
+            rhs_params,
+            flattened_params: Some(flattened_params),
+        }
     }
 }
 
@@ -713,8 +762,11 @@ pub fn ir_fn_to_boolector(
                     let idx_val = BV::from_u64(array_bv.get_btor(), i as u64, index_bv.get_width());
                     let is_this = index_bv._eq(&idx_val);
                     let selected = is_this.cond_bv(value_bv, &orig_elem);
+                    // Build the updated array value so that element 0 ends up
+                    // in the least-significant slice, matching the layout of
+                    // Array literals, Array construction and ArrayIndex.
                     result = Some(if let Some(acc) = result {
-                        selected.concat(&acc)
+                        acc.concat(&selected)
                     } else {
                         selected
                     });
@@ -1029,10 +1081,12 @@ pub enum EquivResult {
     /// Counterexample with inputs that distinguish the two functions,
     /// along with the corresponding outputs from the lhs and rhs functions.
     Disproved {
-        /// Counterexample input assignments.
-        inputs: Vec<IrBits>,
-        /// Counterexample outputs for lhs and rhs functions.
-        outputs: (IrBits, IrBits),
+        /// Counterexample input assignments, reconstructed as structured IR
+        /// values.
+        inputs: Vec<IrValue>,
+        /// Counterexample outputs for lhs and rhs functions, reconstructed as
+        /// structured IR values.
+        outputs: (IrValue, IrValue),
     },
 }
 
@@ -1054,6 +1108,21 @@ fn flatten_bv(bv: &BV<Rc<Btor>>, ty: &crate::xls_ir::ir::Type) -> BV<Rc<Btor>> {
                 });
             }
             result.expect("Tuple must have at least one member")
+        }
+        crate::xls_ir::ir::Type::Array(arr) => {
+            let mut offset = 0;
+            let mut result = None;
+            for _ in 0..arr.element_count {
+                let width = arr.element_type.bit_count() as u32;
+                let slice = bv.slice(offset + width - 1, offset);
+                offset += width;
+                result = Some(if let Some(acc) = result {
+                    slice.concat(&acc)
+                } else {
+                    slice
+                });
+            }
+            result.expect("Array must have at least one element")
         }
         _ => unimplemented!("flatten_bv for {:?}", ty),
     }
@@ -1088,12 +1157,19 @@ fn bv_solution_to_ir_bits(bv: &BV<Rc<Btor>>) -> IrBits {
     crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits)
 }
 
+/// Helper: convert a Boolector BV model solution to a typed IRValue using the
+/// given IR type.
+fn bv_solution_to_ir_value(bv: &BV<Rc<Btor>>, ty: &Type) -> IrValue {
+    let bits = bv_solution_to_ir_bits(bv);
+    ir_value_from_bits_with_type(&bits, ty)
+}
+
 /// Checks equivalence of two IR functions using Boolector.
 /// Only supports literal-only, zero-parameter functions for now.
 fn check_equiv_internal_with_btor(
     lhs: &Fn,
     rhs: &Fn,
-    _flatten_aggregates: bool,
+    flatten_aggregates: bool,
     ctx: &Ctx,
     use_frame: bool, // whether to push/pop a solver frame
 ) -> EquivResult {
@@ -1109,30 +1185,10 @@ fn check_equiv_internal_with_btor(
     }
     log::info!("LHS signature: {}", signature_str(lhs));
     log::info!("RHS signature: {}", signature_str(rhs));
-    if _flatten_aggregates {
-        // Flatten parameter types
-        let lhs_param_flat: Vec<usize> = lhs.params.iter().map(|p| flatten_type(&p.ty)).collect();
-        let rhs_param_flat: Vec<usize> = rhs.params.iter().map(|p| flatten_type(&p.ty)).collect();
-        log::info!("LHS flattened param widths: {:?}", lhs_param_flat);
-        log::info!("RHS flattened param widths: {:?}", rhs_param_flat);
-        assert_eq!(
-            lhs_param_flat, rhs_param_flat,
-            "Flattened parameter bit widths must match: lhs={:?} rhs={:?}",
-            lhs_param_flat, rhs_param_flat
-        );
-        // Flatten return types
-        let lhs_width = flatten_type(&lhs.ret_ty);
-        let rhs_width = flatten_type(&rhs.ret_ty);
-        log::info!("LHS flattened return width: {}", lhs_width);
-        log::info!("RHS flattened return width: {}", rhs_width);
-        assert_eq!(
-            lhs_width, rhs_width,
-            "Flattened return widths must match: lhs={} rhs={}",
-            lhs_width, rhs_width
-        );
-    } else {
+    if !flatten_aggregates {
+        // Not flattened, so we need to make sure that return types and parameter lists
+        // are identical
         assert_eq!(lhs.ret_ty, rhs.ret_ty, "Return types must match");
-        // Check that parameter lists are identical in type and order
         assert_eq!(
             lhs.params.len(),
             rhs.params.len(),
@@ -1149,34 +1205,15 @@ fn check_equiv_internal_with_btor(
     if use_frame {
         ctx.btor.push(1);
     }
-    // Create param BVs adjusted from the context's root parameters. Use lhs
-    // names for the context but map BVs to the parameter names of each
-    // function individually.
-    let mut lhs_param_bvs = HashMap::new();
-    let mut rhs_param_bvs = HashMap::new();
-    for (l, r) in lhs.params.iter().zip(rhs.params.iter()) {
-        let root = ctx
-            .params
-            .get(&l.name)
-            .expect("parameter BV missing from context");
-        let width = l.ty.bit_count() as u32;
-        let bv = match root.get_width().cmp(&width) {
-            std::cmp::Ordering::Equal => root.clone(),
-            std::cmp::Ordering::Greater => root.slice(width - 1, 0),
-            std::cmp::Ordering::Less => root.uext(width - root.get_width()),
-        };
-        lhs_param_bvs.insert(l.name.clone(), bv.clone());
-        rhs_param_bvs.insert(r.name.clone(), bv);
-    }
-    let lhs_result = ir_fn_to_boolector(ctx.btor.clone(), lhs, Some(&lhs_param_bvs));
-    let rhs_result = ir_fn_to_boolector(ctx.btor.clone(), rhs, Some(&rhs_param_bvs));
+    let lhs_result = ir_fn_to_boolector(ctx.btor.clone(), lhs, Some(&ctx.lhs_params));
+    let rhs_result = ir_fn_to_boolector(ctx.btor.clone(), rhs, Some(&ctx.rhs_params));
     // Flatten outputs if needed
-    let lhs_out = if _flatten_aggregates {
+    let lhs_out = if flatten_aggregates {
         flatten_bv(&lhs_result.output, &lhs.ret_ty)
     } else {
         lhs_result.output.clone()
     };
-    let rhs_out = if _flatten_aggregates {
+    let rhs_out = if flatten_aggregates {
         flatten_bv(&rhs_result.output, &rhs.ret_ty)
     } else {
         rhs_result.output.clone()
@@ -1188,19 +1225,18 @@ fn check_equiv_internal_with_btor(
     let res = match sat_result {
         SolverResult::Unsat => EquivResult::Proved,
         SolverResult::Sat => {
-            // Extract input assignments from the model
+            // Extract input assignments from the model and reconstruct typed IR values.
             let mut counterexample = Vec::new();
             for param in &lhs.params {
-                let bv = lhs_param_bvs.get(&param.name).unwrap();
-                let ir_bits = bv_solution_to_ir_bits(bv);
-                counterexample.push(ir_bits);
+                let bv = ctx.lhs_params.get(&param.name).unwrap();
+                counterexample.push(bv_solution_to_ir_value(bv, &param.ty));
             }
-            // Extract outputs for lhs and rhs
-            let lhs_ir_bits = bv_solution_to_ir_bits(&lhs_out);
-            let rhs_ir_bits = bv_solution_to_ir_bits(&rhs_out);
+            // Extract outputs for lhs and rhs and reconstruct typed IR values.
+            let lhs_val = bv_solution_to_ir_value(&lhs_out, &lhs.ret_ty);
+            let rhs_val = bv_solution_to_ir_value(&rhs_out, &lhs.ret_ty);
             EquivResult::Disproved {
                 inputs: counterexample,
-                outputs: (lhs_ir_bits, rhs_ir_bits),
+                outputs: (lhs_val, rhs_val),
             }
         }
         SolverResult::Unknown => panic!("Solver returned unknown result"),
@@ -1212,35 +1248,19 @@ fn check_equiv_internal_with_btor(
 }
 
 /// Standard equivalence check (no aggregate flattening)
-pub fn prove_ir_fn_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    let params: Vec<(String, u32)> = lhs
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
-        .collect();
-    let ctx = Ctx::new(&params);
-    check_equiv_internal_with_btor(lhs, rhs, false, &ctx, false)
-}
-
-/// Equivalence check with tuple/array flattening
-pub fn prove_ir_equiv_flattened(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    let params: Vec<(String, u32)> = lhs
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
-        .collect();
-    let ctx = Ctx::new(&params);
-    check_equiv_internal_with_btor(lhs, rhs, true, &ctx, false)
+pub fn prove_ir_fn_equiv(lhs: &Fn, rhs: &Fn, flatten_aggregates: bool) -> EquivResult {
+    let ctx = Ctx::new(lhs, rhs);
+    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, &ctx, false)
 }
 
 /// Equivalence check reusing the given solver context.
-pub fn prove_ir_fn_equiv_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
-    check_equiv_internal_with_btor(lhs, rhs, false, ctx, true)
-}
-
-/// Flattened equivalence check reusing the given solver context.
-pub fn prove_ir_equiv_flattened_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
-    check_equiv_internal_with_btor(lhs, rhs, true, ctx, true)
+pub fn prove_ir_fn_equiv_with_ctx(
+    lhs: &Fn,
+    rhs: &Fn,
+    flatten_aggregates: bool,
+    ctx: &Ctx,
+) -> EquivResult {
+    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, ctx, true)
 }
 
 fn shift_boolector<F>(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>, shift_op: F) -> BV<Rc<Btor>>
@@ -1323,14 +1343,23 @@ fn ir_value_to_bv(
             result
         }
         crate::xls_ir::ir::Type::Tuple(types) => {
+            // Keep element-0 as the most-significant slice to match the
+            // ordering used by the `tuple` IR node and by
+            // `tuple_get_flat_bit_slice_for_index`.
             let elements = ir_value
                 .get_elements()
                 .expect("Tuple literal must have elements");
-            let mut bvs = Vec::new();
-            for (elem, elem_ty) in elements.iter().rev().zip(types.iter().rev()) {
+            assert_eq!(elements.len(), types.len());
+
+            let mut bvs = Vec::with_capacity(elements.len());
+            // Iterate in *forward* order so that element-0 is processed first
+            // and will end up in the MSB position after successive concats.
+            for (elem, elem_ty) in elements.iter().zip(types.iter()) {
                 let bv = ir_value_to_bv(btor.clone(), elem, elem_ty);
                 bvs.push(bv);
             }
+
+            // Concatenate, keeping accumulated value as MSBs.
             let mut result = bvs[0].clone();
             for bv in bvs.iter().skip(1) {
                 result = result.concat(bv);
@@ -1384,7 +1413,7 @@ fn shift_boolector_signed(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>) -> BV<Rc<Bto
 pub fn prove_ir_fn_equiv_output_bits_parallel(
     lhs: &Fn,
     rhs: &Fn,
-    _flatten_aggregates: bool,
+    flatten_aggregates: bool,
 ) -> EquivResult {
     // Ensure both functions return the same bit width.
     let width = lhs.ret_ty.bit_count();
@@ -1417,7 +1446,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
     }
 
     let found = Arc::new(AtomicBool::new(false));
-    let cex: Arc<Mutex<Option<(Vec<IrBits>, (IrBits, IrBits))>>> = Arc::new(Mutex::new(None));
+    let cex: Arc<Mutex<Option<(Vec<IrValue>, (IrValue, IrValue))>>> = Arc::new(Mutex::new(None));
     let next = Arc::new(AtomicUsize::new(0));
     let threads = num_cpus::get();
     let mut handles = Vec::new();
@@ -1445,15 +1474,12 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
                 // single bits value, but the slice is taken out of a (potentially
                 // aggregate) original return value. Flattening guarantees
                 // consistent bit ordering between the two functions.
-                let res = prove_ir_equiv_flattened(&lf, &rf);
+                let res = prove_ir_fn_equiv(&lf, &rf, flatten_aggregates);
                 log::debug!("thread {} checking bit {} result: {:?}", thread_no, i, res);
-                if let EquivResult::Disproved {
-                    inputs: bits,
-                    outputs,
-                } = res
-                {
+                if let EquivResult::Disproved { inputs, outputs } = res {
+                    // Inputs and outputs are already typed IR values.
                     found_cl.store(true, Ordering::SeqCst);
-                    *cex_cl.lock().unwrap() = Some((bits, outputs));
+                    *cex_cl.lock().unwrap() = Some((inputs, outputs));
                     break;
                 }
             }
@@ -1466,12 +1492,12 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
         h.join().unwrap();
     }
 
-    let maybe_bits = {
+    let maybe_cex = {
         let mut guard = cex.lock().unwrap();
         guard.take()
     };
 
-    if let Some((inputs, outputs)) = maybe_bits {
+    if let Some((inputs, outputs)) = maybe_cex {
         EquivResult::Disproved { inputs, outputs }
     } else {
         EquivResult::Proved
@@ -1488,11 +1514,12 @@ pub fn prove_ir_fn_equiv_split_input_bit(
     rhs: &Fn,
     split_input_index: usize,
     split_input_bit_index: usize,
+    flatten_aggregates: bool,
 ) -> EquivResult {
     // If there are no parameters, fall back to the standard prover. No need to
     // panic here.
     if lhs.params.is_empty() || rhs.params.is_empty() {
-        return prove_ir_fn_equiv(lhs, rhs);
+        return prove_ir_fn_equiv(lhs, rhs, flatten_aggregates);
     }
     assert_eq!(
         lhs.params.len(),
@@ -1522,21 +1549,16 @@ pub fn prove_ir_fn_equiv_split_input_bit(
         split_input_bit_index
     );
 
-    let params: Vec<(String, u32)> = lhs
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
-        .collect();
-    let ctx = Ctx::new(&params);
+    let ctx = Ctx::new(lhs, rhs);
 
     // Helper closure to run one branch under an assumption.
     let run_branch = |bit_value: u64| -> EquivResult {
         ctx.btor.push(1);
-        let root_bv = ctx
-            .params
-            .get(&split_param.name)
-            .expect("missing split param in Ctx");
-        let bit_bv = root_bv.slice(split_input_bit_index as u32, split_input_bit_index as u32);
+        let bit_bv = ctx
+            .flattened_params
+            .as_ref()
+            .unwrap()
+            .slice(split_input_bit_index as u32, split_input_bit_index as u32);
         let val_bv = BV::from_u64(ctx.btor.clone(), bit_value, 1);
         // In the discussion we said assume, but here we actually use assert as we are
         // proving unsatisfiability. Let F be the formula we are proving
@@ -1546,8 +1568,13 @@ pub fn prove_ir_fn_equiv_split_input_bit(
         // are both unsatisfiable.
         bit_bv._eq(&val_bv).assert();
 
-        let res =
-            check_equiv_internal_with_btor(lhs, rhs, false, &ctx, /* use_frame= */ false);
+        let res = check_equiv_internal_with_btor(
+            lhs,
+            rhs,
+            flatten_aggregates,
+            &ctx,
+            /* use_frame= */ false,
+        );
         ctx.btor.pop(1);
         res
     };
@@ -1576,7 +1603,7 @@ mod tests {
     fn assert_fn_equiv_to_self(ir_text: &str) {
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().expect("Failed to parse IR");
-        let result = prove_ir_fn_equiv(&f, &f);
+        let result = prove_ir_fn_equiv(&f, &f, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -1629,7 +1656,7 @@ mod tests {
         let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
         let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
-        assert_eq!(prove_ir_fn_equiv(&lhs, &rhs), EquivResult::Proved);
+        assert_eq!(prove_ir_fn_equiv(&lhs, &rhs, false), EquivResult::Proved);
     }
 
     #[test]
@@ -1660,23 +1687,17 @@ mod tests {
 }"#;
         let f = ir_parser::Parser::new(ir_text_f).parse_fn().unwrap();
         let g = ir_parser::Parser::new(ir_text_g).parse_fn().unwrap();
-        let result = prove_ir_fn_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g, false);
         match result {
             EquivResult::Disproved {
                 inputs: ref cex,
                 outputs: _,
             } => {
                 assert_eq!(cex.len(), 1);
-                let bits = &cex[0];
-                assert_eq!(bits.get_bit_count(), 8);
+                let val = &cex[0];
+                assert_eq!(val.bit_count().unwrap(), 8);
                 // Should be 42
-                let mut value = 0u64;
-                for i in 0..8 {
-                    if bits.get_bit(i).unwrap() {
-                        value |= 1 << i;
-                    }
-                }
-                assert_eq!(value, 42);
+                assert_eq!(val.to_u64().unwrap(), 42);
             }
             _ => panic!("Expected Disproved with counterexample"),
         }
@@ -1799,7 +1820,7 @@ mod tests {
         // Use the existing assert_fn_equiv helper to check equivalence
         let f = ir_parser::Parser::new(ir_identity).parse_fn().unwrap();
         let g = ir_parser::Parser::new(ir_recompose).parse_fn().unwrap();
-        let result = prove_ir_fn_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g, false);
         match result {
             EquivResult::Proved => (),
             EquivResult::Disproved {
@@ -2090,7 +2111,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let mut parser = ir_parser::Parser::new(ir_text);
         let pkg = parser.parse_package().unwrap();
         let f = pkg.get_fn("fuzz_test").unwrap();
-        let result = prove_ir_fn_equiv(f, f);
+        let result = prove_ir_fn_equiv(f, f, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2139,7 +2160,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let zero_f = crate::xls_ir::ir_parser::Parser::new(ir_zero)
             .parse_fn()
             .unwrap();
-        let result = prove_ir_fn_equiv(&slice_f, &zero_f);
+        let result = prove_ir_fn_equiv(&slice_f, &zero_f, false);
         assert_eq!(result, EquivResult::Proved);
     }
 
@@ -2189,7 +2210,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_const)
             .parse_fn()
             .unwrap();
-        let result = prove_ir_fn_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2213,7 +2234,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_id)
             .parse_fn()
             .unwrap();
-        let res = prove_ir_fn_equiv(&f, &g);
+        let res = prove_ir_fn_equiv(&f, &g, false);
         assert_eq!(res, EquivResult::Proved);
     }
 
@@ -2232,7 +2253,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_static)
             .parse_fn()
             .unwrap();
-        assert_eq!(prove_ir_fn_equiv(&f, &g), EquivResult::Proved);
+        assert_eq!(prove_ir_fn_equiv(&f, &g, false), EquivResult::Proved);
     }
 
     #[test]
@@ -2256,7 +2277,7 @@ fn func_literal_7() -> bits[3] {
             .parse_fn()
             .expect("Failed to parse literal_7 IR");
 
-        let result = prove_ir_fn_equiv(&f_encode, &f_literal);
+        let result = prove_ir_fn_equiv(&f_encode, &f_literal, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2290,7 +2311,7 @@ fn optimized_fn(input: bits[3] id=1) -> bits[5] {
             .parse_fn()
             .expect("Failed to parse optimized_fn IR for one_hot_reverse_fuzz_case");
 
-        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized);
+        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2322,7 +2343,7 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
             .parse_fn()
             .expect("Failed to parse optimized_shrl_saturation_fn IR");
 
-        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized);
+        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2345,7 +2366,7 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
         let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
             .parse_fn()
             .unwrap();
-        assert_eq!(prove_ir_fn_equiv(&f_shl, &f_id), EquivResult::Proved);
+        assert_eq!(prove_ir_fn_equiv(&f_shl, &f_id, false), EquivResult::Proved);
     }
 
     #[test]
@@ -2366,7 +2387,10 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
         let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
             .parse_fn()
             .unwrap();
-        assert_eq!(prove_ir_fn_equiv(&f_shra, &f_id), EquivResult::Proved);
+        assert_eq!(
+            prove_ir_fn_equiv(&f_shra, &f_id, false),
+            EquivResult::Proved
+        );
     }
 
     /// From a fuzz_ir_opt_equiv minimized counter-example.
@@ -2412,7 +2436,7 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
         let f_orig = pkg_orig.get_fn("fuzz_test").unwrap();
         let f_opt = pkg_opt.get_fn("fuzz_test").unwrap();
 
-        let result = prove_ir_fn_equiv(f_orig, f_opt);
+        let result = prove_ir_fn_equiv(f_orig, f_opt, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2453,7 +2477,7 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
             .parse_fn()
             .expect("Failed to parse optimized IR");
 
-        let result = prove_ir_fn_equiv(&lhs, &rhs);
+        let result = prove_ir_fn_equiv(&lhs, &rhs, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2551,11 +2575,12 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
         let rhs = crate::xls_ir::ir_parser::Parser::new(opt_ir)
             .parse_fn()
             .expect("parse rhs");
-        let result = prove_ir_fn_equiv(&lhs, &rhs);
+        let result = prove_ir_fn_equiv(&lhs, &rhs, false);
         assert_eq!(result, EquivResult::Proved);
     }
 
     #[test]
+
     fn test_bit_slice_update_wider_update_value() {
         // Regression test for a fuzz case where the update_value is wider than the
         // slice being updated. Previously this caused Boolector to abort due to a
@@ -2612,6 +2637,210 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
         assert_eq!(
             super::prove_ir_fn_equiv(&lhs, &rhs),
             super::EquivResult::Proved
+
+    fn test_tuple_literal_vs_constructed_inconsistent() {
+        // Two functions that should be equivalent: one returns a tuple literal, the
+        // other constructs the same tuple with the `tuple` operator.  If tuple
+        // encoding is consistent the prover should return `Proved`.  The
+        // current implementation is inconsistent, therefore we expect
+        // `Disproved` which reveals the bug.
+        let lhs_ir = r#"fn lhs() -> (bits[8], bits[4]) {
+  ret lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> (bits[8], bits[4]) {
+  lit0: bits[8] = literal(value=0x12, id=1)
+  lit1: bits[4] = literal(value=0x4, id=2)
+  ret tup: (bits[8], bits[4]) = tuple(lit0, lit1, id=3)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert_eq!(
+            result,
+            super::EquivResult::Proved,
+            "Tuple literal vs constructed should be equivalent; failing reveals bug in tuple encoding"
+        );
+    }
+
+    #[test]
+    fn test_tuple_index_on_literal_inconsistent() {
+        // The first element of (0x12, 0x4) is 0x12.  With consistent tuple encoding,
+        // the two functions below should be equivalent.  Inconsistent encoding
+        // causes the prover to find a spurious difference.
+        let lhs_ir = r#"fn lhs() -> bits[8] {
+  lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+  ret idx0: bits[8] = tuple_index(lit_tuple, index=0, id=2)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[8] {
+  ret lit: bits[8] = literal(value=0x12, id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert_eq!(
+            result,
+            super::EquivResult::Proved,
+            "Tuple index on literal should produce equivalent values; failing reveals bug in tuple encoding"
+        );
+    }
+
+    #[test]
+    fn test_array_update_element0_value() {
+        // Update element 0 of a 3-element array and then read it back.  Correct
+        // semantics should yield the updated value (0xF).
+        // Current implementation misorders bits in array_update, so the prover
+        // will find a mismatch and return Disproved – the test therefore
+        // expects Proved and will fail until the bug is fixed.
+        let lhs_ir = r#"fn lhs() -> bits[4] {
+  orig: bits[4][3] = literal(value=[1, 2, 4], id=1)
+  val_f: bits[4] = literal(value=0xF, id=2)
+  idx0: bits[2] = literal(value=0, id=3)
+  upd: bits[4][3] = array_update(orig, val_f, indices=[idx0], id=4)
+  ret elem0: bits[4] = array_index(upd, indices=[idx0], id=5)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[4] {
+  ret lit: bits[4] = literal(value=0xF, id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert!(
+            matches!(result, super::EquivResult::Proved),
+            "array_update then array_index at 0 should yield updated value; failing reveals bug in array_update ordering"
+        );
+    }
+
+    #[test]
+    fn test_array_update_full_array_equiv() {
+        // Replace element 1 in a 3-element array and compare full array to a
+        // literal with the expected ordering.  Should be equivalent if ordering
+        // is correct.
+        let lhs_ir = r#"fn lhs() -> bits[4][3] {
+  orig: bits[4][3] = literal(value=[1, 2, 4], id=1)
+  val_a: bits[4] = literal(value=0xA, id=2)
+  idx1: bits[2] = literal(value=1, id=3)
+  upd: bits[4][3] = array_update(orig, val_a, indices=[idx1], id=4)
+  ret out: bits[4][3] = identity(upd, id=5)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[4][3] {
+  ret expected: bits[4][3] = literal(value=[1, 0xA, 4], id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert!(
+            matches!(result, super::EquivResult::Proved),
+            "array_update should produce expected full array value; failing reveals ordering bug"
+        );
+    }
+
+    #[test]
+    fn test_array_literal_vs_constructed_equiv() {
+        // Literal array should be equivalent to one built via the `array` IR
+        // node from the same elements.
+        let lhs_ir = r#"fn lhs() -> bits[4][3] {
+  ret litarr: bits[4][3] = literal(value=[1, 2, 3], id=1)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[4][3] {
+  e0: bits[4] = literal(value=1, id=1)
+  e1: bits[4] = literal(value=2, id=2)
+  e2: bits[4] = literal(value=3, id=3)
+  ret arr: bits[4][3] = array(e0, e1, e2, id=4)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert!(
+            matches!(result, super::EquivResult::Proved),
+            "Array literal and constructed array should be equivalent; discrepancy indicates ordering bug"
+        );
+    }
+
+    #[test]
+    fn test_array_index_on_literal_elements() {
+        // Index 1 of literal [1,2,3] is 2.
+        let lhs_ir = r#"fn lhs() -> bits[4] {
+  lit: bits[4][3] = literal(value=[1, 2, 3], id=1)
+  idx1: bits[2] = literal(value=0, id=2)
+  ret elem1: bits[4] = array_index(lit, indices=[idx1], id=3)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[4] {
+  ret two: bits[4] = literal(value=1, id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
+        assert!(
+            matches!(result, super::EquivResult::Proved),
+            "array_index on literal should return correct element value; failure indicates ordering bug"
+        );
+    }
+
+    #[test]
+    fn test_array_flatten_equiv_bits() {
+        // Verify that an array value and its flattened bits representation are
+        // equivalent when flatten_aggregates=true.
+        let lhs_ir = r#"fn lhs() -> bits[4][3] {
+  ret litarr: bits[4][3] = literal(value=[1, 2, 3], id=1)
+}"#;
+
+        let rhs_ir = r#"fn rhs() -> bits[12] {
+  ret flat: bits[12] = literal(value=0x321, id=1)
+}"#;
+
+        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
+            .parse_fn()
+            .unwrap();
+        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
+            .parse_fn()
+            .unwrap();
+
+        let result = super::prove_ir_fn_equiv(&lhs, &rhs, true);
+        assert!(
+            matches!(result, super::EquivResult::Proved),
+            "Flattened bits should be equivalent to array value when flattening is allowed"
         );
     }
 }
