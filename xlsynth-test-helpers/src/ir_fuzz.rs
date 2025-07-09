@@ -316,6 +316,18 @@ pub fn generate_ir_fn(
                 width,
             } => {
                 assert!(width > 0, "bit slice has no width");
+                let operand_bv = &available_nodes[(operand.index as usize) % available_nodes.len()];
+                let operand_width = fn_builder
+                    .get_type(operand_bv)
+                    .unwrap()
+                    .get_flat_bit_count() as u8;
+                assert!(
+                    start + width <= operand_width,
+                    "The bit-width of operand ({}) must be greater than or equal to start ({}) + width ({})",
+                    operand_width,
+                    start,
+                    width
+                );
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
                 let node = fn_builder.bit_slice(operand, start as u64, width as u64, None);
                 available_nodes.push(node);
@@ -510,10 +522,22 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     });
                 }
                 FuzzOpFlat::BitSlice => {
-                    // BitSlice op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let start = u.int_in_range(0..=8)?;
-                    let width = u.int_in_range(1..=8)?;
+                    // TODO: In the long term we may want to carry an {IrOp: IrType} mapping so we
+                    // can ensure that we don't generate invalid IR.
+
+                    // Generate an in-bounds BitSlice that always refers to the primary input (index
+                    // 0) whose width is `input_bits`. This guarantees the slice
+                    // is legal without having to track the widths of all
+                    // intermediate IR nodes.
+                    let index: u8 = 0; // primary input
+
+                    // Choose a valid start such that 0 <= start < input_bits
+                    let start = u.int_in_range(0..=((input_bits as u64) - 1))? as u8;
+
+                    // Width must be at least 1 and satisfy start + width <= input_bits
+                    let max_width = input_bits - start;
+                    let width = u.int_in_range(1..=(max_width as u64))? as u8;
+
                     ops.push(FuzzOp::BitSlice {
                         operand: FuzzOperand { index },
                         start,
