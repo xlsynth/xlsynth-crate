@@ -2635,9 +2635,12 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
             .unwrap();
 
         assert_eq!(
-            super::prove_ir_fn_equiv(&lhs, &rhs),
+            super::prove_ir_fn_equiv(&lhs, &rhs, false),
             super::EquivResult::Proved
+        );
+    }
 
+    #[test]
     fn test_tuple_literal_vs_constructed_inconsistent() {
         // Two functions that should be equivalent: one returns a tuple literal, the
         // other constructs the same tuple with the `tuple` operator.  If tuple
