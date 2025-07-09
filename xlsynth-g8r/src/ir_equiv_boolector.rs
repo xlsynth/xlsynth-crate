@@ -2573,8 +2573,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
         // update_value is 80 bits, operand is 32 bits. Only lower bits should be used.
         let ir_text = r#"fn g() -> bits[32] {
   operand: bits[32] = literal(value=0xABCD1234, id=1)
-  start: bits[5] = literal(value=4, id=2) // update starts at bit 4
-  upd_val: bits[80] = literal(value=0xFFFFFFFFFFFFFFFFFFF, id=3) // 80 ones
+  start: bits[5] = literal(value=4, id=2)
+  upd_val: bits[80] = literal(value=0xFFFFFFFFFFFFFFFFFFF, id=3)
   ret r: bits[32] = bit_slice_update(operand, start, upd_val, id=4)
 }"#;
 
