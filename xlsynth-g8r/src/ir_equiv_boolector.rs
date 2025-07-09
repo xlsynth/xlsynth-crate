@@ -26,7 +26,9 @@ pub struct IrFnBoolectorResult {
 /// Solver context that can be reused across multiple equivalence checks.
 pub struct Ctx {
     btor: Rc<Btor>,
-    params: HashMap<String, BV<Rc<Btor>>>,
+    lhs_params: HashMap<String, BV<Rc<Btor>>>,
+    rhs_params: HashMap<String, BV<Rc<Btor>>>,
+    flattened_params: Option<BV<Rc<Btor>>>,
 }
 
 /// Whether a Boolector solver should be created with incremental (push/pop)
@@ -52,13 +54,58 @@ impl Ctx {
     /// Creates a new Boolector solver context with model generation enabled
     /// and incremental solving turned on so clause learning can be reused
     /// across proofs.
-    pub fn new(params: &[(String, u32)]) -> Self {
+    pub fn new(lhs: &Fn, rhs: &Fn) -> Self {
         let btor = new_btor(Incremental::Yes);
-        let mut m = HashMap::new();
-        for (name, w) in params {
-            m.insert(name.clone(), BV::new(btor.clone(), *w, Some(name)));
+        let collect_param_bit_widths = |params: &[crate::xls_ir::ir::Param]| {
+            params
+                .iter()
+                .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
+                .collect()
+        };
+        let lhs_params_bit_widths: Vec<(String, u32)> = collect_param_bit_widths(&lhs.params);
+        let rhs_params_bit_widths: Vec<(String, u32)> = collect_param_bit_widths(&rhs.params);
+        let lhs_params_total_width = lhs_params_bit_widths.iter().map(|(_, w)| *w).sum::<u32>();
+        let rhs_params_total_width = rhs_params_bit_widths.iter().map(|(_, w)| *w).sum::<u32>();
+        assert_eq!(
+            lhs_params_total_width, rhs_params_total_width,
+            "LHS and RHS must have the same number of bits"
+        );
+        if lhs_params_total_width == 0 {
+            return Self {
+                btor,
+                lhs_params: HashMap::new(),
+                rhs_params: HashMap::new(),
+                flattened_params: None,
+            };
         }
-        Self { btor, params: m }
+        let flattened_params = BV::new(
+            btor.clone(),
+            lhs_params_total_width,
+            Some("flattened_params"),
+        );
+        // split the flattened params by the bit widths of the lhs and rhs params
+        // Low should be the last high in each iteration
+        fn split_params<'a>(
+            param_bit_widths: impl IntoIterator<Item = (String, u32)>,
+            bv: &BV<Rc<Btor>>,
+        ) -> HashMap<String, BV<Rc<Btor>>> {
+            let mut params = HashMap::new();
+            let mut low = 0;
+            for (name, width) in param_bit_widths {
+                params.insert(name.clone(), bv.slice(low + width - 1, low));
+                low += width;
+            }
+            params
+        }
+
+        let lhs_params = split_params(lhs_params_bit_widths, &flattened_params);
+        let rhs_params = split_params(rhs_params_bit_widths, &flattened_params);
+        Self {
+            btor,
+            lhs_params,
+            rhs_params,
+            flattened_params: Some(flattened_params),
+        }
     }
 }
 
@@ -1060,7 +1107,7 @@ fn bv_solution_to_ir_value(bv: &BV<Rc<Btor>>, ty: &Type) -> IrValue {
 fn check_equiv_internal_with_btor(
     lhs: &Fn,
     rhs: &Fn,
-    _flatten_aggregates: bool,
+    flatten_aggregates: bool,
     ctx: &Ctx,
     use_frame: bool, // whether to push/pop a solver frame
 ) -> EquivResult {
@@ -1076,30 +1123,10 @@ fn check_equiv_internal_with_btor(
     }
     log::info!("LHS signature: {}", signature_str(lhs));
     log::info!("RHS signature: {}", signature_str(rhs));
-    if _flatten_aggregates {
-        // Flatten parameter types
-        let lhs_param_flat: Vec<usize> = lhs.params.iter().map(|p| flatten_type(&p.ty)).collect();
-        let rhs_param_flat: Vec<usize> = rhs.params.iter().map(|p| flatten_type(&p.ty)).collect();
-        log::info!("LHS flattened param widths: {:?}", lhs_param_flat);
-        log::info!("RHS flattened param widths: {:?}", rhs_param_flat);
-        assert_eq!(
-            lhs_param_flat, rhs_param_flat,
-            "Flattened parameter bit widths must match: lhs={:?} rhs={:?}",
-            lhs_param_flat, rhs_param_flat
-        );
-        // Flatten return types
-        let lhs_width = flatten_type(&lhs.ret_ty);
-        let rhs_width = flatten_type(&rhs.ret_ty);
-        log::info!("LHS flattened return width: {}", lhs_width);
-        log::info!("RHS flattened return width: {}", rhs_width);
-        assert_eq!(
-            lhs_width, rhs_width,
-            "Flattened return widths must match: lhs={} rhs={}",
-            lhs_width, rhs_width
-        );
-    } else {
+    if !flatten_aggregates {
+        // Not flattened, so we need to make sure that return types and parameter lists
+        // are identical
         assert_eq!(lhs.ret_ty, rhs.ret_ty, "Return types must match");
-        // Check that parameter lists are identical in type and order
         assert_eq!(
             lhs.params.len(),
             rhs.params.len(),
@@ -1116,34 +1143,15 @@ fn check_equiv_internal_with_btor(
     if use_frame {
         ctx.btor.push(1);
     }
-    // Create param BVs adjusted from the context's root parameters. Use lhs
-    // names for the context but map BVs to the parameter names of each
-    // function individually.
-    let mut lhs_param_bvs = HashMap::new();
-    let mut rhs_param_bvs = HashMap::new();
-    for (l, r) in lhs.params.iter().zip(rhs.params.iter()) {
-        let root = ctx
-            .params
-            .get(&l.name)
-            .expect("parameter BV missing from context");
-        let width = l.ty.bit_count() as u32;
-        let bv = match root.get_width().cmp(&width) {
-            std::cmp::Ordering::Equal => root.clone(),
-            std::cmp::Ordering::Greater => root.slice(width - 1, 0),
-            std::cmp::Ordering::Less => root.uext(width - root.get_width()),
-        };
-        lhs_param_bvs.insert(l.name.clone(), bv.clone());
-        rhs_param_bvs.insert(r.name.clone(), bv);
-    }
-    let lhs_result = ir_fn_to_boolector(ctx.btor.clone(), lhs, Some(&lhs_param_bvs));
-    let rhs_result = ir_fn_to_boolector(ctx.btor.clone(), rhs, Some(&rhs_param_bvs));
+    let lhs_result = ir_fn_to_boolector(ctx.btor.clone(), lhs, Some(&ctx.lhs_params));
+    let rhs_result = ir_fn_to_boolector(ctx.btor.clone(), rhs, Some(&ctx.rhs_params));
     // Flatten outputs if needed
-    let lhs_out = if _flatten_aggregates {
+    let lhs_out = if flatten_aggregates {
         flatten_bv(&lhs_result.output, &lhs.ret_ty)
     } else {
         lhs_result.output.clone()
     };
-    let rhs_out = if _flatten_aggregates {
+    let rhs_out = if flatten_aggregates {
         flatten_bv(&rhs_result.output, &rhs.ret_ty)
     } else {
         rhs_result.output.clone()
@@ -1158,7 +1166,7 @@ fn check_equiv_internal_with_btor(
             // Extract input assignments from the model and reconstruct typed IR values.
             let mut counterexample = Vec::new();
             for param in &lhs.params {
-                let bv = lhs_param_bvs.get(&param.name).unwrap();
+                let bv = ctx.lhs_params.get(&param.name).unwrap();
                 counterexample.push(bv_solution_to_ir_value(bv, &param.ty));
             }
             // Extract outputs for lhs and rhs and reconstruct typed IR values.
@@ -1178,35 +1186,19 @@ fn check_equiv_internal_with_btor(
 }
 
 /// Standard equivalence check (no aggregate flattening)
-pub fn prove_ir_fn_equiv(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    let params: Vec<(String, u32)> = lhs
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
-        .collect();
-    let ctx = Ctx::new(&params);
-    check_equiv_internal_with_btor(lhs, rhs, false, &ctx, false)
-}
-
-/// Equivalence check with tuple/array flattening
-pub fn prove_ir_equiv_flattened(lhs: &Fn, rhs: &Fn) -> EquivResult {
-    let params: Vec<(String, u32)> = lhs
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
-        .collect();
-    let ctx = Ctx::new(&params);
-    check_equiv_internal_with_btor(lhs, rhs, true, &ctx, false)
+pub fn prove_ir_fn_equiv(lhs: &Fn, rhs: &Fn, flatten_aggregates: bool) -> EquivResult {
+    let ctx = Ctx::new(lhs, rhs);
+    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, &ctx, false)
 }
 
 /// Equivalence check reusing the given solver context.
-pub fn prove_ir_fn_equiv_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
-    check_equiv_internal_with_btor(lhs, rhs, false, ctx, true)
-}
-
-/// Flattened equivalence check reusing the given solver context.
-pub fn prove_ir_equiv_flattened_with_ctx(lhs: &Fn, rhs: &Fn, ctx: &Ctx) -> EquivResult {
-    check_equiv_internal_with_btor(lhs, rhs, true, ctx, true)
+pub fn prove_ir_fn_equiv_with_ctx(
+    lhs: &Fn,
+    rhs: &Fn,
+    flatten_aggregates: bool,
+    ctx: &Ctx,
+) -> EquivResult {
+    check_equiv_internal_with_btor(lhs, rhs, flatten_aggregates, ctx, true)
 }
 
 fn shift_boolector<F>(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>, shift_op: F) -> BV<Rc<Btor>>
@@ -1350,7 +1342,7 @@ fn shift_boolector_signed(val: &BV<Rc<Btor>>, shamt: &BV<Rc<Btor>>) -> BV<Rc<Bto
 pub fn prove_ir_fn_equiv_output_bits_parallel(
     lhs: &Fn,
     rhs: &Fn,
-    _flatten_aggregates: bool,
+    flatten_aggregates: bool,
 ) -> EquivResult {
     // Ensure both functions return the same bit width.
     let width = lhs.ret_ty.bit_count();
@@ -1411,7 +1403,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
                 // single bits value, but the slice is taken out of a (potentially
                 // aggregate) original return value. Flattening guarantees
                 // consistent bit ordering between the two functions.
-                let res = prove_ir_equiv_flattened(&lf, &rf);
+                let res = prove_ir_fn_equiv(&lf, &rf, flatten_aggregates);
                 log::debug!("thread {} checking bit {} result: {:?}", thread_no, i, res);
                 if let EquivResult::Disproved { inputs, outputs } = res {
                     // Inputs and outputs are already typed IR values.
@@ -1451,11 +1443,12 @@ pub fn prove_ir_fn_equiv_split_input_bit(
     rhs: &Fn,
     split_input_index: usize,
     split_input_bit_index: usize,
+    flatten_aggregates: bool,
 ) -> EquivResult {
     // If there are no parameters, fall back to the standard prover. No need to
     // panic here.
     if lhs.params.is_empty() || rhs.params.is_empty() {
-        return prove_ir_fn_equiv(lhs, rhs);
+        return prove_ir_fn_equiv(lhs, rhs, flatten_aggregates);
     }
     assert_eq!(
         lhs.params.len(),
@@ -1485,21 +1478,16 @@ pub fn prove_ir_fn_equiv_split_input_bit(
         split_input_bit_index
     );
 
-    let params: Vec<(String, u32)> = lhs
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
-        .collect();
-    let ctx = Ctx::new(&params);
+    let ctx = Ctx::new(lhs, rhs);
 
     // Helper closure to run one branch under an assumption.
     let run_branch = |bit_value: u64| -> EquivResult {
         ctx.btor.push(1);
-        let root_bv = ctx
-            .params
-            .get(&split_param.name)
-            .expect("missing split param in Ctx");
-        let bit_bv = root_bv.slice(split_input_bit_index as u32, split_input_bit_index as u32);
+        let bit_bv = ctx
+            .flattened_params
+            .as_ref()
+            .unwrap()
+            .slice(split_input_bit_index as u32, split_input_bit_index as u32);
         let val_bv = BV::from_u64(ctx.btor.clone(), bit_value, 1);
         // In the discussion we said assume, but here we actually use assert as we are
         // proving unsatisfiability. Let F be the formula we are proving
@@ -1509,8 +1497,13 @@ pub fn prove_ir_fn_equiv_split_input_bit(
         // are both unsatisfiable.
         bit_bv._eq(&val_bv).assert();
 
-        let res =
-            check_equiv_internal_with_btor(lhs, rhs, false, &ctx, /* use_frame= */ false);
+        let res = check_equiv_internal_with_btor(
+            lhs,
+            rhs,
+            flatten_aggregates,
+            &ctx,
+            /* use_frame= */ false,
+        );
         ctx.btor.pop(1);
         res
     };
@@ -1539,7 +1532,7 @@ mod tests {
     fn assert_fn_equiv_to_self(ir_text: &str) {
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().expect("Failed to parse IR");
-        let result = prove_ir_fn_equiv(&f, &f);
+        let result = prove_ir_fn_equiv(&f, &f, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -1592,7 +1585,7 @@ mod tests {
         let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
         let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
-        assert_eq!(prove_ir_fn_equiv(&lhs, &rhs), EquivResult::Proved);
+        assert_eq!(prove_ir_fn_equiv(&lhs, &rhs, false), EquivResult::Proved);
     }
 
     #[test]
@@ -1623,7 +1616,7 @@ mod tests {
 }"#;
         let f = ir_parser::Parser::new(ir_text_f).parse_fn().unwrap();
         let g = ir_parser::Parser::new(ir_text_g).parse_fn().unwrap();
-        let result = prove_ir_fn_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g, false);
         match result {
             EquivResult::Disproved {
                 inputs: ref cex,
@@ -1756,7 +1749,7 @@ mod tests {
         // Use the existing assert_fn_equiv helper to check equivalence
         let f = ir_parser::Parser::new(ir_identity).parse_fn().unwrap();
         let g = ir_parser::Parser::new(ir_recompose).parse_fn().unwrap();
-        let result = prove_ir_fn_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g, false);
         match result {
             EquivResult::Proved => (),
             EquivResult::Disproved {
@@ -2047,7 +2040,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let mut parser = ir_parser::Parser::new(ir_text);
         let pkg = parser.parse_package().unwrap();
         let f = pkg.get_fn("fuzz_test").unwrap();
-        let result = prove_ir_fn_equiv(f, f);
+        let result = prove_ir_fn_equiv(f, f, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2096,7 +2089,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let zero_f = crate::xls_ir::ir_parser::Parser::new(ir_zero)
             .parse_fn()
             .unwrap();
-        let result = prove_ir_fn_equiv(&slice_f, &zero_f);
+        let result = prove_ir_fn_equiv(&slice_f, &zero_f, false);
         assert_eq!(result, EquivResult::Proved);
     }
 
@@ -2146,7 +2139,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_const)
             .parse_fn()
             .unwrap();
-        let result = prove_ir_fn_equiv(&f, &g);
+        let result = prove_ir_fn_equiv(&f, &g, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2170,7 +2163,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_id)
             .parse_fn()
             .unwrap();
-        let res = prove_ir_fn_equiv(&f, &g);
+        let res = prove_ir_fn_equiv(&f, &g, false);
         assert_eq!(res, EquivResult::Proved);
     }
 
@@ -2189,7 +2182,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let g = crate::xls_ir::ir_parser::Parser::new(ir_static)
             .parse_fn()
             .unwrap();
-        assert_eq!(prove_ir_fn_equiv(&f, &g), EquivResult::Proved);
+        assert_eq!(prove_ir_fn_equiv(&f, &g, false), EquivResult::Proved);
     }
 
     #[test]
@@ -2213,7 +2206,7 @@ fn func_literal_7() -> bits[3] {
             .parse_fn()
             .expect("Failed to parse literal_7 IR");
 
-        let result = prove_ir_fn_equiv(&f_encode, &f_literal);
+        let result = prove_ir_fn_equiv(&f_encode, &f_literal, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2247,7 +2240,7 @@ fn optimized_fn(input: bits[3] id=1) -> bits[5] {
             .parse_fn()
             .expect("Failed to parse optimized_fn IR for one_hot_reverse_fuzz_case");
 
-        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized);
+        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2279,7 +2272,7 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
             .parse_fn()
             .expect("Failed to parse optimized_shrl_saturation_fn IR");
 
-        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized);
+        let result = prove_ir_fn_equiv(&fn_original, &fn_optimized, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2302,7 +2295,7 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
         let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
             .parse_fn()
             .unwrap();
-        assert_eq!(prove_ir_fn_equiv(&f_shl, &f_id), EquivResult::Proved);
+        assert_eq!(prove_ir_fn_equiv(&f_shl, &f_id, false), EquivResult::Proved);
     }
 
     #[test]
@@ -2323,7 +2316,10 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
         let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
             .parse_fn()
             .unwrap();
-        assert_eq!(prove_ir_fn_equiv(&f_shra, &f_id), EquivResult::Proved);
+        assert_eq!(
+            prove_ir_fn_equiv(&f_shra, &f_id, false),
+            EquivResult::Proved
+        );
     }
 
     /// From a fuzz_ir_opt_equiv minimized counter-example.
@@ -2369,7 +2365,7 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
         let f_orig = pkg_orig.get_fn("fuzz_test").unwrap();
         let f_opt = pkg_opt.get_fn("fuzz_test").unwrap();
 
-        let result = prove_ir_fn_equiv(f_orig, f_opt);
+        let result = prove_ir_fn_equiv(f_orig, f_opt, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2410,7 +2406,7 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
             .parse_fn()
             .expect("Failed to parse optimized IR");
 
-        let result = prove_ir_fn_equiv(&lhs, &rhs);
+        let result = prove_ir_fn_equiv(&lhs, &rhs, false);
         assert_eq!(
             result,
             EquivResult::Proved,
@@ -2508,7 +2504,7 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
         let rhs = crate::xls_ir::ir_parser::Parser::new(opt_ir)
             .parse_fn()
             .expect("parse rhs");
-        let result = prove_ir_fn_equiv(&lhs, &rhs);
+        let result = prove_ir_fn_equiv(&lhs, &rhs, false);
         assert_eq!(result, EquivResult::Proved);
     }
 }

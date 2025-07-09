@@ -143,11 +143,7 @@ fn run_boolector_equiv_check(
         .expect("Dropped parameter is used in the function body!");
     let result = match strategy {
         ParallelismStrategy::SingleThreaded => {
-            if flatten_aggregates {
-                xlsynth_g8r::ir_equiv_boolector::prove_ir_equiv_flattened(&lhs_fn, &rhs_fn)
-            } else {
-                xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn)
-            }
+            xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv(&lhs_fn, &rhs_fn, flatten_aggregates)
         }
         ParallelismStrategy::OutputBits => {
             xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
@@ -161,7 +157,11 @@ fn run_boolector_equiv_check(
         // divide-and-conquer dynamically on more and more bits.
         ParallelismStrategy::InputBitSplit => {
             xlsynth_g8r::ir_equiv_boolector::prove_ir_fn_equiv_split_input_bit(
-                &lhs_fn, &rhs_fn, 0, 0,
+                &lhs_fn,
+                &rhs_fn,
+                0,
+                0,
+                flatten_aggregates,
             )
         }
     };
