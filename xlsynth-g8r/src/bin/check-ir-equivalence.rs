@@ -1,20 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Parser;
-#[cfg(feature = "has-boolector")]
 use std::time::Instant;
-
-#[cfg(feature = "has-boolector")]
-use xlsynth_g8r::ir_equiv_boolector;
-
-#[cfg(feature = "has-boolector")]
-use xlsynth_g8r::xls_ir::ir::Package;
-
-#[cfg(feature = "has-boolector")]
-use xlsynth_g8r::xls_ir::ir_parser::Parser as IrParser;
-
-#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::check_equivalence::check_equivalence_with_top;
+use xlsynth_g8r::xls_ir::ir::Package;
+use xlsynth_g8r::xls_ir::ir_parser::Parser as IrParser;
 
 /// Checks equivalence of two XLS IR functions by name.
 #[derive(Parser, Debug)]
@@ -31,7 +21,6 @@ struct Args {
     top: String,
 }
 
-#[cfg(feature = "has-boolector")]
 fn parse_package(path: &str) -> Package {
     let file_content =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
@@ -41,8 +30,11 @@ fn parse_package(path: &str) -> Package {
         .unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e))
 }
 
-#[cfg(feature = "has-boolector")]
-fn main_has_boolector(args: Args) {
+#[cfg(feature = "has-easy-smt")]
+fn main_has_easy_smt(args: Args) {
+    use xlsynth_g8r::equiv::easy_smt_backend::{EasySMTConfig, EasySMTSolver};
+    use xlsynth_g8r::equiv::prove_equiv::{EquivResult, prove_ir_fn_equiv};
+
     let pkg1 = parse_package(&args.ir1);
     let pkg2 = parse_package(&args.ir2);
 
@@ -53,28 +45,29 @@ fn main_has_boolector(args: Args) {
         .get_fn(&args.top)
         .unwrap_or_else(|| panic!("function '{}' not found in {}", args.top, args.ir2));
 
-    // First run the Boolector-based equivalence prover.
-    let boolector_start = Instant::now();
-    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(f1, f2, false);
-    let boolector_elapsed = boolector_start.elapsed();
+    // First run the Bitwuzla-based equivalence prover.
+    let bitwuzla_start = Instant::now();
+    let bitwuzla_result =
+        prove_ir_fn_equiv::<EasySMTSolver>(&EasySMTConfig::bitwuzla(), f1, f2, false);
+    let bitwuzla_elapsed = bitwuzla_start.elapsed();
 
-    // Convert Boolector result into a simple boolean for later comparison.
-    let boolector_equiv = matches!(&boolector_result, ir_equiv_boolector::EquivResult::Proved);
+    // Convert Bitwuzla result into a simple boolean for later comparison.
+    let bitwuzla_equiv = matches!(&bitwuzla_result, EquivResult::Proved);
 
-    match &boolector_result {
-        ir_equiv_boolector::EquivResult::Proved => {
+    match &bitwuzla_result {
+        EquivResult::Proved => {
             println!(
-                "Equivalence result (boolector): PROVED (took {:?})",
-                boolector_elapsed
+                "Equivalence result (bitwuzla): PROVED (took {:?})",
+                bitwuzla_elapsed
             );
         }
-        ir_equiv_boolector::EquivResult::Disproved {
+        EquivResult::Disproved {
             inputs: cex,
             outputs: (lhs_val, rhs_val),
         } => {
             println!(
-                "Equivalence result (boolector): DISPROVED (took {:?})",
-                boolector_elapsed
+                "Equivalence result (bitwuzla): DISPROVED (took {:?})",
+                bitwuzla_elapsed
             );
             println!("Counterexample inputs:");
             let values: Vec<_> = cex.iter().cloned().collect();
@@ -130,16 +123,16 @@ fn main_has_boolector(args: Args) {
     };
 
     // If we have a definitive answer from the external tool, ensure it matches
-    // Boolector.
+    // Bitwuzla.
     if let Some(ext_equiv) = ext_equiv_opt {
-        if ext_equiv != boolector_equiv {
-            eprintln!("error: inconsistency detected between Boolector prover and external tool");
+        if ext_equiv != bitwuzla_equiv {
+            eprintln!("error: inconsistency detected between Bitwuzla prover and external tool");
             std::process::exit(2);
         }
     }
 
     // Exit with 0 when equivalent, 1 when non-equivalent.
-    if boolector_equiv {
+    if bitwuzla_equiv {
         std::process::exit(0);
     } else {
         std::process::exit(1);
@@ -150,17 +143,9 @@ fn main() {
     let _ = env_logger::builder().try_init();
     log::info!("Starting check-ir-equivalence");
 
-    #[cfg(feature = "has-boolector")]
+    #[cfg(feature = "has-easy-smt")]
     {
         let args = Args::parse();
-        main_has_boolector(args);
-    }
-
-    #[cfg(not(feature = "has-boolector"))]
-    {
-        eprintln!(
-            "error: check-ir-equivalence requires --features=with-boolector-built or --features=with-boolector-system"
-        );
-        std::process::exit(1);
+        main_has_easy_smt(args);
     }
 }

@@ -475,9 +475,28 @@ fn main() {
                         .long("rhs_ir_top")
                         .help("The top-level entry point for the right-hand side IR"),
                 )
-                .add_bool_arg(
-                    "boolector",
-                    "Use Boolector for equivalence checking (requires --features=with-boolector-built or --features=with-boolector-system)",
+                .arg(
+                    Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
+                        .value_parser([
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector-binary",
+                            #[cfg(feature = "has-bitwuzla")]
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector-legacy",
+                            "toolchain",
+                        ])
+                        .default_value("toolchain")
+                        .action(ArgAction::Set),
                 )
                 .add_bool_arg(
                     "flatten_aggregates",
@@ -493,7 +512,7 @@ fn main() {
                     Arg::new("parallelism_strategy")
                         .long("parallelism-strategy")
                         .value_name("STRATEGY")
-                        .help("Parallelism strategy when using Boolector")
+                        .help("Parallelism strategy")
                         .value_parser(["single-threaded", "output-bits", "input-bit-split"])
                         .default_value("single-threaded")
                         .action(ArgAction::Set),

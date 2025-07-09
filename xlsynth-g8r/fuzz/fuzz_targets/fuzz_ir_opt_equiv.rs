@@ -3,7 +3,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::ir_equiv_boolector;
+use xlsynth_g8r::equiv::easy_smt_backend::{EasySMTConfig, EasySMTSolver};
+use xlsynth_g8r::equiv::prove_equiv::{EquivResult, prove_ir_fn_equiv};
+use xlsynth_g8r::equiv::prove_equiv::prove_ir_fn_equiv_output_bits_parallel;
 use xlsynth_g8r::xls_ir::ir_parser;
 use xlsynth_test_helpers::ir_fuzz::{generate_ir_fn, FuzzSample};
 
@@ -54,11 +56,14 @@ fuzz_target!(|sample: FuzzSample| {
     let top_fn_name = "fuzz_test";
     let ext_equiv =
         check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
-    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn, false);
+    let result = prove_ir_fn_equiv::<EasySMTSolver>(&EasySMTConfig::bitwuzla(), orig_fn, opt_fn, false);
     let output_bit_count = orig_fn.ret_ty.bit_count();
     let parallel_result = if output_bit_count <= 64 {
-        Some(ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
-            orig_fn, opt_fn, false,
+        Some(prove_ir_fn_equiv_output_bits_parallel::<EasySMTSolver>(
+            &EasySMTConfig::bitwuzla(),
+            orig_fn,
+            opt_fn,
+            false,
         ))
     } else {
         None
@@ -66,14 +71,14 @@ fuzz_target!(|sample: FuzzSample| {
     match ext_equiv {
         Ok(()) => {
             // External tool says equivalent, Boolector should agree
-            match (boolector_result, parallel_result) {
+        match (result, parallel_result) {
                 (
-                    ir_equiv_boolector::EquivResult::Proved,
-                    Some(ir_equiv_boolector::EquivResult::Proved),
+                    EquivResult::Proved,
+                    Some(EquivResult::Proved),
                 )
-                | (ir_equiv_boolector::EquivResult::Proved, None) => (),
-                (ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. }, _)
-                | (_, Some(ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. })) => {
+                | (EquivResult::Proved, None) => (),
+                (EquivResult::Disproved { inputs: cex, .. }, _)
+                | (_, Some(EquivResult::Disproved { inputs: cex, .. })) => {
                     log::info!("==== IR disagreement detected ====");
                     log::info!("Original IR:\n{}", orig_ir);
                     log::info!("Optimized IR:\n{}", opt_ir);
@@ -86,10 +91,10 @@ fuzz_target!(|sample: FuzzSample| {
         }
         Err(ext_err) => {
             // External tool says not equivalent, check Boolector and parallel
-            match (boolector_result, parallel_result) {
-                (ir_equiv_boolector::EquivResult::Proved, _)
-                | (_, Some(ir_equiv_boolector::EquivResult::Proved))
-                | (ir_equiv_boolector::EquivResult::Proved, None) => {
+            match (result, parallel_result) {
+                (EquivResult::Proved, _)
+                | (_, Some(EquivResult::Proved))
+                | (EquivResult::Proved, None) => {
                     log::info!("==== IR disagreement detected ====");
                     log::info!("Original IR:\n{}", orig_ir);
                     log::info!("Optimized IR:\n{}", opt_ir);
@@ -99,10 +104,10 @@ fuzz_target!(|sample: FuzzSample| {
                     );
                 }
                 (
-                    ir_equiv_boolector::EquivResult::Disproved { .. },
-                    Some(ir_equiv_boolector::EquivResult::Disproved { .. }),
+                    EquivResult::Disproved { .. },
+                    Some(EquivResult::Disproved { .. }),
                 )
-                | (ir_equiv_boolector::EquivResult::Disproved { .. }, None) => (), /* All agree not equivalent */
+                | (EquivResult::Disproved { .. }, None) => (), /* All agree not equivalent */
             }
         }
     }

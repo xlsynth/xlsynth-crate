@@ -15,7 +15,7 @@ env_logger = "0.11"
 xlsynth = { path = "../../xlsynth", version = "0.0.164" }
 rand = "0.8"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
-xlsynth-g8r = { path = "../../xlsynth-g8r", features = ["with-boolector-system", "with-z3-system"] }
+xlsynth-g8r = { path = "../../xlsynth-g8r", features = ["with-boolector-built", "with-easy-smt", "with-bitwuzla-built"] }
 
 [lib]
 name = "xlsynth_g8r_fuzz"
