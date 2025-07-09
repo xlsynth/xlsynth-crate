@@ -126,15 +126,31 @@ pub trait Solver: Sized {
     fn check(&mut self) -> io::Result<Response>;
     fn assert(&mut self, bit_vec: &BitVec<Self::Term>) -> io::Result<()>;
     fn render(&mut self, bit_vec: &BitVec<Self::Term>) -> String;
+    fn smax(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term> {
+        let cond = self.slt(lhs, rhs);
+        self.ite(&cond, rhs, lhs)
+    }
+    fn umax(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term> {
+        let cond = self.ult(lhs, rhs);
+        self.ite(&cond, rhs, lhs)
+    }
+    fn smin(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term> {
+        let cond = self.slt(lhs, rhs);
+        self.ite(&cond, lhs, rhs)
+    }
+    fn umin(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term> {
+        let cond = self.ult(lhs, rhs);
+        self.ite(&cond, lhs, rhs)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum BitVec<Rep> {
-    BitVec { width: usize, rep: Rep },
+pub enum BitVec<Term> {
+    BitVec { width: usize, rep: Term },
     ZeroWidth,
 }
 
-impl<Rep> BitVec<Rep> {
+impl<Term> BitVec<Term> {
     pub fn get_width(&self) -> usize {
         match self {
             BitVec::BitVec { width, .. } => *width,
@@ -142,7 +158,7 @@ impl<Rep> BitVec<Rep> {
         }
     }
 
-    pub fn get_rep(&self) -> Option<&Rep> {
+    pub fn get_term(&self) -> Option<&Term> {
         match self {
             BitVec::BitVec { rep, .. } => Some(rep),
             BitVec::ZeroWidth => None,
@@ -722,6 +738,33 @@ macro_rules! test_solver {
             crate::test_solver_binary!(test_xor, $solver, xor, 4, 0b1010, 0b1100, 4, 0b0110);
             crate::test_solver_binary!(test_nor, $solver, nor, 4, 0b1010, 0b1100, 4, 0b0001);
             crate::test_solver_binary!(test_nand, $solver, nand, 4, 0b1010, 0b1100, 4, 0b0111);
+
+            crate::test_solver_binary!(test_umin, $solver, umin, 4, 0b1010, 0b1100, 4, 0b1010);
+            crate::test_solver_binary!(test_umax, $solver, umax, 4, 0b1010, 0b1100, 4, 0b1100);
+            crate::test_solver_binary!(test_smax_pos, $solver, smax, 4, 0b0010, 0b0100, 4, 0b0100);
+            crate::test_solver_binary!(test_smin_pos, $solver, smin, 4, 0b0010, 0b0100, 4, 0b0010);
+            crate::test_solver_binary!(test_smax_neg, $solver, smax, 4, 0b1110, 0b1000, 4, 0b1110);
+            crate::test_solver_binary!(test_smin_neg, $solver, smin, 4, 0b1110, 0b1000, 4, 0b1000);
+            crate::test_solver_binary!(
+                test_smax_mixed,
+                $solver,
+                smax,
+                4,
+                0b0110,
+                0b1000,
+                4,
+                0b0110
+            );
+            crate::test_solver_binary!(
+                test_smin_mixed,
+                $solver,
+                smin,
+                4,
+                0b0110,
+                0b1000,
+                4,
+                0b1000
+            );
 
             crate::test_solver_extend!(
                 test_zero_extend_zero,

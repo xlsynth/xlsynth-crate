@@ -584,7 +584,7 @@ impl Solver for EasySmtSolver {
     fn render(&mut self, bit_vec: &BitVec<SExpr>) -> String {
         let shared = Arc::clone(&self.context);
         let context = shared.lock().unwrap();
-        match bit_vec.get_rep() {
+        match bit_vec.get_term() {
             None => "<zero-width>".to_string(),
             Some(rep) => context.display(rep.clone()).to_string(),
         }
