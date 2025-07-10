@@ -5,3 +5,4 @@ module my_main(
 );
   assign out = x;
 endmodule
+
