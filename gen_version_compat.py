@@ -29,13 +29,23 @@ import sys
 import urllib.request
 import json
 from dataclasses import dataclass
-from typing import Optional, Dict, List
+from typing import Optional, List
+
+from datetime import datetime, timezone
+
+# Prefer stdlib zoneinfo (Python ≥3.9) for accurate TZ handling; fall back to a fixed offset if unavailable.
+try:
+    from zoneinfo import ZoneInfo  # type: ignore
+except ImportError:  # pragma: no cover –<3.9 fallback
+    ZoneInfo = None  # type: ignore
 
 
 @dataclass
 class VersionMapping:
     crate_version: str
     lib_version: str
+    # Human-readable commit/tag datetime in America/Los_Angeles.
+    release_datetime: str
 
 
 def get_file_content_at_commit(commit: str, file_path: str) -> Optional[str]:
@@ -64,44 +74,82 @@ def extract_version_from_content(content: str) -> Optional[str]:
     return None
 
 
-def generate_markdown_table(mapping: Dict[str, str]) -> str:
-    """
-    Generates a Markdown table from a mapping of:
-      xlsynth‑crate version -> library release version
+# -- Git helpers
 
-    Each cell is a markdown link, and this function dynamically pads each column
-    based on the maximum cell width.
+
+def _to_los_angeles(iso_dt: str) -> str:
+    """Convert an ISO-8601 datetime string to America/Los_Angeles formatted output."""
+    # Git may emit a 'Z' suffix for UTC – replace with +00:00 for fromisoformat.
+    iso_dt = iso_dt.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(iso_dt)
+
+    if ZoneInfo is not None:
+        la_tz = ZoneInfo("America/Los_Angeles")
+    else:
+        # Fallback: fixed ‑08:00 offset (DST ignored). Better than nothing.
+        from datetime import timedelta
+
+        la_tz = timezone(timedelta(hours=-8))
+
+    return dt.astimezone(la_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def get_tag_datetime(tag: str) -> Optional[str]:
+    """Return the committer date of a tag as a Los_Angeles-formatted string."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%cI", tag],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True,
+        )
+        iso_dt = result.stdout.strip()
+        if not iso_dt:
+            return None
+        return _to_los_angeles(iso_dt)
+    except subprocess.CalledProcessError:
+        return None
+
+
+def generate_markdown_table(mappings: List[VersionMapping]) -> str:
+    """
+    Generates a Markdown table showing the relationship:
+      xlsynth-crate version → library release version → tag datetime (Los_Angeles)
+
+    Each cell is a markdown link where appropriate. Column widths are padded
+    dynamically based on the maximum rendered cell width.
     """
     # Link to the xlsynth crate on crates.io for the left column.
     crate_base_url = "https://crates.io/crates/xlsynth/{}"
     # Right column still links to the GitHub release for the lib.
     lib_base_url = "https://github.com/xlsynth/xlsynth/releases/tag/v{}"
 
-    def version_key(v: str):
-        return tuple(int(x) for x in v.split("."))
+    def version_key(v: VersionMapping):
+        return tuple(int(x) for x in v.crate_version.split("."))
 
-    sorted_crate_versions = sorted(mapping.keys(), key=version_key, reverse=True)
+    sorted_mappings = sorted(mappings, key=version_key, reverse=True)
 
     left_header = "xlsynth crate version"
-    right_header = "xlsynth release version"
+    mid_header = "xlsynth release version"
+    right_header = "release datetime (Los_Angeles)"
 
     rows = []
-    for crate_ver in sorted_crate_versions:
-        lib_ver = mapping[crate_ver]
-        left_cell = f"[{crate_ver}]({crate_base_url.format(crate_ver)})"
-        right_cell = f"[{lib_ver}]({lib_base_url.format(lib_ver)})"
-        rows.append((left_cell, right_cell))
+    for vm in sorted_mappings:
+        left_cell = f"[{vm.crate_version}]({crate_base_url.format(vm.crate_version)})"
+        mid_cell = f"[{vm.lib_version}]({lib_base_url.format(vm.lib_version)})"
+        right_cell = vm.release_datetime
+        rows.append((left_cell, mid_cell, right_cell))
 
-    left_width = max(len(left_header), *(len(row[0]) for row in rows))
-    right_width = max(len(right_header), *(len(row[1]) for row in rows))
+    left_width = max(len(left_header), *(len(r[0]) for r in rows))
+    mid_width = max(len(mid_header), *(len(r[1]) for r in rows))
+    right_width = max(len(right_header), *(len(r[2]) for r in rows))
 
-    header_row = (
-        f"| {left_header.ljust(left_width)} | {right_header.ljust(right_width)} |"
-    )
-    separator_row = f"| {'-' * left_width} | {'-' * right_width} |"
+    header_row = f"| {left_header.ljust(left_width)} | {mid_header.ljust(mid_width)} | {right_header.ljust(right_width)} |"
+    separator_row = f"| {'-' * left_width} | {'-' * mid_width} | {'-' * right_width} |"
     data_rows = [
-        f"| {left.ljust(left_width)} | {right.ljust(right_width)} |"
-        for left, right in rows
+        f"| {left.ljust(left_width)} | {mid.ljust(mid_width)} | {right.ljust(right_width)} |"
+        for left, mid, right in rows
     ]
 
     return "\n".join([header_row, separator_row] + data_rows) + "\n"
@@ -141,11 +189,11 @@ def crate_published(crate_version: str) -> bool:
         return False
 
 
-def get_version_mapping() -> Dict[str, str]:
+def get_version_mapping() -> List[VersionMapping]:
     file_path = "xlsynth-sys/build.rs"
     all_tags = get_all_tags()
     print(f"Found {len(all_tags)} tags. Processing...", flush=True)
-    mappings: Dict[str, str] = {}
+    mappings: List[VersionMapping] = []
     skipped_unpublished = 0
     for tag in all_tags:
         print(f"Processing tag {tag}...", flush=True)
@@ -158,6 +206,7 @@ def get_version_mapping() -> Dict[str, str]:
             print(f"  Skipped tag {tag}: no lib version extracted.", flush=True)
             continue
         crate_version = tag.lstrip("v")
+        release_dt = get_tag_datetime(tag) or "Unknown"
         if not crate_published(crate_version):
             print(
                 f"  Skipped tag {tag}: crate version {crate_version} not published on crates.io.",
@@ -165,7 +214,13 @@ def get_version_mapping() -> Dict[str, str]:
             )
             skipped_unpublished += 1
             continue
-        mappings[crate_version] = lib_version
+        mappings.append(
+            VersionMapping(
+                crate_version=crate_version,
+                lib_version=lib_version,
+                release_datetime=release_dt,
+            )
+        )
         print(
             f"  Mapped crate version {crate_version} -> lib version {lib_version}",
             flush=True,
@@ -224,7 +279,15 @@ def get_single_version_mapping(crate_version: str) -> Optional[VersionMapping]:
             flush=True,
         )
         return None
-    return VersionMapping(crate_version=crate_version, lib_version=lib_version)
+    release_dt = get_tag_datetime(tag) or "Unknown"
+    return VersionMapping(
+        crate_version=crate_version,
+        lib_version=lib_version,
+        release_datetime=release_dt,
+    )
+
+
+# -- Entry point
 
 
 def main() -> None:
@@ -253,6 +316,11 @@ def test_mapping_for_v0_0_101() -> None:
     assert (
         mapping.lib_version == "0.0.173"
     ), f"Expected lib version '0.0.173', got {mapping.lib_version}"
+    expected_dt = get_tag_datetime("v0.0.101")
+    assert expected_dt is not None, "Could not determine expected datetime for v0.0.101"
+    assert (
+        mapping.release_datetime == expected_dt
+    ), f"Expected datetime '{expected_dt}', got {mapping.release_datetime}"
 
 
 def test_mapping_for_v0_0_100() -> None:
@@ -264,6 +332,11 @@ def test_mapping_for_v0_0_100() -> None:
     assert (
         mapping.lib_version == "0.0.173"
     ), f"Expected lib version '0.0.173', got {mapping.lib_version}"
+    expected_dt = get_tag_datetime("v0.0.100")
+    assert expected_dt is not None, "Could not determine expected datetime for v0.0.100"
+    assert (
+        mapping.release_datetime == expected_dt
+    ), f"Expected datetime '{expected_dt}', got {mapping.release_datetime}"
 
 
 if __name__ == "__main__":

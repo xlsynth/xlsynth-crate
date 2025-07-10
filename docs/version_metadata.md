@@ -2,130 +2,130 @@
 
 Updated for tags as of: 2025-06-24 22:47:16 -0700
 
-| xlsynth crate version                               | xlsynth release version                                             |
-| --------------------------------------------------- | ------------------------------------------------------------------- |
-| [0.0.163](https://crates.io/crates/xlsynth/0.0.163) | [0.0.208](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.208) |
-| [0.0.162](https://crates.io/crates/xlsynth/0.0.162) | [0.0.208](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.208) |
-| [0.0.161](https://crates.io/crates/xlsynth/0.0.161) | [0.0.207](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.207) |
-| [0.0.160](https://crates.io/crates/xlsynth/0.0.160) | [0.0.207](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.207) |
-| [0.0.159](https://crates.io/crates/xlsynth/0.0.159) | [0.0.207](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.207) |
-| [0.0.156](https://crates.io/crates/xlsynth/0.0.156) | [0.0.203](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.203) |
-| [0.0.155](https://crates.io/crates/xlsynth/0.0.155) | [0.0.203](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.203) |
-| [0.0.154](https://crates.io/crates/xlsynth/0.0.154) | [0.0.202](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.202) |
-| [0.0.153](https://crates.io/crates/xlsynth/0.0.153) | [0.0.202](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.202) |
-| [0.0.152](https://crates.io/crates/xlsynth/0.0.152) | [0.0.200](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.200) |
-| [0.0.151](https://crates.io/crates/xlsynth/0.0.151) | [0.0.200](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.200) |
-| [0.0.150](https://crates.io/crates/xlsynth/0.0.150) | [0.0.200](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.200) |
-| [0.0.149](https://crates.io/crates/xlsynth/0.0.149) | [0.0.196](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.196) |
-| [0.0.148](https://crates.io/crates/xlsynth/0.0.148) | [0.0.194](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.194) |
-| [0.0.147](https://crates.io/crates/xlsynth/0.0.147) | [0.0.194](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.194) |
-| [0.0.146](https://crates.io/crates/xlsynth/0.0.146) | [0.0.192](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.192) |
-| [0.0.141](https://crates.io/crates/xlsynth/0.0.141) | [0.0.184](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.184) |
-| [0.0.140](https://crates.io/crates/xlsynth/0.0.140) | [0.0.184](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.184) |
-| [0.0.139](https://crates.io/crates/xlsynth/0.0.139) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.138](https://crates.io/crates/xlsynth/0.0.138) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.137](https://crates.io/crates/xlsynth/0.0.137) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.136](https://crates.io/crates/xlsynth/0.0.136) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.135](https://crates.io/crates/xlsynth/0.0.135) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.134](https://crates.io/crates/xlsynth/0.0.134) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.133](https://crates.io/crates/xlsynth/0.0.133) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.132](https://crates.io/crates/xlsynth/0.0.132) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.131](https://crates.io/crates/xlsynth/0.0.131) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.130](https://crates.io/crates/xlsynth/0.0.130) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.129](https://crates.io/crates/xlsynth/0.0.129) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.128](https://crates.io/crates/xlsynth/0.0.128) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.127](https://crates.io/crates/xlsynth/0.0.127) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.126](https://crates.io/crates/xlsynth/0.0.126) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.125](https://crates.io/crates/xlsynth/0.0.125) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.124](https://crates.io/crates/xlsynth/0.0.124) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.123](https://crates.io/crates/xlsynth/0.0.123) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.122](https://crates.io/crates/xlsynth/0.0.122) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.121](https://crates.io/crates/xlsynth/0.0.121) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.120](https://crates.io/crates/xlsynth/0.0.120) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) |
-| [0.0.119](https://crates.io/crates/xlsynth/0.0.119) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
-| [0.0.118](https://crates.io/crates/xlsynth/0.0.118) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
-| [0.0.117](https://crates.io/crates/xlsynth/0.0.117) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
-| [0.0.116](https://crates.io/crates/xlsynth/0.0.116) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
-| [0.0.115](https://crates.io/crates/xlsynth/0.0.115) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
-| [0.0.114](https://crates.io/crates/xlsynth/0.0.114) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) |
-| [0.0.113](https://crates.io/crates/xlsynth/0.0.113) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.112](https://crates.io/crates/xlsynth/0.0.112) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.111](https://crates.io/crates/xlsynth/0.0.111) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.110](https://crates.io/crates/xlsynth/0.0.110) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.107](https://crates.io/crates/xlsynth/0.0.107) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.106](https://crates.io/crates/xlsynth/0.0.106) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.105](https://crates.io/crates/xlsynth/0.0.105) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.104](https://crates.io/crates/xlsynth/0.0.104) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.103](https://crates.io/crates/xlsynth/0.0.103) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.102](https://crates.io/crates/xlsynth/0.0.102) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.101](https://crates.io/crates/xlsynth/0.0.101) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.100](https://crates.io/crates/xlsynth/0.0.100) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.99](https://crates.io/crates/xlsynth/0.0.99)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.98](https://crates.io/crates/xlsynth/0.0.98)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.97](https://crates.io/crates/xlsynth/0.0.97)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.96](https://crates.io/crates/xlsynth/0.0.96)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) |
-| [0.0.95](https://crates.io/crates/xlsynth/0.0.95)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) |
-| [0.0.94](https://crates.io/crates/xlsynth/0.0.94)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) |
-| [0.0.93](https://crates.io/crates/xlsynth/0.0.93)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) |
-| [0.0.92](https://crates.io/crates/xlsynth/0.0.92)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) |
-| [0.0.91](https://crates.io/crates/xlsynth/0.0.91)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) |
-| [0.0.90](https://crates.io/crates/xlsynth/0.0.90)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) |
-| [0.0.88](https://crates.io/crates/xlsynth/0.0.88)   | [0.0.170](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.170) |
-| [0.0.87](https://crates.io/crates/xlsynth/0.0.87)   | [0.0.170](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.170) |
-| [0.0.85](https://crates.io/crates/xlsynth/0.0.85)   | [0.0.169](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.169) |
-| [0.0.84](https://crates.io/crates/xlsynth/0.0.84)   | [0.0.169](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.169) |
-| [0.0.83](https://crates.io/crates/xlsynth/0.0.83)   | [0.0.169](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.169) |
-| [0.0.82](https://crates.io/crates/xlsynth/0.0.82)   | [0.0.168](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.168) |
-| [0.0.81](https://crates.io/crates/xlsynth/0.0.81)   | [0.0.168](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.168) |
-| [0.0.80](https://crates.io/crates/xlsynth/0.0.80)   | [0.0.168](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.168) |
-| [0.0.79](https://crates.io/crates/xlsynth/0.0.79)   | [0.0.167](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.167) |
-| [0.0.78](https://crates.io/crates/xlsynth/0.0.78)   | [0.0.164](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.164) |
-| [0.0.77](https://crates.io/crates/xlsynth/0.0.77)   | [0.0.163](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.163) |
-| [0.0.76](https://crates.io/crates/xlsynth/0.0.76)   | [0.0.159](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.159) |
-| [0.0.75](https://crates.io/crates/xlsynth/0.0.75)   | [0.0.146](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.146) |
-| [0.0.74](https://crates.io/crates/xlsynth/0.0.74)   | [0.0.146](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.146) |
-| [0.0.73](https://crates.io/crates/xlsynth/0.0.73)   | [0.0.146](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.146) |
-| [0.0.72](https://crates.io/crates/xlsynth/0.0.72)   | [0.0.144](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.144) |
-| [0.0.71](https://crates.io/crates/xlsynth/0.0.71)   | [0.0.143](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.143) |
-| [0.0.70](https://crates.io/crates/xlsynth/0.0.70)   | [0.0.142](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.142) |
-| [0.0.69](https://crates.io/crates/xlsynth/0.0.69)   | [0.0.140](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.140) |
-| [0.0.66](https://crates.io/crates/xlsynth/0.0.66)   | [0.0.139](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.139) |
-| [0.0.65](https://crates.io/crates/xlsynth/0.0.65)   | [0.0.133](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.133) |
-| [0.0.62](https://crates.io/crates/xlsynth/0.0.62)   | [0.0.133](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.133) |
-| [0.0.61](https://crates.io/crates/xlsynth/0.0.61)   | [0.0.133](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.133) |
-| [0.0.60](https://crates.io/crates/xlsynth/0.0.60)   | [0.0.133](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.133) |
-| [0.0.59](https://crates.io/crates/xlsynth/0.0.59)   | [0.0.126](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.126) |
-| [0.0.58](https://crates.io/crates/xlsynth/0.0.58)   | [0.0.124](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.124) |
-| [0.0.56](https://crates.io/crates/xlsynth/0.0.56)   | [0.0.124](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.124) |
-| [0.0.55](https://crates.io/crates/xlsynth/0.0.55)   | [0.0.121](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.121) |
-| [0.0.54](https://crates.io/crates/xlsynth/0.0.54)   | [0.0.121](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.121) |
-| [0.0.53](https://crates.io/crates/xlsynth/0.0.53)   | [0.0.120](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.120) |
-| [0.0.52](https://crates.io/crates/xlsynth/0.0.52)   | [0.0.120](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.120) |
-| [0.0.51](https://crates.io/crates/xlsynth/0.0.51)   | [0.0.118](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.118) |
-| [0.0.50](https://crates.io/crates/xlsynth/0.0.50)   | [0.0.117](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.117) |
-| [0.0.49](https://crates.io/crates/xlsynth/0.0.49)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) |
-| [0.0.48](https://crates.io/crates/xlsynth/0.0.48)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) |
-| [0.0.47](https://crates.io/crates/xlsynth/0.0.47)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) |
-| [0.0.46](https://crates.io/crates/xlsynth/0.0.46)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) |
-| [0.0.43](https://crates.io/crates/xlsynth/0.0.43)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) |
-| [0.0.42](https://crates.io/crates/xlsynth/0.0.42)   | [0.0.112](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.112) |
-| [0.0.41](https://crates.io/crates/xlsynth/0.0.41)   | [0.0.112](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.112) |
-| [0.0.40](https://crates.io/crates/xlsynth/0.0.40)   | [0.0.109](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.109) |
-| [0.0.38](https://crates.io/crates/xlsynth/0.0.38)   | [0.0.109](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.109) |
-| [0.0.37](https://crates.io/crates/xlsynth/0.0.37)   | [0.0.109](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.109) |
-| [0.0.36](https://crates.io/crates/xlsynth/0.0.36)   | [0.0.109](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.109) |
-| [0.0.35](https://crates.io/crates/xlsynth/0.0.35)   | [0.0.105](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.105) |
-| [0.0.34](https://crates.io/crates/xlsynth/0.0.34)   | [0.0.101](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.101) |
-| [0.0.33](https://crates.io/crates/xlsynth/0.0.33)   | [0.0.101](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.101) |
-| [0.0.32](https://crates.io/crates/xlsynth/0.0.32)   | [0.0.101](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.101) |
-| [0.0.31](https://crates.io/crates/xlsynth/0.0.31)   | [0.0.95](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.95)   |
-| [0.0.30](https://crates.io/crates/xlsynth/0.0.30)   | [0.0.95](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.95)   |
-| [0.0.29](https://crates.io/crates/xlsynth/0.0.29)   | [0.0.93](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.93)   |
-| [0.0.28](https://crates.io/crates/xlsynth/0.0.28)   | [0.0.93](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.93)   |
-| [0.0.27](https://crates.io/crates/xlsynth/0.0.27)   | [0.0.87](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.87)   |
-| [0.0.26](https://crates.io/crates/xlsynth/0.0.26)   | [0.0.87](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.87)   |
-| [0.0.25](https://crates.io/crates/xlsynth/0.0.25)   | [0.0.87](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.87)   |
-| [0.0.24](https://crates.io/crates/xlsynth/0.0.24)   | [0.0.87](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.87)   |
-| [0.0.23](https://crates.io/crates/xlsynth/0.0.23)   | [0.0.79](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.79)   |
-| [0.0.22](https://crates.io/crates/xlsynth/0.0.22)   | [0.0.77](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.77)   |
-| [0.0.21](https://crates.io/crates/xlsynth/0.0.21)   | [0.0.69](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.69)   |
+| xlsynth crate version                               | xlsynth release version                                             | release datetime (Los_Angeles) |
+| --------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------ |
+| [0.0.163](https://crates.io/crates/xlsynth/0.0.163) | [0.0.208](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.208) | 2025-06-24 22:47:16 PDT        |
+| [0.0.162](https://crates.io/crates/xlsynth/0.0.162) | [0.0.208](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.208) | 2025-06-24 10:02:31 PDT        |
+| [0.0.161](https://crates.io/crates/xlsynth/0.0.161) | [0.0.207](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.207) | 2025-06-22 14:33:51 PDT        |
+| [0.0.160](https://crates.io/crates/xlsynth/0.0.160) | [0.0.207](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.207) | 2025-06-19 16:46:40 PDT        |
+| [0.0.159](https://crates.io/crates/xlsynth/0.0.159) | [0.0.207](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.207) | 2025-06-18 08:58:14 PDT        |
+| [0.0.156](https://crates.io/crates/xlsynth/0.0.156) | [0.0.203](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.203) | 2025-06-11 16:35:20 PDT        |
+| [0.0.155](https://crates.io/crates/xlsynth/0.0.155) | [0.0.203](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.203) | 2025-06-11 09:41:42 PDT        |
+| [0.0.154](https://crates.io/crates/xlsynth/0.0.154) | [0.0.202](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.202) | 2025-06-10 19:29:38 PDT        |
+| [0.0.153](https://crates.io/crates/xlsynth/0.0.153) | [0.0.202](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.202) | 2025-06-10 17:35:46 PDT        |
+| [0.0.152](https://crates.io/crates/xlsynth/0.0.152) | [0.0.200](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.200) | 2025-06-09 12:01:21 PDT        |
+| [0.0.151](https://crates.io/crates/xlsynth/0.0.151) | [0.0.200](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.200) | 2025-06-05 13:09:11 PDT        |
+| [0.0.150](https://crates.io/crates/xlsynth/0.0.150) | [0.0.200](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.200) | 2025-06-04 22:39:33 PDT        |
+| [0.0.149](https://crates.io/crates/xlsynth/0.0.149) | [0.0.196](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.196) | 2025-06-02 10:32:22 PDT        |
+| [0.0.148](https://crates.io/crates/xlsynth/0.0.148) | [0.0.194](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.194) | 2025-05-26 21:05:06 PDT        |
+| [0.0.147](https://crates.io/crates/xlsynth/0.0.147) | [0.0.194](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.194) | 2025-05-25 11:23:15 PDT        |
+| [0.0.146](https://crates.io/crates/xlsynth/0.0.146) | [0.0.192](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.192) | 2025-05-22 14:40:43 PDT        |
+| [0.0.141](https://crates.io/crates/xlsynth/0.0.141) | [0.0.184](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.184) | 2025-05-17 09:17:19 PDT        |
+| [0.0.140](https://crates.io/crates/xlsynth/0.0.140) | [0.0.184](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.184) | 2025-05-15 19:41:08 PDT        |
+| [0.0.139](https://crates.io/crates/xlsynth/0.0.139) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-14 01:27:52 PDT        |
+| [0.0.138](https://crates.io/crates/xlsynth/0.0.138) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-12 19:47:54 PDT        |
+| [0.0.137](https://crates.io/crates/xlsynth/0.0.137) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-10 14:50:21 PDT        |
+| [0.0.136](https://crates.io/crates/xlsynth/0.0.136) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-09 20:06:08 PDT        |
+| [0.0.135](https://crates.io/crates/xlsynth/0.0.135) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-09 15:36:14 PDT        |
+| [0.0.134](https://crates.io/crates/xlsynth/0.0.134) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-09 13:30:06 PDT        |
+| [0.0.133](https://crates.io/crates/xlsynth/0.0.133) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-09 00:10:52 PDT        |
+| [0.0.132](https://crates.io/crates/xlsynth/0.0.132) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-07 22:28:11 PDT        |
+| [0.0.131](https://crates.io/crates/xlsynth/0.0.131) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-05-01 21:20:41 PDT        |
+| [0.0.130](https://crates.io/crates/xlsynth/0.0.130) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-29 22:20:52 PDT        |
+| [0.0.129](https://crates.io/crates/xlsynth/0.0.129) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-29 18:24:55 PDT        |
+| [0.0.128](https://crates.io/crates/xlsynth/0.0.128) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-28 01:47:18 PDT        |
+| [0.0.127](https://crates.io/crates/xlsynth/0.0.127) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-25 20:53:40 PDT        |
+| [0.0.126](https://crates.io/crates/xlsynth/0.0.126) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-25 14:12:40 PDT        |
+| [0.0.125](https://crates.io/crates/xlsynth/0.0.125) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-25 10:32:03 PDT        |
+| [0.0.124](https://crates.io/crates/xlsynth/0.0.124) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-24 20:46:25 PDT        |
+| [0.0.123](https://crates.io/crates/xlsynth/0.0.123) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-24 15:09:48 PDT        |
+| [0.0.122](https://crates.io/crates/xlsynth/0.0.122) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-24 02:11:23 PDT        |
+| [0.0.121](https://crates.io/crates/xlsynth/0.0.121) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-23 10:18:34 PDT        |
+| [0.0.120](https://crates.io/crates/xlsynth/0.0.120) | [0.0.181](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.181) | 2025-04-20 18:11:21 PDT        |
+| [0.0.119](https://crates.io/crates/xlsynth/0.0.119) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) | 2025-04-19 01:26:14 PDT        |
+| [0.0.118](https://crates.io/crates/xlsynth/0.0.118) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) | 2025-04-18 17:32:16 PDT        |
+| [0.0.117](https://crates.io/crates/xlsynth/0.0.117) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) | 2025-04-16 14:32:05 PDT        |
+| [0.0.116](https://crates.io/crates/xlsynth/0.0.116) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) | 2025-04-15 19:19:29 PDT        |
+| [0.0.115](https://crates.io/crates/xlsynth/0.0.115) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) | 2025-04-11 11:33:48 PDT        |
+| [0.0.114](https://crates.io/crates/xlsynth/0.0.114) | [0.0.174](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.174) | 2025-04-11 08:28:09 PDT        |
+| [0.0.113](https://crates.io/crates/xlsynth/0.0.113) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-04-07 19:17:46 PDT        |
+| [0.0.112](https://crates.io/crates/xlsynth/0.0.112) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-04-02 11:27:16 PDT        |
+| [0.0.111](https://crates.io/crates/xlsynth/0.0.111) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-04-02 07:58:13 PDT        |
+| [0.0.110](https://crates.io/crates/xlsynth/0.0.110) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-04-02 07:21:16 PDT        |
+| [0.0.107](https://crates.io/crates/xlsynth/0.0.107) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-04-01 21:44:32 PDT        |
+| [0.0.106](https://crates.io/crates/xlsynth/0.0.106) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-04-01 11:16:41 PDT        |
+| [0.0.105](https://crates.io/crates/xlsynth/0.0.105) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-30 00:00:40 PDT        |
+| [0.0.104](https://crates.io/crates/xlsynth/0.0.104) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-29 11:01:05 PDT        |
+| [0.0.103](https://crates.io/crates/xlsynth/0.0.103) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-27 22:15:36 PDT        |
+| [0.0.102](https://crates.io/crates/xlsynth/0.0.102) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-22 19:28:22 PDT        |
+| [0.0.101](https://crates.io/crates/xlsynth/0.0.101) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-20 13:37:22 PDT        |
+| [0.0.100](https://crates.io/crates/xlsynth/0.0.100) | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-19 18:35:18 PDT        |
+| [0.0.99](https://crates.io/crates/xlsynth/0.0.99)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-19 12:26:40 PDT        |
+| [0.0.98](https://crates.io/crates/xlsynth/0.0.98)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-19 11:08:04 PDT        |
+| [0.0.97](https://crates.io/crates/xlsynth/0.0.97)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-19 01:08:14 PDT        |
+| [0.0.96](https://crates.io/crates/xlsynth/0.0.96)   | [0.0.173](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.173) | 2025-03-19 00:54:37 PDT        |
+| [0.0.95](https://crates.io/crates/xlsynth/0.0.95)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) | 2025-03-16 21:19:51 PDT        |
+| [0.0.94](https://crates.io/crates/xlsynth/0.0.94)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) | 2025-03-16 19:20:02 PDT        |
+| [0.0.93](https://crates.io/crates/xlsynth/0.0.93)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) | 2025-03-13 16:56:17 PDT        |
+| [0.0.92](https://crates.io/crates/xlsynth/0.0.92)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) | 2025-03-13 15:12:21 PDT        |
+| [0.0.91](https://crates.io/crates/xlsynth/0.0.91)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) | 2025-03-13 11:06:21 PDT        |
+| [0.0.90](https://crates.io/crates/xlsynth/0.0.90)   | [0.0.171](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.171) | 2025-03-12 09:04:31 PDT        |
+| [0.0.88](https://crates.io/crates/xlsynth/0.0.88)   | [0.0.170](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.170) | 2025-03-11 20:11:17 PDT        |
+| [0.0.87](https://crates.io/crates/xlsynth/0.0.87)   | [0.0.170](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.170) | 2025-03-08 15:43:52 PST        |
+| [0.0.85](https://crates.io/crates/xlsynth/0.0.85)   | [0.0.169](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.169) | 2025-03-07 22:29:08 PST        |
+| [0.0.84](https://crates.io/crates/xlsynth/0.0.84)   | [0.0.169](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.169) | 2025-03-07 21:28:54 PST        |
+| [0.0.83](https://crates.io/crates/xlsynth/0.0.83)   | [0.0.169](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.169) | 2025-03-07 19:50:58 PST        |
+| [0.0.82](https://crates.io/crates/xlsynth/0.0.82)   | [0.0.168](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.168) | 2025-03-06 11:18:28 PST        |
+| [0.0.81](https://crates.io/crates/xlsynth/0.0.81)   | [0.0.168](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.168) | 2025-03-06 10:24:19 PST        |
+| [0.0.80](https://crates.io/crates/xlsynth/0.0.80)   | [0.0.168](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.168) | 2025-03-06 09:36:29 PST        |
+| [0.0.79](https://crates.io/crates/xlsynth/0.0.79)   | [0.0.167](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.167) | 2025-03-05 19:30:11 PST        |
+| [0.0.78](https://crates.io/crates/xlsynth/0.0.78)   | [0.0.164](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.164) | 2025-03-02 16:59:45 PST        |
+| [0.0.77](https://crates.io/crates/xlsynth/0.0.77)   | [0.0.163](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.163) | 2025-03-01 16:26:54 PST        |
+| [0.0.76](https://crates.io/crates/xlsynth/0.0.76)   | [0.0.159](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.159) | 2025-02-24 15:55:12 PST        |
+| [0.0.75](https://crates.io/crates/xlsynth/0.0.75)   | [0.0.146](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.146) | 2025-02-21 10:27:41 PST        |
+| [0.0.74](https://crates.io/crates/xlsynth/0.0.74)   | [0.0.146](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.146) | 2025-02-20 13:47:09 PST        |
+| [0.0.73](https://crates.io/crates/xlsynth/0.0.73)   | [0.0.146](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.146) | 2025-02-14 08:56:01 PST        |
+| [0.0.72](https://crates.io/crates/xlsynth/0.0.72)   | [0.0.144](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.144) | 2025-02-13 13:25:01 PST        |
+| [0.0.71](https://crates.io/crates/xlsynth/0.0.71)   | [0.0.143](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.143) | 2025-02-12 16:41:05 PST        |
+| [0.0.70](https://crates.io/crates/xlsynth/0.0.70)   | [0.0.142](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.142) | 2025-02-11 19:23:39 PST        |
+| [0.0.69](https://crates.io/crates/xlsynth/0.0.69)   | [0.0.140](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.140) | 2025-02-08 20:38:08 PST        |
+| [0.0.66](https://crates.io/crates/xlsynth/0.0.66)   | [0.0.139](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.139) | 2025-02-07 16:08:10 PST        |
+| [0.0.65](https://crates.io/crates/xlsynth/0.0.65)   | [0.0.133](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.133) | 2025-01-29 22:59:42 PST        |
+| [0.0.62](https://crates.io/crates/xlsynth/0.0.62)   | [0.0.133](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.133) | 2025-01-29 21:40:49 PST        |
+| [0.0.61](https://crates.io/crates/xlsynth/0.0.61)   | [0.0.133](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.133) | 2025-01-29 21:13:42 PST        |
+| [0.0.60](https://crates.io/crates/xlsynth/0.0.60)   | [0.0.133](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.133) | 2025-01-29 19:59:03 PST        |
+| [0.0.59](https://crates.io/crates/xlsynth/0.0.59)   | [0.0.126](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.126) | 2025-01-12 20:48:10 PST        |
+| [0.0.58](https://crates.io/crates/xlsynth/0.0.58)   | [0.0.124](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.124) | 2025-01-10 17:18:40 PST        |
+| [0.0.56](https://crates.io/crates/xlsynth/0.0.56)   | [0.0.124](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.124) | 2025-01-10 15:23:27 PST        |
+| [0.0.55](https://crates.io/crates/xlsynth/0.0.55)   | [0.0.121](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.121) | 2024-12-17 20:31:24 PST        |
+| [0.0.54](https://crates.io/crates/xlsynth/0.0.54)   | [0.0.121](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.121) | 2024-12-17 20:17:44 PST        |
+| [0.0.53](https://crates.io/crates/xlsynth/0.0.53)   | [0.0.120](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.120) | 2024-12-13 14:50:45 PST        |
+| [0.0.52](https://crates.io/crates/xlsynth/0.0.52)   | [0.0.120](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.120) | 2024-12-13 09:40:45 PST        |
+| [0.0.51](https://crates.io/crates/xlsynth/0.0.51)   | [0.0.118](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.118) | 2024-12-11 23:29:17 PST        |
+| [0.0.50](https://crates.io/crates/xlsynth/0.0.50)   | [0.0.117](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.117) | 2024-12-10 22:39:41 PST        |
+| [0.0.49](https://crates.io/crates/xlsynth/0.0.49)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) | 2024-12-06 20:33:40 PST        |
+| [0.0.48](https://crates.io/crates/xlsynth/0.0.48)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) | 2024-12-06 10:45:25 PST        |
+| [0.0.47](https://crates.io/crates/xlsynth/0.0.47)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) | 2024-12-04 16:59:06 PST        |
+| [0.0.46](https://crates.io/crates/xlsynth/0.0.46)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) | 2024-12-04 16:54:14 PST        |
+| [0.0.43](https://crates.io/crates/xlsynth/0.0.43)   | [0.0.114](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.114) | 2024-12-02 01:56:52 PST        |
+| [0.0.42](https://crates.io/crates/xlsynth/0.0.42)   | [0.0.112](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.112) | 2024-11-18 19:32:58 PST        |
+| [0.0.41](https://crates.io/crates/xlsynth/0.0.41)   | [0.0.112](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.112) | 2024-11-17 21:35:37 PST        |
+| [0.0.40](https://crates.io/crates/xlsynth/0.0.40)   | [0.0.109](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.109) | 2024-11-13 09:16:47 PST        |
+| [0.0.38](https://crates.io/crates/xlsynth/0.0.38)   | [0.0.109](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.109) | 2024-11-13 07:03:08 PST        |
+| [0.0.37](https://crates.io/crates/xlsynth/0.0.37)   | [0.0.109](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.109) | 2024-11-13 00:05:01 PST        |
+| [0.0.36](https://crates.io/crates/xlsynth/0.0.36)   | [0.0.109](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.109) | 2024-11-11 16:16:49 PST        |
+| [0.0.35](https://crates.io/crates/xlsynth/0.0.35)   | [0.0.105](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.105) | 2024-10-28 18:20:33 PDT        |
+| [0.0.34](https://crates.io/crates/xlsynth/0.0.34)   | [0.0.101](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.101) | 2024-10-27 21:00:12 PDT        |
+| [0.0.33](https://crates.io/crates/xlsynth/0.0.33)   | [0.0.101](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.101) | 2024-10-19 21:41:20 PDT        |
+| [0.0.32](https://crates.io/crates/xlsynth/0.0.32)   | [0.0.101](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.101) | 2024-10-19 18:20:23 PDT        |
+| [0.0.31](https://crates.io/crates/xlsynth/0.0.31)   | [0.0.95](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.95)   | 2024-10-15 23:57:10 PDT        |
+| [0.0.30](https://crates.io/crates/xlsynth/0.0.30)   | [0.0.95](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.95)   | 2024-10-11 15:02:53 PDT        |
+| [0.0.29](https://crates.io/crates/xlsynth/0.0.29)   | [0.0.93](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.93)   | 2024-10-06 11:00:59 PDT        |
+| [0.0.28](https://crates.io/crates/xlsynth/0.0.28)   | [0.0.93](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.93)   | 2024-10-05 21:45:22 PDT        |
+| [0.0.27](https://crates.io/crates/xlsynth/0.0.27)   | [0.0.87](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.87)   | 2024-09-23 15:45:28 PDT        |
+| [0.0.26](https://crates.io/crates/xlsynth/0.0.26)   | [0.0.87](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.87)   | 2024-09-17 15:38:50 PDT        |
+| [0.0.25](https://crates.io/crates/xlsynth/0.0.25)   | [0.0.87](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.87)   | 2024-09-16 18:35:52 PDT        |
+| [0.0.24](https://crates.io/crates/xlsynth/0.0.24)   | [0.0.87](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.87)   | 2024-09-15 16:52:11 PDT        |
+| [0.0.23](https://crates.io/crates/xlsynth/0.0.23)   | [0.0.79](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.79)   | 2024-09-05 22:23:31 PDT        |
+| [0.0.22](https://crates.io/crates/xlsynth/0.0.22)   | [0.0.77](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.77)   | 2024-09-03 17:10:23 PDT        |
+| [0.0.21](https://crates.io/crates/xlsynth/0.0.21)   | [0.0.69](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.69)   | 2024-08-21 17:37:23 PDT        |
