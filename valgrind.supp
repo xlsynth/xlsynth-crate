@@ -188,3 +188,11 @@
    fun:_ZN3xls21SystemVerilogKeywords*
    ...
 }
+{
+   absl_flags_register_command_line_flag
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   fun:*flags_internal*RegisterCommandLineFlag*
+   ...
+}
