@@ -11,3 +11,4 @@ __pycache__
 Cargo.lock
 xlsynth_tools/
 slang
+.venv
