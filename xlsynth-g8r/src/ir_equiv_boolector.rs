@@ -739,6 +739,7 @@ pub fn ir_fn_to_boolector(
                 array,
                 value,
                 indices,
+                assumed_in_bounds: _,
             } => {
                 assert_eq!(
                     indices.len(),

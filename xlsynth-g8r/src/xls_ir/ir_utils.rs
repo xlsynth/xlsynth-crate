@@ -28,6 +28,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             array,
             value,
             indices,
+            assumed_in_bounds: _,
         } => {
             let mut deps = vec![*array, *value];
             deps.extend(indices.iter().cloned());

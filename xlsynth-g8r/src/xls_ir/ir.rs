@@ -340,6 +340,7 @@ pub enum NodePayload {
         array: NodeRef,
         value: NodeRef,
         indices: Vec<NodeRef>,
+        assumed_in_bounds: bool,
     },
     ArrayIndex {
         array: NodeRef,
@@ -566,15 +567,17 @@ impl NodePayload {
                 array,
                 value,
                 indices,
+                assumed_in_bounds,
             } => format!(
-                "array_update({}, {}, {})",
+                "array_update({}, {}, {}, assumed_in_bounds={})",
                 get_name(*array),
                 get_name(*value),
                 indices
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                assumed_in_bounds
             ),
             NodePayload::ArrayIndex {
                 array,
@@ -882,6 +885,7 @@ impl Fn {
                         array,
                         value,
                         indices,
+                        assumed_in_bounds: _,
                     } => array == &node_ref || value == &node_ref || indices.contains(&node_ref),
                     ArrayIndex { array, indices, .. } => {
                         array == &node_ref || indices.contains(&node_ref)

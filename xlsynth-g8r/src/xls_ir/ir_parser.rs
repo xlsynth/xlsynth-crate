@@ -67,6 +67,24 @@ impl Parser {
         }
     }
 
+    fn current_line(&self) -> String {
+        let mut start = 0;
+        for i in (0..self.offset).rev() {
+            if self.chars[i] == '\n' {
+                start = i + 1;
+                break;
+            }
+        }
+        let mut end = self.chars.len();
+        for i in self.offset..self.chars.len() {
+            if self.chars[i] == '\n' {
+                end = i;
+                break;
+            }
+        }
+        self.chars[start..end].iter().collect::<String>()
+    }
+
     fn at_eof(&mut self) -> bool {
         self.drop_whitespace_and_comments();
         self.offset >= self.chars.len()
@@ -278,10 +296,10 @@ impl Parser {
             Ok(())
         } else {
             Err(ParseError::new(format!(
-                "expected {:?} in {}; rest_of_line: {:?}",
+                "expected {:?} in {}; line: {:?}",
                 s,
                 ctx,
-                self.rest_of_line()
+                self.current_line()
             )))
         }
     }
@@ -292,9 +310,9 @@ impl Parser {
             Ok(())
         } else {
             Err(ParseError::new(format!(
-                "expected {:?}; rest_of_line: {:?}",
+                "expected {:?}; line: {:?}",
                 s,
-                self.rest_of_line()
+                self.current_line()
             )))
         }
     }
@@ -603,10 +621,20 @@ impl Parser {
                     &node_env,
                     "array_update indices",
                 )?;
-                if self.peek_is(",") {
-                    self.dropc()?;
-                    let id_attr = self.parse_id_attribute()?;
-                    maybe_id = Some(id_attr);
+                let mut assumed_in_bounds = false;
+                if self.try_drop(",") {
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("assumed_in_bounds=") {
+                        assumed_in_bounds =
+                            self.parse_bool_attribute("assumed_in_bounds")?;
+                        if self.try_drop(",") {
+                            let id_attr = self.parse_id_attribute()?;
+                            maybe_id = Some(id_attr);
+                        }
+                    } else {
+                        let id_attr = self.parse_id_attribute()?;
+                        maybe_id = Some(id_attr);
+                    }
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
@@ -618,6 +646,7 @@ impl Parser {
                         array,
                         value,
                         indices,
+                        assumed_in_bounds,
                     },
                     maybe_id.unwrap(),
                 )
@@ -655,16 +684,20 @@ impl Parser {
                     &node_env,
                     "array_index indices",
                 )?;
-                let assumed_in_bounds = if self.peek_is(", assumed_in_bounds=") {
-                    self.dropc()?;
-                    self.parse_bool_attribute("assumed_in_bounds")?
-                } else {
-                    false
-                };
-                if self.peek_is(",") {
-                    self.dropc()?;
-                    let id_attr = self.parse_id_attribute()?;
-                    maybe_id = Some(id_attr);
+                let mut assumed_in_bounds = false;
+                if self.try_drop(",") {
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("assumed_in_bounds=") {
+                        assumed_in_bounds =
+                            self.parse_bool_attribute("assumed_in_bounds")?;
+                        if self.try_drop(",") {
+                            let id_attr = self.parse_id_attribute()?;
+                            maybe_id = Some(id_attr);
+                        }
+                    } else {
+                        let id_attr = self.parse_id_attribute()?;
+                        maybe_id = Some(id_attr);
+                    }
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
@@ -1760,6 +1793,62 @@ top fn main(t: token id=1) -> token {
         assert!(matches!(
             node.payload,
             ir::NodePayload::ArrayIndex {
+                assumed_in_bounds: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_array_index_assumed_in_bounds_no_space() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = "array_index.2: bits[32] = array_index(x, indices=[literal.1],assumed_in_bounds=true, id=2)";
+        let mut parser = Parser::new(input);
+        let mut node_env = IrNodeEnv::new();
+        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        node_env.add(Some("literal.1".to_string()), 2, ir::NodeRef { index: 2 });
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert!(matches!(
+            node.payload,
+            ir::NodePayload::ArrayIndex {
+                assumed_in_bounds: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_array_update_assumed_in_bounds() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = "array_update.2: bits[32][1] = array_update(x, y, indices=[literal.1], assumed_in_bounds=true, id=2)";
+        let mut parser = Parser::new(input);
+        let mut node_env = IrNodeEnv::new();
+        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
+        node_env.add(Some("literal.1".to_string()), 3, ir::NodeRef { index: 3 });
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert!(matches!(
+            node.payload,
+            ir::NodePayload::ArrayUpdate {
+                assumed_in_bounds: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_array_update_assumed_in_bounds_no_space() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = "array_update.2: bits[32][1] = array_update(x, y, indices=[literal.1],assumed_in_bounds=true, id=2)";
+        let mut parser = Parser::new(input);
+        let mut node_env = IrNodeEnv::new();
+        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
+        node_env.add(Some("literal.1".to_string()), 3, ir::NodeRef { index: 3 });
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert!(matches!(
+            node.payload,
+            ir::NodePayload::ArrayUpdate {
                 assumed_in_bounds: true,
                 ..
             }
