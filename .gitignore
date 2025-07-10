@@ -12,3 +12,4 @@ Cargo.lock
 xlsynth_tools/
 slang
 .venv
+.spr.yml
