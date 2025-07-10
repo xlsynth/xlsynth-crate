@@ -26,11 +26,11 @@ module __my_module__main(
   end
 
   // ===== Pipe stage 1:
-  wire [31:0] p1_literal_8_comb;
+  wire [31:0] p1_literal_5_comb;
   wire [31:0] p1_add_9_comb;
   wire p1_load_en_comb;
-  assign p1_literal_8_comb = 32'h0000_0001;
-  assign p1_add_9_comb = p0_x + p1_literal_8_comb;
+  assign p1_literal_5_comb = 32'h0000_0001;
+  assign p1_add_9_comb = p0_x + p1_literal_5_comb;
   assign p1_load_en_comb = p0_valid | p0_not_18_comb;
 
   // Registers for pipe stage 1:
