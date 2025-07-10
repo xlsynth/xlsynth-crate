@@ -11,6 +11,9 @@ on:
       - main
       - 'spr/main/**'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+
 jobs:
   # -----------------------------------------------------------
   # 1) Lint-check / pre-commit gate on Ubuntu
