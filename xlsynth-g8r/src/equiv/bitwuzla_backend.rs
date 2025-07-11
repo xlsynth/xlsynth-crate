@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(feature = "with-bitwuzla-built")]
+#![cfg(feature = "has-bitwuzla")]
 
 use std::{
     ffi::{CStr, CString},
