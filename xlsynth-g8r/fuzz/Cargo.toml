@@ -15,7 +15,7 @@ env_logger = "0.11"
 xlsynth = { path = "../../xlsynth", version = "0.0.165" }
 rand = "0.8"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
-xlsynth-g8r = { path = "../../xlsynth-g8r", features = ["with-boolector-system", "with-z3-system"] }
+xlsynth-g8r = { path = "../../xlsynth-g8r", features = ["with-bitwuzla-built", "with-boolector-system", "with-z3-system"] }
 
 [lib]
 name = "xlsynth_g8r_fuzz"
@@ -66,3 +66,12 @@ name = "fuzz_gate_fn_aiger_roundtrip"
 path = "fuzz_targets/fuzz_gate_fn_aiger_roundtrip.rs"
 test = false
 doc = false
+
+[features]
+# No default optional features; required solver integrations are always enabled via dependency specification above.
+default = []
+has-easy-smt = []
+# Forward selected optional solver/testing features to xlsynth-g8r so callers can enable them on this crate.
+with-boolector-binary-test = ["has-easy-smt", "xlsynth-g8r/with-boolector-binary-test"]
+with-bitwuzla-binary-test = ["has-easy-smt", "xlsynth-g8r/with-bitwuzla-binary-test"]
+with-z3-binary-test = ["has-easy-smt", "xlsynth-g8r/with-z3-binary-test"]

@@ -13,13 +13,14 @@ use boolector_sys::{
     BTOR_OPT_INCREMENTAL, BTOR_OPT_MODEL_GEN, BoolectorNode, Btor, BtorOption, boolector_add,
     boolector_and, boolector_assert, boolector_bitvec_sort, boolector_bv_assignment,
     boolector_concat, boolector_cond, boolector_const, boolector_consth, boolector_delete,
-    boolector_eq, boolector_free_bv_assignment, boolector_mul, boolector_nand, boolector_ne,
-    boolector_neg, boolector_new, boolector_nor, boolector_not, boolector_one, boolector_or,
-    boolector_pop, boolector_push, boolector_sat, boolector_sdiv, boolector_set_opt,
-    boolector_sext, boolector_sgt, boolector_sgte, boolector_slice, boolector_sll, boolector_slt,
-    boolector_slte, boolector_sra, boolector_srem, boolector_srl, boolector_sub, boolector_udiv,
-    boolector_uext, boolector_ugt, boolector_ugte, boolector_ult, boolector_ulte,
-    boolector_unsigned_int, boolector_urem, boolector_var, boolector_xor, boolector_zero,
+    boolector_eq, boolector_free_bv_assignment, boolector_get_refs, boolector_mul, boolector_nand,
+    boolector_ne, boolector_neg, boolector_new, boolector_nor, boolector_not, boolector_one,
+    boolector_or, boolector_pop, boolector_push, boolector_release_all, boolector_sat,
+    boolector_sdiv, boolector_set_opt, boolector_sext, boolector_sgt, boolector_sgte,
+    boolector_slice, boolector_sll, boolector_slt, boolector_slte, boolector_sra, boolector_srem,
+    boolector_srl, boolector_sub, boolector_udiv, boolector_uext, boolector_ugt, boolector_ugte,
+    boolector_ult, boolector_ulte, boolector_unsigned_int, boolector_urem, boolector_var,
+    boolector_xor, boolector_zero,
 };
 
 use crate::{
@@ -42,7 +43,13 @@ impl RawBtor {
 
 impl Drop for RawBtor {
     fn drop(&mut self) {
-        unsafe { boolector_delete(self.raw) };
+        unsafe {
+            // Boolector requires us to call `boolector_release_all` before
+            // calling `boolector_delete`.
+            boolector_release_all(self.raw);
+            assert_eq!(boolector_get_refs(self.raw) as i32, 0);
+            boolector_delete(self.raw)
+        };
     }
 }
 

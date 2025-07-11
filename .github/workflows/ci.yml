@@ -603,7 +603,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev build-essential
+          sudo apt-get install -y pkg-config libssl-dev build-essential meson
 
       - name: Install protobuf compiler
         run: |
@@ -622,6 +622,11 @@ jobs:
           ls -l /usr/lib/libboolector.so
           ldconfig -p | grep boolector
 
+      - name: Install Z3 binary
+        run: |
+          sudo apt-get install -y z3
+
+
       - name: Download xlsynth tools for fuzzing
         run: |
           pip3 install -r requirements.txt
@@ -637,7 +642,7 @@ jobs:
         run: |
           cargo install cargo-fuzz
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_opt_equiv -- -max_total_time=10
+          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test -- -max_total_time=10
 
       - name: Build and run fuzz_gatify for 10 seconds
         env:

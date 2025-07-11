@@ -44,7 +44,7 @@ use bitwuzla_sys::{
     bitwuzla_mk_const, bitwuzla_mk_term1, bitwuzla_mk_term1_indexed1, bitwuzla_mk_term1_indexed2,
     bitwuzla_mk_term2, bitwuzla_mk_term3, bitwuzla_new, bitwuzla_options_delete,
     bitwuzla_options_new, bitwuzla_pop, bitwuzla_push, bitwuzla_set_option,
-    bitwuzla_set_option_mode, bitwuzla_term_manager_new, bitwuzla_term_manager_release,
+    bitwuzla_set_option_mode, bitwuzla_term_manager_delete, bitwuzla_term_manager_new,
     bitwuzla_term_to_string, bitwuzla_term_value_get_str,
 };
 
@@ -71,7 +71,8 @@ impl Drop for RawBitwuzla {
     fn drop(&mut self) {
         unsafe {
             bitwuzla_delete(self.raw);
-            bitwuzla_term_manager_release(self.term_manager);
+            // Bitwuzla doesn't require us to release the terms prior to calling the delete.
+            bitwuzla_term_manager_delete(self.term_manager);
         };
     }
 }

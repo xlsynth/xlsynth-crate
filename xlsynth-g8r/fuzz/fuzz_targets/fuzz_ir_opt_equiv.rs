@@ -3,9 +3,50 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::ir_equiv_boolector;
+use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
+use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
+#[cfg(feature = "has-easy-smt")]
+use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtSolver, EasySmtConfig};
+use xlsynth_g8r::equiv::prove_equiv::{prove_ir_fn_equiv, EquivResult};
 use xlsynth_g8r::xls_ir::ir_parser;
 use xlsynth_test_helpers::ir_fuzz::{generate_ir_fn, FuzzSample};
+
+// Insert helper that checks consistency among the external tool, a primary
+// solver result, and an optional per-bit parallel solver result.
+fn validate_equiv_result(
+    ext_equiv: Result<(), String>,
+    solver_result: EquivResult,
+    solver_name: &str,
+    orig_ir: &str,
+    opt_ir: &str,
+) {
+    match ext_equiv {
+        Ok(()) => {
+            // External tool says equivalent – solver must prove equivalence.
+            if let EquivResult::Disproved { inputs: cex, .. } = solver_result {
+                log::info!("==== IR disagreement detected ====");
+                log::info!("Original IR:\n{}", orig_ir);
+                log::info!("Optimized IR:\n{}", opt_ir);
+                panic!(
+                    "Disagreement: external tool says equivalent, but {} solver disproves: {:?}",
+                    solver_name, cex
+                );
+            }
+        }
+        Err(ext_err) => {
+            // External tool says not equivalent – solver should also find inequivalence.
+            if let EquivResult::Proved = solver_result {
+                log::info!("==== IR disagreement detected ====");
+                log::info!("Original IR:\n{}", orig_ir);
+                log::info!("Optimized IR:\n{}", opt_ir);
+                panic!(
+                    "Disagreement: external tool says NOT equivalent, but {} solver proves equivalence. External error: {}",
+                    solver_name, ext_err
+                );
+            }
+        }
+    }
+}
 
 fuzz_target!(|sample: FuzzSample| {
     // Ensure XLSYNTH_TOOLS is set for equivalence checking
@@ -54,56 +95,26 @@ fuzz_target!(|sample: FuzzSample| {
     let top_fn_name = "fuzz_test";
     let ext_equiv =
         check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
-    let boolector_result = ir_equiv_boolector::prove_ir_fn_equiv(orig_fn, opt_fn, false);
-    let output_bit_count = orig_fn.ret_ty.bit_count();
-    let parallel_result = if output_bit_count <= 64 {
-        Some(ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
-            orig_fn, opt_fn, false,
-        ))
-    } else {
-        None
-    };
-    match ext_equiv {
-        Ok(()) => {
-            // External tool says equivalent, Boolector should agree
-            match (boolector_result, parallel_result) {
-                (
-                    ir_equiv_boolector::EquivResult::Proved,
-                    Some(ir_equiv_boolector::EquivResult::Proved),
-                )
-                | (ir_equiv_boolector::EquivResult::Proved, None) => (),
-                (ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. }, _)
-                | (_, Some(ir_equiv_boolector::EquivResult::Disproved { inputs: cex, .. })) => {
-                    log::info!("==== IR disagreement detected ====");
-                    log::info!("Original IR:\n{}", orig_ir);
-                    log::info!("Optimized IR:\n{}", opt_ir);
-                    panic!(
-                        "Disagreement: external tool says equivalent, Boolector or parallel disproves: {:?}",
-                        cex
-                    );
-                }
-            }
-        }
-        Err(ext_err) => {
-            // External tool says not equivalent, check Boolector and parallel
-            match (boolector_result, parallel_result) {
-                (ir_equiv_boolector::EquivResult::Proved, _)
-                | (_, Some(ir_equiv_boolector::EquivResult::Proved))
-                | (ir_equiv_boolector::EquivResult::Proved, None) => {
-                    log::info!("==== IR disagreement detected ====");
-                    log::info!("Original IR:\n{}", orig_ir);
-                    log::info!("Optimized IR:\n{}", opt_ir);
-                    panic!(
-                        "Disagreement: external tool says NOT equivalent, but Boolector or parallel proves equivalence. External error: {}",
-                        ext_err
-                    );
-                }
-                (
-                    ir_equiv_boolector::EquivResult::Disproved { .. },
-                    Some(ir_equiv_boolector::EquivResult::Disproved { .. }),
-                )
-                | (ir_equiv_boolector::EquivResult::Disproved { .. }, None) => (), /* All agree not equivalent */
-            }
-        }
+    let bitwuzla_result = prove_ir_fn_equiv::<Bitwuzla>(&BitwuzlaOptions::new(), orig_fn, opt_fn, false);
+    validate_equiv_result(ext_equiv.clone(), bitwuzla_result, "Bitwuzla", &orig_ir, &opt_ir);
+    let boolector_result = prove_ir_fn_equiv::<Boolector>(&BoolectorConfig::new(), orig_fn, opt_fn, false);
+    validate_equiv_result(ext_equiv.clone(), boolector_result, "Boolector", &orig_ir, &opt_ir);
+
+    #[cfg(feature = "with-boolector-binary-test")]
+    {
+        let boolector_result = prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::boolector(), orig_fn, opt_fn, false);
+        validate_equiv_result(ext_equiv.clone(), boolector_result, "Boolector binary", &orig_ir, &opt_ir);
+    }
+
+    #[cfg(feature = "with-bitwuzla-binary-test")]
+    {
+        let bitwuzla_result = prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::bitwuzla(), orig_fn, opt_fn, false);
+        validate_equiv_result(ext_equiv.clone(), bitwuzla_result, "Bitwuzla binary", &orig_ir, &opt_ir);
+    }
+
+    #[cfg(feature = "with-z3-binary-test")]
+    {
+        let z3_result = prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::z3(), orig_fn, opt_fn, false);
+        validate_equiv_result(ext_equiv.clone(), z3_result, "Z3 binary", &orig_ir, &opt_ir);
     }
 });
