@@ -473,9 +473,19 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
         let input_bits = u.int_in_range(1..=8)?;
         // Decide how many operations to generate.
         let num_ops = u.int_in_range(0..=20)?;
-        // We always start with one available IR node: the input parameter
-        let mut available_nodes = 1;
+        // We maintain a parallel vector that records, for each existing IR node,
+        // whether it is a tuple and how many elements it contains. `None` means
+        // the node is *not* a tuple. This lets us generate in-bounds indices
+        // for `TupleIndex` operations.
+        let mut available_nodes = 1; // starts with the primary input (not a tuple)
+        let mut tuple_sizes: Vec<Option<u8>> = vec![None];
         let mut ops = Vec::with_capacity(num_ops as usize);
+
+        // TODO: In the long term we may want to carry an {IrOp: IrType} mapping so we
+        // can ensure that we don't generate invalid IR.
+        //
+        // There has been multiple pull requests related to temporary fixes due to this
+        // issue. See #428 and $432.
 
         for _ in 0..num_ops {
             // Randomly decide which kind of operation to generate
@@ -522,9 +532,6 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     });
                 }
                 FuzzOpFlat::BitSlice => {
-                    // TODO: In the long term we may want to carry an {IrOp: IrType} mapping so we
-                    // can ensure that we don't generate invalid IR.
-
                     // Generate an in-bounds BitSlice that always refers to the primary input (index
                     // 0) whose width is `input_bits`. This guarantees the slice
                     // is legal without having to track the widths of all
@@ -622,14 +629,45 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                         });
                     }
                     ops.push(FuzzOp::Tuple { elements });
+                    // Record that the new node is a tuple with `num_elements` elements.
+                    tuple_sizes.push(Some(num_elements as u8));
                 }
                 FuzzOpFlat::TupleIndex => {
-                    let tuple_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let index = u.int_in_range(0..=8)?;
-                    ops.push(FuzzOp::TupleIndex {
-                        tuple: FuzzOperand { index: tuple_idx },
-                        index,
-                    });
+                    // Choose only from nodes that are tuples so we can stay in-bounds.
+                    let tuple_candidates: Vec<(usize, u8)> = tuple_sizes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, sz)| sz.map(|s| (idx, s)))
+                        .collect();
+
+                    if !tuple_candidates.is_empty() {
+                        // Pick a random tuple node.
+                        let which =
+                            u.int_in_range(0..=(tuple_candidates.len() as u64 - 1))? as usize;
+                        let (tuple_idx, tuple_len) = tuple_candidates[which];
+                        // Now pick an element index that is definitely in-bounds.
+                        let index = if tuple_len == 1 {
+                            0u8
+                        } else {
+                            u.int_in_range(0..=((tuple_len - 1) as u64))? as u8
+                        };
+                        ops.push(FuzzOp::TupleIndex {
+                            tuple: FuzzOperand {
+                                index: tuple_idx as u8,
+                            },
+                            index,
+                        });
+                    } else {
+                        // No tuple exists yet – fall back to a no-op literal so we still
+                        // generate the expected number of ops without causing an error.
+                        let literal_bits = 1u8;
+                        ops.push(FuzzOp::Literal {
+                            bits: literal_bits,
+                            value: 0,
+                        });
+                    }
+                    // The result of TupleIndex is not a tuple.
+                    tuple_sizes.push(None);
                 }
                 FuzzOpFlat::UMul => {
                     // UMul op: sample two valid indices.
@@ -689,7 +727,12 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     });
                 }
             }
-            // Each operation produces one new IR node
+            // For non-tuple ops that didn’t manually push into `tuple_sizes`, record None.
+            if tuple_sizes.len() < (available_nodes + 1) as usize {
+                tuple_sizes.push(None);
+            }
+
+            // Each operation produces one new IR node.
             available_nodes += 1;
         }
         Ok(FuzzSample { input_bits, ops })
