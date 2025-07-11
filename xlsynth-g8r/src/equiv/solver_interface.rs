@@ -2,7 +2,7 @@
 
 use std::io;
 
-use xlsynth::IrValue;
+use xlsynth::{IrBits, IrValue, ir_value::IrFormatPreference};
 
 use crate::xls_ir::ir;
 
@@ -40,6 +40,11 @@ pub trait Solver: Sized {
     fn new(config: &Self::Config) -> io::Result<Self>;
     fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>>;
     fn numerical(&mut self, width: usize, value: u64) -> BitVec<Self::Term>;
+    fn from_ir_bits(&mut self, ir_bits: &IrBits) -> BitVec<Self::Term> {
+        let ir_bits_width = ir_bits.get_bit_count();
+        let ir_bits_str = ir_bits.to_string_fmt(IrFormatPreference::Binary, false);
+        self.from_raw_str(ir_bits_width, &ir_bits_str)
+    }
     fn zero(&mut self, width: usize) -> BitVec<Self::Term> {
         self.numerical(width, 0)
     }
@@ -652,6 +657,14 @@ pub mod test_utils {
         );
     }
 
+    pub fn test_from_ir_bits<S: Solver>(solver: &mut S) {
+        let a = solver.numerical(16, 0x1234);
+        let b = solver.from_ir_bits(&IrBits::make_ubits(16, 0x1234).unwrap());
+        let eq_constraint = solver.eq(&a, &b);
+        solver.assert(&eq_constraint).unwrap();
+        assert_eq!(solver.check().unwrap(), Response::Sat);
+    }
+
     pub fn test_constants<S: Solver>(solver: &mut S) {
         let zero = solver.zero(128);
         let one = solver.one(128);
@@ -1038,6 +1051,12 @@ macro_rules! test_solver {
             fn test_numerical_long() {
                 let mut solver = $solver;
                 test_utils::test_numerical_long(&mut solver);
+            }
+
+            #[test]
+            fn test_from_ir_bits() {
+                let mut solver = $solver;
+                test_utils::test_from_ir_bits(&mut solver);
             }
 
             crate::test_get_value!(
