@@ -664,7 +664,7 @@ pub struct BitwuzlaTerm {
 }
 
 impl Solver for Bitwuzla {
-    type Rep = BitwuzlaTerm;
+    type Term = BitwuzlaTerm;
     type Config = BitwuzlaOptions;
 
     fn new(config: &Self::Config) -> io::Result<Self> {
@@ -674,7 +674,7 @@ impl Solver for Bitwuzla {
         })
     }
 
-    fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Rep>> {
+    fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>> {
         if width == 0 {
             return Ok(BitVec::ZeroWidth);
         }
@@ -687,7 +687,7 @@ impl Solver for Bitwuzla {
         })
     }
 
-    fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<Self::Rep> {
+    fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<Self::Term> {
         assert!(width > 0, "Width must be positive");
 
         // Clamp the value so that it fits in the requested bit-width.
@@ -714,7 +714,7 @@ impl Solver for Bitwuzla {
         }
     }
 
-    fn from_raw_str(&mut self, width: usize, value: &str) -> BitVec<Self::Rep> {
+    fn from_raw_str(&mut self, width: usize, value: &str) -> BitVec<Self::Term> {
         assert!(width > 0, "Width must be positive");
         let sort = unsafe { bitwuzla_mk_bv_sort(self.raw_term_manager(), width as u64) };
         let rep = if let Some(str) = value.strip_prefix("#b") {
@@ -734,7 +734,7 @@ impl Solver for Bitwuzla {
 
     fn get_value(
         &mut self,
-        bit_vec: &BitVec<Self::Rep>,
+        bit_vec: &BitVec<Self::Term>,
         ty: &ir::Type,
     ) -> io::Result<xlsynth::IrValue> {
         match bit_vec {
@@ -753,7 +753,7 @@ impl Solver for Bitwuzla {
         }
     }
 
-    fn extract(&mut self, bit_vec: &BitVec<Self::Rep>, high: i32, low: i32) -> BitVec<Self::Rep> {
+    fn extract(&mut self, bit_vec: &BitVec<Self::Term>, high: i32, low: i32) -> BitVec<Self::Term> {
         if high < low {
             return BitVec::ZeroWidth;
         }
@@ -783,15 +783,15 @@ impl Solver for Bitwuzla {
         }
     }
 
-    fn not(&mut self, bv: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn not(&mut self, bv: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.unary_op(bv, BITWUZLA_KIND_BV_NOT)
     }
 
-    fn neg(&mut self, bv: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn neg(&mut self, bv: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.unary_op(bv, BITWUZLA_KIND_BV_NEG)
     }
 
-    fn reverse(&mut self, bv: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn reverse(&mut self, bv: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         match bv {
             BitVec::ZeroWidth => BitVec::ZeroWidth,
             BitVec::BitVec { width, rep } => {
@@ -831,59 +831,59 @@ impl Solver for Bitwuzla {
         }
     }
 
-    fn or_reduce(&mut self, bv: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn or_reduce(&mut self, bv: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.reduce_op(bv, BITWUZLA_KIND_BV_OR)
     }
 
-    fn and_reduce(&mut self, bv: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn and_reduce(&mut self, bv: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.reduce_op(bv, BITWUZLA_KIND_BV_AND)
     }
 
-    fn xor_reduce(&mut self, bv: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn xor_reduce(&mut self, bv: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.reduce_op(bv, BITWUZLA_KIND_BV_XOR)
     }
 
-    fn add(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn add(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_ADD)
     }
 
-    fn sub(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn sub(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_SUB)
     }
 
-    fn mul(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn mul(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_MUL)
     }
 
-    fn udiv(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn udiv(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_UDIV)
     }
 
-    fn urem(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn urem(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_UREM)
     }
 
-    fn srem(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn srem(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_SREM)
     }
 
-    fn sdiv(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn sdiv(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_SDIV)
     }
 
-    fn shl(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn shl(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_SHL)
     }
 
-    fn lshr(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn lshr(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_SHR)
     }
 
-    fn ashr(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn ashr(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_ASHR)
     }
 
-    fn concat(&mut self, a: &BitVec<Self::Rep>, b: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn concat(&mut self, a: &BitVec<Self::Term>, b: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         match (&a, &b) {
             (BitVec::BitVec { width: w1, rep: r1 }, BitVec::BitVec { width: w2, rep: r2 }) => {
                 let rep2 = unsafe {
@@ -904,27 +904,27 @@ impl Solver for Bitwuzla {
         }
     }
 
-    fn or(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn or(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_OR)
     }
 
-    fn and(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn and(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_AND)
     }
 
-    fn xor(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn xor(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_XOR)
     }
 
-    fn nor(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn nor(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_NOR)
     }
 
-    fn nand(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn nand(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_NAND)
     }
 
-    fn extend(&mut self, bv: &BitVec<Self::Rep>, ext: usize, signed: bool) -> BitVec<Self::Rep> {
+    fn extend(&mut self, bv: &BitVec<Self::Term>, ext: usize, signed: bool) -> BitVec<Self::Term> {
         match bv {
             BitVec::ZeroWidth => panic!("Cannot extend zero-width bitvector"),
             BitVec::BitVec { width, rep } => {
@@ -952,10 +952,10 @@ impl Solver for Bitwuzla {
 
     fn ite(
         &mut self,
-        c: &BitVec<Self::Rep>,
-        t: &BitVec<Self::Rep>,
-        e: &BitVec<Self::Rep>,
-    ) -> BitVec<Self::Rep> {
+        c: &BitVec<Self::Term>,
+        t: &BitVec<Self::Term>,
+        e: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term> {
         match (c.clone(), t, e) {
             (
                 BitVec::BitVec { rep: _, width: wc },
@@ -987,12 +987,12 @@ impl Solver for Bitwuzla {
         }
     }
 
-    fn eq(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn eq(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 1);
         self.bin_bool_op(x, y, BITWUZLA_KIND_EQUAL, result)
     }
 
-    fn ne(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn ne(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         match (x, y) {
             (BitVec::BitVec { width: w1, rep: r1 }, BitVec::BitVec { width: w2, rep: r2 }) => {
                 assert_eq!(w1, w2, "Bitvector width mismatch");
@@ -1015,42 +1015,42 @@ impl Solver for Bitwuzla {
         }
     }
 
-    fn slt(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn slt(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 0);
         self.bin_bool_op(x, y, BITWUZLA_KIND_BV_SLT, result)
     }
 
-    fn sgt(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn sgt(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 0);
         self.bin_bool_op(x, y, BITWUZLA_KIND_BV_SGT, result)
     }
 
-    fn sle(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn sle(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 1);
         self.bin_bool_op(x, y, BITWUZLA_KIND_BV_SLE, result)
     }
 
-    fn sge(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn sge(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 1);
         self.bin_bool_op(x, y, BITWUZLA_KIND_BV_SGE, result)
     }
 
-    fn ult(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn ult(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 0);
         self.bin_bool_op(x, y, BITWUZLA_KIND_BV_ULT, result)
     }
 
-    fn ugt(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn ugt(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 0);
         self.bin_bool_op(x, y, BITWUZLA_KIND_BV_UGT, result)
     }
 
-    fn ule(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn ule(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 1);
         self.bin_bool_op(x, y, BITWUZLA_KIND_BV_ULE, result)
     }
 
-    fn uge(&mut self, x: &BitVec<Self::Rep>, y: &BitVec<Self::Rep>) -> BitVec<Self::Rep> {
+    fn uge(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         let result = self.numerical(1, 1);
         self.bin_bool_op(x, y, BITWUZLA_KIND_BV_UGE, result)
     }
@@ -1078,13 +1078,13 @@ impl Solver for Bitwuzla {
         }
     }
 
-    fn assert(&mut self, bv: &BitVec<Self::Rep>) -> io::Result<()> {
+    fn assert(&mut self, bv: &BitVec<Self::Term>) -> io::Result<()> {
         let cond = self.bv_to_bool(&bv);
         unsafe { bitwuzla_assert(self.bitwuzla.raw, cond.raw) };
         Ok(())
     }
 
-    fn render(&mut self, bv: &BitVec<Self::Rep>) -> String {
+    fn render(&mut self, bv: &BitVec<Self::Term>) -> String {
         match bv {
             BitVec::ZeroWidth => "<zero-width>".to_string(),
             BitVec::BitVec { rep, .. } => unsafe {
