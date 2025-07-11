@@ -319,7 +319,13 @@ impl Parser {
 
     pub fn parse_type(&mut self) -> Result<ir::Type, ParseError> {
         self.drop_whitespace_and_comments();
-        let ty: ir::Type = if self.try_drop("(") {
+        // First, parse the *base* type which may be a tuple, bits, or token.
+        // Afterwards, we iteratively wrap the base type in `Array` layers for
+        // each `[N]` dimension that follows. This mirrors the textual syntax
+        // used by XLS IR where multidimensional array types are expressed as a
+        // series of bracket-delimited sizes (e.g. `bits[8][4][2]`).
+
+        let mut ty: ir::Type = if self.try_drop("(") {
             let mut members = Vec::new();
             while !self.try_drop(")") {
                 let member = self.parse_type()?;
@@ -334,13 +340,16 @@ impl Parser {
             self.drop_or_error("[")?;
             let count = self.pop_number_usize_or_error("bit count")?;
             self.drop_or_error("]")?;
-            let mut ty = ir::Type::Bits(count);
+            let mut bits_ty = ir::Type::Bits(count);
+            // `bits` types can also have array dimensions directly attached –
+            // handle those here before we fall through to the common suffix
+            // parsing loop below.
             while self.try_drop("[") {
                 let count = self.pop_number_usize_or_error("array type size")?;
                 self.drop_or_error("]")?;
-                ty = ir::Type::new_array(ty, count);
+                bits_ty = ir::Type::new_array(bits_ty, count);
             }
-            ty
+            bits_ty
         } else if self.try_drop("token") {
             ir::Type::Token
         } else {
@@ -349,16 +358,20 @@ impl Parser {
                 self.rest_of_line()
             )));
         };
-        if self.try_drop("[") {
+
+        // Handle *additional* array dimensions that may follow the base type –
+        // this is required for cases like `((bits[2])[7][2]` where a tuple (or
+        // any base type) is wrapped in multiple array dimensions.
+        while self.try_drop("[") {
             let count = self.pop_number_usize_or_error("array type size")?;
             self.drop_or_error("]")?;
-            Ok(ir::Type::Array(ArrayTypeData {
+            ty = ir::Type::Array(ArrayTypeData {
                 element_type: Box::new(ty),
                 element_count: count,
-            }))
-        } else {
-            Ok(ty)
+            });
         }
+
+        Ok(ty)
     }
 
     fn parse_param(&mut self, default_id: usize) -> Result<ir::Param, ParseError> {
@@ -1961,5 +1974,28 @@ top fn main() -> bits[32] {
         assert_eq!(pkg.name, "cmt_pkg");
         let main_fn = pkg.get_fn("main").unwrap();
         assert_eq!(main_fn.ret_ty.to_string(), "bits[8]");
+    }
+
+    // Regression test for parsing multidimensional array types whose element
+    // type is *itself* a tuple. Prior to the fix for issue #<none>, the parser
+    // accepted only a single `[N]` suffix after a tuple, failing on inputs like
+    // `((bits[2][2][2], bits[2])[7][2]`. This test ensures such inputs are now
+    // handled correctly.
+    #[test]
+    fn test_parse_tuple_multidim_array_type() {
+        let input = "(bits[2], bits[3])[7][2]";
+        let mut parser = Parser::new(input);
+        let parsed_ty = parser.parse_type().unwrap();
+
+        // Manually construct the expected type: a 2-tuple of bits[2] values,
+        // wrapped in a 7-element array, then wrapped in a 2-element array.
+        let inner_tuple = ir::Type::Tuple(vec![
+            Box::new(ir::Type::Bits(2)),
+            Box::new(ir::Type::Bits(3)),
+        ]);
+        let array_7 = ir::Type::new_array(inner_tuple, 7);
+        let want = ir::Type::new_array(array_7, 2);
+
+        assert_eq!(parsed_ty, want);
     }
 }
