@@ -3,17 +3,17 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
+#[cfg(feature = "has-bitwuzla")]
 use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
+#[cfg(feature = "has-boolector")]
 use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
-use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtSolver, EasySmtConfig};
+use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
 use xlsynth_g8r::equiv::prove_equiv::{
-    prove_ir_fn_equiv,
-    prove_ir_fn_equiv_output_bits_parallel,
-    EquivResult,
+    EquivResult, prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel,
 };
 use xlsynth_g8r::xls_ir::ir_parser;
-use xlsynth_test_helpers::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_test_helpers::ir_fuzz::{FuzzSample, generate_ir_fn};
 
 // Insert helper that checks consistency among the external tool, a primary
 // solver result, and an optional per-bit parallel solver result.
@@ -99,37 +99,82 @@ fuzz_target!(|sample: FuzzSample| {
     let top_fn_name = "fuzz_test";
     let ext_equiv =
         check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
-    let bitwuzla_result = prove_ir_fn_equiv::<Bitwuzla>(&BitwuzlaOptions::new(), orig_fn, opt_fn, false);
-    validate_equiv_result(ext_equiv.clone(), bitwuzla_result, "Bitwuzla", &orig_ir, &opt_ir);
-    let boolector_result = prove_ir_fn_equiv::<Boolector>(&BoolectorConfig::new(), orig_fn, opt_fn, false);
-    validate_equiv_result(ext_equiv.clone(), boolector_result, "Boolector", &orig_ir, &opt_ir);
+    #[cfg(feature = "has-bitwuzla")]
+    {
+        let bitwuzla_result =
+            prove_ir_fn_equiv::<Bitwuzla>(&BitwuzlaOptions::new(), orig_fn, opt_fn, false);
+        validate_equiv_result(
+            ext_equiv.clone(),
+            bitwuzla_result,
+            "Bitwuzla",
+            &orig_ir,
+            &opt_ir,
+        );
+    }
+
+    #[cfg(feature = "has-boolector")]
+    {
+        let boolector_result =
+            prove_ir_fn_equiv::<Boolector>(&BoolectorConfig::new(), orig_fn, opt_fn, false);
+        validate_equiv_result(
+            ext_equiv.clone(),
+            boolector_result,
+            "Boolector",
+            &orig_ir,
+            &opt_ir,
+        );
+    }
 
     #[cfg(feature = "with-boolector-binary-test")]
     {
-        let boolector_result = prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::boolector(), orig_fn, opt_fn, false);
-        validate_equiv_result(ext_equiv.clone(), boolector_result, "Boolector binary", &orig_ir, &opt_ir);
+        let boolector_result =
+            prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::boolector(), orig_fn, opt_fn, false);
+        validate_equiv_result(
+            ext_equiv.clone(),
+            boolector_result,
+            "Boolector binary",
+            &orig_ir,
+            &opt_ir,
+        );
     }
 
     #[cfg(feature = "with-bitwuzla-binary-test")]
     {
-        let bitwuzla_result = prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::bitwuzla(), orig_fn, opt_fn, false);
-        validate_equiv_result(ext_equiv.clone(), bitwuzla_result, "Bitwuzla binary", &orig_ir, &opt_ir);
+        let bitwuzla_result =
+            prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::bitwuzla(), orig_fn, opt_fn, false);
+        validate_equiv_result(
+            ext_equiv.clone(),
+            bitwuzla_result,
+            "Bitwuzla binary",
+            &orig_ir,
+            &opt_ir,
+        );
     }
 
     #[cfg(feature = "with-z3-binary-test")]
     {
-        let z3_result = prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::z3(), orig_fn, opt_fn, false);
+        let z3_result =
+            prove_ir_fn_equiv::<EasySmtSolver>(&EasySmtConfig::z3(), orig_fn, opt_fn, false);
         validate_equiv_result(ext_equiv.clone(), z3_result, "Z3 binary", &orig_ir, &opt_ir);
     }
 
-    let output_bit_count = orig_fn.ret_ty.bit_count();
-    if output_bit_count <= 64 {
-        let bitwuzla_parallel_result = prove_ir_fn_equiv_output_bits_parallel::<Bitwuzla>(
-            &BitwuzlaOptions::new(),
-            orig_fn,
-            opt_fn,
-            false,
-        );
-        validate_equiv_result(ext_equiv, bitwuzla_parallel_result, "Bitwuzla-parallel", &orig_ir, &opt_ir);
+    #[cfg(feature = "has-bitwuzla")]
+    {
+        let output_bit_count = orig_fn.ret_ty.bit_count();
+        if output_bit_count <= 64 {
+            let bitwuzla_parallel_result = prove_ir_fn_equiv_output_bits_parallel::<Bitwuzla>(
+                &BitwuzlaOptions::new(),
+                orig_fn,
+                opt_fn,
+                false,
+            );
+            validate_equiv_result(
+                ext_equiv,
+                bitwuzla_parallel_result,
+                "Bitwuzla-parallel",
+                &orig_ir,
+                &opt_ir,
+            );
+        }
     }
 });
