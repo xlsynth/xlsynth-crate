@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(feature = "with-boolector-built")]
+#![cfg(feature = "has-boolector")]
 
 use std::{
     collections::HashMap,
