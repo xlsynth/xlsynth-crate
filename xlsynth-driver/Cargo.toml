@@ -27,6 +27,7 @@ prost-reflect = { version = "0.12.0", features = ["text-format"] }
 bincode = "1.3"
 rand_xoshiro = "0.6"
 once_cell = "1.19"
+paste = "1.0.15"
 
 [dev-dependencies]
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
@@ -41,6 +42,8 @@ glob = "0.3"
 [features]
 default = []
 has-boolector = ["xlsynth-g8r/has-boolector"]
+has-easy-smt = ["xlsynth-g8r/has-easy-smt"]
+has-bitwuzla = ["xlsynth-g8r/has-bitwuzla"]
 # Enables boolector support, defaulting to system linking
 with-boolector-system = ["xlsynth-g8r/with-boolector-system", "has-boolector"]
 # Enables boolector support AND builds it from source
@@ -49,3 +52,9 @@ with-boolector-built = ["xlsynth-g8r/with-boolector-built", "has-boolector"]
 with-z3-system = ["xlsynth-g8r/with-z3-system"]
 # Enables z3 library support AND builds it from source
 with-z3-built = ["xlsynth-g8r/with-z3-built"]
+with-easy-smt = ["xlsynth-g8r/with-easy-smt", "has-easy-smt"]
+with-boolector-binary-test = ["xlsynth-g8r/with-easy-smt"]
+with-bitwuzla-binary-test = ["xlsynth-g8r/with-easy-smt"]
+with-z3-binary-test = ["xlsynth-g8r/with-easy-smt"]
+with-bitwuzla-system = ["xlsynth-g8r/with-bitwuzla-system", "has-bitwuzla"]
+with-bitwuzla-built = ["xlsynth-g8r/with-bitwuzla-built", "has-bitwuzla"]
