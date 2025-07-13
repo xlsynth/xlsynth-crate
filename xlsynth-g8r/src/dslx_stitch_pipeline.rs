@@ -2,8 +2,10 @@
 //! Simple utility to stitch together pipeline stages defined in DSLX.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
+use xlsynth::dslx::{self, MatchableModuleMember};
 use xlsynth::{
     DslxConvertOptions, convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen,
 };
@@ -216,6 +218,57 @@ fn make_stage_info_comb(
     })
 }
 
+fn is_implicit_stage_name(name: &str) -> bool {
+    if let Some(idx) = name.rfind("_cycle") {
+        let digits = &name[idx + 6..];
+        !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+/// Uses the DSLX front-end to identify parametric stage functions following
+/// the implicit `<top>_cycle<N>` naming convention.
+fn check_for_parametric_stages(
+    dslx_text: &str,
+    path: &std::path::Path,
+) -> Result<(), xlsynth::XlsynthError> {
+    let module_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| xlsynth::XlsynthError("invalid path".into()))?;
+
+    let mut import_data = dslx::ImportData::default();
+    let tc_module = dslx::parse_and_typecheck(
+        dslx_text,
+        path.to_str().unwrap(),
+        module_name,
+        &mut import_data,
+    )?;
+
+    let module = tc_module.get_module();
+    let mut offending = HashSet::new();
+    for i in 0..module.get_member_count() {
+        let member = module.get_member(i);
+        if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
+            let name = func.get_identifier();
+            if is_implicit_stage_name(&name) && func.is_parametric() {
+                offending.insert(name);
+            }
+        }
+    }
+
+    if !offending.is_empty() {
+        let mut names: Vec<String> = offending.into_iter().collect();
+        names.sort();
+        return Err(xlsynth::XlsynthError(format!(
+            "parametric stage function(s) detected that cannot be stitched: {}. Provide a concrete (non-parametric) wrapper or specialization before running the stitch tool.",
+            names.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// Generates SystemVerilog for pipeline stages `top_cycle0`, `top_cycle1`, ...
 /// in `dslx` and stitches them together into a wrapper module.
 ///
@@ -228,6 +281,7 @@ pub fn stitch_pipeline(
     verilog_version: VerilogVersion,
     explicit_stages: Option<&[String]>,
 ) -> Result<String, xlsynth::XlsynthError> {
+    check_for_parametric_stages(dslx, path)?;
     let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
     let ir = conv.ir;
 
@@ -460,6 +514,7 @@ pub fn stitch_pipeline_with_valid(
     verilog_version: VerilogVersion,
     explicit_stages: Option<&[String]>,
 ) -> Result<String, xlsynth::XlsynthError> {
+    check_for_parametric_stages(dslx, path)?;
     let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
     let ir = conv.ir;
 

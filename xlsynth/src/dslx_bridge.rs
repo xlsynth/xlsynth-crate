@@ -171,6 +171,9 @@ pub fn convert_imported_module(
             dslx::MatchableModuleMember::ConstantDef(constant_def) => {
                 convert_constant(&constant_def, &type_info, builder)?
             }
+            dslx::MatchableModuleMember::Function(function) => {
+                continue;
+            }
         }
     }
 
