@@ -2456,3 +2456,38 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
         stderr
     );
 }
+
+#[test]
+fn test_dslx_stitch_pipeline_parametric_stage_error() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // DSLX with a parametric pipeline stage function (generic parameter `N`).
+    let dslx = "fn foo_cycle0(x: u32) -> u32 { x }\nfn foo_cycle1<N: u32>(x: u32) -> u32 { x }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "command should fail, stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("parametric"),
+        "stderr should mention parametric stage error, got: {}",
+        stderr
+    );
+}

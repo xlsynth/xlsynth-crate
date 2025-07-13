@@ -184,6 +184,7 @@ pub enum MatchableModuleMember {
     StructDef(StructDef),
     TypeAlias(TypeAlias),
     ConstantDef(ConstantDef),
+    Function(Function),
 }
 
 impl ModuleMember {
@@ -217,6 +218,13 @@ impl ModuleMember {
                 Some(MatchableModuleMember::ConstantDef(ConstantDef {
                     parent: self.parent.clone(),
                     ptr: constant_def,
+                }))
+            }
+            ModuleMemberKind::Function => {
+                let func_ptr = unsafe { sys::xls_dslx_module_member_get_function(self.ptr) };
+                Some(MatchableModuleMember::Function(Function {
+                    parent: self.parent.clone(),
+                    ptr: func_ptr,
                 }))
             }
             _ => None,
@@ -570,6 +578,25 @@ impl TypeAlias {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_type_alias_get_type_annotation(self.ptr) },
         }
+    }
+}
+
+/// Wrapper for a DSLX function definition.
+pub struct Function {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxFunction,
+}
+
+impl Function {
+    pub fn get_identifier(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_function_get_identifier(self.ptr);
+            crate::c_str_to_rust(c_str)
+        }
+    }
+
+    pub fn is_parametric(&self) -> bool {
+        unsafe { sys::xls_dslx_function_is_parametric(self.ptr) }
     }
 }
 

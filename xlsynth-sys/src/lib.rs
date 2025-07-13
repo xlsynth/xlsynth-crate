@@ -224,6 +224,11 @@ pub struct CDslxModuleMember {
 }
 
 #[repr(C)]
+pub struct CDslxFunction {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CScheduleAndCodegenResult {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -1392,6 +1397,14 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         name_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+
+    pub fn xls_dslx_module_member_get_function(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxFunction;
+    pub fn xls_dslx_function_is_parametric(function: *const CDslxFunction) -> bool;
+    pub fn xls_dslx_function_get_identifier(
+        function: *const CDslxFunction,
+    ) -> *mut std::os::raw::c_char;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
