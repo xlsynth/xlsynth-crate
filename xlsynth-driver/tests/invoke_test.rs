@@ -2491,3 +2491,48 @@ fn test_dslx_stitch_pipeline_parametric_stage_error() {
         stderr
     );
 }
+
+#[test]
+fn test_dslx_stitch_pipeline_add_mul() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Two-stage pipeline: cycle0 computes x + y, cycle1 multiplies by z.
+    let dslx = "fn add_mul_cycle0(x: u32, y: u32, z: u32) -> (u32, u32) { (x + y, z) }\nfn add_mul_cycle1(sum: u32, z: u32) -> u32 { sum * z }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("add_mul.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("add_mul")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let sv = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&sv);
+
+    let golden_path = std::path::Path::new("tests/test_dslx_stitch_pipeline_add_mul.golden.sv");
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+        std::fs::write(golden_path, &sv).expect("write golden");
+    } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+        std::fs::write(golden_path, &sv).expect("write golden");
+    } else {
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            sv.trim(),
+            want.trim(),
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+}
