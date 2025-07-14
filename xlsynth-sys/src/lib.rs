@@ -1405,6 +1405,14 @@ extern "C" {
     pub fn xls_dslx_function_get_identifier(
         function: *const CDslxFunction,
     ) -> *mut std::os::raw::c_char;
+
+    // -- "requires implicit token?" determination for a DSLX function
+    pub fn xls_dslx_type_info_get_requires_implicit_token(
+        type_info: *mut CDslxTypeInfo,
+        function: *mut CDslxFunction,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut bool,
+    ) -> bool;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
