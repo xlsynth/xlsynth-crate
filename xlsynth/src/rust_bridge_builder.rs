@@ -51,7 +51,7 @@ impl RustBridgeBuilder {
 impl BridgeBuilder for RustBridgeBuilder {
     fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError> {
         self.lines = vec![
-            format!("mod {module_name} {{"),
+            format!("pub mod {module_name} {{"),
             // We allow e.g. enum variants to be unused in consumer code.
             "#![allow(dead_code)]".to_string(),
             "#![allow(unused_imports)]".to_string(),
@@ -61,7 +61,7 @@ impl BridgeBuilder for RustBridgeBuilder {
     }
 
     fn end_module(&mut self, module_name: &str) -> Result<(), XlsynthError> {
-        self.lines.push(format!("}} // mod {module_name}"));
+        self.lines.push(format!("}} // pub mod {module_name}"));
         Ok(())
     }
 
@@ -168,7 +168,7 @@ mod tests {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"mod my_module {
+            r#"pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
@@ -187,7 +187,7 @@ impl Into<IrValue> for MyEnum {
     }
 }
 
-} // mod my_module"#
+} // pub mod my_module"#
         );
     }
 
@@ -205,7 +205,7 @@ impl Into<IrValue> for MyEnum {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"mod my_module {
+            r#"pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
@@ -215,7 +215,7 @@ pub struct MyStruct {
     pub b: IrSBits<16>,
 }
 
-} // mod my_module"#
+} // pub mod my_module"#
         );
     }
 
@@ -234,7 +234,7 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"mod my_module {
+            r#"pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
@@ -258,7 +258,7 @@ pub struct MyStruct {
     pub b: IrSBits<16>,
 }
 
-} // mod my_module"#
+} // pub mod my_module"#
         );
     }
 
@@ -281,7 +281,7 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"mod my_module {
+            r#"pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
@@ -297,7 +297,7 @@ pub struct MyStruct {
     pub c: MyInnerStruct,
 }
 
-} // mod my_module"#
+} // pub mod my_module"#
         );
     }
 
@@ -316,7 +316,7 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"mod my_module {
+            r#"pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
@@ -327,7 +327,7 @@ pub struct MyStruct {
     pub c: [IrUBits<8>; 4],
 }
 
-} // mod my_module"#
+} // pub mod my_module"#
         );
     }
 
@@ -340,14 +340,14 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"mod my_module {
+            r#"pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
 
 pub type MyType = IrUBits<8>;
 
-} // mod my_module"#
+} // pub mod my_module"#
         );
     }
 
@@ -368,7 +368,7 @@ pub type MyType = IrUBits<8>;
         convert_imported_module(&importer_typechecked, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            "mod importer {
+            "pub mod importer {
 #![allow(dead_code)]
 #![allow(unused_imports)]
 use xlsynth::{IrValue, IrUBits, IrSBits};
@@ -377,7 +377,7 @@ pub struct MyStruct {
     pub a: MyImportedStruct,
 }
 
-} // mod importer"
+} // pub mod importer"
         );
     }
 }
