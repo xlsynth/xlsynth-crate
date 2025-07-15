@@ -229,7 +229,7 @@ pub struct CDslxFunction {
 }
 
 #[repr(C)]
-pub struct CDslxQuickCheck {
+pub struct CDslxQuickcheck {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
@@ -1419,22 +1419,22 @@ extern "C" {
         result_out: *mut bool,
     ) -> bool;
 
-    // -- QuickCheck APIs
+    // -- Quickcheck APIs
     pub fn xls_dslx_module_member_get_quickcheck(
         member: *const CDslxModuleMember,
-    ) -> *mut CDslxQuickCheck;
+    ) -> *mut CDslxQuickcheck;
 
-    pub fn xls_dslx_quickcheck_get_function(qc: *const CDslxQuickCheck) -> *mut CDslxFunction;
+    pub fn xls_dslx_quickcheck_get_function(qc: *const CDslxQuickcheck) -> *mut CDslxFunction;
 
-    /// Returns true iff the QuickCheck has the `exhaustive` test-cases
+    /// Returns true iff the Quickcheck has the `exhaustive` test-cases
     /// specifier.
-    pub fn xls_dslx_quickcheck_is_exhaustive(qc: *const CDslxQuickCheck) -> bool;
+    pub fn xls_dslx_quickcheck_is_exhaustive(qc: *const CDslxQuickcheck) -> bool;
 
-    /// Retrieves the test-case count for the QuickCheck. Returns true and sets
-    /// `*result_out` when the QuickCheck has a counted test-case specifier;
-    /// returns false when the QuickCheck is marked exhaustive (in which case
+    /// Retrieves the test-case count for the Quickcheck. Returns true and sets
+    /// `*result_out` when the Quickcheck has a counted test-case specifier;
+    /// returns false when the Quickcheck is marked exhaustive (in which case
     /// `*result_out` is not modified).
-    pub fn xls_dslx_quickcheck_get_count(qc: *const CDslxQuickCheck, result_out: *mut i64) -> bool;
+    pub fn xls_dslx_quickcheck_get_count(qc: *const CDslxQuickcheck, result_out: *mut i64) -> bool;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");

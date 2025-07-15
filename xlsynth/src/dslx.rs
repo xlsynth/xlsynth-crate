@@ -24,7 +24,7 @@ pub enum ModuleMemberKind {
     Proc = 1,
     TestFunction = 2,
     TestProc = 3,
-    QuickCheck = 4,
+    Quickcheck = 4,
     TypeAlias = 5,
     StructDef = 6,
     ProcDef = 7,
@@ -43,7 +43,7 @@ impl From<sys::DslxModuleMemberKind> for ModuleMemberKind {
             1 => ModuleMemberKind::Proc,
             2 => ModuleMemberKind::TestFunction,
             3 => ModuleMemberKind::TestProc,
-            4 => ModuleMemberKind::QuickCheck,
+            4 => ModuleMemberKind::Quickcheck,
             5 => ModuleMemberKind::TypeAlias,
             6 => ModuleMemberKind::StructDef,
             7 => ModuleMemberKind::ProcDef,
@@ -185,7 +185,7 @@ pub enum MatchableModuleMember {
     TypeAlias(TypeAlias),
     ConstantDef(ConstantDef),
     Function(Function),
-    QuickCheck(QuickCheck),
+    Quickcheck(Quickcheck),
 }
 
 impl ModuleMember {
@@ -228,9 +228,9 @@ impl ModuleMember {
                     ptr: func_ptr,
                 }))
             }
-            ModuleMemberKind::QuickCheck => {
+            ModuleMemberKind::Quickcheck => {
                 let qc_ptr = unsafe { sys::xls_dslx_module_member_get_quickcheck(self.ptr) };
-                Some(MatchableModuleMember::QuickCheck(QuickCheck {
+                Some(MatchableModuleMember::Quickcheck(Quickcheck {
                     parent: self.parent.clone(),
                     ptr: qc_ptr,
                 }))
@@ -240,14 +240,14 @@ impl ModuleMember {
     }
 }
 
-// -- QuickCheck
+// -- Quickcheck
 
-pub struct QuickCheck {
+pub struct Quickcheck {
     parent: Rc<TypecheckedModulePtr>,
-    ptr: *mut sys::CDslxQuickCheck,
+    ptr: *mut sys::CDslxQuickcheck,
 }
 
-impl QuickCheck {
+impl Quickcheck {
     pub fn get_function(&self) -> Function {
         let func_ptr = unsafe { sys::xls_dslx_quickcheck_get_function(self.ptr) };
         Function {

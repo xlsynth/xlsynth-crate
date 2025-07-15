@@ -175,8 +175,8 @@ pub fn convert_imported_module(
                 // Functions are not converted by the bridge.
                 continue;
             }
-            dslx::MatchableModuleMember::QuickCheck(_) => {
-                // QuickChecks are currently not converted by the bridge.
+            dslx::MatchableModuleMember::Quickcheck(_) => {
+                // Quickchecks are currently not converted by the bridge.
                 continue;
             }
         }
