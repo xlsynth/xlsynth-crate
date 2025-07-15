@@ -983,1207 +983,771 @@ pub fn prove_ir_fn_equiv_split_input_bit<S: Solver>(
     EquivResult::Proved
 }
 
-mod test_utils {
-    #[macro_export]
-    macro_rules! assert_smt_fn_eq {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $ir_text:expr, $expected:expr) => {
-            #[test]
-            fn $fn_name() {
-                let mut parser = crate::xls_ir::ir_parser::Parser::new(&$ir_text);
-                let f = parser.parse_fn().unwrap();
-                let mut solver = <$solver_type>::new($solver_config).unwrap();
-                let fn_inputs = get_fn_inputs(&mut solver, &f, None);
-                let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
-                let expected = $expected(&mut solver, &fn_inputs);
-                crate::equiv::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &smt_fn.output.bitvec,
-                    &expected,
-                );
-            }
-        };
+#[cfg(test)]
+pub mod test_utils {
+
+    use xlsynth::IrValue;
+
+    use crate::{
+        equiv::{
+            prove_equiv::{
+                EquivResult, FnInputs, get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
+            },
+            solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
+        },
+        xls_ir::ir,
+    };
+
+    pub fn assert_smt_fn_eq<S: Solver>(
+        solver_config: &S::Config,
+        ir_text: &str,
+        expected: impl Fn(&mut S, &FnInputs<S::Term>) -> BitVec<S::Term>,
+    ) {
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let mut solver = S::new(solver_config).unwrap();
+        let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+        let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
+        let expected_result = expected(&mut solver, &fn_inputs);
+        assert_solver_eq(&mut solver, &smt_fn.output.bitvec, &expected_result);
     }
 
-    #[macro_export]
-    macro_rules! assert_ir_value_to_bv_eq {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $ir_value:expr, $ir_type:expr, $expected:expr) => {
-            #[test]
-            fn $fn_name() {
-                let mut solver = <$solver_type>::new($solver_config).unwrap();
-                let ir_value = $ir_value;
-                let ir_type = $ir_type;
-                let bv = ir_value_to_bv(&mut solver, &ir_value, &ir_type);
-                assert_eq!(bv.ir_type, &ir_type);
-                let expected = $expected(&mut solver);
-                crate::equiv::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &bv.bitvec,
-                    &expected,
-                );
-            }
-        };
+    pub fn assert_ir_value_to_bv_eq<S: Solver>(
+        solver_config: &S::Config,
+        ir_value: &IrValue,
+        ir_type: &ir::Type,
+        expected: impl Fn(&mut S) -> BitVec<S::Term>,
+    ) {
+        let mut solver = S::new(solver_config).unwrap();
+        let bv = ir_value_to_bv(&mut solver, &ir_value, &ir_type);
+        assert_eq!(bv.ir_type, ir_type);
+        let expected_value = expected(&mut solver);
+        crate::equiv::solver_interface::test_utils::assert_solver_eq(
+            &mut solver,
+            &bv.bitvec,
+            &expected_value,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_fn_equiv {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $ir_text_1:expr, $ir_text_2:expr, $allow_flatten:expr, $result:pat) => {
-            #[test]
-            fn $fn_name() {
-                let mut parser = crate::xls_ir::ir_parser::Parser::new($ir_text_1);
-                let f1 = parser.parse_fn().unwrap();
-                let mut parser = crate::xls_ir::ir_parser::Parser::new($ir_text_2);
-                let f2 = parser.parse_fn().unwrap();
-                let result =
-                    prove_ir_fn_equiv::<$solver_type>($solver_config, &f1, &f2, $allow_flatten);
-                assert!(matches!(result, $result));
-            }
-        };
+    fn assert_ir_fn_equiv_base<S: Solver>(
+        solver_config: &S::Config,
+        ir_text_1: &str,
+        ir_text_2: &str,
+        allow_flatten: bool,
+        expected_proven: bool,
+    ) {
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text_1);
+        let f1 = parser.parse_fn().unwrap();
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text_2);
+        let f2 = parser.parse_fn().unwrap();
+        let actual = prove_ir_fn_equiv::<S>(solver_config, &f1, &f2, allow_flatten);
+        if expected_proven {
+            assert!(matches!(actual, EquivResult::Proved));
+        } else {
+            assert!(matches!(actual, EquivResult::Disproved { .. }));
+        }
     }
 
-    #[macro_export]
-    macro_rules! test_assert_fn_equiv_to_self {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $ir_text:expr) => {
-            crate::test_ir_fn_equiv!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                $ir_text,
-                $ir_text,
-                false,
-                EquivResult::Proved
-            );
-        };
+    pub fn assert_ir_fn_equiv<S: Solver>(
+        solver_config: &S::Config,
+        ir_text_1: &str,
+        ir_text_2: &str,
+        allow_flatten: bool,
+    ) {
+        assert_ir_fn_equiv_base::<S>(solver_config, ir_text_1, ir_text_2, allow_flatten, true);
     }
 
-    #[macro_export]
-    macro_rules! test_assert_fn_inequiv {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $ir_text_1:expr, $ir_text_2:expr, $allow_flatten:expr) => {
-            crate::test_ir_fn_equiv!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                $ir_text_1,
-                $ir_text_2,
-                $allow_flatten,
-                EquivResult::Disproved { .. }
-            );
-        };
+    pub fn assert_ir_fn_inequiv<S: Solver>(
+        solver_config: &S::Config,
+        ir_text_1: &str,
+        ir_text_2: &str,
+        allow_flatten: bool,
+    ) {
+        assert_ir_fn_equiv_base::<S>(solver_config, ir_text_1, ir_text_2, allow_flatten, false);
     }
 
-    #[macro_export]
-    macro_rules! test_ir_value_bits {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_ir_value_to_bv_eq!(
-                test_ir_value_bits,
-                $solver_type,
-                $solver_config,
-                IrValue::u32(0x12345678),
-                ir::Type::Bits(32),
-                |solver: &mut $solver_type| solver.from_raw_str(32, "#x12345678")
-            );
-        };
+    fn test_ir_fn_equiv_to_self<S: Solver>(solver_config: &S::Config, ir_text: &str) {
+        assert_ir_fn_equiv::<S>(solver_config, ir_text, ir_text, false);
     }
 
-    #[macro_export]
-    macro_rules! test_ir_bits {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_ir_bits,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[32] {
-                    ret literal.1: bits[32] = literal(value=0x12345678, id=1)
-                }"#,
-                |solver: &mut $solver_type, _: &FnInputs<<$solver_type as Solver>::Term>| solver
-                    .from_raw_str(32, "#x12345678")
-            );
-        };
+    pub fn test_ir_value_bits<S: Solver>(solver_config: &S::Config) {
+        assert_ir_value_to_bv_eq::<S>(
+            solver_config,
+            &IrValue::u32(0x12345678),
+            &ir::Type::Bits(32),
+            |solver: &mut S| solver.from_raw_str(32, "#x12345678"),
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_value_array {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_ir_value_to_bv_eq!(
-                test_ir_value_array,
-                $solver_type,
-                $solver_config,
+    pub fn test_ir_bits<S: Solver>(solver_config: &S::Config) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f() -> bits[32] {
+                ret literal.1: bits[32] = literal(value=0x12345678, id=1)
+            }"#,
+            |solver: &mut S, _: &FnInputs<S::Term>| solver.from_raw_str(32, "#x12345678"),
+        );
+    }
+
+    pub fn test_ir_value_array<S: Solver>(solver_config: &S::Config) {
+        crate::equiv::prove_equiv::test_utils::assert_ir_value_to_bv_eq::<S>(
+            solver_config,
+            &IrValue::make_array(&[
                 IrValue::make_array(&[
-                    IrValue::make_array(&[
-                        IrValue::make_ubits(8, 0x12).unwrap(),
-                        IrValue::make_ubits(8, 0x34).unwrap(),
-                    ])
-                    .unwrap(),
-                    IrValue::make_array(&[
-                        IrValue::make_ubits(8, 0x56).unwrap(),
-                        IrValue::make_ubits(8, 0x78).unwrap(),
-                    ])
-                    .unwrap(),
-                    IrValue::make_array(&[
-                        IrValue::make_ubits(8, 0x9a).unwrap(),
-                        IrValue::make_ubits(8, 0xbc).unwrap(),
-                    ])
-                    .unwrap(),
+                    IrValue::make_ubits(8, 0x12).unwrap(),
+                    IrValue::make_ubits(8, 0x34).unwrap(),
                 ])
                 .unwrap(),
-                ir::Type::Array(ir::ArrayTypeData {
-                    element_type: Box::new(ir::Type::Array(ir::ArrayTypeData {
-                        element_type: Box::new(ir::Type::Bits(8)),
-                        element_count: 2,
-                    })),
-                    element_count: 3,
-                }),
-                |solver: &mut $solver_type| solver.from_raw_str(48, "#xbc9a78563412")
-            );
-        };
+                IrValue::make_array(&[
+                    IrValue::make_ubits(8, 0x56).unwrap(),
+                    IrValue::make_ubits(8, 0x78).unwrap(),
+                ])
+                .unwrap(),
+                IrValue::make_array(&[
+                    IrValue::make_ubits(8, 0x9a).unwrap(),
+                    IrValue::make_ubits(8, 0xbc).unwrap(),
+                ])
+                .unwrap(),
+            ])
+            .unwrap(),
+            &ir::Type::Array(ir::ArrayTypeData {
+                element_type: Box::new(ir::Type::Array(ir::ArrayTypeData {
+                    element_type: Box::new(ir::Type::Bits(8)),
+                    element_count: 2,
+                })),
+                element_count: 3,
+            }),
+            |solver: &mut S| solver.from_raw_str(48, "#xbc9a78563412"),
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_array {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_ir_array,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[8][2][3] {
-                    ret literal.1: bits[8][2][3] = literal(value=[[0x12, 0x34], [0x56, 0x78], [0x9a, 0xbc]], id=1)
-                }"#,
-                |solver: &mut $solver_type, _: &FnInputs<<$solver_type as Solver>::Term>| solver
-                    .from_raw_str(48, "#xbc9a78563412")
-            );
-        };
+    pub fn test_ir_array<S: Solver>(solver_config: &S::Config) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f() -> bits[8][2][3] {
+                ret literal.1: bits[8][2][3] = literal(value=[[0x12, 0x34], [0x56, 0x78], [0x9a, 0xbc]], id=1)
+            }"#,
+            |solver: &mut S, _: &FnInputs<S::Term>| solver.from_raw_str(48, "#xbc9a78563412"),
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_value_tuple {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_ir_value_to_bv_eq!(
-                test_ir_value_tuple,
-                $solver_type,
-                $solver_config,
-                IrValue::make_tuple(&[
-                    IrValue::make_ubits(8, 0x12).unwrap(),
-                    IrValue::make_ubits(4, 0x4).unwrap(),
-                ]),
-                ir::Type::Tuple(vec![
-                    Box::new(ir::Type::Bits(8)),
-                    Box::new(ir::Type::Bits(4)),
-                ]),
-                |solver: &mut $solver_type| solver.from_raw_str(12, "#x124")
-            );
-        };
+    pub fn test_ir_value_tuple<S: Solver>(solver_config: &S::Config) {
+        assert_ir_value_to_bv_eq::<S>(
+            solver_config,
+            &IrValue::make_tuple(&[
+                IrValue::make_ubits(8, 0x12).unwrap(),
+                IrValue::make_ubits(4, 0x4).unwrap(),
+            ]),
+            &ir::Type::Tuple(vec![
+                Box::new(ir::Type::Bits(8)),
+                Box::new(ir::Type::Bits(4)),
+            ]),
+            |solver: &mut S| solver.from_raw_str(12, "#x124"),
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_tuple {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_ir_tuple,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> (bits[8], bits[4]) {
-                   ret literal.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
-                }"#,
-                |solver: &mut $solver_type, _: &FnInputs<<$solver_type as Solver>::Term>| solver
-                    .from_raw_str(12, "#x124")
-            );
-        };
+    pub fn test_ir_tuple<S: Solver>(solver_config: &S::Config) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f() -> (bits[8], bits[4]) {
+                ret literal.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+            }"#,
+            |solver: &mut S, _: &FnInputs<S::Term>| solver.from_raw_str(12, "#x124"),
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_value_token {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_ir_value_to_bv_eq!(
-                test_ir_value_token,
-                $solver_type,
-                $solver_config,
-                IrValue::make_ubits(0, 0).unwrap(),
-                ir::Type::Token,
-                |_: &mut $solver_type| BitVec::ZeroWidth
-            );
-        };
+    pub fn test_ir_value_token<S: Solver>(solver_config: &S::Config) {
+        assert_ir_value_to_bv_eq::<S>(
+            solver_config,
+            &IrValue::make_ubits(0, 0).unwrap(),
+            &ir::Type::Token,
+            |_: &mut S| BitVec::ZeroWidth,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_unop_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $unop_xls_name:expr, $unop:expr) => {
-            crate::assert_smt_fn_eq!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                r#"fn f(x: bits[8]) -> bits[8] {
-                    ret get_param.1: bits[8] = "#
-                    .to_string()
-                    + $unop_xls_name
-                    + r#"(x, id=1)
-                }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    $unop(solver, &inputs.inputs.get("x").unwrap().bitvec)
-                }
-            );
-        };
+    pub fn test_unop_base<S: Solver>(
+        solver_config: &S::Config,
+        unop_xls_name: &str,
+        unop: impl Fn(&mut S, &BitVec<S::Term>) -> BitVec<S::Term>,
+    ) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            &(format!(
+                r#"fn f(x: bits[8]) -> bits[8] {{
+                ret get_param.1: bits[8] = {}(x, id=1)
+            }}"#,
+                unop_xls_name
+            )),
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                unop(solver, &inputs.inputs.get("x").unwrap().bitvec)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_all_unops {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_unop_base!(test_not, $solver_type, $solver_config, "not", Solver::not);
-            crate::test_unop_base!(test_neg, $solver_type, $solver_config, "neg", Solver::neg);
-            crate::test_unop_base!(
-                test_or_reduce,
-                $solver_type,
-                $solver_config,
-                "or_reduce",
-                Solver::or_reduce
-            );
-            crate::test_unop_base!(
-                test_and_reduce,
-                $solver_type,
-                $solver_config,
-                "and_reduce",
-                Solver::and_reduce
-            );
-            crate::test_unop_base!(
-                test_xor_reduce,
-                $solver_type,
-                $solver_config,
-                "xor_reduce",
-                Solver::xor_reduce
-            );
-            crate::test_unop_base!(
-                test_identity,
-                $solver_type,
-                $solver_config,
-                "identity",
-                |_, a: &BitVec<<$solver_type as Solver>::Term>| a.clone()
-            );
-            crate::test_unop_base!(
-                test_reverse,
-                $solver_type,
-                $solver_config,
-                "reverse",
-                Solver::reverse
-            );
-        };
+    pub fn test_binop_base<S: Solver>(
+        solver_config: &S::Config,
+        binop_xls_name: &str,
+        binop: impl Fn(&mut S, &BitVec<S::Term>, &BitVec<S::Term>) -> BitVec<S::Term>,
+        lhs_width: usize,
+        rhs_width: usize,
+        result_width: usize,
+    ) {
+        let lhs_width_str = lhs_width.to_string();
+        let rhs_width_str = rhs_width.to_string();
+        let result_width_str = result_width.to_string();
+        let ir_text = format!(
+            r#"fn f(x: bits[{}], y: bits[{}]) -> bits[{}] {{
+                ret get_param.1: bits[{}] = {}(x, y, id=1)
+            }}"#,
+            lhs_width_str, rhs_width_str, result_width_str, result_width_str, binop_xls_name
+        );
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(&ir_text);
+        let f = parser.parse_fn().unwrap();
+        let mut solver = S::new(solver_config).unwrap();
+        let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+        let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
+        let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
+        let y = fn_inputs.inputs.get("y").unwrap().bitvec.clone();
+        let expected = binop(&mut solver, &x, &y);
+        crate::equiv::solver_interface::test_utils::assert_solver_eq(
+            &mut solver,
+            &smt_fn.output.bitvec,
+            &expected,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_binop_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $binop_xls_name:expr,
-            $expected:expr, $lhs_width:expr, $rhs_width:expr, $result_width:expr) => {
-            #[test]
-            fn $fn_name() {
-                let lhs_width_str = $lhs_width.to_string();
-                let rhs_width_str = $rhs_width.to_string();
-                let ir_text = format!(
-                    r#"fn f(x: bits[{}], y: bits[{}]) -> bits[{}] {{
-                    ret get_param.1: bits[{}] = {}(x, y, id=1)
-                }}"#,
-                    lhs_width_str, rhs_width_str, $result_width, $result_width, $binop_xls_name
-                );
-                let mut parser = crate::xls_ir::ir_parser::Parser::new(&ir_text);
-                let f = parser.parse_fn().unwrap();
-                let mut solver = <$solver_type>::new($solver_config).unwrap();
-                let fn_inputs = get_fn_inputs(&mut solver, &f, None);
-                let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
-                let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
-                let y = fn_inputs.inputs.get("y").unwrap().bitvec.clone();
-                let expected = $expected(&mut solver, x, y);
-                crate::equiv::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &smt_fn.output.bitvec,
-                    &expected,
-                );
-            }
-        };
+    pub fn test_binop_8_bit<S: Solver>(
+        solver_config: &S::Config,
+        binop_xls_name: &str,
+        binop: impl Fn(&mut S, &BitVec<S::Term>, &BitVec<S::Term>) -> BitVec<S::Term>,
+    ) {
+        test_binop_base::<S>(solver_config, binop_xls_name, binop, 8, 8, 8);
     }
 
-    #[macro_export]
-    macro_rules! test_binop_simple {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $binop_xls_name:expr, $binop:ident,
-            $lhs_width:expr, $rhs_width:expr, $result_width:expr) => {
-            crate::test_binop_base!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                $binop_xls_name,
-                |solver: &mut $solver_type, x, y| { solver.$binop(&x, &y) },
-                $lhs_width,
-                $rhs_width,
-                $result_width
-            );
-        };
+    pub fn test_binop_bool<S: Solver>(
+        solver_config: &S::Config,
+        binop_xls_name: &str,
+        binop: impl Fn(&mut S, &BitVec<S::Term>, &BitVec<S::Term>) -> BitVec<S::Term>,
+    ) {
+        test_binop_base::<S>(solver_config, binop_xls_name, binop, 8, 8, 1);
     }
 
-    #[macro_export]
-    macro_rules! test_all_binops {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_binop_simple!(test_add, $solver_type, $solver_config, "add", add, 8, 8, 8);
-            crate::test_binop_simple!(test_sub, $solver_type, $solver_config, "sub", sub, 8, 8, 8);
-            crate::test_binop_simple!(test_eq, $solver_type, $solver_config, "eq", eq, 8, 8, 1);
-            crate::test_binop_simple!(test_ne, $solver_type, $solver_config, "ne", ne, 8, 8, 1);
-            crate::test_binop_simple!(test_uge, $solver_type, $solver_config, "uge", uge, 8, 8, 1);
-            crate::test_binop_simple!(test_ugt, $solver_type, $solver_config, "ugt", ugt, 8, 8, 1);
-            crate::test_binop_simple!(test_ult, $solver_type, $solver_config, "ult", ult, 8, 8, 1);
-            crate::test_binop_simple!(test_ule, $solver_type, $solver_config, "ule", ule, 8, 8, 1);
-            crate::test_binop_simple!(test_sgt, $solver_type, $solver_config, "sgt", sgt, 8, 8, 1);
-            crate::test_binop_simple!(test_sge, $solver_type, $solver_config, "sge", sge, 8, 8, 1);
-            crate::test_binop_simple!(test_slt, $solver_type, $solver_config, "slt", slt, 8, 8, 1);
-            crate::test_binop_simple!(test_sle, $solver_type, $solver_config, "sle", sle, 8, 8, 1);
-            crate::test_binop_simple!(
-                test_xls_shll,
-                $solver_type,
-                $solver_config,
-                "shll",
-                xls_shll,
-                8,
-                4,
-                8
-            );
-            crate::test_binop_simple!(
-                test_xls_shrl,
-                $solver_type,
-                $solver_config,
-                "shrl",
-                xls_shrl,
-                8,
-                4,
-                8
-            );
-            crate::test_binop_simple!(
-                test_xls_shra,
-                $solver_type,
-                $solver_config,
-                "shra",
-                xls_shra,
-                8,
-                4,
-                8
-            );
-            crate::test_binop_base!(
-                test_xls_umul,
-                $solver_type,
-                $solver_config,
-                "umul",
-                |solver: &mut $solver_type, x, y| { solver.xls_arbitrary_width_umul(&x, &y, 16) },
-                8,
-                12,
-                16
-            );
-            crate::test_binop_base!(
-                test_xls_smul,
-                $solver_type,
-                $solver_config,
-                "smul",
-                |solver: &mut $solver_type, x, y| { solver.xls_arbitrary_width_smul(&x, &y, 16) },
-                8,
-                12,
-                16
-            );
-            crate::test_binop_simple!(
-                test_xls_udiv,
-                $solver_type,
-                $solver_config,
-                "udiv",
-                xls_udiv,
-                8,
-                8,
-                8
-            );
-            crate::test_binop_simple!(
-                test_xls_sdiv,
-                $solver_type,
-                $solver_config,
-                "sdiv",
-                xls_sdiv,
-                8,
-                8,
-                8
-            );
-            crate::test_binop_simple!(
-                test_xls_umod,
-                $solver_type,
-                $solver_config,
-                "umod",
-                xls_umod,
-                8,
-                8,
-                8
-            );
-            crate::test_binop_simple!(
-                test_xls_smod,
-                $solver_type,
-                $solver_config,
-                "smod",
-                xls_smod,
-                8,
-                8,
-                8
-            );
-        };
+    pub fn test_ir_tuple_index<S: Solver>(solver_config: &S::Config) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: (bits[8], bits[4])) -> bits[8] {
+                ret tuple_index.1: bits[8] = tuple_index(input, index=0, id=1)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let tuple = inputs.inputs.get("input").unwrap().bitvec.clone();
+                solver.extract(&tuple, 11, 4)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_tuple_index {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_ir_tuple_index,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: (bits[8], bits[4])) -> bits[8] {
-                    ret tuple_index.1: bits[8] = tuple_index(input, index=0, id=1)
-                }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let tuple = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    solver.extract(&tuple, 11, 4)
-                }
-            );
-        };
-    }
-
-    #[macro_export]
-    macro_rules! test_ir_tuple_index_literal {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_ir_tuple_index_literal,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[8] {
+    pub fn test_ir_tuple_index_literal<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            &(r#"fn f() -> bits[8] {
                     literal.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
                     ret tuple_index.1: bits[8] = tuple_index(literal.1, index=0, id=1)
-                }"#,
-                |solver: &mut $solver_type, _: &FnInputs<<$solver_type as Solver>::Term>| {
-                    solver.from_raw_str(8, "#x12")
-                }
-            );
-        };
+                    }"#),
+            |solver: &mut S, _: &FnInputs<S::Term>| solver.from_raw_str(8, "#x12"),
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_tuple_reverse {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_ir_tuple_reverse,
-                $solver_type,
-                $solver_config,
-                r#"fn f(a: (bits[8], bits[4])) -> (bits[4], bits[8]) {
+    pub fn test_ir_tuple_reverse<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(a: (bits[8], bits[4])) -> (bits[4], bits[8]) {
                     tuple_index.3: bits[4] = tuple_index(a, index=1, id=3)
                     tuple_index.5: bits[8] = tuple_index(a, index=0, id=5)
                     ret tuple.6: (bits[4], bits[8]) = tuple(tuple_index.3, tuple_index.5, id=6)
                 }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let tuple = inputs.inputs.get("a").unwrap().bitvec.clone();
-                    let tuple_0 = solver.extract(&tuple, 11, 4);
-                    let tuple_1 = solver.extract(&tuple, 3, 0);
-                    solver.concat(&tuple_1, &tuple_0)
-                }
-            );
-        };
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let tuple = inputs.inputs.get("a").unwrap().bitvec.clone();
+                let tuple_0 = solver.extract(&tuple, 11, 4);
+                let tuple_1 = solver.extract(&tuple, 3, 0);
+                solver.concat(&tuple_1, &tuple_0)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_tuple_flattened {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_ir_tuple_flattened,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> (bits[8], bits[4]) {
-                    ret tuple.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
-                }"#,
-                r#"fn g() -> bits[12] {
-                    ret tuple.1: bits[12] = literal(value=0x124, id=1)
-                }"#,
-                true,
-                EquivResult::Proved
-            );
-        };
+    pub fn test_ir_tuple_flattened<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f() -> (bits[8], bits[4]) {
+            ret tuple.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+        }"#,
+            r#"fn g() -> bits[12] {
+            ret tuple.1: bits[12] = literal(value=0x124, id=1)
+        }"#,
+            true,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_tuple_literal_vs_constructed {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_tuple_literal_vs_constructed,
-                $solver_type,
-                $solver_config,
-                r#"fn lhs() -> (bits[8], bits[4]) {
-                    ret lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
-                }"#,
-                r#"fn rhs() -> (bits[8], bits[4]) {
-                    lit0: bits[8] = literal(value=0x12, id=1)
-                    lit1: bits[4] = literal(value=0x4, id=2)
-                    ret tup: (bits[8], bits[4]) = tuple(lit0, lit1, id=3)
-                }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+    pub fn test_tuple_literal_vs_constructed<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn lhs() -> (bits[8], bits[4]) {
+            ret lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+        }"#,
+            r#"fn rhs() -> (bits[8], bits[4]) {
+            lit0: bits[8] = literal(value=0x12, id=1)
+            lit1: bits[4] = literal(value=0x4, id=2)
+            ret tup: (bits[8], bits[4]) = tuple(lit0, lit1, id=3)
+        }"#,
+            false,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_tuple_index_on_literal {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_tuple_index_on_literal,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[8] {
-                    lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
-                    ret idx0: bits[8] = tuple_index(lit_tuple, index=0, id=2)
-                }"#,
-                r#"fn g() -> bits[8] {
-                    ret lit: bits[8] = literal(value=0x12, id=1)
-                }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+    pub fn test_tuple_index_on_literal<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f() -> bits[8] {
+            lit_tuple: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+            ret idx0: bits[8] = tuple_index(lit_tuple, index=0, id=2)
+        }"#,
+            r#"fn g() -> bits[8] {
+            ret lit: bits[8] = literal(value=0x12, id=1)
+        }"#,
+            false,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_array_index_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $index:expr, $expected_low:expr) => {
-            crate::assert_smt_fn_eq!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[8][4] id=1) -> bits[8] {
-                    literal.4: bits[3] = literal(value="#.to_string() + $index + r#", id=4)
+    pub fn test_ir_array_index_base<S: Solver>(
+        solver_config: &S::Config,
+        index: &str,
+        expected_low: i32,
+    ) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            &(r#"fn f(input: bits[8][4] id=1) -> bits[8] {
+                    literal.4: bits[3] = literal(value="#
+                .to_string()
+                + index
+                + r#", id=4)
                     ret array_index.5: bits[8] = array_index(input, indices=[literal.4], assumed_in_bounds=true, id=5)
-                }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    solver.extract(&array, $expected_low + 7, $expected_low)
-                }
-            );
-        };
+                }"#),
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                solver.extract(&array, expected_low + 7, expected_low)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_array_index {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_array_index_base!(
-                test_ir_array_index_0,
-                $solver_type,
-                $solver_config,
-                "0",
-                0
-            );
-            crate::test_ir_array_index_base!(
-                test_ir_array_index_1,
-                $solver_type,
-                $solver_config,
-                "1",
-                8
-            );
-            crate::test_ir_array_index_base!(
-                test_ir_array_index_2,
-                $solver_type,
-                $solver_config,
-                "2",
-                16
-            );
-            crate::test_ir_array_index_base!(
-                test_ir_array_index_3,
-                $solver_type,
-                $solver_config,
-                "3",
-                24
-            );
-            crate::test_ir_array_index_base!(
-                test_ir_array_index_out_of_bounds,
-                $solver_type,
-                $solver_config,
-                "4",
-                24
-            );
-        };
+    pub fn test_ir_array_index_multi_level<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8][4][2] id=1) -> bits[8] {
+                literal.4: bits[2] = literal(value=1, id=4)
+                ret array_index.6: bits[8] = array_index(input, indices=[literal.4], assumed_in_bounds=true, id=6)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                solver.extract(&array, 63, 32)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_array_index_multi_level {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_ir_array_index_multi_level,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[8][4][2] id=1) -> bits[8] {
-                    literal.4: bits[2] = literal(value=1, id=4)
-                    ret array_index.6: bits[8] = array_index(input, indices=[literal.4], assumed_in_bounds=true, id=6)
-                }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    solver.extract(&array, 63, 32)
-                }
-            );
-        };
+    pub fn test_ir_array_index_deep_multi_level<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8][4][2] id=1) -> bits[8] {
+                literal.4: bits[2] = literal(value=1, id=4)
+                literal.5: bits[2] = literal(value=0, id=5)
+                ret array_index.6: bits[8] = array_index(input, indices=[literal.4, literal.5], assumed_in_bounds=true, id=6)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                solver.extract(&array, 39, 32)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_array_index_deep_multi_level {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_ir_array_index_deep_multi_level,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[8][4][2] id=1) -> bits[8] {
-                    literal.4: bits[2] = literal(value=1, id=4)
-                    literal.5: bits[2] = literal(value=0, id=5)
-                    ret array_index.6: bits[8] = array_index(input, indices=[literal.4, literal.5], assumed_in_bounds=true, id=6)
-                }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    solver.extract(&array, 39, 32)
-                }
-            );
-        };
+    pub fn test_array_update_inbound_value<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[4][4] id=1, val: bits[4] id=2) -> bits[4][4] {
+                lit: bits[2] = literal(value=1, id=3)
+                ret upd: bits[4][4] = array_update(input, val, indices=[lit], id=4)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let val = inputs.inputs.get("val").unwrap().bitvec.clone();
+                let pre = solver.extract(&array, 3, 0);
+                let with_mid = solver.concat(&val, &pre);
+                let post = solver.extract(&array, 15, 8);
+                solver.concat(&post, &with_mid)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_array_update_inbound_value {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_array_update_elem0_value,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[4][4] id=1, val: bits[4] id=2) -> bits[4][4] {
-                    lit: bits[2] = literal(value=1, id=3)
-                    ret upd: bits[4][4] = array_update(input, val, indices=[lit], id=4)
-                }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    let val = inputs.inputs.get("val").unwrap().bitvec.clone();
-                    let pre = solver.extract(&array, 3, 0);
-                    let with_mid = solver.concat(&val, &pre);
-                    let post = solver.extract(&array, 15, 8);
-                    solver.concat(&post, &with_mid)
-                }
-            );
-        };
+    pub fn test_array_update_nested<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8][4][4] id=1, val: bits[8][4] id=2) -> bits[8][4][4] {
+                idx0: bits[2] = literal(value=1, id=3)
+                ret upd: bits[8][4][4] = array_update(input, val, indices=[idx0], id=5)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let val = inputs.inputs.get("val").unwrap().bitvec.clone();
+                let pre = solver.extract(&array, 31, 0);
+                let with_mid = solver.concat(&val, &pre);
+                let post = solver.extract(&array, 127, 64);
+                solver.concat(&post, &with_mid)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_array_update_nested {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_array_update_nested,
-                $solver_type,
-                $solver_config,
-                r#"fn lhs(input: bits[8][4][4] id=1, val: bits[8][4] id=2) -> bits[8][4][4] {
-                    idx0: bits[2] = literal(value=1, id=3)
-                    ret upd: bits[8][4][4] = array_update(input, val, indices=[idx0], id=5)
-                }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    let val = inputs.inputs.get("val").unwrap().bitvec.clone();
-                    let pre = solver.extract(&array, 31, 0);
-                    let with_mid = solver.concat(&val, &pre);
-                    let post = solver.extract(&array, 127, 64);
-                    solver.concat(&post, &with_mid)
-                }
-            );
-        };
+    pub fn test_array_update_deep_nested<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8][2][2] id=1, val: bits[8] id=2) -> bits[8][2][2] {
+                idx0: bits[2] = literal(value=1, id=3)
+                idx1: bits[2] = literal(value=0, id=4)
+                ret upd: bits[8][2][2] = array_update(input, val, indices=[idx0, idx1], id=5)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let val = inputs.inputs.get("val").unwrap().bitvec.clone();
+                let pre = solver.extract(&array, 15, 0);
+                let with_mid = solver.concat(&val, &pre);
+                let post = solver.extract(&array, 31, 24);
+                solver.concat(&post, &with_mid)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_array_update_deep_nested {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_array_update_deep_nested,
-                $solver_type,
-                $solver_config,
-                r#"fn lhs(input: bits[8][2][2] id=1, val: bits[8] id=2) -> bits[8][2][2] {
-                    idx0: bits[2] = literal(value=1, id=3)
-                    idx1: bits[2] = literal(value=0, id=4)
-                    ret upd: bits[8][2][2] = array_update(input, val, indices=[idx0, idx1], id=5)
-                }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let array = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    let val = inputs.inputs.get("val").unwrap().bitvec.clone();
-                    let pre = solver.extract(&array, 15, 0);
-                    let with_mid = solver.concat(&val, &pre);
-                    let post = solver.extract(&array, 31, 24);
-                    solver.concat(&post, &with_mid)
-                }
-            );
-        };
+    pub fn test_extend_base<S: Solver>(
+        solver_config: &S::Config,
+        extend_width: usize,
+        signed: bool,
+    ) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            &(format!(
+                r#"fn f(x: bits[8]) -> bits[{}] {{
+                ret get_param.1: bits[{}] = {}(x, new_bit_count={}, id=1)
+            }}"#,
+                extend_width,
+                extend_width,
+                if signed { "sign_ext" } else { "zero_ext" },
+                extend_width
+            )),
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let x = inputs.inputs.get("x").unwrap().bitvec.clone();
+                solver.extend_to(&x, extend_width, signed)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_extend {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $extend_width:expr, $signed:expr) => {
-            crate::assert_smt_fn_eq!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                format!(
-                    r#"fn f(x: bits[8]) -> bits[{}] {{
-                    ret get_param.1: bits[{}] = {}(x, new_bit_count={}, id=1)
-                }}"#,
-                    $extend_width,
-                    $extend_width,
-                    if $signed { "sign_ext" } else { "zero_ext" },
-                    $extend_width,
-                ),
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let x = inputs.inputs.get("x").unwrap().bitvec.clone();
-                    solver.extend_to(&x, $extend_width, $signed)
-                }
-            );
-        };
+    pub fn test_dynamic_bit_slice_base<S: Solver>(
+        solver_config: &S::Config,
+        start: usize,
+        width: usize,
+    ) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            &(format!(
+                r#"fn f(input: bits[8]) -> bits[{}] {{
+                start: bits[4] = literal(value={}, id=2)
+                ret get_param.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
+            }}"#,
+                width, start, width, width
+            )),
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let needed_width = start + width;
+                let input_ext = if needed_width > input.get_width() {
+                    solver.extend_to(&input, needed_width, false)
+                } else {
+                    input
+                };
+                solver.slice(&input_ext, start, width)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_dynamic_bit_slice_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $start:expr, $width:expr) => {
-            crate::assert_smt_fn_eq!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                format!(r#"fn f(input: bits[8]) -> bits[{}] {{
-                    start: bits[4] = literal(value={}, id=2)
-                    ret get_param.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
-                }}"#, $width, $start, $width, $width),
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    let needed_width = $start + $width;
-                    let input_ext = if needed_width > input.get_width() {
-                        solver.extend_to(&input, needed_width, false)
-                    } else {
-                        input
-                    };
-                    solver.slice(&input_ext, $start, $width)
-                }
-            );
-        };
+    pub fn test_bit_slice_base<S: Solver>(solver_config: &S::Config, start: usize, width: usize) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            &format!(
+                r#"fn f(input: bits[8]) -> bits[{}] {{
+                ret get_param.1: bits[{}] = bit_slice(input, start={}, width={}, id=1)
+            }}"#,
+                width, width, start, width
+            ),
+            &format!(
+                r#"fn f(input: bits[8]) -> bits[{}] {{
+                start: bits[4] = literal(value={}, id=2)
+                ret get_param.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
+            }}"#,
+                width, start, width, width
+            ),
+            false,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_dynamic_bit_slice {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_dynamic_bit_slice_base!(
-                test_dynamic_bit_slice_0_4,
-                $solver_type,
-                $solver_config,
-                0,
-                4
-            );
-            crate::test_dynamic_bit_slice_base!(
-                test_dynamic_bit_slice_5_4,
-                $solver_type,
-                $solver_config,
-                5,
-                4
-            );
-            crate::test_dynamic_bit_slice_base!(
-                test_dynamic_bit_slice_0_8,
-                $solver_type,
-                $solver_config,
-                0,
-                8
-            );
-            crate::test_dynamic_bit_slice_base!(
-                test_dynamic_bit_slice_5_8,
-                $solver_type,
-                $solver_config,
-                5,
-                8
-            );
-            crate::test_dynamic_bit_slice_base!(
-                test_dynamic_bit_slice_10_4,
-                $solver_type,
-                $solver_config,
-                10,
-                4
-            );
-            crate::test_dynamic_bit_slice_base!(
-                test_dynamic_bit_slice_10_8,
-                $solver_type,
-                $solver_config,
-                10,
-                8
-            );
-        };
-    }
-
-    #[macro_export]
-    macro_rules! test_bit_slice_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $start:expr, $width:expr) => {
-            crate::test_ir_fn_equiv!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                &format!(r#"fn f(input: bits[8]) -> bits[{}] {{
-                    ret get_param.1: bits[{}] = bit_slice(input, start={}, width={}, id=1)
-                }}"#, $width, $width, $start, $width),
-                &format!(r#"fn f(input: bits[8]) -> bits[{}] {{
-                    start: bits[4] = literal(value={}, id=2)
-                    ret get_param.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
-                }}"#, $width, $start, $width, $width),
-                false,
-                EquivResult::Proved
-            );
-        };
-    }
-
-    #[macro_export]
-    macro_rules! test_bit_slice {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_bit_slice_base!(test_bit_slice_0_4, $solver_type, $solver_config, 0, 4);
-            crate::test_bit_slice_base!(test_bit_slice_5_4, $solver_type, $solver_config, 5, 3);
-            crate::test_bit_slice_base!(test_bit_slice_0_8, $solver_type, $solver_config, 0, 8);
-        };
-    }
-
-    #[macro_export]
-    macro_rules! test_bit_slice_update_zero {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_bit_slice_update_zero,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
+    pub fn test_bit_slice_update_zero<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
                     start: bits[4] = literal(value=0, id=2)
                     ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
                 }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
-                    let input_upper = solver.slice(&input, 4, 4);
-                    let updated = solver.concat(&input_upper, &slice);
-                    updated
-                }
-            );
-        };
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
+                let input_upper = solver.slice(&input, 4, 4);
+                let updated = solver.concat(&input_upper, &slice);
+                updated
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_bit_slice_update_middle {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_bit_slice_update_middle,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
+    pub fn test_bit_slice_update_middle<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
                     start: bits[4] = literal(value=1, id=2)
                     ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
                 }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
-                    let input_lower = solver.slice(&input, 0, 1);
-                    let input_upper = solver.slice(&input, 5, 3);
-                    let updated = solver.concat(&slice, &input_lower);
-                    let updated = solver.concat(&input_upper, &updated);
-                    updated
-                }
-            );
-        };
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
+                let input_lower = solver.slice(&input, 0, 1);
+                let input_upper = solver.slice(&input, 5, 3);
+                let updated = solver.concat(&slice, &input_lower);
+                let updated = solver.concat(&input_upper, &updated);
+                updated
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_bit_slice_update_end {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_bit_slice_update_end,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
+    pub fn test_bit_slice_update_end<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
                     start: bits[4] = literal(value=4, id=2)
                     ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
                 }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
-                    let input_lower = solver.slice(&input, 0, 4);
-                    let updated = solver.concat(&slice, &input_lower);
-                    updated
-                }
-            );
-        };
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
+                let input_lower = solver.slice(&input, 0, 4);
+                let updated = solver.concat(&slice, &input_lower);
+                updated
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_bit_slice_update_beyond_end {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_bit_slice_update_beyond_end,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[8], slice: bits[10]) -> bits[8] {
+    pub fn test_bit_slice_update_beyond_end<S: Solver>(solver_config: &S::Config) {
+        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8], slice: bits[10]) -> bits[8] {
                     start: bits[4] = literal(value=4, id=2)
                     ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
                 }"#,
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let input = inputs.inputs.get("input").unwrap().bitvec.clone();
-                    let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
-                    let input_lower = solver.slice(&input, 0, 4);
-                    let slice_extracted = solver.slice(&slice, 0, 4);
-                    let updated = solver.concat(&slice_extracted, &input_lower);
-                    updated
-                }
-            );
-        };
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let input = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let slice = inputs.inputs.get("slice").unwrap().bitvec.clone();
+                let input_lower = solver.slice(&input, 0, 4);
+                let slice_extracted = solver.slice(&slice, 0, 4);
+                let updated = solver.concat(&slice_extracted, &input_lower);
+                updated
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_bit_slice_update_wider_update_value {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_bit_slice_update_wider_update_value,
-                $solver_type,
-                $solver_config,
-                r#"fn f(input: bits[7] id=1) -> bits[5] {
+    pub fn test_bit_slice_update_wider_update_value<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f(input: bits[7] id=1) -> bits[5] {
                     slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
                     ret upd.3: bits[5] = bit_slice_update(slice.2, input, input, id=3)
                 }"#,
-                r#"fn f(input: bits[7] id=1) -> bits[5] {
+            r#"fn f(input: bits[7] id=1) -> bits[5] {
                     slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
                     ret upd.3: bits[5] = bit_slice_update(slice.2, input, input, id=3)
                 }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+            false,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_bit_slice_update_large_update_value {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::assert_smt_fn_eq!(
-                test_bit_slice_update_large_update_value,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[32] {
+    pub fn test_bit_slice_update_large_update_value<S: Solver>(solver_config: &S::Config) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f() -> bits[32] {
                     operand: bits[32] = literal(value=0xABCD1234, id=1)
                     start: bits[5] = literal(value=4, id=2)
                     upd_val: bits[80] = literal(value=0xFFFFFFFFFFFFFFFFFFF, id=3)
                     ret r: bits[32] = bit_slice_update(operand, start, upd_val, id=4)
                 }"#,
-                |solver: &mut $solver_type, _: &FnInputs<<$solver_type as Solver>::Term>| {
-                    solver.from_raw_str(32, "#xFFFFFFF4")
-                }
-            );
-        };
+            |solver: &mut S, _: &FnInputs<S::Term>| solver.from_raw_str(32, "#xFFFFFFF4"),
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_fuzz_dynamic_bit_slice_shrink_panics {
-        ($solver_type:ty, $solver_config:expr) => {
-            #[test]
-            fn test_fuzz_dynamic_bit_slice_shrink_panics() {
-                let ir = r#"fn bad(input: bits[32]) -> bits[16] {
+    pub fn test_fuzz_dynamic_bit_slice_shrink_panics<S: Solver>(solver_config: &S::Config) {
+        let ir = r#"fn bad(input: bits[32]) -> bits[16] {
                     start: bits[4] = literal(value=4, id=2)
                     ret r: bits[16] = dynamic_bit_slice(input, start, width=16, id=1)
                 }"#;
-                let f = crate::xls_ir::ir_parser::Parser::new(ir)
-                    .parse_fn()
-                    .unwrap();
-                let mut solver = <$solver_type>::new($solver_config).unwrap();
-                let inputs = get_fn_inputs(&mut solver, &f, None);
-                // This call should not panic
-                let _ = ir_to_smt(&mut solver, &inputs);
-            }
-        };
+        let f = crate::xls_ir::ir_parser::Parser::new(ir)
+            .parse_fn()
+            .unwrap();
+        let mut solver = S::new(solver_config).unwrap();
+        let inputs = get_fn_inputs(&mut solver, &f, None);
+        // This call should not panic
+        let _ = ir_to_smt(&mut solver, &inputs);
     }
 
-    #[macro_export]
-    macro_rules! test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob,
-                $solver_type,
-                $solver_config,
-                r#"fn fuzz_test(input: bits[8] id=1) -> bits[8] {
+    pub fn test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob<S: Solver>(
+        solver_config: &S::Config,
+    ) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn fuzz_test(input: bits[8] id=1) -> bits[8] {
                     literal_255: bits[8] = literal(value=255, id=3)
                     bsu1: bits[8] = bit_slice_update(input, input, input, id=2)
                     ret bsu2: bits[8] = bit_slice_update(literal_255, literal_255, bsu1, id=4)
                 }"#,
-                r#"fn fuzz_test(input: bits[8] id=1) -> bits[8] {
+            r#"fn fuzz_test(input: bits[8] id=1) -> bits[8] {
                     ret literal_255: bits[8] = literal(value=255, id=3)
                 }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+            false,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_prove_fn_equiv {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_assert_fn_equiv_to_self!(
-                test_prove_fn_equiv,
-                $solver_type,
-                $solver_config,
-                r#"fn f(x: bits[8], y: bits[8]) -> bits[8] {
-                    ret get_param.1: bits[8] = identity(x, id=1)
-                }"#
-            );
-        };
+    pub fn test_prove_fn_equiv<S: Solver>(solver_config: &S::Config) {
+        test_ir_fn_equiv_to_self::<S>(
+            solver_config,
+            r#"fn f(x: bits[8], y: bits[8]) -> bits[8] {
+                ret get_param.1: bits[8] = identity(x, id=1)
+            }"#,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_prove_fn_inequiv {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_prove_fn_inequiv,
-                $solver_type,
-                $solver_config,
-                r#"fn f(x: bits[8]) -> bits[8] {
+    pub fn test_prove_fn_inequiv<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_inequiv::<S>(
+            solver_config,
+            r#"fn f(x: bits[8]) -> bits[8] {
                     ret get_param.1: bits[8] = identity(x, id=1)
                 }"#,
-                r#"fn g(x: bits[8]) -> bits[8] {
+            r#"fn g(x: bits[8]) -> bits[8] {
                     ret get_param.1: bits[8] = not(x, id=1)
                 }"#,
-                false,
-                EquivResult::Disproved { .. }
-            );
-        };
+            false,
+        );
     }
 
     // --------------------------------------------------------------
     // Nary operation test helpers (Concat/And/Or/Xor/Nor/Nand)
     // --------------------------------------------------------------
-    #[macro_export]
-    macro_rules! test_nary_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $op_name:expr, $builder:expr) => {
-            crate::assert_smt_fn_eq!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                concat!(
-                    "fn f(a: bits[4], b: bits[4], c: bits[4]) -> bits[4] {\n    ret nary.1: bits[4] = ",
-                    $op_name,
-                    "(a, b, c, id=1)\n}"
-                ),
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let a = inputs.inputs.get("a").unwrap().bitvec.clone();
-                    let b = inputs.inputs.get("b").unwrap().bitvec.clone();
-                    let c = inputs.inputs.get("c").unwrap().bitvec.clone();
-                    $builder(solver, a, b, c)
-                }
-            );
-        };
+    pub fn test_nary_base<S: Solver>(
+        solver_config: &S::Config,
+        op_name: &str,
+        builder: impl Fn(
+            &mut S,
+            &BitVec<S::Term>,
+            &BitVec<S::Term>,
+            &BitVec<S::Term>,
+        ) -> BitVec<S::Term>,
+    ) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            &format!(
+                r#"fn f(a: bits[4], b: bits[4], c: bits[4]) -> bits[4] {{
+                    ret nary.1: bits[4] = {op_name}(a, b, c, id=1)
+                }}"#,
+            ),
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let a = inputs.inputs.get("a").unwrap().bitvec.clone();
+                let b = inputs.inputs.get("b").unwrap().bitvec.clone();
+                let c = inputs.inputs.get("c").unwrap().bitvec.clone();
+                builder(solver, &a, &b, &c)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_all_nary {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_nary_base!(
-                test_concat_nary,
-                $solver_type,
-                $solver_config,
-                "concat",
-                |s: &mut $solver_type, a, b, c| { s.concat_many(vec![&a, &b, &c]) }
-            );
-            crate::test_nary_base!(
-                test_and_nary,
-                $solver_type,
-                $solver_config,
-                "and",
-                |s: &mut $solver_type, a, b, c| { s.and_many(vec![&a, &b, &c]) }
-            );
-            crate::test_nary_base!(
-                test_or_nary,
-                $solver_type,
-                $solver_config,
-                "or",
-                |s: &mut $solver_type, a, b, c| { s.or_many(vec![&a, &b, &c]) }
-            );
-            crate::test_nary_base!(
-                test_xor_nary,
-                $solver_type,
-                $solver_config,
-                "xor",
-                |s: &mut $solver_type, a, b, c| { s.xor_many(vec![&a, &b, &c]) }
-            );
-            crate::test_nary_base!(
-                test_nor_nary,
-                $solver_type,
-                $solver_config,
-                "nor",
-                |s: &mut $solver_type, a, b, c| { s.nor_many(vec![&a, &b, &c]) }
-            );
-            crate::test_nary_base!(
-                test_nand_nary,
-                $solver_type,
-                $solver_config,
-                "nand",
-                |s: &mut $solver_type, a, b, c| { s.nand_many(vec![&a, &b, &c]) }
-            );
-        };
-    }
-
-    #[macro_export]
-    macro_rules! test_ir_decode_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $in_width:expr, $out_width:expr) => {
-            crate::assert_smt_fn_eq!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                format!(
-                    r#"fn f(x: bits[{iw}]) -> bits[{ow}] {{
+    pub fn test_ir_decode_base<S: Solver>(
+        solver_config: &S::Config,
+        in_width: usize,
+        out_width: usize,
+    ) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            &format!(
+                r#"fn f(x: bits[{iw}]) -> bits[{ow}] {{
     ret d.1: bits[{ow}] = decode(x, width={ow}, id=1)
 }}"#,
-                    iw = $in_width,
-                    ow = $out_width
-                ),
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let x = inputs.inputs.get("x").unwrap().bitvec.clone();
-                    solver.xls_decode(&x, $out_width)
-                }
-            );
-        };
+                iw = in_width,
+                ow = out_width
+            ),
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let x = inputs.inputs.get("x").unwrap().bitvec.clone();
+                solver.xls_decode(&x, out_width)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_encode_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $in_width:expr, $out_width:expr) => {
-            crate::assert_smt_fn_eq!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                format!(
-                    r#"fn f(x: bits[{iw}]) -> bits[{ow}] {{
+    pub fn test_ir_encode_base<S: Solver>(
+        solver_config: &S::Config,
+        in_width: usize,
+        out_width: usize,
+    ) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            &format!(
+                r#"fn f(x: bits[{iw}]) -> bits[{ow}] {{
                         ret e.1: bits[{ow}] = encode(x, id=1)
                     }}"#,
-                    iw = $in_width,
-                    ow = $out_width
-                ),
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let x = inputs.inputs.get("x").unwrap().bitvec.clone();
-                    solver.xls_encode(&x)
-                }
-            );
-        };
+                iw = in_width,
+                ow = out_width
+            ),
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let x = inputs.inputs.get("x").unwrap().bitvec.clone();
+                solver.xls_encode(&x)
+            },
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_ir_one_hot_base {
-        ($fn_name:ident, $solver_type:ty, $solver_config:expr, $prio:expr) => {
-            crate::assert_smt_fn_eq!(
-                $fn_name,
-                $solver_type,
-                $solver_config,
-                if $prio {
-                    r#"fn f(x: bits[16]) -> bits[16] {
+    pub fn test_ir_one_hot_base<S: Solver>(solver_config: &S::Config, lsb_prio: bool) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            if lsb_prio {
+                r#"fn f(x: bits[16]) -> bits[16] {
                         ret oh.1: bits[16] = one_hot(x, lsb_prio=true, id=1)
                     }"#
-                } else {
-                    r#"fn f(x: bits[16]) -> bits[16] {
+            } else {
+                r#"fn f(x: bits[16]) -> bits[16] {
                         ret oh.1: bits[16] = one_hot(x, lsb_prio=false, id=1)
                     }"#
-                },
-                |solver: &mut $solver_type, inputs: &FnInputs<<$solver_type as Solver>::Term>| {
-                    let x = inputs.inputs.get("x").unwrap().bitvec.clone();
-                    if $prio {
-                        solver.xls_one_hot_lsb_prio(&x)
-                    } else {
-                        solver.xls_one_hot_msb_prio(&x)
-                    }
+            },
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let x = inputs.inputs.get("x").unwrap().bitvec.clone();
+                if lsb_prio {
+                    solver.xls_one_hot_lsb_prio(&x)
+                } else {
+                    solver.xls_one_hot_msb_prio(&x)
                 }
-            );
-        };
+            },
+        );
     }
 
     // ----------------------------
@@ -2191,14 +1755,10 @@ mod test_utils {
     // ----------------------------
 
     // sel basic: selector in range (bits[2]=1) -> second case
-    #[macro_export]
-    macro_rules! test_sel_basic {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_sel_basic,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[4] {
+    pub fn test_sel_basic<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f() -> bits[4] {
                     selidx: bits[2] = literal(value=1, id=10)
                     a: bits[4] = literal(value=10, id=11)
                     b: bits[4] = literal(value=11, id=12)
@@ -2206,24 +1766,18 @@ mod test_utils {
                     d: bits[4] = literal(value=13, id=14)
                     ret s: bits[4] = sel(selidx, cases=[a, b, c, d], id=15)
                 }"#,
-                r#"fn g() -> bits[4] {
+            r#"fn g() -> bits[4] {
                     ret k: bits[4] = literal(value=11, id=1)
                 }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+            false,
+        );
     }
 
     // sel default path: selector out of range chooses default
-    #[macro_export]
-    macro_rules! test_sel_default {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_sel_default,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[4] {
+    pub fn test_sel_default<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f() -> bits[4] {
                     selidx: bits[2] = literal(value=3, id=10)
                     a: bits[4] = literal(value=10, id=11)
                     b: bits[4] = literal(value=11, id=12)
@@ -2231,47 +1785,32 @@ mod test_utils {
                     def: bits[4] = literal(value=15, id=14)
                     ret s: bits[4] = sel(selidx, cases=[a, b, c], default=def, id=15)
                 }"#,
-                r#"fn g() -> bits[4] {
+            r#"fn g() -> bits[4] {
                     ret k: bits[4] = literal(value=15, id=1)
                 }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+            false,
+        );
     }
 
-    #[macro_export]
-    macro_rules! test_sel_missing_default_panics {
-        ($solver_type:ty, $solver_config:expr) => {
-            // Invalid Sel spec tests (expect panic)
-            #[should_panic]
-            #[test]
-            fn test_sel_missing_default_panics() {
-                let ir = r#"fn bad() -> bits[4] {
+    pub fn test_sel_missing_default_panics<S: Solver>(solver_config: &S::Config) {
+        let ir = r#"fn bad() -> bits[4] {
                     idx: bits[2] = literal(value=3, id=1)
                     a: bits[4] = literal(value=1, id=2)
                     b: bits[4] = literal(value=2, id=3)
                     c: bits[4] = literal(value=3, id=4)
                     ret s: bits[4] = sel(idx, cases=[a, b, c], id=5)
                 }"#;
-                let f = crate::xls_ir::ir_parser::Parser::new(ir)
-                    .parse_fn()
-                    .unwrap();
-                let mut solver = <$solver_type>::new($solver_config).unwrap();
-                let inputs = get_fn_inputs(&mut solver, &f, None);
-                // Should panic during conversion due to missing default
-                let _ = ir_to_smt(&mut solver, &inputs);
-            }
-        };
+        let f = crate::xls_ir::ir_parser::Parser::new(ir)
+            .parse_fn()
+            .unwrap();
+        let mut solver = S::new(solver_config).unwrap();
+        let inputs = get_fn_inputs(&mut solver, &f, None);
+        // Should panic during conversion due to missing default
+        let _ = ir_to_smt(&mut solver, &inputs);
     }
 
-    #[macro_export]
-    macro_rules! test_sel_unexpected_default_panics {
-        ($solver_type:ty, $solver_config:expr) => {
-            #[should_panic]
-            #[test]
-            fn test_sel_unexpected_default_panics() {
-                let ir = r#"fn bad() -> bits[4] {
+    pub fn test_sel_unexpected_default_panics<S: Solver>(solver_config: &S::Config) {
+        let ir = r#"fn bad() -> bits[4] {
                     idx: bits[2] = literal(value=1, id=1)
                     a: bits[4] = literal(value=1, id=2)
                     b: bits[4] = literal(value=2, id=3)
@@ -2280,49 +1819,37 @@ mod test_utils {
                     def: bits[4] = literal(value=5, id=6)
                     ret s: bits[4] = sel(idx, cases=[a,b,c,d], default=def, id=7)
                 }"#;
-                let f = crate::xls_ir::ir_parser::Parser::new(ir)
-                    .parse_fn()
-                    .unwrap();
-                let mut solver = <$solver_type>::new($solver_config).unwrap();
-                let inputs = get_fn_inputs(&mut solver, &f, None);
-                let _ = ir_to_smt(&mut solver, &inputs);
-            }
-        };
+        let f = crate::xls_ir::ir_parser::Parser::new(ir)
+            .parse_fn()
+            .unwrap();
+        let mut solver = S::new(solver_config).unwrap();
+        let inputs = get_fn_inputs(&mut solver, &f, None);
+        let _ = ir_to_smt(&mut solver, &inputs);
     }
 
     // one_hot_sel: multiple bits
-    #[macro_export]
-    macro_rules! test_one_hot_sel_multi {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_one_hot_sel_multi,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[4] {
+    pub fn test_one_hot_sel_multi<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f() -> bits[4] {
                     sel: bits[3] = literal(value=3, id=1)
                     c0: bits[4] = literal(value=1, id=2)
                     c1: bits[4] = literal(value=2, id=3)
                     c2: bits[4] = literal(value=4, id=4)
                     ret o: bits[4] = one_hot_sel(sel, cases=[c0, c1, c2], id=5)
                 }"#,
-                r#"fn g() -> bits[4] {
+            r#"fn g() -> bits[4] {
                     ret lit: bits[4] = literal(value=3, id=1)
                 }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+            false,
+        );
     }
 
     // priority_sel: multiple bits -> lowest index wins
-    #[macro_export]
-    macro_rules! test_priority_sel_multi {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_priority_sel_multi,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[4] {
+    pub fn test_priority_sel_multi<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f() -> bits[4] {
                     sel: bits[3] = literal(value=5, id=1)
                     c0: bits[4] = literal(value=1, id=2)
                     c1: bits[4] = literal(value=2, id=3)
@@ -2330,24 +1857,18 @@ mod test_utils {
                     def: bits[4] = literal(value=8, id=5)
                     ret o: bits[4] = priority_sel(sel, cases=[c0, c1, c2], default=def, id=6)
                 }"#,
-                r#"fn g() -> bits[4] {
+            r#"fn g() -> bits[4] {
                     ret lit: bits[4] = literal(value=1, id=1)
                 }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+            false,
+        );
     }
 
     // priority_sel: no bits set selects default
-    #[macro_export]
-    macro_rules! test_priority_sel_default {
-        ($solver_type:ty, $solver_config:expr) => {
-            crate::test_ir_fn_equiv!(
-                test_priority_sel_default,
-                $solver_type,
-                $solver_config,
-                r#"fn f() -> bits[4] {
+    pub fn test_priority_sel_default<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f() -> bits[4] {
                     sel: bits[3] = literal(value=0, id=1)
                     c0: bits[4] = literal(value=1, id=2)
                     c1: bits[4] = literal(value=2, id=3)
@@ -2355,13 +1876,11 @@ mod test_utils {
                     def: bits[4] = literal(value=8, id=5)
                     ret o: bits[4] = priority_sel(sel, cases=[c0, c1, c2], default=def, id=6)
                 }"#,
-                r#"fn g() -> bits[4] {
+            r#"fn g() -> bits[4] {
                     ret lit: bits[4] = literal(value=8, id=1)
                 }"#,
-                false,
-                EquivResult::Proved
-            );
-        };
+            false,
+        );
     }
 }
 
@@ -2370,64 +1889,485 @@ macro_rules! test_with_solver {
         #[cfg(test)]
         mod $mod_ident {
             use super::*;
+            use crate::equiv::prove_equiv::test_utils;
 
-            crate::test_ir_value_bits!($solver_type, $solver_config);
-            crate::test_ir_bits!($solver_type, $solver_config);
-            crate::test_ir_value_array!($solver_type, $solver_config);
-            crate::test_ir_array!($solver_type, $solver_config);
-            crate::test_ir_value_tuple!($solver_type, $solver_config);
-            crate::test_ir_tuple!($solver_type, $solver_config);
-            crate::test_ir_value_token!($solver_type, $solver_config);
-            crate::test_all_binops!($solver_type, $solver_config);
-            crate::test_all_unops!($solver_type, $solver_config);
-            crate::test_ir_tuple_index!($solver_type, $solver_config);
-            crate::test_ir_tuple_index_literal!($solver_type, $solver_config);
-            crate::test_ir_tuple_reverse!($solver_type, $solver_config);
-            crate::test_ir_tuple_flattened!($solver_type, $solver_config);
-            crate::test_tuple_literal_vs_constructed!($solver_type, $solver_config);
-            crate::test_tuple_index_on_literal!($solver_type, $solver_config);
-            crate::test_ir_array_index!($solver_type, $solver_config);
-            crate::test_ir_array_index_multi_level!($solver_type, $solver_config);
-            crate::test_ir_array_index_deep_multi_level!($solver_type, $solver_config);
-            crate::test_array_update_inbound_value!($solver_type, $solver_config);
-            crate::test_array_update_nested!($solver_type, $solver_config);
-            crate::test_array_update_deep_nested!($solver_type, $solver_config);
-            crate::test_prove_fn_equiv!($solver_type, $solver_config);
-            crate::test_prove_fn_inequiv!($solver_type, $solver_config);
-            crate::test_extend!(test_extend_zero, $solver_type, $solver_config, 16, false);
-            crate::test_extend!(test_extend_sign, $solver_type, $solver_config, 16, true);
-            crate::test_dynamic_bit_slice!($solver_type, $solver_config);
-            crate::test_bit_slice!($solver_type, $solver_config);
-            crate::test_bit_slice_update_zero!($solver_type, $solver_config);
-            crate::test_bit_slice_update_middle!($solver_type, $solver_config);
-            crate::test_bit_slice_update_end!($solver_type, $solver_config);
-            crate::test_bit_slice_update_beyond_end!($solver_type, $solver_config);
-            crate::test_bit_slice_update_wider_update_value!($solver_type, $solver_config);
-            crate::test_bit_slice_update_large_update_value!($solver_type, $solver_config);
-            crate::test_fuzz_dynamic_bit_slice_shrink_panics!($solver_type, $solver_config);
-            crate::test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob!(
-                $solver_type,
-                $solver_config
-            );
-            crate::test_all_nary!($solver_type, $solver_config);
-            crate::test_ir_decode_base!(test_ir_decode_0, $solver_type, $solver_config, 8, 8);
-            crate::test_ir_decode_base!(test_ir_decode_1, $solver_type, $solver_config, 8, 16);
-            crate::test_ir_encode_base!(test_ir_encode_0, $solver_type, $solver_config, 8, 3);
-            crate::test_ir_encode_base!(test_ir_encode_1, $solver_type, $solver_config, 16, 4);
-            crate::test_ir_one_hot_base!(test_ir_one_hot_true, $solver_type, $solver_config, true);
-            crate::test_ir_one_hot_base!(
-                test_ir_one_hot_false,
-                $solver_type,
-                $solver_config,
-                false
-            );
-            crate::test_sel_basic!($solver_type, $solver_config);
-            crate::test_sel_default!($solver_type, $solver_config);
-            crate::test_sel_missing_default_panics!($solver_type, $solver_config);
-            crate::test_sel_unexpected_default_panics!($solver_type, $solver_config);
-            crate::test_one_hot_sel_multi!($solver_type, $solver_config);
-            crate::test_priority_sel_multi!($solver_type, $solver_config);
-            crate::test_priority_sel_default!($solver_type, $solver_config);
+            #[test]
+            fn test_ir_value_bits() {
+                test_utils::test_ir_value_bits::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_bits() {
+                test_utils::test_ir_bits::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_value_array() {
+                test_utils::test_ir_value_array::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_array() {
+                test_utils::test_ir_array::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_value_tuple() {
+                test_utils::test_ir_value_tuple::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_tuple() {
+                test_utils::test_ir_tuple::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_value_token() {
+                test_utils::test_ir_value_token::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_not() {
+                test_utils::test_unop_base::<$solver_type>($solver_config, "not", Solver::not);
+            }
+            #[test]
+            fn test_neg() {
+                test_utils::test_unop_base::<$solver_type>($solver_config, "neg", Solver::neg);
+            }
+            #[test]
+            fn test_bit_slice() {
+                test_utils::test_unop_base::<$solver_type>(
+                    $solver_config,
+                    "or_reduce",
+                    Solver::or_reduce,
+                );
+            }
+            #[test]
+            fn test_and_reduce() {
+                test_utils::test_unop_base::<$solver_type>(
+                    $solver_config,
+                    "and_reduce",
+                    Solver::and_reduce,
+                );
+            }
+            #[test]
+            fn test_xor_reduce() {
+                test_utils::test_unop_base::<$solver_type>(
+                    $solver_config,
+                    "xor_reduce",
+                    Solver::xor_reduce,
+                );
+            }
+            #[test]
+            fn test_identity() {
+                test_utils::test_unop_base::<$solver_type>(
+                    $solver_config,
+                    "identity",
+                    |_solver, x| x.clone(),
+                );
+            }
+            #[test]
+            fn test_reverse() {
+                test_utils::test_unop_base::<$solver_type>(
+                    $solver_config,
+                    "reverse",
+                    Solver::reverse,
+                );
+            }
+            // crate::test_all_binops!($solver_type, $solver_config);
+            #[test]
+            fn test_add() {
+                test_utils::test_binop_8_bit::<$solver_type>($solver_config, "add", Solver::add);
+            }
+            #[test]
+            fn test_sub() {
+                test_utils::test_binop_8_bit::<$solver_type>($solver_config, "sub", Solver::sub);
+            }
+            #[test]
+            fn test_eq() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "eq", Solver::eq);
+            }
+            #[test]
+            fn test_ne() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "ne", Solver::ne);
+            }
+            #[test]
+            fn test_uge() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "uge", Solver::uge);
+            }
+            #[test]
+            fn test_ugt() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "ugt", Solver::ugt);
+            }
+            #[test]
+            fn test_ule() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "ule", Solver::ule);
+            }
+            #[test]
+            fn test_ult() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "ult", Solver::ult);
+            }
+            #[test]
+            fn test_slt() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "slt", Solver::slt);
+            }
+            #[test]
+            fn test_sle() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "sle", Solver::sle);
+            }
+            #[test]
+            fn test_sgt() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "sgt", Solver::sgt);
+            }
+            #[test]
+            fn test_sge() {
+                test_utils::test_binop_bool::<$solver_type>($solver_config, "sge", Solver::sge);
+            }
+
+            #[test]
+            fn test_xls_shll() {
+                test_utils::test_binop_base::<$solver_type>(
+                    $solver_config,
+                    "shll",
+                    Solver::xls_shll,
+                    8,
+                    4,
+                    8,
+                );
+            }
+            #[test]
+            fn test_xls_shrl() {
+                test_utils::test_binop_base::<$solver_type>(
+                    $solver_config,
+                    "shrl",
+                    Solver::xls_shrl,
+                    8,
+                    4,
+                    8,
+                );
+            }
+            #[test]
+            fn test_xls_shra() {
+                test_utils::test_binop_base::<$solver_type>(
+                    $solver_config,
+                    "shra",
+                    Solver::xls_shra,
+                    8,
+                    4,
+                    8,
+                );
+            }
+
+            #[test]
+            fn test_xls_umul() {
+                test_utils::test_binop_base::<$solver_type>(
+                    $solver_config,
+                    "umul",
+                    |solver, x, y| Solver::xls_arbitrary_width_umul(solver, x, y, 16),
+                    8,
+                    12,
+                    16,
+                );
+            }
+            #[test]
+            fn test_xls_smul() {
+                test_utils::test_binop_base::<$solver_type>(
+                    $solver_config,
+                    "smul",
+                    |solver, x, y| Solver::xls_arbitrary_width_smul(solver, x, y, 16),
+                    8,
+                    12,
+                    16,
+                );
+            }
+            #[test]
+            fn test_xls_udiv() {
+                test_utils::test_binop_8_bit::<$solver_type>(
+                    $solver_config,
+                    "udiv",
+                    Solver::xls_udiv,
+                );
+            }
+
+            #[test]
+            fn test_xls_sdiv() {
+                test_utils::test_binop_8_bit::<$solver_type>(
+                    $solver_config,
+                    "sdiv",
+                    Solver::xls_sdiv,
+                );
+            }
+            #[test]
+            fn test_xls_umod() {
+                test_utils::test_binop_8_bit::<$solver_type>(
+                    $solver_config,
+                    "umod",
+                    Solver::xls_umod,
+                );
+            }
+            #[test]
+            fn test_xls_smod() {
+                test_utils::test_binop_8_bit::<$solver_type>(
+                    $solver_config,
+                    "smod",
+                    Solver::xls_smod,
+                );
+            }
+
+            #[test]
+            fn test_ir_tuple_index() {
+                test_utils::test_ir_tuple_index::<$solver_type>($solver_config);
+            }
+
+            #[test]
+            fn test_ir_tuple_index_literal() {
+                test_utils::test_ir_tuple_index_literal::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_tuple_reverse() {
+                test_utils::test_ir_tuple_reverse::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_tuple_flattened() {
+                test_utils::test_ir_tuple_flattened::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_tuple_literal_vs_constructed() {
+                test_utils::test_tuple_literal_vs_constructed::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_tuple_index_on_literal() {
+                test_utils::test_tuple_index_on_literal::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_array_index_0() {
+                test_utils::test_ir_array_index_base::<$solver_type>($solver_config, "0", 0);
+            }
+            #[test]
+            fn test_ir_array_index_1() {
+                test_utils::test_ir_array_index_base::<$solver_type>($solver_config, "1", 8);
+            }
+            #[test]
+            fn test_ir_array_index_2() {
+                test_utils::test_ir_array_index_base::<$solver_type>($solver_config, "2", 16);
+            }
+            #[test]
+            fn test_ir_array_index_3() {
+                test_utils::test_ir_array_index_base::<$solver_type>($solver_config, "3", 24);
+            }
+            #[test]
+            fn test_ir_array_index_4() {
+                test_utils::test_ir_array_index_base::<$solver_type>($solver_config, "4", 24);
+            }
+            #[test]
+            fn test_ir_array_index_multi_level() {
+                test_utils::test_ir_array_index_multi_level::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_array_index_deep_multi_level() {
+                test_utils::test_ir_array_index_deep_multi_level::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_array_update_inbound_value() {
+                test_utils::test_array_update_inbound_value::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_array_update_nested() {
+                test_utils::test_array_update_nested::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_array_update_deep_nested() {
+                test_utils::test_array_update_deep_nested::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_prove_fn_equiv() {
+                test_utils::test_prove_fn_equiv::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_prove_fn_inequiv() {
+                test_utils::test_prove_fn_inequiv::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_extend_zero() {
+                test_utils::test_extend_base::<$solver_type>($solver_config, 16, false);
+            }
+            #[test]
+            fn test_extend_sign() {
+                test_utils::test_extend_base::<$solver_type>($solver_config, 16, true);
+            }
+            #[test]
+            fn test_dynamic_bit_slice_0_4() {
+                test_utils::test_dynamic_bit_slice_base::<$solver_type>($solver_config, 0, 4);
+            }
+            #[test]
+            fn test_dynamic_bit_slice_5_4() {
+                test_utils::test_dynamic_bit_slice_base::<$solver_type>($solver_config, 5, 4);
+            }
+            #[test]
+            fn test_dynamic_bit_slice_0_8() {
+                test_utils::test_dynamic_bit_slice_base::<$solver_type>($solver_config, 0, 8);
+            }
+            #[test]
+            fn test_dynamic_bit_slice_5_8() {
+                test_utils::test_dynamic_bit_slice_base::<$solver_type>($solver_config, 5, 8);
+            }
+            #[test]
+            fn test_dynamic_bit_slice_10_4() {
+                test_utils::test_dynamic_bit_slice_base::<$solver_type>($solver_config, 10, 4);
+            }
+            #[test]
+            fn test_dynamic_bit_slice_10_8() {
+                test_utils::test_dynamic_bit_slice_base::<$solver_type>($solver_config, 10, 8);
+            }
+            // crate::test_bit_slice!($solver_type, $solver_config);
+            #[test]
+            fn test_bit_slice_0_4() {
+                test_utils::test_bit_slice_base::<$solver_type>($solver_config, 0, 4);
+            }
+            #[test]
+            fn test_bit_slice_5_3() {
+                test_utils::test_bit_slice_base::<$solver_type>($solver_config, 5, 3);
+            }
+            #[test]
+            fn test_bit_slice_0_8() {
+                test_utils::test_bit_slice_base::<$solver_type>($solver_config, 0, 8);
+            }
+            #[test]
+            fn test_bit_slice_update_zero() {
+                test_utils::test_bit_slice_update_zero::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_bit_slice_update_middle() {
+                test_utils::test_bit_slice_update_middle::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_bit_slice_update_end() {
+                test_utils::test_bit_slice_update_end::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_bit_slice_update_beyond_end() {
+                test_utils::test_bit_slice_update_beyond_end::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_bit_slice_update_wider_update_value() {
+                test_utils::test_bit_slice_update_wider_update_value::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_bit_slice_update_large_update_value() {
+                test_utils::test_bit_slice_update_large_update_value::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_fuzz_dynamic_bit_slice_shrink_panics() {
+                test_utils::test_fuzz_dynamic_bit_slice_shrink_panics::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob() {
+                test_utils::test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_nary_concat() {
+                test_utils::test_nary_base::<$solver_type>(
+                    $solver_config,
+                    "concat",
+                    |solver, a, b, c| solver.concat_many([a, b, c].to_vec()),
+                );
+            }
+            #[test]
+            fn test_nary_and() {
+                test_utils::test_nary_base::<$solver_type>(
+                    $solver_config,
+                    "and",
+                    |solver, a, b, c| solver.and_many([a, b, c].to_vec()),
+                );
+            }
+            #[test]
+            fn test_nary_or() {
+                test_utils::test_nary_base::<$solver_type>(
+                    $solver_config,
+                    "or",
+                    |solver, a, b, c| solver.or_many([a, b, c].to_vec()),
+                );
+            }
+            #[test]
+            fn test_nary_xor() {
+                test_utils::test_nary_base::<$solver_type>(
+                    $solver_config,
+                    "xor",
+                    |solver, a, b, c| solver.xor_many([a, b, c].to_vec()),
+                );
+            }
+            #[test]
+            fn test_nary_nor() {
+                test_utils::test_nary_base::<$solver_type>(
+                    $solver_config,
+                    "nor",
+                    |solver, a, b, c| solver.nor_many([a, b, c].to_vec()),
+                );
+            }
+            #[test]
+            fn test_nary_nand() {
+                test_utils::test_nary_base::<$solver_type>(
+                    $solver_config,
+                    "nand",
+                    |solver, a, b, c| solver.nand_many([a, b, c].to_vec()),
+                );
+            }
+
+            #[test]
+            fn test_ir_decode_0() {
+                test_utils::test_ir_decode_base::<$solver_type>($solver_config, 8, 8);
+            }
+            #[test]
+            fn test_ir_decode_1() {
+                test_utils::test_ir_decode_base::<$solver_type>($solver_config, 8, 16);
+            }
+            #[test]
+            fn test_ir_encode_0() {
+                test_utils::test_ir_encode_base::<$solver_type>($solver_config, 8, 3);
+            }
+            #[test]
+            fn test_ir_encode_1() {
+                test_utils::test_ir_encode_base::<$solver_type>($solver_config, 16, 4);
+            }
+            #[test]
+            fn test_ir_one_hot_true() {
+                test_utils::test_ir_one_hot_base::<$solver_type>($solver_config, true);
+            }
+            #[test]
+            fn test_ir_one_hot_false() {
+                test_utils::test_ir_one_hot_base::<$solver_type>($solver_config, false);
+            }
+            #[test]
+            fn test_sel_basic() {
+                test_utils::test_sel_basic::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_sel_default() {
+                test_utils::test_sel_default::<$solver_type>($solver_config);
+            }
+            #[should_panic]
+            #[test]
+            fn test_sel_missing_default_panics() {
+                test_utils::test_sel_missing_default_panics::<$solver_type>($solver_config);
+            }
+            #[should_panic]
+            #[test]
+            fn test_sel_unexpected_default_panics() {
+                test_utils::test_sel_unexpected_default_panics::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_one_hot_sel_multi() {
+                test_utils::test_one_hot_sel_multi::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_priority_sel_multi() {
+                test_utils::test_priority_sel_multi::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_priority_sel_default() {
+                test_utils::test_priority_sel_default::<$solver_type>($solver_config);
+            }
         }
     };
 }
