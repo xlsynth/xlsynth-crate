@@ -2,7 +2,8 @@
 
 use clap::ArgMatches;
 
-use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
+use crate::common::collect_dslx_search_paths;
+use crate::toolchain_config::{get_dslx_stdlib_path, ToolchainConfig};
 
 pub fn dslx2sv_types(
     input_file: &std::path::Path,
@@ -16,18 +17,19 @@ pub fn dslx2sv_types(
         dslx_stdlib_path.map(|s| std::path::Path::new(s).to_path_buf());
     let dslx_stdlib_path = dslx_stdlib_path_buf.as_ref().map(|p| p.as_path());
 
-    let mut additional_search_path_bufs: Vec<std::path::PathBuf> = vec![];
-    if let Some(dslx_path) = dslx_path {
-        for path in dslx_path.split(';') {
-            additional_search_path_bufs.push(std::path::Path::new(path).to_path_buf());
-        }
-    }
-
-    // We need the `Path` view type instead of `PathBuf`.
+    let additional_search_path_bufs = if let Some(paths_str) = dslx_path {
+        paths_str
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(|p| std::path::Path::new(p).to_path_buf())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let additional_search_path_views: Vec<&std::path::Path> = additional_search_path_bufs
         .iter()
         .map(|p| p.as_path())
-        .collect::<Vec<_>>();
+        .collect();
 
     let mut import_data =
         xlsynth::dslx::ImportData::new(dslx_stdlib_path, &additional_search_path_views);
@@ -48,8 +50,19 @@ pub fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfi
         dslx_stdlib_path.map(|s| std::path::Path::new(&s).to_path_buf());
     let dslx_stdlib_path = dslx_stdlib_path.as_ref().map(|p| p.as_path());
 
-    let dslx_path = get_dslx_path(matches, config);
-    let dslx_path = dslx_path.as_deref();
+    let search_paths_bufs = collect_dslx_search_paths(matches, config);
+    let dslx_path_string = if search_paths_bufs.is_empty() {
+        None
+    } else {
+        Some(
+            search_paths_bufs
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(";"),
+        )
+    };
+    let dslx_path = dslx_path_string.as_deref();
 
     // Stub function for DSLX to SV type conversion
     dslx2sv_types(input_path, dslx_stdlib_path, dslx_path);

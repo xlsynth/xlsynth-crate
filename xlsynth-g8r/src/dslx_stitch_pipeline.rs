@@ -228,17 +228,19 @@ fn is_implicit_stage_name(name: &str) -> bool {
 }
 
 /// Uses the DSLX front-end to identify parametric stage functions following
-/// the implicit `<top>_cycle<N>` naming convention.
+/// the implicit `<top>_cycle<N>` naming convention. Additional search paths
+/// are supplied so imports resolve the same way as during IR conversion.
 fn check_for_parametric_stages(
     dslx_text: &str,
     path: &std::path::Path,
+    search_paths: &[&std::path::Path],
 ) -> Result<(), xlsynth::XlsynthError> {
     let module_name = path
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| xlsynth::XlsynthError("invalid path".into()))?;
 
-    let mut import_data = dslx::ImportData::default();
+    let mut import_data = dslx::ImportData::new(None, search_paths);
     let tc_module = dslx::parse_and_typecheck(
         dslx_text,
         path.to_str().unwrap(),
@@ -280,9 +282,16 @@ pub fn stitch_pipeline(
     top: &str,
     verilog_version: VerilogVersion,
     explicit_stages: Option<&[String]>,
+    search_paths: &[&Path],
 ) -> Result<String, xlsynth::XlsynthError> {
-    check_for_parametric_stages(dslx, path)?;
-    let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
+    check_for_parametric_stages(dslx, path, search_paths)?;
+    let convert_opts = DslxConvertOptions {
+        dslx_stdlib_path: None,
+        additional_search_paths: search_paths.to_vec(),
+        enable_warnings: None,
+        disable_warnings: None,
+    };
+    let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
     let ir = conv.ir;
 
     let cfg = PipelineCfg {
@@ -513,9 +522,16 @@ pub fn stitch_pipeline_with_valid(
     top: &str,
     verilog_version: VerilogVersion,
     explicit_stages: Option<&[String]>,
+    search_paths: &[&Path],
 ) -> Result<String, xlsynth::XlsynthError> {
-    check_for_parametric_stages(dslx, path)?;
-    let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
+    check_for_parametric_stages(dslx, path, search_paths)?;
+    let convert_opts = DslxConvertOptions {
+        dslx_stdlib_path: None,
+        additional_search_paths: search_paths.to_vec(),
+        enable_warnings: None,
+        disable_warnings: None,
+    };
+    let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
     let ir = conv.ir;
 
     let cfg = PipelineCfg {
@@ -747,6 +763,7 @@ mod tests {
             "mul_add",
             VerilogVersion::SystemVerilog,
             None,
+            &[],
         )
         .unwrap();
         // Validate generated SV.
@@ -776,6 +793,7 @@ mod tests {
             "foo",
             VerilogVersion::SystemVerilog,
             None,
+            &[],
         )
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
@@ -804,6 +822,7 @@ mod tests {
             "one",
             VerilogVersion::SystemVerilog,
             None,
+            &[],
         )
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
@@ -831,6 +850,7 @@ mod tests {
             "foo",
             VerilogVersion::SystemVerilog,
             None,
+            &[],
         )
         .unwrap()
     }
@@ -876,6 +896,7 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             "foo",
             VerilogVersion::SystemVerilog,
             None,
+            &[],
         );
         assert!(result.is_err());
         let err = result.unwrap_err().0;

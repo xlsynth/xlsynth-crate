@@ -278,3 +278,43 @@ pub fn pipeline_codegen_flags_proto(codegen_flags: &CodegenFlags) -> String {
         codegen_flags_to_textproto(codegen_flags)
     )
 }
+
+/// Gathers additional DSLX module search paths from:
+///   • the `--dslx_path` command-line flag (semi-colon separated)
+///   • `[toolchain.dslx].dslx_path` array in the toolchain config.
+/// Returns a vector of unique `PathBuf`s in the order first–seen.
+pub fn collect_dslx_search_paths(
+    matches: &ArgMatches,
+    config: &Option<crate::toolchain_config::ToolchainConfig>,
+) -> Vec<std::path::PathBuf> {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    // --dslx_path flag: semicolon-separated list like "dirA;dirB" (kept for
+    // consistency with other subcommands).
+    if let Some(flag_value) = matches.get_one::<String>("dslx_path") {
+        for entry in flag_value.split(';').filter(|s| !s.is_empty()) {
+            out.push(PathBuf::from(entry));
+        }
+    }
+
+    // toolchain.toml paths: Vec<String>.
+    if let Some(cfg) = config {
+        if let Some(dslx_cfg) = &cfg.dslx {
+            if let Some(vec) = &dslx_cfg.dslx_path {
+                for p in vec {
+                    if !p.is_empty() {
+                        out.push(PathBuf::from(p));
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate preserving the first occurrence.
+    let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
+}
