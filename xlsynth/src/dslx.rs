@@ -185,6 +185,7 @@ pub enum MatchableModuleMember {
     TypeAlias(TypeAlias),
     ConstantDef(ConstantDef),
     Function(Function),
+    QuickCheck(QuickCheck),
 }
 
 impl ModuleMember {
@@ -227,7 +228,45 @@ impl ModuleMember {
                     ptr: func_ptr,
                 }))
             }
+            ModuleMemberKind::QuickCheck => {
+                let qc_ptr = unsafe { sys::xls_dslx_module_member_get_quickcheck(self.ptr) };
+                Some(MatchableModuleMember::QuickCheck(QuickCheck {
+                    parent: self.parent.clone(),
+                    ptr: qc_ptr,
+                }))
+            }
             _ => None,
+        }
+    }
+}
+
+// -- QuickCheck
+
+pub struct QuickCheck {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxQuickCheck,
+}
+
+impl QuickCheck {
+    pub fn get_function(&self) -> Function {
+        let func_ptr = unsafe { sys::xls_dslx_quickcheck_get_function(self.ptr) };
+        Function {
+            parent: self.parent.clone(),
+            ptr: func_ptr,
+        }
+    }
+
+    pub fn is_exhaustive(&self) -> bool {
+        unsafe { sys::xls_dslx_quickcheck_is_exhaustive(self.ptr) }
+    }
+
+    pub fn get_count(&self) -> Option<i64> {
+        let mut result: i64 = 0;
+        let has_count = unsafe { sys::xls_dslx_quickcheck_get_count(self.ptr, &mut result) };
+        if has_count {
+            Some(result)
+        } else {
+            None
         }
     }
 }

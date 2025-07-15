@@ -171,7 +171,12 @@ pub fn convert_imported_module(
             dslx::MatchableModuleMember::ConstantDef(constant_def) => {
                 convert_constant(&constant_def, &type_info, builder)?
             }
-            dslx::MatchableModuleMember::Function(function) => {
+            dslx::MatchableModuleMember::Function(_function) => {
+                // Functions are not converted by the bridge.
+                continue;
+            }
+            dslx::MatchableModuleMember::QuickCheck(_) => {
+                // QuickChecks are currently not converted by the bridge.
                 continue;
             }
         }
