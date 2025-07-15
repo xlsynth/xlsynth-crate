@@ -277,7 +277,13 @@ impl Solver for Boolector {
                     ty,
                 ))
             },
-            BitVec::ZeroWidth => panic!("Cannot get value of zero-width bitvector"),
+            BitVec::ZeroWidth => {
+                if matches!(ty, ir::Type::Token) {
+                    Ok(xlsynth::IrValue::make_token())
+                } else {
+                    panic!("Cannot get value of zero-width bitvector for type {:?}", ty)
+                }
+            }
         }
     }
 
