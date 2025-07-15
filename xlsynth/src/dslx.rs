@@ -702,6 +702,27 @@ impl TypeInfo {
         assert!(!result.ptr.is_null());
         result
     }
+
+    pub fn requires_implicit_token(&self, function: &Function) -> Result<bool, XlsynthError> {
+        let mut error_out = std::ptr::null_mut();
+        let mut result_out = false;
+        let success = unsafe {
+            sys::xls_dslx_type_info_get_requires_implicit_token(
+                self.ptr,
+                function.ptr,
+                &mut error_out,
+                &mut result_out,
+            )
+        };
+        if success {
+            assert!(error_out.is_null());
+            Ok(result_out)
+        } else {
+            assert!(!error_out.is_null());
+            let error_out_str: String = unsafe { c_str_to_rust(error_out) };
+            Err(XlsynthError(error_out_str))
+        }
+    }
 }
 
 /// RAII-style wrapper around a `CDslxTypeDim` pointer that calls `free` on
@@ -1025,5 +1046,51 @@ mod tests {
                 .expect("u16 should be bits-like");
             assert_eq!(bits_like, (false, 16));
         }
+    }
+
+    #[test]
+    fn test_requires_implicit_token() {
+        let dslx = "fn with_assert(a: u32, b: u32) -> u32 {
+    assert!(a > b, \"a_greater_than_b\");
+    a + b
+}
+
+fn without_assert(a: u32, b: u32) -> u32 {
+    a + b
+}";
+        let mut import_data = ImportData::default();
+        let typechecked_module = parse_and_typecheck(
+            dslx,
+            "/fake/implicit_token_test.x",
+            "implicit_token_test_mod",
+            &mut import_data,
+        )
+        .expect("parse-and-typecheck success");
+        let module = typechecked_module.get_module();
+        let type_info = typechecked_module.get_type_info();
+
+        use crate::dslx::MatchableModuleMember;
+
+        let mut with_assert_fn: Option<Function> = None;
+        let mut without_assert_fn: Option<Function> = None;
+        for i in 0..module.get_member_count() {
+            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
+                match f.get_identifier().as_str() {
+                    "with_assert" => with_assert_fn = Some(f),
+                    "without_assert" => without_assert_fn = Some(f),
+                    _ => {}
+                }
+            }
+        }
+
+        let with_assert_fn = with_assert_fn.expect("with_assert fn found");
+        let without_assert_fn = without_assert_fn.expect("without_assert fn found");
+
+        assert!(type_info
+            .requires_implicit_token(&with_assert_fn)
+            .expect("requires_implicit_token success (with_assert)"));
+        assert!(!type_info
+            .requires_implicit_token(&without_assert_fn)
+            .expect("requires_implicit_token success (without_assert)"));
     }
 }
