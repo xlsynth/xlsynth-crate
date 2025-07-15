@@ -24,7 +24,7 @@ pub enum ModuleMemberKind {
     Proc = 1,
     TestFunction = 2,
     TestProc = 3,
-    QuickCheck = 4,
+    Quickcheck = 4,
     TypeAlias = 5,
     StructDef = 6,
     ProcDef = 7,
@@ -43,7 +43,7 @@ impl From<sys::DslxModuleMemberKind> for ModuleMemberKind {
             1 => ModuleMemberKind::Proc,
             2 => ModuleMemberKind::TestFunction,
             3 => ModuleMemberKind::TestProc,
-            4 => ModuleMemberKind::QuickCheck,
+            4 => ModuleMemberKind::Quickcheck,
             5 => ModuleMemberKind::TypeAlias,
             6 => ModuleMemberKind::StructDef,
             7 => ModuleMemberKind::ProcDef,
@@ -185,6 +185,7 @@ pub enum MatchableModuleMember {
     TypeAlias(TypeAlias),
     ConstantDef(ConstantDef),
     Function(Function),
+    Quickcheck(Quickcheck),
 }
 
 impl ModuleMember {
@@ -227,7 +228,45 @@ impl ModuleMember {
                     ptr: func_ptr,
                 }))
             }
+            ModuleMemberKind::Quickcheck => {
+                let qc_ptr = unsafe { sys::xls_dslx_module_member_get_quickcheck(self.ptr) };
+                Some(MatchableModuleMember::Quickcheck(Quickcheck {
+                    parent: self.parent.clone(),
+                    ptr: qc_ptr,
+                }))
+            }
             _ => None,
+        }
+    }
+}
+
+// -- Quickcheck
+
+pub struct Quickcheck {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxQuickcheck,
+}
+
+impl Quickcheck {
+    pub fn get_function(&self) -> Function {
+        let func_ptr = unsafe { sys::xls_dslx_quickcheck_get_function(self.ptr) };
+        Function {
+            parent: self.parent.clone(),
+            ptr: func_ptr,
+        }
+    }
+
+    pub fn is_exhaustive(&self) -> bool {
+        unsafe { sys::xls_dslx_quickcheck_is_exhaustive(self.ptr) }
+    }
+
+    pub fn get_count(&self) -> Option<i64> {
+        let mut result: i64 = 0;
+        let has_count = unsafe { sys::xls_dslx_quickcheck_get_count(self.ptr, &mut result) };
+        if has_count {
+            Some(result)
+        } else {
+            None
         }
     }
 }

@@ -229,6 +229,11 @@ pub struct CDslxFunction {
 }
 
 #[repr(C)]
+pub struct CDslxQuickcheck {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CScheduleAndCodegenResult {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -1413,6 +1418,23 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut bool,
     ) -> bool;
+
+    // -- Quickcheck APIs
+    pub fn xls_dslx_module_member_get_quickcheck(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxQuickcheck;
+
+    pub fn xls_dslx_quickcheck_get_function(qc: *const CDslxQuickcheck) -> *mut CDslxFunction;
+
+    /// Returns true iff the Quickcheck has the `exhaustive` test-cases
+    /// specifier.
+    pub fn xls_dslx_quickcheck_is_exhaustive(qc: *const CDslxQuickcheck) -> bool;
+
+    /// Retrieves the test-case count for the Quickcheck. Returns true and sets
+    /// `*result_out` when the Quickcheck has a counted test-case specifier;
+    /// returns false when the Quickcheck is marked exhaustive (in which case
+    /// `*result_out` is not modified).
+    pub fn xls_dslx_quickcheck_get_count(qc: *const CDslxQuickcheck, result_out: *mut i64) -> bool;
 }
 
 pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
