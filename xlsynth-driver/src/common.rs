@@ -318,3 +318,37 @@ pub fn collect_dslx_search_paths(
     out.retain(|p| seen.insert(p.clone()));
     out
 }
+
+/// Holds resolved locations for DSLX support files.
+pub struct DslxPaths {
+    /// Optional alternative stdlib root.
+    pub stdlib_path: Option<std::path::PathBuf>,
+    /// Additional search directories beyond the source file’s dir.
+    pub search_paths: Vec<std::path::PathBuf>,
+}
+
+impl DslxPaths {
+    /// Returns the additional search paths as borrowed `&Path` slice for APIs
+    /// like `ImportData::new` or `DslxConvertOptions`.
+    pub fn search_path_views(&self) -> Vec<&std::path::Path> {
+        self.search_paths.iter().map(|p| p.as_path()).collect()
+    }
+}
+
+/// Builds the `DslxPaths` structure from CLI flags / toolchain configuration.
+pub fn get_dslx_paths(
+    matches: &ArgMatches,
+    config: &Option<crate::toolchain_config::ToolchainConfig>,
+) -> DslxPaths {
+    use crate::toolchain_config::get_dslx_stdlib_path;
+
+    let stdlib_path_opt =
+        get_dslx_stdlib_path(matches, config).map(|s| std::path::PathBuf::from(s));
+
+    let search_paths = collect_dslx_search_paths(matches, config);
+
+    DslxPaths {
+        stdlib_path: stdlib_path_opt,
+        search_paths,
+    }
+}

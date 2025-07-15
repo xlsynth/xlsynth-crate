@@ -2626,3 +2626,68 @@ dslx_path = ["{}", "{}"]
         );
     }
 }
+
+#[test]
+fn test_dslx_stitch_pipeline_with_custom_stdlib_path() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // Fake stdlib directory with a popcount that always returns 7.
+    let stdlib_dir = temp_dir.path().join("fake_stdlib");
+    std::fs::create_dir(&stdlib_dir).unwrap();
+    let std_path = stdlib_dir.join("std.x");
+    std::fs::write(&std_path, "pub fn popcount(x: u32) -> u32 { u32:7 }").unwrap();
+
+    // DSLX file that relies on std::popcount and a two-stage pipeline.
+    let dslx = "import std;\nfn foo_cycle0() -> u32 { std::popcount(u32:123) }\nfn foo_cycle1(x: u32) -> u32 { x }";
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    // Toolchain.toml pointing at our fake stdlib.
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml = format!(
+        r#"[toolchain]
+
+[toolchain.dslx]
+dslx_stdlib_path = "{}""#,
+        stdlib_dir.to_str().unwrap()
+    );
+    std::fs::write(&toolchain_path, toolchain_toml).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .output()
+        .expect("driver run");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let sv = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&sv);
+
+    // Golden comparison.
+    let golden_path =
+        std::path::Path::new("tests/test_dslx_stitch_pipeline_custom_stdlib.golden.sv");
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+        println!("INFO: Updating golden file: {}", golden_path.display());
+        std::fs::write(golden_path, &sv).expect("write golden");
+    } else {
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            sv.trim(),
+            want.trim(),
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+}
