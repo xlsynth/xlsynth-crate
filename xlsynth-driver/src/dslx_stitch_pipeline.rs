@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::common::get_dslx_paths;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
 use xlsynth_g8r::verilog_version::VerilogVersion;
 
 /// Handles the `dslx-stitch-pipeline` subcommand.
-pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
+pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
+    let paths = get_dslx_paths(matches, config);
+    let path_refs = paths.search_path_views();
+
     let input = matches.get_one::<String>("dslx_input_file").unwrap();
     let top = matches.get_one::<String>("dslx_top").unwrap();
     let dslx = std::fs::read_to_string(input).unwrap_or_else(|e| {
@@ -31,6 +35,8 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, _config: &Option<Toolch
         top,
         verilog_version,
         stage_list.as_ref().map(|v| v.as_slice()),
+        paths.stdlib_path.as_deref(),
+        &path_refs,
     ) {
         Ok(sv) => println!("{}", sv),
         Err(e) => report_cli_error_and_exit("stitch error", Some(&e.0), vec![]),

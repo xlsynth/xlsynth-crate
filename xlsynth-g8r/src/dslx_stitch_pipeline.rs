@@ -148,43 +148,6 @@ fn verify_stage_signatures(
     Ok(())
 }
 
-/// Run XLS optimise + schedule + codegen for a stage and gather `StageInfo`.
-fn make_stage_info(
-    cfg: &PipelineCfg,
-    stage_name_unmangled: &str,
-    stage_mangled: &str,
-    is_last: bool,
-) -> Result<StageInfo, xlsynth::XlsynthError> {
-    let opt = optimize_ir(cfg.ir, stage_mangled)?;
-    let sched = "delay_model: \"unit\"\npipeline_stages: 1";
-    let flop_inputs = "flop_inputs: true";
-    let flop_outputs = if is_last {
-        "flop_outputs: true"
-    } else {
-        "flop_outputs: false"
-    };
-    let codegen = format!(
-        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nmodule_name: \"{stage}\"\nuse_system_verilog: {sv}\n{fi}\n{fo}",
-        stage = stage_name_unmangled,
-        sv = cfg.verilog_version.is_system_verilog(),
-        fi = flop_inputs,
-        fo = flop_outputs
-    );
-    let result = schedule_and_codegen(&opt, sched, &codegen)?;
-    let sv_text = result.get_verilog_text()?;
-
-    let func = cfg.ir.get_function(stage_mangled)?;
-    let fty = func.get_type()?;
-    let (mut ports, output_width) = build_ports_from_ir(&func, &fty)?;
-    ports.retain(|p| p.name != "clk");
-
-    Ok(StageInfo {
-        sv_text,
-        ports,
-        output_width,
-    })
-}
-
 // Run XLS optimise + schedule + codegen for a stage without inserting any
 // flops so the resulting module is purely combinational.
 fn make_stage_info_comb(
@@ -228,17 +191,20 @@ fn is_implicit_stage_name(name: &str) -> bool {
 }
 
 /// Uses the DSLX front-end to identify parametric stage functions following
-/// the implicit `<top>_cycle<N>` naming convention.
+/// the implicit `<top>_cycle<N>` naming convention. Additional search paths
+/// are supplied so imports resolve the same way as during IR conversion.
 fn check_for_parametric_stages(
     dslx_text: &str,
     path: &std::path::Path,
+    stdlib_path: Option<&std::path::Path>,
+    search_paths: &[&std::path::Path],
 ) -> Result<(), xlsynth::XlsynthError> {
     let module_name = path
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| xlsynth::XlsynthError("invalid path".into()))?;
 
-    let mut import_data = dslx::ImportData::default();
+    let mut import_data = dslx::ImportData::new(stdlib_path, search_paths);
     let tc_module = dslx::parse_and_typecheck(
         dslx_text,
         path.to_str().unwrap(),
@@ -280,9 +246,17 @@ pub fn stitch_pipeline(
     top: &str,
     verilog_version: VerilogVersion,
     explicit_stages: Option<&[String]>,
+    stdlib_path: Option<&Path>,
+    search_paths: &[&Path],
 ) -> Result<String, xlsynth::XlsynthError> {
-    check_for_parametric_stages(dslx, path)?;
-    let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
+    check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
+    let convert_opts = DslxConvertOptions {
+        dslx_stdlib_path: stdlib_path,
+        additional_search_paths: search_paths.to_vec(),
+        enable_warnings: None,
+        disable_warnings: None,
+    };
+    let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
     let ir = conv.ir;
 
     let cfg = PipelineCfg {
@@ -513,9 +487,17 @@ pub fn stitch_pipeline_with_valid(
     top: &str,
     verilog_version: VerilogVersion,
     explicit_stages: Option<&[String]>,
+    stdlib_path: Option<&Path>,
+    search_paths: &[&Path],
 ) -> Result<String, xlsynth::XlsynthError> {
-    check_for_parametric_stages(dslx, path)?;
-    let conv = convert_dslx_to_ir(dslx, path, &DslxConvertOptions::default())?;
+    check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
+    let convert_opts = DslxConvertOptions {
+        dslx_stdlib_path: stdlib_path,
+        additional_search_paths: search_paths.to_vec(),
+        enable_warnings: None,
+        disable_warnings: None,
+    };
+    let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
     let ir = conv.ir;
 
     let cfg = PipelineCfg {
@@ -747,6 +729,8 @@ mod tests {
             "mul_add",
             VerilogVersion::SystemVerilog,
             None,
+            None,
+            &[],
         )
         .unwrap();
         // Validate generated SV.
@@ -776,6 +760,8 @@ mod tests {
             "foo",
             VerilogVersion::SystemVerilog,
             None,
+            None,
+            &[],
         )
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
@@ -804,6 +790,8 @@ mod tests {
             "one",
             VerilogVersion::SystemVerilog,
             None,
+            None,
+            &[],
         )
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
@@ -831,6 +819,8 @@ mod tests {
             "foo",
             VerilogVersion::SystemVerilog,
             None,
+            None,
+            &[],
         )
         .unwrap()
     }
@@ -876,6 +866,8 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             "foo",
             VerilogVersion::SystemVerilog,
             None,
+            None,
+            &[],
         );
         assert!(result.is_err());
         let err = result.unwrap_err().0;
