@@ -186,7 +186,7 @@ pub fn align_fn_inputs<'a, S: Solver>(
                 let existing_bitvec = inputs.inputs.get(&n.name).unwrap();
                 let new_bitvec = {
                     let w = existing_bitvec.bitvec.get_width();
-                    let h = (offset + w - 1) as i32;
+                    let h = offset as i32 + (w as i32) - 1;
                     let l = offset as i32;
                     offset += w;
                     let extracted = solver.extract(&flattened, h, l);
@@ -991,12 +991,43 @@ pub mod test_utils {
     use crate::{
         equiv::{
             prove_equiv::{
-                EquivResult, FnInputs, get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
+                EquivResult, FnInputs, align_fn_inputs, get_fn_inputs, ir_to_smt, ir_value_to_bv,
+                prove_ir_fn_equiv,
             },
             solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
         },
         xls_ir::ir,
     };
+
+    pub fn align_zero_width_fn_inputs<S: Solver>(solver_config: &S::Config) {
+        let ir_text = r#"
+            fn lhs(tok: token) -> token {
+                ret t: token = param(name=tok, id=1)
+            }
+        "#;
+
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let mut solver = S::new(solver_config).unwrap();
+        let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+        // Must not panic.
+        let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
+    }
+
+    pub fn align_non_zero_width_fn_inputs_first_token<S: Solver>(solver_config: &S::Config) {
+        let ir_text = r#"
+            fn lhs(tok: token, x: bits[4]) -> token {
+                ret t: token = param(name=tok, id=1)
+            }
+        "#;
+
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let mut solver = S::new(solver_config).unwrap();
+        let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+        // Must not panic.
+        let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
+    }
 
     pub fn assert_smt_fn_eq<S: Solver>(
         solver_config: &S::Config,
@@ -1891,6 +1922,16 @@ macro_rules! test_with_solver {
             use super::*;
             use crate::equiv::prove_equiv::test_utils;
 
+            #[test]
+            fn test_align_zero_width_fn_inputs() {
+                test_utils::align_zero_width_fn_inputs::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_align_non_zero_width_fn_inputs_first_token() {
+                test_utils::align_non_zero_width_fn_inputs_first_token::<$solver_type>(
+                    $solver_config,
+                );
+            }
             #[test]
             fn test_ir_value_bits() {
                 test_utils::test_ir_value_bits::<$solver_type>($solver_config);
