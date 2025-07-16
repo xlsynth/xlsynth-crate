@@ -547,6 +547,14 @@ fn main() {
                         .value_parser(["ignore", "never", "same", "assume", "implies"])
                         .default_value("same")
                         .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "lhs_fixed_implicit_activation",
+                    "Fix the implicit activation bit to true for the LHS IR, useful when only LHS or RHS has implicit token",
+                )
+                .add_bool_arg(
+                    "rhs_fixed_implicit_activation",
+                    "Fix the implicit activation bit to true for the RHS IR, useful when only LHS or RHS has implicit token",
                 ),
         )
         .subcommand(
