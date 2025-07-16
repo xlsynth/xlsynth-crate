@@ -643,7 +643,7 @@ jobs:
         run: |
           cargo install cargo-fuzz
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test -- -max_total_time=10
+          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-bitwuzla-built,with-boolector-system -- -max_total_time=10
 
       - name: Build and run fuzz_gatify for 10 seconds
         env:
