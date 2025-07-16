@@ -149,6 +149,31 @@ fn gatify_array_index(
     result
 }
 
+fn gatify_array_update(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    value_bits: &AigBitVector,
+    index_bits: &AigBitVector,
+) -> AigBitVector {
+    let element_bit_count = array_ty.element_type.bit_count();
+    let index_decoded = gatify_decode(gb, array_ty.element_count, index_bits);
+    let mut updated_elems: Vec<AigBitVector> = Vec::new();
+
+    for i in 0..array_ty.element_count {
+        let orig_elem = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
+        let selector = index_decoded.get_lsb(i);
+        let updated = gb.add_mux2_vec(selector, value_bits, &orig_elem);
+        updated_elems.push(updated);
+    }
+
+    let mut lsb_to_msb = Vec::new();
+    for elem_bits in updated_elems.into_iter().rev() {
+        lsb_to_msb.extend(elem_bits.iter_lsb_to_msb().cloned());
+    }
+    AigBitVector::from_lsb_is_index_0(&lsb_to_msb)
+}
+
 fn gatify_sel(
     gb: &mut GateBuilder,
     selector_bits: &AigBitVector,
@@ -1138,6 +1163,36 @@ fn gatify_internal(
                 }
 
                 env.add(node_ref, GateOrVec::BitVector(array_bits));
+            }
+            ir::NodePayload::ArrayUpdate {
+                array,
+                value,
+                indices,
+                assumed_in_bounds: _,
+            } => {
+                assert_eq!(
+                    indices.len(),
+                    1,
+                    "Only single-dimensional array updates are supported",
+                );
+                let array_ty = match f.get_node_ty(*array) {
+                    ir::Type::Array(array_ty_data) => array_ty_data,
+                    other => panic!("Expected array type for array_update, got {:?}", other),
+                };
+
+                let array_bits = env.get_bit_vector(*array).unwrap();
+                let value_bits = env.get_bit_vector(*value).unwrap();
+                let index_bits = env.get_bit_vector(indices[0]).unwrap();
+
+                let result_bits = gatify_array_update(
+                    g8_builder,
+                    array_ty,
+                    &array_bits,
+                    &value_bits,
+                    &index_bits,
+                );
+
+                env.add(node_ref, GateOrVec::BitVector(result_bits));
             }
             ir::NodePayload::Array(members) => {
                 // Similar to Tuple: flatten all members into a bit vector.
