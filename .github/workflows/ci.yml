@@ -112,7 +112,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           pip3 install -r requirements.txt
-          python3 download_release.py -p ubuntu2004 -o xlsynth_tools
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Download Slang
         run: |
@@ -260,7 +260,7 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          python3 download_release.py -p ubuntu2004 -o xlsynth_tools
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Install protobuf compiler
         run: |
@@ -350,7 +350,7 @@ jobs:
         run: |
           python3 -V  # Print the python3 version.
           pip3 install --break-system-packages -r requirements.txt
-          python3 download_release.py -p arm64 -o xlsynth_tools
+          python3 download_release.py -p arm64 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Install protobuf compiler
         run: |
@@ -414,7 +414,7 @@ jobs:
           dnf install -y python3 python3-pip
           python3 -V  # Print the python3 version.
           pip3 install -r requirements.txt
-          python3 download_release.py -p rocky8 -o xlsynth_tools
+          python3 download_release.py -p rocky8 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Install protobuf compiler
         run: |
@@ -533,7 +533,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           pip3 install -r requirements.txt
-          python3 download_release.py -p ubuntu2004 -o xlsynth_tools
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Download Slang
         run: |
@@ -572,7 +572,7 @@ jobs:
         run: |
           # Note we download rocky8 version just because they have the fewest/oldest system
           # requirements.
-          python3 download_release.py -p rocky8 -o pre_download -d
+          python3 download_release.py -p rocky8 -o pre_download -d --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Run cargo tests using pre-downloaded artifacts
         env:

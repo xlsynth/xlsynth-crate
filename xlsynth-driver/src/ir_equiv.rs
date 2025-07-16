@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::report_cli_error::report_cli_error_and_exit;
+use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
 use xlsynth_g8r::equiv::solver_interface::Solver;
@@ -26,45 +27,6 @@ impl std::str::FromStr for ParallelismStrategy {
             "output-bits" => Ok(Self::OutputBits),
             "input-bit-split" => Ok(Self::InputBitSplit),
             _ => Err(format!("invalid parallelism strategy: {}", s)),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum SolverChoice {
-    #[cfg(feature = "has-easy-smt")]
-    Z3Binary,
-    #[cfg(feature = "has-easy-smt")]
-    BitwuzlaBinary,
-    #[cfg(feature = "has-easy-smt")]
-    BoolectorBinary,
-    #[cfg(feature = "has-bitwuzla")]
-    Bitwuzla,
-    #[cfg(feature = "has-boolector")]
-    Boolector,
-    #[cfg(feature = "has-boolector")]
-    BoolectorLegacy,
-    Toolchain,
-}
-
-impl std::str::FromStr for SolverChoice {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            #[cfg(feature = "has-easy-smt")]
-            "z3-binary" => Ok(Self::Z3Binary),
-            #[cfg(feature = "has-easy-smt")]
-            "bitwuzla-binary" => Ok(Self::BitwuzlaBinary),
-            #[cfg(feature = "has-easy-smt")]
-            "boolector-binary" => Ok(Self::BoolectorBinary),
-            #[cfg(feature = "has-bitwuzla")]
-            "bitwuzla" => Ok(Self::Bitwuzla),
-            #[cfg(feature = "has-boolector")]
-            "boolector" => Ok(Self::Boolector),
-            #[cfg(feature = "has-boolector")]
-            "boolector-legacy" => Ok(Self::BoolectorLegacy),
-            "toolchain" => Ok(Self::Toolchain),
-            _ => Err(format!("invalid solver: {}", s)),
         }
     }
 }
