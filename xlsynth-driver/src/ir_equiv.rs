@@ -7,7 +7,7 @@ use xlsynth_g8r::equiv::solver_interface::Solver;
 
 use xlsynth_g8r::equiv::prove_equiv::{
     prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
-    EquivResult,
+    AssertionSemantics, EquivResult,
 };
 use xlsynth_g8r::xls_ir::ir_parser;
 
@@ -234,6 +234,7 @@ fn run_easy_smt_equiv_check<S: Solver>(
     flatten_aggregates: bool,
     drop_params: &[String],
     strategy: ParallelismStrategy,
+    assertion_semantics: AssertionSemantics,
     solver_config: &S::Config,
 ) -> ! {
     // Parse both IR files to xls_ir::ir::Package
@@ -283,13 +284,18 @@ fn run_easy_smt_equiv_check<S: Solver>(
         .expect("Dropped parameter is used in the function body!");
     let start_time = std::time::Instant::now();
     let result = match strategy {
-        ParallelismStrategy::SingleThreaded => {
-            prove_ir_fn_equiv::<S>(solver_config, &lhs_fn, &rhs_fn, flatten_aggregates)
-        }
+        ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv::<S>(
+            solver_config,
+            &lhs_fn,
+            &rhs_fn,
+            assertion_semantics,
+            flatten_aggregates,
+        ),
         ParallelismStrategy::OutputBits => prove_ir_fn_equiv_output_bits_parallel::<S>(
             solver_config,
             &lhs_fn,
             &rhs_fn,
+            assertion_semantics,
             flatten_aggregates,
         ),
         // Split on the first parameter and the first bit for now.
@@ -301,6 +307,7 @@ fn run_easy_smt_equiv_check<S: Solver>(
             &rhs_fn,
             0,
             0,
+            assertion_semantics,
             flatten_aggregates,
         ),
     };
@@ -356,6 +363,10 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
 
     let lhs_path = std::path::Path::new(lhs);
     let rhs_path = std::path::Path::new(rhs);
+    let assertion_semantics = matches
+        .get_one::<String>("assertion_semantics")
+        .map(|s| s.parse().unwrap())
+        .unwrap_or(AssertionSemantics::Same);
 
     let solver: Option<SolverChoice> = matches
         .get_one::<String>("solver")
@@ -368,6 +379,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
             rhs_path: &std::path::Path,
             lhs_top: Option<&str>,
             rhs_top: Option<&str>,
+            assertion_semantics: AssertionSemantics,
         ) {
             let flatten_aggregates = matches
                 .get_one::<String>("flatten_aggregates")
@@ -389,6 +401,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 flatten_aggregates,
                 &drop_params,
                 strategy,
+                assertion_semantics,
                 &solver_config,
             );
         }
@@ -399,7 +412,13 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
                 let config = BoolectorConfig::new();
                 run_solver_equiv_check::<Boolector>(
-                    &config, matches, lhs_path, rhs_path, lhs_top, rhs_top,
+                    &config,
+                    matches,
+                    lhs_path,
+                    rhs_path,
+                    lhs_top,
+                    rhs_top,
+                    assertion_semantics,
                 );
             }
             #[cfg(feature = "has-easy-smt")]
@@ -414,7 +433,13 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                     _ => unreachable!(),
                 };
                 run_solver_equiv_check::<EasySmtSolver>(
-                    &config, matches, lhs_path, rhs_path, lhs_top, rhs_top,
+                    &config,
+                    matches,
+                    lhs_path,
+                    rhs_path,
+                    lhs_top,
+                    rhs_top,
+                    assertion_semantics,
                 );
             }
             #[cfg(feature = "has-bitwuzla")]
@@ -423,7 +448,13 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 let options = BitwuzlaOptions::new();
                 let config = options;
                 run_solver_equiv_check::<Bitwuzla>(
-                    &config, matches, lhs_path, rhs_path, lhs_top, rhs_top,
+                    &config,
+                    matches,
+                    lhs_path,
+                    rhs_path,
+                    lhs_top,
+                    rhs_top,
+                    assertion_semantics,
                 );
             }
             #[cfg(feature = "has-boolector")]
