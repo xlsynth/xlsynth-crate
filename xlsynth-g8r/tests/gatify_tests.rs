@@ -322,6 +322,29 @@ bit_count_test_cases!(test_array_index_multidim_to_gates, |input_bits: u32,
     );
 });
 
+#[test]
+fn test_array_update_ir_to_gates() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let ir_text = "package sample
+fn f(input: bits[4][4] id=1, val: bits[4] id=2) -> bits[4][4] {
+  lit: bits[2] = literal(value=1, id=3)
+  ret upd: bits[4][4] = array_update(input, val, indices=[lit], id=4)
+}";
+    do_test_ir_conversion(&ir_text, Opt::No);
+}
+
+#[test]
+fn test_array_update_deep_ir_to_gates() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let ir_text = "package sample
+fn f(input: bits[8][2][2] id=1, val: bits[8] id=2) -> bits[8][2][2] {
+  idx0: bits[2] = literal(value=1, id=3)
+  idx1: bits[2] = literal(value=0, id=4)
+  ret upd: bits[8][2][2] = array_update(input, val, indices=[idx0, idx1], id=5)
+}";
+    do_test_ir_conversion(&ir_text, Opt::No);
+}
+
 bit_count_test_cases!(test_dslx_array_to_gates, |input_bits: u32,
                                                  opt: Opt|
  -> () {

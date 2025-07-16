@@ -149,6 +149,46 @@ fn gatify_array_index(
     result
 }
 
+fn gatify_array_update(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    indices: &[AigBitVector],
+    update_bits: &AigBitVector,
+) -> AigBitVector {
+    if indices.is_empty() {
+        assert_eq!(array_ty.bit_count(), update_bits.get_bit_count());
+        return update_bits.clone();
+    }
+
+    let element_ty = &array_ty.element_type;
+    let element_bit_count = element_ty.bit_count();
+    let index_bits = &indices[0];
+    let index_width = index_bits.get_bit_count();
+
+    let mut lsb_to_msb = Vec::new();
+    for i in (0..array_ty.element_count).rev() {
+        let slice = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
+        let updated_child = if indices.len() == 1 {
+            update_bits.clone()
+        } else {
+            match element_ty {
+                ir::Type::Array(next_ty) => {
+                    gatify_array_update(gb, next_ty, &slice, &indices[1..], update_bits)
+                }
+                other => panic!("ArrayUpdate: expected array type, found {:?}", other),
+            }
+        };
+
+        let literal_bits =
+            gb.add_literal(&xlsynth::IrBits::make_ubits(index_width, i as u64).unwrap());
+        let cond = gb.add_eq_vec(index_bits, &literal_bits, ReductionKind::Tree);
+        let selected = gb.add_mux2_vec(&cond, &updated_child, &slice);
+        lsb_to_msb.extend(selected.iter_lsb_to_msb().cloned());
+    }
+    AigBitVector::from_lsb_is_index_0(&lsb_to_msb)
+}
+
 fn gatify_sel(
     gb: &mut GateBuilder,
     selector_bits: &AigBitVector,
@@ -1138,6 +1178,37 @@ fn gatify_internal(
                 }
 
                 env.add(node_ref, GateOrVec::BitVector(array_bits));
+            }
+            ir::NodePayload::ArrayUpdate {
+                array,
+                value,
+                indices,
+                assumed_in_bounds: _,
+            } => {
+                assert!(!indices.is_empty(), "Array update must have an index");
+
+                let array_ty = match f.get_node_ty(*array) {
+                    ir::Type::Array(array_ty_data) => array_ty_data,
+                    other => panic!("Expected array type for array_update, got {:?}", other),
+                };
+                let array_bits = env.get_bit_vector(*array).unwrap();
+                let value_bits = env.get_bit_vector(*value).unwrap();
+
+                let mut index_bits_vec = Vec::new();
+                for index_node in indices.iter() {
+                    let idx_bits = env.get_bit_vector(*index_node).unwrap();
+                    index_bits_vec.push(idx_bits);
+                }
+
+                let result_bits = gatify_array_update(
+                    g8_builder,
+                    array_ty,
+                    &array_bits,
+                    &index_bits_vec,
+                    &value_bits,
+                );
+
+                env.add(node_ref, GateOrVec::BitVector(result_bits));
             }
             ir::NodePayload::Array(members) => {
                 // Similar to Tuple: flatten all members into a bit vector.
