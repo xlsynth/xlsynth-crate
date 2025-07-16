@@ -414,6 +414,15 @@ bit_count_test_cases!(test_bit_slice_update, |input_bits: u32, opt: Opt| -> () {
     );
 });
 
+#[test]
+fn test_array_update_ir_to_gates() {
+    let ir_text = "package sample
+fn f(arr: bits[8][4], value: bits[8], index: bits[1]) -> bits[8][4] {
+  ret result: bits[8][4] = array_update(arr, value, indices=[index], id=3)
+}";
+    do_test_ir_conversion_no_equiv(ir_text, Opt::No);
+}
+
 bit_count_test_cases!(test_shra_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
