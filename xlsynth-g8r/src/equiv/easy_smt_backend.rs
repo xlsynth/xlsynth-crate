@@ -272,6 +272,14 @@ impl Solver for EasySmtSolver {
         builder.solver(&config.solver_path);
         builder.solver_args(&config.solver_args);
         let context = builder.build()?;
+        // Trick for boolector solver.
+        // Boolector would render 1-bit bit-vector results as `true` or `false`
+        // instead of `#b1` or `#b0`.
+        //
+        // We need to ensure that easy-smt already knows about `true` and `false`
+        // so that it can parse them correctly.
+        context.atom("true");
+        context.atom("false");
         Ok(EasySmtSolver {
             context: Arc::new(Mutex::new(context)),
             solver_fn: config.solver_fn.clone(),
@@ -325,8 +333,8 @@ impl Solver for EasySmtSolver {
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         match bit_vec {
-            BitVec::BitVec { rep, .. } => {
-                let value = context.get_value(vec![rep.clone()])?[0].1;
+            BitVec::BitVec { rep, width } => {
+                let value = context.get_value(vec![rep.clone()]).unwrap()[0].1;
                 let atom = context.get_atom(value).expect("model value must be atom");
                 let bitstr = if let Some(rest) = atom.strip_prefix("#b") {
                     rest.to_string()
@@ -341,7 +349,14 @@ impl Solver for EasySmtSolver {
                         .collect::<Vec<_>>()
                         .join("")
                 } else {
-                    panic!("Invalid atom: {}", atom);
+                    // Trick for boolector solver.
+                    if atom == "true" && *width == 1 {
+                        "1".to_string()
+                    } else if atom == "false" && *width == 1 {
+                        "0".to_string()
+                    } else {
+                        panic!("Invalid atom: {}", atom);
+                    }
                 };
                 let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
                 Ok(ir_value_from_bits_with_type(
