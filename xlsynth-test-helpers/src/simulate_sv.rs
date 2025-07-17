@@ -8,7 +8,6 @@
 //! `vvp`, and return the collected VCD waveform contents so tests can make
 //! assertions about dynamic behaviour.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Command as StdCommand;
@@ -233,6 +232,17 @@ pub fn simulate_sv_flist(
     // Read and return the VCD contents.
     let vcd = std::fs::read_to_string(&vcd_path).map_err(SimulateSvError::Io)?;
 
+    // Optionally copy VCD to user-specified directory for debugging.
+    if let Ok(dir) = std::env::var("XLSYNTH_WAVE_DIR") {
+        if !dir.is_empty() {
+            let target = std::path::Path::new(&dir).join(vcd_name);
+            // Best-effort copy; ignore errors.
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&target, &vcd);
+            log::info!("Saved wave dump to {}", target.display());
+        }
+    }
+
     Ok(vcd)
 }
 
@@ -327,9 +337,10 @@ module tb;
     {reset_signal} = {initial_reset_val};
     for (i = 0; i < 2; i = i + 1) @(posedge clk);
     {reset_signal} = {deassert_reset_val};
-    @(posedge clk);
-{assign_values}    {input_valid_signal} = 1;
-    @(posedge clk);
+    @(negedge clk);
+    {assign_values}
+    {input_valid_signal} = 1;
+    @(negedge clk);
     {input_valid_signal} = 0;
     for (i = 0; i < {latency}; i = i + 1) @(posedge clk);
     #1;
@@ -374,90 +385,6 @@ pub fn simulate_pipeline_single_pulse(
         "rst",
         true,
     )
-}
-
-/// Parses the given VCD text and returns the first timestamp and value of
-/// `data_sig` at the moment `valid_sig` is asserted (changes to 1'b1).
-/// The value is returned as a Vec<bool> with LSB at index 0.
-pub fn capture_value_on_valid(
-    vcd_text: &str,
-    valid_sig: &str,
-    data_sig: &str,
-) -> Option<(u64, xlsynth::IrBits)> {
-    // First pass: build mapping from signal name to id code (one or more chars)
-    let mut code_for_name: HashMap<String, String> = HashMap::new();
-    for line in vcd_text.lines() {
-        if line.starts_with("$var ") {
-            // Example: $var wire 1 ! output_valid $end
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 5 {
-                let code = parts[3].to_string();
-                let name = parts[4].to_string();
-                code_for_name.insert(name, code);
-            }
-        }
-        if line.starts_with("$enddefinitions") {
-            break;
-        }
-    }
-
-    let valid_code = code_for_name.get(valid_sig)?.clone();
-    let data_code = code_for_name.get(data_sig)?.clone();
-
-    let mut cur_time: u64 = 0;
-    let mut cur_data: Vec<bool> = Vec::new();
-    let mut valid_high = false;
-
-    for line in vcd_text.lines() {
-        if line.starts_with('#') {
-            // timestamp
-            if let Ok(t) = line[1..].trim().parse::<u64>() {
-                cur_time = t;
-                if valid_high {
-                    // Convert bits vec (LSB first) into IrBits.
-                    let bit_count = cur_data.len();
-                    let mut value: u64 = 0;
-                    for (idx, bit) in cur_data.iter().enumerate().take(64) {
-                        if *bit {
-                            value |= 1u64 << idx;
-                        }
-                    }
-                    let irb = if bit_count <= 64 {
-                        xlsynth::IrBits::make_ubits(bit_count, value).ok()?
-                    } else {
-                        // Fallback: build literal string.
-                        let bin: String = cur_data
-                            .iter()
-                            .rev()
-                            .map(|b| if *b { '1' } else { '0' })
-                            .collect();
-                        let typed = format!("bits[{}]:0b{}", bit_count, bin);
-                        xlsynth::IrValue::parse_typed(&typed).ok()?.to_bits().ok()?
-                    };
-                    return Some((cur_time, irb));
-                }
-            }
-        } else if line.starts_with('b') {
-            // vector change: b1010 <code>
-            let mut parts = line[1..].split_whitespace();
-            if let (Some(bits_str), Some(code)) = (parts.next(), parts.next()) {
-                if code == data_code {
-                    cur_data = bits_str
-                        .chars()
-                        .rev() // LSB first
-                        .map(|c| c == '1')
-                        .collect();
-                }
-            }
-        } else {
-            // scalar change: 1<code> or 0<code>
-            if line.ends_with(&valid_code) {
-                let val_char = line.chars().next()?;
-                valid_high = val_char == '1';
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
