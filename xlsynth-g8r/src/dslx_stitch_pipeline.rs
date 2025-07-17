@@ -489,7 +489,27 @@ pub fn stitch_pipeline_with_valid(
     explicit_stages: Option<&[String]>,
     stdlib_path: Option<&Path>,
     search_paths: &[&Path],
+    input_valid_signal: Option<&str>,
+    output_valid_signal: Option<&str>,
+    reset: Option<&str>,
+    reset_active_low: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
+    // Precondition checks
+    if reset.is_none() {
+        return Err(xlsynth::XlsynthError(
+            "reset signal must be specified when using valid handshaking (with_valid)".to_string(),
+        ));
+    }
+    if output_valid_signal.is_some() && input_valid_signal.is_none() {
+        return Err(xlsynth::XlsynthError(
+            "--output_valid_signal requires --input_valid_signal to be specified".to_string(),
+        ));
+    }
+
+    let input_valid_signal = input_valid_signal.unwrap_or("input_valid");
+    let reset_signal = reset.unwrap_or("rst");
+    let output_valid_requested = output_valid_signal.is_some();
+    let output_valid_name = output_valid_signal.unwrap_or("output_valid");
     check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
     let convert_opts = DslxConvertOptions {
         dslx_stdlib_path: stdlib_path,
@@ -529,8 +549,8 @@ pub fn stitch_pipeline_with_valid(
 
     let mut wrapper = file.add_module(top);
     let clk_port = wrapper.add_input("clk", &scalar_type);
-    let rst_port = wrapper.add_input("rst", &scalar_type);
-    let input_valid_port = wrapper.add_input("input_valid", &scalar_type);
+    let rst_port = wrapper.add_input(reset_signal, &scalar_type);
+    let input_valid_port = wrapper.add_input(input_valid_signal, &scalar_type);
 
     let first_stage_ports = &stage_infos[0].ports;
     let mut wrapper_inputs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
@@ -556,7 +576,11 @@ pub fn stitch_pipeline_with_valid(
         dynamic_types.last().unwrap()
     };
     let out_port = wrapper.add_output("out", out_dt_ref);
-    let output_valid_port = wrapper.add_output("output_valid", &scalar_type);
+    let output_valid_port = if output_valid_requested {
+        Some(wrapper.add_output(output_valid_name, &scalar_type))
+    } else {
+        None
+    };
 
     // Input pipeline registers (p0)
     let mut p0_regs = HashMap::new();
@@ -588,12 +612,24 @@ pub fn stitch_pipeline_with_valid(
     for name in p0_names {
         let reg = p0_regs.get(&name).unwrap();
         let src = wrapper_inputs.get(&name).unwrap();
-        sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
+        let gated_expr =
+            file.make_ternary(&input_valid_port.to_expr(), &src.to_expr(), &reg.to_expr());
+        sb0.add_nonblocking_assignment(&reg.to_expr(), &gated_expr);
     }
     let zero = file
         .make_literal("bits[1]:0", &xlsynth::ir_value::IrFormatPreference::Binary)
         .unwrap();
-    let tern = file.make_ternary(&rst_port.to_expr(), &input_valid_port.to_expr(), &zero);
+    // Use the reset port directly; arm order depends on active-low vs active-high.
+    let rst_expr = rst_port.to_expr();
+    let (true_arm, false_arm) = if reset_active_low {
+        // Active-low: rst_n == 1'b0 means reset asserted, so when rst_n is 0 clear,
+        // else propagate. Ternary form: condition ? propagate : clear.
+        (&input_valid_port.to_expr(), &zero)
+    } else {
+        // Active-high: rst == 1'b1 means reset asserted.
+        (&zero, &input_valid_port.to_expr())
+    };
+    let tern = file.make_ternary(&rst_expr, true_arm, false_arm);
     sb0.add_nonblocking_assignment(&p0_valid_reg.to_expr(), &tern);
 
     // Stage processing
@@ -686,8 +722,19 @@ pub fn stitch_pipeline_with_valid(
             wrapper.add_always_at(&[&posedge_clk]).unwrap()
         };
         let mut sb = always.get_statement_block();
-        sb.add_nonblocking_assignment(&out_reg.to_expr(), &output_wire.to_expr());
-        let tern_v = file.make_ternary(&rst_port.to_expr(), &prev_valid.to_expr(), &zero);
+        let gated_data = file.make_ternary(
+            &prev_valid.to_expr(),
+            &output_wire.to_expr(),
+            &out_reg.to_expr(),
+        );
+        sb.add_nonblocking_assignment(&out_reg.to_expr(), &gated_data);
+        // Stage valid bit update with active-low/active-high awareness.
+        let (true_arm_v, false_arm_v) = if reset_active_low {
+            (&prev_valid.to_expr(), &zero)
+        } else {
+            (&zero, &prev_valid.to_expr())
+        };
+        let tern_v = file.make_ternary(&rst_expr, true_arm_v, false_arm_v);
         sb.add_nonblocking_assignment(&valid_reg.to_expr(), &tern_v);
 
         prev_reg = Some(out_reg);
@@ -699,9 +746,11 @@ pub fn stitch_pipeline_with_valid(
     wrapper.add_member_continuous_assignment(
         file.make_continuous_assignment(&out_port.to_expr(), &final_reg.to_expr()),
     );
-    wrapper.add_member_continuous_assignment(
-        file.make_continuous_assignment(&output_valid_port.to_expr(), &prev_valid.to_expr()),
-    );
+    if let Some(vport) = &output_valid_port {
+        wrapper.add_member_continuous_assignment(
+            file.make_continuous_assignment(&vport.to_expr(), &prev_valid.to_expr()),
+        );
+    }
 
     let mut text = stage_infos
         .iter()
@@ -821,6 +870,10 @@ mod tests {
             None,
             None,
             &[],
+            Some("input_valid"),
+            Some("output_valid"),
+            Some("rst"),
+            true, // Use active-low reset to match simulation helper expectations.
         )
         .unwrap()
     }

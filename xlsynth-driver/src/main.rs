@@ -346,6 +346,28 @@ fn main() {
                     "Whether to emit SystemVerilog (default true; set to false for plain Verilog)",
                 )
                 .arg(
+                    Arg::new("input_valid_signal")
+                        .long("input_valid_signal")
+                        .value_name("INPUT_VALID_SIGNAL")
+                        .help("Load enable signal for pipeline registers"),
+                )
+                .arg(
+                    Arg::new("output_valid_signal")
+                        .long("output_valid_signal")
+                        .value_name("OUTPUT_VALID_SIGNAL")
+                        .help("Output port holding pipelined valid signal"),
+                )
+                .arg(
+                    Arg::new("reset")
+                        .long("reset")
+                        .value_name("RESET")
+                        .help("Reset signal name"),
+                )
+                .add_bool_arg(
+                    "reset_active_low",
+                    "Reset is active low",
+                )
+                .arg(
                     Arg::new("stages")
                         .long("stages")
                         .value_name("CSV")

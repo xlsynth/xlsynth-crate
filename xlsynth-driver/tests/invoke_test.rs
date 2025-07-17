@@ -3,6 +3,7 @@
 //! Tests for invoking the xlsynth-driver CLI and its subcommands as a
 //! subprocess.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
 use xlsynth::IrBits;
@@ -1186,7 +1187,6 @@ fn test_ir2gates_quiet_json_output() {
     assert_eq!(json["live_nodes"], 96);
 
     // Check expected values for this simple AND circuit
-    use std::collections::HashMap;
     let expected_toggle_stats: HashMap<&str, i32> = [
         ("gate_output_toggles", 363),
         ("gate_input_toggles", 980),
@@ -2690,4 +2690,253 @@ dslx_stdlib_path = "{}""#,
             "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
     }
+}
+
+#[test]
+fn test_dslx_stitch_pipeline_with_valid() {
+    let dslx =
+        "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .arg("--input_valid_signal=input_valid")
+        .arg("--reset=rst")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+    let golden_path = std::path::Path::new("tests/test_dslx_stitch_pipeline_with_valid.golden.sv");
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+        std::fs::write(golden_path, &stdout).expect("write golden");
+    } else {
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            stdout.trim(),
+            want.trim(),
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+
+    // Simulation (input_valid only, active-low rst)
+    simulate_basic_valid_pipeline(&stdout, "foo", "input_valid", "rst", false);
+}
+
+#[test]
+fn test_stitch_with_valid_custom_in_valid_reset() {
+    let dslx =
+        "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .arg("--input_valid_signal=in_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=false")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+    let golden_path =
+        std::path::Path::new("tests/test_dslx_stitch_pipeline_with_valid_in_valid_rst.golden.sv");
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+        std::fs::write(golden_path, &stdout).expect("write golden");
+    } else {
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            stdout.trim(),
+            want.trim(),
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+
+    // Simulation active-high reset without output_valid
+    simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst", false);
+}
+
+#[test]
+fn test_stitch_with_valid_custom_in_valid_rst_n_active_low() {
+    let dslx =
+        "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .arg("--input_valid_signal=in_valid")
+        .arg("--reset=rst_n")
+        .arg("--reset_active_low=true")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+    let golden_path = std::path::Path::new(
+        "tests/test_dslx_stitch_pipeline_with_valid_in_valid_rst_n_active_low.golden.sv",
+    );
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+        std::fs::write(golden_path, &stdout).expect("write golden");
+    } else {
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            stdout.trim(),
+            want.trim(),
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+
+    // Simulation active-low reset with rst_n name
+    simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst_n", true);
+}
+
+#[test]
+fn test_stitch_with_valid_custom_in_and_out_valid() {
+    let _ = env_logger::try_init();
+    let dslx =
+        "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .arg("--input_valid_signal=in_valid")
+        .arg("--output_valid_signal=out_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=false")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+    let golden_path = std::path::Path::new(
+        "tests/test_dslx_stitch_pipeline_with_valid_in_and_out_valid.golden.sv",
+    );
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+        std::fs::write(golden_path, &stdout).expect("write golden");
+    } else {
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            stdout.trim(),
+            want.trim(),
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+
+    // Simulation check for custom valid signal names.
+    use xlsynth::ir_value::IrBits;
+    let inputs = vec![("x", IrBits::u32(5))];
+    let expected = IrBits::u32(8);
+    let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse_custom(
+        &stdout,
+        "foo",
+        &inputs,
+        &expected,
+        2,
+        "in_valid",
+        Some("out_valid"),
+        "rst",
+        false,
+    )
+    .expect("simulation succeeds");
+    assert!(vcd.contains("$var"));
+}
+
+#[test]
+fn test_stitch_with_valid_missing_reset_should_error() {
+    let dslx =
+        "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .arg("--input_valid_signal=in_valid")
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "Expected error for missing reset, got success. stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reset"),
+        "Expected error message to mention reset, got: {}",
+        stderr
+    );
+}
+
+// Helper to simulate two-stage valid pipelines without output_valid.
+fn simulate_basic_valid_pipeline(
+    sv: &str,
+    module_name: &str,
+    input_valid: &str,
+    reset: &str,
+    reset_active_low: bool,
+) {
+    let inputs = vec![("x", IrBits::u32(5))];
+    let expected = IrBits::u32(8);
+    let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse_custom(
+        sv,
+        module_name,
+        &inputs,
+        &expected,
+        2,
+        input_valid,
+        None,
+        reset,
+        reset_active_low,
+    )
+    .expect("simulation succeeds");
+    assert!(vcd.contains("$var"));
 }
