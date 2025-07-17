@@ -220,10 +220,17 @@ pub fn align_fn_inputs<'a, S: Solver>(
     }
 }
 
+pub struct Assertion<'a, R> {
+    pub active: BitVec<R>,
+    pub message: &'a str,
+    pub label: &'a str,
+}
+
 pub struct SmtFn<'a, R> {
     pub fn_ref: &'a ir::Fn,
     pub inputs: Vec<IrTypedBitVec<'a, R>>,
     pub output: IrTypedBitVec<'a, R>,
+    pub assertions: Vec<Assertion<'a, R>>,
 }
 
 pub fn ir_to_smt<'a, S: Solver>(
@@ -232,6 +239,7 @@ pub fn ir_to_smt<'a, S: Solver>(
 ) -> SmtFn<'a, S::Term> {
     let topo = get_topological(inputs.fn_ref);
     let mut env: HashMap<NodeRef, IrTypedBitVec<'a, S::Term>> = HashMap::new();
+    let mut assertions = Vec::new();
     for nr in topo {
         let node = &inputs.fn_ref.nodes[nr.index];
         fn get_num_indexable_elements<'a, S: Solver>(
@@ -572,10 +580,22 @@ pub fn ir_to_smt<'a, S: Solver>(
                     bitvec: solver.slice(&combined, 0, arg_width),
                 }
             }
-            NodePayload::Assert { .. } => {
-                // TODO: Turn Assert into a proof objective in Boolector.
-                // For now, treat as a no-op (like Nil/AfterAll).
-                continue;
+            NodePayload::Assert {
+                activate,
+                message,
+                label,
+                ..
+            } => {
+                let active = env.get(activate).expect("Assert activate must be present");
+                assertions.push(Assertion {
+                    active: active.bitvec.clone(),
+                    message: &message,
+                    label: &label,
+                });
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: BitVec::ZeroWidth,
+                }
             }
             NodePayload::Trace { .. } => {
                 // Trace has no effect on value computation
@@ -751,6 +771,24 @@ pub fn ir_to_smt<'a, S: Solver>(
         fn_ref: inputs.fn_ref,
         inputs: inputs.inputs.values().cloned().collect(),
         output: env.remove(&ret).unwrap(),
+        assertions,
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum FnOutput {
+    Value(IrValue),
+    AssertionViolation { message: String, label: String },
+}
+
+impl std::fmt::Display for FnOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FnOutput::Value(value) => write!(f, "{:?}", value),
+            FnOutput::AssertionViolation { message, label } => {
+                write!(f, "Assertion violation: {} (label: {})", message, label)
+            }
+        }
     }
 }
 
@@ -759,26 +797,181 @@ pub enum EquivResult {
     Proved,
     Disproved {
         inputs: Vec<IrValue>,
-        outputs: (IrValue, IrValue),
+        outputs: (FnOutput, FnOutput),
     },
+}
+
+/// Semantics for handling `assert` statements when checking functional
+/// equivalence.
+///
+/// Shorthand used in the formulas below:
+/// • `r_l` – result of the **l**eft function
+/// • `r_r` – result of the **r**ight function
+/// • `s_l` – "success" flag of the left (`true` iff no assertion failed)
+/// • `s_r` – "success" flag of the right (`true` iff no assertion failed)
+///
+/// For every variant we list
+///  1. **Success condition** – when the equivalence checker should consider the
+///     two functions *equivalent*.
+///  2. **Failure condition** – negation of the success condition; if *any*
+///     model satisfies this predicate, the checker must report a
+///     counter-example.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum AssertionSemantics {
+    /// Ignore all assertions.
+    /// 1. Success: `r_l == r_r`
+    /// 2. Failure: `r_l != r_r`
+    Ignore,
+
+    /// Both sides must succeed and produce the same result – they can **never**
+    /// fail.
+    /// 1. Success: `s_l ∧ s_r ∧ (r_l == r_r)`
+    /// 2. Failure: `¬s_l ∨ ¬s_r ∨ (r_l != r_r)`
+    Never,
+
+    /// The two sides must fail in exactly the same way **or** both succeed with
+    /// equal results.
+    /// 1. Success: `(¬s_l ∧ ¬s_r) ∨ (s_l ∧ s_r ∧ (r_l == r_r))`
+    /// 2. Failure: `(s_l ⊕ s_r) ∨ (s_l ∧ s_r ∧ (r_l != r_r))`
+    Same,
+
+    /// We *assume* both sides do not fail. In other words, we only check that
+    /// if they do succeed, their results must be equal.
+    /// 1. Success: `¬(s_l ∧ s_r) ∨ (r_l == r_r)`  (equivalently, `(s_l ∧ s_r) →
+    ///    r_l == r_r`)
+    /// 2. Failure: `s_l ∧ s_r ∧ (r_l != r_r)`
+    Assume,
+
+    /// If the left succeeds, the right must also succeed and match the
+    /// result; if the left fails, the right is unconstrained.
+    /// 1. Success: `¬s_l ∨ (s_r ∧ (r_l == r_r))`
+    /// 2. Failure: `s_l ∧ (¬s_r ∨ (r_l != r_r))`
+    Implies,
+}
+
+impl std::str::FromStr for AssertionSemantics {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ignore" => Ok(AssertionSemantics::Ignore),
+            "never" => Ok(AssertionSemantics::Never),
+            "same" => Ok(AssertionSemantics::Same),
+            "assume" => Ok(AssertionSemantics::Assume),
+            "implies" => Ok(AssertionSemantics::Implies),
+            _ => Err(format!("Invalid assertion semantics: {}", s)),
+        }
+    }
 }
 
 fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     solver: &mut S,
     lhs: &SmtFn<'a, S::Term>,
     rhs: &SmtFn<'a, S::Term>,
+    assertion_semantics: AssertionSemantics,
 ) -> EquivResult {
-    let diff = solver.ne(&lhs.output.bitvec, &rhs.output.bitvec);
-    solver.assert(&diff).unwrap();
+    // --------------------------------------------
+    // Helper: build a 1-bit "failed" flag for each
+    // side indicating whether **any** assertion is
+    // violated (active bit == 0).
+    // --------------------------------------------
+
+    // Build a flag that is true iff ALL assertions are active (i.e., no violation).
+    let mk_success_flag = |solver: &mut S, asserts: &Vec<Assertion<'a, S::Term>>| {
+        if asserts.is_empty() {
+            // No assertions → always succeed (true)
+            solver.numerical(1, 1)
+        } else {
+            let mut acc: Option<BitVec<S::Term>> = None;
+            for a in asserts {
+                acc = Some(match acc {
+                    None => a.active.clone(),
+                    Some(prev) => solver.and(&prev, &a.active),
+                });
+            }
+            acc.expect("acc populated")
+        }
+    };
+
+    let lhs_pass = mk_success_flag(solver, &lhs.assertions);
+    let rhs_pass = mk_success_flag(solver, &rhs.assertions);
+
+    let lhs_failed = solver.not(&lhs_pass);
+    let rhs_failed = solver.not(&rhs_pass);
+
+    // diff of outputs
+    let outputs_diff = solver.ne(&lhs.output.bitvec, &rhs.output.bitvec);
+
+    // Build the overall condition to assert based on semantics
+    let condition = match assertion_semantics {
+        AssertionSemantics::Ignore => outputs_diff.clone(),
+        AssertionSemantics::Never => {
+            let any_failed = solver.or(&lhs_failed, &rhs_failed);
+            solver.or(&outputs_diff, &any_failed)
+        }
+        AssertionSemantics::Same => {
+            // fail status differs OR (both pass AND outputs differ)
+            let fail_status_diff = solver.ne(&lhs_failed, &rhs_failed);
+            let both_pass = solver.and(&lhs_pass, &rhs_pass);
+            let diff_when_pass = solver.and(&outputs_diff, &both_pass);
+            solver.or(&fail_status_diff, &diff_when_pass)
+        }
+        AssertionSemantics::Assume => {
+            println!("{}", solver.render(&lhs_pass));
+            println!("{}", solver.render(&rhs_pass));
+            println!("{}", solver.render(&outputs_diff));
+            let both_pass = solver.and(&lhs_pass, &rhs_pass);
+            solver.and(&both_pass, &outputs_diff)
+        }
+        AssertionSemantics::Implies => {
+            // lhs passes AND (rhs fails OR outputs differ)
+            let rhs_fail_or_diff = solver.or(&rhs_failed, &outputs_diff);
+            solver.and(&lhs_pass, &rhs_fail_or_diff)
+        }
+    };
+
+    solver.assert(&condition).unwrap();
 
     match solver.check().unwrap() {
         Response::Sat => {
+            // Helper to fetch first violated assertion (if any)
+            let get_assertion = |solver: &mut S,
+                                 asserts: &Vec<Assertion<'a, S::Term>>|
+             -> Option<(String, String)> {
+                for a in asserts {
+                    let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
+                    let bits = val.to_bits().unwrap();
+                    let ok = bits.get_bit(0).unwrap();
+                    if !ok {
+                        return Some((a.message.to_string(), a.label.to_string()));
+                    }
+                }
+                None
+            };
+
+            let lhs_violation = { get_assertion(solver, &lhs.assertions) };
+            let rhs_violation = { get_assertion(solver, &rhs.assertions) };
+
+            // Now we can safely create a helper closure that borrows `solver` again
             let mut get_value = |i: &IrTypedBitVec<'a, S::Term>| -> IrValue {
                 solver.get_value(&i.bitvec, &i.ir_type).unwrap()
             };
+
+            // Helper to produce FnOutput given optional violation info.
+            let mut get_output =
+                |vio: Option<(String, String)>, tbv: &IrTypedBitVec<'a, S::Term>| match vio {
+                    Some((msg, lbl)) => FnOutput::AssertionViolation {
+                        message: msg,
+                        label: lbl,
+                    },
+                    None => FnOutput::Value(get_value(tbv)),
+                };
+
+            let lhs_output = get_output(lhs_violation, &lhs.output);
+            let rhs_output = get_output(rhs_violation, &rhs.output);
+
             EquivResult::Disproved {
                 inputs: lhs.inputs.iter().map(|i| get_value(i)).collect(),
-                outputs: (get_value(&lhs.output), get_value(&rhs.output)),
+                outputs: (lhs_output, rhs_output),
             }
         }
         Response::Unsat => EquivResult::Proved,
@@ -790,6 +983,7 @@ fn check_fn_equiv_internal<'a, S: Solver>(
     solver: &mut S,
     lhs: &ir::Fn,
     rhs: &ir::Fn,
+    assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
     let fn_inputs_1 = get_fn_inputs(solver, lhs, Some("lhs"));
@@ -797,17 +991,18 @@ fn check_fn_equiv_internal<'a, S: Solver>(
     let aligned_fn_inputs = align_fn_inputs(solver, &fn_inputs_1, &fn_inputs_2, allow_flatten);
     let smt_fn_1 = ir_to_smt(solver, &aligned_fn_inputs.lhs);
     let smt_fn_2 = ir_to_smt(solver, &aligned_fn_inputs.rhs);
-    check_aligned_fn_equiv_internal(solver, &smt_fn_1, &smt_fn_2)
+    check_aligned_fn_equiv_internal(solver, &smt_fn_1, &smt_fn_2, assertion_semantics)
 }
 
 pub fn prove_ir_fn_equiv<'a, S: Solver>(
     solver_config: &S::Config,
     lhs: &ir::Fn,
     rhs: &ir::Fn,
+    assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
     let mut solver = S::new(solver_config).unwrap();
-    check_fn_equiv_internal(&mut solver, lhs, rhs, allow_flatten)
+    check_fn_equiv_internal(&mut solver, lhs, rhs, assertion_semantics, allow_flatten)
 }
 
 // Add parallel equivalence-checking strategies that were previously only
@@ -848,6 +1043,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<S: Solver>(
     solver_config: &S::Config,
     lhs: &ir::Fn,
     rhs: &ir::Fn,
+    assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
     let width = lhs.ret_ty.bit_count();
@@ -855,7 +1051,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<S: Solver>(
     if width == 0 {
         // Zero-width values – fall back to the standard equivalence prover because
         // there is no bit to split on.
-        return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, allow_flatten);
+        return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, assertion_semantics, allow_flatten);
     }
 
     let found = Arc::new(AtomicBool::new(false));
@@ -884,7 +1080,13 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<S: Solver>(
 
                     let lf = make_bit_fn(&lhs_cl, idx);
                     let rf = make_bit_fn(&rhs_cl, idx);
-                    let res = prove_ir_fn_equiv::<S>(solver_config, &lf, &rf, allow_flatten);
+                    let res = prove_ir_fn_equiv::<S>(
+                        solver_config,
+                        &lf,
+                        &rf,
+                        assertion_semantics.clone(),
+                        allow_flatten,
+                    );
                     if let EquivResult::Disproved { .. } = &res {
                         let mut guard = cex_cl.lock().unwrap();
                         *guard = Some(res.clone());
@@ -916,10 +1118,11 @@ pub fn prove_ir_fn_equiv_split_input_bit<S: Solver>(
     rhs: &ir::Fn,
     split_input_index: usize,
     split_input_bit_index: usize,
+    assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
     if lhs.params.is_empty() || rhs.params.is_empty() {
-        return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, allow_flatten);
+        return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, assertion_semantics, allow_flatten);
     }
 
     assert_eq!(
@@ -970,7 +1173,10 @@ pub fn prove_ir_fn_equiv_split_input_bit<S: Solver>(
                 };
                 return EquivResult::Disproved {
                     inputs: smt_lhs.inputs.iter().map(|i| get_val(i)).collect(),
-                    outputs: (get_val(&smt_lhs.output), get_val(&smt_rhs.output)),
+                    outputs: (
+                        FnOutput::Value(get_val(&smt_lhs.output)),
+                        FnOutput::Value(get_val(&smt_rhs.output)),
+                    ),
                 };
             }
             Response::Unsat => {
@@ -991,8 +1197,8 @@ pub mod test_utils {
     use crate::{
         equiv::{
             prove_equiv::{
-                EquivResult, FnInputs, align_fn_inputs, get_fn_inputs, ir_to_smt, ir_value_to_bv,
-                prove_ir_fn_equiv,
+                AssertionSemantics, EquivResult, FnInputs, align_fn_inputs, get_fn_inputs,
+                ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
             },
             solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
         },
@@ -1065,13 +1271,15 @@ pub mod test_utils {
         ir_text_1: &str,
         ir_text_2: &str,
         allow_flatten: bool,
+        assertion_semantics: AssertionSemantics,
         expected_proven: bool,
     ) {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text_1);
         let f1 = parser.parse_fn().unwrap();
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text_2);
         let f2 = parser.parse_fn().unwrap();
-        let actual = prove_ir_fn_equiv::<S>(solver_config, &f1, &f2, allow_flatten);
+        let actual =
+            prove_ir_fn_equiv::<S>(solver_config, &f1, &f2, assertion_semantics, allow_flatten);
         if expected_proven {
             assert!(matches!(actual, EquivResult::Proved));
         } else {
@@ -1085,7 +1293,14 @@ pub mod test_utils {
         ir_text_2: &str,
         allow_flatten: bool,
     ) {
-        assert_ir_fn_equiv_base::<S>(solver_config, ir_text_1, ir_text_2, allow_flatten, true);
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            ir_text_1,
+            ir_text_2,
+            allow_flatten,
+            AssertionSemantics::Same,
+            true,
+        );
     }
 
     pub fn assert_ir_fn_inequiv<S: Solver>(
@@ -1094,7 +1309,14 @@ pub mod test_utils {
         ir_text_2: &str,
         allow_flatten: bool,
     ) {
-        assert_ir_fn_equiv_base::<S>(solver_config, ir_text_1, ir_text_2, allow_flatten, false);
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            ir_text_1,
+            ir_text_2,
+            allow_flatten,
+            AssertionSemantics::Same,
+            false,
+        );
     }
 
     fn test_ir_fn_equiv_to_self<S: Solver>(solver_config: &S::Config, ir_text: &str) {
@@ -1913,6 +2135,181 @@ pub mod test_utils {
             false,
         );
     }
+
+    fn assert_ir_text(is_lt: bool, assert_value: u32, ret_value: u32) -> String {
+        format!(
+            r#"fn f(__token: token, a: bits[4]) -> (token, bits[4]) {{
+            literal.1: bits[4] = literal(value={assert_value}, id=1)
+            {op}.2: bits[1] = {op}(a, literal.1, id=2)
+            assert.3: token = assert(__token, {op}.2, message="Assertion failure!", label="a", id=3)
+            literal.4: bits[4] = literal(value={ret_value}, id=4)
+            ret tuple.5: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
+        }}"#,
+            op = if is_lt { "ult" } else { "uge" },
+            ret_value = ret_value,
+        )
+    }
+
+    // Helper builders leveraging `assert_ir_text` from above.
+    fn lt_ir(threshold: u32, ret_val: u32) -> String {
+        // Assertion passes when a < threshold
+        assert_ir_text(true, threshold, ret_val)
+    }
+
+    fn ge_ir(threshold: u32, ret_val: u32) -> String {
+        // Assertion passes when a >= threshold
+        assert_ir_text(false, threshold, ret_val)
+    }
+
+    fn vacuous_ir(ret_val: u32) -> String {
+        assert_ir_text(true, 0, ret_val)
+    }
+
+    fn no_assertion_ir(ret_val: u32) -> String {
+        assert_ir_text(false, 0, ret_val)
+    }
+
+    // ----- Same -----
+    pub fn test_assert_semantics_same<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lt_ir(1, 2),
+            &lt_ir(1, 2),
+            false,
+            AssertionSemantics::Same,
+            true,
+        );
+    }
+
+    pub fn test_assert_semantics_same_different_assertion<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lt_ir(1, 2),
+            &lt_ir(2, 2),
+            false,
+            AssertionSemantics::Same,
+            false,
+        );
+    }
+
+    pub fn test_assert_semantics_same_different_result<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lt_ir(1, 2),
+            &lt_ir(1, 3),
+            false,
+            AssertionSemantics::Same,
+            false,
+        );
+    }
+
+    // ----- Ignore -----
+    pub fn test_assert_semantics_ignore_proved<S: Solver>(solver_config: &S::Config) {
+        let lhs = lt_ir(5, 1);
+        let rhs = ge_ir(10, 1);
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lhs,
+            &rhs,
+            false,
+            AssertionSemantics::Ignore,
+            true,
+        );
+    }
+
+    pub fn test_assert_semantics_ignore_different_result<S: Solver>(solver_config: &S::Config) {
+        let lhs = lt_ir(8, 1);
+        let rhs = lt_ir(8, 2);
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lhs,
+            &rhs,
+            false,
+            AssertionSemantics::Ignore,
+            false,
+        );
+    }
+
+    // ----- Never -----
+    pub fn test_assert_semantics_never_proved<S: Solver>(solver_config: &S::Config) {
+        let lhs = no_assertion_ir(1);
+        let rhs = no_assertion_ir(1);
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lhs,
+            &rhs,
+            false,
+            AssertionSemantics::Never,
+            true,
+        );
+    }
+
+    pub fn test_assert_semantics_never_any_fail<S: Solver>(solver_config: &S::Config) {
+        let lhs = lt_ir(4, 1);
+        let rhs = lt_ir(4, 1);
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lhs,
+            &rhs,
+            false,
+            AssertionSemantics::Never,
+            false,
+        );
+    }
+
+    // ----- Assume -----
+    pub fn test_assert_semantics_assume_proved_vacuous<S: Solver>(solver_config: &S::Config) {
+        let lhs = vacuous_ir(1);
+        let rhs = no_assertion_ir(2);
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lhs,
+            &rhs,
+            false,
+            AssertionSemantics::Assume,
+            true,
+        );
+    }
+
+    pub fn test_assert_semantics_assume_disproved<S: Solver>(solver_config: &S::Config) {
+        let lhs = lt_ir(8, 1);
+        let rhs = lt_ir(8, 2); // both succeed for same range a<8
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lhs,
+            &rhs,
+            false,
+            AssertionSemantics::Assume,
+            false,
+        );
+    }
+
+    // ----- Implies -----
+    pub fn test_assert_semantics_implies_proved_lhs_fails<S: Solver>(solver_config: &S::Config) {
+        let lhs = lt_ir(5, 1); // passes a<5
+        let rhs = lt_ir(8, 1); // passes a<8
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lhs,
+            &rhs,
+            false,
+            AssertionSemantics::Implies,
+            true,
+        );
+    }
+
+    pub fn test_assert_semantics_implies_disproved_rhs_fails<S: Solver>(solver_config: &S::Config) {
+        let lhs = lt_ir(8, 1); // passes a<8
+        let rhs = lt_ir(5, 1); // passes a<5 (subset) - rhs may fail when lhs passes
+        assert_ir_fn_equiv_base::<S>(
+            solver_config,
+            &lhs,
+            &rhs,
+            false,
+            AssertionSemantics::Implies,
+            false,
+        );
+    }
 }
 
 macro_rules! test_with_solver {
@@ -2408,6 +2805,62 @@ macro_rules! test_with_solver {
             #[test]
             fn test_priority_sel_default() {
                 test_utils::test_priority_sel_default::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_assert_semantics_same() {
+                test_utils::test_assert_semantics_same::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_assert_semantics_same_different_assertion() {
+                test_utils::test_assert_semantics_same_different_assertion::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_assert_semantics_same_different_result() {
+                test_utils::test_assert_semantics_same_different_result::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_assert_semantics_ignore_proved() {
+                test_utils::test_assert_semantics_ignore_proved::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_assert_semantics_ignore_different_result() {
+                test_utils::test_assert_semantics_ignore_different_result::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_assert_semantics_never_proved() {
+                test_utils::test_assert_semantics_never_proved::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_assert_semantics_never_any_fail() {
+                test_utils::test_assert_semantics_never_any_fail::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_assert_semantics_assume_proved_vacuous() {
+                test_utils::test_assert_semantics_assume_proved_vacuous::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_assert_semantics_assume_disproved() {
+                test_utils::test_assert_semantics_assume_disproved::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_assert_semantics_implies_proved_lhs_fails() {
+                test_utils::test_assert_semantics_implies_proved_lhs_fails::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_assert_semantics_implies_disproved_rhs_fails() {
+                test_utils::test_assert_semantics_implies_disproved_rhs_fails::<$solver_type>(
+                    $solver_config,
+                );
             }
         }
     };

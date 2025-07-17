@@ -538,6 +538,15 @@ fn main() {
                         .value_parser(["single-threaded", "output-bits", "input-bit-split"])
                         .default_value("single-threaded")
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("assertion_semantics")
+                        .long("assertion-semantics")
+                        .value_name("SEMANTICS")
+                        .help("Assertion semantics")
+                        .value_parser(["ignore", "never", "same", "assume", "implies"])
+                        .default_value("same")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
