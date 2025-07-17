@@ -84,22 +84,67 @@ pub fn ir_value_to_bv<'a, S: Solver>(
 }
 
 #[derive(Debug, Clone)]
-pub struct FnInputs<'a, R> {
+pub struct IrFn<'a> {
     pub fn_ref: &'a ir::Fn,
+    pub fixed_implicit_activation: bool,
+}
+
+impl<'a> IrFn<'a> {
+    pub fn new_plain(fn_ref: &'a ir::Fn) -> Self {
+        Self {
+            fn_ref,
+            fixed_implicit_activation: false,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.fn_ref.name
+    }
+
+    pub fn params(&self) -> &'a [ir::Param] {
+        &self.fn_ref.params
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FnInputs<'a, R> {
+    pub ir_fn: &'a IrFn<'a>,
     pub inputs: HashMap<String, IrTypedBitVec<'a, R>>,
 }
 
 pub fn get_fn_inputs<'a, S: Solver>(
     solver: &mut S,
-    fn_ref: &'a ir::Fn,
+    ir_fn: &'a IrFn<'a>,
     name_prefix: Option<&str>,
 ) -> FnInputs<'a, S::Term> {
+    let mut params_iter = ir_fn.fn_ref.params.iter();
     let mut inputs = HashMap::new();
-    for p in fn_ref.params.iter() {
-        let name = match name_prefix {
-            Some(prefix) => format!("__{}__{}", prefix, p.name),
-            None => p.name.clone(),
-        };
+    let prefix_name = |name: &str| match name_prefix {
+        Some(prefix) => format!("_{}__{}", prefix, name),
+        None => name.to_string(),
+    };
+    if ir_fn.fixed_implicit_activation {
+        let itok = params_iter.next().unwrap();
+        assert_eq!(itok.ty, ir::Type::Token);
+        inputs.insert(
+            itok.name.clone(),
+            IrTypedBitVec {
+                ir_type: &itok.ty,
+                bitvec: solver.zero_width(),
+            },
+        );
+        let iact = params_iter.next().unwrap();
+        assert_eq!(iact.ty, ir::Type::Bits(1));
+        inputs.insert(
+            prefix_name(&iact.name),
+            IrTypedBitVec {
+                ir_type: &iact.ty,
+                bitvec: solver.one(1),
+            },
+        );
+    }
+    for p in params_iter {
+        let name = prefix_name(&p.name);
         let bv = solver.declare(&name, p.ty.bit_count() as usize).unwrap();
         inputs.insert(
             p.name.clone(),
@@ -109,12 +154,52 @@ pub fn get_fn_inputs<'a, S: Solver>(
             },
         );
     }
-    FnInputs { fn_ref, inputs }
+    FnInputs { ir_fn, inputs }
 }
 
 impl<'a, R> FnInputs<'a, R> {
     pub fn total_width(&self) -> usize {
         self.inputs.values().map(|b| b.bitvec.get_width()).sum()
+    }
+
+    pub fn total_free_width(&self) -> usize {
+        if self.fixed_implicit_activation() {
+            self.total_width() - 1
+        } else {
+            self.total_width()
+        }
+    }
+
+    pub fn fixed_implicit_activation(&self) -> bool {
+        self.ir_fn.fixed_implicit_activation
+    }
+
+    pub fn params(&self) -> &'a [ir::Param] {
+        self.ir_fn.params()
+    }
+
+    pub fn params_len(&self) -> usize {
+        self.params().len()
+    }
+
+    pub fn free_params_len(&self) -> usize {
+        if self.fixed_implicit_activation() {
+            self.params_len() - 2
+        } else {
+            self.params_len()
+        }
+    }
+
+    pub fn free_params(&self) -> &'a [ir::Param] {
+        if self.fixed_implicit_activation() {
+            &self.params()[2..]
+        } else {
+            self.params()
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        self.ir_fn.name()
     }
 }
 
@@ -138,23 +223,22 @@ pub fn align_fn_inputs<'a, S: Solver>(
     rhs_inputs: &FnInputs<'a, S::Term>,
     allow_flatten: bool,
 ) -> AlignedFnInputs<'a, S::Term> {
-    let lhs_inputs_total_width = lhs_inputs.total_width();
-    let rhs_inputs_total_width = rhs_inputs.total_width();
+    let lhs_inputs_total_width = lhs_inputs.total_free_width();
+    let rhs_inputs_total_width = rhs_inputs.total_free_width();
     assert_eq!(
         lhs_inputs_total_width, rhs_inputs_total_width,
         "LHS and RHS must have the same number of bits"
     );
     if !allow_flatten {
         assert_eq!(
-            lhs_inputs.fn_ref.params.len(),
-            rhs_inputs.fn_ref.params.len(),
+            lhs_inputs.free_params_len(),
+            rhs_inputs.free_params_len(),
             "LHS and RHS must have the same number of inputs"
         );
         for (l, r) in lhs_inputs
-            .fn_ref
-            .params
+            .free_params()
             .iter()
-            .zip(rhs_inputs.fn_ref.params.iter())
+            .zip(rhs_inputs.free_params().iter())
         {
             assert_eq!(
                 l.ty, r.ty,
@@ -172,7 +256,8 @@ pub fn align_fn_inputs<'a, S: Solver>(
     }
     let params_name = format!(
         "__flattened_params__{}__{}",
-        lhs_inputs.fn_ref.name, rhs_inputs.fn_ref.name
+        lhs_inputs.name(),
+        rhs_inputs.name()
     );
     let flattened = solver
         .declare(&params_name, lhs_inputs_total_width)
@@ -181,8 +266,31 @@ pub fn align_fn_inputs<'a, S: Solver>(
     let mut split_map =
         |inputs: &FnInputs<'a, S::Term>| -> HashMap<String, IrTypedBitVec<'a, S::Term>> {
             let mut m = HashMap::new();
+            let mut params_iter = inputs.params().iter();
+
+            if inputs.fixed_implicit_activation() {
+                let itok = params_iter.next().unwrap();
+                assert_eq!(itok.ty, ir::Type::Token);
+                m.insert(
+                    itok.name.clone(),
+                    IrTypedBitVec {
+                        ir_type: &itok.ty,
+                        bitvec: solver.zero_width(),
+                    },
+                );
+                let iact = params_iter.next().unwrap();
+                assert_eq!(iact.ty, ir::Type::Bits(1));
+                m.insert(
+                    iact.name.clone(),
+                    IrTypedBitVec {
+                        ir_type: &iact.ty,
+                        bitvec: solver.one(1),
+                    },
+                );
+            }
+
             let mut offset = 0;
-            for n in inputs.fn_ref.params.iter() {
+            for n in params_iter {
                 let existing_bitvec = inputs.inputs.get(&n.name).unwrap();
                 let new_bitvec = {
                     let w = existing_bitvec.bitvec.get_width();
@@ -209,11 +317,11 @@ pub fn align_fn_inputs<'a, S: Solver>(
 
     AlignedFnInputs {
         lhs: FnInputs {
-            fn_ref: lhs_inputs.fn_ref,
+            ir_fn: lhs_inputs.ir_fn,
             inputs: lhs_params,
         },
         rhs: FnInputs {
-            fn_ref: rhs_inputs.fn_ref,
+            ir_fn: rhs_inputs.ir_fn,
             inputs: rhs_params,
         },
         flattened,
@@ -237,11 +345,11 @@ pub fn ir_to_smt<'a, S: Solver>(
     solver: &mut S,
     inputs: &'a FnInputs<'a, S::Term>,
 ) -> SmtFn<'a, S::Term> {
-    let topo = get_topological(inputs.fn_ref);
+    let topo = get_topological(inputs.ir_fn.fn_ref);
     let mut env: HashMap<NodeRef, IrTypedBitVec<'a, S::Term>> = HashMap::new();
     let mut assertions = Vec::new();
     for nr in topo {
-        let node = &inputs.fn_ref.nodes[nr.index];
+        let node = &inputs.ir_fn.fn_ref.nodes[nr.index];
         fn get_num_indexable_elements<'a, S: Solver>(
             index: &IrTypedBitVec<'a, S::Term>,
             num_elements: usize,
@@ -258,7 +366,7 @@ pub fn ir_to_smt<'a, S: Solver>(
         let exp: IrTypedBitVec<'a, S::Term> = match &node.payload {
             NodePayload::Nil => continue,
             NodePayload::GetParam(pid) => {
-                let p = inputs.fn_ref.params.iter().find(|p| p.id == *pid).unwrap();
+                let p = inputs.params().iter().find(|p| p.id == *pid).unwrap();
                 if let Some(sym) = inputs.inputs.get(&p.name) {
                     sym.clone()
                 } else {
@@ -289,7 +397,7 @@ pub fn ir_to_smt<'a, S: Solver>(
             }
             NodePayload::TupleIndex { tuple, index } => {
                 let tuple_bv = env.get(tuple).expect("Tuple operand must be present");
-                let tuple_ty = inputs.fn_ref.get_node_ty(*tuple);
+                let tuple_ty = inputs.ir_fn.fn_ref.get_node_ty(*tuple);
                 let slice = tuple_ty
                     .tuple_get_flat_bit_slice_for_index(*index)
                     .expect("TupleIndex: not a tuple type");
@@ -766,9 +874,9 @@ pub fn ir_to_smt<'a, S: Solver>(
         };
         env.insert(nr, exp);
     }
-    let ret = inputs.fn_ref.ret_node_ref.unwrap();
+    let ret = inputs.ir_fn.fn_ref.ret_node_ref.unwrap();
     SmtFn {
-        fn_ref: inputs.fn_ref,
+        fn_ref: inputs.ir_fn.fn_ref,
         inputs: inputs.inputs.values().cloned().collect(),
         output: env.remove(&ret).unwrap(),
         assertions,
@@ -981,8 +1089,8 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
 
 fn check_fn_equiv_internal<'a, S: Solver>(
     solver: &mut S,
-    lhs: &ir::Fn,
-    rhs: &ir::Fn,
+    lhs: &IrFn<'a>,
+    rhs: &IrFn<'a>,
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
@@ -996,8 +1104,8 @@ fn check_fn_equiv_internal<'a, S: Solver>(
 
 pub fn prove_ir_fn_equiv<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &ir::Fn,
-    rhs: &ir::Fn,
+    lhs: &IrFn<'a>,
+    rhs: &IrFn<'a>,
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
@@ -1039,20 +1147,24 @@ fn make_bit_fn(f: &ir::Fn, bit: usize) -> ir::Fn {
 /// Prove equivalence by splitting on each output bit in parallel.
 /// `solver_factory` must be able to create an independent solver instance for
 /// each spawned thread.
-pub fn prove_ir_fn_equiv_output_bits_parallel<S: Solver>(
+pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &ir::Fn,
-    rhs: &ir::Fn,
+    lhs: &IrFn<'a>,
+    rhs: &IrFn<'a>,
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
-    let width = lhs.ret_ty.bit_count();
-    assert_eq!(width, rhs.ret_ty.bit_count(), "Return widths must match");
+    let width = lhs.fn_ref.ret_ty.bit_count();
+    assert_eq!(
+        width,
+        rhs.fn_ref.ret_ty.bit_count(),
+        "Return widths must match"
+    );
     if width == 0 {
         // Zero-width values – fall back to the standard equivalence prover because
         // there is no bit to split on.
         return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, assertion_semantics, allow_flatten);
-    }
+    };
 
     let found = Arc::new(AtomicBool::new(false));
     let counterexample: Arc<Mutex<Option<EquivResult>>> = Arc::new(Mutex::new(None));
@@ -1078,8 +1190,16 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<S: Solver>(
                         break;
                     }
 
-                    let lf = make_bit_fn(&lhs_cl, idx);
-                    let rf = make_bit_fn(&rhs_cl, idx);
+                    let lf = make_bit_fn(&lhs_cl.fn_ref, idx);
+                    let rf = make_bit_fn(&rhs_cl.fn_ref, idx);
+                    let lf = IrFn {
+                        fn_ref: &lf,
+                        ..lhs_cl
+                    };
+                    let rf = IrFn {
+                        fn_ref: &rf,
+                        ..rhs_cl
+                    };
                     let res = prove_ir_fn_equiv::<S>(
                         solver_config,
                         &lf,
@@ -1112,30 +1232,30 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<S: Solver>(
 /// Prove equivalence by case-splitting on a single input bit value (0 / 1).
 /// `split_input_index` selects the parameter to split on and
 /// `split_input_bit_index` selects the bit inside that parameter.
-pub fn prove_ir_fn_equiv_split_input_bit<S: Solver>(
+pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &ir::Fn,
-    rhs: &ir::Fn,
+    lhs: &IrFn<'a>,
+    rhs: &IrFn<'a>,
     split_input_index: usize,
     split_input_bit_index: usize,
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
-    if lhs.params.is_empty() || rhs.params.is_empty() {
+    if lhs.fn_ref.params.is_empty() || rhs.fn_ref.params.is_empty() {
         return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, assertion_semantics, allow_flatten);
     }
 
     assert_eq!(
-        lhs.params.len(),
-        rhs.params.len(),
+        lhs.fn_ref.params.len(),
+        rhs.fn_ref.params.len(),
         "Parameter count mismatch"
     );
     assert!(
-        split_input_index < lhs.params.len(),
+        split_input_index < lhs.fn_ref.params.len(),
         "split_input_index out of bounds"
     );
     assert!(
-        split_input_bit_index < lhs.params[split_input_index].ty.bit_count(),
+        split_input_bit_index < lhs.fn_ref.params[split_input_index].ty.bit_count(),
         "split_input_bit_index out of bounds"
     );
 
@@ -1149,7 +1269,8 @@ pub fn prove_ir_fn_equiv_split_input_bit<S: Solver>(
         let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs);
 
         // Locate the chosen parameter on the LHS side.
-        let param_name = &lhs.params[split_input_index].name;
+        let param_name = &lhs.fn_ref.params[split_input_index].name;
+
         let param_bv = aligned
             .lhs
             .inputs
@@ -1197,7 +1318,7 @@ pub mod test_utils {
     use crate::{
         equiv::{
             prove_equiv::{
-                AssertionSemantics, EquivResult, FnInputs, align_fn_inputs, get_fn_inputs,
+                AssertionSemantics, EquivResult, FnInputs, IrFn, align_fn_inputs, get_fn_inputs,
                 ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
             },
             solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
@@ -1215,7 +1336,8 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+        let ir_fn = IrFn::new_plain(&f);
+        let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
     }
@@ -1230,7 +1352,8 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+        let ir_fn = IrFn::new_plain(&f);
+        let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
     }
@@ -1243,7 +1366,8 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+        let ir_fn = IrFn::new_plain(&f);
+        let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
         let expected_result = expected(&mut solver, &fn_inputs);
         assert_solver_eq(&mut solver, &smt_fn.output.bitvec, &expected_result);
@@ -1266,6 +1390,40 @@ pub mod test_utils {
         );
     }
 
+    fn assert_ir_fn_equiv_base_with_implicit_token_policy<S: Solver>(
+        solver_config: &S::Config,
+        lhs_text: &str,
+        rhs_text: &str,
+        lhs_fixed_implicit_activation: bool,
+        rhs_fixed_implicit_activation: bool,
+        allow_flatten: bool,
+        assertion_semantics: AssertionSemantics,
+        expected_proven: bool,
+    ) {
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(lhs_text);
+        let lhs_ir_fn = parser.parse_fn().unwrap();
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(rhs_text);
+        let rhs_ir_fn = parser.parse_fn().unwrap();
+        let actual = prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn {
+                fn_ref: &lhs_ir_fn,
+                fixed_implicit_activation: lhs_fixed_implicit_activation,
+            },
+            &IrFn {
+                fn_ref: &rhs_ir_fn,
+                fixed_implicit_activation: rhs_fixed_implicit_activation,
+            },
+            assertion_semantics,
+            allow_flatten,
+        );
+        if expected_proven {
+            assert!(matches!(actual, EquivResult::Proved));
+        } else {
+            assert!(matches!(actual, EquivResult::Disproved { .. }));
+        }
+    }
+
     fn assert_ir_fn_equiv_base<S: Solver>(
         solver_config: &S::Config,
         ir_text_1: &str,
@@ -1274,17 +1432,16 @@ pub mod test_utils {
         assertion_semantics: AssertionSemantics,
         expected_proven: bool,
     ) {
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text_1);
-        let f1 = parser.parse_fn().unwrap();
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text_2);
-        let f2 = parser.parse_fn().unwrap();
-        let actual =
-            prove_ir_fn_equiv::<S>(solver_config, &f1, &f2, assertion_semantics, allow_flatten);
-        if expected_proven {
-            assert!(matches!(actual, EquivResult::Proved));
-        } else {
-            assert!(matches!(actual, EquivResult::Disproved { .. }));
-        }
+        assert_ir_fn_equiv_base_with_implicit_token_policy::<S>(
+            solver_config,
+            ir_text_1,
+            ir_text_2,
+            false,
+            false,
+            allow_flatten,
+            assertion_semantics,
+            expected_proven,
+        );
     }
 
     pub fn assert_ir_fn_equiv<S: Solver>(
@@ -1457,7 +1614,8 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(&ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let fn_inputs = get_fn_inputs(&mut solver, &f, None);
+        let ir_fn = IrFn::new_plain(&f);
+        let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
         let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
         let y = fn_inputs.inputs.get("y").unwrap().bitvec.clone();
@@ -1865,7 +2023,8 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let inputs = get_fn_inputs(&mut solver, &f, None);
+        let ir_fn = IrFn::new_plain(&f);
+        let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // This call should not panic
         let _ = ir_to_smt(&mut solver, &inputs);
     }
@@ -2057,7 +2216,8 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let inputs = get_fn_inputs(&mut solver, &f, None);
+        let ir_fn = IrFn::new_plain(&f);
+        let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Should panic during conversion due to missing default
         let _ = ir_to_smt(&mut solver, &inputs);
     }
@@ -2076,7 +2236,8 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let inputs = get_fn_inputs(&mut solver, &f, None);
+        let ir_fn = IrFn::new_plain(&f);
+        let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let _ = ir_to_smt(&mut solver, &inputs);
     }
 
@@ -2308,6 +2469,92 @@ pub mod test_utils {
             false,
             AssertionSemantics::Implies,
             false,
+        );
+    }
+
+    fn fail_if_deactivated() -> &'static str {
+        r#"fn f(__token: token, __activate: bits[1], tok: token, a: bits[4]) -> (token, bits[4]) {
+                assert.3: token = assert(__token, __activate, message="Assertion failure!", label="a", id=3)
+                literal.4: bits[4] = literal(value=1, id=4)
+                ret tuple.5: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
+            }"#
+    }
+
+    fn fail_if_activated() -> &'static str {
+        r#"fn f(__token: token, __activate: bits[1], tok: token, a: bits[4]) -> (token, bits[4]) {
+                not.2: bits[1] = not(__activate, id=2)
+                assert.3: token = assert(__token, not.2, message="Assertion failure!", label="a", id=3)
+                literal.4: bits[4] = literal(value=1, id=4)
+                ret tuple.5: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
+            }"#
+    }
+
+    fn plain_success() -> &'static str {
+        r#"fn f(tok: token, a: bits[4]) -> (token, bits[4]) {
+                literal.1: bits[4] = literal(value=1, id=1)
+                ret tuple.2: (token, bits[4]) = tuple(tok, literal.1, id=2)
+            }"#
+    }
+
+    fn plain_failure() -> &'static str {
+        r#"fn f(tok: token, a: bits[4]) -> (token, bits[4]) {
+                literal.1: bits[1] = literal(value=0, id=1)
+                assert.2: token = assert(tok, literal.1, message="Assertion failure!", label="a", id=2)
+                literal.3: bits[4] = literal(value=1, id=3)
+                ret tuple.4: (token, bits[4]) = tuple(tok, literal.3, id=4)
+            }"#
+    }
+
+    pub fn test_both_implicit_token_no_fixed_implicit_activation<S: Solver>(
+        solver_config: &S::Config,
+    ) {
+        assert_ir_fn_equiv_base_with_implicit_token_policy::<S>(
+            solver_config,
+            &fail_if_deactivated(),
+            &fail_if_deactivated(),
+            false,
+            false,
+            false,
+            AssertionSemantics::Same,
+            true,
+        );
+    }
+    pub fn test_implicit_token_policy_fixed_implicit_activation<S: Solver>(
+        solver_config: &S::Config,
+    ) {
+        assert_ir_fn_equiv_base_with_implicit_token_policy::<S>(
+            solver_config,
+            &fail_if_deactivated(),
+            &fail_if_deactivated(),
+            true,
+            true,
+            false,
+            AssertionSemantics::Same,
+            true,
+        );
+    }
+    pub fn test_single_fixed_implicit_activation_success<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv_base_with_implicit_token_policy::<S>(
+            solver_config,
+            &fail_if_deactivated(),
+            &plain_success(),
+            true,
+            false,
+            false,
+            AssertionSemantics::Same,
+            true,
+        );
+    }
+    pub fn test_single_fixed_implicit_activation_failure<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv_base_with_implicit_token_policy::<S>(
+            solver_config,
+            &fail_if_activated(),
+            &plain_failure(),
+            true,
+            false,
+            false,
+            AssertionSemantics::Same,
+            true,
         );
     }
 }
@@ -2859,6 +3106,30 @@ macro_rules! test_with_solver {
             #[test]
             fn test_assert_semantics_implies_disproved_rhs_fails() {
                 test_utils::test_assert_semantics_implies_disproved_rhs_fails::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_both_implicit_token_no_fixed_implicit_activation() {
+                test_utils::test_both_implicit_token_no_fixed_implicit_activation::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_implicit_token_policy_fixed_implicit_activation() {
+                test_utils::test_implicit_token_policy_fixed_implicit_activation::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_single_fixed_implicit_activation_success() {
+                test_utils::test_single_fixed_implicit_activation_success::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_single_fixed_implicit_activation_failure() {
+                test_utils::test_single_fixed_implicit_activation_failure::<$solver_type>(
                     $solver_config,
                 );
             }

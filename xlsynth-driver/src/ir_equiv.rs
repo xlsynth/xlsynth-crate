@@ -7,7 +7,7 @@ use xlsynth_g8r::equiv::solver_interface::Solver;
 
 use xlsynth_g8r::equiv::prove_equiv::{
     prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
-    AssertionSemantics, EquivResult,
+    AssertionSemantics, EquivResult, IrFn,
 };
 use xlsynth_g8r::xls_ir::ir_parser;
 
@@ -226,16 +226,18 @@ fn run_boolector_equiv_check(
     }
 }
 
-fn run_easy_smt_equiv_check<S: Solver>(
+fn run_equiv_check<S: Solver>(
+    solver_config: &S::Config,
     lhs_path: &std::path::Path,
     rhs_path: &std::path::Path,
     lhs_top: Option<&str>,
     rhs_top: Option<&str>,
+    lhs_fixed_implicit_activation: bool,
+    rhs_fixed_implicit_activation: bool,
     flatten_aggregates: bool,
     drop_params: &[String],
     strategy: ParallelismStrategy,
     assertion_semantics: AssertionSemantics,
-    solver_config: &S::Config,
 ) -> ! {
     // Parse both IR files to xls_ir::ir::Package
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
@@ -276,12 +278,19 @@ fn run_easy_smt_equiv_check<S: Solver>(
         })
     };
     // Drop parameters by name and check for usage
-    let lhs_fn = lhs_fn
-        .drop_params(drop_params)
-        .expect("Dropped parameter is used in the function body!");
-    let rhs_fn = rhs_fn
-        .drop_params(drop_params)
-        .expect("Dropped parameter is used in the function body!");
+    let lhs_fn = IrFn {
+        fn_ref: &lhs_fn
+            .drop_params(drop_params)
+            .expect("Dropped parameter is used in the function body!"),
+        fixed_implicit_activation: lhs_fixed_implicit_activation,
+    };
+    let rhs_fn = IrFn {
+        fn_ref: &rhs_fn
+            .drop_params(drop_params)
+            .expect("Dropped parameter is used in the function body!"),
+        fixed_implicit_activation: rhs_fixed_implicit_activation,
+    };
+
     let start_time = std::time::Instant::now();
     let result = match strategy {
         ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv::<S>(
@@ -371,53 +380,45 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     let solver: Option<SolverChoice> = matches
         .get_one::<String>("solver")
         .map(|s| s.parse().unwrap());
-    if let Some(solver) = solver {
-        fn run_solver_equiv_check<S: Solver>(
-            solver_config: &S::Config,
-            matches: &clap::ArgMatches,
-            lhs_path: &std::path::Path,
-            rhs_path: &std::path::Path,
-            lhs_top: Option<&str>,
-            rhs_top: Option<&str>,
-            assertion_semantics: AssertionSemantics,
-        ) {
-            let flatten_aggregates = matches
-                .get_one::<String>("flatten_aggregates")
-                .map(|s| s == "true")
-                .unwrap_or(false);
-            let drop_params: Vec<String> = matches
-                .get_one::<String>("drop_params")
-                .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
-                .unwrap_or_else(Vec::new);
-            let strategy = matches
-                .get_one::<String>("parallelism_strategy")
-                .map(|s| s.parse().unwrap())
-                .unwrap_or(ParallelismStrategy::SingleThreaded);
-            run_easy_smt_equiv_check::<S>(
-                lhs_path,
-                rhs_path,
-                lhs_top,
-                rhs_top,
-                flatten_aggregates,
-                &drop_params,
-                strategy,
-                assertion_semantics,
-                &solver_config,
-            );
-        }
 
+    let flatten_aggregates = matches
+        .get_one::<String>("flatten_aggregates")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+    let drop_params: Vec<String> = matches
+        .get_one::<String>("drop_params")
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+        .unwrap_or_else(Vec::new);
+    let strategy = matches
+        .get_one::<String>("parallelism_strategy")
+        .map(|s| s.parse().unwrap())
+        .unwrap_or(ParallelismStrategy::SingleThreaded);
+    let lhs_fixed_implicit_activation = matches
+        .get_one::<String>("lhs_fixed_implicit_activation")
+        .map(|s| s.parse().unwrap())
+        .unwrap_or(false);
+    let rhs_fixed_implicit_activation = matches
+        .get_one::<String>("rhs_fixed_implicit_activation")
+        .map(|s| s.parse().unwrap())
+        .unwrap_or(false);
+
+    if let Some(solver) = solver {
         match solver {
             #[cfg(feature = "has-boolector")]
             SolverChoice::Boolector => {
                 use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
                 let config = BoolectorConfig::new();
-                run_solver_equiv_check::<Boolector>(
+                run_equiv_check::<Boolector>(
                     &config,
-                    matches,
                     lhs_path,
                     rhs_path,
                     lhs_top,
                     rhs_top,
+                    lhs_fixed_implicit_activation,
+                    rhs_fixed_implicit_activation,
+                    flatten_aggregates,
+                    &drop_params,
+                    strategy,
                     assertion_semantics,
                 );
             }
@@ -432,13 +433,17 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                     SolverChoice::BoolectorBinary => EasySmtConfig::boolector(),
                     _ => unreachable!(),
                 };
-                run_solver_equiv_check::<EasySmtSolver>(
+                run_equiv_check::<EasySmtSolver>(
                     &config,
-                    matches,
                     lhs_path,
                     rhs_path,
                     lhs_top,
                     rhs_top,
+                    lhs_fixed_implicit_activation,
+                    rhs_fixed_implicit_activation,
+                    flatten_aggregates,
+                    &drop_params,
+                    strategy,
                     assertion_semantics,
                 );
             }
@@ -447,32 +452,33 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                 use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
                 let options = BitwuzlaOptions::new();
                 let config = options;
-                run_solver_equiv_check::<Bitwuzla>(
+                run_equiv_check::<Bitwuzla>(
                     &config,
-                    matches,
                     lhs_path,
                     rhs_path,
                     lhs_top,
                     rhs_top,
+                    lhs_fixed_implicit_activation,
+                    rhs_fixed_implicit_activation,
+                    flatten_aggregates,
+                    &drop_params,
+                    strategy,
                     assertion_semantics,
                 );
             }
             #[cfg(feature = "has-boolector")]
             SolverChoice::BoolectorLegacy => {
-                let flatten_aggregates = matches
-                    .get_one::<String>("flatten_aggregates")
-                    .map(|s| s == "true")
-                    .unwrap_or(false);
-                let drop_params: Vec<String> = matches
-                    .get_one::<String>("drop_params")
-                    .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
-                    .unwrap_or_else(Vec::new);
-                let strategy = matches
-                    .get_one::<String>("parallelism_strategy")
-                    .map(|s| s.parse().unwrap())
-                    .unwrap_or(ParallelismStrategy::SingleThreaded);
-
                 log::info!("run_boolector_equiv_check");
+                if lhs_fixed_implicit_activation || rhs_fixed_implicit_activation {
+                    eprintln!("Error: --lhs_fixed_implicit_activation and --rhs_fixed_implicit_activation are not supported for boolector-legacy solver");
+                    std::process::exit(1);
+                }
+                if assertion_semantics != AssertionSemantics::Same {
+                    eprintln!(
+                        "Error: --assertion_semantics is not supported for boolector-legacy solver"
+                    );
+                    std::process::exit(1);
+                }
                 run_boolector_equiv_check(
                     lhs_path,
                     rhs_path,

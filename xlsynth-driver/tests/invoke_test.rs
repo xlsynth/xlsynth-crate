@@ -1365,6 +1365,70 @@ fn test_irequiv_subcommand_solver_equivalent(solver: &str) {
     );
 }
 
+// Test for ir-equiv subcommand using Solver
+fn test_irequiv_subcommand_solver_equivalent_with_fixed_implicit_activation(solver: &str) {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_ir = r#"
+        package add_then_sub
+        fn my_main(__token: token, __activation: bits[1], x: bits[32]) -> (token, bits[32]) {
+            assert.2: token = assert(__token, __activation, message="activation should be false", label="activation_should_be_false")
+            add.3: bits[32] = add(x, x)
+            sub.4: bits[32] = sub(add.3, x)
+            ret tuple.5: (token, bits[32]) = tuple(assert.2, sub.4)
+        }
+    "#;
+    let rhs_ir = r#"
+        package identity
+        fn my_main(x: bits[32]) -> bits[32] {
+            ret identity.2: bits[32] = identity(x)
+        }
+    "#;
+    // Write the IR files to the temp directory.
+    let lhs_path = temp_dir.path().join("lhs.ir");
+    std::fs::write(&lhs_path, lhs_ir).unwrap();
+    let rhs_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_path, rhs_ir).unwrap();
+
+    // Write out toolchain configuration.
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = "[toolchain]\n".to_string();
+    // Unconditionally add tool_path for this test for now.
+    let toolchain_toml_contents_with_path = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents_with_path).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .arg(format!("--solver={}", solver))
+        .arg("--lhs_fixed_implicit_activation=true")
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
+    assert!(
+        output.status.success(),
+        "Solver ir-equiv should succeed; \nstdout:\n {}\nstderr:\n {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("Solver proved equivalence"),
+        "stdout:\n {}\nstderr:\n {}",
+        stdout,
+        stderr
+    );
+}
+
 /// Test for ir-equiv command with different IR top entry
 /// points.
 fn test_irequiv_subcommand_solver_different_top_entry_points(solver: &str) {
@@ -1496,7 +1560,7 @@ pub fn main(x: u8, y: u8) -> (u8, u8) { if y == u8:0 { (all_ones!<u8>(), zero!<u
     assert!(stdout.contains("Solver proved equivalence"));
 }
 
-macro_rules! test_irequiv_subcommand_solver {
+macro_rules! test_irequiv_subcommand_solver_base {
     ($solver:ident, $feature:expr, $choice:expr) => {
         paste::paste! {
             #[cfg(feature = $feature)]
@@ -1518,19 +1582,37 @@ macro_rules! test_irequiv_subcommand_solver {
     };
 }
 
-test_irequiv_subcommand_solver!(boolector, "has-boolector", "boolector");
-test_irequiv_subcommand_solver!(boolector_legacy, "has-boolector", "boolector-legacy");
-test_irequiv_subcommand_solver!(bitwuzla, "has-bitwuzla", "bitwuzla");
+macro_rules! test_irequiv_subcommand_solver {
+    ($solver:ident, $feature:expr, $choice:expr, true) => {
+        paste::paste! {
+            test_irequiv_subcommand_solver_base!($solver, $feature, $choice);
+            #[cfg(feature = $feature)]
+            #[test]
+            fn [<test_irequiv_subcommand_ $solver _equivalent_with_fixed_implicit_activation>]() {
+                test_irequiv_subcommand_solver_equivalent_with_fixed_implicit_activation($choice);
+            }
+        }
+    };
+    ($solver:ident, $feature:expr, $choice:expr, false) => {
+        test_irequiv_subcommand_solver_base!($solver, $feature, $choice);
+    };
+}
+
+test_irequiv_subcommand_solver!(boolector, "has-boolector", "boolector", true);
+test_irequiv_subcommand_solver!(boolector_legacy, "has-boolector", "boolector-legacy", false);
+test_irequiv_subcommand_solver!(bitwuzla, "has-bitwuzla", "bitwuzla", true);
 test_irequiv_subcommand_solver!(
     boolector_binary,
     "with-boolector-binary-test",
-    "boolector-binary"
+    "boolector-binary",
+    true
 );
-test_irequiv_subcommand_solver!(z3_binary, "with-z3-binary-test", "z3-binary");
+test_irequiv_subcommand_solver!(z3_binary, "with-z3-binary-test", "z3-binary", true);
 test_irequiv_subcommand_solver!(
     bitwuzla_binary,
     "with-bitwuzla-binary-test",
-    "bitwuzla-binary"
+    "bitwuzla-binary",
+    true
 );
 
 #[test_case(true; "with_tool_path")]

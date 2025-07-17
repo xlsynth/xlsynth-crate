@@ -33,7 +33,9 @@ fn parse_package(path: &str) -> Package {
 #[cfg(feature = "has-bitwuzla")]
 fn main_has_bitwuzla(args: Args) {
     use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
-    use xlsynth_g8r::equiv::prove_equiv::{AssertionSemantics, EquivResult, prove_ir_fn_equiv};
+    use xlsynth_g8r::equiv::prove_equiv::{
+        AssertionSemantics, EquivResult, IrFn, prove_ir_fn_equiv,
+    };
 
     let pkg1 = parse_package(&args.ir1);
     let pkg2 = parse_package(&args.ir2);
@@ -49,8 +51,14 @@ fn main_has_bitwuzla(args: Args) {
     let bitwuzla_start = Instant::now();
     let bitwuzla_result = prove_ir_fn_equiv::<Bitwuzla>(
         &BitwuzlaOptions::new(),
-        f1,
-        f2,
+        &IrFn {
+            fn_ref: f1,
+            fixed_implicit_activation: false,
+        },
+        &IrFn {
+            fn_ref: f2,
+            fixed_implicit_activation: false,
+        },
         AssertionSemantics::Same,
         false,
     );
