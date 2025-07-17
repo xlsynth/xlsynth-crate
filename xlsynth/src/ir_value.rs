@@ -7,8 +7,8 @@ use crate::{
         xls_bits_make_sbits, xls_bits_make_ubits, xls_bits_to_debug_str, xls_bits_to_string,
         xls_format_preference_from_string, xls_value_eq, xls_value_free, xls_value_get_bits,
         xls_value_get_element, xls_value_get_element_count, xls_value_make_array,
-        xls_value_make_sbits, xls_value_make_tuple, xls_value_make_ubits, xls_value_to_string,
-        xls_value_to_string_format_preference,
+        xls_value_make_sbits, xls_value_make_token, xls_value_make_tuple, xls_value_make_ubits,
+        xls_value_to_string, xls_value_to_string_format_preference,
     },
     xls_parse_typed_value,
     xlsynth_error::XlsynthError,
@@ -267,6 +267,10 @@ pub struct IrValue {
 }
 
 impl IrValue {
+    pub fn make_token() -> Self {
+        xls_value_make_token()
+    }
+
     pub fn make_tuple(elements: &[IrValue]) -> Self {
         xls_value_make_tuple(elements)
     }

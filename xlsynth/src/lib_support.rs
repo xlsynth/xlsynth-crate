@@ -199,6 +199,12 @@ pub(crate) fn xls_value_make_sbits(value: i64, bit_count: usize) -> Result<IrVal
     Ok(IrValue { ptr: result })
 }
 
+pub(crate) fn xls_value_make_token() -> IrValue {
+    let result = unsafe { xlsynth_sys::xls_value_make_token() };
+    assert!(!result.is_null());
+    IrValue { ptr: result }
+}
+
 pub(crate) fn xls_value_make_tuple(elements: &[IrValue]) -> IrValue {
     unsafe {
         let elements_ptrs: Vec<*const CIrValue> =

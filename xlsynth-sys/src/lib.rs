@@ -315,6 +315,9 @@ extern "C" {
         values: *const *const CIrValue,
     ) -> *mut CIrValue;
 
+    // Create a token value
+    pub fn xls_value_make_token() -> *mut CIrValue;
+
     /// Returns an error:
     /// * if the elements do not all have the same type, or
     /// * if the array is empty (because then we cannot determine the element
