@@ -35,7 +35,7 @@ module foo(
   reg [31:0] p0_x;
   reg p0_valid;
   always_ff @ (posedge clk) begin
-    p0_x <= x;
+    p0_x <= in_valid ? x : p0_x;
     p0_valid <= rst ? in_valid : 1'b0;
   end
   wire [31:0] stage0_out_comb;

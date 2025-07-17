@@ -612,7 +612,9 @@ pub fn stitch_pipeline_with_valid(
     for name in p0_names {
         let reg = p0_regs.get(&name).unwrap();
         let src = wrapper_inputs.get(&name).unwrap();
-        sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
+        let gated_expr =
+            file.make_ternary(&input_valid_port.to_expr(), &src.to_expr(), &reg.to_expr());
+        sb0.add_nonblocking_assignment(&reg.to_expr(), &gated_expr);
     }
     let zero = file
         .make_literal("bits[1]:0", &xlsynth::ir_value::IrFormatPreference::Binary)
