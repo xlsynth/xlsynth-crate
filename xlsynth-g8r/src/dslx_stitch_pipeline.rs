@@ -717,7 +717,12 @@ pub fn stitch_pipeline_with_valid(
             wrapper.add_always_at(&[&posedge_clk]).unwrap()
         };
         let mut sb = always.get_statement_block();
-        sb.add_nonblocking_assignment(&out_reg.to_expr(), &output_wire.to_expr());
+        let gated_data = file.make_ternary(
+            &prev_valid.to_expr(),
+            &output_wire.to_expr(),
+            &out_reg.to_expr(),
+        );
+        sb.add_nonblocking_assignment(&out_reg.to_expr(), &gated_data);
         let tern_v = file.make_ternary(&rst_expr, &prev_valid.to_expr(), &zero);
         sb.add_nonblocking_assignment(&valid_reg.to_expr(), &tern_v);
 

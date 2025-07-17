@@ -47,7 +47,7 @@ module foo(
   reg [31:0] p1_out;
   reg p1_valid;
   always_ff @ (posedge clk) begin
-    p1_out <= stage0_out_comb;
+    p1_out <= p0_valid ? stage0_out_comb : p1_out;
     p1_valid <= rst ? p0_valid : 1'b0;
   end
   wire [31:0] stage1_out_comb;
@@ -58,7 +58,7 @@ module foo(
   reg [31:0] p2_out;
   reg p2_valid;
   always_ff @ (posedge clk) begin
-    p2_out <= stage1_out_comb;
+    p2_out <= p1_valid ? stage1_out_comb : p2_out;
     p2_valid <= rst ? p1_valid : 1'b0;
   end
   assign out = p2_out;
