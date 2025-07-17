@@ -154,16 +154,30 @@ fn gatify_array_update(
     array_ty: &ir::ArrayTypeData,
     array_bits: &AigBitVector,
     value_bits: &AigBitVector,
-    index_bits: &AigBitVector,
+    index_bits: &[AigBitVector],
 ) -> AigBitVector {
+    assert!(!index_bits.is_empty());
+
     let element_bit_count = array_ty.element_type.bit_count();
-    let index_decoded = gatify_decode(gb, array_ty.element_count, index_bits);
+    let index_decoded = gatify_decode(gb, array_ty.element_count, &index_bits[0]);
     let mut updated_elems: Vec<AigBitVector> = Vec::new();
 
     for i in 0..array_ty.element_count {
         let orig_elem = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
+        let updated_value = if index_bits.len() == 1 {
+            value_bits.clone()
+        } else {
+            let next_ty = match array_ty.element_type.as_ref() {
+                ir::Type::Array(ty) => ty,
+                other => panic!(
+                    "Expected array type for multidimensional array update, got {:?}",
+                    other
+                ),
+            };
+            gatify_array_update(gb, next_ty, &orig_elem, value_bits, &index_bits[1..])
+        };
         let selector = index_decoded.get_lsb(i);
-        let updated = gb.add_mux2_vec(selector, value_bits, &orig_elem);
+        let updated = gb.add_mux2_vec(selector, &updated_value, &orig_elem);
         updated_elems.push(updated);
     }
 
@@ -1170,10 +1184,9 @@ fn gatify_internal(
                 indices,
                 assumed_in_bounds: _,
             } => {
-                assert_eq!(
-                    indices.len(),
-                    1,
-                    "Only single-dimensional array updates are supported",
+                assert!(
+                    !indices.is_empty(),
+                    "Array update must have at least one index",
                 );
                 let array_ty = match f.get_node_ty(*array) {
                     ir::Type::Array(array_ty_data) => array_ty_data,
@@ -1182,7 +1195,10 @@ fn gatify_internal(
 
                 let array_bits = env.get_bit_vector(*array).unwrap();
                 let value_bits = env.get_bit_vector(*value).unwrap();
-                let index_bits = env.get_bit_vector(indices[0]).unwrap();
+                let index_bits: Vec<AigBitVector> = indices
+                    .iter()
+                    .map(|i| env.get_bit_vector(*i).unwrap())
+                    .collect();
 
                 let result_bits = gatify_array_update(
                     g8_builder,

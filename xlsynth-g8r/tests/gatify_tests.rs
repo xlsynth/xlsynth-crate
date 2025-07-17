@@ -423,6 +423,15 @@ fn f(arr: bits[8][4], value: bits[8], index: bits[1]) -> bits[8][4] {
     do_test_ir_conversion_no_equiv(ir_text, Opt::No);
 }
 
+#[test]
+fn test_array_update_multidim_ir_to_gates() {
+    let ir_text = "package sample
+fn f(arr: bits[8][2][2], value: bits[8], i0: bits[1], i1: bits[1]) -> bits[8][2][2] {
+  ret result: bits[8][2][2] = array_update(arr, value, indices=[i0, i1], id=3)
+}";
+    do_test_ir_conversion_no_equiv(ir_text, Opt::No);
+}
+
 bit_count_test_cases!(test_shra_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,
