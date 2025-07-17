@@ -2855,6 +2855,24 @@ fn test_stitch_with_valid_custom_in_and_out_valid() {
             "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
     }
+
+    // Simulation check for custom valid signal names.
+    use xlsynth::ir_value::IrBits;
+    let inputs = vec![("x", IrBits::u32(5))];
+    let expected = IrBits::u32(8);
+    let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse_custom(
+        &stdout,
+        "foo",
+        &inputs,
+        &expected,
+        2,
+        "in_valid",
+        "out_valid",
+        "rst",
+        false,
+    )
+    .expect("simulation succeeds");
+    assert!(vcd.contains("$var"));
 }
 
 #[test]

@@ -235,18 +235,22 @@ pub fn simulate_sv_flist(
     Ok(vcd)
 }
 
-/// Simulates a pipeline design by pulsing its `input_valid` signal for a single
-/// clock cycle and verifying that `output_valid` is asserted exactly
-/// `latency` cycles later with the provided expected value. The pipeline is
-/// assumed to use a low-active synchronous reset named `rst` and to have the
-/// following ports: `clk`, `rst`, `input_valid`, `x`, `output_valid`, and
-/// `out`.
-pub fn simulate_pipeline_single_pulse(
+/// Simulates a pipeline design with parameterized signal names.
+///
+/// * `input_valid_signal` / `output_valid_signal` – names of the handshake
+///   pins.
+/// * `reset_signal` – reset pin name.
+/// * `reset_active_low` – if true, reset asserts when `0`.
+pub fn simulate_pipeline_single_pulse_custom(
     pipeline_sv: &str,
     module_name: &str,
     inputs: &[(&str, IrBits)],
     expected_output: &IrBits,
     latency: usize,
+    input_valid_signal: &str,
+    output_valid_signal: &str,
+    reset_signal: &str,
+    reset_active_low: bool,
 ) -> Result<String, SimulateSvError> {
     use xlsynth::ir_value::IrFormatPreference;
 
@@ -277,34 +281,55 @@ pub fn simulate_pipeline_single_pulse(
         .trim_start_matches("0x")
         .to_string();
 
+    // Handshake and reset regs are declared separately in the TB header below to
+    // avoid duplicates.
+
+    // Reset literal values depending on polarity.
+    let initial_reset_val = if reset_active_low { "0" } else { "1" };
+    let deassert_reset_val = if reset_active_low { "1" } else { "0" };
+
+    // Assemble port connections including handshake and reset.
+    let mut ports_joined = ports;
+    if !ports_joined.is_empty() {
+        // we'll prepend comma later when used
+    }
+    // Handshake and reset ports are added explicitly in the DUT instantiation
+    // below.
+
+    let ports_part = if ports_joined.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", ports_joined)
+    };
+
     let tb = format!(
         r#"`timescale 1ns/1ps
 module tb;
   reg clk = 0;
   always #5 clk = ~clk;
-  reg rst = 0;
-  reg input_valid = 0;
-{reg_decls}  wire output_valid;
+  reg {reset_signal} = {initial_reset_val};
+  reg {input_valid_signal} = 0;
+{reg_decls}  wire {output_valid_signal};
   wire [{out_width_minus_one}:0] out;
-  {module_name} dut(.clk(clk), .rst(rst), .input_valid(input_valid), {ports}, .output_valid(output_valid), .out(out));
+  {module_name} dut(.clk(clk), .{reset_signal}({reset_signal}), .{input_valid_signal}({input_valid_signal}){ports_part}, .{output_valid_signal}({output_valid_signal}), .out(out));
   integer i;
   initial begin
     $dumpfile("dump.vcd");
     $dumpvars(0, tb);
-    rst = 0;
+    {reset_signal} = {initial_reset_val};
     for (i = 0; i < 2; i = i + 1) @(posedge clk);
-    rst = 1;
+    {reset_signal} = {deassert_reset_val};
     @(posedge clk);
-{assign_values}    input_valid = 1;
+{assign_values}    {input_valid_signal} = 1;
     @(posedge clk);
-    input_valid = 0;
+    {input_valid_signal} = 0;
     for (i = 0; i < {latency}; i = i + 1) @(posedge clk);
     #1;
-    if (output_valid !== 1'b1) $fatal(1, "output_valid not asserted");
+    if ({output_valid_signal} !== 1'b1) $fatal(1, "{output_valid_signal} not asserted");
     if (out !== {out_width_minus_one_plus_one}'h{exp_hex}) $fatal(1, "unexpected output");
     @(posedge clk);
     #1;
-    if (output_valid !== 1'b0) $fatal(1, "output_valid did not deassert");
+    if ({output_valid_signal} !== 1'b0) $fatal(1, "{output_valid_signal} did not deassert");
     $finish;
   end
 endmodule"#
@@ -322,6 +347,27 @@ endmodule"#
     ];
 
     simulate_sv_flist(&files, "tb", "dump.vcd")
+}
+
+/// Backward-compat wrapper that uses default signal names.
+pub fn simulate_pipeline_single_pulse(
+    pipeline_sv: &str,
+    module_name: &str,
+    inputs: &[(&str, IrBits)],
+    expected_output: &IrBits,
+    latency: usize,
+) -> Result<String, SimulateSvError> {
+    simulate_pipeline_single_pulse_custom(
+        pipeline_sv,
+        module_name,
+        inputs,
+        expected_output,
+        latency,
+        "input_valid",
+        "output_valid",
+        "rst",
+        true,
+    )
 }
 
 #[cfg(test)]
