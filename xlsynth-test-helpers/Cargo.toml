@@ -16,6 +16,7 @@ log = "0.4"
 env_logger = "0.11"
 xlsynth = { version = "0.0.168", path = "../xlsynth" }
 arbitrary = { version = "1.3", features = ["derive"] }
+vcd = "0.6"
 
 [dev-dependencies]
 xlsynth-sys = { path = "../xlsynth-sys" }
