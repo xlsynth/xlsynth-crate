@@ -875,27 +875,46 @@ pub fn ir_to_smt<'a, S: Solver>(
         env.insert(nr, exp);
     }
     let ret = inputs.ir_fn.fn_ref.ret_node_ref.unwrap();
+    // Collect inputs in the same order as they are declared in the IR function
+    let mut ordered_inputs: Vec<IrTypedBitVec<'a, S::Term>> = Vec::new();
+    for param in inputs.params() {
+        if let Some(bv) = inputs.inputs.get(&param.name) {
+            ordered_inputs.push(bv.clone());
+        } else {
+            panic!("Param {} not found in inputs map", param.name);
+        }
+    }
+
     SmtFn {
         fn_ref: inputs.ir_fn.fn_ref,
-        inputs: inputs.inputs.values().cloned().collect(),
+        inputs: ordered_inputs,
         output: env.remove(&ret).unwrap(),
         assertions,
     }
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum FnOutput {
-    Value(IrValue),
-    AssertionViolation { message: String, label: String },
+pub struct AssertionViolation {
+    pub message: String,
+    pub label: String,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct FnOutput {
+    pub value: IrValue,
+    pub assertion_violation: Option<AssertionViolation>,
 }
 
 impl std::fmt::Display for FnOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FnOutput::Value(value) => write!(f, "{:?}", value),
-            FnOutput::AssertionViolation { message, label } => {
-                write!(f, "Assertion violation: {} (label: {})", message, label)
-            }
+        if let Some(violation) = &self.assertion_violation {
+            write!(
+                f,
+                "Value: {:?}, Assertion violation: {} (label: {})",
+                self.value, violation.message, violation.label
+            )
+        } else {
+            write!(f, "Value: {:?}", self.value)
         }
     }
 }
@@ -904,8 +923,10 @@ impl std::fmt::Display for FnOutput {
 pub enum EquivResult {
     Proved,
     Disproved {
-        inputs: Vec<IrValue>,
-        outputs: (FnOutput, FnOutput),
+        lhs_inputs: Vec<(String, IrValue)>,
+        rhs_inputs: Vec<(String, IrValue)>,
+        lhs_output: FnOutput,
+        rhs_output: FnOutput,
     },
 }
 
@@ -1029,9 +1050,6 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
             solver.or(&fail_status_diff, &diff_when_pass)
         }
         AssertionSemantics::Assume => {
-            println!("{}", solver.render(&lhs_pass));
-            println!("{}", solver.render(&rhs_pass));
-            println!("{}", solver.render(&outputs_diff));
             let both_pass = solver.and(&lhs_pass, &rhs_pass);
             solver.and(&both_pass, &outputs_diff)
         }
@@ -1065,26 +1083,43 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
             let rhs_violation = { get_assertion(solver, &rhs.assertions) };
 
             // Now we can safely create a helper closure that borrows `solver` again
-            let mut get_value = |i: &IrTypedBitVec<'a, S::Term>| -> IrValue {
+            let get_value = |solver: &mut S, i: &IrTypedBitVec<'a, S::Term>| -> IrValue {
                 solver.get_value(&i.bitvec, &i.ir_type).unwrap()
             };
 
             // Helper to produce FnOutput given optional violation info.
-            let mut get_output =
-                |vio: Option<(String, String)>, tbv: &IrTypedBitVec<'a, S::Term>| match vio {
-                    Some((msg, lbl)) => FnOutput::AssertionViolation {
+            let get_output =
+                |solver: &mut S,
+                 vio: Option<(String, String)>,
+                 tbv: &IrTypedBitVec<'a, S::Term>| FnOutput {
+                    value: get_value(solver, tbv),
+                    assertion_violation: vio.map(|(msg, lbl)| AssertionViolation {
                         message: msg,
                         label: lbl,
-                    },
-                    None => FnOutput::Value(get_value(tbv)),
+                    }),
                 };
 
-            let lhs_output = get_output(lhs_violation, &lhs.output);
-            let rhs_output = get_output(rhs_violation, &rhs.output);
+            let build_inputs = |solver: &mut S, smt_fn: &SmtFn<'a, S::Term>| {
+                smt_fn
+                    .fn_ref
+                    .params
+                    .iter()
+                    .zip(smt_fn.inputs.iter())
+                    .map(|(p, i)| (p.name.clone(), get_value(solver, i)))
+                    .collect()
+            };
+
+            let lhs_inputs = build_inputs(solver, lhs);
+            let rhs_inputs = build_inputs(solver, rhs);
+
+            let lhs_output = get_output(solver, lhs_violation, &lhs.output);
+            let rhs_output = get_output(solver, rhs_violation, &rhs.output);
 
             EquivResult::Disproved {
-                inputs: lhs.inputs.iter().map(|i| get_value(i)).collect(),
-                outputs: (lhs_output, rhs_output),
+                lhs_inputs,
+                rhs_inputs,
+                lhs_output,
+                rhs_output,
             }
         }
         Response::Unsat => EquivResult::Proved,
@@ -1288,28 +1323,7 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         let eq_bv = solver.eq(&bit_bv, &val_bv);
         solver.assert(&eq_bv).unwrap();
 
-        // Assert outputs differ.
-        let diff = solver.ne(&smt_lhs.output.bitvec, &smt_rhs.output.bitvec);
-        solver.assert(&diff).unwrap();
-
-        match solver.check().unwrap() {
-            Response::Sat => {
-                let mut get_val = |irbv: &IrTypedBitVec<'_, S::Term>| -> IrValue {
-                    solver.get_value(&irbv.bitvec, &irbv.ir_type).unwrap()
-                };
-                return EquivResult::Disproved {
-                    inputs: smt_lhs.inputs.iter().map(|i| get_val(i)).collect(),
-                    outputs: (
-                        FnOutput::Value(get_val(&smt_lhs.output)),
-                        FnOutput::Value(get_val(&smt_rhs.output)),
-                    ),
-                };
-            }
-            Response::Unsat => {
-                // Continue to next bit value
-            }
-            Response::Unknown => panic!("Solver returned unknown result"),
-        }
+        check_aligned_fn_equiv_internal(&mut solver, &smt_lhs, &smt_rhs, assertion_semantics);
     }
 
     EquivResult::Proved
@@ -2562,6 +2576,53 @@ pub mod test_utils {
             true,
         );
     }
+
+    pub fn test_counterexample_input_order<S: Solver>(solver_config: &S::Config) {
+        // IR pair intentionally inequivalent: returns different parameters to force a
+        // counterexample.
+        let lhs_ir = r#"fn lhs(a: bits[8], b: bits[8]) -> bits[8] {
+                ret id.1: bits[8] = identity(a, id=1)
+            }"#;
+        let rhs_ir = r#"fn rhs(a: bits[8], b: bits[8]) -> bits[8] {
+                ret id.1: bits[8] = identity(b, id=1)
+            }"#;
+        // Parse the IR text into functions.
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(lhs_ir);
+        let lhs_fn_ir = parser.parse_fn().unwrap();
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(rhs_ir);
+        let rhs_fn_ir = parser.parse_fn().unwrap();
+
+        // Run equivalence prover – expect a counter-example (Disproved).
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn::new_plain(&lhs_fn_ir),
+            &IrFn::new_plain(&rhs_fn_ir),
+            AssertionSemantics::Same,
+            false,
+        );
+
+        match res {
+            EquivResult::Disproved {
+                lhs_inputs,
+                rhs_inputs,
+                ..
+            } => {
+                // Verify LHS input ordering & naming.
+                assert_eq!(lhs_inputs.len(), lhs_fn_ir.params.len());
+                for (idx, param) in lhs_fn_ir.params.iter().enumerate() {
+                    assert_eq!(lhs_inputs[idx].0, param.name);
+                    assert_eq!(lhs_inputs[idx].1.bit_count().unwrap(), param.ty.bit_count());
+                }
+                // Verify RHS input ordering & naming.
+                assert_eq!(rhs_inputs.len(), rhs_fn_ir.params.len());
+                for (idx, param) in rhs_fn_ir.params.iter().enumerate() {
+                    assert_eq!(rhs_inputs[idx].0, param.name);
+                    assert_eq!(rhs_inputs[idx].1.bit_count().unwrap(), param.ty.bit_count());
+                }
+            }
+            _ => panic!("Expected inequivalence with counter-example, but proof succeeded"),
+        }
+    }
 }
 
 macro_rules! test_with_solver {
@@ -3137,6 +3198,10 @@ macro_rules! test_with_solver {
                 test_utils::test_single_fixed_implicit_activation_failure::<$solver_type>(
                     $solver_config,
                 );
+            }
+            #[test]
+            fn test_counterexample_input_order() {
+                test_utils::test_counterexample_input_order::<$solver_type>($solver_config);
             }
         }
     };

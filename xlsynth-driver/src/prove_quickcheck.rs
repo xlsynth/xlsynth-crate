@@ -164,10 +164,9 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 }
                 BoolPropertyResult::Disproved { inputs, output } => {
                     all_passed = false;
-                    println!(
-                        "QuickCheck '{}' disproved – counter-example: inputs={:?} output={} ",
-                        qc_name, inputs, output
-                    );
+                    println!("QuickCheck '{}' disproved", qc_name);
+                    println!("  Inputs: {:?}", inputs);
+                    println!("  Output: {:?}", output);
                 }
             }
         }
