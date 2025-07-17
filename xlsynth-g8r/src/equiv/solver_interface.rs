@@ -2035,6 +2035,33 @@ macro_rules! test_solver {
             crate::test_solver_encode!(test_xls_encode_single_hot, $solver, 8, 0x20, 3, 0x05);
             crate::test_solver_encode!(test_xls_encode_multiple_hot, $solver, 16, 0x0028, 4, 0x07);
             crate::test_solver_encode!(test_xls_encode_zero, $solver, 16, 0x0000, 4, 0x00);
+
+            use crate::xls_ir::ir;
+            use xlsynth::IrValue;
+
+            /// Tests that we can handle single-bit values converting to/from the solver
+            /// as this have a different syntax with Boolector vs. other solvers.
+            #[test]
+            fn get_value_1_bit() {
+                let mut solver = $solver;
+                let a = solver.declare("a", 1).unwrap();
+                let b1 = solver.numerical(1, 1);
+                let b0 = solver.numerical(1, 0);
+                let eq1 = solver.eq(&a, &b1);
+                let eq0 = solver.eq(&a, &b0);
+                solver.push().unwrap();
+                solver.assert(&eq1).unwrap();
+                solver.check().unwrap();
+                let a_value = solver.get_value(&a, &ir::Type::Bits(1)).unwrap();
+                assert_eq!(a_value, IrValue::make_ubits(1, 1).unwrap());
+                solver.pop().unwrap();
+                solver.push().unwrap();
+                solver.assert(&eq0).unwrap();
+                solver.check().unwrap();
+                let a_value = solver.get_value(&a, &ir::Type::Bits(1)).unwrap();
+                assert_eq!(a_value, IrValue::make_ubits(1, 0).unwrap());
+                solver.pop().unwrap();
+            }
         }
     };
 }
