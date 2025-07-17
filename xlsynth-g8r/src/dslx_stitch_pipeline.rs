@@ -619,12 +619,17 @@ pub fn stitch_pipeline_with_valid(
     let zero = file
         .make_literal("bits[1]:0", &xlsynth::ir_value::IrFormatPreference::Binary)
         .unwrap();
-    let rst_expr = if reset_active_low {
-        file.make_not(&rst_port.to_expr())
+    // Use the reset port directly; arm order depends on active-low vs active-high.
+    let rst_expr = rst_port.to_expr();
+    let (true_arm, false_arm) = if reset_active_low {
+        // Active-low: rst_n == 1'b0 means reset asserted, so when rst_n is 0 clear,
+        // else propagate. Ternary form: condition ? propagate : clear.
+        (&input_valid_port.to_expr(), &zero)
     } else {
-        rst_port.to_expr()
+        // Active-high: rst == 1'b1 means reset asserted.
+        (&zero, &input_valid_port.to_expr())
     };
-    let tern = file.make_ternary(&rst_expr, &input_valid_port.to_expr(), &zero);
+    let tern = file.make_ternary(&rst_expr, true_arm, false_arm);
     sb0.add_nonblocking_assignment(&p0_valid_reg.to_expr(), &tern);
 
     // Stage processing
@@ -723,7 +728,13 @@ pub fn stitch_pipeline_with_valid(
             &out_reg.to_expr(),
         );
         sb.add_nonblocking_assignment(&out_reg.to_expr(), &gated_data);
-        let tern_v = file.make_ternary(&rst_expr, &prev_valid.to_expr(), &zero);
+        // Stage valid bit update with active-low/active-high awareness.
+        let (true_arm_v, false_arm_v) = if reset_active_low {
+            (&prev_valid.to_expr(), &zero)
+        } else {
+            (&zero, &prev_valid.to_expr())
+        };
+        let tern_v = file.make_ternary(&rst_expr, true_arm_v, false_arm_v);
         sb.add_nonblocking_assignment(&valid_reg.to_expr(), &tern_v);
 
         prev_reg = Some(out_reg);
@@ -862,7 +873,7 @@ mod tests {
             Some("input_valid"),
             Some("output_valid"),
             Some("rst"),
-            false,
+            true, // Use active-low reset to match simulation helper expectations.
         )
         .unwrap()
     }
