@@ -248,7 +248,7 @@ pub fn simulate_pipeline_single_pulse_custom(
     expected_output: &IrBits,
     latency: usize,
     input_valid_signal: &str,
-    output_valid_signal: &str,
+    output_valid_signal: Option<&str>,
     reset_signal: &str,
     reset_active_low: bool,
 ) -> Result<String, SimulateSvError> {
@@ -295,6 +295,21 @@ pub fn simulate_pipeline_single_pulse_custom(
         format!(", {ports}")
     };
 
+    // Build optional output-valid port snippet.
+    let (output_valid_decl, output_valid_port, output_valid_asserts) = if let Some(ov) =
+        output_valid_signal
+    {
+        (
+            format!("  wire {ov};\n"),
+            format!(", .{ov}({ov})"),
+            format!(
+                "    if ({ov} !== 1'b1) $fatal(1, \"{ov} not asserted\");\n    @(posedge clk);\n    #1;\n    if ({ov} !== 1'b0) $fatal(1, \"{ov} did not deassert\");\n"
+            ),
+        )
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+
     let tb = format!(
         r#"`timescale 1ns/1ps
 module tb;
@@ -302,9 +317,8 @@ module tb;
   always #5 clk = ~clk;
   reg {reset_signal} = {initial_reset_val};
   reg {input_valid_signal} = 0;
-{reg_decls}  wire {output_valid_signal};
-  wire [{out_width_minus_one}:0] out;
-  {module_name} dut(.clk(clk), .{reset_signal}({reset_signal}), .{input_valid_signal}({input_valid_signal}){user_ports_part}, .{output_valid_signal}({output_valid_signal}), .out(out));
+{reg_decls}{output_valid_decl}  wire [{out_width_minus_one}:0] out;
+  {module_name} dut(.clk(clk), .{reset_signal}({reset_signal}), .{input_valid_signal}({input_valid_signal}){user_ports_part}{output_valid_port}, .out(out));
   integer i;
   initial begin
     $dumpfile("dump.vcd");
@@ -318,11 +332,9 @@ module tb;
     {input_valid_signal} = 0;
     for (i = 0; i < {latency}; i = i + 1) @(posedge clk);
     #1;
-    if ({output_valid_signal} !== 1'b1) $fatal(1, "{output_valid_signal} not asserted");
-    if (out !== {out_width_minus_one_plus_one}'h{exp_hex}) $fatal(1, "unexpected output");
+{output_valid_asserts}    if (out !== {out_width_minus_one_plus_one}'h{exp_hex}) $fatal(1, "unexpected output");
     @(posedge clk);
     #1;
-    if ({output_valid_signal} !== 1'b0) $fatal(1, "{output_valid_signal} did not deassert");
     $finish;
   end
 endmodule"#
@@ -357,7 +369,7 @@ pub fn simulate_pipeline_single_pulse(
         expected_output,
         latency,
         "input_valid",
-        "output_valid",
+        Some("output_valid"),
         "rst",
         true,
     )

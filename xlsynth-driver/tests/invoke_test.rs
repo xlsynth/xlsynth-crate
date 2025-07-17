@@ -2729,6 +2729,9 @@ fn test_dslx_stitch_pipeline_with_valid() {
             "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
     }
+
+    // Simulation (input_valid only, active-low rst)
+    simulate_basic_valid_pipeline(&stdout, "foo", "input_valid", "rst", false);
 }
 
 #[test]
@@ -2770,6 +2773,9 @@ fn test_stitch_with_valid_custom_in_valid_reset() {
             "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
     }
+
+    // Simulation active-high reset without output_valid
+    simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst", false);
 }
 
 #[test]
@@ -2812,6 +2818,9 @@ fn test_stitch_with_valid_custom_in_valid_rst_n_active_low() {
             "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
         );
     }
+
+    // Simulation active-low reset with rst_n name
+    simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst_n", true);
 }
 
 #[test]
@@ -2867,7 +2876,7 @@ fn test_stitch_with_valid_custom_in_and_out_valid() {
         &expected,
         2,
         "in_valid",
-        "out_valid",
+        Some("out_valid"),
         "rst",
         false,
     )
@@ -2904,4 +2913,30 @@ fn test_stitch_with_valid_missing_reset_should_error() {
         "Expected error message to mention reset, got: {}",
         stderr
     );
+}
+
+// Helper to simulate two-stage valid pipelines without output_valid.
+fn simulate_basic_valid_pipeline(
+    sv: &str,
+    module_name: &str,
+    input_valid: &str,
+    reset: &str,
+    reset_active_low: bool,
+) {
+    use xlsynth::ir_value::IrBits;
+    let inputs = vec![("x", IrBits::u32(5))];
+    let expected = IrBits::u32(8);
+    let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse_custom(
+        sv,
+        module_name,
+        &inputs,
+        &expected,
+        2,
+        input_valid,
+        None,
+        reset,
+        reset_active_low,
+    )
+    .expect("simulation succeeds");
+    assert!(vcd.contains("$var"));
 }
