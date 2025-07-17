@@ -291,12 +291,16 @@ fn run_equiv_check<S: Solver>(
             std::process::exit(0);
         }
         EquivResult::Disproved {
-            inputs: cex,
-            outputs: (lhs_bits, rhs_bits),
+            lhs_inputs,
+            rhs_inputs,
+            lhs_output,
+            rhs_output,
         } => {
-            println!("failure: Solver found counterexample: {:?}", cex);
-            println!("    output LHS: {:?}", lhs_bits);
-            println!("    output RHS: {:?}", rhs_bits);
+            println!("failure: Solver found counterexample:");
+            println!("  inputs LHS: {:?}", lhs_inputs);
+            println!("  inputs RHS: {:?}", rhs_inputs);
+            println!("  output LHS: {:?}", lhs_output);
+            println!("  output RHS: {:?}", rhs_output);
             std::process::exit(1);
         }
     }

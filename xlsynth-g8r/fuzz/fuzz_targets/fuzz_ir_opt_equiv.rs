@@ -28,13 +28,13 @@ fn validate_equiv_result(
     match ext_equiv {
         Ok(()) => {
             // External tool says equivalent – solver must prove equivalence.
-            if let EquivResult::Disproved { inputs: cex, .. } = solver_result {
+            if let EquivResult::Disproved { lhs_inputs, rhs_inputs, .. } = solver_result {
                 log::info!("==== IR disagreement detected ====");
                 log::info!("Original IR:\n{}", orig_ir);
                 log::info!("Optimized IR:\n{}", opt_ir);
                 panic!(
-                    "Disagreement: external tool says equivalent, but {} solver disproves: {:?}",
-                    solver_name, cex
+                    "Disagreement: external tool says equivalent, but {} solver disproves: lhs_inputs={:?} rhs_inputs={:?}",
+                    solver_name, lhs_inputs, rhs_inputs
                 );
             }
         }
