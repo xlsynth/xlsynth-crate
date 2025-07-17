@@ -184,6 +184,51 @@ pub fn run_check_ir_equivalence_main(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Runs the prove_quickcheck_main tool shipped in the external toolchain.
+///
+/// `entry_file` – DSLX file path; `quickcheck_name` – the QC function to prove.
+/// Returns stdout on success, or the full `Output` on failure (caller decides).
+pub fn run_prove_quickcheck_main(
+    entry_file: &std::path::Path,
+    test_filter: Option<&str>,
+    tool_path: &str,
+) -> Result<String, std::process::Output> {
+    log::info!(
+        "run_prove_quickcheck_main entry_file={:?} test_filter={:?} tool_path={} ",
+        entry_file,
+        test_filter,
+        tool_path
+    );
+
+    let qc_path = format!("{}/prove_quickcheck_main", tool_path);
+    if !std::path::Path::new(&qc_path).exists() {
+        eprintln!("prove_quickcheck_main tool not found at: {}", qc_path);
+        std::process::exit(1);
+    }
+
+    let mut command = Command::new(qc_path);
+    if let Some(test_filter) = test_filter {
+        command.arg("--test_filter").arg(test_filter);
+    }
+    command.arg(entry_file);
+
+    log::info!("command: {:?}", command);
+
+    let output = command.output().expect("prove_quickcheck_main should run");
+
+    if !output.status.success() {
+        log::info!(
+            "prove_quickcheck_main failed – status: {} stdout: {} stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Err(output);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 pub fn run_codegen_combinational(
     input_file: &std::path::Path,
     delay_model: &str,

@@ -9,6 +9,7 @@ use crate::equiv::{
 
 use crate::equiv::prove_equiv::FnOutput;
 
+#[derive(Debug, Clone, Copy)]
 pub enum QuickCheckAssertionSemantics {
     Ignore,
     Never,

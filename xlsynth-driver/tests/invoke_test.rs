@@ -3022,3 +3022,68 @@ fn simulate_basic_valid_pipeline(
     .expect("simulation succeeds");
     assert!(vcd.contains("$var"));
 }
+
+const QUICKCHECK_DSLX: &'static str = r#"
+fn f(x: u8) -> bool { x == x }
+#[quickcheck] fn qc_success(x: u8) -> bool { f(x) }
+#[quickcheck] fn qc_failure(x: u8) -> bool { x == u8:0 }
+"#;
+
+#[cfg_attr(feature="has-boolector", test_case("boolector", true; "boolector_success"))]
+#[cfg_attr(feature="has-boolector", test_case("boolector", false; "boolector_failure"))]
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla", true; "bitwuzla_success"))]
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla", false; "bitwuzla_failure"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary", true; "z3_binary_success"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary", false; "z3_binary_failure"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary", true; "bitwuzla_bin_success"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary", false; "bitwuzla_bin_failure"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case("boolector-binary", true; "boolector_bin_success"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case("boolector-binary", false; "boolector_bin_failure"))]
+#[test_case("toolchain", true; "toolchain_success")]
+#[test_case("toolchain", false; "toolchain_failure")]
+fn test_prove_quickcheck_solver_param(solver: &str, should_succeed: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    use std::process::Command;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let file_name = "qc.x";
+    let dslx_path = temp_dir.path().join(file_name);
+    std::fs::write(&dslx_path, QUICKCHECK_DSLX).unwrap();
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut cmd = Command::new(driver);
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_contents).unwrap();
+
+    cmd.arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("prove-quickcheck")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--solver")
+        .arg(solver)
+        .arg("--test_filter")
+        .arg(if should_succeed {
+            ".*success"
+        } else {
+            ".*failure"
+        });
+    let output = cmd.output().unwrap();
+    if should_succeed {
+        assert!(
+            output.status.success(),
+            "Prove QC with solver {} should succeed. stderr: {}",
+            solver,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Success: All QuickChecks proved"));
+    } else {
+        assert!(
+            !output.status.success(),
+            "Prove QC with solver {} should fail (property false).",
+            solver
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Failure: Some QuickChecks disproved"));
+    }
+}

@@ -28,12 +28,12 @@ bincode = "1.3"
 rand_xoshiro = "0.6"
 once_cell = "1.19"
 paste = "1.0.15"
+regex = "1.11.1"
 
 [dev-dependencies]
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
 test-case = "3.3.1"
 pretty_assertions = "1.3"
-regex = "1.11.1"
 
 [build-dependencies]
 prost-build = "0.12"

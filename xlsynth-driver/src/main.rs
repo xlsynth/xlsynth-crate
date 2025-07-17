@@ -52,7 +52,9 @@ mod ir_equiv;
 mod ir_fn_eval;
 mod ir_ged;
 mod lib2proto;
+mod prove_quickcheck;
 mod report_cli_error;
+mod solver_choice;
 mod toolchain_config;
 mod tools;
 
@@ -756,6 +758,48 @@ fn main() {
                         .index(3),
                 )
         )
+        .subcommand(
+            clap::Command::new("prove-quickcheck")
+                .about("Prove that DSLX #[quickcheck] functions always return true")
+                .add_dslx_input_args(false)
+                .arg(
+                    clap::Arg::new("test_filter")
+                        .long("test_filter")
+                        .value_name("FILTER")
+                        .help("Regular expression; prove only quickcheck functions whose name fully matches the pattern"),
+                )
+                .arg(
+                    clap::Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Select solver backend")
+                        .value_parser([
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector-binary",
+                            #[cfg(feature = "has-bitwuzla")]
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector-legacy",
+                            "toolchain",
+                        ])
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("assertion_semantics")
+                        .long("assertion-semantics")
+                        .value_name("SEM")
+                        .help("Assertion semantics: ignore | never | assume")
+                        .value_parser(["ignore", "never", "assume"])
+                        .default_value("never")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
         .get_matches();
 
     let mut toml_path: Option<String> = matches
@@ -839,6 +883,8 @@ fn main() {
         ir_fn_eval::handle_ir_fn_eval(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("g8r-equiv") {
         g8r_equiv::handle_g8r_equiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("prove-quickcheck") {
+        prove_quickcheck::handle_prove_quickcheck(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2combo") {
         ir2combo::handle_ir2combo(matches, &config);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
