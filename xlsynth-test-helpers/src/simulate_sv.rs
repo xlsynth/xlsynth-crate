@@ -288,18 +288,11 @@ pub fn simulate_pipeline_single_pulse_custom(
     let initial_reset_val = if reset_active_low { "0" } else { "1" };
     let deassert_reset_val = if reset_active_low { "1" } else { "0" };
 
-    // Assemble port connections including handshake and reset.
-    let mut ports_joined = ports;
-    if !ports_joined.is_empty() {
-        // we'll prepend comma later when used
-    }
-    // Handshake and reset ports are added explicitly in the DUT instantiation
-    // below.
-
-    let ports_part = if ports_joined.is_empty() {
+    // Optional user data ports segment (prefixed with a comma when non-empty).
+    let user_ports_part = if ports.is_empty() {
         String::new()
     } else {
-        format!(", {}", ports_joined)
+        format!(", {ports}")
     };
 
     let tb = format!(
@@ -311,7 +304,7 @@ module tb;
   reg {input_valid_signal} = 0;
 {reg_decls}  wire {output_valid_signal};
   wire [{out_width_minus_one}:0] out;
-  {module_name} dut(.clk(clk), .{reset_signal}({reset_signal}), .{input_valid_signal}({input_valid_signal}){ports_part}, .{output_valid_signal}({output_valid_signal}), .out(out));
+  {module_name} dut(.clk(clk), .{reset_signal}({reset_signal}), .{input_valid_signal}({input_valid_signal}){user_ports_part}, .{output_valid_signal}({output_valid_signal}), .out(out));
   integer i;
   initial begin
     $dumpfile("dump.vcd");
