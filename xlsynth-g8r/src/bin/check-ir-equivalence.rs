@@ -75,23 +75,21 @@ fn main_has_bitwuzla(args: Args) {
             );
         }
         EquivResult::Disproved {
-            inputs: cex,
-            outputs: (lhs_val, rhs_val),
+            lhs_inputs,
+            rhs_inputs,
+            lhs_output,
+            rhs_output,
         } => {
             println!(
                 "Equivalence result (bitwuzla): DISPROVED (took {:?})",
                 bitwuzla_elapsed
             );
-            println!("Counterexample inputs:");
-            let values: Vec<_> = cex.iter().cloned().collect();
-            if values.len() == 1 {
-                println!("  {}", values[0]);
-            } else {
-                println!("  {:?}", values);
-            }
+            println!("failure: Solver found counterexample:");
+            println!("  inputs LHS: {:?}", lhs_inputs);
+            println!("  inputs RHS: {:?}", rhs_inputs);
             // Report outputs for the counterexample
-            println!("Output LHS: {}", lhs_val);
-            println!("Output RHS: {}", rhs_val);
+            println!("  output LHS: {:?}", lhs_output);
+            println!("  output RHS: {:?}", rhs_output);
         }
     }
 
