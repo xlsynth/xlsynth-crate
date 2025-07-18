@@ -65,18 +65,23 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         }
     };
     let module = tcm.get_module();
-    let mut quickchecks: Vec<String> = Vec::new();
+    let type_info = tcm.get_type_info();
+    let mut quickchecks: Vec<(String, bool)> = Vec::new();
     for idx in 0..module.get_member_count() {
         if let Some(xlsynth::dslx::MatchableModuleMember::Quickcheck(qc)) =
             module.get_member(idx).to_matchable()
         {
-            let fn_ident = qc.get_function().get_identifier();
+            let function = qc.get_function();
+            let fn_ident = function.get_identifier();
             if filter_regex
                 .as_ref()
                 .map(|re| re.is_match(&fn_ident))
                 .unwrap_or(true)
             {
-                quickchecks.push(fn_ident);
+                let requires_itok = type_info
+                    .requires_implicit_token(&function)
+                    .expect("requires_implicit_token query");
+                quickchecks.push((fn_ident, requires_itok));
             }
         }
     }
@@ -136,15 +141,19 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
     // Helper closure that runs proof for a given solver type.
     fn run_for_solver<S: Solver>(
         config: &S::Config,
-        qc_names: &[String],
+        quickchecks: &[(String, bool)],
         ir_text: &str,
         module_name: &str,
         semantics: QuickCheckAssertionSemantics,
     ) -> ! {
         let mut all_passed = true;
-        for qc_name in qc_names {
-            let mangled = mangle_dslx_name(module_name, qc_name).unwrap();
-            // Optimize IR with this QC as top.
+        for (qc_name, has_itok) in quickchecks {
+            let base_mangled = mangle_dslx_name(module_name, qc_name).unwrap();
+            let mangled = if *has_itok {
+                format!("__itok{}", base_mangled)
+            } else {
+                base_mangled
+            };
             let base_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
             let optimized_pkg = xlsynth::optimize_ir(&base_pkg, &mangled).unwrap();
             let optimized_text = optimized_pkg.to_string();
@@ -155,7 +164,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
             let ir_fn = IrFn {
                 fn_ref: ir_fn_ref,
-                fixed_implicit_activation: false,
+                fixed_implicit_activation: *has_itok,
             };
             let res = prove_ir_fn_always_true::<S>(config, &ir_fn, semantics.clone());
             match res {
@@ -183,7 +192,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         SolverChoice::Toolchain => {
             let tool_path = tool_path.expect("tool_path required for Toolchain solver");
             let mut all_passed = true;
-            for qc_name in &quickchecks {
+            for (qc_name, _) in &quickchecks {
                 match run_prove_quickcheck_main(input_path, Some(qc_name), tool_path) {
                     Ok(stdout) => {
                         println!("QuickCheck '{}' proved: {}", qc_name, stdout.trim());
