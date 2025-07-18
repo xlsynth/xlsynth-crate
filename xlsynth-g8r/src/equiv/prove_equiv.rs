@@ -924,27 +924,31 @@ pub enum EquivResult {
 ///  2. **Failure condition** – negation of the success condition; if *any*
 ///     model satisfies this predicate, the checker must report a
 ///     counter-example.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, clap::ValueEnum)]
 pub enum AssertionSemantics {
     /// Ignore all assertions.
+    ///
     /// 1. Success: `r_l == r_r`
     /// 2. Failure: `r_l != r_r`
     Ignore,
 
     /// Both sides must succeed and produce the same result – they can **never**
     /// fail.
+    ///
     /// 1. Success: `s_l ∧ s_r ∧ (r_l == r_r)`
     /// 2. Failure: `¬s_l ∨ ¬s_r ∨ (r_l != r_r)`
     Never,
 
     /// The two sides must fail in exactly the same way **or** both succeed with
     /// equal results.
+    ///
     /// 1. Success: `(¬s_l ∧ ¬s_r) ∨ (s_l ∧ s_r ∧ (r_l == r_r))`
     /// 2. Failure: `(s_l ⊕ s_r) ∨ (s_l ∧ s_r ∧ (r_l != r_r))`
     Same,
 
     /// We *assume* both sides do not fail. In other words, we only check that
     /// if they do succeed, their results must be equal.
+    ///
     /// 1. Success: `¬(s_l ∧ s_r) ∨ (r_l == r_r)`  (equivalently, `(s_l ∧ s_r) →
     ///    r_l == r_r`)
     /// 2. Failure: `s_l ∧ s_r ∧ (r_l != r_r)`
@@ -952,6 +956,7 @@ pub enum AssertionSemantics {
 
     /// If the left succeeds, the right must also succeed and match the
     /// result; if the left fails, the right is unconstrained.
+    ///
     /// 1. Success: `¬s_l ∨ (s_r ∧ (r_l == r_r))`
     /// 2. Failure: `s_l ∧ (¬s_r ∨ (r_l != r_r))`
     Implies,
