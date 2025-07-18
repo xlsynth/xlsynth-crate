@@ -12,24 +12,7 @@ use xlsynth_g8r::equiv::prove_equiv::{
 };
 use xlsynth_g8r::xls_ir::ir_parser;
 
-#[derive(Clone, Copy)]
-enum ParallelismStrategy {
-    SingleThreaded,
-    OutputBits,
-    InputBitSplit,
-}
-
-impl std::str::FromStr for ParallelismStrategy {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "single-threaded" => Ok(Self::SingleThreaded),
-            "output-bits" => Ok(Self::OutputBits),
-            "input-bit-split" => Ok(Self::InputBitSplit),
-            _ => Err(format!("invalid parallelism strategy: {}", s)),
-        }
-    }
-}
+use crate::parallelism::ParallelismStrategy;
 
 const SUBCOMMAND: &str = "ir-equiv";
 
