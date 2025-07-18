@@ -2940,3 +2940,84 @@ fn simulate_basic_valid_pipeline(
     .expect("simulation succeeds");
     assert!(vcd.contains("$var"));
 }
+
+/// Test for "DSLX stitch pipeline" subcommand with no IO flops but valid/reset
+/// signals
+#[test]
+fn test_stitch_pipeline_with_valid_no_io_flops() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Two-stage pipeline that increments by one then by two.
+    let dslx =
+        "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+    // Create temporary DSLX file.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .arg("--input_valid_signal=input_valid")
+        .arg("--output_valid_signal=output_valid")
+        .arg("--reset=rst")
+        .arg("--flop_inputs=false")
+        .arg("--flop_outputs=false")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+
+    // Golden file check.
+    let golden_path =
+        std::path::Path::new("tests/test_dslx_stitch_pipeline_valid_no_io_flops.golden.sv");
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
+        std::fs::write(golden_path, &stdout).expect("write golden");
+    } else {
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            stdout.trim(),
+            want.trim(),
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+
+    // Sanity: no leading/trailing flop registers should be present.
+    assert!(
+        !stdout.contains("p0_x"),
+        "input data flop register should be absent when --flop_inputs=false"
+    );
+    assert!(
+        !stdout.contains("reg p1_out"),
+        "output flop registers should be absent when --flop_outputs=false"
+    );
+
+    // Simulation check.
+    use xlsynth::ir_value::IrBits;
+    let inputs = vec![("x", IrBits::u32(5))];
+    let expected = IrBits::u32(8);
+    let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse_custom(
+        &stdout,
+        "foo",
+        &inputs,
+        &expected,
+        1, // Expected latency since there is only an internal stage register.
+        "input_valid",
+        Some("output_valid"),
+        "rst",
+        false, // reset active high
+    )
+    .expect("simulation succeeds");
+    assert!(vcd.contains("$var"));
+}

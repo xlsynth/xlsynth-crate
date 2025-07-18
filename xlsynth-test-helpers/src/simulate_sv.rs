@@ -226,24 +226,34 @@ pub fn simulate_sv_flist(
     // Compile.
     let vvp_path = compile_with_iverilog(temp_dir.path(), &src_paths, top_module)?;
 
-    // Run simulation.
-    run_vvp(&vvp_path, temp_dir.path())?;
+    // Run simulation (capture the result but don't early-return yet).
+    let sim_result = run_vvp(&vvp_path, temp_dir.path());
 
-    // Read and return the VCD contents.
-    let vcd = std::fs::read_to_string(&vcd_path).map_err(SimulateSvError::Io)?;
+    // Attempt to read the VCD regardless of simulation success so it can be
+    // copied out for debugging when the testbench hits a $fatal.
+    let vcd_contents = std::fs::read_to_string(&vcd_path).ok();
 
-    // Optionally copy VCD to user-specified directory for debugging.
-    if let Ok(dir) = std::env::var("XLSYNTH_WAVE_DIR") {
-        if !dir.is_empty() {
-            let target = std::path::Path::new(&dir).join(vcd_name);
-            // Best-effort copy; ignore errors.
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(&target, &vcd);
-            log::info!("Saved wave dump to {}", target.display());
+    // Best-effort copy to user-specified directory.
+    if let Some(ref vcd) = vcd_contents {
+        if let Ok(dir) = std::env::var("XLSYNTH_WAVE_DIR") {
+            if !dir.is_empty() {
+                let target = std::path::Path::new(&dir).join(vcd_name);
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(&target, vcd);
+                log::info!("Saved wave dump to {}", target.display());
+            }
         }
     }
 
-    Ok(vcd)
+    // If the simulation failed, propagate the error now *after* copying the
+    // waveform so callers can inspect it.
+    if let Err(e) = sim_result {
+        return Err(e);
+    }
+
+    // Simulation succeeded; return the VCD text (or empty string if we could
+    // not read it for some reason).
+    Ok(vcd_contents.unwrap_or_default())
 }
 
 /// Simulates a pipeline design with parameterized signal names.

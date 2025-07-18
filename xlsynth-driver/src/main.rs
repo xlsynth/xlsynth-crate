@@ -367,6 +367,15 @@ fn main() {
                     "reset_active_low",
                     "Reset is active low",
                 )
+                // Allow disabling/enabling IO flop insertion (default true).
+                .add_bool_arg(
+                    "flop_inputs",
+                    "Whether to insert flops on all input ports (default true)",
+                )
+                .add_bool_arg(
+                    "flop_outputs",
+                    "Whether to insert flops on all output ports (default true)",
+                )
                 .arg(
                     Arg::new("stages")
                         .long("stages")

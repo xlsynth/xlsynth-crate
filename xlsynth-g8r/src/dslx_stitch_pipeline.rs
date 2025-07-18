@@ -248,6 +248,8 @@ pub fn stitch_pipeline(
     explicit_stages: Option<&[String]>,
     stdlib_path: Option<&Path>,
     search_paths: &[&Path],
+    input_flops: bool,
+    output_flops: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
     check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
     let convert_opts = DslxConvertOptions {
@@ -299,37 +301,55 @@ pub fn stitch_pipeline(
     let first_stage_ports = &stage_infos[0].ports;
     let mut wrapper_inputs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
     let mut p0_regs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
-    for p in first_stage_ports
-        .iter()
-        .filter(|p| p.is_input && p.name != "clk")
-    {
-        let dt_ref = if p.width == 1 {
-            &scalar_type
-        } else {
-            // Create and store the bitvector type so its lifetime extends.
-            dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
-            dynamic_types.last().unwrap()
-        };
-        let lr = wrapper.add_input(&p.name, dt_ref);
-        wrapper_inputs.insert(p.name.clone(), lr);
-        let reg = wrapper.add_reg(&format!("p0_{}", p.name), dt_ref).unwrap();
-        p0_regs.insert(p.name.clone(), reg);
+    // Set up input flop registers if requested.
+    if input_flops {
+        for p in first_stage_ports
+            .iter()
+            .filter(|p| p.is_input && p.name != "clk")
+        {
+            let dt_ref = if p.width == 1 {
+                &scalar_type
+            } else {
+                dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
+                dynamic_types.last().unwrap()
+            };
+            let lr = wrapper.add_input(&p.name, dt_ref);
+            wrapper_inputs.insert(p.name.clone(), lr);
+            let reg = wrapper.add_reg(&format!("p0_{}", p.name), dt_ref).unwrap();
+            p0_regs.insert(p.name.clone(), reg);
+        }
+    } else {
+        for p in first_stage_ports
+            .iter()
+            .filter(|p| p.is_input && p.name != "clk")
+        {
+            let dt_ref = if p.width == 1 {
+                &scalar_type
+            } else {
+                dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
+                dynamic_types.last().unwrap()
+            };
+            let lr = wrapper.add_input(&p.name, dt_ref);
+            wrapper_inputs.insert(p.name.clone(), lr);
+        }
     }
 
+    // If we inserted input flops create their driving always block.
     let posedge_clk = file.make_pos_edge(&clk_port.to_expr());
-    let always_p0 = if cfg.verilog_version.is_system_verilog() {
-        wrapper.add_always_ff(&[&posedge_clk]).unwrap()
-    } else {
-        wrapper.add_always_at(&[&posedge_clk]).unwrap()
-    };
-    let mut sb0 = always_p0.get_statement_block();
-    // Iterate in a deterministic order to ensure stable Verilog output.
-    let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
-    p0_names.sort();
-    for name in p0_names {
-        let reg = p0_regs.get(&name).unwrap();
-        let src = wrapper_inputs.get(&name).unwrap();
-        sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
+    if input_flops {
+        let always_p0 = if cfg.verilog_version.is_system_verilog() {
+            wrapper.add_always_ff(&[&posedge_clk]).unwrap()
+        } else {
+            wrapper.add_always_at(&[&posedge_clk]).unwrap()
+        };
+        let mut sb0 = always_p0.get_statement_block();
+        let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
+        p0_names.sort();
+        for name in p0_names {
+            let reg = p0_regs.get(&name).unwrap();
+            let src = wrapper_inputs.get(&name).unwrap();
+            sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
+        }
     }
 
     // Output port derived from final stage out width
@@ -390,13 +410,22 @@ pub fn stitch_pipeline(
 
             // Input port (non-clk)
             if idx == 0 {
-                // Connect from the input pipeline registers.
-                if let Some(reg) = p0_regs.get(&port.name) {
-                    let e = reg.to_expr();
-                    temp_exprs.push(e);
-                    conn_expr_indices.push(Some(temp_exprs.len() - 1));
+                if input_flops {
+                    if let Some(reg) = p0_regs.get(&port.name) {
+                        let e = reg.to_expr();
+                        temp_exprs.push(e);
+                        conn_expr_indices.push(Some(temp_exprs.len() - 1));
+                    } else {
+                        conn_expr_indices.push(None);
+                    }
                 } else {
-                    conn_expr_indices.push(None);
+                    if let Some(inp) = wrapper_inputs.get(&port.name) {
+                        let e = inp.to_expr();
+                        temp_exprs.push(e);
+                        conn_expr_indices.push(Some(temp_exprs.len() - 1));
+                    } else {
+                        conn_expr_indices.push(None);
+                    }
                 }
             } else {
                 // Connect from prev stage output.
@@ -444,23 +473,29 @@ pub fn stitch_pipeline(
             &conn_exprs,
         ));
 
-        // Create the pipeline register that captures this stage's output.
-        let out_reg = wrapper
-            .add_reg(&format!("p{}", idx + 1), out_dt_stage_ref)
-            .unwrap();
-        let always = if cfg.verilog_version.is_system_verilog() {
-            wrapper.add_always_ff(&[&posedge_clk]).unwrap()
+        let is_last = idx + 1 == stage_infos.len();
+        if is_last && !output_flops {
+            prev_reg = Some(output_wire);
+            prev_width = output_width;
         } else {
-            wrapper.add_always_at(&[&posedge_clk]).unwrap()
-        };
-        let mut sb = always.get_statement_block();
-        sb.add_nonblocking_assignment(&out_reg.to_expr(), &output_wire.to_expr());
+            // Create the pipeline register that captures this stage's output.
+            let out_reg = wrapper
+                .add_reg(&format!("p{}", idx + 1), out_dt_stage_ref)
+                .unwrap();
+            let always = if cfg.verilog_version.is_system_verilog() {
+                wrapper.add_always_ff(&[&posedge_clk]).unwrap()
+            } else {
+                wrapper.add_always_at(&[&posedge_clk]).unwrap()
+            };
+            let mut sb = always.get_statement_block();
+            sb.add_nonblocking_assignment(&out_reg.to_expr(), &output_wire.to_expr());
 
-        prev_reg = Some(out_reg);
-        prev_width = output_width;
+            prev_reg = Some(out_reg);
+            prev_width = output_width;
+        }
     }
 
-    // Assign wrapper.out = last pipeline register
+    // Assign wrapper.out = last pipeline register or wire
     if let Some(final_reg) = &prev_reg {
         wrapper.add_member_continuous_assignment(
             file.make_continuous_assignment(&out_port.to_expr(), &final_reg.to_expr()),
@@ -493,6 +528,8 @@ pub fn stitch_pipeline_with_valid(
     output_valid_signal: Option<&str>,
     reset: Option<&str>,
     reset_active_low: bool,
+    input_flops: bool,
+    output_flops: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
     // Precondition checks
     if reset.is_none() {
@@ -554,18 +591,34 @@ pub fn stitch_pipeline_with_valid(
 
     let first_stage_ports = &stage_infos[0].ports;
     let mut wrapper_inputs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
-    for p in first_stage_ports
-        .iter()
-        .filter(|p| p.is_input && p.name != "clk")
-    {
-        let dt_ref = if p.width == 1 {
-            &scalar_type
-        } else {
-            dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
-            dynamic_types.last().unwrap()
-        };
-        let lr = wrapper.add_input(&p.name, dt_ref);
-        wrapper_inputs.insert(p.name.clone(), lr);
+    if input_flops {
+        for p in first_stage_ports
+            .iter()
+            .filter(|p| p.is_input && p.name != "clk")
+        {
+            let dt_ref = if p.width == 1 {
+                &scalar_type
+            } else {
+                dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
+                dynamic_types.last().unwrap()
+            };
+            let lr = wrapper.add_input(&p.name, dt_ref);
+            wrapper_inputs.insert(p.name.clone(), lr);
+        }
+    } else {
+        for p in first_stage_ports
+            .iter()
+            .filter(|p| p.is_input && p.name != "clk")
+        {
+            let dt_ref = if p.width == 1 {
+                &scalar_type
+            } else {
+                dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
+                dynamic_types.last().unwrap()
+            };
+            let lr = wrapper.add_input(&p.name, dt_ref);
+            wrapper_inputs.insert(p.name.clone(), lr);
+        }
     }
 
     let last_out_width = stage_infos.last().unwrap().output_width;
@@ -582,60 +635,74 @@ pub fn stitch_pipeline_with_valid(
         None
     };
 
-    // Input pipeline registers (p0)
+    // Input pipeline registers (p0) and initial valid handling.
     let mut p0_regs = HashMap::new();
-    for p in first_stage_ports
-        .iter()
-        .filter(|p| p.is_input && p.name != "clk")
-    {
-        let dt_ref = if p.width == 1 {
-            &scalar_type
-        } else {
-            dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
-            dynamic_types.last().unwrap()
-        };
-        let reg = wrapper.add_reg(&format!("p0_{}", p.name), dt_ref).unwrap();
-        p0_regs.insert(p.name.clone(), reg);
-    }
-    let p0_valid_reg = wrapper.add_reg("p0_valid", &scalar_type).unwrap();
+    let mut prev_valid: xlsynth::vast::LogicRef;
 
+    // Clock edge expression shared across always_ff blocks.
     let posedge_clk = file.make_pos_edge(&clk_port.to_expr());
-    let always_p0 = if cfg.verilog_version.is_system_verilog() {
-        wrapper.add_always_ff(&[&posedge_clk]).unwrap()
-    } else {
-        wrapper.add_always_at(&[&posedge_clk]).unwrap()
-    };
-    let mut sb0 = always_p0.get_statement_block();
-    // Iterate in a deterministic order to ensure stable Verilog output.
-    let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
-    p0_names.sort();
-    for name in p0_names {
-        let reg = p0_regs.get(&name).unwrap();
-        let src = wrapper_inputs.get(&name).unwrap();
-        let gated_expr =
-            file.make_ternary(&input_valid_port.to_expr(), &src.to_expr(), &reg.to_expr());
-        sb0.add_nonblocking_assignment(&reg.to_expr(), &gated_expr);
-    }
+    // Constant literal 1'b0 used in many ternaries.
     let zero = file
         .make_literal("bits[1]:0", &xlsynth::ir_value::IrFormatPreference::Binary)
         .unwrap();
-    // Use the reset port directly; arm order depends on active-low vs active-high.
+    // Reset expression wire.
     let rst_expr = rst_port.to_expr();
-    let (true_arm, false_arm) = if reset_active_low {
-        // Active-low: rst_n == 1'b0 means reset asserted, so when rst_n is 0 clear,
-        // else propagate. Ternary form: condition ? propagate : clear.
-        (&input_valid_port.to_expr(), &zero)
+
+    if input_flops {
+        // Create data flops for inputs.
+        for p in first_stage_ports
+            .iter()
+            .filter(|p| p.is_input && p.name != "clk")
+        {
+            let dt_ref = if p.width == 1 {
+                &scalar_type
+            } else {
+                dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
+                dynamic_types.last().unwrap()
+            };
+            let reg = wrapper.add_reg(&format!("p0_{}", p.name), dt_ref).unwrap();
+            p0_regs.insert(p.name.clone(), reg);
+        }
+
+        // Create p0_valid register that aligns with input flops.
+        let p0_valid_reg = wrapper.add_reg("p0_valid", &scalar_type).unwrap();
+        prev_valid = p0_valid_reg.clone();
+
+        // Build clocked block updating p0_* regs and p0_valid.
+        let always_p0 = if cfg.verilog_version.is_system_verilog() {
+            wrapper.add_always_ff(&[&posedge_clk]).unwrap()
+        } else {
+            wrapper.add_always_at(&[&posedge_clk]).unwrap()
+        };
+        let mut sb0 = always_p0.get_statement_block();
+        // Deterministic order.
+        let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
+        p0_names.sort();
+        for name in p0_names {
+            let reg = p0_regs.get(&name).unwrap();
+            let src = wrapper_inputs.get(&name).unwrap();
+            let gated_expr =
+                file.make_ternary(&input_valid_port.to_expr(), &src.to_expr(), &reg.to_expr());
+            sb0.add_nonblocking_assignment(&reg.to_expr(), &gated_expr);
+        }
+
+        let (true_arm, false_arm) = if reset_active_low {
+            (&input_valid_port.to_expr(), &zero)
+        } else {
+            (&zero, &input_valid_port.to_expr())
+        };
+        let tern = file.make_ternary(&rst_expr, true_arm, false_arm);
+        sb0.add_nonblocking_assignment(&p0_valid_reg.to_expr(), &tern);
     } else {
-        // Active-high: rst == 1'b1 means reset asserted.
-        (&zero, &input_valid_port.to_expr())
-    };
-    let tern = file.make_ternary(&rst_expr, true_arm, false_arm);
-    sb0.add_nonblocking_assignment(&p0_valid_reg.to_expr(), &tern);
+        // No input flops: use input_valid port directly.
+        prev_valid = input_valid_port.clone();
+    }
 
     // Stage processing
     let mut prev_reg: Option<xlsynth::vast::LogicRef> = None;
-    let mut prev_valid = p0_valid_reg;
+    // `prev_valid` already set appropriately above.
     let mut prev_width: u32 = 0;
+
     for (idx, stage_info) in stage_infos.iter().enumerate() {
         let stage_unmangled = &stages[idx].0;
         let output_width = stage_info.output_width;
@@ -670,9 +737,15 @@ pub fn stitch_pipeline_with_valid(
                 continue;
             }
             if idx == 0 {
-                let reg = p0_regs.get(&port.name).unwrap();
-                temp_exprs.push(reg.to_expr());
-                conn_expr_indices.push(Some(temp_exprs.len() - 1));
+                if input_flops {
+                    let reg = p0_regs.get(&port.name).unwrap();
+                    temp_exprs.push(reg.to_expr());
+                    conn_expr_indices.push(Some(temp_exprs.len() - 1));
+                } else {
+                    let inp = wrapper_inputs.get(&port.name).unwrap();
+                    temp_exprs.push(inp.to_expr());
+                    conn_expr_indices.push(Some(temp_exprs.len() - 1));
+                }
             } else if stage_info
                 .ports
                 .iter()
@@ -710,36 +783,46 @@ pub fn stitch_pipeline_with_valid(
             &conn_exprs,
         ));
 
-        let out_reg = wrapper
-            .add_reg(&format!("p{}_out", idx + 1), out_dt_stage_ref)
-            .unwrap();
-        let valid_reg = wrapper
-            .add_reg(&format!("p{}_valid", idx + 1), &scalar_type)
-            .unwrap();
-        let always = if cfg.verilog_version.is_system_verilog() {
-            wrapper.add_always_ff(&[&posedge_clk]).unwrap()
-        } else {
-            wrapper.add_always_at(&[&posedge_clk]).unwrap()
-        };
-        let mut sb = always.get_statement_block();
-        let gated_data = file.make_ternary(
-            &prev_valid.to_expr(),
-            &output_wire.to_expr(),
-            &out_reg.to_expr(),
-        );
-        sb.add_nonblocking_assignment(&out_reg.to_expr(), &gated_data);
-        // Stage valid bit update with active-low/active-high awareness.
-        let (true_arm_v, false_arm_v) = if reset_active_low {
-            (&prev_valid.to_expr(), &zero)
-        } else {
-            (&zero, &prev_valid.to_expr())
-        };
-        let tern_v = file.make_ternary(&rst_expr, true_arm_v, false_arm_v);
-        sb.add_nonblocking_assignment(&valid_reg.to_expr(), &tern_v);
+        let is_last = idx + 1 == stage_infos.len();
 
-        prev_reg = Some(out_reg);
-        prev_valid = valid_reg;
-        prev_width = output_width;
+        if is_last && !output_flops {
+            // No output register: drive wrapper outputs directly from wire.
+            prev_reg = Some(output_wire);
+            // Valid bit remains unchanged (prev_valid) since there is no extra latency.
+            prev_width = output_width;
+        } else {
+            // Create output data and valid registers.
+            let out_reg = wrapper
+                .add_reg(&format!("p{}_out", idx + 1), out_dt_stage_ref)
+                .unwrap();
+            let valid_reg = wrapper
+                .add_reg(&format!("p{}_valid", idx + 1), &scalar_type)
+                .unwrap();
+            let always = if cfg.verilog_version.is_system_verilog() {
+                wrapper.add_always_ff(&[&posedge_clk]).unwrap()
+            } else {
+                wrapper.add_always_at(&[&posedge_clk]).unwrap()
+            };
+            let mut sb = always.get_statement_block();
+            let gated_data = file.make_ternary(
+                &prev_valid.to_expr(),
+                &output_wire.to_expr(),
+                &out_reg.to_expr(),
+            );
+            sb.add_nonblocking_assignment(&out_reg.to_expr(), &gated_data);
+            // Stage valid bit update with active-low/active-high awareness.
+            let (true_arm_v, false_arm_v) = if reset_active_low {
+                (&prev_valid.to_expr(), &zero)
+            } else {
+                (&zero, &prev_valid.to_expr())
+            };
+            let tern_v = file.make_ternary(&rst_expr, true_arm_v, false_arm_v);
+            sb.add_nonblocking_assignment(&valid_reg.to_expr(), &tern_v);
+
+            prev_reg = Some(out_reg);
+            prev_valid = valid_reg;
+            prev_width = output_width;
+        }
     }
 
     let final_reg = prev_reg.unwrap();
@@ -780,6 +863,8 @@ mod tests {
             None,
             None,
             &[],
+            true, // input flops enabled (default behavior)
+            true, // output flops enabled
         )
         .unwrap();
         // Validate generated SV.
@@ -811,6 +896,8 @@ mod tests {
             None,
             None,
             &[],
+            true, // input flops
+            true, // output flops
         )
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
@@ -841,6 +928,8 @@ mod tests {
             None,
             None,
             &[],
+            true,
+            true,
         )
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
@@ -873,7 +962,9 @@ mod tests {
             Some("input_valid"),
             Some("output_valid"),
             Some("rst"),
-            true, // Use active-low reset to match simulation helper expectations.
+            true, // Use active-low reset
+            true, // input flops
+            true, // output flops
         )
         .unwrap()
     }
@@ -921,9 +1012,68 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             None,
             None,
             &[],
+            true,
+            true,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().0;
         assert!(err.contains("does not match"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_stitch_pipeline_no_io_flops() {
+        // Simple single-stage pipeline to verify that disabling the input/output
+        // flop options removes the leading and trailing registers from the
+        // generated wrapper.
+        let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }";
+        let sv = stitch_pipeline(
+            dslx,
+            Path::new("test.x"),
+            "foo",
+            VerilogVersion::SystemVerilog,
+            None,
+            None,
+            &[],
+            false, // disable input flops
+            false, // disable output flops
+        )
+        .unwrap();
+
+        // Basic sanity: emitted SystemVerilog should be syntactically valid.
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+
+        // Ensure that the wrapper does not contain the p0_ or p1 registers which
+        // would be present if flops were inserted. (Relaxed check: substring search.)
+        assert!(!sv.contains("p0_x"), "input flop register should be absent");
+        assert!(
+            !sv.contains("reg p1 "),
+            "output flop register should be absent"
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_with_valid_no_output_flops() {
+        let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+        let sv = stitch_pipeline_with_valid(
+            dslx,
+            Path::new("test.x"),
+            "foo",
+            VerilogVersion::SystemVerilog,
+            None,
+            None,
+            &[],
+            Some("in_valid"),
+            Some("out_valid"),
+            Some("rst"),
+            false, // active-high reset
+            true,  // input flops enabled
+            false, // disable output flops
+        )
+        .unwrap();
+
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+
+        // Ensure final pN_out register absent.
+        assert!(!sv.contains("reg p1_out"), "output flop should be absent");
     }
 }
