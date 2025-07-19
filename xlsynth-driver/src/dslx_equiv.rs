@@ -1,92 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
-use crate::report_cli_error::report_cli_error_and_exit;
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
-use crate::tools::{run_check_ir_equivalence_main, run_ir_converter_main, run_opt_main};
+use crate::tools::{run_ir_converter_main, run_opt_main};
 use xlsynth::{mangle_dslx_name, DslxConvertOptions, IrPackage};
-use xlsynth_g8r::equiv::prove_equiv::{
-    prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
-    AssertionSemantics, EquivResult, IrFn,
-};
-use xlsynth_g8r::equiv::solver_interface::Solver;
+use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
 
 const SUBCOMMAND: &str = "dslx-equiv";
 
-fn run_dslx_toolchain_equiv(lhs_ir: &str, rhs_ir: &str, top: &str, tool_path: &str) -> ! {
-    // Write IRs to temp files then invoke external equivalence checker.
-    let lhs_tmp = tempfile::NamedTempFile::new().unwrap();
-    let rhs_tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(lhs_tmp.path(), lhs_ir).unwrap();
-    std::fs::write(rhs_tmp.path(), rhs_ir).unwrap();
-    let output =
-        run_check_ir_equivalence_main(lhs_tmp.path(), rhs_tmp.path(), Some(top), tool_path);
-    match output {
-        Ok(stdout) => {
-            println!("success: {}", stdout.trim());
-            std::process::exit(0);
-        }
-        Err(output) => {
-            // stdout contains counterexample details.
-            let mut message = String::from_utf8_lossy(&output.stdout);
-            if message.is_empty() {
-                message = String::from_utf8_lossy(&output.stderr);
-            }
-            report_cli_error_and_exit(
-                &format!("failure: {}", message),
-                Some(SUBCOMMAND),
-                vec![
-                    (
-                        "stdout",
-                        &format!("{:?}", String::from_utf8_lossy(&output.stdout)),
-                    ),
-                    (
-                        "stderr",
-                        &format!("{:?}", String::from_utf8_lossy(&output.stderr)),
-                    ),
-                ],
-            );
-        }
-    }
+pub struct OptimizedIrText {
+    pub ir_text: String,
+    pub mangled_top: String,
 }
 
-// When using the external toolchain solver we historically required the
-// mangled top names (module+function) to match so a single top name could be
-// provided to the checker. To make the UX friendlier we now permit different
-// DSLX top names by rewriting the RHS (and/or LHS) IR text in-memory so both
-// packages expose a function with a unified name. This is a purely textual
-// token replacement; sufficient for top-level functions because the name only
-// appears in the definition header and any self-recursive references.
-fn unify_toolchain_tops<'a>(
-    lhs_ir: &'a str,
-    rhs_ir: &'a str,
-    lhs_top: &str,
-    rhs_top: &str,
-) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>, String) {
-    if lhs_top == rhs_top {
-        return (
-            std::borrow::Cow::Borrowed(lhs_ir),
-            std::borrow::Cow::Borrowed(rhs_ir),
-            lhs_top.to_string(),
-        );
-    }
-    // Use the LHS mangled top as the unified name.
-    let unified = lhs_top.to_string();
-    // Naive token replacement; we guard against accidental substring capture by
-    // only replacing whole-word occurrences followed by characters that can
-    // appear after a function name in XLS IR ( '(', ',', ')', whitespace ).
-    // For simplicity and to avoid a regex dependency, we fall back to a plain
-    // replace which is acceptable given mangled names are unique and unlikely
-    // to be substrings of other identifiers.
-    let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
-    (
-        std::borrow::Cow::Borrowed(lhs_ir),
-        std::borrow::Cow::Owned(rhs_rewritten),
-        unified,
-    )
-}
-
+/// Builds (always optimized) IR text plus mangled top name for a DSLX module.
 fn build_ir_for_dslx(
     input_path: &std::path::Path,
     dslx_top: &str,
@@ -96,14 +25,12 @@ fn build_ir_for_dslx(
     disable_warnings: Option<&[String]>,
     tool_path: Option<&str>,
     type_inference_v2: Option<bool>,
-    opt: bool,
-) -> (String, String) {
-    // Returns (optimized_ir_text, mangled_top_name)
+) -> OptimizedIrText {
     let module_name = input_path.file_stem().unwrap().to_str().unwrap();
     let mangled_top = mangle_dslx_name(module_name, dslx_top).unwrap();
 
     if let Some(tool_path) = tool_path {
-        // Use external tool to convert; optionally optimize.
+        // Convert via external tool then always optimize.
         let mut ir_text = run_ir_converter_main(
             input_path,
             Some(dslx_top),
@@ -114,13 +41,13 @@ fn build_ir_for_dslx(
             disable_warnings,
             type_inference_v2,
         );
-        if opt {
-            // Optimize using external tool.
-            let tmp = tempfile::NamedTempFile::new().unwrap();
-            std::fs::write(tmp.path(), &ir_text).unwrap();
-            ir_text = run_opt_main(tmp.path(), Some(&mangled_top), tool_path);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &ir_text).unwrap();
+        ir_text = run_opt_main(tmp.path(), Some(&mangled_top), tool_path);
+        OptimizedIrText {
+            ir_text,
+            mangled_top,
         }
-        (ir_text, mangled_top)
     } else {
         if type_inference_v2 == Some(true) {
             eprintln!("error: --type_inference_v2 is only supported with external toolchain");
@@ -146,113 +73,17 @@ fn build_ir_for_dslx(
             },
         )
         .expect("successful DSLX->IR conversion");
-        let ir_text = if opt {
-            let pkg = IrPackage::parse_ir(&result.ir, Some(&mangled_top)).unwrap();
-            let optimized = xlsynth::optimize_ir(&pkg, &mangled_top).unwrap();
-            optimized.to_string()
-        } else {
-            result.ir
-        };
-        (ir_text, mangled_top)
-    }
-}
-
-fn prove_equiv_internal<S: Solver>(
-    solver_cfg: &S::Config,
-    lhs_ir_text: &str,
-    rhs_ir_text: &str,
-    lhs_top: &str,
-    rhs_top: &str,
-    lhs_fixed_implicit_activation: bool,
-    rhs_fixed_implicit_activation: bool,
-    flatten_aggregates: bool,
-    drop_params: &[String],
-    strategy: ParallelismStrategy,
-    assertion_semantics: AssertionSemantics,
-) -> ! {
-    // Parse both IR packages through g8r parser so we can re-use existing proving
-    // code.
-    let lhs_pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(lhs_ir_text)
-        .parse_package()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to parse LHS IR: {}", e);
-            std::process::exit(1);
-        });
-    let rhs_pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(rhs_ir_text)
-        .parse_package()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to parse RHS IR: {}", e);
-            std::process::exit(1);
-        });
-    let lhs_fn_owned = lhs_pkg.get_fn(lhs_top).cloned().unwrap_or_else(|| {
-        eprintln!("Top function '{}' not found in LHS IR", lhs_top);
-        std::process::exit(1);
-    });
-    let rhs_fn_owned = rhs_pkg.get_fn(rhs_top).cloned().unwrap_or_else(|| {
-        eprintln!("Top function '{}' not found in RHS IR", rhs_top);
-        std::process::exit(1);
-    });
-    let lhs_fn_dropped = lhs_fn_owned
-        .drop_params(drop_params)
-        .expect("Dropped parameter used in LHS body");
-    let rhs_fn_dropped = rhs_fn_owned
-        .drop_params(drop_params)
-        .expect("Dropped parameter used in RHS body");
-    let lhs_ir_fn = IrFn {
-        fn_ref: &lhs_fn_dropped,
-        fixed_implicit_activation: lhs_fixed_implicit_activation,
-    };
-    let rhs_ir_fn = IrFn {
-        fn_ref: &rhs_fn_dropped,
-        fixed_implicit_activation: rhs_fixed_implicit_activation,
-    };
-
-    let start = std::time::Instant::now();
-    let result = match strategy {
-        ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv::<S>(
-            solver_cfg,
-            &lhs_ir_fn,
-            &rhs_ir_fn,
-            assertion_semantics,
-            flatten_aggregates,
-        ),
-        ParallelismStrategy::OutputBits => prove_ir_fn_equiv_output_bits_parallel::<S>(
-            solver_cfg,
-            &lhs_ir_fn,
-            &rhs_ir_fn,
-            assertion_semantics,
-            flatten_aggregates,
-        ),
-        ParallelismStrategy::InputBitSplit => prove_ir_fn_equiv_split_input_bit::<S>(
-            solver_cfg,
-            &lhs_ir_fn,
-            &rhs_ir_fn,
-            0,
-            0,
-            assertion_semantics,
-            flatten_aggregates,
-        ),
-    };
-    let end = std::time::Instant::now();
-    println!("Time taken: {:?}", end.duration_since(start));
-    match result {
-        EquivResult::Proved => {
-            println!("success: Solver proved equivalence");
-            std::process::exit(0);
-        }
-        EquivResult::Disproved {
-            inputs,
-            outputs: (lhs_bits, rhs_bits),
-        } => {
-            println!("failure: Solver found counterexample: {:?}", inputs);
-            println!("    output LHS: {:?}", lhs_bits);
-            println!("    output RHS: {:?}", rhs_bits);
-            std::process::exit(1);
+        let pkg = IrPackage::parse_ir(&result.ir, Some(&mangled_top)).unwrap();
+        let optimized = xlsynth::optimize_ir(&pkg, &mangled_top).unwrap();
+        OptimizedIrText {
+            ir_text: optimized.to_string(),
+            mangled_top,
         }
     }
 }
 
 pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
+    log::info!("handle_dslx_equiv");
     let lhs_file = matches.get_one::<String>("lhs_dslx_file").unwrap();
     let rhs_file = matches.get_one::<String>("rhs_dslx_file").unwrap();
 
@@ -263,9 +94,9 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         .get_one::<String>("rhs_dslx_top")
         .map(|s| s.as_str());
 
-    let shared_top = matches.get_one::<String>("dslx_top").map(|s| s.as_str());
+    let top = matches.get_one::<String>("dslx_top").map(|s| s.as_str());
 
-    if shared_top.is_some() && (lhs_top.is_some() || rhs_top.is_some()) {
+    if top.is_some() && (lhs_top.is_some() || rhs_top.is_some()) {
         eprintln!("Error: --dslx_top and --lhs_dslx_top/--rhs_dslx_top cannot be used together");
         std::process::exit(1);
     }
@@ -273,9 +104,9 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         eprintln!("Error: --lhs_dslx_top and --rhs_dslx_top must be used together");
         std::process::exit(1);
     }
-    if shared_top.is_some() {
-        lhs_top = shared_top;
-        rhs_top = shared_top;
+    if top.is_some() {
+        lhs_top = top;
+        rhs_top = top;
     }
 
     if lhs_top.is_none() || rhs_top.is_none() {
@@ -307,10 +138,14 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
                 .and_then(|c| c.dslx.as_ref()?.type_inference_v2)
         });
 
-    let opt = matches
-        .get_one::<String>("opt")
-        .map(|s| s == "true")
-        .unwrap_or(false);
+    // Retrieve but ignore deprecated --opt flag if provided.
+    if let Some(val) = matches.get_one::<String>("opt") {
+        if val == "false" {
+            eprintln!(
+                "[warning] --opt=false ignored: dslx-equiv always optimizes IR before proving"
+            );
+        }
+    }
 
     let assertion_semantics = matches
         .get_one::<String>("assertion_semantics")
@@ -346,9 +181,10 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
-    // Build IRs (possibly using external converter) always; if solver is toolchain
-    // we may re-use optimized IRs for temp files.
-    let (lhs_ir_text_raw, lhs_mangled_top) = build_ir_for_dslx(
+    let OptimizedIrText {
+        ir_text: lhs_ir_text,
+        mangled_top: lhs_mangled_top,
+    } = build_ir_for_dslx(
         lhs_path,
         lhs_top.unwrap(),
         dslx_stdlib_path,
@@ -357,9 +193,11 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         disable_warnings,
         tool_path,
         type_inference_v2,
-        opt,
     );
-    let (rhs_ir_text_raw, rhs_mangled_top) = build_ir_for_dslx(
+    let OptimizedIrText {
+        ir_text: rhs_ir_text,
+        mangled_top: rhs_mangled_top,
+    } = build_ir_for_dslx(
         rhs_path,
         rhs_top.unwrap(),
         dslx_stdlib_path,
@@ -368,196 +206,23 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         disable_warnings,
         tool_path,
         type_inference_v2,
-        opt,
     );
 
-    // Always optimize before proving equivalence to normalize IR and remove
-    // constructs the g8r parser / equivalence engine may not yet support (e.g.
-    // counted_for).
-    let lhs_ir_text = if opt {
-        lhs_ir_text_raw.clone()
-    } else if let Some(tp) = tool_path {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), &lhs_ir_text_raw).unwrap();
-        run_opt_main(tmp.path(), Some(&lhs_mangled_top), tp)
-    } else {
-        let pkg = IrPackage::parse_ir(&lhs_ir_text_raw, Some(&lhs_mangled_top)).unwrap();
-        xlsynth::optimize_ir(&pkg, &lhs_mangled_top)
-            .unwrap()
-            .to_string()
-    };
-    let rhs_ir_text = if opt {
-        rhs_ir_text_raw.clone()
-    } else if let Some(tp) = tool_path {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), &rhs_ir_text_raw).unwrap();
-        run_opt_main(tmp.path(), Some(&rhs_mangled_top), tp)
-    } else {
-        let pkg = IrPackage::parse_ir(&rhs_ir_text_raw, Some(&rhs_mangled_top)).unwrap();
-        xlsynth::optimize_ir(&pkg, &rhs_mangled_top)
-            .unwrap()
-            .to_string()
+    let inputs = EquivInputs {
+        lhs_ir_text: &lhs_ir_text,
+        rhs_ir_text: &rhs_ir_text,
+        lhs_top: Some(&lhs_mangled_top),
+        rhs_top: Some(&rhs_mangled_top),
+        flatten_aggregates,
+        drop_params: &drop_params,
+        strategy,
+        assertion_semantics,
+        lhs_fixed_implicit_activation,
+        rhs_fixed_implicit_activation,
+        subcommand: SUBCOMMAND,
+        lhs_origin: lhs_file,
+        rhs_origin: rhs_file,
     };
 
-    if let Some(solver) = solver_choice {
-        match solver {
-            #[cfg(feature = "has-boolector")]
-            SolverChoice::Boolector => {
-                use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
-                let cfg = BoolectorConfig::new();
-                prove_equiv_internal::<Boolector>(
-                    &cfg,
-                    &lhs_ir_text,
-                    &rhs_ir_text,
-                    &lhs_mangled_top,
-                    &rhs_mangled_top,
-                    lhs_fixed_implicit_activation,
-                    rhs_fixed_implicit_activation,
-                    flatten_aggregates,
-                    &drop_params,
-                    strategy,
-                    assertion_semantics,
-                );
-            }
-            #[cfg(feature = "has-easy-smt")]
-            SolverChoice::Z3Binary
-            | SolverChoice::BitwuzlaBinary
-            | SolverChoice::BoolectorBinary => {
-                use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
-                let cfg = match solver {
-                    SolverChoice::Z3Binary => EasySmtConfig::z3(),
-                    SolverChoice::BitwuzlaBinary => EasySmtConfig::bitwuzla(),
-                    SolverChoice::BoolectorBinary => EasySmtConfig::boolector(),
-                    _ => unreachable!(),
-                };
-                prove_equiv_internal::<EasySmtSolver>(
-                    &cfg,
-                    &lhs_ir_text,
-                    &rhs_ir_text,
-                    &lhs_mangled_top,
-                    &rhs_mangled_top,
-                    lhs_fixed_implicit_activation,
-                    rhs_fixed_implicit_activation,
-                    flatten_aggregates,
-                    &drop_params,
-                    strategy,
-                    assertion_semantics,
-                );
-            }
-            #[cfg(feature = "has-bitwuzla")]
-            SolverChoice::Bitwuzla => {
-                use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
-                let opts = BitwuzlaOptions::new();
-                prove_equiv_internal::<Bitwuzla>(
-                    &opts,
-                    &lhs_ir_text,
-                    &rhs_ir_text,
-                    &lhs_mangled_top,
-                    &rhs_mangled_top,
-                    lhs_fixed_implicit_activation,
-                    rhs_fixed_implicit_activation,
-                    flatten_aggregates,
-                    &drop_params,
-                    strategy,
-                    assertion_semantics,
-                );
-            }
-            #[cfg(feature = "has-boolector")]
-            SolverChoice::BoolectorLegacy => {
-                if lhs_fixed_implicit_activation || rhs_fixed_implicit_activation {
-                    eprintln!("Error: fixed implicit activation flags not supported for boolector-legacy solver");
-                    std::process::exit(1);
-                }
-                if assertion_semantics != AssertionSemantics::Same {
-                    eprintln!("Error: assertion semantics other than 'same' not supported for boolector-legacy solver");
-                    std::process::exit(1);
-                }
-                use xlsynth_g8r::ir_equiv_boolector;
-                // Use legacy path directly with parsed IR (boolector legacy expects flattened
-                // style similar to ir_equiv.rs)
-                let lhs_pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&lhs_ir_text)
-                    .parse_package()
-                    .unwrap();
-                let rhs_pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&rhs_ir_text)
-                    .parse_package()
-                    .unwrap();
-                let lhs_fn_owned = lhs_pkg.get_fn(&lhs_mangled_top).cloned().unwrap();
-                let rhs_fn_owned = rhs_pkg.get_fn(&rhs_mangled_top).cloned().unwrap();
-                let lhs_fn_dropped = lhs_fn_owned
-                    .drop_params(&drop_params)
-                    .expect("Dropped parameter used in LHS body");
-                let rhs_fn_dropped = rhs_fn_owned
-                    .drop_params(&drop_params)
-                    .expect("Dropped parameter used in RHS body");
-                let start = std::time::Instant::now();
-                let result = match strategy {
-                    ParallelismStrategy::SingleThreaded => ir_equiv_boolector::prove_ir_fn_equiv(
-                        &lhs_fn_dropped,
-                        &rhs_fn_dropped,
-                        flatten_aggregates,
-                    ),
-                    ParallelismStrategy::OutputBits => {
-                        ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
-                            &lhs_fn_dropped,
-                            &rhs_fn_dropped,
-                            flatten_aggregates,
-                        )
-                    }
-                    ParallelismStrategy::InputBitSplit => {
-                        ir_equiv_boolector::prove_ir_fn_equiv_split_input_bit(
-                            &lhs_fn_dropped,
-                            &rhs_fn_dropped,
-                            0,
-                            0,
-                            flatten_aggregates,
-                        )
-                    }
-                };
-                let end = std::time::Instant::now();
-                println!("Time taken: {:?}", end.duration_since(start));
-                match result {
-                    ir_equiv_boolector::EquivResult::Proved => {
-                        println!("success: Solver proved equivalence");
-                        std::process::exit(0);
-                    }
-                    ir_equiv_boolector::EquivResult::Disproved {
-                        inputs,
-                        outputs: (lhs_bits, rhs_bits),
-                    } => {
-                        println!("failure: Solver found counterexample: {:?}", inputs);
-                        println!("    output LHS: {:?}", lhs_bits);
-                        println!("    output RHS: {:?}", rhs_bits);
-                        std::process::exit(1);
-                    }
-                }
-            }
-            SolverChoice::Toolchain => {
-                let tool_path = tool_path.expect("tool_path required for toolchain solver");
-                let (lhs_ir_use, rhs_ir_use, unified_top) = unify_toolchain_tops(
-                    &lhs_ir_text,
-                    &rhs_ir_text,
-                    &lhs_mangled_top,
-                    &rhs_mangled_top,
-                );
-                run_dslx_toolchain_equiv(&lhs_ir_use, &rhs_ir_use, &unified_top, tool_path);
-            }
-        }
-    } else {
-        // Default to toolchain if available.
-        if let Some(tool_path) = tool_path {
-            let (lhs_ir_use, rhs_ir_use, unified_top) = unify_toolchain_tops(
-                &lhs_ir_text,
-                &rhs_ir_text,
-                &lhs_mangled_top,
-                &rhs_mangled_top,
-            );
-            run_dslx_toolchain_equiv(&lhs_ir_use, &rhs_ir_use, &unified_top, tool_path);
-        } else {
-            report_cli_error_and_exit(
-                "No solver specified and no toolchain available",
-                Some(SUBCOMMAND),
-                vec![],
-            );
-        }
-    }
+    dispatch_ir_equiv(solver_choice, tool_path, &inputs);
 }
