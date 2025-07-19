@@ -35,7 +35,7 @@ fn parse_verilog_top_module(verilog: &str) -> anyhow::Result<(String, Vec<PortIn
         .arg("--single-unit")
         .arg("--parse-only")
         .arg("--ast-json")
-        .arg("-") // stdout
+        .arg("-")
         .arg(tmp_file.path())
         .output()?;
 
