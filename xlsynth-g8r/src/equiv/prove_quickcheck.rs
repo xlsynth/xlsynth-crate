@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrValue;
-
 use crate::equiv::{
-    prove_equiv::{AssertionViolation, IrFn, get_fn_inputs, ir_to_smt},
+    prove_equiv::{AssertionViolation, FnInput, IrFn, get_fn_inputs, ir_to_smt},
     solver_interface::{BitVec, Response, Solver},
 };
 
@@ -31,7 +29,7 @@ pub enum BoolPropertyResult {
     Disproved {
         /// Concrete input values leading to failure. Kept in the same order as
         /// the function parameters after potential implicit-token handling.
-        inputs: Vec<(String, IrValue)>,
+        inputs: Vec<FnInput>,
         /// Concrete (possibly failing) output value observed for the
         /// counter-example.
         output: FnOutput,
@@ -111,16 +109,14 @@ where
         Response::Unsat => BoolPropertyResult::Proved,
         Response::Sat => {
             // Extract counter-example values.
-            let inputs: Vec<(String, IrValue)> = smt_fn
+            let inputs: Vec<FnInput> = smt_fn
                 .fn_ref
                 .params
                 .iter()
                 .zip(smt_fn.inputs.iter())
-                .map(|(p, i)| {
-                    (
-                        p.name.clone(),
-                        solver.get_value(&i.bitvec, &i.ir_type).unwrap(),
-                    )
+                .map(|(p, i)| FnInput {
+                    name: p.name.clone(),
+                    value: solver.get_value(&i.bitvec, &i.ir_type).unwrap(),
                 })
                 .collect();
 
@@ -314,11 +310,11 @@ mod test_utils {
                 assert_eq!(inputs.len(), f.params.len());
                 for (idx, param) in f.params.iter().enumerate() {
                     assert_eq!(
-                        inputs[idx].0, param.name,
+                        inputs[idx].name, param.name,
                         "param name mismatch at index {idx}"
                     );
                     assert_eq!(
-                        inputs[idx].1.bit_count().unwrap(),
+                        inputs[idx].value.bit_count().unwrap(),
                         param.ty.bit_count(),
                         "param bit width mismatch at index {idx}"
                     );

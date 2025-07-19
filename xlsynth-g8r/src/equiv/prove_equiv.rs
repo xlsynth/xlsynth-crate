@@ -900,6 +900,12 @@ pub struct AssertionViolation {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct FnInput {
+    pub name: String,
+    pub value: IrValue,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct FnOutput {
     pub value: IrValue,
     pub assertion_violation: Option<AssertionViolation>,
@@ -923,8 +929,8 @@ impl std::fmt::Display for FnOutput {
 pub enum EquivResult {
     Proved,
     Disproved {
-        lhs_inputs: Vec<(String, IrValue)>,
-        rhs_inputs: Vec<(String, IrValue)>,
+        lhs_inputs: Vec<FnInput>,
+        rhs_inputs: Vec<FnInput>,
         lhs_output: FnOutput,
         rhs_output: FnOutput,
     },
@@ -1105,7 +1111,10 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
                     .params
                     .iter()
                     .zip(smt_fn.inputs.iter())
-                    .map(|(p, i)| (p.name.clone(), get_value(solver, i)))
+                    .map(|(p, i)| FnInput {
+                        name: p.name.clone(),
+                        value: get_value(solver, i),
+                    })
                     .collect()
             };
 
@@ -2610,14 +2619,20 @@ pub mod test_utils {
                 // Verify LHS input ordering & naming.
                 assert_eq!(lhs_inputs.len(), lhs_fn_ir.params.len());
                 for (idx, param) in lhs_fn_ir.params.iter().enumerate() {
-                    assert_eq!(lhs_inputs[idx].0, param.name);
-                    assert_eq!(lhs_inputs[idx].1.bit_count().unwrap(), param.ty.bit_count());
+                    assert_eq!(lhs_inputs[idx].name, param.name);
+                    assert_eq!(
+                        lhs_inputs[idx].value.bit_count().unwrap(),
+                        param.ty.bit_count()
+                    );
                 }
                 // Verify RHS input ordering & naming.
                 assert_eq!(rhs_inputs.len(), rhs_fn_ir.params.len());
                 for (idx, param) in rhs_fn_ir.params.iter().enumerate() {
-                    assert_eq!(rhs_inputs[idx].0, param.name);
-                    assert_eq!(rhs_inputs[idx].1.bit_count().unwrap(), param.ty.bit_count());
+                    assert_eq!(rhs_inputs[idx].name, param.name);
+                    assert_eq!(
+                        rhs_inputs[idx].value.bit_count().unwrap(),
+                        param.ty.bit_count()
+                    );
                 }
             }
             _ => panic!("Expected inequivalence with counter-example, but proof succeeded"),
