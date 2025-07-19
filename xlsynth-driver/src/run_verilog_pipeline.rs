@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::common::{execute_command_with_context, find_and_verify_executable};
 use clap::ArgMatches;
 use regex::Regex;
 use serde_json::Value;
@@ -26,18 +27,27 @@ fn parse_verilog_top_module(verilog: &str) -> anyhow::Result<(String, Vec<PortIn
     let tmp_file = tempfile::Builder::new().suffix(".sv").tempfile()?;
     std::fs::write(tmp_file.path(), verilog)?;
 
-    // Locate the `slang` executable.
-    let slang_path = which::which("slang")
-        .map_err(|_| anyhow::anyhow!("`slang` executable not found in PATH"))?;
+    // Locate and verify the `slang` executable.
+    let slang_path = find_and_verify_executable(
+        "slang",
+        "Please ensure slang is installed and available in PATH. \
+         You can download it from https://github.com/xlsynth/slang-rs/releases or install it via your package manager."
+    )?;
 
     // Invoke slang to obtain the AST in JSON form on stdout.
-    let output = Command::new(slang_path)
-        .arg("--quiet")
+    let mut cmd = Command::new(&slang_path);
+    cmd.arg("--quiet")
         .arg("--single-unit")
         .arg("--ast-json")
         .arg("-")
-        .arg(tmp_file.path())
-        .output()?;
+        .arg(tmp_file.path());
+    let output = execute_command_with_context(
+        cmd,
+        &format!(
+            "Failed to execute slang binary at '{}'",
+            slang_path.display()
+        ),
+    )?;
 
     if !output.status.success() {
         return Err(anyhow::anyhow!(
@@ -131,9 +141,11 @@ fn parse_verilog_top_module(verilog: &str) -> anyhow::Result<(String, Vec<PortIn
 /// Compiles the given sources with iverilog and runs them via vvp, returning
 /// the captured stdout.
 fn compile_and_run(work_dir: &Path, sources: &[PathBuf]) -> anyhow::Result<String> {
-    // Locate iverilog.
-    let iverilog_path =
-        which::which("iverilog").map_err(|_| anyhow::anyhow!("iverilog not found"))?;
+    // Locate and verify iverilog.
+    let iverilog_path = find_and_verify_executable(
+        "iverilog",
+        "Please install iverilog. On Ubuntu/Debian: 'sudo apt-get install iverilog', on macOS: 'brew install icarus-verilog'"
+    )?;
     let vvp_out = work_dir.join("sim.vvp");
     // Build.
     let mut cmd_compile = Command::new(&iverilog_path);
@@ -147,7 +159,7 @@ fn compile_and_run(work_dir: &Path, sources: &[PathBuf]) -> anyhow::Result<Strin
     for src in sources {
         cmd_compile.arg(src);
     }
-    let out_compile = cmd_compile.output()?;
+    let out_compile = execute_command_with_context(cmd_compile, "Failed to execute iverilog")?;
     if !out_compile.status.success() {
         return Err(anyhow::anyhow!(
             "iverilog failed: {}",
@@ -156,10 +168,10 @@ fn compile_and_run(work_dir: &Path, sources: &[PathBuf]) -> anyhow::Result<Strin
     }
 
     // Run simulation.
-    let out_sim = Command::new("vvp")
-        .current_dir(work_dir)
-        .arg(&vvp_out)
-        .output()?;
+    let mut vvp_cmd = Command::new("vvp");
+    vvp_cmd.current_dir(work_dir).arg(&vvp_out);
+    let out_sim =
+        execute_command_with_context(vvp_cmd, "Failed to execute vvp (Verilog simulator)")?;
     if !out_sim.status.success() {
         return Err(anyhow::anyhow!(
             "vvp failed: {}",
@@ -226,7 +238,20 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         eprintln!("run-verilog-pipeline: --latency must be provided when --output_valid_signal is not used");
         std::process::exit(1);
     }
-    let latency: usize = latency_opt.map(|s| s.parse().unwrap()).unwrap_or(0);
+    let latency: usize = if let Some(latency_str) = latency_opt {
+        match latency_str.parse() {
+            Ok(val) => val,
+            Err(e) => {
+                eprintln!(
+                    "run-verilog-pipeline: invalid latency value '{}': {}",
+                    latency_str, e
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        0
+    };
 
     // Require an explicit clock port named `clk`.
     if ports
@@ -270,9 +295,10 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     // Parse the XLS IR value provided on the command line. It may be either a
     // single bits value (for a single data input) *or* a tuple whose arity
     // must match the number of data input ports detected above.
-    let input_value_str = matches
-        .get_one::<String>("input_value")
-        .expect("input_value arg");
+    let input_value_str = matches.get_one::<String>("input_value").unwrap_or_else(|| {
+        eprintln!("run-verilog-pipeline: missing required INPUT_VALUE argument");
+        std::process::exit(1);
+    });
     let input_value = match IrValue::parse_typed(input_value_str) {
         Ok(v) => v,
         Err(e) => {
@@ -472,11 +498,29 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     tb_src.push_str("endmodule\n");
 
     // Write sources to temp dir and run.
-    let temp_dir = tempdir().expect("tempdir");
+    let temp_dir = match tempdir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!(
+                "run-verilog-pipeline: failed to create temporary directory: {}",
+                e
+            );
+            std::process::exit(1);
+        }
+    };
     let dut_path = temp_dir.path().join("dut.sv");
     let tb_path = temp_dir.path().join("tb.sv");
-    std::fs::write(&dut_path, sv_input).expect("write dut");
-    std::fs::write(&tb_path, tb_src).expect("write tb");
+    if let Err(e) = std::fs::write(&dut_path, sv_input) {
+        eprintln!("run-verilog-pipeline: failed to write DUT file: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::write(&tb_path, tb_src) {
+        eprintln!(
+            "run-verilog-pipeline: failed to write testbench file: {}",
+            e
+        );
+        std::process::exit(1);
+    }
 
     // Run compile+sim.
     let stdout_sim = match compile_and_run(temp_dir.path(), &[dut_path, tb_path]) {
@@ -496,7 +540,8 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     }
 
     // Filter and print mapping lines.
-    let re_map = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*: bits\[\d+\]:").unwrap();
+    let re_map = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*: bits\[\d+\]:")
+        .expect("regex pattern should be valid");
     for line in stdout_sim.lines() {
         if re_map.is_match(line.trim()) {
             println!("{}", line.trim());

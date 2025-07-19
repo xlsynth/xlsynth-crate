@@ -352,3 +352,55 @@ pub fn get_dslx_paths(
         search_paths,
     }
 }
+
+/// Locates an executable in PATH and verifies it can actually be executed.
+///
+/// This function:
+/// 1. Uses `which` to find the executable in PATH
+/// 2. Verifies the file has executable permissions (on Unix systems)
+/// 3. Returns the path if valid, or a descriptive error if not
+pub fn find_and_verify_executable(
+    name: &str,
+    install_hint: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    // Find the executable in PATH
+    let exe_path = which::which(name).map_err(|_| {
+        anyhow::anyhow!("`{}` executable not found in PATH. {}", name, install_hint)
+    })?;
+
+    // Verify the binary is actually executable
+    if let Ok(metadata) = std::fs::metadata(&exe_path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = metadata.permissions();
+            if perms.mode() & 0o111 == 0 {
+                return Err(anyhow::anyhow!(
+                    "{} binary at '{}' exists but is not executable (permissions: {:o})",
+                    name,
+                    exe_path.display(),
+                    perms.mode()
+                ));
+            }
+        }
+    }
+
+    Ok(exe_path)
+}
+
+/// Executes a command and provides a descriptive error message if execution
+/// fails.
+pub fn execute_command_with_context(
+    mut cmd: std::process::Command,
+    context: &str,
+) -> anyhow::Result<std::process::Output> {
+    cmd.output().map_err(|e| {
+        anyhow::anyhow!(
+            "{}: {}. This could indicate missing dynamic libraries or other execution issues.",
+            context,
+            e
+        )
+    })
+}
