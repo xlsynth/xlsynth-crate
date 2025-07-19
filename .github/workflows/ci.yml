@@ -120,6 +120,8 @@ jobs:
           # version that works for ubuntu 22.04.
           curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
           chmod +x slang
+          # Add slang to PATH for subprocess usage
+          echo "$(pwd)" >> $GITHUB_PATH
 
       - name: Install protobuf compiler
         run: |
@@ -456,6 +458,8 @@ jobs:
         run: |
           curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
           chmod +x slang
+          # Add slang to PATH for subprocess usage
+          echo "$(pwd)" >> $GITHUB_PATH
 
       - name: Build crate
         run: |
@@ -539,6 +543,8 @@ jobs:
         run: |
           curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
           chmod +x slang
+          # Add slang to PATH for subprocess usage
+          echo "$(pwd)" >> $GITHUB_PATH
 
       - name: Build crate
         run: cargo build --features with-z3-system --workspace -vv

@@ -54,6 +54,7 @@ mod ir_ged;
 mod lib2proto;
 mod prove_quickcheck;
 mod report_cli_error;
+mod run_verilog_pipeline;
 mod solver_choice;
 mod toolchain_config;
 mod tools;
@@ -759,6 +760,54 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("run-verilog-pipeline")
+                .about("Runs a SystemVerilog pipeline via iverilog with a single input value")
+                .arg(
+                    Arg::new("input_valid_signal")
+                        .long("input_valid_signal")
+                        .value_name("NAME")
+                        .help("Input-valid signal name"),
+                )
+                .arg(
+                    Arg::new("output_valid_signal")
+                        .long("output_valid_signal")
+                        .value_name("NAME")
+                        .help("Output-valid signal name"),
+                )
+                .arg(
+                    Arg::new("reset")
+                        .long("reset")
+                        .value_name("NAME")
+                        .help("Reset signal name"),
+                )
+                .add_bool_arg("reset_active_low", "Reset is active low")
+                .arg(
+                    Arg::new("latency")
+                        .long("latency")
+                        .value_name("CYCLES")
+                        .help("Latency in cycles (required if output_valid_signal is not provided)"),
+                )
+                .arg(
+                    Arg::new("waves")
+                        .long("waves")
+                        .value_name("PATH")
+                        .help("Write VCD dump to PATH"),
+                )
+                .arg(
+                    Arg::new("input_value")
+                        .help("XLS IR typed value used as input")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("sv_path")
+                        .help("Path to SystemVerilog pipeline source (use '-' for stdin)")
+                        .required(false)
+                        .index(2)
+                        .default_value("-"),
+                ),
+        )
+        .subcommand(
             clap::Command::new("prove-quickcheck")
                 .about("Prove that DSLX #[quickcheck] functions always return true")
                 .add_dslx_input_args(false)
@@ -883,6 +932,8 @@ fn main() {
         ir_fn_eval::handle_ir_fn_eval(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("g8r-equiv") {
         g8r_equiv::handle_g8r_equiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("run-verilog-pipeline") {
+        run_verilog_pipeline::handle_run_verilog_pipeline(matches);
     } else if let Some(matches) = matches.subcommand_matches("prove-quickcheck") {
         prove_quickcheck::handle_prove_quickcheck(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2combo") {
