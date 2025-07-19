@@ -3348,3 +3348,179 @@ fn test_run_verilog_pipeline_with_valid_signals() {
         stdout
     );
 }
+
+#[cfg_attr(feature="has-boolector", test_case("boolector", true; "dslx_equiv_boolector_equivalent"))]
+#[cfg_attr(feature="has-boolector", test_case("boolector", false; "dslx_equiv_boolector_nonequivalent"))]
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla", true; "dslx_equiv_bitwuzla_equivalent"))]
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla", false; "dslx_equiv_bitwuzla_nonequivalent"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary", true; "dslx_equiv_z3_binary_equivalent"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary", false; "dslx_equiv_z3_binary_nonequivalent"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary", true; "dslx_equiv_bitwuzla_binary_equivalent"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary", false; "dslx_equiv_bitwuzla_binary_nonequivalent"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case("boolector-binary", true; "dslx_equiv_boolector_binary_equivalent"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case("boolector-binary", false; "dslx_equiv_boolector_binary_nonequivalent"))]
+#[test_case("toolchain", true; "dslx_equiv_toolchain_equivalent")]
+#[test_case("toolchain", false; "dslx_equiv_toolchain_nonequivalent")]
+fn test_dslx_equiv_solver_param(solver: &str, should_succeed: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // LHS DSLX (same in both success/failure cases): algebraically (x + x) - x == x
+    // modulo 2^32.
+    let lhs_dslx = "fn main(x: u32) -> u32 { (x + x) - x }";
+    // RHS varies depending on whether we want equivalence.
+    let rhs_dslx_equiv = "fn main(x: u32) -> u32 { x }";
+    let rhs_dslx_nonequiv = "fn main(x: u32) -> u32 { x + u32:1 }"; // differs by +1.
+
+    let lhs_path = temp_dir.path().join("lhs.x");
+    let rhs_path = temp_dir.path().join("rhs.x");
+    std::fs::write(&lhs_path, lhs_dslx).unwrap();
+    std::fs::write(
+        &rhs_path,
+        if should_succeed {
+            rhs_dslx_equiv
+        } else {
+            rhs_dslx_nonequiv
+        },
+    )
+    .unwrap();
+
+    // Toolchain config so the toolchain solver (and default path when unspecified)
+    // works.
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let mut toolchain_toml_contents = "[toolchain]\n".to_string();
+    // Always add tool_path so the default / toolchain solver path is available.
+    toolchain_toml_contents = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .expect("dslx-equiv invocation should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if should_succeed {
+        assert!(
+            output.status.success(),
+            "dslx-equiv should report equivalence. stdout: {}\nstderr: {}",
+            stdout,
+            stderr
+        );
+        assert!(
+            stdout.contains("success"),
+            "expected success marker in stdout: {}",
+            stdout
+        );
+    } else {
+        assert!(
+            !output.status.success(),
+            "dslx-equiv should report non-equivalence. stdout: {}\nstderr: {}",
+            stdout,
+            stderr
+        );
+        assert!(
+            stderr.contains("failure") || stdout.contains("failure"),
+            "expected failure marker. stdout: {} stderr: {}",
+            stdout,
+            stderr
+        );
+    }
+}
+
+#[cfg_attr(feature="has-boolector", test_case("boolector", true; "dslx_equiv_diff_tops_boolector_equiv"))]
+#[cfg_attr(feature="has-boolector", test_case("boolector", false; "dslx_equiv_diff_tops_boolector_nonequiv"))]
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla", true; "dslx_equiv_diff_tops_bitwuzla_equiv"))]
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla", false; "dslx_equiv_diff_tops_bitwuzla_nonequiv"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary", true; "dslx_equiv_diff_tops_z3_equiv"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary", false; "dslx_equiv_diff_tops_z3_nonequiv"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary", true; "dslx_equiv_diff_tops_bitwuzla_bin_equiv"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary", false; "dslx_equiv_diff_tops_bitwuzla_bin_nonequiv"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case("boolector-binary", true; "dslx_equiv_diff_tops_boolector_bin_equiv"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case("boolector-binary", false; "dslx_equiv_diff_tops_boolector_bin_nonequiv"))]
+#[test_case("toolchain", true; "dslx_equiv_diff_tops_toolchain_equiv")]
+#[test_case("toolchain", false; "dslx_equiv_diff_tops_toolchain_nonequiv")]
+fn test_dslx_equiv_solver_param_different_tops(solver: &str, should_succeed: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let lhs_dslx = "fn alpha(x: u32) -> u32 { (x + x) - x }"; // simplifies to x
+    let rhs_dslx_equiv = "fn beta(x: u32) -> u32 { x }";
+    let rhs_dslx_nonequiv = "fn beta(x: u32) -> u32 { x + u32:1 }";
+
+    let lhs_path = temp_dir.path().join("lhs.x");
+    let rhs_path = temp_dir.path().join("rhs.x");
+    std::fs::write(&lhs_path, lhs_dslx).unwrap();
+    std::fs::write(
+        &rhs_path,
+        if should_succeed {
+            rhs_dslx_equiv
+        } else {
+            rhs_dslx_nonequiv
+        },
+    )
+    .unwrap();
+
+    // Toolchain TOML with tool_path so external solver binaries (if configured)
+    // still ok.
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let mut toolchain_toml_contents = "[toolchain]\n".to_string();
+    toolchain_toml_contents = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--lhs_dslx_top")
+        .arg("alpha")
+        .arg("--rhs_dslx_top")
+        .arg("beta")
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .expect("dslx-equiv invocation should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if should_succeed {
+        assert!(
+            output.status.success(),
+            "dslx-equiv (different tops) should report equivalence. stdout: {}\nstderr: {}",
+            stdout,
+            stderr
+        );
+        assert!(
+            stdout.contains("success"),
+            "expected success marker in stdout: {}",
+            stdout
+        );
+    } else {
+        assert!(
+            !output.status.success(),
+            "dslx-equiv (different tops) should report non-equivalence. stdout: {}\nstderr: {}",
+            stdout,
+            stderr
+        );
+        assert!(
+            stderr.contains("failure") || stdout.contains("failure"),
+            "expected failure marker. stdout: {} stderr: {}",
+            stdout,
+            stderr
+        );
+    }
+}

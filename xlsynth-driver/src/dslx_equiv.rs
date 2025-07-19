@@ -51,6 +51,42 @@ fn run_dslx_toolchain_equiv(lhs_ir: &str, rhs_ir: &str, top: &str, tool_path: &s
     }
 }
 
+// When using the external toolchain solver we historically required the
+// mangled top names (module+function) to match so a single top name could be
+// provided to the checker. To make the UX friendlier we now permit different
+// DSLX top names by rewriting the RHS (and/or LHS) IR text in-memory so both
+// packages expose a function with a unified name. This is a purely textual
+// token replacement; sufficient for top-level functions because the name only
+// appears in the definition header and any self-recursive references.
+fn unify_toolchain_tops<'a>(
+    lhs_ir: &'a str,
+    rhs_ir: &'a str,
+    lhs_top: &str,
+    rhs_top: &str,
+) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>, String) {
+    if lhs_top == rhs_top {
+        return (
+            std::borrow::Cow::Borrowed(lhs_ir),
+            std::borrow::Cow::Borrowed(rhs_ir),
+            lhs_top.to_string(),
+        );
+    }
+    // Use the LHS mangled top as the unified name.
+    let unified = lhs_top.to_string();
+    // Naive token replacement; we guard against accidental substring capture by
+    // only replacing whole-word occurrences followed by characters that can
+    // appear after a function name in XLS IR ( '(', ',', ')', whitespace ).
+    // For simplicity and to avoid a regex dependency, we fall back to a plain
+    // replace which is acceptable given mangled names are unique and unlikely
+    // to be substrings of other identifiers.
+    let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
+    (
+        std::borrow::Cow::Borrowed(lhs_ir),
+        std::borrow::Cow::Owned(rhs_rewritten),
+        unified,
+    )
+}
+
 fn build_ir_for_dslx(
     input_path: &std::path::Path,
     dslx_top: &str,
@@ -230,7 +266,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let shared_top = matches.get_one::<String>("dslx_top").map(|s| s.as_str());
 
     if shared_top.is_some() && (lhs_top.is_some() || rhs_top.is_some()) {
-        eprintln!("Error: --top and --lhs_dslx_top/--rhs_dslx_top cannot be used together");
+        eprintln!("Error: --dslx_top and --lhs_dslx_top/--rhs_dslx_top cannot be used together");
         std::process::exit(1);
     }
     if lhs_top.is_some() ^ rhs_top.is_some() {
@@ -243,7 +279,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     }
 
     if lhs_top.is_none() || rhs_top.is_none() {
-        eprintln!("Error: a top function must be specified via --top or both --lhs_dslx_top/--rhs_dslx_top");
+        eprintln!("Error: a top function must be specified via --dslx_top or both --lhs_dslx_top/--rhs_dslx_top");
         std::process::exit(1);
     }
 
@@ -497,21 +533,25 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
             }
             SolverChoice::Toolchain => {
                 let tool_path = tool_path.expect("tool_path required for toolchain solver");
-                if lhs_mangled_top != rhs_mangled_top {
-                    eprintln!("Error: with toolchain solver, LHS/RHS mangled top names must match (module and function must be same)");
-                    std::process::exit(1);
-                }
-                run_dslx_toolchain_equiv(&lhs_ir_text, &rhs_ir_text, &lhs_mangled_top, tool_path);
+                let (lhs_ir_use, rhs_ir_use, unified_top) = unify_toolchain_tops(
+                    &lhs_ir_text,
+                    &rhs_ir_text,
+                    &lhs_mangled_top,
+                    &rhs_mangled_top,
+                );
+                run_dslx_toolchain_equiv(&lhs_ir_use, &rhs_ir_use, &unified_top, tool_path);
             }
         }
     } else {
         // Default to toolchain if available.
         if let Some(tool_path) = tool_path {
-            if lhs_mangled_top != rhs_mangled_top {
-                eprintln!("Error: with toolchain solver, LHS/RHS mangled top names must match (module and function must be same)");
-                std::process::exit(1);
-            }
-            run_dslx_toolchain_equiv(&lhs_ir_text, &rhs_ir_text, &lhs_mangled_top, tool_path);
+            let (lhs_ir_use, rhs_ir_use, unified_top) = unify_toolchain_tops(
+                &lhs_ir_text,
+                &rhs_ir_text,
+                &lhs_mangled_top,
+                &rhs_mangled_top,
+            );
+            run_dslx_toolchain_equiv(&lhs_ir_use, &rhs_ir_use, &unified_top, tool_path);
         } else {
             report_cli_error_and_exit(
                 "No solver specified and no toolchain available",

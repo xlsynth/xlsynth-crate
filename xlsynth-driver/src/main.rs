@@ -871,7 +871,7 @@ fn main() {
                 )
                 .arg(
                     clap::Arg::new("dslx_top")
-                        .long("top")
+                        .long("dslx_top")
                         .value_name("TOP")
                         .help("Shared top-level function name (applies to both LHS and RHS if provided)"),
                 )
