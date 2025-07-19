@@ -353,15 +353,15 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     ));
     if let Some(in_valid) = input_valid_signal {
         tb_src.push_str(&format!(
-            "    {} = 1'b1;\n    @(negedge clk);\n    {} = 1'b0;\n",
-            in_valid, in_valid
+            "    {} = 1'b1;\n    wait ({});\n    #1;\n    {} = 1'b0;\n",
+            in_valid,
+            output_valid_signal.unwrap_or("dummy"), // safe unwrap handled below
+            in_valid
         ));
     }
 
-    // Wait for output ready.
-    if let Some(out_valid) = output_valid_signal {
-        tb_src.push_str(&format!("    wait ({});\n    #1;\n", out_valid));
-    } else {
+    // Wait for outputs when no explicit output_valid.
+    if output_valid_signal.is_none() {
         tb_src.push_str(&format!(
             "    for (i = 0; i < {}; i = i + 1) @(posedge clk);\n    #1;\n",
             latency
@@ -376,7 +376,18 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         ));
     }
 
-    tb_src.push_str("    $finish;\n  end\nendmodule\n");
+    tb_src.push_str("    $finish;\n  end\n");
+
+    // Timeout watchdog: if the simulation exceeds a generous cycle budget, abort.
+    // Each clock cycle is 10 ns (clk toggles every 5 ns), so we wait
+    // (latency+50)*10 ns.
+    let timeout_cycles = latency + 50;
+    tb_src.push_str(&format!(
+        "  initial begin\n    #{};\n    $fatal(1, \"Simulation timed out\");\n  end\n",
+        timeout_cycles * 10
+    ));
+
+    tb_src.push_str("endmodule\n");
 
     // Write sources to temp dir and run.
     let temp_dir = tempdir().expect("tempdir");
