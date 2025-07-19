@@ -242,6 +242,31 @@ pub fn mangle_dslx_name(module: &str, name: &str) -> Result<String, XlsynthError
     xls_mangle_dslx_name(module, name)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Indicates the calling convention used by a DSLX function for mangling.
+pub enum DslxCallingConvention {
+    /// Normal DSLX function (no implicit token parameter in the mangled name).
+    Normal,
+    /// DSLX function that has an implicit token parameter; mangled name is
+    /// prefixed with `__itok`.
+    ImplicitToken,
+}
+
+/// Mangles a DSLX function name according to the given calling convention.
+/// This wraps `mangle_dslx_name` and applies the implicit-token prefix when
+/// `DslxCallingConvention::ImplicitToken` is specified.
+pub fn mangle_dslx_name_with_calling_convention(
+    module: &str,
+    name: &str,
+    cc: DslxCallingConvention,
+) -> Result<String, XlsynthError> {
+    let base = mangle_dslx_name(module, name)?;
+    Ok(match cc {
+        DslxCallingConvention::Normal => base,
+        DslxCallingConvention::ImplicitToken => format!("__itok{}", base),
+    })
+}
+
 fn x_path_to_rs_filename(path: &std::path::Path) -> String {
     let mut out = path.file_stem().unwrap().to_str().unwrap().to_string();
     out.push_str(".rs");

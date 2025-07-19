@@ -10,7 +10,9 @@ use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConf
 use crate::solver_choice::SolverChoice;
 use crate::tools::run_prove_quickcheck_main;
 use regex::Regex;
-use xlsynth::{mangle_dslx_name, DslxConvertOptions};
+use xlsynth::{
+    mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
+};
 use xlsynth_g8r::equiv::prove_equiv::IrFn;
 use xlsynth_g8r::equiv::prove_quickcheck::{
     prove_ir_fn_always_true, BoolPropertyResult, QuickCheckAssertionSemantics,
@@ -148,12 +150,13 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
     ) -> ! {
         let mut all_passed = true;
         for (qc_name, has_itok) in quickchecks {
-            let base_mangled = mangle_dslx_name(module_name, qc_name).unwrap();
-            let mangled = if *has_itok {
-                format!("__itok{}", base_mangled)
+            let cc = if *has_itok {
+                DslxCallingConvention::ImplicitToken
             } else {
-                base_mangled
+                DslxCallingConvention::Normal
             };
+            let mangled =
+                mangle_dslx_name_with_calling_convention(module_name, qc_name, cc).unwrap();
             let base_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
             let optimized_pkg = xlsynth::optimize_ir(&base_pkg, &mangled).unwrap();
             let optimized_text = optimized_pkg.to_string();

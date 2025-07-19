@@ -3086,6 +3086,75 @@ fn test_prove_quickcheck_solver_param(solver: &str, should_succeed: bool) {
     }
 }
 
+// Parameterized version of the multi-quickcheck test that explicitly invokes
+// each solver (external or SMT backend) to ensure the fallback to
+// implicit-token mangled names works with each configured solver backend. Only
+// success cases are tested.
+#[test_case("toolchain"; "multi_qc_toolchain")]
+#[cfg_attr(feature="has-boolector", test_case("boolector"; "multi_qc_boolector"))]
+#[cfg_attr(feature="has-boolector", test_case("boolector-legacy"; "multi_qc_boolector_legacy"))]
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla"; "multi_qc_bitwuzla"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary"; "multi_qc_z3_binary"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary"; "multi_qc_bitwuzla_binary"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case("boolector-binary"; "multi_qc_boolector_binary"))]
+fn test_prove_quickcheck_multiple_functions_with_assertions_solver(solver: &str) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    const MULTI_QC_DSLX: &str = r#"
+fn add1(x: u8) -> u8 { x + u8:1 }
+
+#[quickcheck] fn qc_reflexive(x: u8) -> bool {
+  assert!(x == x, "reflexive");
+  true
+}
+
+#[quickcheck] fn qc_commutative(x: u8, y: u8) -> bool {
+  assert!(x + y == y + x, "commutative");
+  x + y == y + x
+}
+
+#[quickcheck] fn qc_increment_changes(x: u8) -> bool {
+  let y = add1(x);
+  assert!(y != x, "increment differs");
+  (y > x) || (x == u8:255)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("multi_qc.x");
+    std::fs::write(&dslx_path, MULTI_QC_DSLX).unwrap();
+
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("prove-quickcheck")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "prove-quickcheck should succeed for solver {}.\nstdout: {}\nstderr: {}",
+        solver,
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("Success: All QuickChecks proved"),
+        "stdout: {}",
+        stdout
+    );
+}
+
 /// Helper: skip test when `slang` executable is not available.
 /// Returns true if slang is available and tests should proceed, false if tests
 /// should be skipped.
