@@ -3088,9 +3088,19 @@ fn test_prove_quickcheck_solver_param(solver: &str, should_succeed: bool) {
     }
 }
 
+/// Helper: skip test when `slang` executable is not available.
+fn skip_if_no_slang() {
+    if which::which("slang").is_err() {
+        log::warn!("skipping test - `slang` executable not found in PATH");
+        return;
+    }
+}
+
 #[test]
 fn test_run_verilog_pipeline_basic_add1() {
     let _ = env_logger::builder().is_test(true).try_init();
+
+    skip_if_no_slang();
 
     // Simple DSLX that increments by one.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -3149,6 +3159,8 @@ fn test_run_verilog_pipeline_wave_dump() {
     let _ = env_logger::builder().is_test(true).try_init();
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    skip_if_no_slang();
 
     // Simple DSLX that increments by one.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -3214,6 +3226,8 @@ fn test_run_verilog_pipeline_with_valid_signals() {
     let _ = env_logger::builder().is_test(true).try_init();
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    skip_if_no_slang();
 
     // DSLX with simple increment.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
