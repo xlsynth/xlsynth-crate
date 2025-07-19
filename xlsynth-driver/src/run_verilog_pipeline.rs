@@ -32,8 +32,8 @@ fn parse_verilog_top_module(verilog: &str) -> anyhow::Result<(String, Vec<PortIn
 
     // Invoke slang to obtain the AST in JSON form on stdout.
     let output = Command::new(slang_path)
+        .arg("--quiet")
         .arg("--single-unit")
-        .arg("--parse-only")
         .arg("--ast-json")
         .arg("-")
         .arg(tmp_file.path())
@@ -371,7 +371,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     // Display outputs.
     for outp in &data_outputs {
         tb_src.push_str(&format!(
-            "    $display(\"{}: bits[{}]:%h\", {});\n",
+            "    $display(\"{}: bits[{}]:%0d\", {});\n",
             outp.name, outp.width, outp.name
         ));
     }
