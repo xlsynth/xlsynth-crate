@@ -2949,7 +2949,6 @@ fn test_stitch_with_valid_custom_in_and_out_valid() {
     }
 
     // Simulation check for custom valid signal names.
-    use xlsynth::ir_value::IrBits;
     let inputs = vec![("x", IrBits::u32(5))];
     let expected = IrBits::u32(8);
     let vcd = xlsynth_test_helpers::simulate_pipeline_single_pulse_custom(
@@ -3043,7 +3042,6 @@ fn f(x: u8) -> bool { x == x }
 #[test_case("toolchain", false; "toolchain_failure")]
 fn test_prove_quickcheck_solver_param(solver: &str, should_succeed: bool) {
     let _ = env_logger::builder().is_test(true).try_init();
-    use std::process::Command;
     let temp_dir = tempfile::tempdir().unwrap();
     let file_name = "qc.x";
     let dslx_path = temp_dir.path().join(file_name);
@@ -3159,8 +3157,6 @@ fn test_run_verilog_pipeline_basic_add1() {
 #[test]
 fn test_run_verilog_pipeline_wave_dump() {
     let _ = env_logger::builder().is_test(true).try_init();
-    use std::io::Write;
-    use std::process::{Command, Stdio};
 
     skip_if_no_slang();
 
@@ -3200,8 +3196,8 @@ fn test_run_verilog_pipeline_wave_dump() {
         .arg("--waves")
         .arg(wave_path.to_str().unwrap())
         .arg("bits[32]:5")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
     let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
     {
         let stdin = child.stdin.as_mut().expect("get stdin");
@@ -3232,8 +3228,6 @@ fn test_run_verilog_pipeline_wave_dump() {
 #[test]
 fn test_run_verilog_pipeline_with_valid_signals() {
     let _ = env_logger::builder().is_test(true).try_init();
-    use std::io::Write;
-    use std::process::{Command, Stdio};
 
     skip_if_no_slang();
 
@@ -3274,8 +3268,8 @@ fn test_run_verilog_pipeline_with_valid_signals() {
         .arg("--reset=rst")
         .arg("--reset_active_low=false")
         .arg("bits[32]:5") // input value
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
     let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
     {
         let stdin = child.stdin.as_mut().expect("stdin");
