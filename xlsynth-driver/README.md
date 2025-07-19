@@ -241,6 +241,87 @@ xlsynth-driver dslx-stitch-pipeline \
   --stages=foo_cycle0,foo_cycle1,foo_cycle2 > foo_pipeline.sv
 ```
 
+### `run-verilog-pipeline` *(experimental)*
+
+Runs a synthesized *pipelined* SystemVerilog module through a throw-away, automatically-generated test-bench and prints the value(s) that appear on the data output port(s).
+
+> **Experimental:** This command is a thin wrapper that glues together three separate external facilities – on-the-fly test-bench generation, [`slang`](https://github.com/MikePopoloski/slang) for Verilog/SV parsing, and the `iverilog` + `vvp` simulator pair. It exists purely to *kick the tires* on freshly generated pipelines. **Do not** rely on it for rigorous or long-running verification.
+>
+> Internally it expects:
+>
+> 1. One **or more** data input ports (plus optional handshake/reset/clock).  When there are several, supply a tuple value on the CLI that matches the port order.
+> 1. A free-running clock named `clk` – this port **must** be present in the top‐level module.
+> 1. The pipeline source text provided either via **stdin** or as a positional file argument.
+
+Basic usage (latency known a-priori):
+
+```shell
+# Create a 1-stage pipeline and immediately simulate it with x = 5
+xlsynth-driver dslx2pipeline my_module.x main \
+  --pipeline_stages=1 --delay_model=asap7 | \
+  xlsynth-driver run-verilog-pipeline --latency=1 bits[32]:5
+# Prints:  out: bits[32]:6
+```
+
+`run-verilog-pipeline` accepts the SystemVerilog text either **via `stdin`** (pass `-`) or by specifying a *file path* as a second positional argument.
+
+If the pipeline uses *valid* handshake signals the latency can be discovered automatically:
+
+```shell
+# Reading Verilog from a file
+xlsynth-driver run-verilog-pipeline \
+  --input_valid_signal=in_valid \
+  --output_valid_signal=out_valid \
+  --reset=rst \
+  --reset_active_low=false \
+  bits[32]:5  pipeline.sv
+
+# Equivalent stdin form
+cat pipeline.sv | xlsynth-driver run-verilog-pipeline \
+  --input_valid_signal=in_valid \
+  --output_valid_signal=out_valid \
+  --reset=rst \
+  --reset_active_low=false \
+  bits[32]:5 -
+```
+
+Key flags:
+
+- `--input_valid_signal=<NAME>`   Name of the *input-valid* handshake port.
+- `--output_valid_signal=<NAME>`  Name of the *output-valid* handshake port. If omitted you **must** specify `--latency`.
+- `--latency=<CYCLES>`            Pipeline latency in cycles when no output-valid handshake is present.
+- `--reset=<NAME>`                Optional reset signal name; defaults to none.
+- `--reset_active_low`            Treat the reset as active-low (default is active-high).
+- `--waves=<PATH>`                Write a VCD dump of the simulation to `PATH`.
+
+Reset sequencing:
+
+When a `--reset` signal is provided the generated test-bench:
+
+1. Drives the reset **active** (respecting `--reset_active_low`) for two rising edges of `clk`.
+1. De-asserts the reset and waits one negative edge before applying data inputs / `input_valid`.
+
+This guarantees that the design observes at least one full cycle of reset before valid stimulus arrives.
+
+The positional argument `<INPUT_VALUE>` is an *XLS IR* typed value.  For modules with **multiple** data input ports supply a *tuple* whose order matches the port list.
+
+Example with two data inputs (`a`, `b`) each 32-bits wide:
+
+```shell
+# Suppose `pipeline.sv` has ports:  clk, a, b, out
+xlsynth-driver run-verilog-pipeline --latency=1 '(bits[32]:5, bits[32]:17)' pipeline.sv
+# Prints lines like:
+#  out: bits[32]:22
+```
+
+On success the command prints one line per data output:
+
+```
+<port_name>: bits[W]:<VALUE>
+```
+
+making it easy to splice into shell pipelines or test scripts.
+
 ## Toolchain configuration (`xlsynth-toolchain.toml`)
 
 Several subcommands accept a `--toolchain` option that points at a
@@ -248,22 +329,15 @@ Several subcommands accept a `--toolchain` option that points at a
 `[toolchain]` table and can contain **nested** tables for DSLX- and
 code-generation-specific settings:
 
-- `[toolchain.dslx]` – options that affect the DSLX → IR path.
-- `[toolchain.codegen]` – options that affect IR → Verilog/Gate conversion.
-
-Supported fields:
-
-| Section                     | Key                                   | Purpose |
-|-----------------------------|---------------------------------------|---------|
-| `[toolchain]`               | `tool_path`                           | Directory containing the XLS tools (`codegen_main`, `opt_main`, …). |
-| `[toolchain.dslx]`          | `type_inference_v2`                   | Enables the experimental type-inference-v2 algorithm globally unless overridden by a CLI flag. |
-|                             | `dslx_stdlib_path`                    | Path to the DSLX standard library. |
-|                             | `dslx_path`                           | *Array* of additional DSLX search paths. |
-|                             | `warnings_as_errors`                  | Treat DSLX warnings as hard errors. |
-|                             | `enable_warnings` / `disable_warnings`| Lists of DSLX warning names to enable / suppress. |
-| `[toolchain.codegen]`       | `gate_format`                         | Template string used for `gate!` macro expansion. |
-|                             | `assert_format`                       | Template string used for `assert!` macro expansion. |
-|                             | `use_system_verilog`                  | Emit SystemVerilog instead of plain Verilog. |
+- `[toolchain]`               | `tool_path`                           | Directory containing the XLS tools (`codegen_main`, `opt_main`, …). |
+- `[toolchain.dslx]`          | `type_inference_v2`                   | Enables the experimental type-inference-v2 algorithm globally unless overridden by a CLI flag. |
+  |                             | `dslx_stdlib_path`                    | Path to the DSLX standard library. |
+  |                             | `dslx_path`                           | *Array* of additional DSLX search paths. |
+  |                             | `warnings_as_errors`                  | Treat DSLX warnings as hard errors. |
+  |                             | `enable_warnings` / `disable_warnings`| Lists of DSLX warning names to enable / suppress. |
+  | `[toolchain.codegen]`       | `gate_format`                         | Template string used for `gate!` macro expansion. |
+  |                             | `assert_format`                       | Template string used for `assert!` macro expansion. |
+  |                             | `use_system_verilog`                  | Emit SystemVerilog instead of plain Verilog. |
 
 Only the fields you need must be present.  When invoked with
 `--toolchain <FILE>` the driver uses these values as defaults for the
