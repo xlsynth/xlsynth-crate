@@ -396,11 +396,20 @@ pub fn execute_command_with_context(
     mut cmd: std::process::Command,
     context: &str,
 ) -> anyhow::Result<std::process::Output> {
-    cmd.output().map_err(|e| {
+    log::debug!("execute_command_with_context: About to execute command");
+    let result = cmd.output().map_err(|e| {
         anyhow::anyhow!(
             "{}: {}. This could indicate missing dynamic libraries or other execution issues.",
             context,
             e
         )
-    })
+    });
+    match &result {
+        Ok(output) => log::debug!(
+            "execute_command_with_context: Command completed with status: {}",
+            output.status
+        ),
+        Err(e) => log::debug!("execute_command_with_context: Command failed: {}", e),
+    }
+    result
 }
