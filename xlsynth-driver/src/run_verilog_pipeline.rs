@@ -239,7 +239,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     }
 
     // Determine clk and handshake names to exclude from data lists.
-    let mut data_inputs: Vec<&PortInfo> = ports
+    let data_inputs: Vec<&PortInfo> = ports
         .iter()
         .filter(|p| {
             if !p.is_input {
