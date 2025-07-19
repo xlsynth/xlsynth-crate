@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::IrValue;
-
 use crate::equiv::{
-    prove_equiv::{IrFn, get_fn_inputs, ir_to_smt},
+    prove_equiv::{AssertionViolation, FnInput, IrFn, get_fn_inputs, ir_to_smt},
     solver_interface::{BitVec, Response, Solver},
 };
 
@@ -31,7 +29,7 @@ pub enum BoolPropertyResult {
     Disproved {
         /// Concrete input values leading to failure. Kept in the same order as
         /// the function parameters after potential implicit-token handling.
-        inputs: Vec<IrValue>,
+        inputs: Vec<FnInput>,
         /// Concrete (possibly failing) output value observed for the
         /// counter-example.
         output: FnOutput,
@@ -111,10 +109,15 @@ where
         Response::Unsat => BoolPropertyResult::Proved,
         Response::Sat => {
             // Extract counter-example values.
-            let inputs: Vec<IrValue> = smt_fn
-                .inputs
+            let inputs: Vec<FnInput> = smt_fn
+                .fn_ref
+                .params
                 .iter()
-                .map(|i| solver.get_value(&i.bitvec, &i.ir_type).unwrap())
+                .zip(smt_fn.inputs.iter())
+                .map(|(p, i)| FnInput {
+                    name: p.name.clone(),
+                    value: solver.get_value(&i.bitvec, &i.ir_type).unwrap(),
+                })
                 .collect();
 
             // Determine if any assertion violated and build FnOutput accordingly
@@ -130,16 +133,16 @@ where
                 }
             }
 
-            let output: FnOutput = match violation {
-                Some((msg, lbl)) => FnOutput::AssertionViolation {
-                    message: msg,
-                    label: lbl,
-                },
-                None => FnOutput::Value(
-                    solver
+            let output: FnOutput = {
+                FnOutput {
+                    value: solver
                         .get_value(&smt_fn.output.bitvec, &smt_fn.output.ir_type)
                         .unwrap(),
-                ),
+                    assertion_violation: violation.map(|(msg, lbl)| AssertionViolation {
+                        message: msg,
+                        label: lbl,
+                    }),
+                }
             };
 
             BoolPropertyResult::Disproved { inputs, output }
@@ -211,8 +214,20 @@ mod test_utils {
         let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem);
         match res {
             BoolPropertyResult::Disproved { output, .. } => match (expect_violation, output) {
-                (true, FnOutput::AssertionViolation { .. }) => {}
-                (false, FnOutput::Value(_)) => {}
+                (
+                    true,
+                    FnOutput {
+                        assertion_violation: Some(_),
+                        ..
+                    },
+                ) => {}
+                (
+                    false,
+                    FnOutput {
+                        assertion_violation: None,
+                        ..
+                    },
+                ) => {}
                 (true, other) => panic!("Expected AssertionViolation, got {:?}", other),
                 (false, other) => panic!("Expected Value, got {:?}", other),
             },
@@ -257,6 +272,60 @@ mod test_utils {
             ret p: (token, bits[1]) = tuple(assert.3, literal.2, id=4)
         }
     "#;
+
+    /// Ensure that counter-example input ordering matches function parameter
+    /// order.
+    ///
+    /// This mirrors the ordering check performed in
+    /// `prove_equiv::test_utils::test_counterexample_input_order`,
+    /// but for the QuickCheck path where we prove a single function is always
+    /// true. We create a trivially falsifiable function with multiple
+    /// parameters of differing widths and confirm that the returned
+    /// `inputs` vector from `BoolPropertyResult::Disproved` preserves the
+    /// declared parameter order and widths.
+    pub fn test_counterexample_input_order<S: Solver>(solver_config: &S::Config) {
+        // Intentionally not always-true: returns param `c`, so setting c=0 falsifies
+        // the property.
+        let ir_text = r#"
+            fn f(a: bits[8], b: bits[4], c: bits[1]) -> bits[1] {
+                ret pc: bits[1] = identity(c, id=1)
+            }
+        "#;
+
+        let mut parser = Parser::new(ir_text);
+        let f = parser.parse_fn().expect("Failed to parse IR function");
+        let ir_fn = IrFn {
+            fn_ref: &f,
+            fixed_implicit_activation: false,
+        };
+
+        let res = super::prove_ir_fn_always_true::<S>(
+            solver_config,
+            &ir_fn,
+            QuickCheckAssertionSemantics::Ignore,
+        );
+
+        match res {
+            BoolPropertyResult::Disproved { inputs, .. } => {
+                assert_eq!(inputs.len(), f.params.len());
+                for (idx, param) in f.params.iter().enumerate() {
+                    assert_eq!(
+                        inputs[idx].name, param.name,
+                        "param name mismatch at index {idx}"
+                    );
+                    assert_eq!(
+                        inputs[idx].value.bit_count().unwrap(),
+                        param.ty.bit_count(),
+                        "param bit width mismatch at index {idx}"
+                    );
+                }
+            }
+            other => panic!(
+                "Expected Disproved result with counterexample, got {:?}",
+                other
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +457,12 @@ macro_rules! quickcheck_test_with_solver {
                     QuickCheckAssertionSemantics::Never,
                     true,
                 );
+            }
+
+            // New: ensure counterexample input ordering matches parameter order.
+            #[test]
+            fn counterexample_input_order() {
+                test_utils::test_counterexample_input_order::<$solver_type>($solver_config);
             }
         }
     };
