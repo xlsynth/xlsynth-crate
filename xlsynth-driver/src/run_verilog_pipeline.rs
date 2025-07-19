@@ -171,12 +171,32 @@ fn compile_and_run(work_dir: &Path, sources: &[PathBuf]) -> anyhow::Result<Strin
 
 pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     let _ = env_logger::try_init();
-    // Read pipeline SV text from stdin.
-    let mut sv_input = String::new();
-    if std::io::stdin().read_to_string(&mut sv_input).is_err() || sv_input.is_empty() {
-        eprintln!("run-verilog-pipeline: expected SystemVerilog source on stdin");
-        std::process::exit(1);
-    }
+    // Obtain SV source: either from file path argument or stdin ("-").
+    let sv_path_arg = matches
+        .get_one::<String>("sv_path")
+        .map(String::as_str)
+        .unwrap_or("-");
+    let sv_input = if sv_path_arg == "-" {
+        let mut buf = String::new();
+        if std::io::stdin().read_to_string(&mut buf).is_err() || buf.is_empty() {
+            eprintln!(
+                "run-verilog-pipeline: expected SystemVerilog source on stdin (or specify a file path)"
+            );
+            std::process::exit(1);
+        }
+        buf
+    } else {
+        match std::fs::read_to_string(sv_path_arg) {
+            Ok(contents) => contents,
+            Err(e) => {
+                eprintln!(
+                    "run-verilog-pipeline: failed to read '{}': {}",
+                    sv_path_arg, e
+                );
+                std::process::exit(1);
+            }
+        }
+    };
 
     // Parse module and ports.
     let (module_name, ports) = match parse_verilog_top_module(&sv_input) {
@@ -208,26 +228,15 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     }
     let latency: usize = latency_opt.map(|s| s.parse().unwrap()).unwrap_or(0);
 
-    let input_value_str = matches
-        .get_one::<String>("input_value")
-        .expect("input_value arg");
-    let input_value = match IrValue::parse_typed(input_value_str) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!(
-                "Failed to parse input XLS IR value '{}': {}",
-                input_value_str, e
-            );
-            std::process::exit(1);
-        }
-    };
-    let input_bits = match input_value.to_bits() {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("Input value is not bits type: {}", e);
-            std::process::exit(1);
-        }
-    };
+    // Require an explicit clock port named `clk`.
+    if ports
+        .iter()
+        .find(|p| p.name == "clk" && p.is_input)
+        .is_none()
+    {
+        eprintln!("run-verilog-pipeline: top module must have an input port named `clk`");
+        std::process::exit(1);
+    }
 
     // Determine clk and handshake names to exclude from data lists.
     let mut data_inputs: Vec<&PortInfo> = ports
@@ -253,14 +262,77 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         })
         .collect();
 
-    if data_inputs.len() != 1 {
-        eprintln!(
-            "Currently this command supports exactly one data input port; found: {:?}",
-            data_inputs
-        );
+    if data_inputs.is_empty() {
+        eprintln!("No data input ports detected – at least one is required");
         std::process::exit(1);
     }
-    let data_in = data_inputs.remove(0);
+
+    // Parse the XLS IR value provided on the command line. It may be either a
+    // single bits value (for a single data input) *or* a tuple whose arity
+    // must match the number of data input ports detected above.
+    let input_value_str = matches
+        .get_one::<String>("input_value")
+        .expect("input_value arg");
+    let input_value = match IrValue::parse_typed(input_value_str) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "Failed to parse input XLS IR value '{}': {}",
+                input_value_str, e
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Map each data input port to a corresponding IrBits value.
+    let mut input_port_bits: Vec<(&PortInfo, xlsynth::IrBits)> = Vec::new();
+    if data_inputs.len() == 1 {
+        // Expect a single bits value.
+        match input_value.to_bits() {
+            Ok(bits) => {
+                input_port_bits.push((data_inputs[0], bits));
+            }
+            Err(_) => {
+                eprintln!(
+                    "For a single data input port the <INPUT_VALUE> argument must be a bits value; got: {}",
+                    input_value_str
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Expect a tuple with arity equal to the number of data input ports.
+        let elems = match input_value.get_elements() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!(
+                    "With {} data input ports the <INPUT_VALUE> argument must be a tuple of equal arity; got non-tuple value {}",
+                    data_inputs.len(), input_value_str
+                );
+                std::process::exit(1);
+            }
+        };
+        if elems.len() != data_inputs.len() {
+            eprintln!(
+                "Tuple arity ({}) does not match number of data input ports ({})",
+                elems.len(),
+                data_inputs.len()
+            );
+            std::process::exit(1);
+        }
+        for (port, elem) in data_inputs.iter().zip(elems.iter()) {
+            match elem.to_bits() {
+                Ok(bits) => input_port_bits.push((*port, bits)),
+                Err(_) => {
+                    eprintln!(
+                        "Tuple element for port '{}' is not a bits value: {}",
+                        port.name, elem
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 
     // Determine data outputs (exclude handshake outputs like output_valid_signal)
     let data_outputs: Vec<&PortInfo> = ports
@@ -287,12 +359,15 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     let mut tb_src = String::new();
     tb_src.push_str("`timescale 1ns/1ps\nmodule tb;\n  reg clk = 0;\n  always #5 clk = ~clk;\n");
 
-    // Declarations.
-    tb_src.push_str(&format!(
-        "  reg [{}:0] {} = 0;\n",
-        data_in.width - 1,
-        data_in.name
-    ));
+    // Declarations for data input ports.
+    for (port, _) in &input_port_bits {
+        tb_src.push_str(&format!(
+            "  reg [{}:0] {} = 0;\n",
+            port.width - 1,
+            port.name
+        ));
+    }
+    // Handshake/reg declarations.
     if let Some(in_valid) = input_valid_signal {
         tb_src.push_str(&format!("  reg {} = 0;\n", in_valid));
     }
@@ -321,8 +396,10 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     for outp in &data_outputs {
         tb_src.push_str(&format!(", .{}({})", outp.name, outp.name));
     }
-    // Data input connection last to keep ordering simple.
-    tb_src.push_str(&format!(", .{}({})", data_in.name, data_in.name));
+    // Data input connections.
+    for (port, _) in &input_port_bits {
+        tb_src.push_str(&format!(", .{}({})", port.name, port.name));
+    }
     if let Some(out_valid) = output_valid_signal {
         tb_src.push_str(&format!(", .{}({})", out_valid, out_valid));
     }
@@ -343,25 +420,30 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
 
     // Apply input after one negedge so it aligns with clk.
     tb_src.push_str("    @(negedge clk);\n");
-    let hex_val = input_bits
-        .to_string_fmt(IrFormatPreference::Hex, false)
-        .trim_start_matches("0x")
-        .to_string();
-    tb_src.push_str(&format!(
-        "    {} = {}'h{};\n",
-        data_in.name, data_in.width, hex_val
-    ));
-    if let Some(in_valid) = input_valid_signal {
+    for (port, bits) in &input_port_bits {
+        let hex_val = bits
+            .to_string_fmt(IrFormatPreference::Hex, false)
+            .trim_start_matches("0x")
+            .to_string();
         tb_src.push_str(&format!(
-            "    {} = 1'b1;\n    wait ({});\n    #1;\n    {} = 1'b0;\n",
-            in_valid,
-            output_valid_signal.unwrap_or("dummy"), // safe unwrap handled below
-            in_valid
+            "    {} = {}'h{};\n",
+            port.name, port.width, hex_val
         ));
     }
-
-    // Wait for outputs when no explicit output_valid.
-    if output_valid_signal.is_none() {
+    if let Some(in_valid) = input_valid_signal {
+        tb_src.push_str(&format!("    {} = 1'b1;\n", in_valid));
+        if let Some(out_valid) = output_valid_signal {
+            tb_src.push_str(&format!("    wait ({});\n", out_valid));
+        } else {
+            // Fallback: wait latency cycles when no explicit output_valid.
+            tb_src.push_str(&format!(
+                "    for (i = 0; i < {}; i = i + 1) @(posedge clk);\n",
+                latency
+            ));
+        }
+        tb_src.push_str(&format!("    #1;\n    {} = 1'b0;\n", in_valid));
+    } else if output_valid_signal.is_none() {
+        // No handshake: wait latency cycles.
         tb_src.push_str(&format!(
             "    for (i = 0; i < {}; i = i + 1) @(posedge clk);\n    #1;\n",
             latency

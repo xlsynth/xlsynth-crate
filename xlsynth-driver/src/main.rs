@@ -798,6 +798,13 @@ fn main() {
                         .help("XLS IR typed value used as input")
                         .required(true)
                         .index(1),
+                )
+                .arg(
+                    Arg::new("sv_path")
+                        .help("Path to SystemVerilog pipeline source (use '-' for stdin)")
+                        .required(false)
+                        .index(2)
+                        .default_value("-"),
                 ),
         )
         .subcommand(
