@@ -38,6 +38,7 @@ mod common;
 mod dslx2ir;
 mod dslx2pipeline;
 mod dslx2sv_types;
+mod dslx_equiv;
 mod dslx_g8r_stats;
 mod dslx_stitch_pipeline;
 mod g8r2v;
@@ -52,6 +53,7 @@ mod ir_equiv;
 mod ir_fn_eval;
 mod ir_ged;
 mod lib2proto;
+mod parallelism;
 mod prove_quickcheck;
 mod report_cli_error;
 mod run_verilog_pipeline;
@@ -852,6 +854,116 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 ),
         )
+        .subcommand(
+            clap::Command::new("dslx-equiv")
+                .about("Checks if two DSLX functions are equivalent")
+                .arg(
+                    clap::Arg::new("lhs_dslx_file")
+                        .help("The left-hand side DSLX file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("rhs_dslx_file")
+                        .help("The right-hand side DSLX file")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    clap::Arg::new("dslx_top")
+                        .long("dslx_top")
+                        .value_name("TOP")
+                        .help("Shared top-level function name (applies to both LHS and RHS if provided)"),
+                )
+                .arg(
+                    clap::Arg::new("lhs_dslx_top")
+                        .long("lhs_dslx_top")
+                        .value_name("LHS_TOP")
+                        .help("Top-level function name for the LHS DSLX file"),
+                )
+                .arg(
+                    clap::Arg::new("rhs_dslx_top")
+                        .long("rhs_dslx_top")
+                        .value_name("RHS_TOP")
+                        .help("Top-level function name for the RHS DSLX file"),
+                )
+                .arg(
+                    clap::Arg::new("dslx_path")
+                        .long("dslx_path")
+                        .value_name("DSLX_PATH_SEMI_SEPARATED")
+                        .help("Semi-separated search paths for DSLX modules"),
+                )
+                .arg(
+                    clap::Arg::new("dslx_stdlib_path")
+                        .long("dslx_stdlib_path")
+                        .value_name("DSLX_STDLIB_PATH")
+                        .help("Path to the DSLX standard library"),
+                )
+                .add_bool_arg("opt", "Optimize the IR before equivalence checking")
+                .add_bool_arg(
+                    "type_inference_v2",
+                    "Enable the experimental type-inference v2 algorithm (external toolchain only)",
+                )
+                .arg(
+                    clap::Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Use the specified solver for equivalence checking")
+                        .value_parser([
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector-binary",
+                            #[cfg(feature = "has-bitwuzla")]
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector-legacy",
+                            "toolchain",
+                        ])
+                        .default_value("toolchain")
+                        .action(clap::ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "flatten_aggregates",
+                    "Flatten tuple and array types to bits for equivalence checking",
+                )
+                .arg(
+                    clap::Arg::new("drop_params")
+                        .long("drop_params")
+                        .value_name("CSV")
+                        .help("Comma-separated list of parameter names to drop prior to equivalence checking"),
+                )
+                .arg(
+                    clap::Arg::new("parallelism_strategy")
+                        .long("parallelism-strategy")
+                        .value_name("STRATEGY")
+                        .help("Parallelism strategy")
+                        .value_parser(["single-threaded", "output-bits", "input-bit-split"])
+                        .default_value("single-threaded")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("assertion_semantics")
+                        .long("assertion-semantics")
+                        .value_name("SEMANTICS")
+                        .help("Assertion semantics")
+                        .value_parser(["ignore", "never", "same", "assume", "implies"])
+                        .default_value("same")
+                        .action(clap::ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "lhs_fixed_implicit_activation",
+                    "Fix the implicit activation bit to true for the LHS IR, useful when only LHS or RHS has implicit token",
+                )
+                .add_bool_arg(
+                    "rhs_fixed_implicit_activation",
+                    "Fix the implicit activation bit to true for the RHS IR, useful when only LHS or RHS has implicit token",
+                ),
+        )
         .get_matches();
 
     let mut toml_path: Option<String> = matches
@@ -917,6 +1029,8 @@ fn main() {
         ir2delayinfo::handle_ir2delayinfo(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-equiv") {
         ir_equiv::handle_ir_equiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("dslx-equiv") {
+        dslx_equiv::handle_dslx_equiv(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-ged") {
         ir_ged::handle_ir_ged(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
