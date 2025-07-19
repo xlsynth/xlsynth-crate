@@ -294,6 +294,15 @@ Key flags:
 - `--reset_active_low`            Treat the reset as active-low (default is active-high).
 - `--waves=<PATH>`                Write a VCD dump of the simulation to `PATH`.
 
+Reset sequencing:
+
+When a `--reset` signal is provided the generated test-bench:
+
+1. Drives the reset **active** (respecting `--reset_active_low`) for two rising edges of `clk`.
+1. De-asserts the reset and waits one negative edge before applying data inputs / `input_valid`.
+
+This guarantees that the design observes at least one full cycle of reset before valid stimulus arrives.
+
 The positional argument `<INPUT_VALUE>` is an *XLS IR* typed value.  For modules with **multiple** data input ports supply a *tuple* whose order matches the port list.
 
 Example with two data inputs (`a`, `b`) each 32-bits wide:
