@@ -3087,18 +3087,66 @@ fn test_prove_quickcheck_solver_param(solver: &str, should_succeed: bool) {
 }
 
 /// Helper: skip test when `slang` executable is not available.
-fn skip_if_no_slang() {
-    if which::which("slang").is_err() {
-        log::warn!("skipping test - `slang` executable not found in PATH");
-        return;
+/// Returns true if slang is available and tests should proceed, false if tests
+/// should be skipped.
+fn should_skip_if_no_slang() -> bool {
+    // Check if slang exists in PATH
+    let slang_path = match which::which("slang") {
+        Ok(path) => path,
+        Err(_) => {
+            println!("SKIPPED: `slang` executable not found in PATH");
+            return true;
+        }
+    };
+
+    // Also verify it's actually executable (same check as in
+    // run_verilog_pipeline.rs)
+    if let Ok(metadata) = std::fs::metadata(&slang_path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = metadata.permissions();
+            if perms.mode() & 0o111 == 0 {
+                println!(
+                    "SKIPPED: `slang` found at '{}' but not executable (permissions: {:o})",
+                    slang_path.display(),
+                    perms.mode()
+                );
+                return true;
+            }
+        }
     }
+
+    // Quick test to see if slang can actually execute
+    match std::process::Command::new(&slang_path)
+        .arg("--version")
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                println!(
+                    "SKIPPED: `slang` exists but failed to run: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return true;
+            }
+        }
+        Err(e) => {
+            println!("SKIPPED: `slang` exists but failed to execute: {}", e);
+            return true;
+        }
+    }
+
+    false // Don't skip - slang is working
 }
 
 #[test]
 fn test_run_verilog_pipeline_basic_add1() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    skip_if_no_slang();
+    if should_skip_if_no_slang() {
+        return;
+    }
 
     // Simple DSLX that increments by one.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -3132,7 +3180,8 @@ fn test_run_verilog_pipeline_basic_add1() {
         .arg("1")
         .arg("bits[32]:5")
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
     {
         let stdin = child.stdin.as_mut().expect("get stdin");
@@ -3158,7 +3207,9 @@ fn test_run_verilog_pipeline_basic_add1() {
 fn test_run_verilog_pipeline_wave_dump() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    skip_if_no_slang();
+    if should_skip_if_no_slang() {
+        return;
+    }
 
     // Simple DSLX that increments by one.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -3197,7 +3248,8 @@ fn test_run_verilog_pipeline_wave_dump() {
         .arg(wave_path.to_str().unwrap())
         .arg("bits[32]:5")
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
     {
         let stdin = child.stdin.as_mut().expect("get stdin");
@@ -3229,7 +3281,9 @@ fn test_run_verilog_pipeline_wave_dump() {
 fn test_run_verilog_pipeline_with_valid_signals() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    skip_if_no_slang();
+    if should_skip_if_no_slang() {
+        return;
+    }
 
     // DSLX with simple increment.
     let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
@@ -3269,7 +3323,8 @@ fn test_run_verilog_pipeline_with_valid_signals() {
         .arg("--reset_active_low=false")
         .arg("bits[32]:5") // input value
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
     {
         let stdin = child.stdin.as_mut().expect("stdin");
