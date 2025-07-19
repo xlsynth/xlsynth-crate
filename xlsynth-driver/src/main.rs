@@ -765,6 +765,7 @@ fn main() {
         .subcommand(
             clap::Command::new("run-verilog-pipeline")
                 .about("Runs a SystemVerilog pipeline via iverilog with a single input value")
+                .long_about("Runs a SystemVerilog pipeline simulation using iverilog.\n\nUsage: xlsynth-driver run-verilog-pipeline <SV_PATH> [INPUT_VALUE]\n  SV_PATH: Path to SystemVerilog file (or '-' for stdin)\n  INPUT_VALUE: XLS IR typed value (e.g., 'bits[32]:5', 'tuple(bits[8]:1, bits[16]:2)')\n               If not provided, zero values will be used and displayed.")
                 .arg(
                     Arg::new("input_valid_signal")
                         .long("input_valid_signal")
@@ -797,17 +798,16 @@ fn main() {
                         .help("Write VCD dump to PATH"),
                 )
                 .arg(
-                    Arg::new("input_value")
-                        .help("XLS IR typed value used as input")
+                    Arg::new("sv_path")
+                        .help("Path to SystemVerilog pipeline source (use '-' for stdin)")
                         .required(true)
                         .index(1),
                 )
                 .arg(
-                    Arg::new("sv_path")
-                        .help("Path to SystemVerilog pipeline source (use '-' for stdin)")
+                    Arg::new("input_value")
+                        .help("XLS IR typed value used as input (e.g., 'bits[32]:5', 'tuple(bits[8]:1, bits[16]:2)'). If not provided, zero values will be used.")
                         .required(false)
-                        .index(2)
-                        .default_value("-"),
+                        .index(2),
                 ),
         )
         .subcommand(

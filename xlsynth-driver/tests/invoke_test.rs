@@ -3178,6 +3178,7 @@ fn test_run_verilog_pipeline_basic_add1() {
     cmd.arg("run-verilog-pipeline")
         .arg("--latency")
         .arg("1")
+        .arg("-") // Read SystemVerilog from stdin
         .arg("bits[32]:5")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3246,6 +3247,7 @@ fn test_run_verilog_pipeline_wave_dump() {
         .arg("1")
         .arg("--waves")
         .arg(wave_path.to_str().unwrap())
+        .arg("-") // Read SystemVerilog from stdin
         .arg("bits[32]:5")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3321,6 +3323,7 @@ fn test_run_verilog_pipeline_with_valid_signals() {
         .arg("--output_valid_signal=out_valid")
         .arg("--reset=rst")
         .arg("--reset_active_low=false")
+        .arg("-") // Read SystemVerilog from stdin
         .arg("bits[32]:5") // input value
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

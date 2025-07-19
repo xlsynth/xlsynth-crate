@@ -23,24 +23,48 @@ struct PortInfo {
 ///
 /// Returns: (module_name, Vec<PortInfo>)
 fn parse_verilog_top_module(verilog: &str) -> anyhow::Result<(String, Vec<PortInfo>)> {
+    log::debug!("parse_verilog_top_module: Starting");
     // Write the input Verilog to a temporary file so that `slang` can read it.
+    log::debug!("Creating temporary file for slang input");
     let tmp_file = tempfile::Builder::new().suffix(".sv").tempfile()?;
+    log::debug!(
+        "Writing {} bytes to temp file: {:?}",
+        verilog.len(),
+        tmp_file.path()
+    );
     std::fs::write(tmp_file.path(), verilog)?;
+    log::debug!("Successfully wrote temp file");
+    log::debug!(
+        "Temp file content preview: {}",
+        &verilog[..verilog.len().min(200)]
+    );
 
     // Locate and verify the `slang` executable.
+    log::debug!("Looking for slang executable");
     let slang_path = find_and_verify_executable(
         "slang",
         "Please ensure slang is installed and available in PATH. \
          You can download it from https://github.com/xlsynth/slang-rs/releases or install it via your package manager."
     )?;
+    log::debug!("Found slang at: {:?}", slang_path);
 
     // Invoke slang to obtain the AST in JSON form on stdout.
+    log::debug!("Building slang command");
     let mut cmd = Command::new(&slang_path);
-    cmd.arg("--quiet")
-        .arg("--single-unit")
+    cmd.arg("--single-unit")
+        .arg("--quiet") // Suppress status messages like "Top level design units:" and "Build succeeded:" that would
+        // break JSON parsing
         .arg("--ast-json")
-        .arg("-")
+        .arg("-") // Tell slang to write JSON AST to stdout (this is the output file parameter for --ast-json)
         .arg(tmp_file.path());
+    // Verify temp file exists and is readable
+    if let Ok(metadata) = std::fs::metadata(tmp_file.path()) {
+        log::debug!("Temp file size on disk: {} bytes", metadata.len());
+    } else {
+        log::debug!("Warning: temp file doesn't seem to exist!");
+    }
+
+    log::debug!("About to execute slang command: {:?}", cmd);
     let output = execute_command_with_context(
         cmd,
         &format!(
@@ -48,8 +72,14 @@ fn parse_verilog_top_module(verilog: &str) -> anyhow::Result<(String, Vec<PortIn
             slang_path.display()
         ),
     )?;
+    log::debug!(
+        "Slang execution completed, stdout size: {} bytes",
+        output.stdout.len()
+    );
 
     if !output.status.success() {
+        log::debug!("Slang stderr: {}", String::from_utf8_lossy(&output.stderr));
+        log::debug!("Slang stdout: {}", String::from_utf8_lossy(&output.stdout));
         return Err(anyhow::anyhow!(
             "slang failed: {}",
             String::from_utf8_lossy(&output.stderr)
@@ -183,12 +213,19 @@ fn compile_and_run(work_dir: &Path, sources: &[PathBuf]) -> anyhow::Result<Strin
 
 pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     let _ = env_logger::try_init();
+    log::debug!("Starting run_verilog_pipeline");
     // Obtain SV source: either from file path argument or stdin ("-").
     let sv_path_arg = matches
         .get_one::<String>("sv_path")
         .map(String::as_str)
-        .unwrap_or("-");
+        .unwrap_or_else(|| {
+            eprintln!("run-verilog-pipeline: missing required SV_PATH argument");
+            eprintln!("Usage: xlsynth-driver run-verilog-pipeline <SV_PATH> [INPUT_VALUE]");
+            std::process::exit(1);
+        });
+    log::debug!("Reading input from: {}", sv_path_arg);
     let sv_input = if sv_path_arg == "-" {
+        log::debug!("Reading from stdin");
         let mut buf = String::new();
         if std::io::stdin().read_to_string(&mut buf).is_err() || buf.is_empty() {
             eprintln!(
@@ -198,8 +235,12 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         }
         buf
     } else {
+        log::debug!("Reading from file: {}", sv_path_arg);
         match std::fs::read_to_string(sv_path_arg) {
-            Ok(contents) => contents,
+            Ok(contents) => {
+                log::debug!("Successfully read {} bytes from file", contents.len());
+                contents
+            }
             Err(e) => {
                 eprintln!(
                     "run-verilog-pipeline: failed to read '{}': {}",
@@ -209,15 +250,21 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             }
         }
     };
+    log::debug!("Input size: {} bytes", sv_input.len());
 
     // Parse module and ports.
+    log::debug!("About to parse verilog module");
     let (module_name, ports) = match parse_verilog_top_module(&sv_input) {
-        Ok(v) => v,
+        Ok(v) => {
+            log::debug!("Successfully parsed module: {}", v.0);
+            v
+        }
         Err(e) => {
             eprintln!("run-verilog-pipeline: failed to parse module header: {}", e);
             std::process::exit(1);
         }
     };
+    log::debug!("Found module '{}' with {} ports", module_name, ports.len());
 
     // Extract CLI args.
     let input_valid_signal = matches
@@ -292,21 +339,65 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         std::process::exit(1);
     }
 
-    // Parse the XLS IR value provided on the command line. It may be either a
-    // single bits value (for a single data input) *or* a tuple whose arity
-    // must match the number of data input ports detected above.
-    let input_value_str = matches.get_one::<String>("input_value").unwrap_or_else(|| {
-        eprintln!("run-verilog-pipeline: missing required INPUT_VALUE argument");
-        std::process::exit(1);
-    });
-    let input_value = match IrValue::parse_typed(input_value_str) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!(
-                "Failed to parse input XLS IR value '{}': {}",
-                input_value_str, e
+    // Parse or generate the XLS IR value. If not provided, generate zero values.
+    let input_value = match matches.get_one::<String>("input_value") {
+        Some(input_value_str) => {
+            // User provided an input value, parse it
+            match IrValue::parse_typed(input_value_str) {
+                Ok(v) => {
+                    println!("Using provided input: {}", input_value_str);
+                    v
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to parse input XLS IR value '{}': {}",
+                        input_value_str, e
+                    );
+                    eprintln!("Expected an XLS IR value like 'bits[32]:5' or 'tuple(bits[8]:1, bits[16]:2)'.");
+                    eprintln!("Usage: xlsynth-driver run-verilog-pipeline <SV_PATH> [INPUT_VALUE]");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            // Generate zero values based on data input ports
+            let zero_value = if data_inputs.len() == 1 {
+                // Single input: create a zero bits value
+                let port = data_inputs[0];
+                match IrValue::parse_typed(&format!("bits[{}]:0", port.width)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
+                            "Failed to generate zero value for port '{}': {}",
+                            port.name, e
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Multiple inputs: create a zero tuple
+                let mut zero_elements = Vec::new();
+                for port in &data_inputs {
+                    match IrValue::parse_typed(&format!("bits[{}]:0", port.width)) {
+                        Ok(v) => zero_elements.push(v),
+                        Err(e) => {
+                            eprintln!(
+                                "Failed to generate zero value for port '{}': {}",
+                                port.name, e
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                IrValue::make_tuple(&zero_elements)
+            };
+            let zero_str = zero_value.to_string();
+            println!("No input value provided, using zero values: {}", zero_str);
+            println!(
+                "To use different values, run: xlsynth-driver run-verilog-pipeline {} \"{}\"",
+                sv_path_arg, zero_str
             );
-            std::process::exit(1);
+            zero_value
         }
     };
 
@@ -321,7 +412,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             Err(_) => {
                 eprintln!(
                     "For a single data input port the <INPUT_VALUE> argument must be a bits value; got: {}",
-                    input_value_str
+                    input_value.to_string()
                 );
                 std::process::exit(1);
             }
@@ -333,7 +424,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             Err(_) => {
                 eprintln!(
                     "With {} data input ports the <INPUT_VALUE> argument must be a tuple of equal arity; got non-tuple value {}",
-                    data_inputs.len(), input_value_str
+                    data_inputs.len(), input_value.to_string()
                 );
                 std::process::exit(1);
             }
