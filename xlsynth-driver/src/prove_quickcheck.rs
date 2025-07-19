@@ -130,9 +130,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
     // Assertion semantics.
     let assertion_semantics = matches
-        .get_one::<String>("assertion_semantics")
-        .map(|s| s.parse().unwrap())
-        .unwrap_or(QuickCheckAssertionSemantics::Assume);
+        .get_one::<QuickCheckAssertionSemantics>("assertion_semantics")
+        .unwrap_or(&QuickCheckAssertionSemantics::Ignore);
 
     // Helper closure that runs proof for a given solver type.
     fn run_for_solver<S: Solver>(
@@ -217,7 +216,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &quickchecks,
                 &ir_text_result,
                 module_name,
-                assertion_semantics,
+                *assertion_semantics,
             );
         }
         #[cfg(feature = "has-bitwuzla")]
@@ -229,7 +228,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &quickchecks,
                 &ir_text_result,
                 module_name,
-                assertion_semantics,
+                *assertion_semantics,
             );
         }
         #[cfg(feature = "has-easy-smt")]
@@ -246,7 +245,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &quickchecks,
                 &ir_text_result,
                 module_name,
-                assertion_semantics,
+                *assertion_semantics,
             );
         }
     }

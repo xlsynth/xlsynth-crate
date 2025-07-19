@@ -335,9 +335,8 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     let lhs_path = std::path::Path::new(lhs);
     let rhs_path = std::path::Path::new(rhs);
     let assertion_semantics = matches
-        .get_one::<String>("assertion_semantics")
-        .map(|s| s.parse().unwrap())
-        .unwrap_or(AssertionSemantics::Same);
+        .get_one::<AssertionSemantics>("assertion_semantics")
+        .unwrap_or(&AssertionSemantics::Same);
 
     let solver: Option<SolverChoice> = matches
         .get_one::<String>("solver")
@@ -381,7 +380,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                     flatten_aggregates,
                     &drop_params,
                     strategy,
-                    assertion_semantics,
+                    *assertion_semantics,
                 );
             }
             #[cfg(feature = "has-easy-smt")]
@@ -406,7 +405,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                     flatten_aggregates,
                     &drop_params,
                     strategy,
-                    assertion_semantics,
+                    *assertion_semantics,
                 );
             }
             #[cfg(feature = "has-bitwuzla")]
@@ -425,7 +424,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                     flatten_aggregates,
                     &drop_params,
                     strategy,
-                    assertion_semantics,
+                    *assertion_semantics,
                 );
             }
             #[cfg(feature = "has-boolector")]
@@ -435,7 +434,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
                     eprintln!("Error: --lhs_fixed_implicit_activation and --rhs_fixed_implicit_activation are not supported for boolector-legacy solver");
                     std::process::exit(1);
                 }
-                if assertion_semantics != AssertionSemantics::Same {
+                if *assertion_semantics != AssertionSemantics::Same {
                     eprintln!(
                         "Error: --assertion_semantics is not supported for boolector-legacy solver"
                     );

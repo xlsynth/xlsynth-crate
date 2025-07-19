@@ -9,23 +9,14 @@ use crate::equiv::{
 
 use crate::equiv::prove_equiv::FnOutput;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum QuickCheckAssertionSemantics {
+    /// Assertions are just dropped entirely
     Ignore,
+    /// Prove that assertion conditions can never fire
     Never,
+    /// Assume that assertion conditions hold to try to help complete the proof
     Assume,
-}
-
-impl std::str::FromStr for QuickCheckAssertionSemantics {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "ignore" => Ok(QuickCheckAssertionSemantics::Ignore),
-            "never" => Ok(QuickCheckAssertionSemantics::Never),
-            "assume" => Ok(QuickCheckAssertionSemantics::Assume),
-            _ => Err(format!("invalid assertion semantics: {}", s)),
-        }
-    }
 }
 
 /// Result of proving that a boolean-returning function is always `true`.

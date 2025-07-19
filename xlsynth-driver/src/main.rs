@@ -65,6 +65,8 @@ use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
+use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
+use xlsynth_g8r::equiv::prove_quickcheck::QuickCheckAssertionSemantics;
 
 static DEFAULT_ADDER_MAPPING: Lazy<String> =
     Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
@@ -84,6 +86,7 @@ trait AppExt {
     fn add_ir2g8r_flags(self) -> Self;
 }
 
+// TODO: Change flags from using strings to using clap::ValueEnum.
 impl AppExt for clap::Command {
     fn add_delay_model_arg(self) -> Self {
         (self as clap::Command).arg(
@@ -547,7 +550,7 @@ fn main() {
                         .long("assertion-semantics")
                         .value_name("SEMANTICS")
                         .help("Assertion semantics")
-                        .value_parser(["ignore", "never", "same", "assume", "implies"])
+                        .value_parser(clap::value_parser!(AssertionSemantics))
                         .default_value("same")
                         .action(ArgAction::Set),
                 )
@@ -843,9 +846,9 @@ fn main() {
                     clap::Arg::new("assertion_semantics")
                         .long("assertion-semantics")
                         .value_name("SEM")
-                        .help("Assertion semantics: ignore | never | assume")
-                        .value_parser(["ignore", "never", "assume"])
-                        .default_value("never")
+                        .help("Assertion semantics")
+                        .value_parser(clap::value_parser!(QuickCheckAssertionSemantics))
+                        .default_value("ignore")
                         .action(clap::ArgAction::Set),
                 ),
         )
