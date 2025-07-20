@@ -550,24 +550,18 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     if let Some(in_valid) = input_valid_signal {
         // Assert the input valid signal for exactly one clock cycle.
         tb_src.push_str(&format!("    {} = 1'b1;\n", in_valid));
+        if let Some(out_valid) = output_valid_signal {
+            // Wait until the DUT raises out_valid (should happen immediately
+            // in many designs, but using `wait` is robust).
+            tb_src.push_str(&format!("    wait ({});\n", out_valid));
+        }
         tb_src.push_str("    @(posedge clk);\n");
         // Small delay so the DUT reliably samples the asserted valid signal
-        // in the same cycle before we drop it.
         tb_src.push_str("    #1;\n");
         tb_src.push_str(&format!("    {} = 1'b0;\n", in_valid));
-        // Clear data inputs back to zero after they have been sampled.
-        for (port, _) in &input_port_bits {
-            tb_src.push_str(&format!("    {} = {}'h0;\n", port.name, port.width));
-        }
 
         if let Some(out_valid) = output_valid_signal {
-            // Wait until output valid is high (even if already asserted),
-            // then wait for it to drop. Using `wait` instead of an event
-            // expression ensures we don't miss the pulse if it's already
-            // active when we reach this point.
-            tb_src.push_str(&format!("    wait ({});\n", out_valid));
-            tb_src.push_str("    #1;\n");
-            tb_src.push_str(&format!("    @(negedge {});\n", out_valid));
+            tb_src.push_str(&format!("    wait (!{});\n", out_valid));
         } else {
             // Fallback: wait the configured latency when no explicit
             // output_valid signal is provided.
@@ -582,10 +576,6 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             "    for (i = 0; i < {}; i = i + 1) @(posedge clk);\n    #1;\n",
             latency
         ));
-        // Clear data inputs back to zero after they have been sampled.
-        for (port, _) in &input_port_bits {
-            tb_src.push_str(&format!("    {} = {}'h0;\n", port.name, port.width));
-        }
     }
 
     // Display outputs.
@@ -594,6 +584,15 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             "    $display(\"{}: bits[{}]:%0d\", {});\n",
             outp.name, outp.width, outp.name
         ));
+    }
+
+    // For handshake tests, now that outputs have been observed, drive the
+    // data input ports back to zero so they are visible for exactly one
+    // transaction in the waveform.
+    if input_valid_signal.is_some() {
+        for (port, _) in &input_port_bits {
+            tb_src.push_str(&format!("    {} = {}'h0;\n", port.name, port.width));
+        }
     }
 
     // Let the design run for one extra cycle so waveforms capture the stable
