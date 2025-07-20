@@ -138,15 +138,6 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
                 .and_then(|c| c.dslx.as_ref()?.type_inference_v2)
         });
 
-    // Retrieve but ignore deprecated --opt flag if provided.
-    if let Some(val) = matches.get_one::<String>("opt") {
-        if val == "false" {
-            eprintln!(
-                "[warning] --opt=false ignored: dslx-equiv always optimizes IR before proving"
-            );
-        }
-    }
-
     let assertion_semantics = matches
         .get_one::<String>("assertion_semantics")
         .map(|s| s.parse().unwrap())

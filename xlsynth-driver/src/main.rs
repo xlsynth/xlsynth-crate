@@ -899,7 +899,6 @@ fn main() {
                         .value_name("DSLX_STDLIB_PATH")
                         .help("Path to the DSLX standard library"),
                 )
-                .add_bool_arg("opt", "Optimize the IR before equivalence checking")
                 .add_bool_arg(
                     "type_inference_v2",
                     "Enable the experimental type-inference v2 algorithm (external toolchain only)",
