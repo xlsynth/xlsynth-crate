@@ -551,20 +551,28 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         // Assert the input valid signal for exactly one clock cycle.
         tb_src.push_str(&format!("    {} = 1'b1;\n", in_valid));
         if let Some(out_valid) = output_valid_signal {
-            // Wait until the DUT raises out_valid (should happen immediately
-            // in many designs, but using `wait` is robust).
-            tb_src.push_str(&format!("    wait ({});\n", out_valid));
-        }
-        tb_src.push_str("    @(posedge clk);\n");
-        // Small delay so the DUT reliably samples the asserted valid signal
-        tb_src.push_str("    #1;\n");
-        tb_src.push_str(&format!("    {} = 1'b0;\n", in_valid));
-
-        if let Some(out_valid) = output_valid_signal {
-            tb_src.push_str(&format!("    wait (!{});\n", out_valid));
+            tb_src.push_str("    fork\n");
+            // Thread 0: wait for valid handshake to complete
+            tb_src.push_str("      begin\n");
+            tb_src.push_str(&format!("        wait ({});\n", out_valid));
+            tb_src.push_str(&format!("        wait (!{});\n", out_valid));
+            tb_src.push_str("      end\n");
+            // Thread 1: keep in_valid asserted for exactly one cycle
+            tb_src.push_str("      begin\n");
+            tb_src.push_str("        @(posedge clk);\n");
+            tb_src.push_str("        #1;\n");
+            // De-assert valid and immediately clear data inputs.
+            tb_src.push_str(&format!("        {} = 1'b0;\n", in_valid));
+            for (port, _) in &input_port_bits {
+                tb_src.push_str(&format!("        {} = {}'h0;\n", port.name, port.width));
+            }
+            tb_src.push_str("      end\n");
+            tb_src.push_str("    join\n");
         } else {
-            // Fallback: wait the configured latency when no explicit
-            // output_valid signal is provided.
+            // No output_valid: assert for one cycle then wait latency.
+            tb_src.push_str("    @(posedge clk);\n");
+            tb_src.push_str("    #1;\n");
+            tb_src.push_str(&format!("    {} = 1'b0;\n", in_valid));
             tb_src.push_str(&format!(
                 "    for (i = 0; i < {}; i = i + 1) @(posedge clk);\n",
                 latency
@@ -584,15 +592,6 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             "    $display(\"{}: bits[{}]:%0d\", {});\n",
             outp.name, outp.width, outp.name
         ));
-    }
-
-    // For handshake tests, now that outputs have been observed, drive the
-    // data input ports back to zero so they are visible for exactly one
-    // transaction in the waveform.
-    if input_valid_signal.is_some() {
-        for (port, _) in &input_port_bits {
-            tb_src.push_str(&format!("    {} = {}'h0;\n", port.name, port.width));
-        }
     }
 
     // Let the design run for one extra cycle so waveforms capture the stable
