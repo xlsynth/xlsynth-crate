@@ -548,23 +548,44 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         ));
     }
     if let Some(in_valid) = input_valid_signal {
+        // Assert the input valid signal for exactly one clock cycle.
         tb_src.push_str(&format!("    {} = 1'b1;\n", in_valid));
+        tb_src.push_str("    @(posedge clk);\n");
+        // Small delay so the DUT reliably samples the asserted valid signal
+        // in the same cycle before we drop it.
+        tb_src.push_str("    #1;\n");
+        tb_src.push_str(&format!("    {} = 1'b0;\n", in_valid));
+        // Clear data inputs back to zero after they have been sampled.
+        for (port, _) in &input_port_bits {
+            tb_src.push_str(&format!("    {} = {}'h0;\n", port.name, port.width));
+        }
+
         if let Some(out_valid) = output_valid_signal {
+            // Wait until output valid is high (even if already asserted),
+            // then wait for it to drop. Using `wait` instead of an event
+            // expression ensures we don't miss the pulse if it's already
+            // active when we reach this point.
             tb_src.push_str(&format!("    wait ({});\n", out_valid));
+            tb_src.push_str("    #1;\n");
+            tb_src.push_str(&format!("    @(negedge {});\n", out_valid));
         } else {
-            // Fallback: wait latency cycles when no explicit output_valid.
+            // Fallback: wait the configured latency when no explicit
+            // output_valid signal is provided.
             tb_src.push_str(&format!(
                 "    for (i = 0; i < {}; i = i + 1) @(posedge clk);\n",
                 latency
             ));
         }
-        tb_src.push_str(&format!("    #1;\n    {} = 1'b0;\n", in_valid));
     } else if output_valid_signal.is_none() {
         // No handshake: wait latency cycles.
         tb_src.push_str(&format!(
             "    for (i = 0; i < {}; i = i + 1) @(posedge clk);\n    #1;\n",
             latency
         ));
+        // Clear data inputs back to zero after they have been sampled.
+        for (port, _) in &input_port_bits {
+            tb_src.push_str(&format!("    {} = {}'h0;\n", port.name, port.width));
+        }
     }
 
     // Display outputs.
@@ -575,12 +596,15 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         ));
     }
 
-    tb_src.push_str("    $finish;\n  end\n");
+    // Let the design run for one extra cycle so waveforms capture the stable
+    // outputs and any handshake de-assertion before ending.
+    tb_src.push_str("    @(posedge clk);\n    $finish;\n  end\n");
 
     // Timeout watchdog: if the simulation exceeds a generous cycle budget, abort.
-    // Each clock cycle is 10 ns (clk toggles every 5 ns), so we wait
-    // (latency+50)*10 ns.
-    let timeout_cycles = latency + 50;
+    // Each clock cycle is 10 ns (clk toggles every 5 ns).  Deep pipelines with
+    // handshake signalling can legitimately run for hundreds of cycles before
+    // `out_valid` drops, so budget much more generously.
+    let timeout_cycles = latency + 500;
     tb_src.push_str(&format!(
         "  initial begin\n    #{};\n    $fatal(1, \"Simulation timed out\");\n  end\n",
         timeout_cycles * 10
