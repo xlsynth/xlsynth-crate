@@ -3665,3 +3665,145 @@ fn test_dslx_equiv_solver_param_different_tops(solver: &str, should_succeed: boo
         );
     }
 }
+
+#[test]
+fn test_run_verilog_pipeline_with_valid_signals_and_output_flops_only() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if should_skip_if_no_slang() {
+        return;
+    }
+
+    let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("inc_outflop.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let pipeline_output = Command::new(driver)
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--input_valid_signal=in_valid")
+        .arg("--output_valid_signal=out_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=false")
+        .arg("--flop_outputs=true")
+        .output()
+        .expect("dslx2pipeline run");
+    assert!(pipeline_output.status.success(), "dslx2pipeline failed");
+    let pipeline_sv = String::from_utf8(pipeline_output.stdout).unwrap();
+    xlsynth_test_helpers::assert_valid_sv(&pipeline_sv);
+
+    let mut cmd = Command::new(driver);
+    cmd.arg("run-verilog-pipeline")
+        .arg("--input_valid_signal=in_valid")
+        .arg("--output_valid_signal=out_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=false")
+        .arg("-")
+        .arg("bits[32]:5")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
+    {
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(pipeline_sv.as_bytes())
+            .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "run-verilog-pipeline failed; stdout: {:?} stderr: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.trim().contains("out: bits[32]:6"),
+        "unexpected stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_run_verilog_pipeline_with_valid_signals_and_input_flops_only() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if should_skip_if_no_slang() {
+        return;
+    }
+
+    let dslx = "fn main(x: u32) -> u32 { x + u32:1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("inc_inflop.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // Generate pipeline with input flops only.
+    let pipeline_output = Command::new(driver)
+        .arg("dslx2pipeline")
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--delay_model")
+        .arg("asap7")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--input_valid_signal=in_valid")
+        .arg("--output_valid_signal=out_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=false")
+        .arg("--flop_inputs=true")
+        .output()
+        .expect("dslx2pipeline run");
+    assert!(pipeline_output.status.success(), "dslx2pipeline failed");
+    let pipeline_sv = String::from_utf8(pipeline_output.stdout).unwrap();
+    xlsynth_test_helpers::assert_valid_sv(&pipeline_sv);
+
+    // Run simulation.
+    let mut cmd = Command::new(driver);
+    cmd.arg("run-verilog-pipeline")
+        .arg("--input_valid_signal=in_valid")
+        .arg("--output_valid_signal=out_valid")
+        .arg("--reset=rst")
+        .arg("--reset_active_low=false")
+        .arg("-")
+        .arg("bits[32]:5")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(pipeline_sv.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "run-verilog-pipeline failed; stdout: {:?} stderr: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.trim().contains("out: bits[32]:6"),
+        "unexpected stdout: {}",
+        stdout
+    );
+}
