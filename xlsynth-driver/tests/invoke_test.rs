@@ -3368,7 +3368,7 @@ fn test_run_verilog_pipeline_with_valid_signals() {
     let pipeline_output = Command::new(driver)
         .arg("dslx2pipeline")
         .arg("--pipeline_stages")
-        .arg("1")
+        .arg("2")
         .arg("--delay_model")
         .arg("asap7")
         .arg("--dslx_input_file")
