@@ -10,30 +10,10 @@ use xlsynth::{
     DslxConvertOptions, convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen,
 };
 
+mod common;
+use common::{PipelineCfg, Port, StageInfo};
+
 use crate::verilog_version::VerilogVersion;
-
-/// Immutable configuration passed around while stitching a pipeline.
-#[derive(Clone)]
-struct PipelineCfg<'a> {
-    ir: &'a xlsynth::ir_package::IrPackage,
-    verilog_version: VerilogVersion,
-}
-
-/// One port in a stage module (flattened).
-#[derive(Debug, Clone)]
-struct Port {
-    name: String,
-    is_input: bool,
-    width: u32,
-}
-
-/// Information derived for each stage that the wrapper needs.
-#[derive(Debug, Clone)]
-struct StageInfo {
-    sv_text: String,
-    ports: Vec<Port>,
-    output_width: u32,
-}
 
 fn build_ports_from_ir(
     func: &xlsynth::ir_package::IrFunction,

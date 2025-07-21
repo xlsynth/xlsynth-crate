@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use std::collections::HashSet;
 use std::process;
 use std::process::Command;
 
@@ -287,16 +288,13 @@ pub fn collect_dslx_search_paths(
     matches: &ArgMatches,
     config: &Option<crate::toolchain_config::ToolchainConfig>,
 ) -> Vec<std::path::PathBuf> {
-    use std::collections::HashSet;
-    use std::path::PathBuf;
-
-    let mut out: Vec<PathBuf> = Vec::new();
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
 
     // --dslx_path flag: semicolon-separated list like "dirA;dirB" (kept for
     // consistency with other subcommands).
     if let Some(flag_value) = matches.get_one::<String>("dslx_path") {
         for entry in flag_value.split(';').filter(|s| !s.is_empty()) {
-            out.push(PathBuf::from(entry));
+            out.push(std::path::PathBuf::from(entry));
         }
     }
 
@@ -306,7 +304,7 @@ pub fn collect_dslx_search_paths(
             if let Some(vec) = &dslx_cfg.dslx_path {
                 for p in vec {
                     if !p.is_empty() {
-                        out.push(PathBuf::from(p));
+                        out.push(std::path::PathBuf::from(p));
                     }
                 }
             }
@@ -363,8 +361,6 @@ pub fn find_and_verify_executable(
     name: &str,
     install_hint: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
-    use std::path::PathBuf;
-
     // Find the executable in PATH
     let exe_path = which::which(name).map_err(|_| {
         anyhow::anyhow!("`{}` executable not found in PATH. {}", name, install_hint)
