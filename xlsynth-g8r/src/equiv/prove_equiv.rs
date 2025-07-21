@@ -707,11 +707,17 @@ pub fn ir_to_smt<'a, S: Solver>(
             }
             NodePayload::Trace { .. } => {
                 // Trace has no effect on value computation
-                continue;
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: BitVec::ZeroWidth,
+                }
             }
             NodePayload::AfterAll(_) => {
                 // AfterAll is a no-op for Boolector; do not insert a BV (like Nil)
-                continue;
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: BitVec::ZeroWidth,
+                }
             }
             NodePayload::Nary(op, elems) => {
                 let elems_bvs: Vec<&BitVec<S::Term>> = elems
@@ -758,7 +764,10 @@ pub fn ir_to_smt<'a, S: Solver>(
             }
             NodePayload::Cover { .. } => {
                 // Cover statements do not contribute to value computation
-                continue;
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: BitVec::ZeroWidth,
+                }
             }
             NodePayload::Sel {
                 selector,
