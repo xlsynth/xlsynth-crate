@@ -17,6 +17,153 @@ use crate::{
     xls_parse_typed_value, XlsynthError,
 };
 
+// No additional imports needed.
+
+// Represents the direction of a module port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModulePortDirection {
+    Input,
+    Output,
+}
+
+pub struct ModulePort {
+    inner: *mut sys::CVastModulePort,
+    parent: Arc<Mutex<VastFilePtr>>, // Keep the VAST file alive while this port exists.
+}
+
+impl ModulePort {
+    pub fn direction(&self) -> ModulePortDirection {
+        let _locked = self.parent.lock().unwrap();
+        let dir = unsafe { sys::xls_vast_verilog_module_port_get_direction(self.inner) };
+        match dir {
+            x if x == sys::XLS_VAST_MODULE_PORT_DIRECTION_INPUT => ModulePortDirection::Input,
+            x if x == sys::XLS_VAST_MODULE_PORT_DIRECTION_OUTPUT => ModulePortDirection::Output,
+            _ => panic!("Invalid port direction: {dir}"),
+        }
+    }
+
+    pub fn name(&self) -> String {
+        let _locked = self.parent.lock().unwrap();
+        let def_ptr = unsafe { sys::xls_vast_verilog_module_port_get_def(self.inner) };
+        let c_str = unsafe { sys::xls_vast_def_get_name(def_ptr) };
+        unsafe { c_str_to_rust(c_str) }
+    }
+
+    pub fn data_type(&self) -> VastDataType {
+        let _locked = self.parent.lock().unwrap();
+        let def_ptr = unsafe { sys::xls_vast_verilog_module_port_get_def(self.inner) };
+        let dt_ptr = unsafe { sys::xls_vast_def_get_data_type(def_ptr) };
+        VastDataType {
+            inner: dt_ptr,
+            parent: self.parent.clone(),
+        }
+    }
+
+    /// Returns the width (bit count) of this port if determinable; otherwise 0.
+    pub fn width(&self) -> i64 {
+        match self.data_type().flat_bit_count_as_int64() {
+            Ok(w) => w,
+            Err(_) => 0,
+        }
+    }
+}
+
+impl VastDataType {
+    /// Returns the declared width for bit-vector types as an i64.
+    pub fn width_as_int64(&self) -> Result<i64, XlsynthError> {
+        let _locked = self.parent.lock().unwrap();
+        let mut width_out: i64 = 0;
+        let mut error_out: *mut c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_data_type_width_as_int64(self.inner, &mut width_out, &mut error_out)
+        };
+        if success {
+            Ok(width_out)
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    /// Returns the total flat bit count for composite types as an i64.
+    pub fn flat_bit_count_as_int64(&self) -> Result<i64, XlsynthError> {
+        let _locked = self.parent.lock().unwrap();
+        let mut count_out: i64 = 0;
+        let mut error_out: *mut c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_data_type_flat_bit_count_as_int64(
+                self.inner,
+                &mut count_out,
+                &mut error_out,
+            )
+        };
+        if success {
+            Ok(count_out)
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    /// Returns an expression representing the width, if any.
+    pub fn width_expr(&self) -> Option<Expr> {
+        let _locked = self.parent.lock().unwrap();
+        let expr_ptr = unsafe { sys::xls_vast_data_type_width(self.inner) };
+        if expr_ptr.is_null() {
+            None
+        } else {
+            Some(Expr {
+                inner: expr_ptr,
+                parent: self.parent.clone(),
+            })
+        }
+    }
+
+    /// Returns true if the type is signed.
+    pub fn is_signed(&self) -> bool {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_data_type_is_signed(self.inner) }
+    }
+}
+
+// Extend VastModule with querying capabilities.
+impl VastModule {
+    /// Returns all ports (both inputs and outputs) on this module.
+    pub fn ports(&self) -> Vec<ModulePort> {
+        let _locked = self.parent.lock().unwrap();
+        let mut count = 0;
+        let ports_ptr = unsafe { sys::xls_vast_verilog_module_get_ports(self.inner, &mut count) };
+        if ports_ptr.is_null() || count == 0 {
+            return Vec::new();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ports_ptr, count as usize) };
+        let result = slice
+            .iter()
+            .map(|&ptr| ModulePort {
+                inner: ptr,
+                parent: self.parent.clone(),
+            })
+            .collect::<Vec<_>>();
+        // Free the array returned by the C API (but not the individual port objects).
+        unsafe { sys::xls_vast_verilog_module_free_ports(ports_ptr, count) };
+        result
+    }
+
+    /// Returns only the input ports for this module.
+    pub fn input_ports(&self) -> Vec<ModulePort> {
+        self.ports()
+            .into_iter()
+            .filter(|p| p.direction() == ModulePortDirection::Input)
+            .collect()
+    }
+
+    /// Returns only the output ports for this module.
+    pub fn output_ports(&self) -> Vec<ModulePort> {
+        self.ports()
+            .into_iter()
+            .filter(|p| p.direction() == ModulePortDirection::Output)
+            .collect()
+    }
+}
+
 struct VastFilePtr(pub *mut sys::CVastFile);
 
 enum VastOperatorKind {
@@ -61,6 +208,7 @@ impl Drop for VastFilePtr {
     }
 }
 
+#[derive(Clone)]
 pub struct VastDataType {
     inner: *mut sys::CVastDataType,
     parent: Arc<Mutex<VastFilePtr>>,
@@ -73,6 +221,12 @@ pub struct LogicRef {
 }
 
 impl LogicRef {
+    pub fn name(&self) -> String {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_logic_ref_get_name(self.inner) };
+        unsafe { c_str_to_rust(inner) }
+    }
+
     pub fn to_expr(&self) -> Expr {
         let locked = self.parent.lock().unwrap();
         let inner = unsafe { sys::xls_vast_logic_ref_as_expression(self.inner) };
@@ -173,6 +327,12 @@ pub struct VastStatement {
 }
 
 impl VastModule {
+    pub fn name(&self) -> String {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_module_get_name(self.inner) };
+        unsafe { c_str_to_rust(inner) }
+    }
+
     pub fn add_input(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
         let c_name = CString::new(name).unwrap();
         let _locked = self.parent.lock().unwrap();
@@ -209,6 +369,9 @@ impl VastModule {
         }
     }
 
+    /// Adds a member to this module which is an instantiation of another module
+    /// -- this is described by the given `Instantiation` -- see
+    /// `VastFile::make_instantiation`.
     pub fn add_member_instantiation(&mut self, instantiation: Instantiation) {
         let _locked = self.parent.lock().unwrap();
         unsafe {
@@ -216,6 +379,11 @@ impl VastModule {
         }
     }
 
+    /// Adds a "continuous assignment" member to this module; i.e. a statement
+    /// of the form: `assign <lhs> = <rhs>;`
+    ///
+    /// Create a `ContinuousAssignment` structure that describes the assignment
+    /// via `VastFile::make_continuous_assignment`.
     pub fn add_member_continuous_assignment(&mut self, assignment: ContinuousAssignment) {
         let _locked = self.parent.lock().unwrap();
         unsafe {
@@ -374,6 +542,21 @@ impl VastFile {
         }
     }
 
+    /// Creates a structure that describes an instantiation of a module that we
+    /// want to create (as a member within some module, see
+    /// `VastModule::add_member_instantiation`).
+    ///
+    /// Args:
+    /// - `module_name`: The name of the module to instantiate.
+    /// - `instance_name`: The name of the instance of the module to create.
+    /// - `parameter_port_names`: The names of the `parameter`s of the module to
+    ///   instantiate.
+    /// - `parameter_expressions`: The expressions to use in instantiating the
+    ///   parameters of the module.
+    /// - `connection_port_names`: The names of the ports of the module to
+    ///   instantiate.
+    /// - `connection_expressions`: The expressions to use in instantiating the
+    ///   ports of the module.
     pub fn make_instantiation(
         &mut self,
         module_name: &str,
@@ -612,6 +795,8 @@ impl VastFile {
 
     // -- binary ops
 
+    /// Internal helper for binary operators, users should prefer the
+    /// `VastFile::make_*` methods below, such as `VastFile::make_add`.
     fn make_binary(&mut self, op: VastOperatorKind, lhs: &Expr, rhs: &Expr) -> Expr {
         let locked = self.ptr.lock().unwrap();
         let op_i32 = op as i32;
