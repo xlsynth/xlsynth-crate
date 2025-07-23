@@ -22,5 +22,6 @@ pub(crate) struct Port {
 pub(crate) struct StageInfo {
     pub(crate) sv_text: String,
     pub(crate) ports: Vec<Port>,
+    #[allow(dead_code)]
     pub(crate) output_width: u32,
 }

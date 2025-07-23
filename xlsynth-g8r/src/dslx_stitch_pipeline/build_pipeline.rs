@@ -5,8 +5,6 @@ use std::collections::HashMap;
 use xlsynth::ir_value::IrFormatPreference;
 use xlsynth::vast::{Expr, LogicRef, ModulePortDirection, VastDataType, VastFile, VastModule};
 
-use crate::xls_ir::ir::FunctionType;
-
 pub struct PipelineConfig<'a> {
     pub top_module_name: String,
     pub clk_port_name: String,
@@ -16,9 +14,9 @@ pub struct PipelineConfig<'a> {
     pub flop_inputs: bool,
     pub flop_outputs: bool,
 
-    pub input_valid_signal: Option<String>,
-    pub output_valid_signal: Option<String>,
-    pub reset_signal: Option<String>,
+    pub input_valid_signal: Option<&'a str>,
+    pub output_valid_signal: Option<&'a str>,
+    pub reset_signal: Option<&'a str>,
     pub reset_active_low: bool,
 }
 
@@ -96,7 +94,7 @@ fn make_flop_layer(
         assign_info.push((reg, logic_ref.clone(), IsValidReg::No));
     }
 
-    // Handle valid signal register declaration (if any) before always_ff.
+    // Handle valid signal register declaration (if any) before always.
     let flopped_valid_signal = if let Some(ref valid_signal) = current_inputs.valid_signal {
         let reg = outer_module
             .add_reg(&format!("p{next_pipe_stage_number}_valid"), &bit_type)
@@ -117,8 +115,8 @@ fn make_flop_layer(
     // Note that we guard this so that we don't emit an empty `always` block if
     // there are no assignments to perform within it.
     if !assign_info.is_empty() {
-        let always_ff = outer_module.add_always_at(&[posedge_clk]).unwrap();
-        let mut sb = always_ff.get_statement_block();
+        let always = outer_module.add_always_at(&[posedge_clk]).unwrap();
+        let mut sb = always.get_statement_block();
 
         for (reg, src_logic, is_valid_reg) in assign_info {
             let rhs = if is_valid_reg == IsValidReg::No {
@@ -520,9 +518,9 @@ mod tests {
             stage_modules: vec![&add32],
             flop_inputs: true,
             flop_outputs: true,
-            input_valid_signal: Some("in_valid".to_string()),
-            output_valid_signal: Some("out_valid".to_string()),
-            reset_signal: Some("rst".to_string()),
+            input_valid_signal: Some("in_valid"),
+            output_valid_signal: Some("out_valid"),
+            reset_signal: Some("rst"),
             reset_active_low: false,
         };
         let pipeline = build_pipeline(&mut file, &config).unwrap();
@@ -546,9 +544,9 @@ mod tests {
             stage_modules: vec![&add32],
             flop_inputs: true,
             flop_outputs: false,
-            input_valid_signal: Some("in_valid".to_string()),
-            output_valid_signal: Some("out_valid".to_string()),
-            reset_signal: Some("rst".to_string()),
+            input_valid_signal: Some("in_valid"),
+            output_valid_signal: Some("out_valid"),
+            reset_signal: Some("rst"),
             reset_active_low: false,
         };
         let pipeline = build_pipeline(&mut file, &config).unwrap();
@@ -572,9 +570,9 @@ mod tests {
             stage_modules: vec![&add32],
             flop_inputs: false,
             flop_outputs: true,
-            input_valid_signal: Some("in_valid".to_string()),
-            output_valid_signal: Some("out_valid".to_string()),
-            reset_signal: Some("rst".to_string()),
+            input_valid_signal: Some("in_valid"),
+            output_valid_signal: Some("out_valid"),
+            reset_signal: Some("rst"),
             reset_active_low: false,
         };
         let pipeline = build_pipeline(&mut file, &config).unwrap();
