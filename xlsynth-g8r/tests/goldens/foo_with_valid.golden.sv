@@ -27,39 +27,39 @@ module foo_cycle1(
 endmodule
 module foo(
   input wire clk,
-  input wire rst,
-  input wire input_valid,
+  input wire rst_n,
   input wire [31:0] x,
+  input wire input_valid,
   output wire [31:0] out,
   output wire output_valid
 );
   reg [31:0] p0_x;
   reg p0_valid;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p0_x <= input_valid ? x : p0_x;
-    p0_valid <= rst ? input_valid : 1'b0;
+    p0_valid <= rst_n ? input_valid : 1'b0;
   end
-  wire [31:0] stage0_out_comb;
-  foo_cycle0 foo_cycle0_i (
+  wire [31:0] stage_0_out_comb;
+  foo_cycle0 stage_0 (
     .x(p0_x),
-    .out(stage0_out_comb)
+    .out(stage_0_out_comb)
   );
-  reg [31:0] p1_out;
+  reg [31:0] p1_y;
   reg p1_valid;
-  always_ff @ (posedge clk) begin
-    p1_out <= p0_valid ? stage0_out_comb : p1_out;
-    p1_valid <= rst ? p0_valid : 1'b0;
+  always @ (posedge clk) begin
+    p1_y <= p0_valid ? stage_0_out_comb : p1_y;
+    p1_valid <= rst_n ? p0_valid : 1'b0;
   end
-  wire [31:0] stage1_out_comb;
-  foo_cycle1 foo_cycle1_i (
-    .y(p1_out),
-    .out(stage1_out_comb)
+  wire [31:0] stage_1_out_comb;
+  foo_cycle1 stage_1 (
+    .y(p1_y),
+    .out(stage_1_out_comb)
   );
   reg [31:0] p2_out;
   reg p2_valid;
-  always_ff @ (posedge clk) begin
-    p2_out <= p1_valid ? stage1_out_comb : p2_out;
-    p2_valid <= rst ? p1_valid : 1'b0;
+  always @ (posedge clk) begin
+    p2_out <= p1_valid ? stage_1_out_comb : p2_out;
+    p2_valid <= rst_n ? p1_valid : 1'b0;
   end
   assign out = p2_out;
   assign output_valid = p2_valid;

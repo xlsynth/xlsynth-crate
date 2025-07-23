@@ -6,7 +6,7 @@ repos:
     hooks:
       - id: check-yaml
       - id: end-of-file-fixer
-        exclude: '.*\.golden\.sv$' # Exclude files ending in .golden.sv (Python regex)
+        exclude: '.*\.golden\.(sv|v)$' # Exclude files ending in .golden.sv (Python regex)
       - id: trailing-whitespace
       - id: no-commit-to-branch
         args: ["--branch", "main"]

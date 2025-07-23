@@ -382,7 +382,7 @@ pub fn simulate_pipeline_single_pulse(
         latency,
         "input_valid",
         Some("output_valid"),
-        "rst",
+        "rst_n",
         true,
     )
 }

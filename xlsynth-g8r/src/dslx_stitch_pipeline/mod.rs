@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Simple utility to stitch together pipeline stages defined in DSLX.
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -276,7 +275,17 @@ pub fn stitch_pipeline(
     search_paths: &[&Path],
     flop_inputs: bool,
     flop_outputs: bool,
+    input_valid_signal: Option<&str>,
+    output_valid_signal: Option<&str>,
+    reset_signal: Option<&str>,
+    reset_active_low: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
+    if (input_valid_signal.is_some() || output_valid_signal.is_some()) && reset_signal.is_none() {
+        return Err(xlsynth::XlsynthError(
+            "reset signal is required when valid signals are used".into(),
+        ));
+    }
+
     check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
     let convert_opts = DslxConvertOptions {
         dslx_stdlib_path: stdlib_path,
@@ -341,10 +350,10 @@ pub fn stitch_pipeline(
         stage_modules: stage_module_refs,
         flop_inputs,
         flop_outputs,
-        input_valid_signal: None,
-        output_valid_signal: None,
-        reset_signal: None,
-        reset_active_low: false,
+        input_valid_signal,
+        output_valid_signal,
+        reset_signal,
+        reset_active_low,
     };
     let wrapper_sv = build_wrapper(&mut wrapper_file, &pipeline_cfg)?;
 
@@ -354,290 +363,6 @@ pub fn stitch_pipeline(
         .collect::<Vec<_>>()
         .join("\n");
     text.push_str(&wrapper_sv);
-    Ok(text)
-}
-
-/// Like [`stitch_pipeline`] but the stage modules are generated without any
-/// flop inputs/outputs and the wrapper inserts register stages with valid
-/// handshaking. Each stage's output is captured in a register along with a
-/// valid bit that is synchronously cleared when `rst` is low.
-pub fn stitch_pipeline_with_valid(
-    dslx: &str,
-    path: &Path,
-    top: &str,
-    verilog_version: VerilogVersion,
-    explicit_stages: Option<&[String]>,
-    stdlib_path: Option<&Path>,
-    search_paths: &[&Path],
-    input_valid_signal: Option<&str>,
-    output_valid_signal: Option<&str>,
-    reset: Option<&str>,
-    reset_active_low: bool,
-) -> Result<String, xlsynth::XlsynthError> {
-    // Precondition checks
-    if reset.is_none() {
-        return Err(xlsynth::XlsynthError(
-            "reset signal must be specified when using valid handshaking (with_valid)".to_string(),
-        ));
-    }
-    if output_valid_signal.is_some() && input_valid_signal.is_none() {
-        return Err(xlsynth::XlsynthError(
-            "--output_valid_signal requires --input_valid_signal to be specified".to_string(),
-        ));
-    }
-
-    let input_valid_signal = input_valid_signal.unwrap_or("input_valid");
-    let reset_signal = reset.unwrap_or("rst");
-    let output_valid_requested = output_valid_signal.is_some();
-    let output_valid_name = output_valid_signal.unwrap_or("output_valid");
-    check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
-    let convert_opts = DslxConvertOptions {
-        dslx_stdlib_path: stdlib_path,
-        additional_search_paths: search_paths.to_vec(),
-        enable_warnings: None,
-        disable_warnings: None,
-    };
-    let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
-    let ir = conv.ir;
-
-    let cfg = PipelineCfg {
-        ir: &ir,
-        verilog_version,
-    };
-
-    let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
-    verify_stage_signatures(&ir, &stages)?;
-
-    let mut stage_infos = Vec::with_capacity(stages.len());
-    for (stage_unmangled, stage_mangled) in &stages {
-        stage_infos.push(make_stage_info_comb(
-            &cfg,
-            stage_unmangled,
-            stage_mangled,
-            false,
-        )?);
-    }
-
-    let file_type = match cfg.verilog_version {
-        VerilogVersion::SystemVerilog => xlsynth::vast::VastFileType::SystemVerilog,
-        VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
-    };
-    let mut file = xlsynth::vast::VastFile::new(file_type);
-
-    let scalar_type = file.make_scalar_type();
-    let mut dynamic_types: Vec<xlsynth::vast::VastDataType> = Vec::new();
-
-    let mut wrapper = file.add_module(top);
-    let clk_port = wrapper.add_input("clk", &scalar_type);
-    let rst_port = wrapper.add_input(reset_signal, &scalar_type);
-    let input_valid_port = wrapper.add_input(input_valid_signal, &scalar_type);
-
-    let first_stage_ports = &stage_infos[0].ports;
-    let mut wrapper_inputs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
-    for p in first_stage_ports
-        .iter()
-        .filter(|p| p.is_input && p.name != "clk")
-    {
-        let dt_ref = if p.width == 1 {
-            &scalar_type
-        } else {
-            dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
-            dynamic_types.last().unwrap()
-        };
-        let lr = wrapper.add_input(&p.name, dt_ref);
-        wrapper_inputs.insert(p.name.clone(), lr);
-    }
-
-    let last_out_width = stage_infos.last().unwrap().output_width;
-    let out_dt_ref = if last_out_width == 1 {
-        &scalar_type
-    } else {
-        dynamic_types.push(file.make_bit_vector_type(last_out_width as i64, false));
-        dynamic_types.last().unwrap()
-    };
-    let out_port = wrapper.add_output("out", out_dt_ref);
-    let output_valid_port = if output_valid_requested {
-        Some(wrapper.add_output(output_valid_name, &scalar_type))
-    } else {
-        None
-    };
-
-    // Input pipeline registers (p0)
-    let mut p0_regs = HashMap::new();
-    for p in first_stage_ports
-        .iter()
-        .filter(|p| p.is_input && p.name != "clk")
-    {
-        let dt_ref = if p.width == 1 {
-            &scalar_type
-        } else {
-            dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
-            dynamic_types.last().unwrap()
-        };
-        let reg = wrapper.add_reg(&format!("p0_{}", p.name), dt_ref).unwrap();
-        p0_regs.insert(p.name.clone(), reg);
-    }
-    let p0_valid_reg = wrapper.add_reg("p0_valid", &scalar_type).unwrap();
-
-    let posedge_clk = file.make_pos_edge(&clk_port.to_expr());
-    let always_p0 = if cfg.verilog_version.is_system_verilog() {
-        wrapper.add_always_ff(&[&posedge_clk]).unwrap()
-    } else {
-        wrapper.add_always_at(&[&posedge_clk]).unwrap()
-    };
-    let mut sb0 = always_p0.get_statement_block();
-    // Iterate in a deterministic order to ensure stable Verilog output.
-    let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
-    p0_names.sort();
-    for name in p0_names {
-        let reg = p0_regs.get(&name).unwrap();
-        let src = wrapper_inputs.get(&name).unwrap();
-        let gated_expr =
-            file.make_ternary(&input_valid_port.to_expr(), &src.to_expr(), &reg.to_expr());
-        sb0.add_nonblocking_assignment(&reg.to_expr(), &gated_expr);
-    }
-    let zero = file
-        .make_literal("bits[1]:0", &xlsynth::ir_value::IrFormatPreference::Binary)
-        .unwrap();
-    // Use the reset port directly; arm order depends on active-low vs active-high.
-    let rst_expr = rst_port.to_expr();
-    let (true_arm, false_arm) = if reset_active_low {
-        // Active-low: rst_n == 1'b0 means reset asserted, so when rst_n is 0 clear,
-        // else propagate. Ternary form: condition ? propagate : clear.
-        (&input_valid_port.to_expr(), &zero)
-    } else {
-        // Active-high: rst == 1'b1 means reset asserted.
-        (&zero, &input_valid_port.to_expr())
-    };
-    let tern = file.make_ternary(&rst_expr, true_arm, false_arm);
-    sb0.add_nonblocking_assignment(&p0_valid_reg.to_expr(), &tern);
-
-    // Stage processing
-    let mut prev_reg: Option<xlsynth::vast::LogicRef> = None;
-    let mut prev_valid = p0_valid_reg;
-    let mut prev_width: u32 = 0;
-    for (idx, stage_info) in stage_infos.iter().enumerate() {
-        let stage_unmangled = &stages[idx].0;
-        let output_width = stage_info.output_width;
-        let out_dt_stage_ref = if output_width == 1 {
-            &scalar_type
-        } else {
-            dynamic_types.push(file.make_bit_vector_type(output_width as i64, false));
-            dynamic_types.last().unwrap()
-        };
-        let output_wire = wrapper.add_wire(&format!("stage{}_out_comb", idx), out_dt_stage_ref);
-
-        let conn_port_names: Vec<&str> = stage_info
-            .ports
-            .iter()
-            .filter(|p| p.name != "clk")
-            .map(|p| p.name.as_str())
-            .collect();
-        let mut temp_exprs: Vec<xlsynth::vast::Expr> = Vec::new();
-        let mut conn_expr_indices: Vec<Option<usize>> = Vec::new();
-
-        let prev_indexable = prev_reg.as_ref().map(|w| w.to_indexable_expr());
-        let mut bit_cursor: u32 = 0;
-        for port in &stage_info.ports {
-            if port.name == "clk" {
-                // Skip; combinational stage modules have no clock port.
-                continue;
-            }
-            if !port.is_input {
-                let e = output_wire.to_expr();
-                temp_exprs.push(e);
-                conn_expr_indices.push(Some(temp_exprs.len() - 1));
-                continue;
-            }
-            if idx == 0 {
-                let reg = p0_regs.get(&port.name).unwrap();
-                temp_exprs.push(reg.to_expr());
-                conn_expr_indices.push(Some(temp_exprs.len() - 1));
-            } else if stage_info
-                .ports
-                .iter()
-                .filter(|p| p.is_input && p.name != "clk")
-                .count()
-                == 1
-                && port.width == prev_width
-            {
-                let e = prev_reg.as_ref().unwrap().to_expr();
-                temp_exprs.push(e);
-                conn_expr_indices.push(Some(temp_exprs.len() - 1));
-            } else {
-                let hi: i64 = (prev_width - 1 - bit_cursor) as i64;
-                let lo: i64 = (hi - port.width as i64 + 1) as i64;
-                let slice = file
-                    .make_slice(&prev_indexable.as_ref().unwrap(), hi, lo)
-                    .to_expr();
-                temp_exprs.push(slice);
-                conn_expr_indices.push(Some(temp_exprs.len() - 1));
-                bit_cursor += port.width;
-            }
-        }
-        let conn_exprs: Vec<Option<&xlsynth::vast::Expr>> = conn_expr_indices
-            .iter()
-            .map(|opt_idx| opt_idx.map(|i| &temp_exprs[i]))
-            .collect();
-
-        let instance_name = format!("{}_i", stage_unmangled);
-        wrapper.add_member_instantiation(file.make_instantiation(
-            stage_unmangled,
-            &instance_name,
-            &[],
-            &[],
-            &conn_port_names,
-            &conn_exprs,
-        ));
-
-        let out_reg = wrapper
-            .add_reg(&format!("p{}_out", idx + 1), out_dt_stage_ref)
-            .unwrap();
-        let valid_reg = wrapper
-            .add_reg(&format!("p{}_valid", idx + 1), &scalar_type)
-            .unwrap();
-        let always = if cfg.verilog_version.is_system_verilog() {
-            wrapper.add_always_ff(&[&posedge_clk]).unwrap()
-        } else {
-            wrapper.add_always_at(&[&posedge_clk]).unwrap()
-        };
-        let mut sb = always.get_statement_block();
-        let gated_data = file.make_ternary(
-            &prev_valid.to_expr(),
-            &output_wire.to_expr(),
-            &out_reg.to_expr(),
-        );
-        sb.add_nonblocking_assignment(&out_reg.to_expr(), &gated_data);
-        // Stage valid bit update with active-low/active-high awareness.
-        let (true_arm_v, false_arm_v) = if reset_active_low {
-            (&prev_valid.to_expr(), &zero)
-        } else {
-            (&zero, &prev_valid.to_expr())
-        };
-        let tern_v = file.make_ternary(&rst_expr, true_arm_v, false_arm_v);
-        sb.add_nonblocking_assignment(&valid_reg.to_expr(), &tern_v);
-
-        prev_reg = Some(out_reg);
-        prev_valid = valid_reg;
-        prev_width = output_width;
-    }
-
-    let final_reg = prev_reg.unwrap();
-    wrapper.add_member_continuous_assignment(
-        file.make_continuous_assignment(&out_port.to_expr(), &final_reg.to_expr()),
-    );
-    if let Some(vport) = &output_valid_port {
-        wrapper.add_member_continuous_assignment(
-            file.make_continuous_assignment(&vport.to_expr(), &prev_valid.to_expr()),
-        );
-    }
-
-    let mut text = stage_infos
-        .iter()
-        .map(|s| s.sv_text.clone())
-        .collect::<Vec<_>>()
-        .join("\n");
-    text.push_str(&file.emit());
     Ok(text)
 }
 
@@ -662,6 +387,10 @@ mod tests {
             &[],
             true,
             true,
+            None,
+            None,
+            None,
+            false,
         )
         .unwrap();
         // Validate generated SV.
@@ -699,6 +428,10 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             &[],
             true,
             true,
+            None,
+            None,
+            None,
+            false,
         )
         .unwrap();
 
@@ -718,14 +451,21 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             &[],
             true,
             true,
+            None,
+            None,
+            None,
+            false,
         )
         .unwrap();
         compare_golden_sv(&result, "tests/goldens/one.golden.sv");
     }
 
+    /// Generates the verilog for two stages composed in DSLX stitching:
+    /// * The first stage adds 1
+    /// * The second stage adds 2
     fn verilog_for_foo_pipeline_with_valid() -> String {
         let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
-        stitch_pipeline_with_valid(
+        stitch_pipeline(
             dslx,
             Path::new("test.x"),
             "foo",
@@ -733,9 +473,11 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             None,
             None,
             &[],
+            true,
+            true,
             Some("input_valid"),
             Some("output_valid"),
-            Some("rst"),
+            Some("rst_n"),
             true, // Use active-low reset to match simulation helper expectations.
         )
         .unwrap()
@@ -771,6 +513,10 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             &[],
             true,
             true,
+            None,
+            None,
+            None,
+            false,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().0;
