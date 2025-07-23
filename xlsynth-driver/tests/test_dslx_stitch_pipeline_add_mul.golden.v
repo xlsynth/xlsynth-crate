@@ -71,4 +71,3 @@ module add_mul(
   end
   assign out = p2_out;
 endmodule
-
