@@ -64,3 +64,4 @@ module foo(
   assign out = p2_out;
   assign out_valid = p2_valid;
 endmodule
+

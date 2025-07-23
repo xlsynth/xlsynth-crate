@@ -1,6 +1,6 @@
 module __my_module__main(
   input wire clk,
-  input wire rst,
+  input wire rst_n,
   input wire input_valid,
   input wire [31:0] x,
   output wire output_valid,
@@ -9,14 +9,14 @@ module __my_module__main(
   // ===== Pipe stage 0:
   wire p0_not_18_comb;
   wire p0_load_en_comb;
-  assign p0_not_18_comb = ~rst;
+  assign p0_not_18_comb = ~rst_n;
   assign p0_load_en_comb = input_valid | p0_not_18_comb;
 
   // Registers for pipe stage 0:
   reg p0_valid;
   reg [31:0] p0_x;
   always @ (posedge clk) begin
-    if (!rst) begin
+    if (!rst_n) begin
       p0_valid <= 1'h0;
       p0_x <= 32'h0000_0000;
     end else begin
@@ -37,7 +37,7 @@ module __my_module__main(
   reg p1_valid;
   reg [31:0] p1_add_9;
   always @ (posedge clk) begin
-    if (!rst) begin
+    if (!rst_n) begin
       p1_valid <= 1'h0;
       p1_add_9 <= 32'h0000_0000;
     end else begin

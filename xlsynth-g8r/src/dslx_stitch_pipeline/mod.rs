@@ -280,6 +280,12 @@ pub fn stitch_pipeline(
     reset_signal: Option<&str>,
     reset_active_low: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
+    if (input_valid_signal.is_some() || output_valid_signal.is_some()) && reset_signal.is_none() {
+        return Err(xlsynth::XlsynthError(
+            "reset signal is required when valid signals are used".into(),
+        ));
+    }
+
     check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
     let convert_opts = DslxConvertOptions {
         dslx_stdlib_path: stdlib_path,
@@ -454,6 +460,9 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
         compare_golden_sv(&result, "tests/goldens/one.golden.sv");
     }
 
+    /// Generates the verilog for two stages composed in DSLX stitching:
+    /// * The first stage adds 1
+    /// * The second stage adds 2
     fn verilog_for_foo_pipeline_with_valid() -> String {
         let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
         stitch_pipeline(
@@ -464,11 +473,11 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             None,
             None,
             &[],
-            false,
-            false,
+            true,
+            true,
             Some("input_valid"),
             Some("output_valid"),
-            Some("rst"),
+            Some("rst_n"),
             true, // Use active-low reset to match simulation helper expectations.
         )
         .unwrap()
