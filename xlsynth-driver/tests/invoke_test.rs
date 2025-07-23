@@ -3875,7 +3875,7 @@ fn test_dslx_stitch_pipeline_flop_inputs_only() {
     let sv = String::from_utf8_lossy(&output.stdout);
     xlsynth_test_helpers::assert_valid_sv(&sv);
     assert!(
-        sv.contains("reg p0_x"),
+        sv.contains("p0_x"),
         "Expected input flop register p0_x not found"
     );
     assert!(
@@ -3915,7 +3915,7 @@ fn test_dslx_stitch_pipeline_flop_outputs_only() {
     let sv = String::from_utf8_lossy(&output.stdout);
     xlsynth_test_helpers::assert_valid_sv(&sv);
     assert!(
-        sv.contains("reg p0_out"),
+        sv.contains("p0_out"),
         "Expected output flop register p0_out not found"
     );
     assert!(

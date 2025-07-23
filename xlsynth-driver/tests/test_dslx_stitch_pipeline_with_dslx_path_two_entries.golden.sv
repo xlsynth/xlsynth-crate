@@ -20,24 +20,32 @@ module foo(
   output wire [31:0] out
 );
   always_ff @ (posedge clk) begin end
-  wire [63:0] p1_next;
-  foo_cycle0 foo_cycle0_i (
-    .out(p1_next)
+  wire [63:0] p1_out_comb;
+  wire [31:0] p1_x_comb;
+  assign p1_x_comb = p1_out_comb[63:32];
+  wire [31:0] p1_y_comb;
+  assign p1_y_comb = p1_out_comb[31:0];
+  foo_cycle0 stage_0 (
+    .out(p1_out_comb)
   );
-  reg [63:0] p1;
+  reg [63:0] p1_out;
+  reg [31:0] p1_x;
+  reg [31:0] p1_y;
   always_ff @ (posedge clk) begin
-    p1 <= p1_next;
+    p1_out <= p1_out_comb;
+    p1_x <= p1_x_comb;
+    p1_y <= p1_y_comb;
   end
-  wire [31:0] p2_next;
-  foo_cycle1 foo_cycle1_i (
-    .x(p1[63:32]),
-    .y(p1[31:0]),
-    .out(p2_next)
+  wire [31:0] p2_out_comb;
+  foo_cycle1 stage_1 (
+    .x(p1_x),
+    .y(p1_y),
+    .out(p2_out_comb)
   );
-  reg [31:0] p2;
+  reg [31:0] p2_out;
   always_ff @ (posedge clk) begin
-    p2 <= p2_next;
+    p2_out <= p2_out_comb;
   end
-  assign out = p2;
+  assign out = p2_out;
 endmodule
 
