@@ -13,6 +13,8 @@ use xlsynth::{
 mod common;
 use common::{PipelineCfg, Port, StageInfo};
 
+mod build_pipeline;
+
 use crate::verilog_version::VerilogVersion;
 
 fn build_ports_from_ir(

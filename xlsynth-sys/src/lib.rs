@@ -545,6 +545,24 @@ extern "C" {
         dim_count: libc::size_t,
     ) -> *mut CVastDataType;
 
+    // -- Data type introspection
+    pub fn xls_vast_data_type_width_as_int64(
+        type_: *mut CVastDataType,
+        out_width: *mut i64,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    pub fn xls_vast_data_type_flat_bit_count_as_int64(
+        type_: *mut CVastDataType,
+        out_flat_bit_count: *mut i64,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    // Returns width expression; may return nullptr if none.
+    pub fn xls_vast_data_type_width(type_: *mut CVastDataType) -> *mut CVastExpression;
+
+    pub fn xls_vast_data_type_is_signed(type_: *mut CVastDataType) -> bool;
+
     pub fn xls_vast_verilog_file_make_continuous_assignment(
         f: *mut CVastFile,
         lhs: *mut CVastExpression,
@@ -640,6 +658,8 @@ extern "C" {
         ca: *mut CVastContinuousAssignment,
     );
 
+    pub fn xls_vast_verilog_module_get_name(m: *mut CVastModule) -> *mut std::os::raw::c_char;
+
     // - Expression conversions
     pub fn xls_vast_logic_ref_as_indexable_expression(
         v: *mut CVastLogicRef,
@@ -652,6 +672,8 @@ extern "C" {
     pub fn xls_vast_logic_ref_as_expression(v: *mut CVastLogicRef) -> *mut CVastExpression;
     pub fn xls_vast_slice_as_expression(v: *mut CVastSlice) -> *mut CVastExpression;
     pub fn xls_vast_index_as_expression(v: *mut CVastIndex) -> *mut CVastExpression;
+
+    pub fn xls_vast_logic_ref_get_name(v: *mut CVastLogicRef) -> *mut std::os::raw::c_char;
 
     pub fn xls_vast_verilog_file_add_include(f: *mut CVastFile, path: *const std::os::raw::c_char);
     pub fn xls_vast_verilog_file_emit(f: *const CVastFile) -> *mut std::os::raw::c_char;
@@ -1472,3 +1494,44 @@ pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
 /// (If you use this envvar from your crate proper -- i.e. not from build.rs --
 /// then it's perfectly fine.)
 pub const XLS_DSO_PATH: &str = env!("XLS_DSO_PATH");
+
+// Add opaque types for module port and def.
+#[repr(C)]
+pub struct CVastModulePort {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastDef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+// Direction enum for module ports.
+pub type VastModulePortDirection = i32;
+
+// Constants that match the C enum definitions.
+pub const XLS_VAST_MODULE_PORT_DIRECTION_INPUT: VastModulePortDirection = 0;
+pub const XLS_VAST_MODULE_PORT_DIRECTION_OUTPUT: VastModulePortDirection = 1;
+
+extern "C" {
+    // -- Module port inspection APIs
+    pub fn xls_vast_verilog_module_get_ports(
+        m: *mut CVastModule,
+        out_count: *mut libc::size_t,
+    ) -> *mut *mut CVastModulePort;
+
+    pub fn xls_vast_verilog_module_free_ports(
+        ports: *mut *mut CVastModulePort,
+        count: libc::size_t,
+    );
+
+    pub fn xls_vast_verilog_module_port_get_direction(
+        port: *mut CVastModulePort,
+    ) -> VastModulePortDirection;
+
+    pub fn xls_vast_verilog_module_port_get_def(port: *mut CVastModulePort) -> *mut CVastDef;
+
+    pub fn xls_vast_def_get_name(def: *mut CVastDef) -> *mut std::os::raw::c_char;
+
+    pub fn xls_vast_def_get_data_type(def: *mut CVastDef) -> *mut CVastDataType;
+}
