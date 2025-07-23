@@ -409,3 +409,116 @@ pub fn execute_command_with_context(
     }
     result
 }
+
+// -----------------------------------------------------------------------------
+// Shared DSLX -> IR conversion / optimization artifacts
+// -----------------------------------------------------------------------------
+
+pub struct DslxIrArtifacts {
+    pub raw_ir: String,
+    pub optimized_ir: Option<String>,
+    pub mangled_top: String,
+}
+
+pub struct DslxIrBuildOptions<'a> {
+    pub input_path: &'a std::path::Path,
+    pub dslx_top: &'a str,
+    pub dslx_stdlib_path: Option<&'a str>,
+    pub dslx_path: Option<&'a str>, // semicolon separated when Some
+    pub enable_warnings: Option<&'a [String]>,
+    pub disable_warnings: Option<&'a [String]>,
+    pub tool_path: Option<&'a str>,
+    pub type_inference_v2: Option<bool>,
+    pub optimize: bool,
+}
+
+/// Generalized builder that produces raw IR and (optionally) optimized IR for a
+/// DSLX module. If `optimize` is false, `optimized_ir` will be `None`.
+pub fn dslx_to_ir(opts: &DslxIrBuildOptions) -> DslxIrArtifacts {
+    let module_name = opts
+        .input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("valid module name");
+    let mangled_top =
+        xlsynth::mangle_dslx_name(module_name, opts.dslx_top).expect("mangling succeeds");
+
+    if let Some(tool_path) = opts.tool_path {
+        // External tool path conversion.
+        let raw_ir = crate::tools::run_ir_converter_main(
+            opts.input_path,
+            Some(opts.dslx_top),
+            opts.dslx_stdlib_path,
+            opts.dslx_path,
+            tool_path,
+            opts.enable_warnings,
+            opts.disable_warnings,
+            opts.type_inference_v2,
+        );
+        let optimized_ir = if opts.optimize {
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), &raw_ir).unwrap();
+            Some(crate::tools::run_opt_main(
+                tmp.path(),
+                Some(&mangled_top),
+                tool_path,
+            ))
+        } else {
+            None
+        };
+        DslxIrArtifacts {
+            raw_ir,
+            optimized_ir,
+            mangled_top,
+        }
+    } else {
+        if opts.type_inference_v2 == Some(true) {
+            eprintln!("error: --type_inference_v2 is only supported with external toolchain");
+            std::process::exit(1);
+        }
+        // Internal conversion path.
+        let dslx_contents = std::fs::read_to_string(opts.input_path).unwrap_or_else(|e| {
+            eprintln!(
+                "Failed to read DSLX file {}: {}",
+                opts.input_path.display(),
+                e
+            );
+            std::process::exit(1);
+        });
+        let stdlib_path = opts.dslx_stdlib_path.map(|p| std::path::Path::new(p));
+        let additional_search_paths: Vec<&std::path::Path> = opts
+            .dslx_path
+            .map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect())
+            .unwrap_or_default();
+        let convert_result = xlsynth::convert_dslx_to_ir_text(
+            &dslx_contents,
+            opts.input_path,
+            &xlsynth::DslxConvertOptions {
+                dslx_stdlib_path: stdlib_path,
+                additional_search_paths,
+                enable_warnings: opts.enable_warnings,
+                disable_warnings: opts.disable_warnings,
+            },
+        )
+        .expect("successful DSLX->IR conversion");
+        for w in &convert_result.warnings {
+            log::warn!("DSLX warning: {}", w);
+        }
+        let raw_ir = convert_result.ir;
+        let optimized_ir = if opts.optimize {
+            let pkg = xlsynth::IrPackage::parse_ir(&raw_ir, Some(&mangled_top)).unwrap();
+            Some(
+                xlsynth::optimize_ir(&pkg, &mangled_top)
+                    .unwrap()
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        DslxIrArtifacts {
+            raw_ir,
+            optimized_ir,
+            mangled_top,
+        }
+    }
+}

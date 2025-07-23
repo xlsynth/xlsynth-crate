@@ -1,86 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::common::{dslx_to_ir, DslxIrBuildOptions};
 use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
-use crate::tools::{run_ir_converter_main, run_opt_main};
-use xlsynth::{mangle_dslx_name, DslxConvertOptions, IrPackage};
 use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
 
 const SUBCOMMAND: &str = "dslx-equiv";
-
-pub struct OptimizedIrText {
-    pub ir_text: String,
-    pub mangled_top: String,
-}
-
-/// Builds (always optimized) IR text plus mangled top name for a DSLX module.
-fn build_ir_for_dslx(
-    input_path: &std::path::Path,
-    dslx_top: &str,
-    dslx_stdlib_path: Option<&str>,
-    dslx_path: Option<&str>,
-    enable_warnings: Option<&[String]>,
-    disable_warnings: Option<&[String]>,
-    tool_path: Option<&str>,
-    type_inference_v2: Option<bool>,
-) -> OptimizedIrText {
-    let module_name = input_path.file_stem().unwrap().to_str().unwrap();
-    let mangled_top = mangle_dslx_name(module_name, dslx_top).unwrap();
-
-    if let Some(tool_path) = tool_path {
-        // Convert via external tool then always optimize.
-        let mut ir_text = run_ir_converter_main(
-            input_path,
-            Some(dslx_top),
-            dslx_stdlib_path,
-            dslx_path,
-            tool_path,
-            enable_warnings,
-            disable_warnings,
-            type_inference_v2,
-        );
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), &ir_text).unwrap();
-        ir_text = run_opt_main(tmp.path(), Some(&mangled_top), tool_path);
-        OptimizedIrText {
-            ir_text,
-            mangled_top,
-        }
-    } else {
-        if type_inference_v2 == Some(true) {
-            eprintln!("error: --type_inference_v2 is only supported with external toolchain");
-            std::process::exit(1);
-        }
-        let dslx_contents = std::fs::read_to_string(input_path).unwrap_or_else(|e| {
-            eprintln!("Failed to read DSLX file {}: {}", input_path.display(), e);
-            std::process::exit(1);
-        });
-        let dslx_stdlib_path: Option<&std::path::Path> =
-            dslx_stdlib_path.map(|s| std::path::Path::new(s));
-        let additional_search_paths: Vec<&std::path::Path> = dslx_path
-            .map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect())
-            .unwrap_or_default();
-        let result = xlsynth::convert_dslx_to_ir_text(
-            &dslx_contents,
-            input_path,
-            &DslxConvertOptions {
-                dslx_stdlib_path,
-                additional_search_paths,
-                enable_warnings,
-                disable_warnings,
-            },
-        )
-        .expect("successful DSLX->IR conversion");
-        let pkg = IrPackage::parse_ir(&result.ir, Some(&mangled_top)).unwrap();
-        let optimized = xlsynth::optimize_ir(&pkg, &mangled_top).unwrap();
-        OptimizedIrText {
-            ir_text: optimized.to_string(),
-            mangled_top,
-        }
-    }
-}
 
 pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_dslx_equiv");
@@ -172,38 +99,41 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
-    let OptimizedIrText {
-        ir_text: lhs_ir_text,
-        mangled_top: lhs_mangled_top,
-    } = build_ir_for_dslx(
-        lhs_path,
-        lhs_top.unwrap(),
+    // Build artifacts (always optimized) for both sides.
+    let lhs_artifacts = dslx_to_ir(&DslxIrBuildOptions {
+        input_path: lhs_path,
+        dslx_top: lhs_top.unwrap(),
         dslx_stdlib_path,
         dslx_path,
         enable_warnings,
         disable_warnings,
         tool_path,
         type_inference_v2,
-    );
-    let OptimizedIrText {
-        ir_text: rhs_ir_text,
-        mangled_top: rhs_mangled_top,
-    } = build_ir_for_dslx(
-        rhs_path,
-        rhs_top.unwrap(),
+        optimize: true,
+    });
+    let rhs_artifacts = dslx_to_ir(&DslxIrBuildOptions {
+        input_path: rhs_path,
+        dslx_top: rhs_top.unwrap(),
         dslx_stdlib_path,
         dslx_path,
         enable_warnings,
         disable_warnings,
         tool_path,
         type_inference_v2,
-    );
+        optimize: true,
+    });
 
     let inputs = EquivInputs {
-        lhs_ir_text: &lhs_ir_text,
-        rhs_ir_text: &rhs_ir_text,
-        lhs_top: Some(&lhs_mangled_top),
-        rhs_top: Some(&rhs_mangled_top),
+        lhs_ir_text: lhs_artifacts
+            .optimized_ir
+            .as_deref()
+            .unwrap_or(&lhs_artifacts.raw_ir),
+        rhs_ir_text: rhs_artifacts
+            .optimized_ir
+            .as_deref()
+            .unwrap_or(&rhs_artifacts.raw_ir),
+        lhs_top: Some(&lhs_artifacts.mangled_top),
+        rhs_top: Some(&rhs_artifacts.mangled_top),
         flatten_aggregates,
         drop_params: &drop_params,
         strategy,
