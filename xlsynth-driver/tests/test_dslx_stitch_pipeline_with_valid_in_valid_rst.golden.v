@@ -62,4 +62,3 @@ module foo(
   end
   assign out = p2_out;
 endmodule
-

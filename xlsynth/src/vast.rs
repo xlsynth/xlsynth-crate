@@ -38,7 +38,7 @@ impl ModulePort {
         match dir {
             x if x == sys::XLS_VAST_MODULE_PORT_DIRECTION_INPUT => ModulePortDirection::Input,
             x if x == sys::XLS_VAST_MODULE_PORT_DIRECTION_OUTPUT => ModulePortDirection::Output,
-            _ => panic!("Invalid port direction: {dir}"),
+            _ => panic!("Invalid port direction: {}", dir),
         }
     }
 
@@ -461,6 +461,7 @@ impl VastModule {
         }
     }
 
+    /// Note: this does not warn or error if you add it to a Verilog-based file.
     pub fn add_always_ff(
         &mut self,
         sensitivity_list: &[&Expr],

@@ -381,6 +381,14 @@ fn main() {
                         .value_name("CSV")
                         .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
                         .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "flop_inputs",
+                    "Whether to insert input pipeline flops (default true)",
+                )
+                .add_bool_arg(
+                    "flop_outputs",
+                    "Whether to insert output pipeline flops (default true)",
                 ),
         )
         .subcommand(

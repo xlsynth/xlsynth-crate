@@ -28,15 +28,16 @@ endmodule
 module foo(
   input wire clk,
   input wire rst,
-  input wire input_valid,
+  input wire in_valid,
   input wire [31:0] x,
-  output wire [31:0] out
+  output wire [31:0] out,
+  output wire out_valid
 );
   reg [31:0] p0_x;
   reg p0_valid;
   always_ff @ (posedge clk) begin
-    p0_x <= input_valid ? x : p0_x;
-    p0_valid <= rst ? 1'b0 : input_valid;
+    p0_x <= in_valid ? x : p0_x;
+    p0_valid <= rst ? 1'b0 : in_valid;
   end
   wire [31:0] stage0_out_comb;
   foo_cycle0 foo_cycle0_i (
@@ -61,5 +62,5 @@ module foo(
     p2_valid <= rst ? 1'b0 : p1_valid;
   end
   assign out = p2_out;
+  assign out_valid = p2_valid;
 endmodule
-
