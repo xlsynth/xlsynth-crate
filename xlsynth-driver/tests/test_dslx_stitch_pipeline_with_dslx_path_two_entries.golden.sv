@@ -19,7 +19,6 @@ module foo(
   input wire clk,
   output wire [31:0] out
 );
-  always_ff @ (posedge clk) begin end
   wire [63:0] stage_0_out_comb;
   foo_cycle0 stage_0 (
     .out(stage_0_out_comb)

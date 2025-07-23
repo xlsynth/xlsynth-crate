@@ -73,21 +73,27 @@ fn make_flop_layer(
 ) -> NetBundle {
     // First create register declarations so they appear before procedural blocks.
     let mut new_name_to_ref = HashMap::new();
+
     // Collect and sort for deterministic emission order.
     let mut entries: Vec<(String, (LogicRef, VastDataType))> =
         current_inputs.name_to_ref.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Vector of tuples used later to emit assignments. Bool indicates this row is
-    // the valid-reg assignment.
-    let mut assign_info: Vec<(LogicRef, LogicRef, bool)> = Vec::new();
+    #[derive(PartialEq)]
+    enum IsValidReg {
+        Yes,
+        No,
+    }
+
+    // Vector of tuples used later to emit assignments.
+    let mut assign_info: Vec<(LogicRef, LogicRef, IsValidReg)> = Vec::new();
 
     for (name, (logic_ref, data_type)) in &entries {
         let reg = outer_module
             .add_reg(&format!("p{next_pipe_stage_number}_{}", name), &data_type)
             .unwrap();
         new_name_to_ref.insert(name.clone(), (reg.clone(), data_type.clone()));
-        assign_info.push((reg, logic_ref.clone(), false));
+        assign_info.push((reg, logic_ref.clone(), IsValidReg::No));
     }
 
     // Handle valid signal register declaration (if any) before always_ff.
@@ -95,7 +101,7 @@ fn make_flop_layer(
         let reg = outer_module
             .add_reg(&format!("p{next_pipe_stage_number}_valid"), &bit_type)
             .unwrap();
-        assign_info.push((reg.clone(), valid_signal.clone(), true));
+        assign_info.push((reg.clone(), valid_signal.clone(), IsValidReg::Yes));
         Some(reg)
     } else {
         None
@@ -107,35 +113,40 @@ fn make_flop_layer(
         .unwrap();
 
     // Now create the always_ff and emit assignments.
-    let always_ff = outer_module.add_always_ff(&[posedge_clk]).unwrap();
-    let mut sb = always_ff.get_statement_block();
+    //
+    // Note that we guard this so that we don't emit an empty always_ff block if
+    // there are no assignments to do in it.
+    if !assign_info.is_empty() {
+        let always_ff = outer_module.add_always_ff(&[posedge_clk]).unwrap();
+        let mut sb = always_ff.get_statement_block();
 
-    for (reg, src_logic, is_valid_reg) in assign_info {
-        let rhs = if !is_valid_reg {
-            // Data regs: include ternary guard if a valid signal exists.
-            if let Some(ref valid_signal) = current_inputs.valid_signal {
-                file.make_ternary(
-                    &valid_signal.to_expr(),
-                    &src_logic.to_expr(),
-                    &reg.to_expr(),
-                )
-            } else {
-                src_logic.to_expr()
-            }
-        } else {
-            // The valid reg itself just captures the signal directly, but respect reset
-            // gating.
-            if let Some(ref rst) = reset_signal {
-                if reset_active_low {
-                    file.make_ternary(&rst.to_expr(), &src_logic.to_expr(), &zero_expr)
+        for (reg, src_logic, is_valid_reg) in assign_info {
+            let rhs = if is_valid_reg == IsValidReg::No {
+                // Data regs: include ternary guard if a valid signal exists.
+                if let Some(ref valid_signal) = current_inputs.valid_signal {
+                    file.make_ternary(
+                        &valid_signal.to_expr(),
+                        &src_logic.to_expr(),
+                        &reg.to_expr(),
+                    )
                 } else {
-                    file.make_ternary(&rst.to_expr(), &zero_expr, &src_logic.to_expr())
+                    src_logic.to_expr()
                 }
             } else {
-                src_logic.to_expr()
-            }
-        };
-        sb.add_nonblocking_assignment(&reg.to_expr(), &rhs);
+                // The valid reg itself just captures the signal directly, but respect reset
+                // gating.
+                if let Some(ref rst) = reset_signal {
+                    if reset_active_low {
+                        file.make_ternary(&rst.to_expr(), &src_logic.to_expr(), &zero_expr)
+                    } else {
+                        file.make_ternary(&rst.to_expr(), &zero_expr, &src_logic.to_expr())
+                    }
+                } else {
+                    src_logic.to_expr()
+                }
+            };
+            sb.add_nonblocking_assignment(&reg.to_expr(), &rhs);
+        }
     }
 
     NetBundle {
