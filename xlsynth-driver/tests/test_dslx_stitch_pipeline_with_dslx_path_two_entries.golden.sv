@@ -29,7 +29,7 @@ module foo(
   assign p1_y_comb = stage_0_out_comb[63:32];
   reg [31:0] p1_x;
   reg [31:0] p1_y;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p1_x <= p1_x_comb;
     p1_y <= p1_y_comb;
   end
@@ -40,7 +40,7 @@ module foo(
     .out(stage_1_out_comb)
   );
   reg [31:0] p2_out;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p2_out <= stage_1_out_comb;
   end
   assign out = p2_out;

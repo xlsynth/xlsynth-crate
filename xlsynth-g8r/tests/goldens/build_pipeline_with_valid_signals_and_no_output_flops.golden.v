@@ -17,7 +17,7 @@ module top(
   reg [31:0] p0_a;
   reg [31:0] p0_b;
   reg p0_valid;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p0_a <= in_valid ? a : p0_a;
     p0_b <= in_valid ? b : p0_b;
     p0_valid <= rst ? 1'b0 : in_valid;

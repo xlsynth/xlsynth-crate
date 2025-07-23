@@ -13,7 +13,7 @@ module top(
 );
   reg [31:0] p0_a;
   reg [31:0] p0_b;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p0_a <= a;
     p0_b <= b;
   end
@@ -24,7 +24,7 @@ module top(
     .c(stage_0_out_comb)
   );
   reg [31:0] p1_c;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p1_c <= stage_0_out_comb;
   end
   assign c = p1_c;

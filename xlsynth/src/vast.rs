@@ -461,6 +461,7 @@ impl VastModule {
         }
     }
 
+    /// Note: this does not warn or error if you add it to a Verilog-based file.
     pub fn add_always_ff(
         &mut self,
         sensitivity_list: &[&Expr],

@@ -112,12 +112,12 @@ fn make_flop_layer(
         .make_literal("bits[1]:0", &IrFormatPreference::Binary)
         .unwrap();
 
-    // Now create the always_ff and emit assignments.
+    // Now create the `always` block and emit assignments into it.
     //
-    // Note that we guard this so that we don't emit an empty always_ff block if
-    // there are no assignments to do in it.
+    // Note that we guard this so that we don't emit an empty `always` block if
+    // there are no assignments to perform within it.
     if !assign_info.is_empty() {
-        let always_ff = outer_module.add_always_ff(&[posedge_clk]).unwrap();
+        let always_ff = outer_module.add_always_at(&[posedge_clk]).unwrap();
         let mut sb = always_ff.get_statement_block();
 
         for (reg, src_logic, is_valid_reg) in assign_info {

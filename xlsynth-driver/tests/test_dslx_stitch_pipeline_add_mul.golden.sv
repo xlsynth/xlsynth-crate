@@ -37,7 +37,7 @@ module add_mul(
   reg [31:0] p0_x;
   reg [31:0] p0_y;
   reg [31:0] p0_z;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p0_x <= x;
     p0_y <= y;
     p0_z <= z;
@@ -55,7 +55,7 @@ module add_mul(
   assign p1_z_comb = stage_0_out_comb[63:32];
   reg [31:0] p1_sum;
   reg [31:0] p1_z;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p1_sum <= p1_sum_comb;
     p1_z <= p1_z_comb;
   end
@@ -66,7 +66,7 @@ module add_mul(
     .out(stage_1_out_comb)
   );
   reg [31:0] p2_out;
-  always_ff @ (posedge clk) begin
+  always @ (posedge clk) begin
     p2_out <= stage_1_out_comb;
   end
   assign out = p2_out;
