@@ -27,6 +27,23 @@ struct NetBundle {
     valid_signal: Option<LogicRef>,
 }
 
+impl std::fmt::Debug for NetBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name_to_ref_str = self
+            .name_to_ref
+            .iter()
+            .map(|(name, (logic_ref, _vast_type))| format!("{:?} => {}", name, logic_ref.name()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "NetBundle {{ name_to_ref: [{}], valid_signal: {:?} }}",
+            name_to_ref_str,
+            self.valid_signal.as_ref().map(|v| v.name())
+        )
+    }
+}
+
 fn to_net_bundle(
     names: &[String],
     ports: &[(LogicRef, VastDataType)],
@@ -206,6 +223,7 @@ pub fn build_pipeline(
 
     let (mut current_inputs, outer_module_outputs) =
         create_outer_io_ports(file, &mut outer_module, &config);
+    log::debug!("starting with current_inputs: {:?}", current_inputs);
 
     let mut next_pipe_stage_number = 0;
     if config.flop_inputs {
@@ -223,19 +241,23 @@ pub fn build_pipeline(
     }
 
     for (i, stage_module) in config.stage_modules.iter().enumerate() {
-        // Make declarations for output wires so that we can wire those up to the
-        // outputs.
-        let mut stage_output_wires: HashMap<String, (LogicRef, VastDataType)> = HashMap::new();
-        // Use a distinctive wire naming scheme: p<N>_<port>_comb, where <N>
-        // is the pipeline stage number _after_ this combinational block but
-        // _before_ the register that will capture it. This guarantees
-        // uniqueness and clearly documents the role of the signal.
-        for output_port in stage_module.output_ports() {
-            let vast_type = file.make_bit_vector_type(output_port.width(), false);
-            let wire_name = format!("p{}_{}_comb", next_pipe_stage_number, output_port.name());
-            let wire = outer_module.add_wire(&wire_name, &vast_type);
-            stage_output_wires.insert(output_port.name(), (wire, vast_type));
-        }
+        log::debug!(
+            "building stage {}; module name: {}; current_inputs: {:?}",
+            i,
+            stage_module.name(),
+            current_inputs
+        );
+
+        assert_eq!(
+            stage_module.output_ports().len(),
+            1,
+            "Stage module must have exactly one output port"
+        );
+        let stage_output_port = &stage_module.output_ports()[0];
+        let stage_output_name = format!("stage_{}_out_comb", i);
+        let stage_output_width = stage_output_port.width();
+        let stage_output_type = file.make_bit_vector_type(stage_output_width, false);
+        let stage_output_wire = outer_module.add_wire(&stage_output_name, &stage_output_type);
 
         // -- "Smart" slicing: the stage has exactly one output port (because that's how
         // XLS does combinational module generation today), but the next stage
@@ -248,68 +270,39 @@ pub fn build_pipeline(
             1,
             "Stage module must have exactly one output port"
         );
-        // Get the sole output port info.
-        let sole_output_port = &stage_module.output_ports()[0];
-        let sole_output_port_width = sole_output_port.width();
-        let sole_output_port_wire = stage_output_wires
-            .get(&sole_output_port.name())
-            .unwrap()
-            .0
-            .clone();
 
-        // Determine the required destinations.
-        let mut dest_ports: Vec<(String, i64)> = Vec::new();
-        if i + 1 < config.stage_modules.len() {
+        // Determine the required destinations to potentially slice the output wire
+        // into. This is a vector of (next_stage_name, start, limit)
+        let mut dest_ports: Vec<(String, i64, i64)> = Vec::new();
+        let mut dest_bit_index: i64 = 0;
+
+        let last_stage = i + 1 == config.stage_modules.len();
+        if !last_stage {
             // Not the last stage – look at next stage's input ports.
             for p in config.stage_modules[i + 1].input_ports() {
-                dest_ports.push((p.name().to_string(), p.width()));
+                dest_ports.push((
+                    p.name().to_string(),
+                    dest_bit_index,
+                    dest_bit_index + p.width(),
+                ));
+                dest_bit_index += p.width();
             }
         } else {
             // Last stage – slice according to outer-module outputs.
             for (logic_ref, dt) in &outer_module_outputs {
-                dest_ports.push((logic_ref.name().to_string(), dt.width_as_int64().unwrap()));
+                dest_ports.push((
+                    logic_ref.name().to_string(),
+                    dest_bit_index,
+                    dest_bit_index + dt.width_as_int64().unwrap(),
+                ));
+                dest_bit_index += dt.width_as_int64().unwrap();
             }
         }
 
-        if dest_ports.len() > 1 {
-            let total_bits: i64 = dest_ports.iter().map(|(_, w)| *w).sum();
-            assert_eq!(
-                sole_output_port_width, total_bits,
-                "Bit width mismatch between sole output ({sole_output_port_width}) and concatenated destination ports ({}).",
-                total_bits
-            );
-
-            // Create slice wires for each destination based on cumulative cursor
-            let mut cursor: i64 = 0;
-            for (dest_name, w) in dest_ports {
-                assert!(
-                    !stage_output_wires.contains_key(&dest_name),
-                    "Destination port {dest_name} already exists"
-                );
-                let hi: i64 = sole_output_port_width - 1 - cursor;
-                let lo: i64 = hi - w + 1;
-
-                let vast_type = file.make_bit_vector_type(w, false);
-                let wire_name = format!("p{}_{}_comb", next_pipe_stage_number, dest_name);
-                let wire = outer_module.add_wire(&wire_name, &vast_type);
-
-                // Continuous assign: wire = sole_wire[hi:lo]
-                let slice_expr = file
-                    .make_slice(&sole_output_port_wire.to_indexable_expr(), hi, lo)
-                    .to_expr();
-                let assign = file.make_continuous_assignment(&wire.to_expr(), &slice_expr);
-                outer_module.add_member_continuous_assignment(assign);
-
-                stage_output_wires.insert(dest_name, (wire, vast_type));
-
-                cursor += w;
-            }
-
-            assert_eq!(
-                cursor, sole_output_port_width,
-                "Cursor after slicing ({cursor}) did not equal sole output width ({sole_output_port_width})."
-            );
-        }
+        log::debug!(
+            "determined required destinations; dest_ports: {:?}",
+            dest_ports
+        );
 
         // Instantiate the stage module with the current inputs.
         let mut stage_port_names: Vec<String> = Vec::new();
@@ -318,18 +311,21 @@ pub fn build_pipeline(
             match port.direction() {
                 ModulePortDirection::Input => {
                     stage_port_names.push(port.name());
-                    let input_expr = current_inputs
-                        .name_to_ref
-                        .get(&port.name())
-                        .unwrap()
-                        .0
-                        .to_expr();
+                    let (input_logic_ref, _) =
+                        current_inputs
+                            .name_to_ref
+                            .get(&port.name())
+                            .expect(&format!(
+                                "module {} input port {} not found in current_inputs",
+                                stage_module.name(),
+                                port.name()
+                            ));
+                    let input_expr = input_logic_ref.to_expr();
                     stage_expressions.push(Some(input_expr));
                 }
                 ModulePortDirection::Output => {
                     stage_port_names.push(port.name());
-                    let output_wire = stage_output_wires.get(&port.name()).unwrap();
-                    stage_expressions.push(Some(output_wire.0.to_expr()));
+                    stage_expressions.push(Some(stage_output_wire.to_expr()));
                 }
             }
         }
@@ -354,17 +350,49 @@ pub fn build_pipeline(
         );
         outer_module.add_member_instantiation(instantiation);
 
-        // Now grab the output signals from the instance and that is the new
-        // `current_inputs`.
-        current_inputs = NetBundle {
-            name_to_ref: stage_output_wires,
-            valid_signal: current_inputs.valid_signal,
+        // If the next stage wants more than one signal (i.e. it has arity > 1), we
+        // break out the signals by slicing here.
+        current_inputs = if dest_ports.len() > 1 {
+            let total_bits: i64 = dest_bit_index;
+            assert_eq!(
+                stage_output_width, total_bits,
+                "Bit width mismatch between sole output ({stage_output_width}) and concatenated destination ports ({}).",
+                total_bits
+            );
+
+            let mut name_to_ref = HashMap::new();
+            for (dest_name, start, limit) in dest_ports {
+                let vast_type = file.make_bit_vector_type(limit - start, false);
+                let wire_name = format!("p{}_{}_comb", next_pipe_stage_number, dest_name);
+                let wire = outer_module.add_wire(&wire_name, &vast_type);
+                let slice_expr = file
+                    .make_slice(&stage_output_wire.to_indexable_expr(), limit - 1, start)
+                    .to_expr();
+                let assign = file.make_continuous_assignment(&wire.to_expr(), &slice_expr);
+                outer_module.add_member_continuous_assignment(assign);
+                name_to_ref.insert(dest_name.clone(), (wire, vast_type));
+            }
+
+            NetBundle {
+                name_to_ref,
+                valid_signal: current_inputs.valid_signal,
+            }
+        } else {
+            let name_to_ref = HashMap::from([(
+                dest_ports[0].0.clone(),
+                (stage_output_wire, stage_output_type),
+            )]);
+            NetBundle {
+                name_to_ref,
+                valid_signal: current_inputs.valid_signal,
+            }
         };
+
+        log::debug!("current_inputs now: {:?}", current_inputs);
 
         // If this is not the last stage, then we need to make a intra-pipeline flop
         // layer.
-        let last = i + 1 == config.stage_modules.len();
-        if !last {
+        if !last_stage {
             current_inputs = make_flop_layer(
                 file,
                 &mut outer_module,

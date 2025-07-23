@@ -647,7 +647,7 @@ mod tests {
     use env_logger;
     use pretty_assertions::assert_eq;
     use xlsynth::ir_value::IrBits;
-    use xlsynth_test_helpers;
+    use xlsynth_test_helpers::{self, compare_golden_sv};
 
     #[test]
     fn test_stitch_pipeline_tuple() {
@@ -684,7 +684,11 @@ mod tests {
 
     #[test]
     fn test_stitch_pipeline_struct() {
-        let dslx = "struct S { a: u32, b: u32 }\nfn foo_cycle0(s: S) -> S { s }\nfn foo_cycle1(s: S) -> u32 { s.a + s.b }";
+        let _ = env_logger::builder().is_test(true).try_init();
+        let dslx = r#"struct S { a: u32, b: u32 }
+fn foo_cycle0(s: S) -> S { s }
+fn foo_cycle1(s: S) -> u32 { s.a + s.b }
+"#;
         let result = stitch_pipeline(
             dslx,
             Path::new("test.x"),
@@ -697,21 +701,8 @@ mod tests {
             true,
         )
         .unwrap();
-        xlsynth_test_helpers::assert_valid_sv(&result);
 
-        let golden_path = std::path::Path::new("tests/goldens/foo.golden.sv");
-        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-            std::fs::write(golden_path, &result).expect("write golden");
-        } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-            std::fs::write(golden_path, &result).expect("write golden");
-        } else {
-            let want = std::fs::read_to_string(golden_path).expect("read golden");
-            assert_eq!(
-                result.trim(),
-                want.trim(),
-                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-            );
-        }
+        compare_golden_sv(&result, "tests/goldens/foo.golden.sv");
     }
 
     #[test]
@@ -729,21 +720,7 @@ mod tests {
             true,
         )
         .unwrap();
-        xlsynth_test_helpers::assert_valid_sv(&result);
-
-        let golden_path = std::path::Path::new("tests/goldens/one.golden.sv");
-        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-            std::fs::write(golden_path, &result).expect("write golden");
-        } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-            std::fs::write(golden_path, &result).expect("write golden");
-        } else {
-            let want = std::fs::read_to_string(golden_path).expect("read golden");
-            assert_eq!(
-                result.trim(),
-                want.trim(),
-                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-            );
-        }
+        compare_golden_sv(&result, "tests/goldens/one.golden.sv");
     }
 
     fn verilog_for_foo_pipeline_with_valid() -> String {
@@ -768,22 +745,7 @@ mod tests {
     fn test_stitch_pipeline_with_valid() {
         let _ = env_logger::builder().is_test(true).try_init();
         let result = verilog_for_foo_pipeline_with_valid();
-        xlsynth_test_helpers::assert_valid_sv(&result);
-
-        // Golden file check
-        let golden_path = std::path::Path::new("tests/goldens/foo_with_valid.golden.sv");
-        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-            std::fs::write(golden_path, &result).expect("write golden");
-        } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-            std::fs::write(golden_path, &result).expect("write golden");
-        } else {
-            let want = std::fs::read_to_string(golden_path).expect("read golden");
-            assert_eq!(
-                result.trim(),
-                want.trim(),
-                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-            );
-        }
+        compare_golden_sv(&result, "tests/goldens/foo_with_valid.golden.sv");
 
         // Simulation check
         let inputs = vec![("x", IrBits::u32(5))];

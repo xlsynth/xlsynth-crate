@@ -19,15 +19,15 @@ module one(
     p0_x <= x;
     p0_y <= y;
   end
-  wire [31:0] p1_next;
-  one_cycle0 one_cycle0_i (
+  wire [31:0] stage_0_out_comb;
+  one_cycle0 stage_0 (
     .x(p0_x),
     .y(p0_y),
-    .out(p1_next)
+    .out(stage_0_out_comb)
   );
-  reg [31:0] p1;
+  reg [31:0] p1_out;
   always_ff @ (posedge clk) begin
-    p1 <= p1_next;
+    p1_out <= stage_0_out_comb;
   end
-  assign out = p1;
+  assign out = p1_out;
 endmodule

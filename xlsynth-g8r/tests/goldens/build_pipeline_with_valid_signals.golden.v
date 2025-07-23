@@ -22,16 +22,16 @@ module top(
     p0_b <= in_valid ? b : p0_b;
     p0_valid <= rst ? 1'b0 : in_valid;
   end
-  wire [31:0] p1_c_comb;
+  wire [31:0] stage_0_out_comb;
   add32 stage_0 (
     .a(p0_a),
     .b(p0_b),
-    .c(p1_c_comb)
+    .c(stage_0_out_comb)
   );
   reg [31:0] p1_c;
   reg p1_valid;
   always_ff @ (posedge clk) begin
-    p1_c <= p0_valid ? p1_c_comb : p1_c;
+    p1_c <= p0_valid ? stage_0_out_comb : p1_c;
     p1_valid <= rst ? 1'b0 : p0_valid;
   end
   assign c = p1_c;

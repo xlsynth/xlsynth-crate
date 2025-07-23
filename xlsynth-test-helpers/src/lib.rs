@@ -16,8 +16,16 @@ pub fn compare_golden_sv(got: &str, relpath: &str) {
         || !golden_path.exists()
         || golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0
     {
+        log::info!(
+            "compare_golden_sv; writing golden file to {}",
+            golden_path.display()
+        );
         std::fs::write(golden_path, got).expect("write golden");
     } else {
+        log::info!(
+            "compare_golden_sv; reading golden file from {}",
+            golden_path.display()
+        );
         let want = std::fs::read_to_string(golden_path).expect("read golden");
         assert_eq!(
             got.trim(),

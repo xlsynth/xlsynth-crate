@@ -42,26 +42,32 @@ module mul_add(
     p0_y <= y;
     p0_z <= z;
   end
-  wire [63:0] p1_next;
-  mul_add_cycle0 mul_add_cycle0_i (
+  wire [63:0] stage_0_out_comb;
+  mul_add_cycle0 stage_0 (
     .x(p0_x),
     .y(p0_y),
     .z(p0_z),
-    .out(p1_next)
+    .out(stage_0_out_comb)
   );
-  reg [63:0] p1;
+  wire [31:0] p1_partial_comb;
+  assign p1_partial_comb = stage_0_out_comb[31:0];
+  wire [31:0] p1_z_comb;
+  assign p1_z_comb = stage_0_out_comb[63:32];
+  reg [31:0] p1_partial;
+  reg [31:0] p1_z;
   always_ff @ (posedge clk) begin
-    p1 <= p1_next;
+    p1_partial <= p1_partial_comb;
+    p1_z <= p1_z_comb;
   end
-  wire [31:0] p2_next;
-  mul_add_cycle1 mul_add_cycle1_i (
-    .partial(p1[63:32]),
-    .z(p1[31:0]),
-    .out(p2_next)
+  wire [31:0] stage_1_out_comb;
+  mul_add_cycle1 stage_1 (
+    .partial(p1_partial),
+    .z(p1_z),
+    .out(stage_1_out_comb)
   );
-  reg [31:0] p2;
+  reg [31:0] p2_out;
   always_ff @ (posedge clk) begin
-    p2 <= p2_next;
+    p2_out <= stage_1_out_comb;
   end
-  assign out = p2;
+  assign out = p2_out;
 endmodule
