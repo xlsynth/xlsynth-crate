@@ -13,6 +13,7 @@ use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use test_case::test_case;
 
 use pretty_assertions::assert_eq;
+use xlsynth_test_helpers::compare_golden_sv;
 
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
     let tool_path =
@@ -2756,22 +2757,11 @@ dslx_stdlib_path = "{}""#,
     );
 
     let sv = String::from_utf8_lossy(&output.stdout).to_string();
-    xlsynth_test_helpers::assert_valid_sv(&sv);
 
-    // Golden comparison.
-    let golden_path =
-        std::path::Path::new("tests/test_dslx_stitch_pipeline_custom_stdlib.golden.sv");
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-        println!("INFO: Updating golden file: {}", golden_path.display());
-        std::fs::write(golden_path, &sv).expect("write golden");
-    } else {
-        let want = std::fs::read_to_string(golden_path).expect("read golden");
-        assert_eq!(
-            sv.trim(),
-            want.trim(),
-            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+    compare_golden_sv(
+        &sv,
+        "tests/test_dslx_stitch_pipeline_custom_stdlib.golden.sv",
+    );
 }
 
 #[test]
@@ -2799,18 +2789,11 @@ fn test_dslx_stitch_pipeline_with_valid() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    xlsynth_test_helpers::assert_valid_sv(&stdout);
-    let golden_path = std::path::Path::new("tests/test_dslx_stitch_pipeline_with_valid.golden.sv");
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-        std::fs::write(golden_path, &stdout).expect("write golden");
-    } else {
-        let want = std::fs::read_to_string(golden_path).expect("read golden");
-        assert_eq!(
-            stdout.trim(),
-            want.trim(),
-            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+
+    compare_golden_sv(
+        &stdout,
+        "tests/test_dslx_stitch_pipeline_with_valid.golden.sv",
+    );
 
     // Simulation (input_valid only, active-low rst)
     simulate_basic_valid_pipeline(&stdout, "foo", "input_valid", "rst", false);
@@ -2842,19 +2825,10 @@ fn test_stitch_with_valid_custom_in_valid_reset() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    xlsynth_test_helpers::assert_valid_sv(&stdout);
-    let golden_path =
-        std::path::Path::new("tests/test_dslx_stitch_pipeline_with_valid_in_valid_rst.golden.sv");
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-        std::fs::write(golden_path, &stdout).expect("write golden");
-    } else {
-        let want = std::fs::read_to_string(golden_path).expect("read golden");
-        assert_eq!(
-            stdout.trim(),
-            want.trim(),
-            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+    compare_golden_sv(
+        &stdout,
+        "tests/test_dslx_stitch_pipeline_with_valid_in_valid_rst.golden.sv",
+    );
 
     // Simulation active-high reset without output_valid
     simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst", false);
@@ -2886,20 +2860,10 @@ fn test_stitch_with_valid_custom_in_valid_rst_n_active_low() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    xlsynth_test_helpers::assert_valid_sv(&stdout);
-    let golden_path = std::path::Path::new(
+    compare_golden_sv(
+        &stdout,
         "tests/test_dslx_stitch_pipeline_with_valid_in_valid_rst_n_active_low.golden.sv",
     );
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-        std::fs::write(golden_path, &stdout).expect("write golden");
-    } else {
-        let want = std::fs::read_to_string(golden_path).expect("read golden");
-        assert_eq!(
-            stdout.trim(),
-            want.trim(),
-            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
 
     // Simulation active-low reset with rst_n name
     simulate_basic_valid_pipeline(&stdout, "foo", "in_valid", "rst_n", true);
@@ -2933,20 +2897,10 @@ fn test_stitch_with_valid_custom_in_and_out_valid() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    xlsynth_test_helpers::assert_valid_sv(&stdout);
-    let golden_path = std::path::Path::new(
+    compare_golden_sv(
+        &stdout,
         "tests/test_dslx_stitch_pipeline_with_valid_in_and_out_valid.golden.sv",
     );
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-        std::fs::write(golden_path, &stdout).expect("write golden");
-    } else {
-        let want = std::fs::read_to_string(golden_path).expect("read golden");
-        assert_eq!(
-            stdout.trim(),
-            want.trim(),
-            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
 
     // Simulation check for custom valid signal names.
     let inputs = vec![("x", IrBits::u32(5))];
