@@ -41,6 +41,15 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .get_one::<String>("reset_active_low")
         .map(|s| s == "true")
         .unwrap_or(false);
+
+    let flop_inputs = matches
+        .get_one::<String>("flop_inputs")
+        .map(|s| s == "true")
+        .unwrap_or(true);
+    let flop_outputs = matches
+        .get_one::<String>("flop_outputs")
+        .map(|s| s == "true")
+        .unwrap_or(true);
     let result = if valid_mode {
         xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline_with_valid(
             &dslx,
@@ -64,6 +73,8 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
             stage_list.as_ref().map(|v| v.as_slice()),
             paths.stdlib_path.as_deref(),
             &path_refs,
+            flop_inputs,
+            flop_outputs,
         )
     };
     match result {

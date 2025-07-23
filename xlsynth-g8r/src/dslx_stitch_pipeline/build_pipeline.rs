@@ -3,11 +3,9 @@
 use std::collections::HashMap;
 
 use xlsynth::ir_value::IrFormatPreference;
-use xlsynth::vast::{
-    Expr, LogicRef, ModulePort, ModulePortDirection, VastDataType, VastFile, VastModule,
-};
+use xlsynth::vast::{Expr, LogicRef, ModulePortDirection, VastDataType, VastFile, VastModule};
 
-use crate::verilog_version::VerilogVersion;
+use crate::xls_ir::ir::FunctionType;
 
 pub struct PipelineConfig<'a> {
     pub top_module_name: String,
@@ -22,8 +20,6 @@ pub struct PipelineConfig<'a> {
     pub output_valid_signal: Option<String>,
     pub reset_signal: Option<String>,
     pub reset_active_low: bool,
-
-    pub verilog_version: VerilogVersion,
 }
 
 struct NetBundle {
@@ -48,7 +44,7 @@ fn to_net_bundle(
 
 /// Creates a layer of flops using the input combinational signals given in
 /// `current_inputs`. Returns the new `current_inputs` bundle.
-pub fn make_flop_layer(
+fn make_flop_layer(
     file: &mut VastFile,
     outer_module: &mut VastModule,
     posedge_clk: &Expr,
@@ -190,6 +186,12 @@ pub fn build_pipeline(
     file: &mut VastFile,
     config: &PipelineConfig,
 ) -> Result<String, xlsynth::XlsynthError> {
+    if config.stage_modules.is_empty() {
+        return Err(xlsynth::XlsynthError(
+            "Cannot build pipeline: no stage modules provided".to_string(),
+        ));
+    }
+
     let mut outer_module: VastModule = file.add_module(&config.top_module_name);
 
     let bit_type = file.make_bit_vector_type(1, false);
@@ -233,6 +235,80 @@ pub fn build_pipeline(
             let wire_name = format!("p{}_{}_comb", next_pipe_stage_number, output_port.name());
             let wire = outer_module.add_wire(&wire_name, &vast_type);
             stage_output_wires.insert(output_port.name(), (wire, vast_type));
+        }
+
+        // -- "Smart" slicing: the stage has exactly one output port (because that's how
+        // XLS does combinational module generation today), but the next stage
+        // (or the final outer-module connection) may require multiple
+        // signals wired up to input ports: create slice wires for each required
+        // destination.
+
+        assert_eq!(
+            stage_module.output_ports().len(),
+            1,
+            "Stage module must have exactly one output port"
+        );
+        // Get the sole output port info.
+        let sole_output_port = &stage_module.output_ports()[0];
+        let sole_output_port_width = sole_output_port.width();
+        let sole_output_port_wire = stage_output_wires
+            .get(&sole_output_port.name())
+            .unwrap()
+            .0
+            .clone();
+
+        // Determine the required destinations.
+        let mut dest_ports: Vec<(String, i64)> = Vec::new();
+        if i + 1 < config.stage_modules.len() {
+            // Not the last stage – look at next stage's input ports.
+            for p in config.stage_modules[i + 1].input_ports() {
+                dest_ports.push((p.name().to_string(), p.width()));
+            }
+        } else {
+            // Last stage – slice according to outer-module outputs.
+            for (logic_ref, dt) in &outer_module_outputs {
+                dest_ports.push((logic_ref.name().to_string(), dt.width_as_int64().unwrap()));
+            }
+        }
+
+        if dest_ports.len() > 1 {
+            let total_bits: i64 = dest_ports.iter().map(|(_, w)| *w).sum();
+            assert_eq!(
+                sole_output_port_width, total_bits,
+                "Bit width mismatch between sole output ({sole_output_port_width}) and concatenated destination ports ({}).",
+                total_bits
+            );
+
+            // Create slice wires for each destination based on cumulative cursor
+            let mut cursor: i64 = 0;
+            for (dest_name, w) in dest_ports {
+                assert!(
+                    !stage_output_wires.contains_key(&dest_name),
+                    "Destination port {dest_name} already exists"
+                );
+                let hi: i64 = sole_output_port_width - 1 - cursor;
+                let lo: i64 = hi - w + 1;
+
+                let vast_type = file.make_bit_vector_type(w, false);
+                let wire_name = format!("p{}_{}_comb", next_pipe_stage_number, dest_name);
+                let wire = outer_module.add_wire(&wire_name, &vast_type);
+
+                // Continuous assign: wire = sole_wire[hi:lo]
+                let slice_expr = file
+                    .make_slice(&sole_output_port_wire.to_indexable_expr(), hi, lo)
+                    .to_expr();
+                let assign = file.make_continuous_assignment(&wire.to_expr(), &slice_expr);
+                outer_module.add_member_continuous_assignment(assign);
+
+                stage_output_wires.insert(dest_name, (wire, vast_type));
+
+                cursor += w;
+            }
+
+            assert_eq!(
+                cursor, sole_output_port_width,
+                "Cursor after slicing ({cursor}) did not equal sole output width ({sole_output_port_width})."
+            );
         }
 
         // Instantiate the stage module with the current inputs.
@@ -317,9 +393,16 @@ pub fn build_pipeline(
         next_pipe_stage_number += 1;
     }
 
+    assert_eq!(
+        next_pipe_stage_number as usize,
+        (config.stage_modules.len() - 1)
+            + config.flop_inputs as usize
+            + config.flop_outputs as usize
+    );
+
     // Now we need to wire up the output ports for the outer module using the
     // `current_inputs` bundle.
-    for (i, (logic_ref, data_type)) in outer_module_outputs.iter().enumerate() {
+    for (logic_ref, _data_type) in outer_module_outputs.iter() {
         // Make an assignment to this output from the corresponding `current_inputs`
         // value.
         let current_input = &current_inputs.name_to_ref.get(&logic_ref.name()).unwrap().0;
@@ -347,6 +430,8 @@ pub fn build_pipeline(
 mod tests {
     use xlsynth::vast::VastFileType;
 
+    use xlsynth_test_helpers::compare_golden_sv;
+
     use super::*;
 
     fn add_add32_module(file: &mut VastFile) -> VastModule {
@@ -359,26 +444,6 @@ mod tests {
         let assignment = file.make_continuous_assignment(&c.to_expr(), &add);
         module.add_member_continuous_assignment(assignment);
         module
-    }
-
-    fn compare_golden_file(got: &str, relpath: &str) {
-        let golden_path = std::path::Path::new(relpath);
-        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok()
-            || !golden_path.exists()
-            || golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0
-        {
-            std::fs::write(golden_path, got).expect("write golden");
-        } else {
-            let want = std::fs::read_to_string(golden_path).expect("read golden");
-            assert_eq!(
-                got.trim(),
-                want.trim(),
-                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-            );
-        }
-
-        // Validate generated Verilog is syntactically correct after golden check.
-        xlsynth_test_helpers::assert_valid_sv(&got);
     }
 
     /// Builds a pipeline that is one stage with input/output IO flops.
@@ -397,11 +462,10 @@ mod tests {
             output_valid_signal: None,
             reset_signal: None,
             reset_active_low: false,
-            verilog_version: VerilogVersion::Verilog,
         };
         let pipeline = build_pipeline(&mut file, &config).unwrap();
 
-        compare_golden_file(&pipeline, "tests/goldens/build_pipeline_simple.golden.v");
+        compare_golden_sv(&pipeline, "tests/goldens/build_pipeline_simple.golden.v");
     }
 
     /// Builds a pipeline that is one stage with input/output IO flops and
@@ -421,11 +485,10 @@ mod tests {
             output_valid_signal: Some("out_valid".to_string()),
             reset_signal: Some("rst".to_string()),
             reset_active_low: false,
-            verilog_version: VerilogVersion::Verilog,
         };
         let pipeline = build_pipeline(&mut file, &config).unwrap();
 
-        compare_golden_file(
+        compare_golden_sv(
             &pipeline,
             "tests/goldens/build_pipeline_with_valid_signals.golden.v",
         );
@@ -448,11 +511,10 @@ mod tests {
             output_valid_signal: Some("out_valid".to_string()),
             reset_signal: Some("rst".to_string()),
             reset_active_low: false,
-            verilog_version: VerilogVersion::Verilog,
         };
         let pipeline = build_pipeline(&mut file, &config).unwrap();
 
-        compare_golden_file(
+        compare_golden_sv(
             &pipeline,
             "tests/goldens/build_pipeline_with_valid_signals_and_no_output_flops.golden.v",
         );
@@ -475,11 +537,10 @@ mod tests {
             output_valid_signal: Some("out_valid".to_string()),
             reset_signal: Some("rst".to_string()),
             reset_active_low: false,
-            verilog_version: VerilogVersion::Verilog,
         };
         let pipeline = build_pipeline(&mut file, &config).unwrap();
 
-        compare_golden_file(
+        compare_golden_sv(
             &pipeline,
             "tests/goldens/build_pipeline_with_valid_signals_and_no_input_flops.golden.v",
         );

@@ -14,6 +14,7 @@ mod common;
 use common::{PipelineCfg, Port, StageInfo};
 
 mod build_pipeline;
+use build_pipeline::{PipelineConfig as BuildPipelineConfig, build_pipeline as build_wrapper};
 
 use crate::verilog_version::VerilogVersion;
 
@@ -230,6 +231,8 @@ pub fn stitch_pipeline(
     explicit_stages: Option<&[String]>,
     stdlib_path: Option<&Path>,
     search_paths: &[&Path],
+    flop_inputs: bool,
+    flop_outputs: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
     check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
     let convert_opts = DslxConvertOptions {
@@ -250,212 +253,103 @@ pub fn stitch_pipeline(
     verify_stage_signatures(&ir, &stages)?;
 
     // For each stage run codegen immediately so we can parse its port list.
-    // Use the combinational generator so the emitted modules have no clock
-    // port; this simplifies the stitching wrapper logic.
     let mut stage_infos = Vec::with_capacity(stages.len());
     for (stage_unmangled, stage_mangled) in &stages {
-        let info = make_stage_info_comb(&cfg, stage_unmangled, stage_mangled, false)?;
-        stage_infos.push(info);
+        stage_infos.push(make_stage_info_comb(
+            &cfg,
+            stage_unmangled,
+            stage_mangled,
+            false,
+        )?);
     }
 
-    // Build the wrapper using VAST.
-    let file_type = match cfg.verilog_version {
+    // Prepare VAST stubs for the new build_pipeline implementation.
+    let file_type = match verilog_version {
         VerilogVersion::SystemVerilog => xlsynth::vast::VastFileType::SystemVerilog,
         VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
     };
-    let mut file = xlsynth::vast::VastFile::new(file_type);
-
-    let scalar_type = file.make_scalar_type(); // 1-bit default
-    // Keep any dynamically created VAST data types alive for the lifetime of
-    // this function (until we emit the file) by storing them in this Vec.
-    let mut dynamic_types: Vec<xlsynth::vast::VastDataType> = Vec::new();
-
-    // Create the wrapper module. Stage modules generated via the
-    // combinational generator have no clock ports, but the wrapper needs a
-    // clock to drive the pipeline flops it inserts between stages.
-    let mut wrapper = file.add_module(top);
-    let clk_port = wrapper.add_input("clk", &scalar_type);
-
-    // Input ports come from first stage inputs excluding clk. These are also
-    // captured into the initial pipeline registers named `p0_<port>`.
-    let first_stage_ports = &stage_infos[0].ports;
-    let mut wrapper_inputs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
-    let mut p0_regs: HashMap<String, xlsynth::vast::LogicRef> = HashMap::new();
-    for p in first_stage_ports
-        .iter()
-        .filter(|p| p.is_input && p.name != "clk")
-    {
-        let dt_ref = if p.width == 1 {
-            &scalar_type
-        } else {
-            // Create and store the bitvector type so its lifetime extends.
-            dynamic_types.push(file.make_bit_vector_type(p.width as i64, false));
-            dynamic_types.last().unwrap()
-        };
-        let lr = wrapper.add_input(&p.name, dt_ref);
-        wrapper_inputs.insert(p.name.clone(), lr);
-        let reg = wrapper.add_reg(&format!("p0_{}", p.name), dt_ref).unwrap();
-        p0_regs.insert(p.name.clone(), reg);
-    }
-
-    let posedge_clk = file.make_pos_edge(&clk_port.to_expr());
-    let always_p0 = if cfg.verilog_version.is_system_verilog() {
-        wrapper.add_always_ff(&[&posedge_clk]).unwrap()
-    } else {
-        wrapper.add_always_at(&[&posedge_clk]).unwrap()
-    };
-    let mut sb0 = always_p0.get_statement_block();
-    // Iterate in a deterministic order to ensure stable Verilog output.
-    let mut p0_names: Vec<String> = p0_regs.keys().cloned().collect();
-    p0_names.sort();
-    for name in p0_names {
-        let reg = p0_regs.get(&name).unwrap();
-        let src = wrapper_inputs.get(&name).unwrap();
-        sb0.add_nonblocking_assignment(&reg.to_expr(), &src.to_expr());
-    }
-
-    // Output port derived from final stage out width
-    let last_out_width = stage_infos.last().unwrap().output_width;
-    let out_dt_ref = if last_out_width == 1 {
-        &scalar_type
-    } else {
-        dynamic_types.push(file.make_bit_vector_type(last_out_width as i64, false));
-        dynamic_types.last().unwrap()
-    };
-    let out_port = wrapper.add_output("out", out_dt_ref);
-
-    // Stage processing: instantiate each combinational stage and insert a
-    // pipeline register capturing its output. The register names follow the
-    // convention `p<N>` while the combinational result is `p<N>_next`.
-    let mut prev_reg: Option<xlsynth::vast::LogicRef> = None;
-    let mut prev_width: u32 = 0;
+    let mut stub_file = xlsynth::vast::VastFile::new(file_type);
+    let scalar_type_stub = stub_file.make_scalar_type();
+    let mut dynamic_types_stub: Vec<xlsynth::vast::VastDataType> = Vec::new();
+    let mut stub_modules: Vec<xlsynth::vast::VastModule> = Vec::with_capacity(stage_infos.len());
 
     for (idx, stage_info) in stage_infos.iter().enumerate() {
-        let stage_unmangled = &stages[idx].0;
+        let module_name = &stages[idx].0;
+        let mut m = stub_file.add_module(module_name);
 
-        // Determine output wire for this stage
-        let output_width = stage_info.output_width;
-        let out_dt_stage_ref = if output_width == 1 {
-            &scalar_type
-        } else {
-            dynamic_types.push(file.make_bit_vector_type(output_width as i64, false));
-            dynamic_types.last().unwrap()
-        };
-        let output_wire = wrapper.add_wire(&format!("p{}_next", idx + 1), out_dt_stage_ref);
-
-        // Build connection names and expressions in order they appear in port list.
-        let conn_port_names: Vec<&str> = stage_info
-            .ports
-            .iter()
-            .filter(|p| p.name != "clk")
-            .map(|p| p.name.as_str())
-            .collect();
-
-        // Keep expression objects alive.
-        let mut temp_exprs: Vec<xlsynth::vast::Expr> = Vec::new();
-        let mut conn_expr_indices: Vec<Option<usize>> = Vec::new();
-
-        // For slicing we need prev output indexable expr.
-        let prev_indexable = prev_reg.as_ref().map(|w| w.to_indexable_expr());
-
-        // For multi-input slicing we accumulate cursor.
-        let mut bit_cursor: u32 = 0;
-
-        for port in stage_info.ports.iter().filter(|p| p.name != "clk") {
-            if !port.is_input {
-                // Output port: connect the wire we just created.
-                let e = output_wire.to_expr();
-                temp_exprs.push(e);
-                conn_expr_indices.push(Some(temp_exprs.len() - 1));
-                continue;
-            }
-
-            // Input port (non-clk)
-            if idx == 0 {
-                // Connect from the input pipeline registers.
-                if let Some(reg) = p0_regs.get(&port.name) {
-                    let e = reg.to_expr();
-                    temp_exprs.push(e);
-                    conn_expr_indices.push(Some(temp_exprs.len() - 1));
-                } else {
-                    conn_expr_indices.push(None);
-                }
-            } else {
-                // Connect from prev stage output.
-                if stage_info
-                    .ports
-                    .iter()
-                    .filter(|p| p.is_input && p.name != "clk")
-                    .count()
-                    == 1
-                    && port.width == prev_width
-                {
-                    // Whole vector passthrough.
-                    let e = prev_reg.as_ref().unwrap().to_expr();
-                    temp_exprs.push(e);
-                    conn_expr_indices.push(Some(temp_exprs.len() - 1));
-                } else {
-                    // Slice prev_out.
-                    let hi: i64 = (prev_width - 1 - bit_cursor) as i64;
-                    let lo: i64 = (hi - port.width as i64 + 1) as i64;
-                    let slice = file
-                        .make_slice(&prev_indexable.as_ref().unwrap(), hi, lo)
-                        .to_expr();
-                    temp_exprs.push(slice);
-                    conn_expr_indices.push(Some(temp_exprs.len() - 1));
-                    bit_cursor += port.width;
+        // Pre-compute a mapping from output index -> desired name that lines up with
+        // the *next* stage's input ports (if any). This lets build_pipeline
+        // rely on stable names when wiring stage-to-stage.
+        let mut output_name_overrides: Vec<Option<String>> = Vec::new();
+        if idx + 1 < stage_infos.len() {
+            let next_inputs: Vec<&Port> = stage_infos[idx + 1]
+                .ports
+                .iter()
+                .filter(|p| p.is_input)
+                .collect();
+            let this_outputs: Vec<&Port> =
+                stage_info.ports.iter().filter(|p| !p.is_input).collect();
+            if next_inputs.len() == this_outputs.len() {
+                // One-to-one correspondence – use the next stage input names.
+                for p in &next_inputs {
+                    output_name_overrides.push(Some(p.name.clone()));
                 }
             }
         }
 
-        // Convert indices to references now that `temp_exprs` will no longer
-        // be mutated.
-        let conn_exprs: Vec<Option<&xlsynth::vast::Expr>> = conn_expr_indices
-            .iter()
-            .map(|opt_idx| opt_idx.map(|i| &temp_exprs[i]))
-            .collect();
+        let mut output_idx = 0usize;
+        for port in &stage_info.ports {
+            let dt_ref = if port.width == 1 {
+                &scalar_type_stub
+            } else {
+                dynamic_types_stub.push(stub_file.make_bit_vector_type(port.width as i64, false));
+                dynamic_types_stub.last().unwrap()
+            };
 
-        // Build instantiation.
-        let instance_name = format!("{}_i", stage_unmangled);
-        wrapper.add_member_instantiation(file.make_instantiation(
-            stage_unmangled,
-            &instance_name,
-            &[],
-            &[],
-            &conn_port_names,
-            &conn_exprs,
-        ));
-
-        // Create the pipeline register that captures this stage's output.
-        let out_reg = wrapper
-            .add_reg(&format!("p{}", idx + 1), out_dt_stage_ref)
-            .unwrap();
-        let always = if cfg.verilog_version.is_system_verilog() {
-            wrapper.add_always_ff(&[&posedge_clk]).unwrap()
-        } else {
-            wrapper.add_always_at(&[&posedge_clk]).unwrap()
-        };
-        let mut sb = always.get_statement_block();
-        sb.add_nonblocking_assignment(&out_reg.to_expr(), &output_wire.to_expr());
-
-        prev_reg = Some(out_reg);
-        prev_width = output_width;
+            if port.is_input {
+                m.add_input(&port.name, dt_ref);
+            } else {
+                let name = if let Some(new_name) = output_name_overrides
+                    .get(output_idx)
+                    .and_then(|o| o.clone())
+                {
+                    new_name
+                } else {
+                    port.name.clone()
+                };
+                m.add_output(&name, dt_ref);
+                output_idx += 1;
+            }
+        }
+        stub_modules.push(m);
     }
 
-    // Assign wrapper.out = last pipeline register
-    if let Some(final_reg) = &prev_reg {
-        wrapper.add_member_continuous_assignment(
-            file.make_continuous_assignment(&out_port.to_expr(), &final_reg.to_expr()),
-        );
-    }
+    let stage_module_refs: Vec<&xlsynth::vast::VastModule> = stub_modules.iter().collect();
 
-    // Combine stage module text and wrapper text.
+    // Generate wrapper using shared implementation.
+    let mut wrapper_file = xlsynth::vast::VastFile::new(match verilog_version {
+        VerilogVersion::SystemVerilog => xlsynth::vast::VastFileType::SystemVerilog,
+        VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
+    });
+    let pipeline_cfg = BuildPipelineConfig {
+        top_module_name: top.to_string(),
+        clk_port_name: "clk".to_string(),
+        stage_modules: stage_module_refs,
+        flop_inputs,
+        flop_outputs,
+        input_valid_signal: None,
+        output_valid_signal: None,
+        reset_signal: None,
+        reset_active_low: false,
+    };
+    let wrapper_sv = build_wrapper(&mut wrapper_file, &pipeline_cfg)?;
+
     let mut text = stage_infos
         .iter()
         .map(|s| s.sv_text.clone())
         .collect::<Vec<_>>()
         .join("\n");
-    text.push_str(&file.emit());
+    text.push_str(&wrapper_sv);
     Ok(text)
 }
 
@@ -762,6 +656,8 @@ mod tests {
             None,
             None,
             &[],
+            true,
+            true,
         )
         .unwrap();
         // Validate generated SV.
@@ -793,6 +689,8 @@ mod tests {
             None,
             None,
             &[],
+            true,
+            true,
         )
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
@@ -823,6 +721,8 @@ mod tests {
             None,
             None,
             &[],
+            true,
+            true,
         )
         .unwrap();
         xlsynth_test_helpers::assert_valid_sv(&result);
@@ -903,6 +803,8 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             None,
             None,
             &[],
+            true,
+            true,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().0;

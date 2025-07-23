@@ -3807,3 +3807,119 @@ fn test_run_verilog_pipeline_with_valid_signals_and_input_flops_only() {
         stdout
     );
 }
+
+#[test]
+fn test_dslx_stitch_pipeline_no_flops() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = "fn noflop_cycle0(x: u32) -> u32 { x + u32:1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("noflop.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("noflop")
+        .arg("--flop_inputs=false")
+        .arg("--flop_outputs=false")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let sv = String::from_utf8_lossy(&output.stdout);
+    xlsynth_test_helpers::assert_valid_sv(&sv);
+    assert!(
+        !sv.contains("reg p0_"),
+        "No pipeline flop registers expected, but found some in generated SV"
+    );
+}
+
+#[test]
+fn test_dslx_stitch_pipeline_flop_inputs_only() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = "fn inputflop_cycle0(x: u32) -> u32 { x + u32:1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("inputflop.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("inputflop")
+        .arg("--flop_inputs=true")
+        .arg("--flop_outputs=false")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let sv = String::from_utf8_lossy(&output.stdout);
+    xlsynth_test_helpers::assert_valid_sv(&sv);
+    assert!(
+        sv.contains("reg p0_x"),
+        "Expected input flop register p0_x not found"
+    );
+    assert!(
+        !sv.contains("reg p1_"),
+        "Unexpected second stage flop registers found when flop_outputs disabled"
+    );
+}
+
+#[test]
+fn test_dslx_stitch_pipeline_flop_outputs_only() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = "fn outputflop_cycle0(x: u32) -> u32 { x + u32:1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("outputflop.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("outputflop")
+        .arg("--flop_inputs=false")
+        .arg("--flop_outputs=true")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let sv = String::from_utf8_lossy(&output.stdout);
+    xlsynth_test_helpers::assert_valid_sv(&sv);
+    assert!(
+        sv.contains("reg p0_out"),
+        "Expected output flop register p0_out not found"
+    );
+    assert!(
+        !sv.contains("reg p0_x"),
+        "Input flop p0_x register should not be present when flop_inputs disabled"
+    );
+}

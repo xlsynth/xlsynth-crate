@@ -9,3 +9,23 @@ pub use simulate_sv::{
 };
 
 pub mod ir_fuzz;
+
+pub fn compare_golden_sv(got: &str, relpath: &str) {
+    let golden_path = std::path::Path::new(relpath);
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok()
+        || !golden_path.exists()
+        || golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0
+    {
+        std::fs::write(golden_path, got).expect("write golden");
+    } else {
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            got.trim(),
+            want.trim(),
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+
+    // Validate generated Verilog is syntactically correct after golden check.
+    assert_valid_sv(&got);
+}

@@ -262,14 +262,12 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     for gate_ref in depth_stats.deepest_path.iter() {
         let gate: &gate::AigNode = &gate_fn.gates[gate_ref.id];
         println!("  {:4} :: {}", gate_ref.id, format_aig_node(gate));
-        let mut printed_detail = false;
         if let Some(tags) = match gate {
             gate::AigNode::And2 { tags, .. } => tags.as_ref(),
             _ => None,
         } {
             if !tags.is_empty() {
                 println!("          tags: {}", tags.join(", "));
-                printed_detail = true;
             }
         }
         if let Some(srcs) = gate_to_sources.get(&gate_ref.id) {
@@ -278,7 +276,6 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
                 unique.sort();
                 unique.dedup();
                 println!("          source: {}", unique.join(" "));
-                printed_detail = true;
             }
         }
         println!(
