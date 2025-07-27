@@ -65,7 +65,7 @@ pub fn extract_codegen_flags(
     } else {
         (None, None)
     };
-    CodegenFlags {
+    let mut flags = CodegenFlags {
         input_valid_signal: matches
             .get_one::<String>("input_valid_signal")
             .map(|s| s.to_string()),
@@ -87,7 +87,12 @@ pub fn extract_codegen_flags(
             .map(|s| s == "true"),
         add_invariant_assertions: matches
             .get_one::<String>("add_invariant_assertions")
-            .map(|s| s == "true"),
+            .map(|s| s == "true")
+            .or_else(|| {
+                toolchain_config
+                    .and_then(|c| c.codegen.as_ref())
+                    .and_then(|cg| cg.add_invariant_assertions)
+            }),
         module_name: matches
             .get_one::<String>("module_name")
             .map(|s| s.to_string()),
@@ -115,7 +120,31 @@ pub fn extract_codegen_flags(
         output_verilog_line_map_path: matches
             .get_one::<String>("output_verilog_line_map_path")
             .map(|s| s.to_string()),
+    };
+
+    // Fill in library-consistent defaults when still unspecified.
+    if flags.use_system_verilog.is_none() {
+        flags.use_system_verilog = Some(crate::flag_defaults::CODEGEN_USE_SYSTEM_VERILOG);
     }
+    if flags.flop_inputs.is_none() {
+        flags.flop_inputs = Some(crate::flag_defaults::CODEGEN_FLOP_INPUTS);
+    }
+    if flags.flop_outputs.is_none() {
+        flags.flop_outputs = Some(crate::flag_defaults::CODEGEN_FLOP_OUTPUTS);
+    }
+    if flags.add_idle_output.is_none() {
+        flags.add_idle_output = Some(crate::flag_defaults::CODEGEN_ADD_IDLE_OUTPUT);
+    }
+    if flags.add_invariant_assertions.is_none() {
+        flags.add_invariant_assertions =
+            Some(crate::flag_defaults::CODEGEN_ADD_INVARIANT_ASSERTIONS);
+    }
+    if flags.array_index_bounds_checking.is_none() {
+        flags.array_index_bounds_checking =
+            Some(crate::flag_defaults::CODEGEN_ARRAY_INDEX_BOUNDS_CHECKING);
+    }
+
+    flags
 }
 
 pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {

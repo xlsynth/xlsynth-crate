@@ -535,6 +535,7 @@ fn test_dslx2pipeline_with_reset_signal() {
         .arg("asap7")
         .arg("--flop_inputs=true")
         .arg("--flop_outputs=true")
+        .arg("--use_system_verilog=false")
         .arg("--input_valid_signal=input_valid")
         .arg("--output_valid_signal=output_valid")
         .arg("--reset=rst_n")
@@ -560,20 +561,10 @@ fn test_dslx2pipeline_with_reset_signal() {
     log::info!("stderr: {}", stderr);
     xlsynth_test_helpers::assert_valid_sv(&stdout);
 
-    // Define the path for the new golden file
-    let golden_path = std::path::Path::new("tests/test_dslx2pipeline_with_reset_signal.golden.sv");
-
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
-        println!("INFO: Updating golden file: {}", golden_path.display());
-        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
-    } else {
-        let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-        assert_eq!(
-            stdout.trim(),
-            golden_sv.trim(),
-            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+    compare_golden_sv(
+        &stdout,
+        "tests/test_dslx2pipeline_with_reset_signal.golden.sv",
+    );
 }
 
 #[test_case(true; "reset_datapath")]
@@ -594,6 +585,7 @@ fn test_dslx2pipeline_reset_data_path(reset_dp: bool) {
         .arg("asap7")
         .arg("--flop_inputs=true")
         .arg("--flop_outputs=true")
+        .arg("--use_system_verilog=false")
         .arg("--input_valid_signal=input_valid")
         .arg("--output_valid_signal=output_valid")
         .arg("--reset=rst_n")
@@ -622,18 +614,7 @@ fn test_dslx2pipeline_reset_data_path(reset_dp: bool) {
     } else {
         "tests/test_dslx2pipeline_reset_data_path_false.golden.sv"
     };
-    let golden_path = std::path::Path::new(golden_name);
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
-        println!("INFO: Updating golden file: {}", golden_path.display());
-        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
-    } else {
-        let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-        assert_eq!(
-            stdout.trim(),
-            golden_sv.trim(),
-            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+    compare_golden_sv(&stdout, golden_name);
 }
 
 #[test_case(true; "with_tool_path")]
@@ -1735,7 +1716,9 @@ fn test_ir2pipeline_subcommand(use_tool_path: bool, optimize: bool) {
         .arg("--top")
         .arg("my_main")
         .arg("--delay_model")
-        .arg("unit");
+        .arg("unit")
+        .arg("--flop_inputs=false")
+        .arg("--flop_outputs=false");
 
     if optimize {
         cmd.arg("--opt=true");
@@ -1756,25 +1739,10 @@ fn test_ir2pipeline_subcommand(use_tool_path: bool, optimize: bool) {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    xlsynth_test_helpers::assert_valid_sv(&stdout);
-
-    if !use_tool_path {
-        // Compare against golden for runtime API path.
-        let golden_path =
-            std::path::Path::new("tests/test_ir2pipeline_identity_pipeline.golden.sv");
-        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
-            println!("INFO: Updating golden file: {}", golden_path.display());
-            std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
-        } else {
-            let golden_sv =
-                std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-            assert_eq!(
-                stdout.trim(),
-                golden_sv.trim(),
-                "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-            );
-        }
-    }
+    compare_golden_sv(
+        &stdout,
+        "tests/test_ir2pipeline_identity_pipeline.golden.sv",
+    );
 }
 
 #[test]
@@ -3169,6 +3137,8 @@ fn test_run_verilog_pipeline_basic_add1() {
         .arg("dslx2pipeline")
         .arg("--pipeline_stages")
         .arg("1")
+        .arg("--flop_inputs=false")
+        .arg("--flop_outputs=false")
         .arg("--delay_model")
         .arg("asap7")
         .arg("--dslx_input_file")
@@ -3233,6 +3203,8 @@ fn test_run_verilog_pipeline_wave_dump() {
         .arg("dslx2pipeline")
         .arg("--pipeline_stages")
         .arg("1")
+        .arg("--flop_inputs=false")
+        .arg("--flop_outputs=false")
         .arg("--delay_model")
         .arg("asap7")
         .arg("--dslx_input_file")
@@ -4067,4 +4039,76 @@ fn run_dslx_equiv_enum_in_bound_for_solver(solver: &str, expect_supported: bool)
 #[test_case::test_case("toolchain", false; "enum_in_bound_toolchain_unsupported")]
 fn test_dslx_equiv_enum_in_bound_solver_matrix(solver: &str, expect_supported: bool) {
     run_dslx_equiv_enum_in_bound_for_solver(solver, expect_supported);
+}
+
+// Checks that invariant assertions are emitted (or not) for the
+// dslx-stitch-pipeline subcommand when the `add_invariant_assertions` option is
+// toggled via the toolchain configuration. We use a simple two-stage pipeline
+// where the first stage contains a `priority_sel` so that the optimiser can
+// prove the associated invariants and gemit the assertion.
+#[test_case(true; "with_invariant_assertions")]
+#[test_case(false; "without_invariant_assertions")]
+fn test_dslx_stitch_pipeline_priority_sel_invariant(add_inv: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Two-stage pipeline: cycle0 performs a priority-select using a *dynamic*
+    // selector provided as an input to the pipeline. This prevents
+    // constant-propagation from eliminating the priority_sel node (and
+    // therefore its assertion).
+    let dslx = r#"fn f_cycle0(x0: u3, x4: u6) -> u6 {
+    {
+        let x6: u6 = match x0 {
+            u3:0x3 | u3:0x4 => x4,
+            u3:0x2 => u6:0x2a,
+            _ => u6:0x8,
+        };
+        x6
+    }
+}
+
+fn f_cycle1(x: u6) -> u6 {
+    x
+}"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("prio.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    // Write out toolchain.toml with (1) external tool path and (2) the invariant
+    // flag.
+    let toolchain_toml_base = if add_inv {
+        "[toolchain]\n[toolchain.codegen]\nadd_invariant_assertions = true\n"
+    } else {
+        "[toolchain]\n[toolchain.codegen]\nadd_invariant_assertions = false\n"
+    };
+    let toolchain_toml_contents = add_tool_path_value(toolchain_toml_base);
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
+
+    // Invoke the driver.
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("f")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "command failed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let has_asserts = stdout.to_lowercase().contains("assert");
+    if add_inv {
+        assert!(has_asserts, "Expected invariant assertions in generated Verilog when add_invariant_assertions=true, but none were found. stdout: {}", stdout);
+    } else {
+        assert!(!has_asserts, "Did not expect invariant assertions when add_invariant_assertions=false, but some were found. stdout: {}", stdout);
+    }
 }

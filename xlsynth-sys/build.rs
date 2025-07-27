@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const RELEASE_LIB_VERSION_TAG: &str = "v0.0.218";
-const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
+const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
 
 struct DsoInfo {
     extension: &'static str,
@@ -152,7 +152,9 @@ fn high_integrity_download_with_retries(
     max_attempts: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut attempts = 0;
-    let mut delay = 1;
+    // Start with a 2-second delay so the total retry window is a bit longer:
+    // 2 + 4 + 8 + 16 + 32 = 62 seconds worst-case (for 6 attempts).
+    let mut delay = 2;
     while attempts < max_attempts {
         attempts += 1;
         match high_integrity_download(url, out_path) {

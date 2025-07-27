@@ -19,7 +19,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     let use_system_verilog = matches
         .get_one::<String>("use_system_verilog")
         .map(|s| s == "true")
-        .unwrap_or(true);
+        .unwrap_or(crate::flag_defaults::CODEGEN_USE_SYSTEM_VERILOG);
     let verilog_version = if use_system_verilog {
         VerilogVersion::SystemVerilog
     } else {
@@ -41,14 +41,22 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .map(|s| s == "true")
         .unwrap_or(false);
 
+    // Determine whether to add invariant assertions based on toolchain config
+    // (default false).
+    let add_invariant_assertions = config
+        .as_ref()
+        .and_then(|c| c.codegen.as_ref())
+        .and_then(|cg| cg.add_invariant_assertions)
+        .unwrap_or(crate::flag_defaults::CODEGEN_ADD_INVARIANT_ASSERTIONS);
+
     let flop_inputs = matches
         .get_one::<String>("flop_inputs")
         .map(|s| s == "true")
-        .unwrap_or(true);
+        .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_INPUTS);
     let flop_outputs = matches
         .get_one::<String>("flop_outputs")
         .map(|s| s == "true")
-        .unwrap_or(true);
+        .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_OUTPUTS);
     let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
         &dslx,
         std::path::Path::new(input),
@@ -63,6 +71,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         output_valid_signal_opt,
         reset_opt,
         reset_active_low,
+        add_invariant_assertions,
     );
     match result {
         Ok(sv) => println!("{}", sv),

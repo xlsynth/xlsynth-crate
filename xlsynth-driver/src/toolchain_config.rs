@@ -26,6 +26,7 @@ pub struct CodegenConfig {
     pub gate_format: Option<String>,
     pub assert_format: Option<String>,
     pub use_system_verilog: Option<bool>,
+    pub add_invariant_assertions: Option<bool>,
 }
 
 /// Helper for extracting the DSLX standard library path from the command line

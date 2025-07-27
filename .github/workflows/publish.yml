@@ -46,7 +46,7 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          wget https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-osx-aarch_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
           unzip protoc-29.1-osx-aarch_64.zip -d protoc
           sudo mv protoc/bin/protoc /usr/local/bin/protoc
           sudo mv protoc /tmp/

@@ -184,11 +184,24 @@ fn make_stage_info_comb(
     let opt = optimize_ir(cfg.ir, stage_mangled)?;
     let sched = "delay_model: \"unit\"\npipeline_stages: 1";
     // Use the XLS "combinational" generator so the resulting module has *no* clock.
-    let codegen = format!(
-        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_COMBINATIONAL\nmodule_name: \"{stage}\"\nuse_system_verilog: {sv}",
+    let mut codegen = format!(
+        r#"register_merge_strategy: STRATEGY_IDENTITY_ONLY
+generator: GENERATOR_KIND_COMBINATIONAL
+module_name: "{stage}"
+use_system_verilog: {sv}"#,
         stage = stage_name_unmangled,
         sv = cfg.verilog_version.is_system_verilog(),
     );
+    // Explicitly set the invariant-assertion option regardless of the
+    // requested value so that the behaviour is *deterministic* – we do not
+    // rely on the generator’s implicit default. When
+    // `cfg.add_invariant_assertions` is `false` we now emit
+    // `add_invariant_assertions: false`, preventing unexpected assertions
+    // from being injected (see xlsynth-driver/tests/invoke_test.rs).
+    codegen.push_str(&format!(
+        "\nadd_invariant_assertions: {}",
+        cfg.add_invariant_assertions
+    ));
     let result = schedule_and_codegen(&opt, sched, &codegen)?;
     let sv_text = result.get_verilog_text()?;
 
@@ -279,6 +292,7 @@ pub fn stitch_pipeline(
     output_valid_signal: Option<&str>,
     reset_signal: Option<&str>,
     reset_active_low: bool,
+    add_invariant_assertions: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
     if (input_valid_signal.is_some() || output_valid_signal.is_some()) && reset_signal.is_none() {
         return Err(xlsynth::XlsynthError(
@@ -299,6 +313,7 @@ pub fn stitch_pipeline(
     let cfg = PipelineCfg {
         ir: &ir,
         verilog_version,
+        add_invariant_assertions,
     };
 
     let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
@@ -391,6 +406,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         )
         .unwrap();
         // Validate generated SV.
@@ -432,6 +448,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             None,
             None,
             false,
+            false,
         )
         .unwrap();
 
@@ -454,6 +471,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             None,
             None,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -479,6 +497,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             Some("output_valid"),
             Some("rst_n"),
             true, // Use active-low reset to match simulation helper expectations.
+            false,
         )
         .unwrap()
     }
@@ -516,6 +535,7 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             None,
             None,
             None,
+            false,
             false,
         );
         assert!(result.is_err());
