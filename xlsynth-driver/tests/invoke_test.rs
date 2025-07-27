@@ -3862,3 +3862,185 @@ fn test_dslx_stitch_pipeline_flop_outputs_only() {
         "Input flop p0_x register should not be present when flop_inputs disabled"
     );
 }
+
+#[cfg(feature = "with-z3-binary-test")]
+#[test]
+fn test_dslx_equiv_assume_enum_in_bound_swapped_default() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Enum has wider underlying width; only A/B are valid, others are out of
+    // domain.
+    let lhs = r#"
+        enum E : u3 { A = 0, B = 1 }
+        fn f(e: E) -> u32 {
+          match e {
+            E::A => u32:0,
+            _    => u32:1,
+          }
+        }
+    "#;
+    let rhs = r#"
+        enum E : u3 { A = 0, B = 1 }
+        fn f(e: E) -> u32 {
+          match e {
+            E::B => u32:1,
+            _    => u32:0,
+          }
+        }
+    "#;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lhs_path = tmp.path().join("lhs.x");
+    let rhs_path = tmp.path().join("rhs.x");
+    std::fs::write(&lhs_path, lhs).unwrap();
+    std::fs::write(&rhs_path, rhs).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // Without enum-in-bound assumption → must be inequivalent.
+    let out_no_flag = std::process::Command::new(driver)
+        .args([
+            "dslx-equiv",
+            lhs_path.to_str().unwrap(),
+            rhs_path.to_str().unwrap(),
+            "--dslx_top",
+            "f",
+            "--solver",
+            "z3-binary",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out_no_flag.status.success(),
+        "Expected inequivalence without enum-bound assumption. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out_no_flag.stdout),
+        String::from_utf8_lossy(&out_no_flag.stderr)
+    );
+
+    // With enum-in-bound assumption → should be equivalent.
+    let out_with_flag = std::process::Command::new(driver)
+        .args([
+            "dslx-equiv",
+            lhs_path.to_str().unwrap(),
+            rhs_path.to_str().unwrap(),
+            "--dslx_top",
+            "f",
+            "--solver",
+            "z3-binary",
+            "--assume-enum-in-bound",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out_with_flag.status.success(),
+        "Expected equivalence with enum-bound assumption. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out_with_flag.stdout),
+        String::from_utf8_lossy(&out_with_flag.stderr)
+    );
+}
+
+// Helper for enum-in-bound assumption matrix test
+fn run_dslx_equiv_enum_in_bound_for_solver(solver: &str, expect_supported: bool) {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let lhs = r#"
+        enum E : u3 { A = 0, B = 1 }
+        fn f(e: E) -> u32 {
+          match e {
+            E::A => u32:0,
+            _    => u32:1,
+          }
+        }
+    "#;
+    let rhs = r#"
+        enum E : u3 { A = 0, B = 1 }
+        fn f(e: E) -> u32 {
+          match e {
+            E::B => u32:1,
+            _    => u32:0,
+          }
+        }
+    "#;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lhs_path = tmp.path().join("lhs.x");
+    let rhs_path = tmp.path().join("rhs.x");
+    std::fs::write(&lhs_path, lhs).unwrap();
+    std::fs::write(&rhs_path, rhs).unwrap();
+
+    // Provide a toolchain.toml so toolchain-mode is available (and we can catch
+    // unsupported behavior).
+    let toolchain_toml = tmp.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // 1) Without assumption → inequivalent for all solvers.
+    let out_no_flag = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("f")
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .unwrap();
+    assert!(
+        !out_no_flag.status.success(),
+        "Expected inequivalence without enum-bound assumption (solver={}). stdout: {} stderr: {}",
+        solver,
+        String::from_utf8_lossy(&out_no_flag.stdout),
+        String::from_utf8_lossy(&out_no_flag.stderr)
+    );
+
+    // 2) With assumption → native SMT solvers succeed; toolchain should fail
+    //    (unsupported).
+    let out_with_flag = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("f")
+        .arg("--solver")
+        .arg(solver)
+        .arg("--assume-enum-in-bound")
+        .arg("true")
+        .output()
+        .unwrap();
+
+    if expect_supported {
+        assert!(
+            out_with_flag.status.success(),
+            "Expected equivalence with enum-bound assumption (solver={}). stdout: {} stderr: {}",
+            solver,
+            String::from_utf8_lossy(&out_with_flag.stdout),
+            String::from_utf8_lossy(&out_with_flag.stderr)
+        );
+    } else {
+        assert!(
+            !out_with_flag.status.success(),
+            "Expected unsupported/failure for toolchain solver with enum-bound assumption (solver={}). stdout: {} stderr: {}",
+            solver,
+            String::from_utf8_lossy(&out_with_flag.stdout),
+            String::from_utf8_lossy(&out_with_flag.stderr)
+        );
+    }
+}
+
+#[cfg_attr(feature="has-boolector", test_case::test_case("boolector", true; "enum_in_bound_boolector"))]
+#[cfg_attr(feature="has-boolector", test_case::test_case("boolector-legacy", false; "enum_in_bound_boolector_legacy_unsupported"))]
+#[cfg_attr(feature="has-bitwuzla", test_case::test_case("bitwuzla", true; "enum_in_bound_bitwuzla"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case::test_case("z3-binary", true; "enum_in_bound_z3_binary"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary", true; "enum_in_bound_bitwuzla_binary"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case::test_case("boolector-binary", true; "enum_in_bound_boolector_binary"))]
+#[test_case::test_case("toolchain", false; "enum_in_bound_toolchain_unsupported")]
+fn test_dslx_equiv_enum_in_bound_solver_matrix(solver: &str, expect_supported: bool) {
+    run_dslx_equiv_enum_in_bound_for_solver(solver, expect_supported);
+}

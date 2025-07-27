@@ -1145,19 +1145,54 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     }
 }
 
-fn check_fn_equiv_internal<'a, S: Solver>(
-    solver: &mut S,
+// Map param name -> allowed IrValues for domain constraints.
+pub type ParamDomains = std::collections::HashMap<String, Vec<IrValue>>;
+
+/// Prove equivalence like `prove_ir_fn_equiv` but constraining parameters that
+/// are enums to lie within their defined value sets.
+pub fn prove_ir_fn_equiv_with_domains<'a, S: Solver>(
+    solver_config: &S::Config,
     lhs: &IrFn<'a>,
     rhs: &IrFn<'a>,
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
+    lhs_domains: Option<&ParamDomains>,
+    rhs_domains: Option<&ParamDomains>,
 ) -> EquivResult {
-    let fn_inputs_1 = get_fn_inputs(solver, lhs, Some("lhs"));
-    let fn_inputs_2 = get_fn_inputs(solver, rhs, Some("rhs"));
-    let aligned_fn_inputs = align_fn_inputs(solver, &fn_inputs_1, &fn_inputs_2, allow_flatten);
-    let smt_fn_1 = ir_to_smt(solver, &aligned_fn_inputs.lhs);
-    let smt_fn_2 = ir_to_smt(solver, &aligned_fn_inputs.rhs);
-    check_aligned_fn_equiv_internal(solver, &smt_fn_1, &smt_fn_2, assertion_semantics)
+    let mut solver = S::new(solver_config).unwrap();
+    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs, Some("lhs"));
+    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs, Some("rhs"));
+
+    let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: Option<&ParamDomains>| {
+        if let Some(dom) = domains {
+            for p in inputs.params().iter() {
+                if let Some(allowed) = dom.get(&p.name) {
+                    if let Some(sym) = inputs.inputs.get(&p.name) {
+                        let mut or_chain: Option<BitVec<S::Term>> = None;
+                        for v in allowed {
+                            let bv = ir_value_to_bv(&mut solver, v, &p.ty).bitvec;
+                            let eq = solver.eq(&sym.bitvec, &bv);
+                            or_chain = Some(match or_chain {
+                                None => eq,
+                                Some(prev) => solver.or(&prev, &eq),
+                            });
+                        }
+                        if let Some(expr) = or_chain {
+                            solver.assert(&expr).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    assert_domains(&fn_inputs_lhs, lhs_domains);
+    assert_domains(&fn_inputs_rhs, rhs_domains);
+
+    let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
+    let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs);
+    let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs);
+    check_aligned_fn_equiv_internal(&mut solver, &smt_lhs, &smt_rhs, assertion_semantics)
 }
 
 pub fn prove_ir_fn_equiv<'a, S: Solver>(
@@ -1167,8 +1202,15 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
-    let mut solver = S::new(solver_config).unwrap();
-    check_fn_equiv_internal(&mut solver, lhs, rhs, assertion_semantics, allow_flatten)
+    prove_ir_fn_equiv_with_domains::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        assertion_semantics,
+        allow_flatten,
+        None,
+        None,
+    )
 }
 
 // Add parallel equivalence-checking strategies that were previously only
@@ -1355,8 +1397,9 @@ pub mod test_utils {
     use crate::{
         equiv::{
             prove_equiv::{
-                AssertionSemantics, EquivResult, FnInputs, IrFn, align_fn_inputs, get_fn_inputs,
-                ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
+                AssertionSemantics, EquivResult, FnInputs, IrFn, ParamDomains, align_fn_inputs,
+                get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
+                prove_ir_fn_equiv_with_domains,
             },
             solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
         },
@@ -2647,6 +2690,57 @@ pub mod test_utils {
             _ => panic!("Expected inequivalence with counter-example, but proof succeeded"),
         }
     }
+
+    // New: shared test that exercises prove_ir_fn_equiv_with_domains.
+    pub fn test_param_domains_equiv<S: Solver>(solver_config: &S::Config) {
+        let lhs_ir = r#"
+            fn f(x: bits[2]) -> bits[2] {
+                ret id.1: bits[2] = identity(x, id=1)
+            }
+        "#;
+        let rhs_ir = r#"
+            fn g(x: bits[2]) -> bits[2] {
+                one: bits[2] = literal(value=1, id=1)
+                ret and.2: bits[2] = and(x, one, id=2)
+            }
+        "#;
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(lhs_ir);
+        let lhs_fn_ir = parser.parse_fn().unwrap();
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(rhs_ir);
+        let rhs_fn_ir = parser.parse_fn().unwrap();
+
+        let lhs_ir_fn = IrFn::new_plain(&lhs_fn_ir);
+        let rhs_ir_fn = IrFn::new_plain(&rhs_fn_ir);
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &lhs_ir_fn,
+            &rhs_ir_fn,
+            AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res, super::EquivResult::Disproved { .. }));
+
+        let mut doms: ParamDomains = ParamDomains::new();
+        doms.insert(
+            "x".to_string(),
+            vec![
+                xlsynth::IrValue::make_ubits(2, 0).unwrap(),
+                xlsynth::IrValue::make_ubits(2, 1).unwrap(),
+            ],
+        );
+
+        let res2 = prove_ir_fn_equiv_with_domains::<S>(
+            solver_config,
+            &lhs_ir_fn,
+            &rhs_ir_fn,
+            AssertionSemantics::Same,
+            false,
+            Some(&doms),
+            Some(&doms),
+        );
+        assert!(matches!(res2, super::EquivResult::Proved));
+    }
 }
 
 macro_rules! test_with_solver {
@@ -2665,6 +2759,10 @@ macro_rules! test_with_solver {
                 test_utils::align_non_zero_width_fn_inputs_first_token::<$solver_type>(
                     $solver_config,
                 );
+            }
+            #[test]
+            fn test_param_domains_equiv() {
+                test_utils::test_param_domains_equiv::<$solver_type>($solver_config);
             }
             #[test]
             fn test_ir_value_bits() {

@@ -229,6 +229,11 @@ pub struct CDslxFunction {
 }
 
 #[repr(C)]
+pub struct CDslxParam {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CDslxQuickcheck {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -800,6 +805,11 @@ extern "C" {
         type_annotation: *mut CDslxTypeAnnotation,
     ) -> *mut CDslxType;
 
+    pub fn xls_dslx_type_info_get_imported_type_info(
+        type_info: *mut CDslxTypeInfo,
+        module: *mut CDslxModule,
+    ) -> *mut CDslxTypeInfo;
+
     // -- ConstantDef
 
     pub fn xls_dslx_constant_def_get_name(
@@ -905,6 +915,8 @@ extern "C" {
     ) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_enum_member_get_value(member: *const CDslxEnumMember) -> *mut CDslxExpr;
+
+    pub fn xls_dslx_expr_get_owner_module(expr: *mut CDslxExpr) -> *mut CDslxModule;
 
     // --
 
@@ -1435,6 +1447,15 @@ extern "C" {
     pub fn xls_dslx_function_get_identifier(
         function: *const CDslxFunction,
     ) -> *mut std::os::raw::c_char;
+
+    pub fn xls_dslx_function_get_param_count(function: *const CDslxFunction) -> i64;
+    pub fn xls_dslx_function_get_param(
+        function: *const CDslxFunction,
+        index: i64,
+    ) -> *mut CDslxParam;
+    pub fn xls_dslx_param_get_name(param: *const CDslxParam) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_param_get_type_annotation(param: *const CDslxParam)
+        -> *mut CDslxTypeAnnotation;
 
     // -- "requires implicit token?" determination for a DSLX function
     pub fn xls_dslx_type_info_get_requires_implicit_token(

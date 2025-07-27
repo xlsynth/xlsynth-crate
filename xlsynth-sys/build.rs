@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.216";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.218";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
 
 struct DsoInfo {

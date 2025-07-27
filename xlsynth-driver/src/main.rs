@@ -969,7 +969,11 @@ fn main() {
                 .add_bool_arg(
                     "rhs_fixed_implicit_activation",
                     "Fix the implicit activation bit to true for the RHS IR, useful when only LHS or RHS has implicit token",
-                ),
+                )
+                .add_bool_arg(
+                    "assume-enum-in-bound",
+                    "Constrain enum-typed parameters to their defined values during equivalence proving",
+                )
         )
         .get_matches();
 
