@@ -9,7 +9,7 @@ use xlsynth_g8r::equiv::solver_interface::Solver;
 use std::collections::HashMap;
 use xlsynth::IrValue;
 use xlsynth_g8r::equiv::prove_equiv::{
-    prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
+    prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
     prove_ir_fn_equiv_with_domains, AssertionSemantics, EquivResult, IrFn,
 };
 use xlsynth_g8r::xls_ir::ir_parser;
