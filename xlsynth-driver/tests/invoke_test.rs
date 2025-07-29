@@ -2874,7 +2874,8 @@ fn test_stitch_with_valid_custom_in_and_out_valid() {
 }
 
 #[test]
-fn test_stitch_with_valid_missing_reset_should_error() {
+fn test_stitch_with_valid_custom_in_and_out_valid_no_reset() {
+    let _ = env_logger::try_init();
     let dslx =
         "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2888,19 +2889,20 @@ fn test_stitch_with_valid_missing_reset_should_error() {
         .arg("--dslx_top")
         .arg("foo")
         .arg("--input_valid_signal=in_valid")
+        .arg("--output_valid_signal=out_valid")
         .output()
         .unwrap();
     assert!(
-        !output.status.success(),
-        "Expected error for missing reset, got success. stdout: {}\nstderr: {}",
+        output.status.success(),
+        "driver failed; stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("reset"),
-        "Expected error message to mention reset, got: {}",
-        stderr
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    compare_golden_sv(
+        &stdout,
+        "tests/test_dslx_stitch_pipeline_with_valid_in_and_out_valid_no_reset.golden.v",
     );
 }
 
