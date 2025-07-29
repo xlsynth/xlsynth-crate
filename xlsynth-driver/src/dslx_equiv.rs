@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::common::get_function_enum_param_domains;
 use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 use crate::tools::{run_ir_converter_main, run_opt_main};
-use std::collections::HashMap;
 use xlsynth::{mangle_dslx_name, DslxConvertOptions, IrPackage};
 use xlsynth_g8r::equiv::prove_equiv::{AssertionSemantics, ParamDomains};
 
@@ -27,7 +27,7 @@ fn build_ir_for_dslx(
     disable_warnings: Option<&[String]>,
     tool_path: Option<&str>,
     type_inference_v2: Option<bool>,
-    want_domains: bool,
+    want_enum_domains: bool,
 ) -> OptimizedIrText {
     let module_name = input_path.file_stem().unwrap().to_str().unwrap();
     let mangled_top = mangle_dslx_name(module_name, dslx_top).unwrap();
@@ -35,7 +35,7 @@ fn build_ir_for_dslx(
     // If we want enum domains, or we don't want to use the external toolchain
     // (because we need type info through the runtime API), force the runtime
     // path.
-    if !want_domains && tool_path.is_some() {
+    if !want_enum_domains && tool_path.is_some() {
         let tool_path = tool_path.unwrap();
         // Convert via external tool then always optimize.
         let mut ir_text = run_ir_converter_main(
@@ -89,7 +89,7 @@ fn build_ir_for_dslx(
         // again here to avoid duplicating logic deep inside the converter path;
         // this is still a single path in this function, vs. re-parsing
         // elsewhere).
-        let domains = if want_domains {
+        let domains = if want_enum_domains {
             // Parse/typecheck via runtime API
             use xlsynth::dslx;
             let mut import_data = dslx::ImportData::new(dslx_stdlib_path, &additional_search_paths);
@@ -100,53 +100,8 @@ fn build_ir_for_dslx(
                 &mut import_data,
             )
             .expect("parse_and_typecheck success");
-            let module = tcm.get_module();
 
-            let type_info = tcm.get_type_info();
-            let mut domains: ParamDomains = HashMap::new();
-            for i in 0..module.get_member_count() {
-                if let Some(dslx::MatchableModuleMember::Function(f)) =
-                    module.get_member(i).to_matchable()
-                {
-                    if f.get_identifier() == dslx_top {
-                        for pidx in 0..f.get_param_count() {
-                            let p = f.get_param(pidx);
-                            let name = p.get_name();
-                            let ta = p.get_type_annotation();
-                            let ty = type_info.get_type_for_type_annotation(&ta);
-                            if ty.is_enum() {
-                                let enum_def = ty.get_enum_def().unwrap();
-                                let mut values = Vec::new();
-                                for mi in 0..enum_def.get_member_count() {
-                                    let m = enum_def.get_member(mi);
-                                    let expr = m.get_value();
-                                    // Use the owner module's type info for the enum value
-                                    // expression.
-                                    let owner_module = expr.get_owner_module();
-                                    let owner_type_info = tcm
-                                        .get_type_info_for_module(&owner_module)
-                                        .expect("imported type info");
-
-                                    // let owner_type_info = if owner_module == module {
-                                    //     &type_info
-                                    // } else {
-                                    //     &type_info.get_imported_type_info(&owner_module).expect("
-                                    // imported type info") };
-
-                                    // let owner_type_info = tcm
-                                    //     .get_type_info_for_module(&owner_module)
-                                    //     .expect("owner module type info");
-                                    let interp =
-                                        owner_type_info.get_const_expr(&expr).expect("constexpr");
-                                    let ir_val = interp.convert_to_ir().expect("convert");
-                                    values.push(ir_val);
-                                }
-                                domains.insert(name, values);
-                            }
-                        }
-                    }
-                }
-            }
+            let domains = get_function_enum_param_domains(&tcm, dslx_top);
             Some(domains)
         } else {
             None
@@ -246,12 +201,34 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         .get_one::<String>("rhs_fixed_implicit_activation")
         .map(|s| s.parse().unwrap())
         .unwrap_or(false);
+
+    // Enable enum-domain constraints only when supported by the selected solver.
+    let support_domain_constraints = match solver_choice {
+        #[cfg(feature = "has-boolector")]
+        Some(SolverChoice::BoolectorLegacy) => false,
+        Some(SolverChoice::Toolchain) => false,
+        Some(_) => true,
+        None => false,
+    };
+
+    if let Some(assume_enum_in_bound) = matches.get_one::<String>("assume-enum-in-bound") {
+        if assume_enum_in_bound == "true" && !support_domain_constraints {
+            eprintln!(
+                "Error: --assume-enum-in-bound=true is not supported with the given solver {:?}",
+                solver_choice
+            );
+            std::process::exit(1);
+        }
+    }
+
     let assume_enum_in_bound = matches
         .get_one::<String>("assume-enum-in-bound")
         .map(|s| s == "true")
-        .unwrap_or(false);
+        .unwrap_or(true);
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
+
+    let want_enum_domains = assume_enum_in_bound && support_domain_constraints;
 
     let OptimizedIrText {
         ir_text: lhs_ir_text,
@@ -266,7 +243,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         disable_warnings,
         tool_path,
         type_inference_v2,
-        assume_enum_in_bound,
+        want_enum_domains,
     );
     let OptimizedIrText {
         ir_text: rhs_ir_text,
@@ -281,9 +258,9 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         disable_warnings,
         tool_path,
         type_inference_v2,
-        assume_enum_in_bound,
+        want_enum_domains,
     );
-    let (lhs_param_domains, rhs_param_domains) = if assume_enum_in_bound {
+    let (lhs_param_domains, rhs_param_domains) = if want_enum_domains {
         (lhs_domains, rhs_domains)
     } else {
         (None, None)

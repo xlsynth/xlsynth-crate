@@ -1239,15 +1239,8 @@ fn without_assert(a: u32, b: u32) -> u32 {
     #[test]
     fn test_owner_module_and_type_info_for_imported_entity() {
         // Create a temporary directory for the imported and main module files.
-        let tmpdir = std::env::temp_dir().join(format!(
-            "xlsynth_dslx_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&tmpdir).expect("tmpdir created");
+        let tmpdir = xlsynth_test_helpers::make_test_tmpdir("xlsynth_dslx_test");
+        let tmpdir = tmpdir.path().to_path_buf();
 
         // Write the imported module file to disk so ImportData can resolve it by name.
         let imported_path = tmpdir.join("imported.x");

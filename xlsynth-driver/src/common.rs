@@ -409,3 +409,108 @@ pub fn execute_command_with_context(
     }
     result
 }
+
+// -----------------------------------------------------------------------------
+// DSLX helpers shared across subcommands
+// -----------------------------------------------------------------------------
+
+use xlsynth_g8r::equiv::prove_equiv::ParamDomains;
+
+pub fn get_enum_domain(
+    tcm: &xlsynth::dslx::TypecheckedModule,
+    enum_def: &xlsynth::dslx::EnumDef,
+) -> Vec<xlsynth::IrValue> {
+    let mut values = Vec::new();
+    for mi in 0..enum_def.get_member_count() {
+        let m = enum_def.get_member(mi);
+        let expr = m.get_value();
+        let owner_module = expr.get_owner_module();
+        let owner_type_info = tcm
+            .get_type_info_for_module(&owner_module)
+            .expect("imported type info");
+        let interp = owner_type_info.get_const_expr(&expr).expect("constexpr");
+        let ir_val = interp.convert_to_ir().expect("convert");
+        values.push(ir_val);
+    }
+
+    values
+}
+
+pub fn get_function_enum_param_domains(
+    tcm: &xlsynth::dslx::TypecheckedModule,
+    dslx_top: &str,
+) -> ParamDomains {
+    let module = tcm.get_module();
+    let type_info = tcm.get_type_info();
+    let mut domains: ParamDomains = std::collections::HashMap::new();
+
+    for i in 0..module.get_member_count() {
+        if let Some(xlsynth::dslx::MatchableModuleMember::Function(f)) =
+            module.get_member(i).to_matchable()
+        {
+            if f.get_identifier() == dslx_top {
+                for pidx in 0..f.get_param_count() {
+                    let p = f.get_param(pidx);
+                    let name = p.get_name();
+                    let ta = p.get_type_annotation();
+                    let ty = type_info.get_type_for_type_annotation(&ta);
+                    if ty.is_enum() {
+                        let enum_def = ty.get_enum_def().unwrap();
+                        let values = get_enum_domain(tcm, &enum_def);
+                        domains.insert(name, values);
+                    }
+                }
+            }
+        }
+    }
+
+    domains
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_function_enum_param_domains_cross_module() {
+        use xlsynth::dslx;
+
+        // Temp directory housing the modules.
+        let tmpdir = xlsynth_test_helpers::make_test_tmpdir("xlsynth_driver_dslx_test");
+        let dir = tmpdir.path();
+
+        // imported.x defines an enum whose member uses a local const.
+        let imported_path = dir.join("imported.x");
+        let imported_dslx = r#"
+            const K = u3:5;
+            pub enum ImpE : u3 { Z = 0, P = K }
+        "#;
+        std::fs::write(&imported_path, imported_dslx).expect("write imported.x");
+
+        // main.x imports `imported` and exposes a top that takes the imported enum.
+        let main_path = dir.join("main.x");
+        let main_dslx = r#"
+            import imported;
+            pub fn top(x: imported::ImpE) -> u3 { u3:0 }
+        "#;
+        std::fs::write(&main_path, main_dslx).expect("write main.x");
+
+        // Parse/typecheck the main module; imported will be resolved via search path.
+        let mut import_data = dslx::ImportData::new(None, &[dir]);
+        let tcm = dslx::parse_and_typecheck(
+            main_dslx,
+            main_path.to_str().unwrap(),
+            "main",
+            &mut import_data,
+        )
+        .expect("parse_and_typecheck success");
+
+        // Exercise the helper under test.
+        let domains = get_function_enum_param_domains(&tcm, "top");
+        assert!(domains.contains_key("x"));
+        let values = domains.get("x").unwrap();
+        assert_eq!(values.len(), 2);
+        assert!(values.contains(&xlsynth::IrValue::make_ubits(3, 0).unwrap()));
+        assert!(values.contains(&xlsynth::IrValue::make_ubits(3, 5).unwrap()));
+    }
+}

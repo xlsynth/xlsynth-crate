@@ -3897,8 +3897,8 @@ fn test_dslx_equiv_assume_enum_in_bound_swapped_default() {
 
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
 
-    // Without enum-in-bound assumption → must be inequivalent.
-    let out_no_flag = std::process::Command::new(driver)
+    // Default behavior (assume-enum-in-bound enabled) → should be equivalent.
+    let out_default = std::process::Command::new(driver)
         .args([
             "dslx-equiv",
             lhs_path.to_str().unwrap(),
@@ -3911,13 +3911,13 @@ fn test_dslx_equiv_assume_enum_in_bound_swapped_default() {
         .output()
         .unwrap();
     assert!(
-        !out_no_flag.status.success(),
-        "Expected inequivalence without enum-bound assumption. stdout: {} stderr: {}",
-        String::from_utf8_lossy(&out_no_flag.stdout),
-        String::from_utf8_lossy(&out_no_flag.stderr)
+        out_default.status.success(),
+        "Expected equivalence with default enum-bound assumption. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out_default.stdout),
+        String::from_utf8_lossy(&out_default.stderr)
     );
 
-    // With enum-in-bound assumption → should be equivalent.
+    // With enum-in-bound assumption explicitly set to true → should be equivalent.
     let out_with_flag = std::process::Command::new(driver)
         .args([
             "dslx-equiv",
@@ -3937,6 +3937,28 @@ fn test_dslx_equiv_assume_enum_in_bound_swapped_default() {
         "Expected equivalence with enum-bound assumption. stdout: {} stderr: {}",
         String::from_utf8_lossy(&out_with_flag.stdout),
         String::from_utf8_lossy(&out_with_flag.stderr)
+    );
+
+    // With enum-in-bound assumption explicitly disabled → must be inequivalent.
+    let out_without_flag = std::process::Command::new(driver)
+        .args([
+            "dslx-equiv",
+            lhs_path.to_str().unwrap(),
+            rhs_path.to_str().unwrap(),
+            "--dslx_top",
+            "f",
+            "--solver",
+            "z3-binary",
+            "--assume-enum-in-bound",
+            "false",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out_without_flag.status.success(),
+        "Expected inequivalence without enum-bound assumption. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out_without_flag.stdout),
+        String::from_utf8_lossy(&out_without_flag.stderr)
     );
 }
 
@@ -3988,6 +4010,8 @@ fn run_dslx_equiv_enum_in_bound_for_solver(solver: &str, expect_supported: bool)
         .arg("f")
         .arg("--solver")
         .arg(solver)
+        .arg("--assume-enum-in-bound")
+        .arg("false")
         .output()
         .unwrap();
     assert!(
