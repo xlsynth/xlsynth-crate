@@ -19,7 +19,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     let use_system_verilog = matches
         .get_one::<String>("use_system_verilog")
         .map(|s| s == "true")
-        .unwrap_or(true);
+        .unwrap_or(crate::flag_defaults::CODEGEN_USE_SYSTEM_VERILOG);
     let verilog_version = if use_system_verilog {
         VerilogVersion::SystemVerilog
     } else {
@@ -41,28 +41,54 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .map(|s| s == "true")
         .unwrap_or(false);
 
+    // Determine whether to add invariant assertions based on toolchain config
+    // (default false).
+    let add_invariant_assertions = config
+        .as_ref()
+        .and_then(|c| c.codegen.as_ref())
+        .and_then(|cg| cg.add_invariant_assertions)
+        .unwrap_or(crate::flag_defaults::CODEGEN_ADD_INVARIANT_ASSERTIONS);
+
+    // Determine whether to emit array-index bounds checking (default true).
+    let array_index_bounds_checking = matches
+        .get_one::<String>("array_index_bounds_checking")
+        .map(|s| s == "true")
+        .or_else(|| {
+            config
+                .as_ref()
+                .and_then(|c| c.codegen.as_ref())
+                .and_then(|cg| cg.array_index_bounds_checking)
+        })
+        .unwrap_or(crate::flag_defaults::CODEGEN_ARRAY_INDEX_BOUNDS_CHECKING);
+
     let flop_inputs = matches
         .get_one::<String>("flop_inputs")
         .map(|s| s == "true")
-        .unwrap_or(true);
+        .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_INPUTS);
     let flop_outputs = matches
         .get_one::<String>("flop_outputs")
         .map(|s| s == "true")
-        .unwrap_or(true);
+        .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_OUTPUTS);
+    let options = xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineOptions {
+        verilog_version,
+        explicit_stages: stage_list,
+        stdlib_path: paths.stdlib_path.as_deref(),
+        search_paths: path_refs.clone(),
+        flop_inputs,
+        flop_outputs,
+        input_valid_signal: input_valid_signal_opt,
+        output_valid_signal: output_valid_signal_opt,
+        reset_signal: reset_opt,
+        reset_active_low,
+        add_invariant_assertions,
+        array_index_bounds_checking,
+    };
+
     let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
         &dslx,
         std::path::Path::new(input),
         top,
-        verilog_version,
-        stage_list.as_ref().map(|v| v.as_slice()),
-        paths.stdlib_path.as_deref(),
-        &path_refs,
-        flop_inputs,
-        flop_outputs,
-        input_valid_signal_opt,
-        output_valid_signal_opt,
-        reset_opt,
-        reset_active_low,
+        &options,
     );
     match result {
         Ok(sv) => println!("{}", sv),

@@ -41,6 +41,7 @@ mod dslx2sv_types;
 mod dslx_equiv;
 mod dslx_g8r_stats;
 mod dslx_stitch_pipeline;
+mod flag_defaults;
 mod g8r2v;
 mod g8r_equiv;
 mod gv2ir;
@@ -389,6 +390,10 @@ fn main() {
                 .add_bool_arg(
                     "flop_outputs",
                     "Whether to insert output pipeline flops (default true)",
+                )
+                .add_bool_arg(
+                    "array_index_bounds_checking",
+                    "Whether to emit array index bounds checking",
                 ),
         )
         .subcommand(

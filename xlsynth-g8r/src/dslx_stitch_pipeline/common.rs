@@ -7,6 +7,8 @@ use crate::verilog_version::VerilogVersion;
 pub(crate) struct PipelineCfg<'a> {
     pub(crate) ir: &'a xlsynth::ir_package::IrPackage,
     pub(crate) verilog_version: VerilogVersion,
+    pub(crate) add_invariant_assertions: bool,
+    pub(crate) array_index_bounds_checking: bool,
 }
 
 /// One port in a stage module (flattened).

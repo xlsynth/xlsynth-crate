@@ -20,6 +20,42 @@ use build_pipeline::{PipelineConfig as BuildPipelineConfig, build_pipeline as bu
 
 use crate::verilog_version::VerilogVersion;
 
+// Insert StitchPipelineOptions struct and Default implementation
+#[derive(Debug)]
+pub struct StitchPipelineOptions<'a> {
+    pub verilog_version: VerilogVersion,
+    pub explicit_stages: Option<Vec<String>>,
+    pub stdlib_path: Option<&'a Path>,
+    pub search_paths: Vec<&'a Path>,
+    pub flop_inputs: bool,
+    pub flop_outputs: bool,
+    pub input_valid_signal: Option<&'a str>,
+    pub output_valid_signal: Option<&'a str>,
+    pub reset_signal: Option<&'a str>,
+    pub reset_active_low: bool,
+    pub add_invariant_assertions: bool,
+    pub array_index_bounds_checking: bool,
+}
+
+impl<'a> Default for StitchPipelineOptions<'a> {
+    fn default() -> Self {
+        Self {
+            verilog_version: VerilogVersion::SystemVerilog,
+            explicit_stages: None,
+            stdlib_path: None,
+            search_paths: Vec::new(),
+            flop_inputs: true,
+            flop_outputs: true,
+            input_valid_signal: None,
+            output_valid_signal: None,
+            reset_signal: None,
+            reset_active_low: false,
+            add_invariant_assertions: true,
+            array_index_bounds_checking: true,
+        }
+    }
+}
+
 /// Creates a VAST "stub" module from the given `StageInfo`.
 ///
 /// XLS code-gen returns each combinational stage as a *string* of
@@ -184,11 +220,29 @@ fn make_stage_info_comb(
     let opt = optimize_ir(cfg.ir, stage_mangled)?;
     let sched = "delay_model: \"unit\"\npipeline_stages: 1";
     // Use the XLS "combinational" generator so the resulting module has *no* clock.
-    let codegen = format!(
-        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_COMBINATIONAL\nmodule_name: \"{stage}\"\nuse_system_verilog: {sv}",
+    let mut codegen = format!(
+        r#"register_merge_strategy: STRATEGY_IDENTITY_ONLY
+generator: GENERATOR_KIND_COMBINATIONAL
+module_name: "{stage}"
+use_system_verilog: {sv}"#,
         stage = stage_name_unmangled,
         sv = cfg.verilog_version.is_system_verilog(),
     );
+    // Explicitly set the invariant-assertion option regardless of the
+    // requested value so that the behaviour is *deterministic* – we do not
+    // rely on the generator’s implicit default. When
+    // `cfg.add_invariant_assertions` is `false` we now emit
+    // `add_invariant_assertions: false`, preventing unexpected assertions
+    // from being injected (see xlsynth-driver/tests/invoke_test.rs).
+    codegen.push_str(&format!(
+        "\nadd_invariant_assertions: {}",
+        cfg.add_invariant_assertions
+    ));
+    // Emit array-index bounds checking option explicitly for determinism.
+    codegen.push_str(&format!(
+        "\narray_index_bounds_checking: {}",
+        cfg.array_index_bounds_checking
+    ));
     let result = schedule_and_codegen(&opt, sched, &codegen)?;
     let sv_text = result.get_verilog_text()?;
 
@@ -265,21 +319,26 @@ fn check_for_parametric_stages(
 ///
 /// The resulting SystemVerilog contains the stage modules followed by a wrapper
 /// module named `<top>_pipeline` that instantiates each stage.
-pub fn stitch_pipeline(
+pub fn stitch_pipeline<'a>(
     dslx: &str,
     path: &Path,
     top: &str,
-    verilog_version: VerilogVersion,
-    explicit_stages: Option<&[String]>,
-    stdlib_path: Option<&Path>,
-    search_paths: &[&Path],
-    flop_inputs: bool,
-    flop_outputs: bool,
-    input_valid_signal: Option<&str>,
-    output_valid_signal: Option<&str>,
-    reset_signal: Option<&str>,
-    reset_active_low: bool,
+    opts: &StitchPipelineOptions<'a>,
 ) -> Result<String, xlsynth::XlsynthError> {
+    // Extract option fields for backwards-compat ease.
+    let verilog_version = opts.verilog_version;
+    let explicit_stages = opts.explicit_stages.as_ref().map(|v| v.as_slice());
+    let stdlib_path = opts.stdlib_path;
+    let search_paths = opts.search_paths.as_slice();
+    let flop_inputs = opts.flop_inputs;
+    let flop_outputs = opts.flop_outputs;
+    let input_valid_signal = opts.input_valid_signal;
+    let output_valid_signal = opts.output_valid_signal;
+    let reset_signal = opts.reset_signal;
+    let reset_active_low = opts.reset_active_low;
+    let add_invariant_assertions = opts.add_invariant_assertions;
+    let array_index_bounds_checking = opts.array_index_bounds_checking;
+
     if (input_valid_signal.is_some() || output_valid_signal.is_some()) && reset_signal.is_none() {
         return Err(xlsynth::XlsynthError(
             "reset signal is required when valid signals are used".into(),
@@ -299,6 +358,8 @@ pub fn stitch_pipeline(
     let cfg = PipelineCfg {
         ir: &ir,
         verilog_version,
+        add_invariant_assertions,
+        array_index_bounds_checking,
     };
 
     let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
@@ -381,16 +442,7 @@ mod tests {
             dslx,
             Path::new("test.x"),
             "mul_add",
-            VerilogVersion::SystemVerilog,
-            None,
-            None,
-            &[],
-            true,
-            true,
-            None,
-            None,
-            None,
-            false,
+            &StitchPipelineOptions::default(),
         )
         .unwrap();
         // Validate generated SV.
@@ -422,16 +474,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             dslx,
             Path::new("test.x"),
             "foo",
-            VerilogVersion::SystemVerilog,
-            None,
-            None,
-            &[],
-            true,
-            true,
-            None,
-            None,
-            None,
-            false,
+            &StitchPipelineOptions::default(),
         )
         .unwrap();
 
@@ -445,16 +488,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             dslx,
             Path::new("test.x"),
             "one",
-            VerilogVersion::SystemVerilog,
-            None,
-            None,
-            &[],
-            true,
-            true,
-            None,
-            None,
-            None,
-            false,
+            &StitchPipelineOptions::default(),
         )
         .unwrap();
         compare_golden_sv(&result, "tests/goldens/one.golden.sv");
@@ -469,16 +503,20 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             dslx,
             Path::new("test.x"),
             "foo",
-            VerilogVersion::SystemVerilog,
-            None,
-            None,
-            &[],
-            true,
-            true,
-            Some("input_valid"),
-            Some("output_valid"),
-            Some("rst_n"),
-            true, // Use active-low reset to match simulation helper expectations.
+            &StitchPipelineOptions {
+                verilog_version: VerilogVersion::SystemVerilog,
+                explicit_stages: None,
+                stdlib_path: None,
+                search_paths: Vec::new(),
+                flop_inputs: true,
+                flop_outputs: true,
+                input_valid_signal: Some("input_valid"),
+                output_valid_signal: Some("output_valid"),
+                reset_signal: Some("rst_n"),
+                reset_active_low: true,
+                add_invariant_assertions: false,
+                array_index_bounds_checking: true,
+            },
         )
         .unwrap()
     }
@@ -507,16 +545,7 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             dslx,
             Path::new("test.x"),
             "foo",
-            VerilogVersion::SystemVerilog,
-            None,
-            None,
-            &[],
-            true,
-            true,
-            None,
-            None,
-            None,
-            false,
+            &StitchPipelineOptions::default(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err().0;
