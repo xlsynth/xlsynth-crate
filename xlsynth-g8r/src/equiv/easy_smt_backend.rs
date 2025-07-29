@@ -12,7 +12,7 @@ use std::{
 use easy_smt::{Context, ContextBuilder, SExpr};
 
 use crate::{
-    equiv::solver_interface::{BitVec, Solver},
+    equiv::solver_interface::{BitVec, Solver, angelic_div_mod_common},
     ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
     xls_ir::ir,
 };
@@ -114,6 +114,7 @@ pub struct EasySmtSolver {
     term_cache: HashMap<String, SExpr>,
     reverse_cache: HashMap<SExpr, String>,
     fresh_counter: u64,
+    div_rem_cache: HashMap<(SExpr, SExpr, bool), (SExpr, SExpr)>,
 }
 
 impl EasySmtSolver {
@@ -260,6 +261,38 @@ impl EasySmtSolver {
             BitVec::ZeroWidth => panic!("Cannot reduce zero-width bitvector"),
         }
     }
+    fn angelic_div_mod(
+        &mut self,
+        lhs: &BitVec<SExpr>,
+        rhs: &BitVec<SExpr>,
+        is_signed: bool,
+    ) -> (BitVec<SExpr>, BitVec<SExpr>) {
+        let lhs_term = lhs.get_term().unwrap();
+        let rhs_term = rhs.get_term().unwrap();
+        if let Some((div_result, rem_result)) =
+            self.div_rem_cache.get(&(*lhs_term, *rhs_term, is_signed))
+        {
+            return (
+                BitVec::BitVec {
+                    width: lhs.get_width(),
+                    rep: div_result.clone(),
+                },
+                BitVec::BitVec {
+                    width: lhs.get_width(),
+                    rep: rem_result.clone(),
+                },
+            );
+        }
+        let (div_result, rem_result) = angelic_div_mod_common(self, lhs, rhs, is_signed);
+        self.div_rem_cache.insert(
+            (*lhs_term, *rhs_term, is_signed),
+            (
+                div_result.get_term().unwrap().clone(),
+                rem_result.get_term().unwrap().clone(),
+            ),
+        );
+        (div_result, rem_result)
+    }
 }
 
 impl Solver for EasySmtSolver {
@@ -288,6 +321,7 @@ impl Solver for EasySmtSolver {
             term_cache: HashMap::new(),
             reverse_cache: HashMap::new(),
             fresh_counter: 0,
+            div_rem_cache: HashMap::new(),
         })
     }
 
@@ -476,6 +510,22 @@ impl Solver for EasySmtSolver {
 
     fn urem(&mut self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>) -> BitVec<SExpr> {
         self.bin_op(lhs, rhs, Context::bvurem)
+    }
+
+    fn angelic_udiv(&mut self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>) -> BitVec<SExpr> {
+        self.angelic_div_mod(lhs, rhs, false).0
+    }
+
+    fn angelic_urem(&mut self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>) -> BitVec<SExpr> {
+        self.angelic_div_mod(lhs, rhs, false).1
+    }
+
+    fn angelic_sdiv(&mut self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>) -> BitVec<SExpr> {
+        self.angelic_div_mod(lhs, rhs, true).0
+    }
+
+    fn angelic_srem(&mut self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>) -> BitVec<SExpr> {
+        self.angelic_div_mod(lhs, rhs, true).1
     }
 
     fn srem(&mut self, lhs: &BitVec<SExpr>, rhs: &BitVec<SExpr>) -> BitVec<SExpr> {

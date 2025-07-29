@@ -92,6 +92,15 @@ pub trait Solver: Sized {
             BitVec::ZeroWidth => panic!("sign_bit: bit_vec is zero-width"),
         }
     }
+    fn signed_abs(&mut self, bit_vec: &BitVec<Self::Term>) -> BitVec<Self::Term> {
+        let width = bit_vec.get_width();
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
+        let sign = self.sign_bit(bit_vec);
+        let neg = self.neg(bit_vec);
+        self.ite(&sign, &neg, bit_vec)
+    }
     fn true_bv(&mut self) -> BitVec<Self::Term> {
         self.numerical(1, 1)
     }
@@ -121,6 +130,26 @@ pub trait Solver: Sized {
     fn add(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
     fn sub(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
     fn mul(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
+    fn angelic_udiv(
+        &mut self,
+        lhs: &BitVec<Self::Term>,
+        rhs: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term>;
+    fn angelic_urem(
+        &mut self,
+        lhs: &BitVec<Self::Term>,
+        rhs: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term>;
+    fn angelic_sdiv(
+        &mut self,
+        lhs: &BitVec<Self::Term>,
+        rhs: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term>;
+    fn angelic_srem(
+        &mut self,
+        lhs: &BitVec<Self::Term>,
+        rhs: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term>;
     fn udiv(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
     fn urem(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
     fn srem(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
@@ -134,6 +163,14 @@ pub trait Solver: Sized {
     fn xor(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
     fn nor(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
     fn nand(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term>;
+    fn implies(
+        &mut self,
+        lhs: &BitVec<Self::Term>,
+        rhs: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term> {
+        let not_lhs = self.not(lhs);
+        self.or(&not_lhs, rhs)
+    }
     fn extend(
         &mut self,
         bit_vec: &BitVec<Self::Term>,
@@ -608,6 +645,171 @@ impl<Term> BitVec<Term> {
             BitVec::BitVec { rep, .. } => Some(rep),
             BitVec::ZeroWidth => None,
         }
+    }
+}
+
+pub fn angelic_unsigned_div_rem_common<S: Solver>(
+    solver: &mut S,
+    lhs: &BitVec<S::Term>,
+    rhs: &BitVec<S::Term>,
+) -> (BitVec<S::Term>, BitVec<S::Term>) {
+    if lhs.get_width() != rhs.get_width() {
+        panic!("lhs and rhs must have the same width");
+    }
+    if lhs.get_width() == 0 {
+        return (BitVec::ZeroWidth, BitVec::ZeroWidth);
+    }
+    let width = lhs.get_width();
+    let div_result = solver.declare_fresh("udiv", width).unwrap();
+    let rem_result = solver.declare_fresh("urem", width).unwrap();
+    let zero = solver.zero(width);
+    let all_ones = solver.all_ones(width);
+    let rhs_is_zero = solver.eq(&rhs, &zero);
+    let div_is_all_ones = solver.eq(&div_result, &all_ones);
+    let rem_is_lhs = solver.eq(&rem_result, &lhs);
+    let div_zero_constraint = solver.implies(&rhs_is_zero, &div_is_all_ones);
+    let rem_zero_constraint = solver.implies(&rhs_is_zero, &rem_is_lhs);
+    solver.assert(&div_zero_constraint).unwrap();
+    solver.assert(&rem_zero_constraint).unwrap();
+
+    let rhs_is_not_zero = solver.not(&rhs_is_zero);
+
+    let lhs_extended = solver.zero_extend(&lhs, width);
+    let rhs_extended = solver.zero_extend(&rhs, width);
+    let div_extended = solver.zero_extend(&div_result, width);
+    let rem_extended = solver.zero_extend(&rem_result, width);
+
+    let mul = solver.mul(&div_extended, &rhs_extended);
+    let res = solver.add(&rem_extended, &mul);
+    let res_is_lhs = solver.eq(&res, &lhs_extended);
+    let mul_constraint = solver.implies(&rhs_is_not_zero, &res_is_lhs);
+    solver.assert(&mul_constraint).unwrap();
+
+    // Rem in bound
+    let rem_lt_rhs = solver.ult(&rem_extended, &rhs_extended);
+    let rem_lt_rhs_constraint = solver.implies(&rhs_is_not_zero, &rem_lt_rhs);
+    solver.assert(&rem_lt_rhs_constraint).unwrap();
+
+    (div_result, rem_result)
+}
+
+pub fn angelic_signed_div_rem_common<S: Solver>(
+    solver: &mut S,
+    lhs: &BitVec<S::Term>,
+    rhs: &BitVec<S::Term>,
+) -> (BitVec<S::Term>, BitVec<S::Term>) {
+    if lhs.get_width() != rhs.get_width() {
+        panic!("lhs and rhs must have the same width");
+    }
+    if lhs.get_width() == 0 {
+        return (BitVec::ZeroWidth, BitVec::ZeroWidth);
+    }
+    let width = lhs.get_width();
+    let div_result = solver.declare_fresh("sdiv", width).unwrap();
+    let rem_result = solver.declare_fresh("srem", width).unwrap();
+
+    let zero = solver.zero(width);
+    let rhs_is_zero = solver.eq(&rhs, &zero);
+
+    // Fallbacks for rhs == 0 (SMT-LIB semantics):
+    //   sdiv(x, 0) = (-1) if x >= 0 else 1
+    //   srem(x, 0) = x
+    let sign = solver.sign_bit(lhs); // 1-bit: 1 => negative
+    let sign_ext = solver.sign_extend_to(&sign, width); // 0 if non-neg, all-ones if neg
+    let not_sign_ext = solver.not(&sign_ext); // all-ones if non-neg, 0 if neg
+    let one = solver.one(width);
+    let fallback_q = solver.or(&not_sign_ext, &one); // -1 if non-neg, 1 if neg
+    let div_eq_fallback = solver.eq(&div_result, &fallback_q);
+    let div_zero_constraint = solver.implies(&rhs_is_zero, &div_eq_fallback);
+    solver.assert(&div_zero_constraint).unwrap();
+
+    let rem_eq_lhs = solver.eq(&rem_result, lhs);
+    let rem_zero_constraint = solver.implies(&rhs_is_zero, &rem_eq_lhs);
+    solver.assert(&rem_zero_constraint).unwrap();
+
+    // When rhs != 0, constrain q and r with multiplication/addition and signed
+    // bounds.
+    let rhs_is_not_zero = solver.not(&rhs_is_zero);
+
+    // Work in 2*width with sign-extensions to avoid overflow.
+    let lhs_ext = solver.sign_extend(lhs, width);
+    let rhs_ext = solver.sign_extend(rhs, width);
+    let q_ext = solver.sign_extend(&div_result, width);
+    let r_ext = solver.sign_extend(&rem_result, width);
+
+    let prod = solver.mul(&q_ext, &rhs_ext);
+    let sum = solver.add(&prod, &r_ext);
+    let sum_is_lhs = solver.eq(&sum, &lhs_ext);
+    let eq_constr = solver.implies(&rhs_is_not_zero, &sum_is_lhs);
+    solver.assert(&eq_constr).unwrap();
+
+    // Sign of remainder: sign(rem) == sign(lhs) or rem == 0.
+    let zero_w = solver.zero(width);
+    let rem_is_zero = solver.eq(&rem_result, &zero_w);
+    let sign_lhs = solver.sign_bit(lhs);
+    let sign_rem = solver.sign_bit(&rem_result);
+    let sign_eq = solver.eq(&sign_lhs, &sign_rem);
+    let sign_ok = solver.or(&rem_is_zero, &sign_eq);
+    let sign_bound = solver.implies(&rhs_is_not_zero, &sign_ok);
+    solver.assert(&sign_bound).unwrap();
+
+    // Magnitude bound: |rem| < |rhs|
+    let abs_rhs = solver.signed_abs(rhs);
+    let abs_rem = solver.signed_abs(&rem_result);
+    let mag_constr_lt = solver.ult(&abs_rem, &abs_rhs);
+    let mag_bound = solver.implies(&rhs_is_not_zero, &mag_constr_lt);
+    solver.assert(&mag_bound).unwrap();
+
+    (div_result, rem_result)
+}
+
+// Division semantics implemented with angelic "choose" semantics.
+//
+// Background: In program verification it is useful to distinguish two kinds of
+// nondeterminism:
+// - Demonic: an adversary chooses values to falsify the property. An example is
+//   the inputs to a quickcheck test, where we choose the inputs to falsify the
+//   property.
+// - Angelic: a helper chooses values (if any exist) to satisfy the
+//   specification. The solver is free to pick any values that makes our
+//   postconditions true. See Floyd ("Nondeterministic Algorithms", JACM 1967)
+//   and Rastislav Bodik et al. ("Programming with Angelic Nondeterminism", POPL
+//   2006).
+//
+// Idea: Native division is notoriously expensive for SMT solvers: After
+// bit-blasting, division circuits introduce deep, iterative structure that
+// are much harder to solve than add/mul. We avoid reasoning about the divider
+// directly by introducing *angelic witness* (q, r) and constraining them so
+// that, whenever division is well-defined, some choice will uniquely
+// satisfy the spec. Concretely, for bit-vector a, b:
+//
+//     choose q, r s.t.        // angelic witness
+//       assert q * b + r == a // constraint
+//     and remainder bounds:
+//       Unsigned:
+//         0 <= r < b,             // when b != 0
+//         q == all_ones && r == a // when b == 0 (SMT-LIB)
+//       Signed:
+//         |r| < |b| and (r == 0 or sgn(r) == sgn(a)) // when b != 0
+//         q == -sgn(a) && r == a                     // when b == 0 (SMT-LIB)
+//
+// Notation: sgn(x) is the two's-complement sign; |x| is two's-complement abs.
+//
+// Uniqueness: For b != 0, these constraints imply a unique (q, r).
+//
+// Implementation note: We form q*b + r at 2W bits via zero-/sign-extend to
+// avoid overflow. Cost: This removes divider circuitry but still adds a
+// 2W×W multiply; wide bit-vectors remain heavy.
+pub fn angelic_div_mod_common<S: Solver>(
+    solver: &mut S,
+    lhs: &BitVec<S::Term>,
+    rhs: &BitVec<S::Term>,
+    is_signed: bool,
+) -> (BitVec<S::Term>, BitVec<S::Term>) {
+    if is_signed {
+        angelic_signed_div_rem_common(solver, lhs, rhs)
+    } else {
+        angelic_unsigned_div_rem_common(solver, lhs, rhs)
     }
 }
 
@@ -1180,6 +1382,19 @@ macro_rules! test_solver {
                 0
             );
 
+            crate::test_solver_unary!(test_signed_abs_pos, $solver, signed_abs, 8, 0x05, 8, 0x05);
+            crate::test_solver_unary!(test_signed_abs_neg, $solver, signed_abs, 8, 0xFB, 8, 0x05);
+            crate::test_solver_unary!(test_signed_abs_zero, $solver, signed_abs, 8, 0x00, 8, 0x00);
+            crate::test_solver_unary!(
+                test_signed_abs_intmin,
+                $solver,
+                signed_abs,
+                8,
+                0x80,
+                8,
+                0x80
+            );
+
             crate::test_solver_binary!(test_add, $solver, add, 8, 0x15, 0x93, 8, 0xa8);
             crate::test_solver_binary!(test_add_overflow, $solver, add, 8, 0x75, 0x9c, 8, 0x11);
             crate::test_solver_binary!(test_sub, $solver, sub, 8, 0x93, 0x15, 8, 0x7e);
@@ -1471,6 +1686,11 @@ macro_rules! test_solver {
             crate::test_solver_cmp!(test_ne_true, $solver, ne, 8, 0x5A, 0x5B, 1);
             crate::test_solver_cmp!(test_ne_false, $solver, ne, 8, 0x5A, 0x5A, 0);
 
+            crate::test_solver_binary!(test_implies_true_true, $solver, implies, 1, 1, 1, 1, 1);
+            crate::test_solver_binary!(test_implies_true_false, $solver, implies, 1, 1, 0, 1, 0);
+            crate::test_solver_binary!(test_implies_false_true, $solver, implies, 1, 0, 1, 1, 1);
+            crate::test_solver_binary!(test_implies_false_false, $solver, implies, 1, 0, 0, 1, 1);
+
             // Signed comparisons: -3 (0xFD) vs 2 (0x02)
             crate::test_solver_cmp!(test_slt_true, $solver, slt, 8, 0xFD, 0x02, 1);
             crate::test_solver_cmp!(test_slt_false_eq, $solver, slt, 8, 0x02, 0x02, 0);
@@ -1691,6 +1911,156 @@ macro_rules! test_solver {
                 xls_umod,
                 8,
                 0xBC,
+                0x00,
+                8,
+                0x00
+            );
+
+            // ------------------------------------------------------------------
+            // angelic unsigned div/rem
+            // ------------------------------------------------------------------
+            crate::test_solver_binary!(
+                test_angelic_udiv_non_zero,
+                $solver,
+                angelic_udiv,
+                8,
+                0xBC,
+                0x07,
+                8,
+                0x1A
+            );
+            crate::test_solver_binary!(
+                test_angelic_udiv_zero,
+                $solver,
+                angelic_udiv,
+                8,
+                0xBC,
+                0x00,
+                8,
+                0xFF
+            );
+            crate::test_solver_binary!(
+                test_angelic_urem_non_zero,
+                $solver,
+                angelic_urem,
+                8,
+                0xBC,
+                0x07,
+                8,
+                0x06
+            );
+            crate::test_solver_binary!(
+                test_angelic_urem_zero,
+                $solver,
+                angelic_urem,
+                8,
+                0xBC,
+                0x00,
+                8,
+                0xBC
+            );
+
+            // ------------------------------------------------------------------
+            // angelic signed div/rem
+            // For non-zero divisors these match the native signed semantics.
+            // For zero divisors, sdiv fallback is (-1 if lhs >= 0 else 1), srem is lhs.
+            // ------------------------------------------------------------------
+            crate::test_solver_binary!(
+                test_angelic_sdiv_signed_pos_pos,
+                $solver,
+                angelic_sdiv,
+                8,
+                0x5A,
+                0x07,
+                8,
+                0x0C
+            );
+            crate::test_solver_binary!(
+                test_angelic_sdiv_signed_neg_pos,
+                $solver,
+                angelic_sdiv,
+                8,
+                0xBC,
+                0x07,
+                8,
+                0xF7
+            );
+            crate::test_solver_binary!(
+                test_angelic_sdiv_signed_pos_neg,
+                $solver,
+                angelic_sdiv,
+                8,
+                0x5A,
+                0xF9,
+                8,
+                0xF4
+            );
+            crate::test_solver_binary!(
+                test_angelic_sdiv_signed_neg_neg,
+                $solver,
+                angelic_sdiv,
+                8,
+                0xBC,
+                0xF9,
+                8,
+                0x09
+            );
+            crate::test_solver_binary!(
+                test_angelic_sdiv_signed_pos_zero,
+                $solver,
+                angelic_sdiv,
+                8,
+                0x5A,
+                0x00,
+                8,
+                0xFF
+            );
+            crate::test_solver_binary!(
+                test_angelic_sdiv_signed_neg_zero,
+                $solver,
+                angelic_sdiv,
+                8,
+                0xBC,
+                0x00,
+                8,
+                0x01
+            );
+            crate::test_solver_binary!(
+                test_angelic_sdiv_signed_zero_zero,
+                $solver,
+                angelic_sdiv,
+                8,
+                0x00,
+                0x00,
+                8,
+                0xFF
+            );
+            crate::test_solver_binary!(
+                test_angelic_srem_signed_pos_zero,
+                $solver,
+                angelic_srem,
+                8,
+                0x5A,
+                0x00,
+                8,
+                0x5A
+            );
+            crate::test_solver_binary!(
+                test_angelic_srem_signed_neg_zero,
+                $solver,
+                angelic_srem,
+                8,
+                0xBC,
+                0x00,
+                8,
+                0xBC
+            );
+            crate::test_solver_binary!(
+                test_angelic_srem_signed_zero_zero,
+                $solver,
+                angelic_srem,
+                8,
+                0x00,
                 0x00,
                 8,
                 0x00

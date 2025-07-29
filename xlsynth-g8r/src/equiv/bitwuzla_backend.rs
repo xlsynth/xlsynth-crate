@@ -49,7 +49,7 @@ use bitwuzla_sys::{
 };
 
 use crate::{
-    equiv::solver_interface::{BitVec, Response, Solver},
+    equiv::solver_interface::{BitVec, Response, Solver, angelic_div_mod_common},
     ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
     xls_ir::ir,
 };
@@ -876,6 +876,38 @@ impl Solver for Bitwuzla {
 
     fn urem(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
         self.bin_op(x, y, BITWUZLA_KIND_BV_UREM)
+    }
+
+    fn angelic_udiv(
+        &mut self,
+        x: &BitVec<Self::Term>,
+        y: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term> {
+        angelic_div_mod_common(self, x, y, false).0
+    }
+
+    fn angelic_urem(
+        &mut self,
+        x: &BitVec<Self::Term>,
+        y: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term> {
+        angelic_div_mod_common(self, x, y, false).1
+    }
+
+    fn angelic_sdiv(
+        &mut self,
+        x: &BitVec<Self::Term>,
+        y: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term> {
+        angelic_div_mod_common(self, x, y, true).0
+    }
+
+    fn angelic_srem(
+        &mut self,
+        x: &BitVec<Self::Term>,
+        y: &BitVec<Self::Term>,
+    ) -> BitVec<Self::Term> {
+        angelic_div_mod_common(self, x, y, true).1
     }
 
     fn srem(&mut self, x: &BitVec<Self::Term>, y: &BitVec<Self::Term>) -> BitVec<Self::Term> {
