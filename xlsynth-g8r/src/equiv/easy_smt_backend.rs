@@ -113,6 +113,7 @@ pub struct EasySmtSolver {
     next_name_index: usize,
     term_cache: HashMap<String, SExpr>,
     reverse_cache: HashMap<SExpr, String>,
+    fresh_counter: u64,
 }
 
 impl EasySmtSolver {
@@ -286,7 +287,14 @@ impl Solver for EasySmtSolver {
             next_name_index: 0,
             term_cache: HashMap::new(),
             reverse_cache: HashMap::new(),
+            fresh_counter: 0,
         })
+    }
+
+    fn fresh_symbol(&mut self, name: &str) -> io::Result<String> {
+        let symbol = format!("__easy_smt_fresh_{}_{}", name, self.fresh_counter);
+        self.fresh_counter += 1;
+        Ok(symbol)
     }
 
     fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<SExpr>> {
