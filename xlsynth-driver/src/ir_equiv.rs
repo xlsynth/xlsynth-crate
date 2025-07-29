@@ -6,9 +6,11 @@ use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
 use xlsynth_g8r::equiv::solver_interface::Solver;
 
+use std::collections::HashMap;
+use xlsynth::IrValue;
 use xlsynth_g8r::equiv::prove_equiv::{
-    prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
-    AssertionSemantics, EquivResult, IrFn,
+    prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
+    prove_ir_fn_equiv_with_domains, AssertionSemantics, EquivResult, IrFn,
 };
 use xlsynth_g8r::xls_ir::ir_parser;
 
@@ -34,6 +36,8 @@ pub struct EquivInputs<'a> {
     pub subcommand: &'a str,
     pub lhs_origin: &'a str,
     pub rhs_origin: &'a str,
+    pub lhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
+    pub rhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
 }
 
 // Helper: parse IR text, pick top (explicit or package top), drop params.
@@ -130,12 +134,14 @@ fn run_equiv_check_native<S: Solver>(solver_config: &S::Config, inputs: &EquivIn
 
     let start_time = std::time::Instant::now();
     let result = match inputs.strategy {
-        ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv::<S>(
+        ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv_with_domains::<S>(
             solver_config,
             &lhs_ir_fn,
             &rhs_ir_fn,
             inputs.assertion_semantics,
             inputs.flatten_aggregates,
+            inputs.lhs_param_domains.as_ref(),
+            inputs.rhs_param_domains.as_ref(),
         ),
         ParallelismStrategy::OutputBits => prove_ir_fn_equiv_output_bits_parallel::<S>(
             solver_config,
@@ -372,6 +378,26 @@ pub fn dispatch_ir_equiv(
         None => tool_path.is_some(),
     };
 
+    let support_domain_constraints = match solver_choice {
+        #[cfg(feature = "has-boolector")]
+        Some(SolverChoice::BoolectorLegacy) => false,
+        Some(SolverChoice::Toolchain) => false,
+        Some(_) => true,
+        None => false,
+    };
+
+    // Guard: param-domain constraints (e.g., enum in-bound assumptions) are not
+    // supported when using the external toolchain path.
+    if !support_domain_constraints
+        && (inputs.lhs_param_domains.is_some() || inputs.rhs_param_domains.is_some())
+    {
+        eprintln!(
+            "[{}] Error: enum/param domain constraints are not supported with the given solver {:?}",
+            inputs.subcommand, solver_choice
+        );
+        std::process::exit(1);
+    }
+
     if use_toolchain {
         let tool_path = tool_path.expect("tool_path required for toolchain path");
         match (inputs.lhs_top, inputs.rhs_top) {
@@ -496,6 +522,8 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         subcommand: SUBCOMMAND,
         lhs_origin: lhs,
         rhs_origin: rhs,
+        lhs_param_domains: None,
+        rhs_param_domains: None,
     };
 
     dispatch_ir_equiv(solver, tool_path, &inputs);

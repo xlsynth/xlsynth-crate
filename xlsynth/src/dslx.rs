@@ -151,6 +151,15 @@ impl TypecheckedModule {
             ptr: unsafe { sys::xls_dslx_typechecked_module_get_type_info(self.ptr.ptr) },
         }
     }
+
+    pub fn get_type_info_for_module(&self, module: &Module) -> Option<TypeInfo> {
+        let self_type_info = self.get_type_info();
+        if module.ptr == self.get_module().ptr {
+            return Some(self_type_info);
+        } else {
+            return self_type_info.get_imported_type_info(module);
+        }
+    }
 }
 
 pub struct ConstantDef {
@@ -375,6 +384,17 @@ impl EnumMember {
 pub struct Expr {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxExpr,
+}
+
+impl Expr {
+    pub fn get_owner_module(&self) -> Module {
+        let module_ptr = unsafe { sys::xls_dslx_expr_get_owner_module(self.ptr) };
+        assert!(!module_ptr.is_null());
+        Module {
+            parent: self.parent.clone(),
+            ptr: module_ptr,
+        }
+    }
 }
 
 // -- EnumDef
@@ -626,6 +646,24 @@ pub struct Function {
     ptr: *mut sys::CDslxFunction,
 }
 
+pub struct Param {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxParam,
+}
+
+impl Param {
+    pub fn get_name(&self) -> String {
+        unsafe { c_str_to_rust(sys::xls_dslx_param_get_name(self.ptr)) }
+    }
+
+    pub fn get_type_annotation(&self) -> TypeAnnotation {
+        TypeAnnotation {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_param_get_type_annotation(self.ptr) },
+        }
+    }
+}
+
 impl Function {
     pub fn get_identifier(&self) -> String {
         unsafe {
@@ -636,6 +674,21 @@ impl Function {
 
     pub fn is_parametric(&self) -> bool {
         unsafe { sys::xls_dslx_function_is_parametric(self.ptr) }
+    }
+
+    pub fn get_param_count(&self) -> usize {
+        unsafe { sys::xls_dslx_function_get_param_count(self.ptr) as usize }
+    }
+
+    pub fn get_param(&self, idx: usize) -> Param {
+        let p = unsafe { sys::xls_dslx_function_get_param(self.ptr, idx as i64) };
+        if p.is_null() {
+            panic!("Failed to get function param at index {}", idx);
+        }
+        Param {
+            parent: self.parent.clone(),
+            ptr: p,
+        }
     }
 }
 
@@ -760,6 +813,18 @@ impl TypeInfo {
             assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
+        }
+    }
+
+    pub fn get_imported_type_info(&self, module: &Module) -> Option<TypeInfo> {
+        let ptr = unsafe { sys::xls_dslx_type_info_get_imported_type_info(self.ptr, module.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(TypeInfo {
+                parent: self.parent.clone(),
+                ptr,
+            })
         }
     }
 }
@@ -1131,5 +1196,138 @@ fn without_assert(a: u32, b: u32) -> u32 {
         assert!(!type_info
             .requires_implicit_token(&without_assert_fn)
             .expect("requires_implicit_token success (without_assert)"));
+    }
+
+    #[test]
+    fn test_function_params_exposed() {
+        let dslx = r#"
+            enum MyEnum : u8 { A = 0, B = 1 }
+            fn f(a: u32, b: MyEnum) -> u32 { a }
+        "#;
+        let mut import_data = ImportData::default();
+        let tcm = parse_and_typecheck(
+            dslx,
+            "/fake/params_test.x",
+            "params_test_mod",
+            &mut import_data,
+        )
+        .expect("parse-and-typecheck success");
+        let module = tcm.get_module();
+        let type_info = tcm.get_type_info();
+        use crate::dslx::MatchableModuleMember;
+        let mut found = false;
+        for i in 0..module.get_member_count() {
+            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
+                if f.get_identifier() == "f" {
+                    found = true;
+                    assert_eq!(f.get_param_count(), 2);
+                    let p0 = f.get_param(0);
+                    assert_eq!(p0.get_name(), "a");
+                    let p0_ty = type_info.get_type_for_type_annotation(&p0.get_type_annotation());
+                    assert!(p0_ty.is_bits_like().is_some());
+
+                    let p1 = f.get_param(1);
+                    assert_eq!(p1.get_name(), "b");
+                    let p1_ty = type_info.get_type_for_type_annotation(&p1.get_type_annotation());
+                    assert!(p1_ty.is_enum());
+                }
+            }
+        }
+        assert!(found, "function f not found");
+    }
+
+    #[test]
+    fn test_owner_module_and_type_info_for_imported_entity() {
+        // Create a temporary directory for the imported and main module files.
+        let tmpdir = xlsynth_test_helpers::make_test_tmpdir("xlsynth_dslx_test");
+        let tmpdir = tmpdir.path().to_path_buf();
+
+        // Write the imported module file to disk so ImportData can resolve it by name.
+        let imported_path = tmpdir.join("imported.x");
+        let imported_dslx = r#"
+            const TEN = u32:10;
+            pub enum ImpEnum : u8 { Z = 0xa }
+        "#;
+        std::fs::write(&imported_path, imported_dslx).expect("write imported.x");
+
+        // Main module that imports the above and references the enum type.
+        let main_path = tmpdir.join("main.x");
+        let main_dslx = r#"
+            import imported;
+            fn f(x: imported::ImpEnum) -> u32 { u32:0 }
+        "#;
+        std::fs::write(&main_path, main_dslx).expect("write main.x");
+
+        // Use ImportData with the temp directory as a search path.
+        let mut import_data = ImportData::new(None, &[tmpdir.as_path()]);
+
+        // Parse and typecheck ONLY the main module; imported module will be resolved by
+        // import.
+        let main_tcm = parse_and_typecheck(
+            main_dslx,
+            main_path.to_str().unwrap(),
+            "main",
+            &mut import_data,
+        )
+        .expect("parse-and-typecheck main success");
+        let main_module = main_tcm.get_module();
+        let main_type_info = main_tcm.get_type_info();
+
+        // Find function f and its first parameter's type annotation.
+        use crate::dslx::MatchableModuleMember;
+        let mut f_opt: Option<Function> = None;
+        for i in 0..main_module.get_member_count() {
+            if let Some(MatchableModuleMember::Function(f)) =
+                main_module.get_member(i).to_matchable()
+            {
+                if f.get_identifier() == "f" {
+                    f_opt = Some(f);
+                    break;
+                }
+            }
+        }
+        let f = f_opt.expect("function f found");
+        assert_eq!(f.get_param_count(), 1);
+        let p0 = f.get_param(0);
+        let p0_ty = main_type_info.get_type_for_type_annotation(&p0.get_type_annotation());
+        assert!(p0_ty.is_enum());
+
+        // Get the EnumDef backing the imported type and grab a value expression from
+        // it.
+        let enum_def = p0_ty.get_enum_def().expect("enum def for imported type");
+        assert_eq!(enum_def.get_identifier(), "ImpEnum");
+        assert!(enum_def.get_member_count() >= 1);
+        let member_expr = enum_def.get_member(0).get_value();
+
+        // The enum member's value expression is owned by the imported module.
+        let owner_module = member_expr.get_owner_module();
+        assert_eq!(owner_module.get_name(), "imported");
+
+        // Now fetch the TypeInfo corresponding to that imported module from the main
+        // TCM.
+        let imported_type_info = main_tcm
+            .get_type_info_for_module(&owner_module)
+            .expect("imported type info available");
+
+        // Verify we can query type information for the imported EnumDef via the
+        // imported TypeInfo.
+        let imported_enum_type = imported_type_info.get_type_for_enum_def(&enum_def);
+        assert!(imported_enum_type.is_enum());
+        assert_eq!(
+            imported_enum_type.get_enum_def().unwrap().get_identifier(),
+            enum_def.get_identifier()
+        );
+
+        // Also ensure we can evaluate a const expr in the imported module via its
+        // TypeInfo.
+        use crate::ir_value::IrFormatPreference;
+        let iv = imported_type_info
+            .get_const_expr(&member_expr)
+            .expect("const expr evaluation");
+        let ir = iv.convert_to_ir().expect("convert_to_ir");
+        assert_eq!(
+            ir.to_string_fmt(IrFormatPreference::Hex).unwrap(),
+            "bits[8]:0xa"
+        );
     }
 }
