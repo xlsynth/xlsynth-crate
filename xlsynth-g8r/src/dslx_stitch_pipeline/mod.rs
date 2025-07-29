@@ -202,6 +202,11 @@ use_system_verilog: {sv}"#,
         "\nadd_invariant_assertions: {}",
         cfg.add_invariant_assertions
     ));
+    // Emit array-index bounds checking option explicitly for determinism.
+    codegen.push_str(&format!(
+        "\narray_index_bounds_checking: {}",
+        cfg.array_index_bounds_checking
+    ));
     let result = schedule_and_codegen(&opt, sched, &codegen)?;
     let sv_text = result.get_verilog_text()?;
 
@@ -293,6 +298,7 @@ pub fn stitch_pipeline(
     reset_signal: Option<&str>,
     reset_active_low: bool,
     add_invariant_assertions: bool,
+    array_index_bounds_checking: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
     if (input_valid_signal.is_some() || output_valid_signal.is_some()) && reset_signal.is_none() {
         return Err(xlsynth::XlsynthError(
@@ -314,6 +320,7 @@ pub fn stitch_pipeline(
         ir: &ir,
         verilog_version,
         add_invariant_assertions,
+        array_index_bounds_checking,
     };
 
     let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
@@ -407,6 +414,7 @@ mod tests {
             None,
             false,
             false,
+            true,
         )
         .unwrap();
         // Validate generated SV.
@@ -449,6 +457,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             None,
             false,
             false,
+            true,
         )
         .unwrap();
 
@@ -473,6 +482,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             None,
             false,
             false,
+            true,
         )
         .unwrap();
         compare_golden_sv(&result, "tests/goldens/one.golden.sv");
@@ -498,6 +508,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             Some("rst_n"),
             true, // Use active-low reset to match simulation helper expectations.
             false,
+            true,
         )
         .unwrap()
     }
@@ -537,6 +548,7 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             None,
             false,
             false,
+            true,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().0;

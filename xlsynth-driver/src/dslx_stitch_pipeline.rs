@@ -49,6 +49,18 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .and_then(|cg| cg.add_invariant_assertions)
         .unwrap_or(crate::flag_defaults::CODEGEN_ADD_INVARIANT_ASSERTIONS);
 
+    // Determine whether to emit array-index bounds checking (default true).
+    let array_index_bounds_checking = matches
+        .get_one::<String>("array_index_bounds_checking")
+        .map(|s| s == "true")
+        .or_else(|| {
+            config
+                .as_ref()
+                .and_then(|c| c.codegen.as_ref())
+                .and_then(|cg| cg.array_index_bounds_checking)
+        })
+        .unwrap_or(crate::flag_defaults::CODEGEN_ARRAY_INDEX_BOUNDS_CHECKING);
+
     let flop_inputs = matches
         .get_one::<String>("flop_inputs")
         .map(|s| s == "true")
@@ -72,6 +84,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         reset_opt,
         reset_active_low,
         add_invariant_assertions,
+        array_index_bounds_checking,
     );
     match result {
         Ok(sv) => println!("{}", sv),
