@@ -69,22 +69,26 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .get_one::<String>("flop_outputs")
         .map(|s| s == "true")
         .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_OUTPUTS);
+    let options = xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineOptions {
+        verilog_version,
+        explicit_stages: stage_list,
+        stdlib_path: paths.stdlib_path.as_deref(),
+        search_paths: path_refs.clone(),
+        flop_inputs,
+        flop_outputs,
+        input_valid_signal: input_valid_signal_opt,
+        output_valid_signal: output_valid_signal_opt,
+        reset_signal: reset_opt,
+        reset_active_low,
+        add_invariant_assertions,
+        array_index_bounds_checking,
+    };
+
     let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
         &dslx,
         std::path::Path::new(input),
         top,
-        verilog_version,
-        stage_list.as_ref().map(|v| v.as_slice()),
-        paths.stdlib_path.as_deref(),
-        &path_refs,
-        flop_inputs,
-        flop_outputs,
-        input_valid_signal_opt,
-        output_valid_signal_opt,
-        reset_opt,
-        reset_active_low,
-        add_invariant_assertions,
-        array_index_bounds_checking,
+        &options,
     );
     match result {
         Ok(sv) => println!("{}", sv),
