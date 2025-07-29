@@ -390,6 +390,10 @@ fn main() {
                 .add_bool_arg(
                     "flop_outputs",
                     "Whether to insert output pipeline flops (default true)",
+                )
+                .add_bool_arg(
+                    "array_index_bounds_checking",
+                    "Whether to emit array index bounds checking",
                 ),
         )
         .subcommand(

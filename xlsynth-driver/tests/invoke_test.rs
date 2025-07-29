@@ -4112,3 +4112,156 @@ fn f_cycle1(x: u6) -> u6 {
         assert!(!has_asserts, "Did not expect invariant assertions when add_invariant_assertions=false, but some were found. stdout: {}", stdout);
     }
 }
+
+// Checks that "array_index_bounds_checking" knob toggles Verilog emission when
+// an enum value (cast to bits) is used to index an array. When bounds checking
+// is on the generated Verilog should differ (e.g. contain assertion logic)
+// compared to when it is off.
+#[test]
+fn test_dslx2pipeline_array_index_bounds_checking_enum_cast() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Enum with four values (0–3). We index a 4-element array using a cast of
+    // the enum to `u32`.
+    let dslx = r#"enum E : u2 {
+    A = 0,
+    B = 1,
+    C = 2,
+    D = 3,
+}
+
+fn main(sel: E, arr: u32[4]) -> u32 {
+    arr[(sel as u32) + 1]
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("enum_index.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // Helper closure to invoke the driver with the given flag value.
+    let run = |bounds_checking: bool| -> std::process::Output {
+        std::process::Command::new(command_path)
+            .arg("dslx2pipeline")
+            .arg("--pipeline_stages")
+            .arg("1")
+            .arg("--delay_model")
+            .arg("unit")
+            .arg(format!("--array_index_bounds_checking={}", bounds_checking))
+            .arg("--use_system_verilog=true")
+            .arg("--flop_inputs=false")
+            .arg("--flop_outputs=false")
+            .arg("--dslx_input_file")
+            .arg(dslx_path.to_str().unwrap())
+            .arg("--dslx_top")
+            .arg("main")
+            .output()
+            .expect("driver execution")
+    };
+
+    let out_false = run(false);
+    assert!(
+        out_false.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out_false.stderr)
+    );
+    let sv_false = String::from_utf8_lossy(&out_false.stdout).to_string();
+
+    let out_true = run(true);
+    assert!(
+        out_true.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out_true.stderr)
+    );
+    let sv_true = String::from_utf8_lossy(&out_true.stdout).to_string();
+
+    compare_golden_sv(
+        &sv_true,
+        "tests/test_dslx2pipeline_array_index_bounds_checking_enum_cast_true.golden.sv",
+    );
+    compare_golden_sv(
+        &sv_false,
+        "tests/test_dslx2pipeline_array_index_bounds_checking_enum_cast_false.golden.sv",
+    );
+
+    // The two versions should not be identical – bounds-checking inserts extra
+    // logic (e.g. assertions) into the Verilog.
+    assert_ne!(
+        sv_false, sv_true,
+        "Expected different Verilog when bounds checking is toggled"
+    );
+}
+
+// Similar to the previous test but exercises the bound-checking flag on the
+// `dslx-stitch-pipeline` subcommand.
+#[test]
+fn test_dslx_stitch_pipeline_array_index_bounds_checking_enum_cast() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Two-stage pipeline; first stage indexes an array using an enum-based index.
+    let dslx = r#"enum E : u2 {
+    A = 0,
+    B = 1,
+    C = 2,
+    D = 3,
+}
+
+fn foo_cycle0(sel: E, arr: u32[4]) -> u32 {
+    arr[(sel as u3) + u3:1]
+}
+
+fn foo_cycle1(x: u32) -> u32 { x }
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("enum_index_pipeline.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let run = |bounds_checking: bool| -> std::process::Output {
+        std::process::Command::new(command_path)
+            .arg("dslx-stitch-pipeline")
+            .arg("--dslx_input_file")
+            .arg(dslx_path.to_str().unwrap())
+            .arg("--dslx_top")
+            .arg("foo")
+            .arg(format!("--array_index_bounds_checking={}", bounds_checking))
+            .arg("--use_system_verilog=true")
+            .output()
+            .expect("driver execution")
+    };
+
+    let out_false = run(false);
+    assert!(
+        out_false.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out_false.stderr)
+    );
+    let sv_false = String::from_utf8_lossy(&out_false.stdout).to_string();
+
+    let out_true = run(true);
+    assert!(
+        out_true.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out_true.stderr)
+    );
+    let sv_true = String::from_utf8_lossy(&out_true.stdout).to_string();
+
+    compare_golden_sv(
+        &sv_true,
+        "tests/test_dslx_stitch_pipeline_array_index_bounds_checking_enum_cast_true.golden.sv",
+    );
+    compare_golden_sv(
+        &sv_false,
+        "tests/test_dslx_stitch_pipeline_array_index_bounds_checking_enum_cast_false.golden.sv",
+    );
+
+    // Ensure the bound-checking knob changes the emitted Verilog.
+    assert_ne!(
+        sv_false, sv_true,
+        "Expected different Verilog with bounds checking toggled"
+    );
+}
