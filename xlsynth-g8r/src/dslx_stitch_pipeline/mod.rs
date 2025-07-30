@@ -339,12 +339,6 @@ pub fn stitch_pipeline<'a>(
     let add_invariant_assertions = opts.add_invariant_assertions;
     let array_index_bounds_checking = opts.array_index_bounds_checking;
 
-    if (input_valid_signal.is_some() || output_valid_signal.is_some()) && reset_signal.is_none() {
-        return Err(xlsynth::XlsynthError(
-            "reset signal is required when valid signals are used".into(),
-        ));
-    }
-
     check_for_parametric_stages(dslx, path, stdlib_path, search_paths)?;
     let convert_opts = DslxConvertOptions {
         dslx_stdlib_path: stdlib_path,
@@ -535,6 +529,43 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
         )
         .expect("simulation succeeds");
         assert!(vcd.contains("$var"));
+    }
+
+    /// Same as `test_stitch_pipeline_with_valid` but demonstrates that a reset
+    /// signal is no longer required when both input and output valid handshake
+    /// signals are used.
+    #[test]
+    fn test_stitch_pipeline_with_valid_no_reset() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        // Two-stage pipeline: add 1 then add 2.
+        let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+
+        let result = stitch_pipeline(
+            dslx,
+            Path::new("test.x"),
+            "foo",
+            &StitchPipelineOptions {
+                verilog_version: VerilogVersion::SystemVerilog,
+                explicit_stages: None,
+                stdlib_path: None,
+                search_paths: Vec::new(),
+                flop_inputs: true,
+                flop_outputs: true,
+                input_valid_signal: Some("in_valid"),
+                output_valid_signal: Some("out_valid"),
+                reset_signal: None,
+                reset_active_low: false,
+                add_invariant_assertions: false,
+                array_index_bounds_checking: true,
+            },
+        )
+        .unwrap();
+
+        compare_golden_sv(
+            &result,
+            "tests/goldens/foo_pipeline_with_valid_no_reset.golden.sv",
+        );
     }
 
     #[test]
