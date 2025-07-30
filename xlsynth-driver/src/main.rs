@@ -399,8 +399,23 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx2ir")
                 .about("Converts DSLX to IR")
-                .add_dslx_input_args(true)
-                .add_bool_arg("opt", "Optimize the IR we emit as well")
+                .add_dslx_input_args(false)
+                .arg(
+                    Arg::new("dslx_top")
+                        .long("dslx_top")
+                        .value_name("DSLX_TOP")
+                        .help("The top-level entry point")
+                        .required_if_eq("opt", "true"),
+                )
+                .arg(
+                    Arg::new("opt")
+                        .long("opt")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("Optimize the IR we emit as well")
+                )
                 .add_bool_arg(
                     "type_inference_v2",
                     "Enable the experimental type-inference v2 algorithm",

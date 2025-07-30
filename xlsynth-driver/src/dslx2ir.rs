@@ -22,7 +22,6 @@ fn dslx2ir(
     log::info!("dslx2ir");
 
     let dslx_module_name = input_file.file_stem().unwrap().to_str().unwrap();
-    let ir_top = xlsynth::mangle_dslx_name(dslx_module_name, dslx_top.unwrap()).unwrap();
 
     if let Some(tool_path) = tool_path {
         let mut output = run_ir_converter_main(
@@ -40,6 +39,7 @@ fn dslx2ir(
             let temp_file = tempfile::NamedTempFile::new().unwrap();
             let temp_file_path = temp_file.path();
             std::fs::write(temp_file_path, output).unwrap();
+            let ir_top = xlsynth::mangle_dslx_name(dslx_module_name, dslx_top.unwrap()).unwrap();
             output = run_opt_main(temp_file_path, Some(&ir_top), tool_path);
         }
         println!("{}", output);
@@ -77,6 +77,7 @@ fn dslx2ir(
         }
 
         let result_text: String = if opt {
+            let ir_top = xlsynth::mangle_dslx_name(dslx_module_name, dslx_top.unwrap()).unwrap();
             let ir_package = IrPackage::parse_ir(&result.ir, Some(&ir_top)).unwrap();
             let optimized_ir_package = xlsynth::optimize_ir(&ir_package, &ir_top).unwrap();
             optimized_ir_package.to_string()

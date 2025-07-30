@@ -71,6 +71,48 @@ fn test_ir2gates_adder_mapping_flag() {
 }
 
 #[test]
+fn test_dslx2ir_no_top_required_when_no_opt() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = "\nfn foo(x: u32) -> u32 { x + u32:1 }\nfn bar(y: u32) -> u32 { y + u32:2 }\n";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dslx2ir should not require --dslx_top when --opt is not set;\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("package foo"),
+        "Expected package name 'foo' in IR, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fn __foo__foo("),
+        "Expected function __foo__foo in IR, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fn __foo__bar("),
+        "Expected function __foo__bar in IR, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_ir2gates_prints_source_positions() {
     let _ = env_logger::builder().is_test(true).try_init();
 
