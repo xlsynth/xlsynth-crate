@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::report_cli_error::report_cli_error_and_exit;
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
@@ -15,9 +14,16 @@ use xlsynth_g8r::equiv::prove_equiv::{
 use xlsynth_g8r::xls_ir::ir_parser;
 
 use crate::parallelism::ParallelismStrategy;
-use serde_json::json;
 
 const SUBCOMMAND: &str = "ir-equiv";
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EquivOutcome {
+    pub time_micros: u128,
+    pub success: bool,
+    pub counterexample: Option<String>,
+}
 
 // -----------------------------------------------------------------------------
 // Shared equivalence input arguments (solver choice handled outside)
@@ -39,7 +45,6 @@ pub struct EquivInputs<'a> {
     pub rhs_origin: &'a str,
     pub lhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
     pub rhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
-    pub json: bool,
 }
 
 // Helper: parse IR text, pick top (explicit or package top), drop params.
@@ -107,7 +112,10 @@ pub fn unify_toolchain_tops<'a>(
 }
 
 /// Internal helper used by the native runner for solvers (non-legacy path)
-fn run_equiv_check_native<S: Solver>(solver_config: &S::Config, inputs: &EquivInputs) -> ! {
+fn run_equiv_check_native<S: Solver>(
+    solver_config: &S::Config,
+    inputs: &EquivInputs,
+) -> EquivOutcome {
     let lhs_fn_dropped = parse_and_prepare_fn(
         inputs.lhs_ir_text,
         inputs.lhs_top,
@@ -162,61 +170,35 @@ fn run_equiv_check_native<S: Solver>(solver_config: &S::Config, inputs: &EquivIn
             inputs.flatten_aggregates,
         ),
     };
-    let end_time = std::time::Instant::now();
-    let micros = end_time.duration_since(start_time).as_micros();
+    let micros = start_time.elapsed().as_micros();
 
     match result {
-        EquivResult::Proved => {
-            if inputs.json {
-                println!("{}", json!({"time": micros, "success": true}).to_string());
-            } else {
-                println!(
-                    "[{}] Time taken: {:?}",
-                    inputs.subcommand,
-                    end_time.duration_since(start_time)
-                );
-                println!("[{}] success: Solver proved equivalence", inputs.subcommand);
-            }
-            std::process::exit(0);
-        }
+        EquivResult::Proved => EquivOutcome {
+            time_micros: micros,
+            success: true,
+            counterexample: None,
+        },
         EquivResult::Disproved {
             lhs_inputs,
             rhs_inputs,
             lhs_output,
             rhs_output,
         } => {
-            if inputs.json {
-                let cex_str = format!(
-                    "lhs_inputs: {:?}, rhs_inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
-                    lhs_inputs, rhs_inputs, lhs_output, rhs_output
-                );
-                println!(
-                    "{}",
-                    json!({"time": micros, "success": false, "counterexample": cex_str})
-                        .to_string()
-                );
-            } else {
-                println!(
-                    "[{}] Time taken: {:?}",
-                    inputs.subcommand,
-                    end_time.duration_since(start_time)
-                );
-                println!(
-                    "[{}] failure: Solver found counterexample:",
-                    inputs.subcommand
-                );
-                println!("  inputs LHS: {:?}", lhs_inputs);
-                println!("  inputs RHS: {:?}", rhs_inputs);
-                println!("  output LHS: {:?}", lhs_output);
-                println!("  output RHS: {:?}", rhs_output);
+            let cex_str = format!(
+                "lhs_inputs: {:?}, rhs_inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
+                lhs_inputs, rhs_inputs, lhs_output, rhs_output
+            );
+            EquivOutcome {
+                time_micros: micros,
+                success: false,
+                counterexample: Some(cex_str),
             }
-            std::process::exit(1);
         }
     }
 }
 
 #[cfg(feature = "has-boolector")]
-fn run_boolector_legacy_native(inputs: &EquivInputs) -> ! {
+fn run_boolector_legacy_native(inputs: &EquivInputs) -> EquivOutcome {
     use xlsynth_g8r::ir_equiv_boolector;
 
     if inputs.lhs_fixed_implicit_activation || inputs.rhs_fixed_implicit_activation {
@@ -272,62 +254,38 @@ fn run_boolector_legacy_native(inputs: &EquivInputs) -> ! {
             )
         }
     };
-    let end_time = std::time::Instant::now();
-    let micros = end_time.duration_since(start_time).as_micros();
+    let micros = start_time.elapsed().as_micros();
 
     match result {
-        ir_equiv_boolector::EquivResult::Proved => {
-            if inputs.json {
-                println!("{}", json!({"time": micros, "success": true}).to_string());
-            } else {
-                println!(
-                    "[{}] Time taken: {:?}",
-                    inputs.subcommand,
-                    end_time.duration_since(start_time)
-                );
-                println!("[{}] success: Solver proved equivalence", inputs.subcommand);
-            }
-            std::process::exit(0);
-        }
+        ir_equiv_boolector::EquivResult::Proved => EquivOutcome {
+            time_micros: micros,
+            success: true,
+            counterexample: None,
+        },
         ir_equiv_boolector::EquivResult::Disproved {
             inputs: cex,
             outputs: (lhs_bits, rhs_bits),
         } => {
-            if inputs.json {
-                let cex_str = format!(
-                    "inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
-                    cex, lhs_bits, rhs_bits
-                );
-                println!(
-                    "{}",
-                    json!({"time": micros, "success": false, "counterexample": cex_str})
-                        .to_string()
-                );
-            } else {
-                println!(
-                    "[{}] Time taken: {:?}",
-                    inputs.subcommand,
-                    end_time.duration_since(start_time)
-                );
-                println!(
-                    "[{}] failure: Solver found counterexample: {:?}",
-                    inputs.subcommand, cex
-                );
-                println!("    output LHS: {:?}", lhs_bits);
-                println!("    output RHS: {:?}", rhs_bits);
+            let cex_str = format!(
+                "inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
+                cex, lhs_bits, rhs_bits
+            );
+            EquivOutcome {
+                time_micros: micros,
+                success: false,
+                counterexample: Some(cex_str),
             }
-            std::process::exit(1);
         }
     }
 }
 
-pub fn run_ir_equiv_native(solver_choice: SolverChoice, inputs: &EquivInputs) -> ! {
+pub fn run_ir_equiv_native(solver_choice: SolverChoice, inputs: &EquivInputs) -> EquivOutcome {
     match solver_choice {
         #[cfg(feature = "has-boolector")]
         SolverChoice::Boolector => {
             use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
             let cfg = BoolectorConfig::new();
-            run_equiv_check_native::<Boolector>(&cfg, inputs);
+            run_equiv_check_native::<Boolector>(&cfg, inputs)
         }
         #[cfg(feature = "has-easy-smt")]
         SolverChoice::Z3Binary | SolverChoice::BitwuzlaBinary | SolverChoice::BoolectorBinary => {
@@ -338,18 +296,16 @@ pub fn run_ir_equiv_native(solver_choice: SolverChoice, inputs: &EquivInputs) ->
                 SolverChoice::BoolectorBinary => EasySmtConfig::boolector(),
                 _ => unreachable!(),
             };
-            run_equiv_check_native::<EasySmtSolver>(&cfg, inputs);
+            run_equiv_check_native::<EasySmtSolver>(&cfg, inputs)
         }
         #[cfg(feature = "has-bitwuzla")]
         SolverChoice::Bitwuzla => {
             use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
             let opts = BitwuzlaOptions::new();
-            run_equiv_check_native::<Bitwuzla>(&opts, inputs);
+            run_equiv_check_native::<Bitwuzla>(&opts, inputs)
         }
         #[cfg(feature = "has-boolector")]
-        SolverChoice::BoolectorLegacy => {
-            run_boolector_legacy_native(inputs);
-        }
+        SolverChoice::BoolectorLegacy => run_boolector_legacy_native(inputs),
         SolverChoice::Toolchain => {
             eprintln!("Internal error: run_ir_equiv_native called with Toolchain solver");
             std::process::exit(1);
@@ -362,11 +318,7 @@ pub fn run_toolchain_ir_equiv_text(
     rhs_ir: &str,
     top: &str,
     tool_path: &str,
-    subcommand: &str,
-    lhs_origin: &str,
-    rhs_origin: &str,
-    json_mode: bool,
-) -> ! {
+) -> EquivOutcome {
     let lhs_tmp = tempfile::NamedTempFile::new().unwrap();
     let rhs_tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(lhs_tmp.path(), lhs_ir).unwrap();
@@ -374,50 +326,22 @@ pub fn run_toolchain_ir_equiv_text(
     let start_time = std::time::Instant::now();
     let output =
         run_check_ir_equivalence_main(lhs_tmp.path(), rhs_tmp.path(), Some(top), tool_path);
-    let end_time = std::time::Instant::now();
-    let micros = end_time.duration_since(start_time).as_micros();
+    let micros = start_time.elapsed().as_micros();
     match output {
-        Ok(stdout) => {
-            if json_mode {
-                println!("{}", json!({"time": micros, "success": true}).to_string());
-            } else {
-                println!("[{}] success: {}", subcommand, stdout.trim());
-            }
-            std::process::exit(0);
-        }
+        Ok(_stdout) => EquivOutcome {
+            time_micros: micros,
+            success: true,
+            counterexample: None,
+        },
         Err(output) => {
-            if json_mode {
-                let mut msg = String::from_utf8_lossy(&output.stdout).to_string();
-                if msg.trim().is_empty() {
-                    msg = String::from_utf8_lossy(&output.stderr).to_string();
-                }
-                println!(
-                    "{}",
-                    json!({"time": micros, "success": false, "counterexample": msg.trim()})
-                        .to_string()
-                );
-                std::process::exit(1);
-            } else {
-                let mut message = String::from_utf8_lossy(&output.stdout);
-                if message.is_empty() {
-                    message = String::from_utf8_lossy(&output.stderr);
-                }
-                report_cli_error_and_exit(
-                    &format!("failure: {}", message),
-                    Some(subcommand),
-                    vec![
-                        ("lhs_origin", lhs_origin),
-                        ("rhs_origin", rhs_origin),
-                        (
-                            "stdout",
-                            &format!("{:?}", String::from_utf8_lossy(&output.stdout)),
-                        ),
-                        (
-                            "stderr",
-                            &format!("{:?}", String::from_utf8_lossy(&output.stderr)),
-                        ),
-                    ],
-                );
+            let mut msg = String::from_utf8_lossy(&output.stdout).to_string();
+            if msg.trim().is_empty() {
+                msg = String::from_utf8_lossy(&output.stderr).to_string();
+            }
+            EquivOutcome {
+                time_micros: micros,
+                success: false,
+                counterexample: Some(msg.trim().to_string()),
             }
         }
     }
@@ -431,7 +355,7 @@ pub fn dispatch_ir_equiv(
     solver_choice: Option<SolverChoice>,
     tool_path: Option<&str>,
     inputs: &EquivInputs,
-) -> ! {
+) -> EquivOutcome {
     if solver_choice.is_none() && tool_path.is_none() {
         eprintln!(
             "[{}] Error: no solver specified and no toolchain path configured (need --solver or toolchain config)",
@@ -472,27 +396,14 @@ pub fn dispatch_ir_equiv(
                 if lt != rt {
                     let (lhs_use, rhs_use, unified_top) =
                         unify_toolchain_tops(inputs.lhs_ir_text, inputs.rhs_ir_text, lt, rt);
-                    run_toolchain_ir_equiv_text(
-                        &lhs_use,
-                        &rhs_use,
-                        &unified_top,
-                        tool_path,
-                        inputs.subcommand,
-                        inputs.lhs_origin,
-                        inputs.rhs_origin,
-                        inputs.json,
-                    );
+                    run_toolchain_ir_equiv_text(&lhs_use, &rhs_use, &unified_top, tool_path)
                 } else {
                     run_toolchain_ir_equiv_text(
                         inputs.lhs_ir_text,
                         inputs.rhs_ir_text,
                         lt,
                         tool_path,
-                        inputs.subcommand,
-                        inputs.lhs_origin,
-                        inputs.rhs_origin,
-                        inputs.json,
-                    );
+                    )
                 }
             }
             _ => {
@@ -505,7 +416,7 @@ pub fn dispatch_ir_equiv(
         }
     } else {
         let solver_choice = solver_choice.expect("Non-toolchain solver must be specified");
-        run_ir_equiv_native(solver_choice, inputs);
+        run_ir_equiv_native(solver_choice, inputs)
     }
 }
 
@@ -597,8 +508,26 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         rhs_origin: rhs,
         lhs_param_domains: None,
         rhs_param_domains: None,
-        json: json_mode,
     };
 
-    dispatch_ir_equiv(solver, tool_path, &inputs);
+    let outcome = dispatch_ir_equiv(solver, tool_path, &inputs);
+    if json_mode {
+        println!("{}", serde_json::to_string(&outcome).unwrap());
+        std::process::exit(if outcome.success { 0 } else { 1 });
+    } else {
+        let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
+        if outcome.success {
+            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
+            std::process::exit(0);
+        } else {
+            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            if let Some(cex) = outcome.counterexample {
+                eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
+            } else {
+                eprintln!("[{}] failure", SUBCOMMAND);
+            }
+            std::process::exit(1);
+        }
+    }
 }

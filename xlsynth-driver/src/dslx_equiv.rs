@@ -287,8 +287,26 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         rhs_origin: rhs_file,
         lhs_param_domains,
         rhs_param_domains,
-        json: json_mode,
     };
 
-    dispatch_ir_equiv(solver_choice, tool_path, &inputs);
+    let outcome = dispatch_ir_equiv(solver_choice, tool_path, &inputs);
+    if json_mode {
+        println!("{}", serde_json::to_string(&outcome).unwrap());
+        std::process::exit(if outcome.success { 0 } else { 1 });
+    } else {
+        let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
+        if outcome.success {
+            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
+            std::process::exit(0);
+        } else {
+            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            if let Some(cex) = outcome.counterexample {
+                eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
+            } else {
+                eprintln!("[{}] failure", SUBCOMMAND);
+            }
+            std::process::exit(1);
+        }
+    }
 }

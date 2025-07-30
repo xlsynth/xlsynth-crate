@@ -790,7 +790,7 @@ fn my_main(x: bits[32]) -> bits[32] {
     let stderr = String::from_utf8_lossy(&output.stderr);
     log::info!("stdout: {}", stdout);
     log::info!("stderr: {}", stderr);
-    assert!(stdout.contains("success: Verified equivalent"));
+    assert!(stdout.contains("[ir-equiv] success: Solver proved equivalence"));
 }
 
 #[test]
@@ -840,9 +840,7 @@ fn my_main(x: bits[32]) -> bits[32] {
     assert!(!output.status.success());
     assert!(stdout.is_empty());
     assert!(
-        stderr.contains(
-            "xlsynth-driver: ir-equiv: failure: Verified NOT equivalent; results differ for input"
-        ),
+        stderr.contains("[ir-equiv] failure: Verified NOT equivalent; results differ for input"),
         "stderr: {:?}",
         stderr
     );
@@ -4302,7 +4300,7 @@ fn test_irequiv_subcommand_json_equivalent() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
     assert!(
-        v.get("time").is_some() && v["time"].is_number(),
+        v.get("time_micros").is_some() && v["time_micros"].is_number(),
         "missing/invalid time in JSON: {}",
         v
     );
@@ -4351,7 +4349,7 @@ fn test_irequiv_subcommand_json_non_equivalent() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
     assert!(
-        v.get("time").is_some() && v["time"].is_number(),
+        v.get("time_micros").is_some() && v["time_micros"].is_number(),
         "missing/invalid time in JSON: {}",
         v
     );
@@ -4403,7 +4401,7 @@ fn test_dslx_equiv_subcommand_json_equivalent() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
-    assert!(v.get("time").is_some() && v["time"].is_number());
+    assert!(v.get("time_micros").is_some() && v["time_micros"].is_number());
     assert_eq!(v["success"].as_bool(), Some(true));
 }
 
@@ -4443,7 +4441,7 @@ fn test_dslx_equiv_subcommand_json_non_equivalent() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
-    assert!(v.get("time").is_some() && v["time"].is_number());
+    assert!(v.get("time_micros").is_some() && v["time_micros"].is_number());
     assert_eq!(v["success"].as_bool(), Some(false));
     assert!(
         v.get("counterexample").is_some(),
@@ -4491,7 +4489,7 @@ fn test_prove_quickcheck_json_array_mixed() {
         std::collections::HashMap::new();
     for item in arr.iter() {
         let name = item["name"].as_str().expect("missing name").to_string();
-        assert!(item.get("time").is_some() && item["time"].is_number());
+        assert!(item.get("time_micros").is_some() && item["time_micros"].is_number());
         let ok = item["success"].as_bool().expect("missing success bool");
         if !ok {
             assert!(item.get("counterexample").is_some());
