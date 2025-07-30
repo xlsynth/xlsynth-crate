@@ -576,7 +576,8 @@ fn main() {
                 .add_bool_arg(
                     "rhs_fixed_implicit_activation",
                     "Fix the implicit activation bit to true for the RHS IR, useful when only LHS or RHS has implicit token",
-                ),
+                )
+                .add_bool_arg("json", "Output in JSON format"),
         )
         .subcommand(
             clap::Command::new("ir-ged")
@@ -865,7 +866,8 @@ fn main() {
                         .value_parser(clap::value_parser!(QuickCheckAssertionSemantics))
                         .default_value("ignore")
                         .action(clap::ArgAction::Set),
-                ),
+                )
+                .add_bool_arg("json", "Output in JSON format"),
         )
         .subcommand(
             clap::Command::new("dslx-equiv")
@@ -979,6 +981,7 @@ fn main() {
                     "assume-enum-in-bound",
                     "Constrain enum-typed parameters to their defined values during equivalence proving",
                 )
+                .add_bool_arg("json", "Output in JSON format")
         )
         .get_matches();
 

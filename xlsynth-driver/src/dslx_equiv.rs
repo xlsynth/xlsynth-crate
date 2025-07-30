@@ -202,6 +202,11 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         .map(|s| s.parse().unwrap())
         .unwrap_or(false);
 
+    let json_mode = matches
+        .get_one::<String>("json")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+
     // Enable enum-domain constraints only when supported by the selected solver.
     let support_domain_constraints = match solver_choice {
         #[cfg(feature = "has-boolector")]
@@ -282,6 +287,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         rhs_origin: rhs_file,
         lhs_param_domains,
         rhs_param_domains,
+        json: json_mode,
     };
 
     dispatch_ir_equiv(solver_choice, tool_path, &inputs);

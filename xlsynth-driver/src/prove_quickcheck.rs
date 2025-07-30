@@ -10,6 +10,7 @@ use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConf
 use crate::solver_choice::SolverChoice;
 use crate::tools::run_prove_quickcheck_main;
 use regex::Regex;
+use serde_json::json;
 use xlsynth::{
     mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
 };
@@ -140,6 +141,11 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         .get_one::<QuickCheckAssertionSemantics>("assertion_semantics")
         .unwrap_or(&QuickCheckAssertionSemantics::Ignore);
 
+    let json_mode = matches
+        .get_one::<String>("json")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+
     // Helper closure that runs proof for a given solver type.
     fn run_for_solver<S: Solver>(
         config: &S::Config,
@@ -147,8 +153,10 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         ir_text: &str,
         module_name: &str,
         semantics: QuickCheckAssertionSemantics,
+        json_mode: bool,
     ) -> ! {
         let mut all_passed = true;
+        let mut results: Vec<serde_json::Value> = Vec::with_capacity(quickchecks.len());
         for (qc_name, has_itok) in quickchecks {
             let cc = if *has_itok {
                 DslxCallingConvention::ImplicitToken
@@ -169,25 +177,39 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 fn_ref: ir_fn_ref,
                 fixed_implicit_activation: *has_itok,
             };
+            let start_time = std::time::Instant::now();
             let res = prove_ir_fn_always_true::<S>(config, &ir_fn, semantics.clone());
+            let micros = start_time.elapsed().as_micros();
             match res {
                 BoolPropertyResult::Proved => {
-                    println!("QuickCheck '{}' proved", qc_name);
+                    if !json_mode {
+                        println!("QuickCheck '{}' proved", qc_name);
+                    }
+                    results.push(json!({"name": qc_name, "time": micros, "success": true}));
                 }
                 BoolPropertyResult::Disproved { inputs, output } => {
                     all_passed = false;
-                    println!("QuickCheck '{}' disproved", qc_name);
-                    println!("  Inputs: {:?}", inputs);
-                    println!("  Output: {:?}", output);
+                    if !json_mode {
+                        println!("QuickCheck '{}' disproved", qc_name);
+                        println!("  Inputs: {:?}", inputs);
+                        println!("  Output: {:?}", output);
+                    }
+                    let cex_str = format!("inputs: {:?}, output: {:?}", inputs, output);
+                    results.push(json!({"name": qc_name, "time": micros, "success": false, "counterexample": cex_str}));
                 }
             }
         }
-        if all_passed {
-            println!("Success: All QuickChecks proved");
-            std::process::exit(0);
+        if json_mode {
+            println!("{}", serde_json::Value::Array(results).to_string());
+            std::process::exit(if all_passed { 0 } else { 1 });
         } else {
-            println!("Failure: Some QuickChecks disproved");
-            std::process::exit(1);
+            if all_passed {
+                println!("Success: All QuickChecks proved");
+                std::process::exit(0);
+            } else {
+                println!("Failure: Some QuickChecks disproved");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -195,27 +217,42 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         SolverChoice::Toolchain => {
             let tool_path = tool_path.expect("tool_path required for Toolchain solver");
             let mut all_passed = true;
+            let mut results: Vec<serde_json::Value> = Vec::with_capacity(quickchecks.len());
             for (qc_name, _) in &quickchecks {
+                let start = std::time::Instant::now();
                 match run_prove_quickcheck_main(input_path, Some(qc_name), tool_path) {
-                    Ok(stdout) => {
-                        println!("QuickCheck '{}' proved: {}", qc_name, stdout.trim());
+                    Ok(_stdout) => {
+                        let micros = start.elapsed().as_micros();
+                        if !json_mode {
+                            println!("QuickCheck '{}' proved", qc_name);
+                        }
+                        results.push(json!({"name": qc_name, "time": micros, "success": true}));
                     }
                     Err(output) => {
                         all_passed = false;
-                        println!(
-                            "QuickCheck '{}' disproved: {}",
-                            qc_name,
-                            String::from_utf8_lossy(&output.stderr)
-                        );
+                        let micros = start.elapsed().as_micros();
+                        if !json_mode {
+                            println!("QuickCheck '{}' disproved", qc_name);
+                        }
+                        let mut msg = String::from_utf8_lossy(&output.stdout).to_string();
+                        if msg.trim().is_empty() {
+                            msg = String::from_utf8_lossy(&output.stderr).to_string();
+                        }
+                        results.push(json!({"name": qc_name, "time": micros, "success": false, "counterexample": msg.trim()}));
                     }
                 }
             }
-            if all_passed {
-                println!("Success: All QuickChecks proved");
-                std::process::exit(0);
+            if json_mode {
+                println!("{}", serde_json::Value::Array(results).to_string());
+                std::process::exit(if all_passed { 0 } else { 1 });
             } else {
-                println!("Failure: Some QuickChecks disproved");
-                std::process::exit(1);
+                if all_passed {
+                    println!("Success: All QuickChecks proved");
+                    std::process::exit(0);
+                } else {
+                    println!("Failure: Some QuickChecks disproved");
+                    std::process::exit(1);
+                }
             }
         }
         #[cfg(feature = "has-boolector")]
@@ -228,6 +265,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &ir_text_result,
                 module_name,
                 *assertion_semantics,
+                json_mode,
             );
         }
         #[cfg(feature = "has-bitwuzla")]
@@ -240,6 +278,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &ir_text_result,
                 module_name,
                 *assertion_semantics,
+                json_mode,
             );
         }
         #[cfg(feature = "has-easy-smt")]
@@ -257,6 +296,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &ir_text_result,
                 module_name,
                 *assertion_semantics,
+                json_mode,
             );
         }
     }
