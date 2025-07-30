@@ -4279,6 +4279,8 @@ fn test_irequiv_subcommand_json_equivalent() {
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
 
+    let json_path = temp_dir.path().join("irequiv.json");
+
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("--toolchain")
@@ -4288,7 +4290,8 @@ fn test_irequiv_subcommand_json_equivalent() {
         .arg(rhs_path.to_str().unwrap())
         .arg("--top")
         .arg("my_main")
-        .arg("--json=true")
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
         .output()
         .unwrap();
 
@@ -4297,8 +4300,9 @@ fn test_irequiv_subcommand_json_equivalent() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(json_str.trim()).expect("json file must be JSON");
     assert!(
         v.get("time_micros").is_some() && v["time_micros"].is_number(),
         "missing/invalid time in JSON: {}",
@@ -4327,6 +4331,8 @@ fn test_irequiv_subcommand_json_non_equivalent() {
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
 
+    let json_path = temp_dir.path().join("irequiv.json");
+
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("--toolchain")
@@ -4336,7 +4342,8 @@ fn test_irequiv_subcommand_json_non_equivalent() {
         .arg(rhs_path.to_str().unwrap())
         .arg("--top")
         .arg("my_main")
-        .arg("--json=true")
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
         .output()
         .unwrap();
 
@@ -4346,8 +4353,9 @@ fn test_irequiv_subcommand_json_non_equivalent() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(json_str.trim()).expect("json file must be JSON");
     assert!(
         v.get("time_micros").is_some() && v["time_micros"].is_number(),
         "missing/invalid time in JSON: {}",
@@ -4381,6 +4389,8 @@ fn test_dslx_equiv_subcommand_json_equivalent() {
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
 
+    let json_path = temp_dir.path().join("irequiv.json");
+
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("--toolchain")
@@ -4390,7 +4400,8 @@ fn test_dslx_equiv_subcommand_json_equivalent() {
         .arg(rhs_path.to_str().unwrap())
         .arg("--dslx_top")
         .arg("main")
-        .arg("--json=true")
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
         .output()
         .unwrap();
 
@@ -4399,10 +4410,20 @@ fn test_dslx_equiv_subcommand_json_equivalent() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
-    assert!(v.get("time_micros").is_some() && v["time_micros"].is_number());
-    assert_eq!(v["success"].as_bool(), Some(true));
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(json_str.trim()).expect("json file must be JSON");
+    assert!(
+        v.get("time_micros").is_some() && v["time_micros"].is_number(),
+        "missing/invalid time in JSON: {}",
+        v
+    );
+    assert_eq!(
+        v["success"].as_bool(),
+        Some(true),
+        "unexpected success in JSON: {}",
+        v
+    );
 }
 
 #[test]
@@ -4420,6 +4441,8 @@ fn test_dslx_equiv_subcommand_json_non_equivalent() {
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
 
+    let json_path = temp_dir.path().join("irequiv.json");
+
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("--toolchain")
@@ -4429,7 +4452,8 @@ fn test_dslx_equiv_subcommand_json_non_equivalent() {
         .arg(rhs_path.to_str().unwrap())
         .arg("--dslx_top")
         .arg("main")
-        .arg("--json=true")
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
         .output()
         .unwrap();
 
@@ -4439,10 +4463,20 @@ fn test_dslx_equiv_subcommand_json_non_equivalent() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
-    assert!(v.get("time_micros").is_some() && v["time_micros"].is_number());
-    assert_eq!(v["success"].as_bool(), Some(false));
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(json_str.trim()).expect("json file must be JSON");
+    assert!(
+        v.get("time_micros").is_some() && v["time_micros"].is_number(),
+        "missing/invalid time in JSON: {}",
+        v
+    );
+    assert_eq!(
+        v["success"].as_bool(),
+        Some(false),
+        "unexpected success in JSON: {}",
+        v
+    );
     assert!(
         v.get("counterexample").is_some(),
         "missing counterexample in JSON: {}",
@@ -4461,6 +4495,8 @@ fn test_prove_quickcheck_json_array_mixed() {
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
 
+    let json_path = temp_dir.path().join("irequiv.json");
+
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("--toolchain")
@@ -4470,7 +4506,8 @@ fn test_prove_quickcheck_json_array_mixed() {
         .arg(dslx_path.to_str().unwrap())
         .arg("--solver")
         .arg("toolchain")
-        .arg("--json=true")
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
         .output()
         .unwrap();
 
@@ -4480,8 +4517,9 @@ fn test_prove_quickcheck_json_array_mixed() {
         "expected failure due to one disproved QC; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout must be JSON");
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(json_str.trim()).expect("json file must be JSON");
     let arr = v.as_array().expect("expected array JSON");
     assert_eq!(arr.len(), 2, "expected two quickchecks");
     // Map name->success for stable checks; ensure name is included.

@@ -577,7 +577,13 @@ fn main() {
                     "rhs_fixed_implicit_activation",
                     "Fix the implicit activation bit to true for the RHS IR, useful when only LHS or RHS has implicit token",
                 )
-                .add_bool_arg("json", "Output in JSON format"),
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
+                ),
         )
         .subcommand(
             clap::Command::new("ir-ged")
@@ -867,7 +873,13 @@ fn main() {
                         .default_value("ignore")
                         .action(clap::ArgAction::Set),
                 )
-                .add_bool_arg("json", "Output in JSON format"),
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
+                ),
         )
         .subcommand(
             clap::Command::new("dslx-equiv")
@@ -981,7 +993,13 @@ fn main() {
                     "assume-enum-in-bound",
                     "Constrain enum-typed parameters to their defined values during equivalence proving",
                 )
-                .add_bool_arg("json", "Output in JSON format")
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
+                )
         )
         .get_matches();
 

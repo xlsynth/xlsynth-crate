@@ -280,34 +280,27 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         }
     };
 
-    let json_mode = matches
-        .get_one::<String>("json")
-        .map(|s| s == "true")
-        .unwrap_or(false);
-
-    if json_mode {
-        println!("{}", serde_json::to_string(&results).unwrap());
-        let all_passed = results.iter().all(|r| r.success);
-        std::process::exit(if all_passed { 0 } else { 1 });
-    } else {
-        let mut all_passed = true;
-        for r in &results {
-            if r.success {
-                println!("QuickCheck '{}' proved", r.name);
-            } else {
-                all_passed = false;
-                println!("QuickCheck '{}' disproved", r.name);
-                if let Some(ref cex) = r.counterexample {
-                    println!("  {}", cex);
-                }
+    let output_json = matches.get_one::<String>("output_json");
+    if let Some(path) = output_json {
+        std::fs::write(path, serde_json::to_string(&results).unwrap()).unwrap();
+    }
+    let mut all_passed = true;
+    for r in &results {
+        if r.success {
+            println!("QuickCheck '{}' proved", r.name);
+        } else {
+            all_passed = false;
+            println!("QuickCheck '{}' disproved", r.name);
+            if let Some(ref cex) = r.counterexample {
+                println!("  {}", cex);
             }
         }
-        if all_passed {
-            println!("Success: All QuickChecks proved");
-            std::process::exit(0);
-        } else {
-            println!("Failure: Some QuickChecks disproved");
-            std::process::exit(1);
-        }
+    }
+    if all_passed {
+        println!("Success: All QuickChecks proved");
+        std::process::exit(0);
+    } else {
+        println!("Failure: Some QuickChecks disproved");
+        std::process::exit(1);
     }
 }

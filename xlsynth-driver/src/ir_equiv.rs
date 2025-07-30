@@ -476,10 +476,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         .get_one::<String>("rhs_fixed_implicit_activation")
         .map(|s| s.parse().unwrap())
         .unwrap_or(false);
-    let json_mode = matches
-        .get_one::<String>("json")
-        .map(|s| s == "true")
-        .unwrap_or(false);
+    let output_json = matches.get_one::<String>("output_json");
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
@@ -511,23 +508,21 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     };
 
     let outcome = dispatch_ir_equiv(solver, tool_path, &inputs);
-    if json_mode {
-        println!("{}", serde_json::to_string(&outcome).unwrap());
-        std::process::exit(if outcome.success { 0 } else { 1 });
+    if let Some(path) = output_json {
+        std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
+    }
+    let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
+    if outcome.success {
+        println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+        println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
+        std::process::exit(0);
     } else {
-        let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-        if outcome.success {
-            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-            println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
-            std::process::exit(0);
+        eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+        if let Some(cex) = outcome.counterexample {
+            eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
         } else {
-            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-            if let Some(cex) = outcome.counterexample {
-                eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
-            } else {
-                eprintln!("[{}] failure", SUBCOMMAND);
-            }
-            std::process::exit(1);
+            eprintln!("[{}] failure", SUBCOMMAND);
         }
+        std::process::exit(1);
     }
 }
