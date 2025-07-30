@@ -6,8 +6,11 @@ use crate::equiv::{
 };
 
 use crate::equiv::prove_equiv::FnOutput;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum QuickCheckAssertionSemantics {
     /// Assertions are just dropped entirely
     Ignore,
@@ -15,6 +18,17 @@ pub enum QuickCheckAssertionSemantics {
     Never,
     /// Assume that assertion conditions hold to try to help complete the proof
     Assume,
+}
+
+impl fmt::Display for QuickCheckAssertionSemantics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            QuickCheckAssertionSemantics::Ignore => "ignore",
+            QuickCheckAssertionSemantics::Never => "never",
+            QuickCheckAssertionSemantics::Assume => "assume",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 /// Result of proving that a boolean-returning function is always `true`.
