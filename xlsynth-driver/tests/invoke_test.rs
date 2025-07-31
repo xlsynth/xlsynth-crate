@@ -4511,7 +4511,8 @@ fn test_prove_quickcheck_json_array_mixed() {
         .output()
         .unwrap();
 
-    // Expect non-zero because one quickcheck is false, but JSON array on stdout.
+    // Expect non-zero because one quickcheck is false; results are written to JSON
+    // file.
     assert!(
         !output.status.success(),
         "expected failure due to one disproved QC; stderr: {}",
@@ -4520,7 +4521,10 @@ fn test_prove_quickcheck_json_array_mixed() {
     let json_str = std::fs::read_to_string(&json_path).unwrap();
     let v: serde_json::Value =
         serde_json::from_str(json_str.trim()).expect("json file must be JSON");
-    let arr = v.as_array().expect("expected array JSON");
+
+    // New schema: object { success: bool, tests: [ ... ] }
+    assert_eq!(v["success"].as_bool(), Some(false));
+    let arr = v["tests"].as_array().expect("expected tests array in JSON");
     assert_eq!(arr.len(), 2, "expected two quickchecks");
     // Map name->success for stable checks; ensure name is included.
     let mut name_success: std::collections::HashMap<String, bool> =

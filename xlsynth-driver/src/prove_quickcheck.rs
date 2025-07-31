@@ -21,11 +21,17 @@ use xlsynth_g8r::equiv::prove_quickcheck::{
 use xlsynth_g8r::equiv::solver_interface::Solver;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct QuickCheckItemOutcome {
+pub struct QuickCheckTestOutcome {
     pub name: String,
     pub time_micros: u128,
     pub success: bool,
     pub counterexample: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuickCheckOutcome {
+    pub success: bool,
+    pub tests: Vec<QuickCheckTestOutcome>,
 }
 
 /// Implements the `prove-quickcheck` sub-command.
@@ -156,8 +162,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         ir_text: &str,
         module_name: &str,
         semantics: QuickCheckAssertionSemantics,
-    ) -> Vec<QuickCheckItemOutcome> {
-        let mut results: Vec<QuickCheckItemOutcome> = Vec::with_capacity(quickchecks.len());
+    ) -> Vec<QuickCheckTestOutcome> {
+        let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(quickchecks.len());
         for (qc_name, has_itok) in quickchecks {
             let cc = if *has_itok {
                 DslxCallingConvention::ImplicitToken
@@ -183,7 +189,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             let micros = start_time.elapsed().as_micros();
             match res {
                 BoolPropertyResult::Proved => {
-                    results.push(QuickCheckItemOutcome {
+                    results.push(QuickCheckTestOutcome {
                         name: qc_name.clone(),
                         time_micros: micros,
                         success: true,
@@ -192,7 +198,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 }
                 BoolPropertyResult::Disproved { inputs, output } => {
                     let cex_str = format!("inputs: {:?}, output: {:?}", inputs, output);
-                    results.push(QuickCheckItemOutcome {
+                    results.push(QuickCheckTestOutcome {
                         name: qc_name.clone(),
                         time_micros: micros,
                         success: false,
@@ -204,16 +210,16 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         results
     }
 
-    let results: Vec<QuickCheckItemOutcome> = match solver_choice {
+    let results: Vec<QuickCheckTestOutcome> = match solver_choice {
         SolverChoice::Toolchain => {
             let tool_path = tool_path.expect("tool_path required for Toolchain solver");
-            let mut results: Vec<QuickCheckItemOutcome> = Vec::with_capacity(quickchecks.len());
+            let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(quickchecks.len());
             for (qc_name, _) in &quickchecks {
                 let start = std::time::Instant::now();
                 match run_prove_quickcheck_main(input_path, Some(qc_name), tool_path) {
                     Ok(_stdout) => {
                         let micros = start.elapsed().as_micros();
-                        results.push(QuickCheckItemOutcome {
+                        results.push(QuickCheckTestOutcome {
                             name: qc_name.clone(),
                             time_micros: micros,
                             success: true,
@@ -226,7 +232,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                         if msg.trim().is_empty() {
                             msg = String::from_utf8_lossy(&output.stderr).to_string();
                         }
-                        results.push(QuickCheckItemOutcome {
+                        results.push(QuickCheckTestOutcome {
                             name: qc_name.clone(),
                             time_micros: micros,
                             success: false,
@@ -280,10 +286,6 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         }
     };
 
-    let output_json = matches.get_one::<String>("output_json");
-    if let Some(path) = output_json {
-        std::fs::write(path, serde_json::to_string(&results).unwrap()).unwrap();
-    }
     let mut all_passed = true;
     for r in &results {
         if r.success {
@@ -296,6 +298,17 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             }
         }
     }
+
+    let outcome = QuickCheckOutcome {
+        success: all_passed,
+        tests: results,
+    };
+
+    let output_json = matches.get_one::<String>("output_json");
+    if let Some(path) = output_json {
+        std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
+    }
+
     if all_passed {
         println!("Success: All QuickChecks proved");
         std::process::exit(0);
