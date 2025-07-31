@@ -234,6 +234,76 @@ impl ToDriverCommand for ProveQuickcheckConfig {
     }
 }
 
+// -------------------------------
+// Fuzz-only fake task definition
+// -------------------------------
+#[cfg(feature = "prover-fuzz")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FakeTaskConfig {
+    /// Inclusive min delay in milliseconds before writing result.
+    pub min_delay_ms: u32,
+    /// Inclusive max delay in milliseconds before writing result.
+    pub max_delay_ms: u32,
+    /// Whether the task should report success.
+    pub success: bool,
+    /// Number of bytes to write to stdout.
+    pub stdout_len: u16,
+    /// Number of bytes to write to stderr.
+    pub stderr_len: u16,
+}
+
+#[cfg(feature = "prover-fuzz")]
+impl ToDriverCommand for FakeTaskConfig {
+    fn to_command(&self) -> Command {
+        // Use a POSIX shell snippet to sleep and then locate the --output_json path
+        // from argv.
+        let script = r#"
+min=${FAKE_MIN_MS:-1}
+max=${FAKE_MAX_MS:-5}
+# Clamp to small values suitable for fuzzing; avoid floating races.
+[ "$min" -gt 100 ] && min=100
+[ "$max" -gt 100 ] && max=100
+[ "$min" -gt "$max" ] && max=$min
+# Use min as the delay to keep determinism under fuzzing.
+delay_ms=$min
+# Sleep in seconds with fractional part.
+secs=$(printf "%s" "$delay_ms" | awk '{ printf("%.3f", $1/1000.0) }')
+sleep "$secs"
+# Emit stdout noise
+ol=${FAKE_STDOUT_LEN:-0}
+if [ "$ol" -gt 0 ]; then head -c "$ol" < /dev/zero | tr '\0' 'X'; echo; fi
+# Emit stderr noise
+el=${FAKE_STDERR_LEN:-0}
+if [ "$el" -gt 0 ]; then (head -c "$el" < /dev/zero | tr '\0' 'Y'; echo) >&2; fi
+# Parse --output_json DEST from arguments
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--output_json" ]; then
+    shift
+    out="$1"
+    break
+  fi
+  shift
+done
+if [ -n "$out" ]; then
+  if [ "${FAKE_SUCCESS:-1}" -eq 1 ]; then
+    printf '{\"success\":true}\n' > "$out"
+  else
+    printf '{\"success\":false}\n' > "$out"
+  fi
+fi
+"#;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(script).arg("sh");
+        cmd.env("FAKE_MIN_MS", self.min_delay_ms.to_string());
+        cmd.env("FAKE_MAX_MS", self.max_delay_ms.to_string());
+        cmd.env("FAKE_SUCCESS", if self.success { "1" } else { "0" });
+        cmd.env("FAKE_STDOUT_LEN", self.stdout_len.to_string());
+        cmd.env("FAKE_STDERR_LEN", self.stderr_len.to_string());
+        cmd
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Unified enum for collections of prover tasks
 // -----------------------------------------------------------------------------
@@ -256,6 +326,12 @@ pub enum ProverTask {
         #[serde(flatten)]
         config: ProveQuickcheckConfig,
     },
+    #[cfg(feature = "prover-fuzz")]
+    #[serde(rename = "fake")]
+    Fake {
+        #[serde(flatten)]
+        config: FakeTaskConfig,
+    },
 }
 
 impl ToDriverCommand for ProverTask {
@@ -264,6 +340,8 @@ impl ToDriverCommand for ProverTask {
             ProverTask::IrEquiv { config } => config.to_command(),
             ProverTask::DslxEquiv { config } => config.to_command(),
             ProverTask::ProveQuickcheck { config } => config.to_command(),
+            #[cfg(feature = "prover-fuzz")]
+            ProverTask::Fake { config } => config.to_command(),
         }
     }
 }
