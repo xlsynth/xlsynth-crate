@@ -25,9 +25,8 @@ use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 
 use log::{debug, info, trace, warn};
-use once_cell::sync::Lazy;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
-use signal_hook::flag as signal_flag;
+use signal_hook::low_level as siglow;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
@@ -65,6 +64,9 @@ enum TaskState {
 struct TaskNode {
     task: ProverTask,
     state: TaskState,
+    // Captured outputs after task completion; None until completed.
+    completed_stdout: Option<String>,
+    completed_stderr: Option<String>,
 }
 
 #[derive(Debug)]
@@ -90,7 +92,8 @@ struct Node {
     inner: NodeInner,
 }
 
-static CANCEL_REQUESTED: Lazy<Arc<AtomicBool>> = Lazy::new(|| Arc::new(AtomicBool::new(false)));
+// Cancellation is scoped per run via an Arc<AtomicBool> passed into the
+// scheduler.
 
 #[derive(Debug)]
 /// Invariants:
@@ -121,6 +124,8 @@ pub struct Scheduler {
     outputs: HashMap<NodeId, (tempfile::NamedTempFile, tempfile::NamedTempFile, String)>,
     // Persistent record of cmdlines for tasks (even after outputs are dropped).
     cmdlines: HashMap<NodeId, String>,
+    // Run-scoped cancellation flag, toggled by CLI signal handlers or callers.
+    cancel_flag: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -128,6 +133,8 @@ enum ProverReportNode {
     Task {
         cmdline: Option<String>,
         outcome: Option<TaskOutcome>,
+        stdout: Option<String>,
+        stderr: Option<String>,
     },
     Group {
         kind: GroupKind,
@@ -143,10 +150,17 @@ impl serde::Serialize for ProverReportNode {
     {
         use serde::ser::SerializeStruct;
         match self {
-            ProverReportNode::Task { cmdline, outcome } => {
-                let mut s = serializer.serialize_struct("Task", 2)?;
+            ProverReportNode::Task {
+                cmdline,
+                outcome,
+                stdout,
+                stderr,
+            } => {
+                let mut s = serializer.serialize_struct("Task", 4)?;
                 s.serialize_field("cmdline", cmdline)?;
                 s.serialize_field("outcome", outcome)?;
+                s.serialize_field("stdout", stdout)?;
+                s.serialize_field("stderr", stderr)?;
                 s.end()
             }
             ProverReportNode::Group {
@@ -166,8 +180,8 @@ impl serde::Serialize for ProverReportNode {
 
 #[derive(Serialize)]
 pub struct ProverReport {
-    success: bool,
-    plan: ProverReportNode,
+    pub success: bool,
+    pub plan: ProverReportNode,
 }
 
 impl Scheduler {
@@ -176,7 +190,7 @@ impl Scheduler {
     /// - All nodes built; `task_ids` and `round_robin` contain every task once.
     /// - `running`, `pid_to_node`, and `json_files` are empty.
     /// - `root` indexes a node inside `nodes`.
-    pub fn new(plan: ProverPlan, max_procs: usize) -> Scheduler {
+    pub fn new(plan: ProverPlan, max_procs: usize, cancel_flag: Arc<AtomicBool>) -> Scheduler {
         let mut builder = PlanBuilder::default();
         let root = builder.build_plan(None, plan);
         let nodes = builder.nodes;
@@ -200,6 +214,7 @@ impl Scheduler {
             json_files: HashMap::new(),
             outputs: HashMap::new(),
             cmdlines: HashMap::new(),
+            cancel_flag,
         };
         // Precompute planned cmdlines for all tasks so short-circuited tasks still
         // report one.
@@ -235,7 +250,7 @@ impl Scheduler {
     pub fn run(&mut self) -> io::Result<bool> {
         loop {
             // Check for cancellation request.
-            if CANCEL_REQUESTED.load(Ordering::Relaxed) {
+            if self.cancel_flag.load(Ordering::Relaxed) {
                 warn!("prover: cancellation requested; cleaning up and exiting");
                 let _ = self.cleanup_tasks();
                 return Ok(false);
@@ -509,35 +524,26 @@ impl Scheduler {
             }
             let success = self.read_success_from_json(tid);
 
-            // Read and conditionally print captured stdout/stderr for this task.
-            if let Some((stdout_tmp, stderr_tmp, cmdline)) = self.outputs.remove(&tid) {
+            // Read captured stdout/stderr for this task; store for final report printing.
+            let mut captured_stdout: Option<String> = None;
+            let mut captured_stderr: Option<String> = None;
+            if let Some((stdout_tmp, stderr_tmp, _cmdline)) = self.outputs.remove(&tid) {
                 let read_lossy = |p: &std::path::Path| -> String {
                     match std::fs::read(p) {
                         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                         Err(_) => String::new(),
                     }
                 };
-                let stdout_s = read_lossy(stdout_tmp.path());
-                let stderr_s = read_lossy(stderr_tmp.path());
-                println!("{}", "-".repeat(80));
-                println!("{}", cmdline);
-                if stdout_s.is_empty() {
-                    println!(">>>> stdout:");
-                } else {
-                    println!(">>>> stdout:\n{}", stdout_s);
-                }
-                if stderr_s.is_empty() {
-                    println!(">>>> stderr:");
-                } else {
-                    println!(">>>> stderr:\n{}", stderr_s);
-                }
-                println!("{}", "-".repeat(80));
+                captured_stdout = Some(read_lossy(stdout_tmp.path()));
+                captured_stderr = Some(read_lossy(stderr_tmp.path()));
             }
 
             if let NodeInner::Task(t) = &mut self.nodes[tid.0].inner {
                 t.state = TaskState::Completed {
                     outcome: TaskOutcome::finish(success),
                 };
+                t.completed_stdout = captured_stdout;
+                t.completed_stderr = captured_stderr;
                 debug!(
                     "prover: task completed, cmdline=\"{}\" pid={} success={}",
                     self.cmdlines.get(&tid).unwrap(),
@@ -815,10 +821,17 @@ impl Scheduler {
 
     fn build_report_node(&self, id: NodeId) -> ProverReportNode {
         match &self.nodes[id.0].inner {
-            NodeInner::Task(_) => {
+            NodeInner::Task(t) => {
                 let cmdline = self.cmdlines.get(&id).cloned();
                 let outcome = self.node_outcome(id);
-                ProverReportNode::Task { cmdline, outcome }
+                let stdout = t.completed_stdout.clone();
+                let stderr = t.completed_stderr.clone();
+                ProverReportNode::Task {
+                    cmdline,
+                    outcome,
+                    stdout,
+                    stderr,
+                }
             }
             NodeInner::Group(g) => {
                 let outcome = g.outcome;
@@ -844,7 +857,7 @@ impl Scheduler {
     /// After return, no child processes should remain.
     pub fn cleanup_tasks(&mut self) -> io::Result<()> {
         // Prevent any further scheduling if this instance somehow continues.
-        CANCEL_REQUESTED.store(true, Ordering::Relaxed);
+        self.cancel_flag.store(true, Ordering::Relaxed);
         info!("prover: cleanup starting (best-effort) ");
         let _ = self.cancel_subtree(self.root);
         while !self.pid_to_node.is_empty() {
@@ -902,6 +915,8 @@ impl PlanBuilder {
                 NodeInner::Task(TaskNode {
                     task,
                     state: TaskState::NotStarted,
+                    completed_stdout: None,
+                    completed_stderr: None,
                 }),
             ),
             ProverPlan::Group { kind, tasks } => {
@@ -930,9 +945,28 @@ impl PlanBuilder {
 /// concurrent processes.
 /// On internal error, performs cleanup before returning `Err`.
 pub fn run_prover_plan(plan: ProverPlan, max_procs: usize) -> io::Result<ProverReport> {
-    let mut sched = Scheduler::new(plan, max_procs);
+    // Create a run-scoped cancellation flag and wire OS signals to it.
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let mut sig_ids = Vec::new();
+    for sig in [SIGINT, SIGTERM, SIGHUP] {
+        let flag = Arc::clone(&cancel_flag);
+        // Set the flag from signal handler; store SigId so we can unregister on exit.
+        match unsafe { siglow::register(sig, move || flag.store(true, Ordering::Relaxed)) } {
+            Ok(id) => sig_ids.push(id),
+            Err(e) => warn!("prover: failed to register signal {}: {}", sig, e),
+        }
+    }
+
+    let mut sched = Scheduler::new(plan, max_procs, cancel_flag);
     info!("prover: run starting");
-    let result = match sched.run() {
+    let run_res = sched.run();
+
+    // Always unregister signal handlers before returning.
+    for id in sig_ids.drain(..) {
+        let _ = siglow::unregister(id);
+    }
+
+    let result = match run_res {
         Ok(v) => v,
         Err(e) => {
             let _ = sched.cleanup_tasks();
@@ -953,15 +987,6 @@ pub fn run_prover_plan(plan: ProverPlan, max_procs: usize) -> io::Result<ProverR
 /// - Parses and executes the plan with the requested concurrency.
 /// Process exits with status 0 on success, 1 on failure.
 pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfig>) {
-    // Reset cancellation state for a fresh run in this process.
-    CANCEL_REQUESTED.store(false, Ordering::Relaxed);
-
-    // Register cancellation signals to set a global flag.
-    for sig in [SIGINT, SIGTERM, SIGHUP] {
-        let _ = signal_flag::register(sig, Arc::clone(&CANCEL_REQUESTED));
-    }
-    trace!("prover: signal handlers registered");
-
     let cores: usize = matches
         .get_one::<String>("cores")
         .map(|s| s.parse::<usize>().unwrap_or(1))
@@ -1021,11 +1046,46 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
     match run_prover_plan(plan, cores) {
         Ok(report) => {
             if let Some(path) = &output_json_path {
-                // Write full report including plan tree.
+                // Write full report including plan tree and captured outputs; do not print
+                // per-task outputs.
                 let s = serde_json::to_string(&report).unwrap();
                 if let Err(e) = std::fs::write(path, s) {
                     warn!("prover: failed writing output_json to {}: {}", path, e);
                 }
+            } else {
+                // No JSON requested; print all task outputs together at the end in DFS order.
+                fn print_task_outputs(node: &ProverReportNode) {
+                    match node {
+                        ProverReportNode::Task {
+                            cmdline,
+                            stdout,
+                            stderr,
+                            ..
+                        } => {
+                            println!("{}", "-".repeat(80));
+                            println!("{}", cmdline.as_deref().unwrap_or(""));
+                            let out = stdout.as_deref().unwrap_or("");
+                            let err = stderr.as_deref().unwrap_or("");
+                            if out.is_empty() {
+                                println!(">>>> stdout:");
+                            } else {
+                                println!(">>>> stdout:\n{}", out);
+                            }
+                            if err.is_empty() {
+                                println!(">>>> stderr:");
+                            } else {
+                                println!(">>>> stderr:\n{}", err);
+                            }
+                            println!("{}", "-".repeat(80));
+                        }
+                        ProverReportNode::Group { tasks, .. } => {
+                            for t in tasks {
+                                print_task_outputs(t);
+                            }
+                        }
+                    }
+                }
+                print_task_outputs(&report.plan);
             }
             if report.success {
                 println!("Overall: success");
