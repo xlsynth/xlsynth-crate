@@ -5054,3 +5054,205 @@ fn test_prover_any_mixed_succeeds() {
     let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
     assert_eq!(v["success"].as_bool(), Some(true));
 }
+
+#[test]
+fn test_prover_nested_all_any_succeeds() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    // Prepare IR texts with explicit top my_main.
+    let lhs_equiv = "package add_then_sub\nfn my_main(x: bits[32]) -> bits[32] {\n    add.2: bits[32] = add(x, x)\n    ret sub.3: bits[32] = sub(add.2, x)\n}";
+    let rhs_equiv = "package identity\nfn my_main(x: bits[32]) -> bits[32] {\n    ret identity.2: bits[32] = identity(x)\n}";
+    let lhs_ne = "package add_then_sub\nfn my_main(x: bits[32]) -> bits[32] {\n    umul.2: bits[32] = umul(x, x)\n    ret udiv.3: bits[32] = udiv(umul.2, x)\n}";
+
+    // Files for ir-equiv success pair.
+    let lhs1 = dir.join("lhs1.ir");
+    let rhs1 = dir.join("rhs1.ir");
+    std::fs::write(&lhs1, lhs_equiv).unwrap();
+    std::fs::write(&rhs1, rhs_equiv).unwrap();
+
+    // Files for ir-equiv failure pair.
+    let lhs2 = dir.join("lhs2.ir");
+    let rhs2 = dir.join("rhs2.ir");
+    std::fs::write(&lhs2, lhs_ne).unwrap();
+    std::fs::write(&rhs2, rhs_equiv).unwrap();
+
+    // DSLX files for an equivalent pair: (x + x) - x == x
+    let lhs_dslx = dir.join("lhs.x");
+    let rhs_dslx = dir.join("rhs.x");
+    std::fs::write(&lhs_dslx, "fn main(x: u32) -> u32 { (x + x) - x }").unwrap();
+    std::fs::write(&rhs_dslx, "fn main(x: u32) -> u32 { x }").unwrap();
+
+    // QuickCheck file with success/failure tests; we'll filter to the success one.
+    let qc_path = dir.join("qc.x");
+    std::fs::write(&qc_path, QUICKCHECK_DSLX).unwrap();
+
+    // Toolchain config in CWD for child subcommands.
+    let toolchain_toml = dir.join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    // Build a nested plan:
+    // all(
+    //   any(ir-equiv success, ir-equiv failure),
+    //   all(dslx-equiv success, prove-quickcheck filtered success)
+    // )
+    let plan = format!(
+        r#"{{
+  "kind": "all",
+  "tasks": [
+    {{
+      "kind": "any",
+      "tasks": [
+        {{ "kind": "ir-equiv", "lhs_ir_file": "{}", "rhs_ir_file": "{}", "top": "my_main", "solver": "toolchain" }},
+        {{ "kind": "ir-equiv", "lhs_ir_file": "{}", "rhs_ir_file": "{}", "top": "my_main", "solver": "toolchain" }}
+      ]
+    }},
+    {{
+      "kind": "all",
+      "tasks": [
+        {{ "kind": "dslx-equiv", "lhs_dslx_file": "{}", "rhs_dslx_file": "{}", "dslx_top": "main", "solver": "toolchain" }},
+        {{ "kind": "prove-quickcheck", "dslx_input_file": "{}", "test_filter": ".*success", "solver": "toolchain" }}
+      ]
+    }}
+  ]
+}}"#,
+        lhs1.display(),
+        rhs1.display(),
+        lhs2.display(),
+        rhs2.display(),
+        lhs_dslx.display(),
+        rhs_dslx.display(),
+        qc_path.display()
+    );
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_nested_success.json");
+    let output = Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("3")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "nested prover(all(any, all)) should succeed; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Optionally, sanity-check the JSON success flag.
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    assert_eq!(v["success"].as_bool(), Some(true));
+}
+
+#[test]
+fn test_prover_nested_any_all_fails() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    // Prepare IR texts.
+    let lhs_ne = "package add_then_sub\nfn my_main(x: bits[32]) -> bits[32] {\n    umul.2: bits[32] = umul(x, x)\n    ret udiv.3: bits[32] = udiv(umul.2, x)\n}";
+    let rhs_equiv = "package identity\nfn my_main(x: bits[32]) -> bits[32] {\n    ret identity.2: bits[32] = identity(x)\n}";
+
+    // Failing ir-equiv pair used in both subgroups.
+    let lhs1 = dir.join("lhs1.ir");
+    let rhs1 = dir.join("rhs1.ir");
+    let lhs2 = dir.join("lhs2.ir");
+    let rhs2 = dir.join("rhs2.ir");
+    for (p, s) in [
+        (&lhs1, lhs_ne),
+        (&rhs1, rhs_equiv),
+        (&lhs2, lhs_ne),
+        (&rhs2, rhs_equiv),
+    ] {
+        std::fs::write(p, s).unwrap();
+    }
+
+    // DSLX equivalent pair (won't save the all-group that has a failing ir-equiv).
+    let lhs_dslx = dir.join("lhs.x");
+    let rhs_dslx = dir.join("rhs.x");
+    std::fs::write(&lhs_dslx, "fn main(x: u32) -> u32 { (x + x) - x }").unwrap();
+    std::fs::write(&rhs_dslx, "fn main(x: u32) -> u32 { x }").unwrap();
+
+    // QuickCheck file with failure filter to ensure subgroup failure.
+    let qc_path = dir.join("qc.x");
+    std::fs::write(&qc_path, QUICKCHECK_DSLX).unwrap();
+
+    let toolchain_toml = dir.join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    // Build a nested plan that should fail overall:
+    // any(
+    //   all(ir-equiv fail, dslx-equiv success),
+    //   all(ir-equiv fail, prove-quickcheck filtered failure)
+    // )
+    let plan = format!(
+        r#"{{
+  "kind": "any",
+  "tasks": [
+    {{
+      "kind": "all",
+      "tasks": [
+        {{ "kind": "ir-equiv", "lhs_ir_file": "{}", "rhs_ir_file": "{}", "top": "my_main", "solver": "toolchain" }},
+        {{ "kind": "dslx-equiv", "lhs_dslx_file": "{}", "rhs_dslx_file": "{}", "dslx_top": "main", "solver": "toolchain" }}
+      ]
+    }},
+    {{
+      "kind": "all",
+      "tasks": [
+        {{ "kind": "ir-equiv", "lhs_ir_file": "{}", "rhs_ir_file": "{}", "top": "my_main", "solver": "toolchain" }},
+        {{ "kind": "prove-quickcheck", "dslx_input_file": "{}", "test_filter": ".*failure", "solver": "toolchain" }}
+      ]
+    }}
+  ]
+}}"#,
+        lhs1.display(),
+        rhs1.display(),
+        lhs_dslx.display(),
+        rhs_dslx.display(),
+        lhs2.display(),
+        rhs2.display(),
+        qc_path.display()
+    );
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_nested_failure.json");
+    let output = Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("3")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "nested prover(any(all(...), all(...))) should fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    println!("{}", json_str);
+    assert_eq!(v["success"].as_bool(), Some(false));
+}
