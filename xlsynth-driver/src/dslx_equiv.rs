@@ -202,6 +202,8 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         .map(|s| s.parse().unwrap())
         .unwrap_or(false);
 
+    let output_json = matches.get_one::<String>("output_json");
+
     // Enable enum-domain constraints only when supported by the selected solver.
     let support_domain_constraints = match solver_choice {
         #[cfg(feature = "has-boolector")]
@@ -284,5 +286,22 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         rhs_param_domains,
     };
 
-    dispatch_ir_equiv(solver_choice, tool_path, &inputs);
+    let outcome = dispatch_ir_equiv(solver_choice, tool_path, &inputs);
+    if let Some(path) = output_json {
+        std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
+    }
+    let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
+    if outcome.success {
+        println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+        println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
+        std::process::exit(0);
+    } else {
+        eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+        if let Some(cex) = outcome.counterexample {
+            eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
+        } else {
+            eprintln!("[{}] failure", SUBCOMMAND);
+        }
+        std::process::exit(1);
+    }
 }

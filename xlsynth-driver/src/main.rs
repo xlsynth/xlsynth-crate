@@ -591,6 +591,13 @@ fn main() {
                 .add_bool_arg(
                     "rhs_fixed_implicit_activation",
                     "Fix the implicit activation bit to true for the RHS IR, useful when only LHS or RHS has implicit token",
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -880,6 +887,13 @@ fn main() {
                         .value_parser(clap::value_parser!(QuickCheckAssertionSemantics))
                         .default_value("ignore")
                         .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -993,6 +1007,13 @@ fn main() {
                 .add_bool_arg(
                     "assume-enum-in-bound",
                     "Constrain enum-typed parameters to their defined values during equivalence proving",
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
                 )
         )
         .get_matches();

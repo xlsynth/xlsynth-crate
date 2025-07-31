@@ -10,6 +10,7 @@ use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConf
 use crate::solver_choice::SolverChoice;
 use crate::tools::run_prove_quickcheck_main;
 use regex::Regex;
+use serde::Serialize;
 use xlsynth::{
     mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
 };
@@ -18,6 +19,20 @@ use xlsynth_g8r::equiv::prove_quickcheck::{
     prove_ir_fn_always_true, BoolPropertyResult, QuickCheckAssertionSemantics,
 };
 use xlsynth_g8r::equiv::solver_interface::Solver;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuickCheckTestOutcome {
+    pub name: String,
+    pub time_micros: u128,
+    pub success: bool,
+    pub counterexample: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuickCheckOutcome {
+    pub success: bool,
+    pub tests: Vec<QuickCheckTestOutcome>,
+}
 
 /// Implements the `prove-quickcheck` sub-command.
 pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
@@ -140,15 +155,15 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         .get_one::<QuickCheckAssertionSemantics>("assertion_semantics")
         .unwrap_or(&QuickCheckAssertionSemantics::Ignore);
 
-    // Helper closure that runs proof for a given solver type.
+    // Helper that runs proof for a given solver type and collects outcomes.
     fn run_for_solver<S: Solver>(
         config: &S::Config,
         quickchecks: &[(String, bool)],
         ir_text: &str,
         module_name: &str,
         semantics: QuickCheckAssertionSemantics,
-    ) -> ! {
-        let mut all_passed = true;
+    ) -> Vec<QuickCheckTestOutcome> {
+        let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(quickchecks.len());
         for (qc_name, has_itok) in quickchecks {
             let cc = if *has_itok {
                 DslxCallingConvention::ImplicitToken
@@ -169,54 +184,64 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 fn_ref: ir_fn_ref,
                 fixed_implicit_activation: *has_itok,
             };
+            let start_time = std::time::Instant::now();
             let res = prove_ir_fn_always_true::<S>(config, &ir_fn, semantics.clone());
+            let micros = start_time.elapsed().as_micros();
             match res {
                 BoolPropertyResult::Proved => {
-                    println!("QuickCheck '{}' proved", qc_name);
+                    results.push(QuickCheckTestOutcome {
+                        name: qc_name.clone(),
+                        time_micros: micros,
+                        success: true,
+                        counterexample: None,
+                    });
                 }
                 BoolPropertyResult::Disproved { inputs, output } => {
-                    all_passed = false;
-                    println!("QuickCheck '{}' disproved", qc_name);
-                    println!("  Inputs: {:?}", inputs);
-                    println!("  Output: {:?}", output);
+                    let cex_str = format!("inputs: {:?}, output: {:?}", inputs, output);
+                    results.push(QuickCheckTestOutcome {
+                        name: qc_name.clone(),
+                        time_micros: micros,
+                        success: false,
+                        counterexample: Some(cex_str),
+                    });
                 }
             }
         }
-        if all_passed {
-            println!("Success: All QuickChecks proved");
-            std::process::exit(0);
-        } else {
-            println!("Failure: Some QuickChecks disproved");
-            std::process::exit(1);
-        }
+        results
     }
 
-    match solver_choice {
+    let results: Vec<QuickCheckTestOutcome> = match solver_choice {
         SolverChoice::Toolchain => {
             let tool_path = tool_path.expect("tool_path required for Toolchain solver");
-            let mut all_passed = true;
+            let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(quickchecks.len());
             for (qc_name, _) in &quickchecks {
+                let start = std::time::Instant::now();
                 match run_prove_quickcheck_main(input_path, Some(qc_name), tool_path) {
-                    Ok(stdout) => {
-                        println!("QuickCheck '{}' proved: {}", qc_name, stdout.trim());
+                    Ok(_stdout) => {
+                        let micros = start.elapsed().as_micros();
+                        results.push(QuickCheckTestOutcome {
+                            name: qc_name.clone(),
+                            time_micros: micros,
+                            success: true,
+                            counterexample: None,
+                        });
                     }
                     Err(output) => {
-                        all_passed = false;
-                        println!(
-                            "QuickCheck '{}' disproved: {}",
-                            qc_name,
-                            String::from_utf8_lossy(&output.stderr)
-                        );
+                        let micros = start.elapsed().as_micros();
+                        let mut msg = String::from_utf8_lossy(&output.stdout).to_string();
+                        if msg.trim().is_empty() {
+                            msg = String::from_utf8_lossy(&output.stderr).to_string();
+                        }
+                        results.push(QuickCheckTestOutcome {
+                            name: qc_name.clone(),
+                            time_micros: micros,
+                            success: false,
+                            counterexample: Some(msg.trim().to_string()),
+                        });
                     }
                 }
             }
-            if all_passed {
-                println!("Success: All QuickChecks proved");
-                std::process::exit(0);
-            } else {
-                println!("Failure: Some QuickChecks disproved");
-                std::process::exit(1);
-            }
+            results
         }
         #[cfg(feature = "has-boolector")]
         SolverChoice::Boolector | SolverChoice::BoolectorLegacy => {
@@ -228,7 +253,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &ir_text_result,
                 module_name,
                 *assertion_semantics,
-            );
+            )
         }
         #[cfg(feature = "has-bitwuzla")]
         SolverChoice::Bitwuzla => {
@@ -240,7 +265,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &ir_text_result,
                 module_name,
                 *assertion_semantics,
-            );
+            )
         }
         #[cfg(feature = "has-easy-smt")]
         SolverChoice::Z3Binary | SolverChoice::BitwuzlaBinary | SolverChoice::BoolectorBinary => {
@@ -257,7 +282,38 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 &ir_text_result,
                 module_name,
                 *assertion_semantics,
-            );
+            )
         }
+    };
+
+    let mut all_passed = true;
+    for r in &results {
+        if r.success {
+            println!("QuickCheck '{}' proved", r.name);
+        } else {
+            all_passed = false;
+            println!("QuickCheck '{}' disproved", r.name);
+            if let Some(ref cex) = r.counterexample {
+                println!("  {}", cex);
+            }
+        }
+    }
+
+    let outcome = QuickCheckOutcome {
+        success: all_passed,
+        tests: results,
+    };
+
+    let output_json = matches.get_one::<String>("output_json");
+    if let Some(path) = output_json {
+        std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
+    }
+
+    if all_passed {
+        println!("Success: All QuickChecks proved");
+        std::process::exit(0);
+    } else {
+        println!("Failure: Some QuickChecks disproved");
+        std::process::exit(1);
     }
 }
