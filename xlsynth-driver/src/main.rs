@@ -56,6 +56,7 @@ mod ir_ged;
 mod lib2proto;
 mod parallelism;
 mod prove_quickcheck;
+mod prover_config;
 mod report_cli_error;
 mod run_verilog_pipeline;
 mod solver_choice;

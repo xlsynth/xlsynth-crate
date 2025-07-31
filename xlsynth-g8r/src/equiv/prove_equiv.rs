@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -960,7 +962,8 @@ pub enum EquivResult {
 ///  2. **Failure condition** – negation of the success condition; if *any*
 ///     model satisfies this predicate, the checker must report a
 ///     counter-example.
-#[derive(Debug, PartialEq, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, PartialEq, Clone, Copy, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AssertionSemantics {
     /// Ignore all assertions.
     ///
@@ -996,6 +999,19 @@ pub enum AssertionSemantics {
     /// 1. Success: `¬s_l ∨ (s_r ∧ (r_l == r_r))`
     /// 2. Failure: `s_l ∧ (¬s_r ∨ (r_l != r_r))`
     Implies,
+}
+
+impl fmt::Display for AssertionSemantics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            AssertionSemantics::Ignore => "ignore",
+            AssertionSemantics::Never => "never",
+            AssertionSemantics::Same => "same",
+            AssertionSemantics::Assume => "assume",
+            AssertionSemantics::Implies => "implies",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 impl std::str::FromStr for AssertionSemantics {

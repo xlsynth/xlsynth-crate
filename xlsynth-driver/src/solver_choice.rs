@@ -6,7 +6,11 @@
 //! and `prove-quickcheck`) can share a single definition and avoid code
 //! duplication.
 
-#[derive(Debug, Clone, Copy)]
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SolverChoice {
     #[cfg(feature = "has-easy-smt")]
     Z3Binary,
@@ -27,6 +31,27 @@ pub enum SolverChoice {
     /// `xlsynth-toolchain.toml`).  Currently only used by the `ir-equiv`
     /// sub-command – other commands may ignore this variant.
     Toolchain,
+}
+
+impl fmt::Display for SolverChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::Z3Binary => "z3-binary",
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::BitwuzlaBinary => "bitwuzla-binary",
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::BoolectorBinary => "boolector-binary",
+            #[cfg(feature = "has-bitwuzla")]
+            SolverChoice::Bitwuzla => "bitwuzla",
+            #[cfg(feature = "has-boolector")]
+            SolverChoice::Boolector => "boolector",
+            #[cfg(feature = "has-boolector")]
+            SolverChoice::BoolectorLegacy => "boolector-legacy",
+            SolverChoice::Toolchain => "toolchain",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 impl std::str::FromStr for SolverChoice {
