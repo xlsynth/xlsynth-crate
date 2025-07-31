@@ -5,6 +5,21 @@
 //! This module defines configuration structs for invoking xlsynth-driver
 //! subcommands programmatically. Each configuration translates to a complete
 //! command line for the driver, suitable for running in parallel processes.
+//!
+//! JSON DSL overview
+//! - A single task is an object with a `kind` discriminator (`ir-equiv`,
+//!   `dslx-equiv`, `prove-quickcheck`).
+//! - Tasks can be composed into groups with `kind` = `all` | `any` | `first`
+//!   and a `tasks` array.
+//!
+//! Example (single task):
+//!
+//! ```json
+//! { "kind": "ir-equiv", "lhs_ir_file": "lhs.ir", "rhs_ir_file": "rhs.ir", "top": "main" }
+//! ```
+//!
+//! See the driver README section "Prover configuration JSON (task-spec DSL)"
+//! for the full schema and examples.
 
 use std::path::PathBuf;
 use std::process::Command;

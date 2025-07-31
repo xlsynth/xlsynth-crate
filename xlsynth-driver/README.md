@@ -64,7 +64,7 @@ xlsynth-driver ir2g8r my_module.opt.ir \
 
 The command above leaves three artifacts:
 
-1. `my_module.g8r`   – human-readable GateFn (stdout redirection).
+1. `my_module.g8r` – human-readable GateFn (stdout redirection).
 1. `my_module.g8rbin` – compact bincode serialisation of the same GateFn.
 1. `my_module.stats.json` – structural summary statistics as JSON.
 
@@ -164,15 +164,15 @@ diagnostics appear on **stderr**.
 
 ### `ir-ged`
 
-Computes the Graph-Edit-Distance between two IR functions.  Without further
-flags a summary line like `Distance: N` is printed on **stdout**.  With
+Computes the Graph-Edit-Distance between two IR functions. Without further
+flags a summary line like `Distance: N` is printed on **stdout**. With
 `--json=true` the result is emitted as JSON.
 
 ### `ir2gates`: IR to GateFn statistics
 
 Maps an IR function to a gate-level representation and prints a structural
-statistics report.  By default the report is human-readable text.  With
-`--quiet=true` the summary is emitted as JSON instead.  The optional
+statistics report. By default the report is human-readable text. With
+`--quiet=true` the summary is emitted as JSON instead. The optional
 `--output_json=<PATH>` flag writes the same JSON summary to a file regardless of
 the quiet setting.
 
@@ -203,9 +203,156 @@ xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 
 ### `g8r-equiv`
 
-Checks two GateFns for functional equivalence using the available engines.  A
-JSON report is written to **stdout**.  The command exits with a non-zero status
-if any engine finds a counter-example.  Errors are printed to **stderr**.
+Checks two GateFns for functional equivalence using the available engines. A
+JSON report is written to **stdout**. The command exits with a non-zero status
+if any engine finds a counter-example. Errors are printed to **stderr**.
+
+## Prover configuration JSON (task-spec DSL)
+
+The driver exposes a small, composable JSON DSL for describing prover tasks, used by programmatic callers and (optionally) config files. It mirrors the command-line flags and subcommands.
+
+- A single task is one object tagged by `kind`.
+- Collections of tasks can be composed into a tree using groups with `kind` equal to `all`, `any`, or `first`.
+
+Top-level forms:
+
+- Task: an object with `kind` ∈ {`ir-equiv`, `dslx-equiv`, `prove-quickcheck`} and fields below.
+- Group: an object with `kind` ∈ {`all`, `any`, `first`} and `tasks` = array of the same top-level forms (recursive).
+
+Example: single task
+
+```json
+{
+  "kind": "ir-equiv",
+  "lhs_ir_file": "lhs.ir",
+  "rhs_ir_file": "rhs.ir",
+  "top": "main",
+  "solver": "toolchain",
+  "parallelism_strategy": "output-bits",
+  "assertion_semantics": "same",
+  "flatten_aggregates": true,
+  "drop_params": ["p0", "p1"],
+  "json": true
+}
+```
+
+Example: group composition
+
+```json
+{
+  "kind": "all",
+  "tasks": [
+    { "kind": "ir-equiv", "lhs_ir_file": "lhs.ir", "rhs_ir_file": "rhs.ir" },
+    { "kind": "dslx-equiv", "lhs_dslx_file": "lhs.x", "rhs_dslx_file": "rhs.x", "dslx_top": "foo" },
+    { "kind": "prove-quickcheck", "dslx_input_file": "qc.x" }
+  ]
+}
+```
+
+Groups: all / any / first
+
+- `all`: run every child task; overall success if and only if all children succeed.
+- `any`: overall success if at least one child succeeds; schedulers may stop at the first success.
+- `first`: evaluate children in order; stop at the first child that completes successfully; if none succeed, the overall result is failure.
+
+Tree structure example
+
+```json
+{
+  "kind": "first",
+  "tasks": [
+    { "kind": "ir-equiv", "lhs_ir_file": "lhs.ir", "rhs_ir_file": "rhs.ir", "top": "main" },
+    {
+      "kind": "any",
+      "tasks": [
+        { "kind": "dslx-equiv", "lhs_dslx_file": "lhs.x", "rhs_dslx_file": "rhs.x", "dslx_top": "foo" },
+        { "kind": "prove-quickcheck", "dslx_input_file": "qc.x", "test_filter": ".*prop" }
+      ]
+    }
+  ]
+}
+```
+
+Visual shape
+
+```
+first
+├─ ir-equiv(lhs.ir, rhs.ir)
+└─ any
+   ├─ dslx-equiv(lhs.x, rhs.x)
+   └─ prove-quickcheck(qc.x)
+```
+
+Schema details
+
+- Common conventions
+
+  - Unspecified fields use the same defaults as the CLI.
+  - Paths are strings. Arrays of paths use JSON arrays. For DSLX search paths we join paths with `;` internally.
+  - Enum fields are lowercase/kebab-case strings as shown below.
+
+- `kind: "ir-equiv"` (IrEquivConfig)
+
+  - Required: `lhs_ir_file` (path), `rhs_ir_file` (path)
+  - Entry-point selection: either `top` (string) or both `lhs_ir_top` and `rhs_ir_top` (strings)
+  - Optional:
+    - `solver`: one of `toolchain`, `bitwuzla`, `boolector`, `boolector-legacy`, `z3-binary`, `bitwuzla-binary`, `boolector-binary` (availability gated by build features)
+    - `flatten_aggregates`: bool
+    - `drop_params`: array of strings (joined with commas for the CLI)
+    - `parallelism_strategy`: one of `single-threaded`, `output-bits`, `input-bit-split`
+    - `assertion_semantics`: one of `ignore`, `never`, `same`, `assume`, `implies`
+    - `lhs_fixed_implicit_activation`: bool
+    - `rhs_fixed_implicit_activation`: bool
+    - `json`: bool
+
+- `kind: "dslx-equiv"` (DslxEquivConfig)
+
+  - Required: `lhs_dslx_file` (path), `rhs_dslx_file` (path)
+  - Entry-point selection: either `dslx_top` (string) or both `lhs_dslx_top` and `rhs_dslx_top` (strings)
+  - DSLX search paths:
+    - `dslx_path`: array of paths (joined with `;`)
+    - `dslx_stdlib_path`: path
+  - Optional behavior flags:
+    - `solver`: same values as above
+    - `flatten_aggregates`: bool
+    - `drop_params`: array of strings
+    - `parallelism_strategy`: `single-threaded` | `output-bits` | `input-bit-split`
+    - `assertion_semantics`: `ignore` | `never` | `same` | `assume` | `implies`
+    - `lhs_fixed_implicit_activation`: bool
+    - `rhs_fixed_implicit_activation`: bool
+    - `assume_enum_in_bound`: bool
+    - `type_inference_v2`: bool (requires external toolchain)
+    - `json`: bool
+
+- `kind: "prove-quickcheck"` (ProveQuickcheckConfig)
+
+  - Required: `dslx_input_file` (path)
+  - Optional:
+    - `test_filter`: string (regex)
+    - `solver`: same values as above
+    - `assertion_semantics`: `ignore` | `never` | `assume`
+    - `json`: bool
+
+Mapping to CLI
+
+Each task translates 1:1 to an `xlsynth-driver` subcommand invocation. The JSON above for `ir-equiv` maps to:
+
+```shell
+xlsynth-driver ir-equiv lhs.ir rhs.ir \
+  --top main \
+  --solver toolchain \
+  --flatten_aggregates true \
+  --drop_params p0,p1 \
+  --parallelism-strategy output-bits \
+  --assertion-semantics same \
+  --json true
+```
+
+Notes
+
+- Enum values are case-insensitive on the CLI but serialized in lowercase/kebab-case in JSON.
+- `type_inference_v2` is only honored when using the external toolchain (`--toolchain`).
+- `dslx_path` is joined with `;` regardless of platform to match upstream tools.
 
 ### `dslx-stitch-pipeline`: Stitch DSLX pipeline stages
 
@@ -225,11 +372,11 @@ The usual DSLX-related options (`--dslx_input_file`, `--dslx_top`, `--dslx_path`
 
 Additional semantics:
 
-- `--dslx_top=<NAME>` specifies the *logical* pipeline prefix.  Stage
+- `--dslx_top=<NAME>` specifies the *logical* pipeline prefix. Stage
   functions are expected to be named `<NAME>_cycle0`, `<NAME>_cycle1`, … (or
-  be provided explicitly via `--stages`).  A DSLX function named exactly
+  be provided explicitly via `--stages`). A DSLX function named exactly
   `<NAME>` is **ignored** by this command – only the `_cycleN` stage functions
-  participate in stitching.  When `--stages` is supplied the prefix is only
+  participate in stitching. When `--stages` is supplied the prefix is only
   used for the wrapper module name and **not** for stage discovery.
 
 Example:
@@ -249,7 +396,7 @@ Runs a synthesized *pipelined* SystemVerilog module through a throw-away, automa
 >
 > Internally it expects:
 >
-> 1. One **or more** data input ports (plus optional handshake/reset/clock).  When there are several, supply a tuple value on the CLI that matches the port order.
+> 1. One **or more** data input ports (plus optional handshake/reset/clock). When there are several, supply a tuple value on the CLI that matches the port order.
 > 1. A free-running clock named `clk` – this port **must** be present in the top‐level module.
 > 1. The pipeline source text provided either via **stdin** or as a positional file argument.
 
@@ -287,12 +434,12 @@ cat pipeline.sv | xlsynth-driver run-verilog-pipeline \
 
 Key flags:
 
-- `--input_valid_signal=<NAME>`   Name of the *input-valid* handshake port.
-- `--output_valid_signal=<NAME>`  Name of the *output-valid* handshake port. If omitted you **must** specify `--latency`.
-- `--latency=<CYCLES>`            Pipeline latency in cycles when no output-valid handshake is present.
-- `--reset=<NAME>`                Optional reset signal name; defaults to none.
-- `--reset_active_low`            Treat the reset as active-low (default is active-high).
-- `--waves=<PATH>`                Write a VCD dump of the simulation to `PATH`.
+- `--input_valid_signal=<NAME>` Name of the *input-valid* handshake port.
+- `--output_valid_signal=<NAME>` Name of the *output-valid* handshake port. If omitted you **must** specify `--latency`.
+- `--latency=<CYCLES>` Pipeline latency in cycles when no output-valid handshake is present.
+- `--reset=<NAME>` Optional reset signal name; defaults to none.
+- `--reset_active_low` Treat the reset as active-low (default is active-high).
+- `--waves=<PATH>` Write a VCD dump of the simulation to `PATH`.
 
 Reset sequencing:
 
@@ -303,7 +450,7 @@ When a `--reset` signal is provided the generated test-bench:
 
 This guarantees that the design observes at least one full cycle of reset before valid stimulus arrives.
 
-The positional argument `<INPUT_VALUE>` is an *XLS IR* typed value.  For modules with **multiple** data input ports supply a *tuple* whose order matches the port list.
+The positional argument `<INPUT_VALUE>` is an *XLS IR* typed value. For modules with **multiple** data input ports supply a *tuple* whose order matches the port list.
 
 Example with two data inputs (`a`, `b`) each 32-bits wide:
 
@@ -325,21 +472,21 @@ making it easy to splice into shell pipelines or test scripts.
 ## Toolchain configuration (`xlsynth-toolchain.toml`)
 
 Several subcommands accept a `--toolchain` option that points at a
-`xlsynth-toolchain.toml` file.  The file *must* define a top-level
+`xlsynth-toolchain.toml` file. The file *must* define a top-level
 `[toolchain]` table and can contain **nested** tables for DSLX- and
 code-generation-specific settings:
 
-- `[toolchain]`               | `tool_path`                           | Directory containing the XLS tools (`codegen_main`, `opt_main`, …). |
-- `[toolchain.dslx]`          | `type_inference_v2`                   | Enables the experimental type-inference-v2 algorithm globally unless overridden by a CLI flag. |
-  |                             | `dslx_stdlib_path`                    | Path to the DSLX standard library. |
-  |                             | `dslx_path`                           | *Array* of additional DSLX search paths. |
-  |                             | `warnings_as_errors`                  | Treat DSLX warnings as hard errors. |
-  |                             | `enable_warnings` / `disable_warnings`| Lists of DSLX warning names to enable / suppress. |
-  | `[toolchain.codegen]`       | `gate_format`                         | Template string used for `gate!` macro expansion. |
-  |                             | `assert_format`                       | Template string used for `assert!` macro expansion. |
-  |                             | `use_system_verilog`                  | Emit SystemVerilog instead of plain Verilog. |
+- `[toolchain]` | `tool_path` | Directory containing the XLS tools (`codegen_main`, `opt_main`, …). |
+- `[toolchain.dslx]` | `type_inference_v2` | Enables the experimental type-inference-v2 algorithm globally unless overridden by a CLI flag. |
+  | | `dslx_stdlib_path` | Path to the DSLX standard library. |
+  | | `dslx_path` | *Array* of additional DSLX search paths. |
+  | | `warnings_as_errors` | Treat DSLX warnings as hard errors. |
+  | | `enable_warnings` / `disable_warnings`| Lists of DSLX warning names to enable / suppress. |
+  | `[toolchain.codegen]` | `gate_format` | Template string used for `gate!` macro expansion. |
+  | | `assert_format` | Template string used for `assert!` macro expansion. |
+  | | `use_system_verilog` | Emit SystemVerilog instead of plain Verilog. |
 
-Only the fields you need must be present.  When invoked with
+Only the fields you need must be present. When invoked with
 `--toolchain <FILE>` the driver uses these values as defaults for the
 corresponding command-line flags.
 
@@ -377,12 +524,12 @@ If you request this flag without `--toolchain`, the driver will print an error a
 
 ### Supported Subcommands
 
-| Subcommand         | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
+| Subcommand | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
 |--------------------|:-------------------------------:|:-------------------------------:|:---------------------------------:|
-| `dslx2pipeline`    | Yes                             | Yes                             | Yes                              |
-| `dslx2ir`          | Yes                             | Yes                             | Yes                              |
-| `dslx-g8r-stats`   | Yes                             | Yes                             | Yes                              |
-| `dslx2sv-types`    | No                              | N/A                             | Yes                              |
+| `dslx2pipeline` | Yes | Yes | Yes |
+| `dslx2ir` | Yes | Yes | Yes |
+| `dslx-g8r-stats` | Yes | Yes | Yes |
+| `dslx2sv-types` | No | N/A | Yes |
 
 ### Migration and Use
 
