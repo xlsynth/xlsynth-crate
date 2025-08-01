@@ -80,6 +80,7 @@ impl Drop for RawBitwuzla {
 /// A Bitwuzla-rawd SMT solver implementing the `Solver` trait.
 pub struct Bitwuzla {
     bitwuzla: Arc<RawBitwuzla>,
+    fresh_counter: u64,
 }
 
 impl Bitwuzla {
@@ -672,7 +673,14 @@ impl Solver for Bitwuzla {
         let instance = RawBitwuzla::new(config.options.raw);
         Ok(Bitwuzla {
             bitwuzla: Arc::new(instance),
+            fresh_counter: 0,
         })
+    }
+
+    fn fresh_symbol(&mut self, name: &str) -> io::Result<String> {
+        let symbol = format!("__bitwuzla_fresh_{}_{}", name, self.fresh_counter);
+        self.fresh_counter += 1;
+        Ok(symbol)
     }
 
     fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>> {

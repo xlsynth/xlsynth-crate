@@ -39,6 +39,11 @@ pub trait Solver: Sized {
     type Config: Send + Sync;
     fn new(config: &Self::Config) -> io::Result<Self>;
     fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>>;
+    fn fresh_symbol(&mut self, name: &str) -> io::Result<String>;
+    fn declare_fresh(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>> {
+        let symbol = self.fresh_symbol(name)?;
+        self.declare(&symbol, width)
+    }
     fn numerical(&mut self, width: usize, value: u64) -> BitVec<Self::Term>;
     fn zero(&mut self, width: usize) -> BitVec<Self::Term> {
         self.numerical(width, 0)
@@ -1096,6 +1101,37 @@ macro_rules! test_solver {
             fn test_slice() {
                 let mut solver = $solver;
                 test_utils::test_slice(&mut solver);
+            }
+
+            // New tests for declare_fresh symbol generation behavior
+            #[test]
+            fn test_declare_fresh_generates_unique_symbols() {
+                let mut solver = $solver;
+                let f1 = solver.declare_fresh("a", 8).unwrap();
+                let f2 = solver.declare_fresh("a", 8).unwrap();
+                solver.push().unwrap();
+                let ne = solver.ne(&f1, &f2);
+                solver.assert(&ne).unwrap();
+                assert_eq!(
+                    solver.check().unwrap(),
+                    crate::equiv::solver_interface::Response::Sat
+                );
+                solver.pop().unwrap();
+            }
+
+            #[test]
+            fn test_declare_fresh_differs_from_declare() {
+                let mut solver = $solver;
+                let d = solver.declare("a", 8).unwrap();
+                let f = solver.declare_fresh("a", 8).unwrap();
+                solver.push().unwrap();
+                let ne = solver.ne(&d, &f);
+                solver.assert(&ne).unwrap();
+                assert_eq!(
+                    solver.check().unwrap(),
+                    crate::equiv::solver_interface::Response::Sat
+                );
+                solver.pop().unwrap();
             }
 
             crate::test_solver_unary!(test_not, $solver, not, 8, 0x89, 8, 0x76);
