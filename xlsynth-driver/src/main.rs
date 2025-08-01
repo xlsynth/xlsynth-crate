@@ -338,6 +338,22 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx2pipeline")
                 .about("Converts DSLX to SystemVerilog")
+                .arg(
+                    clap::Arg::new("output_unopt_ir")
+                        .long("output_unopt_ir")
+                        .value_name("PATH")
+                        .help("Path to write the unoptimized IR (package) output")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_opt_ir")
+                        .long("output_opt_ir")
+                        .value_name("PATH")
+                        .help("Path to write the optimized IR (package) output")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
                 .add_delay_model_arg()
                 .add_dslx_input_args(true)
                 .add_pipeline_args()
