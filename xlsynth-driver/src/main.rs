@@ -56,6 +56,7 @@ mod ir_ged;
 mod lib2proto;
 mod parallelism;
 mod prove_quickcheck;
+mod prover;
 mod prover_config;
 mod report_cli_error;
 mod run_verilog_pipeline;
@@ -898,6 +899,33 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("prover")
+                .about("Run a prover plan with a process-based scheduler")
+                .arg(
+                    clap::Arg::new("cores")
+                        .long("cores")
+                        .value_name("N")
+                        .help("Maximum concurrent processes to run")
+                        .default_value("1")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("plan_json_file")
+                        .long("plan_json_file")
+                        .value_name("PATH_OR_-")
+                        .help("Path to ProverPlan JSON file or '-' for stdin")
+                        .required(true)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the overall result to PATH as JSON {\"success\": <bool>}")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("dslx-equiv")
                 .about("Checks if two DSLX functions are equivalent")
                 .arg(
@@ -1106,6 +1134,8 @@ fn main() {
         run_verilog_pipeline::handle_run_verilog_pipeline(matches);
     } else if let Some(matches) = matches.subcommand_matches("prove-quickcheck") {
         prove_quickcheck::handle_prove_quickcheck(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("prover") {
+        prover::handle_prover(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2combo") {
         ir2combo::handle_ir2combo(matches, &config);
     } else if let Some(_matches) = matches.subcommand_matches("version") {
