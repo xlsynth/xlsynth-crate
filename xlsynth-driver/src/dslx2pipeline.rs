@@ -21,6 +21,8 @@ fn dslx2pipeline(
     delay_model: &str,
     keep_temps: &Option<bool>,
     type_inference_v2: Option<bool>,
+    output_unopt_ir: &Option<&std::path::Path>,
+    output_opt_ir: &Option<&std::path::Path>,
     config: &Option<ToolchainConfig>,
 ) {
     log::info!("dslx2pipeline; config: {:?}", config);
@@ -62,7 +64,17 @@ fn dslx2pipeline(
 
         let opt_ir = run_opt_main(&unopt_ir_path, Some(&ir_top), tool_path);
         let opt_ir_path = temp_dir.path().join("opt.ir");
-        std::fs::write(&opt_ir_path, opt_ir).unwrap();
+        std::fs::write(&opt_ir_path, opt_ir.clone()).unwrap();
+
+        // If user requested, persist the IR artifacts to the provided paths.
+        if let Some(path) = output_unopt_ir {
+            std::fs::write(path, &std::fs::read_to_string(&unopt_ir_path).unwrap())
+                .expect("write output_unopt_ir");
+        }
+        if let Some(path) = output_opt_ir {
+            std::fs::write(path, &std::fs::read_to_string(&opt_ir_path).unwrap())
+                .expect("write output_opt_ir");
+        }
 
         let sv = run_codegen_pipeline(
             &opt_ir_path,
@@ -144,6 +156,14 @@ fn dslx2pipeline(
 
         let opt_ir = xlsynth::optimize_ir(&convert_result.ir, &ir_top).unwrap();
 
+        // If user requested, persist the IR artifacts to the provided paths.
+        if let Some(path) = output_unopt_ir {
+            std::fs::write(path, &convert_result.ir.to_string()).expect("write output_unopt_ir");
+        }
+        if let Some(path) = output_opt_ir {
+            std::fs::write(path, &opt_ir.to_string()).expect("write output_opt_ir");
+        }
+
         let scheduling_options_flags_proto = scheduling_options_proto(delay_model, pipeline_spec);
         let codegen_flags_proto = pipeline_codegen_flags_proto(codegen_flags);
         let codegen_result = xlsynth::schedule_and_codegen(
@@ -167,6 +187,14 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
     let keep_temps = matches.get_one::<String>("keep_temps").map(|s| s == "true");
     let codegen_flags = extract_codegen_flags(matches, config.as_ref());
 
+    // New optional output paths for capturing IR artifacts
+    let output_unopt_ir: Option<std::path::PathBuf> = matches
+        .get_one::<String>("output_unopt_ir")
+        .map(|s| std::path::PathBuf::from(s));
+    let output_opt_ir: Option<std::path::PathBuf> = matches
+        .get_one::<String>("output_opt_ir")
+        .map(|s| std::path::PathBuf::from(s));
+
     // extract type_inference_v2 flag
     let type_inference_v2 = match matches
         .get_one::<String>("type_inference_v2")
@@ -187,6 +215,8 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
         delay_model,
         &keep_temps,
         type_inference_v2,
+        &output_unopt_ir.as_deref(),
+        &output_opt_ir.as_deref(),
         config,
     );
 }

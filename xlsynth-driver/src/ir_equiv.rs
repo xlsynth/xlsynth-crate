@@ -356,6 +356,11 @@ pub fn dispatch_ir_equiv(
     tool_path: Option<&str>,
     inputs: &EquivInputs,
 ) -> EquivOutcome {
+    log::info!(
+        "dispatch_ir_equiv; solver_choice: {:?}, tool_path: {:?}",
+        solver_choice,
+        tool_path
+    );
     if solver_choice.is_none() && tool_path.is_none() {
         eprintln!(
             "[{}] Error: no solver specified and no toolchain path configured (need --solver or toolchain config)",
