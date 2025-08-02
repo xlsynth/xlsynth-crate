@@ -169,6 +169,9 @@ pub fn ir_fn_to_boolector(
                 let low = slice.start as u32;
                 tuple_bv.slice(high, low)
             }
+            NodePayload::CountedFor { .. } => {
+                panic!("CountedFor nodes are not yet supported in Boolector translation");
+            }
             NodePayload::Nil => {
                 // Do not insert a BV for Nil nodes
                 continue;
