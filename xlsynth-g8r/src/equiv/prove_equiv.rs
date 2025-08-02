@@ -397,6 +397,9 @@ pub fn ir_to_smt<'a, S: Solver>(
                     bitvec: bv,
                 }
             }
+            NodePayload::CountedFor { .. } => {
+                panic!("CountedFor nodes are not yet supported in SMT translation");
+            }
             NodePayload::TupleIndex { tuple, index } => {
                 let tuple_bv = env.get(tuple).expect("Tuple operand must be present");
                 let tuple_ty = inputs.ir_fn.fn_ref.get_node_ty(*tuple);

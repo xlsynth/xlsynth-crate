@@ -115,6 +115,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             label: _,
         } => vec![*predicate],
         Decode { arg, .. } | Encode { arg, .. } => vec![*arg],
+        CountedFor { init, .. } => vec![*init],
     }
 }
 

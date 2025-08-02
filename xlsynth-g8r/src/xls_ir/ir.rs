@@ -409,6 +409,14 @@ pub enum NodePayload {
     Encode {
         arg: NodeRef,
     },
+    // Counted for loop: initializes with `init`, runs for `trip_count` times with stride
+    // `stride`, applying the function `body` each iteration.
+    CountedFor {
+        init: NodeRef,
+        trip_count: usize,
+        stride: usize,
+        body: String,
+    },
 }
 
 impl NodePayload {
@@ -441,6 +449,7 @@ impl NodePayload {
             NodePayload::Cover { .. } => "cover",
             NodePayload::Decode { .. } => "decode",
             NodePayload::Encode { .. } => "encode",
+            NodePayload::CountedFor { .. } => "counted_for",
         }
     }
 
@@ -739,6 +748,21 @@ impl NodePayload {
             }
             NodePayload::Encode { arg } => {
                 format!("encode({}, id={})", get_name(*arg), id)
+            }
+            NodePayload::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+            } => {
+                format!(
+                    "counted_for({}, trip_count={}, stride={}, body={}, id={})",
+                    get_name(*init),
+                    trip_count,
+                    stride,
+                    body,
+                    id
+                )
             }
             NodePayload::GetParam(_) | NodePayload::Nil => return None,
         };

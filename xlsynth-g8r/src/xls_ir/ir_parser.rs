@@ -1062,6 +1062,39 @@ impl Parser {
                     )));
                 }                (ir::NodePayload::Decode { arg, width }, maybe_id.unwrap())
             }
+            "counted_for" => {
+                // counted_for(init, trip_count=..., stride=..., body=...)
+                let init = self.parse_node_ref(&node_env, "counted_for init")?;
+                self.drop_or_error(",")?;
+                self.drop_or_error("trip_count=")?;
+                let trip_count = self.pop_number_usize_or_error("trip_count")?;
+                self.drop_or_error(",")?;
+                self.drop_or_error("stride=")?;
+                let stride = self.pop_number_usize_or_error("stride")?;
+                self.drop_or_error(",")?;
+                self.drop_or_error("body=")?;
+                let body = self.pop_identifier_or_error("counted_for body")?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for counted_for; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::CountedFor {
+                        init,
+                        trip_count,
+                        stride,
+                        body,
+                    },
+                    maybe_id.unwrap(),
+                )
+            }
             "encode" => {
                 let arg = self.parse_node_ref(&node_env, "encode arg")?;
                 if self.peek_is(",") {
@@ -1767,6 +1800,7 @@ top fn main(t: token id=1) -> token {
     #[test]
     fn test_round_trip_or_nary_ir_node() {
         let _ = env_logger::builder().is_test(true).try_init();
+        // Build a small node environment for the n-ary OR node we want to parse.
         let mut node_env = IrNodeEnv::new();
         node_env.add(
             Some("is_result_nan".to_string()),
@@ -1788,10 +1822,53 @@ top fn main(t: token id=1) -> token {
             90409,
             ir::NodeRef { index: 90409 },
         );
+
+        // Input string containing an n-ary OR with four operands and a pos attribute.
         let input = "or.91095: bits[1] = or(is_result_nan, is_operand_inf, bit_slice.90408, and_reduce.90409, id=91095, pos=[(0,2144,26), (2,312,48), (3,2,51)])";
         let mut parser = Parser::new(input);
-        let node = parser.parse_node(&mut node_env).unwrap();
-        println!("{:?}", node);
+        let node = parser
+            .parse_node(&mut node_env)
+            .expect("parse nary or node");
+
+        // The node should be an Nary op with operator OR and four operands.
+        if let ir::NodePayload::Nary(op, operands) = &node.payload {
+            assert_eq!(*op, ir::NaryOp::Or);
+            assert_eq!(operands.len(), 4);
+            assert_eq!(operands[0].index, 1);
+            assert_eq!(operands[1].index, 2);
+            assert_eq!(operands[2].index, 90408);
+            assert_eq!(operands[3].index, 90409);
+        } else {
+            panic!("expected nary or node");
+        }
+    }
+
+    #[test]
+    fn test_parse_counted_for_node() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut node_env = IrNodeEnv::new();
+        // Provide a mapping for the init literal referenced as `literal.5` in the input
+        // string.
+        node_env.add(Some("literal".to_string()), 5, ir::NodeRef { index: 5 });
+        let input = "counted_for.6: bits[11] = counted_for(literal.5, trip_count=7, stride=1, body=body1, id=6)";
+        let mut parser = Parser::new(input);
+        let node = parser
+            .parse_node(&mut node_env)
+            .expect("parse counted_for node");
+        match node.payload {
+            ir::NodePayload::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+            } => {
+                assert_eq!(init.index, 5);
+                assert_eq!(trip_count, 7);
+                assert_eq!(stride, 1);
+                assert_eq!(body, "body1");
+            }
+            _ => panic!("expected counted_for payload"),
+        }
     }
 
     #[test]
