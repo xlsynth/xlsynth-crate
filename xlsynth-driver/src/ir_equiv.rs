@@ -47,9 +47,10 @@ pub struct EquivInputs<'a> {
     pub rhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
 }
 
-// Helper: parse IR text into a Package, pick top (explicit or package top), drop params.
-// Returns the parsed package and an owned function (potentially modified by drop_params).
-// It is okay to keep the unmodified package as we do not allow recursion in the IR.
+// Helper: parse IR text into a Package, pick top (explicit or package top),
+// drop params. Returns the parsed package and an owned function (potentially
+// modified by drop_params). It is okay to keep the unmodified package as we do
+// not allow recursion in the IR.
 fn parse_and_prepare_fn(
     ir_text: &str,
     top: Option<&str>,
@@ -57,7 +58,10 @@ fn parse_and_prepare_fn(
     subcommand: &str,
     origin: &str,
     side: &str,
-) -> (xlsynth_g8r::xls_ir::ir::Package, xlsynth_g8r::xls_ir::ir::Fn) {
+) -> (
+    xlsynth_g8r::xls_ir::ir::Package,
+    xlsynth_g8r::xls_ir::ir::Fn,
+) {
     let pkg = match ir_parser::Parser::new(ir_text).parse_package() {
         Ok(pkg) => pkg,
         Err(e) => {

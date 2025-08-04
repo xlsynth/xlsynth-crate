@@ -149,7 +149,9 @@ pub fn get_fn_inputs<'a, S: Solver>(
     }
     for p in params_iter {
         let name = prefix_name(&p.name);
-        let bv = solver.declare_fresh(&name, p.ty.bit_count() as usize).unwrap();
+        let bv = solver
+            .declare_fresh(&name, p.ty.bit_count() as usize)
+            .unwrap();
         inputs.insert(
             p.name.clone(),
             IrTypedBitVec {
@@ -1496,8 +1498,16 @@ pub mod test_utils {
 
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn { fn_ref: call_fn, pkg_ref: Some(&pkg), fixed_implicit_activation: false },
-            &IrFn { fn_ref: inline_fn, pkg_ref: Some(&pkg), fixed_implicit_activation: false },
+            &IrFn {
+                fn_ref: call_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &IrFn {
+                fn_ref: inline_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
             AssertionSemantics::Same,
             false,
         );
@@ -1530,8 +1540,16 @@ pub mod test_utils {
 
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn { fn_ref: call_fn, pkg_ref: Some(&pkg), fixed_implicit_activation: false },
-            &IrFn { fn_ref: inline_fn, pkg_ref: Some(&pkg), fixed_implicit_activation: false },
+            &IrFn {
+                fn_ref: call_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &IrFn {
+                fn_ref: inline_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
             AssertionSemantics::Same,
             false,
         );
