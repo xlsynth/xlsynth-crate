@@ -88,6 +88,7 @@ pub fn ir_value_to_bv<'a, S: Solver>(
 #[derive(Debug, Clone)]
 pub struct IrFn<'a> {
     pub fn_ref: &'a ir::Fn,
+    // This is allowed to be None for IRs without invoke.
     pub pkg_ref: Option<&'a ir::Package>,
     pub fixed_implicit_activation: bool,
 }
@@ -786,6 +787,7 @@ pub fn ir_to_smt<'a, S: Solver>(
                     ir_fn: &callee_ir_fn,
                     inputs: callee_input_map,
                 };
+                // This effectively inlines the callee in the SMT artifact.
                 let callee_smt = ir_to_smt(solver, &callee_inputs);
                 IrTypedBitVec {
                     ir_type: &node.ty,

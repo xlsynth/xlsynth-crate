@@ -1387,7 +1387,7 @@ fn test_irequiv_subcommand_solver_equivalent(solver: &str) {
     );
 }
 
-// Invoke equivalence across solvers (native SMT backends and binaries).
+// Invoke IR node equivalence across solvers (native SMT backends and binaries).
 fn test_irequiv_subcommand_solver_invoke_equivalent(solver: &str) {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1417,7 +1417,8 @@ fn my_main(x: bits[8]) -> bits[8] {
     let rhs_path = temp_dir.path().join("rhs.ir");
     std::fs::write(&rhs_path, rhs_ir).unwrap();
 
-    // Toolchain file so driver can run external tools when needed (not used here but consistent with other tests).
+    // Toolchain file so driver can run external tools when needed (not used here
+    // but consistent with other tests).
     let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
