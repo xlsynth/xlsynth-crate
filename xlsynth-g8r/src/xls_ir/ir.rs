@@ -416,6 +416,12 @@ pub enum NodePayload {
         trip_count: usize,
         stride: usize,
         body: String,
+        /// Additional invariant operands passed to the loop body after the
+        /// induction variable and loop-carry.
+        ///
+        /// If there are N entries here, the callee body is invoked with
+        /// signature like: body(i, acc, inv0, ..., inv{N-1}).
+        invariant_args: Vec<NodeRef>,
     },
 }
 
@@ -754,13 +760,27 @@ impl NodePayload {
                 trip_count,
                 stride,
                 body,
+                invariant_args,
             } => {
+                let inv_str = if invariant_args.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", invariant_args=[{}]",
+                        invariant_args
+                            .iter()
+                            .map(|n| get_name(*n))
+                            .collect::<Vec<String>>()
+                            .join(", ")
+                    )
+                };
                 format!(
-                    "counted_for({}, trip_count={}, stride={}, body={}, id={})",
+                    "counted_for({}, trip_count={}, stride={}, body={}{}, id={})",
                     get_name(*init),
                     trip_count,
                     stride,
                     body,
+                    inv_str,
                     id
                 )
             }

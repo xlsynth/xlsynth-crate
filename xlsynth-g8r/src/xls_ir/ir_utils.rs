@@ -115,7 +115,15 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             label: _,
         } => vec![*predicate],
         Decode { arg, .. } | Encode { arg, .. } => vec![*arg],
-        CountedFor { init, .. } => vec![*init],
+        CountedFor {
+            init,
+            invariant_args,
+            ..
+        } => {
+            let mut deps = vec![*init];
+            deps.extend(invariant_args.iter().cloned());
+            deps
+        }
     }
 }
 
