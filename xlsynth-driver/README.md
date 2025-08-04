@@ -24,6 +24,17 @@ For a full list of options, run `xlsynth-driver <subcommand> --help`.
 
 Proves two IR functions to be equivalent or provides a counterexample to their equivalence.
 
+Key flags:
+
+- `--top <NAME>` or per-side `--lhs_ir_top <NAME>` / `--rhs_ir_top <NAME>` to select entry points.
+- `--solver <toolchain|bitwuzla|boolector|boolector-legacy|z3-binary|bitwuzla-binary|boolector-binary>`
+- `--flatten_aggregates=<BOOL>`
+- `--drop_params <CSV>`
+- `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
+- `--assertion-semantics <ignore|never|same|assume|implies>`
+- `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
+- `--output_json <PATH>` to write the JSON result.
+
 ### `lib2proto`: liberty files to proto
 
 Liberty files can be unwieldy and large in their textual form -- this command reformats the data
@@ -43,6 +54,9 @@ xlsynth-driver gv2ir \
   --liberty_proto ~/asap7.proto > ~/my_netlist.ir
 ```
 
+- Optional flags:
+  - `--dff_cells <CSV>` – comma-separated list of DFF cell names to treat as identity (D->Q).
+
 ### `ir2g8r`: IR to gate-level representation
 
 Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist in AIG form).
@@ -51,6 +65,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
 - Additional artifacts can be emitted with flags:
   - `--bin-out <PATH>` – write the GateFn as a binary **.g8rbin** file (bincode-encoded).
   - `--stats-out <PATH>` – write a JSON summary of structural statistics.
+  - `--netlist-out <PATH>` – write a human-readable gate-level netlist to a file.
 - The same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--toggle-sample-count`, …).
 
 Example:
@@ -78,6 +93,15 @@ Converts a `.g8r` (text) or `.g8rbin` (bincode) file containing a gate-level `Ga
   - If given as `--add-clk-port` (no value): adds a port named `clk`.
   - If given as `--add-clk-port=foo`: adds a port named `foo`.
 
+Additional flags:
+
+- `--flop-inputs` – add a layer of flops for all inputs.
+- `--flop-outputs` – add a layer of flops for all outputs.
+- `--use-system-verilog` – emit SystemVerilog instead of Verilog.
+- `--module-name <NAME>` – override the generated module name.
+
+Note: If `--flop-inputs` or `--flop-outputs` is used you must also provide `--add-clk-port=<NAME>` to name the clock.
+
 Example usage:
 
 ```shell
@@ -93,6 +117,16 @@ xlsynth-driver g8r2v my_module.g8r --add-clk-port=myclk > my_module.ugv
 
 The output is always written to stdout; redirect to a `.ugv` file as needed.
 
+Example with flops and SystemVerilog output:
+
+```shell
+xlsynth-driver g8r2v my_module.g8r \
+  --add-clk-port=clk \
+  --flop-inputs --flop-outputs \
+  --use-system-verilog \
+  --module-name=my_module_g8r > my_module.ugv
+```
+
 ### `version`
 
 Prints the driver version string to **stdout**.
@@ -107,6 +141,11 @@ Diagnostic messages and the path to temporary files (when
 - The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
   **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
 
+Additional outputs:
+
+- `--output_unopt_ir <PATH>` – write the unoptimized IR package to a file.
+- `--output_opt_ir <PATH>` – write the optimized IR package to a file.
+
 ### `dslx2ir`: DSLX to IR
 
 Converts DSLX source code to the XLS IR. The IR text is emitted on **stdout**.
@@ -114,6 +153,10 @@ DSLX warnings and errors appear on **stderr**.
 
 - The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
   **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
+
+Optional optimization:
+
+- `--opt=true` – run the IR optimizer before emitting. When set, `--dslx_top` becomes required.
 
 ### `dslx2sv-types`: DSLX type definitions to SystemVerilog
 
@@ -132,6 +175,7 @@ optimization, and gatification using either the toolchain or the runtime APIs.
 ### `ir2opt`: optimize IR
 
 Runs the XLS optimizer on an IR file and prints the optimized IR to **stdout**.
+Requires `--top <NAME>` to select the entry point.
 
 ### `ir2pipeline`: IR to pipelined Verilog
 
@@ -139,12 +183,20 @@ Produces a pipelined SystemVerilog design from an IR file. The generated code
 is printed to **stdout**. When `--keep_temps=true` the location of temporary
 files is reported on **stderr**.
 
+Optional optimization:
+
+- `--opt=true` – optimize the IR before scheduling/codegen.
+
 ### `ir2combo`: IR to *combinational* SystemVerilog
 
 Similar to `ir2pipeline` but requests the *combinational* backend in `codegen_main`.
 Generates a single‐cycle (no pipeline registers) SystemVerilog module on **stdout**.
 All the usual code-gen flags (e.g., `--use_system_verilog`, `--add_invariant_assertions`,
 `--flop_inputs`, `--flop_outputs`, etc.) are supported.
+
+Optional optimization:
+
+- `--opt=true` – optimize the IR before code generation.
 
 Example:
 
@@ -206,6 +258,58 @@ xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 Checks two GateFns for functional equivalence using the available engines. A
 JSON report is written to **stdout**. The command exits with a non-zero status
 if any engine finds a counter-example. Errors are printed to **stderr**.
+
+### `dslx-equiv`
+
+Checks two DSLX functions for functional equivalence. By default it converts both to IR and uses the selected solver/toolchain to prove equivalence.
+
+- Positional arguments: `<lhs.x> <rhs.x>`
+- Entry-point selection: either `--dslx_top <NAME>` or both `--lhs_dslx_top <NAME>` and `--rhs_dslx_top <NAME>`.
+- Search paths: `--dslx_path <P1;P2;...>` and `--dslx_stdlib_path <PATH>`.
+- Behavior flags:
+  - `--solver <toolchain|bitwuzla|boolector|boolector-legacy|z3-binary|bitwuzla-binary|boolector-binary>`
+  - `--flatten_aggregates=<BOOL>`
+  - `--drop_params <CSV>`
+  - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
+  - `--assertion-semantics <ignore|never|same|assume|implies>`
+  - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
+  - `--assume-enum-in-bound=<BOOL>`
+  - `--type_inference_v2=<BOOL>` (requires `--toolchain`)
+  - `--output_json <PATH>`
+
+### `prove-quickcheck`
+
+Proves that DSLX `#[quickcheck]` functions always return true.
+
+- Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
+- Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
+- Backend: `--solver <...>` selects the solver/toolchain.
+- Semantics: `--assertion-semantics <ignore|never|assume>`.
+- Output: `--output_json <PATH>` to write results as JSON.
+
+### `prover`
+
+Runs a prover plan described by a JSON file with a process-based scheduler.
+
+- Concurrency: `--cores <N>` controls maximum concurrent processes.
+- Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.
+- Output: `--output_json <PATH>` writes `{ "success": <bool> }`.
+
+### Equivalence/proving flags: meanings
+
+- flatten_aggregates: When `true`, tuples and arrays are flattened to plain bit-vectors during equivalence checking. This relaxes type matching so two functions can be considered equivalent even if their aggregate shapes differ, as long as the bit-level behavior matches.
+
+- drop_params: Comma-separated list of parameter names to remove from the function(s) before proving equivalence. The check fails if any dropped parameter is referenced in the function body. Use this to align functions that differ by unused or environment-only parameters.
+
+- assume-enum-in-bound: When `true`, constrains enum-typed parameters to their declared enumerators (domain restriction) during proofs. This is usually desirable because the underlying bit-width can represent more values than the defined enum members. Default is `true` for supported solvers. Supported by native SMT backends (e.g., z3-binary, bitwuzla, boolector) and not by the toolchain or legacy boolector paths; requesting it where unsupported results in an error.
+
+- assertion-semantics: How to treat `assert` statements when proving equivalence. Let r_l/r_r be results and s_l/s_r indicate that no assertion failed on the left/right.
+
+  - ignore: Ignore assertions.
+  - never: Both sides must never fail; results must match.
+  - same: Both must either fail (both) or succeed with the same result.
+  - assume: Assume both sides succeed; only compare results if they do.
+  - implies: If the left succeeds, the right must also succeed and match; if the left fails, the right is unconstrained.
 
 ## Prover configuration JSON (task-spec DSL)
 
