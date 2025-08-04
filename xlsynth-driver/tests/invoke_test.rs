@@ -1387,6 +1387,82 @@ fn test_irequiv_subcommand_solver_equivalent(solver: &str) {
     );
 }
 
+// Invoke equivalence across solvers (native SMT backends and binaries).
+fn test_irequiv_subcommand_solver_invoke_equivalent(solver: &str) {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // LHS uses invoke to call callee `g`; RHS inlines the add.
+    let lhs_ir = r#"package p_invoke
+
+fn g(x: bits[8]) -> bits[8] {
+  ret add.1: bits[8] = add(x, x, id=1)
+}
+
+fn my_main(x: bits[8]) -> bits[8] {
+  ret invoke.2: bits[8] = invoke(x, to_apply=g, id=2)
+}
+"#;
+
+    let rhs_ir = r#"package p_inline
+
+fn my_main(x: bits[8]) -> bits[8] {
+  ret add.1: bits[8] = add(x, x, id=1)
+}
+"#;
+
+    // Write the IR files to the temp directory.
+    let lhs_path = temp_dir.path().join("lhs.ir");
+    std::fs::write(&lhs_path, lhs_ir).unwrap();
+    let rhs_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_path, rhs_ir).unwrap();
+
+    // Toolchain file so driver can run external tools when needed (not used here but consistent with other tests).
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .arg(format!("--solver={}", solver))
+        .output()
+        .expect("xlsynth-driver should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log::info!("stdout: {}", stdout);
+    log::info!("stderr: {}", stderr);
+    assert!(
+        output.status.success(),
+        "Invoke ir-equiv with solver {} should succeed; stderr: {}",
+        solver,
+        stderr
+    );
+    assert!(
+        stdout.contains("Solver proved equivalence"),
+        "stdout: {}",
+        stdout
+    );
+}
+
+// Parameterized wrappers using cfg_attr + test_case to avoid macros.
+#[cfg_attr(feature="has-boolector", test_case::test_case("boolector"; "invoke_boolector"))]
+#[cfg_attr(feature="has-bitwuzla", test_case::test_case("bitwuzla"; "invoke_bitwuzla"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case::test_case("z3-binary"; "invoke_z3_binary"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "invoke_bitwuzla_binary"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case::test_case("boolector-binary"; "invoke_boolector_binary"))]
+#[test_case::test_case("toolchain"; "invoke_toolchain")]
+fn test_irequiv_subcommand_solver_invoke_equivalent_param(solver: &str) {
+    test_irequiv_subcommand_solver_invoke_equivalent(solver);
+}
+
 // Test for ir-equiv subcommand using Solver
 fn test_irequiv_subcommand_solver_equivalent_with_fixed_implicit_activation(solver: &str) {
     let _ = env_logger::try_init();
