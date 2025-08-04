@@ -295,6 +295,22 @@ Runs a prover plan described by a JSON file with a process-based scheduler.
 - Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.
 - Output: `--output_json <PATH>` writes `{ "success": <bool> }`.
 
+### Equivalence/proving flags: meanings
+
+- flatten_aggregates: When `true`, tuples and arrays are flattened to plain bit-vectors during equivalence checking. This relaxes type matching so two functions can be considered equivalent even if their aggregate shapes differ, as long as the bit-level behavior matches.
+
+- drop_params: Comma-separated list of parameter names to remove from the function(s) before proving equivalence. The check fails if any dropped parameter is referenced in the function body. Use this to align functions that differ by unused or environment-only parameters.
+
+- assume-enum-in-bound: When `true`, constrains enum-typed parameters to their declared enumerators (domain restriction) during proofs. This is usually desirable because the underlying bit-width can represent more values than the defined enum members. Default is `true` for supported solvers. Supported by native SMT backends (e.g., z3-binary, bitwuzla, boolector) and not by the toolchain or legacy boolector paths; requesting it where unsupported results in an error.
+
+- assertion-semantics: How to treat `assert` statements when proving equivalence. Let r_l/r_r be results and s_l/s_r indicate that no assertion failed on the left/right.
+
+  - ignore: Ignore assertions.
+  - never: Both sides must never fail; results must match.
+  - same: Both must either fail (both) or succeed with the same result.
+  - assume: Assume both sides succeed; only compare results if they do.
+  - implies: If the left succeeds, the right must also succeed and match; if the left fails, the right is unconstrained.
+
 ## Prover configuration JSON (task-spec DSL)
 
 The driver exposes a small, composable JSON DSL for describing prover tasks, used by programmatic callers and (optionally) config files. It mirrors the command-line flags and subcommands.
