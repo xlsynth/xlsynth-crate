@@ -45,13 +45,15 @@ pub trait Solver: Sized {
         self.declare(&symbol, width)
     }
     fn numerical(&mut self, width: usize, value: u64) -> BitVec<Self::Term>;
-    /// Create a numerical bit-vector constant from a u128 value at an arbitrary width.
-    /// Always produces exactly `width` bits (zero-extended or truncated as needed).
+    /// Create a numerical bit-vector constant from a u128 value at an arbitrary
+    /// width. Always produces exactly `width` bits (zero-extended or
+    /// truncated as needed).
     fn numerical_u128(&mut self, width: usize, value: u128) -> BitVec<Self::Term> {
         if width == 0 {
             return BitVec::ZeroWidth;
         }
-        // Build a binary string of exactly `width` bits (MSB-first) and delegate to from_raw_str.
+        // Build a binary string of exactly `width` bits (MSB-first) and delegate to
+        // from_raw_str.
         let mut s = String::with_capacity(2 + width);
         s.push_str("#b");
         for bit in (0..width).rev() {
