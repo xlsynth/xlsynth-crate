@@ -16,6 +16,11 @@ use crate::{
     },
 };
 
+#[inline]
+const fn min_bits_u128(n: u128) -> usize {
+    (u128::BITS - n.leading_zeros()) as usize
+}
+
 #[derive(Clone)]
 pub struct IrTypedBitVec<'a, R> {
     pub ir_type: &'a ir::Type,
@@ -207,6 +212,15 @@ impl<'a, R> FnInputs<'a, R> {
 
     pub fn name(&self) -> &str {
         self.ir_fn.name()
+    }
+
+    pub fn get_fn(&self, name: &str) -> &'a ir::Fn {
+        let pkg = self
+            .ir_fn
+            .pkg_ref
+            .expect("fn lookup requires package context");
+        pkg.get_fn(name)
+            .unwrap_or_else(|| panic!("Function '{}' not found in package", name))
     }
 }
 
@@ -402,8 +416,91 @@ pub fn ir_to_smt<'a, S: Solver>(
                     bitvec: bv,
                 }
             }
-            NodePayload::CountedFor { .. } => {
-                panic!("CountedFor nodes are not yet supported in SMT translation");
+            NodePayload::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+            } => {
+                // Evaluate the initial accumulator value.
+                let mut acc = env
+                    .get(init)
+                    .expect("CountedFor init must be present")
+                    .clone();
+
+                // Resolve the body function via shared helper.
+                let callee = inputs.get_fn(body);
+
+                // If the body has extra parameters (e.g., invariant args), we currently
+                // do not support providing them at the counted_for site in this IR.
+                // Enforce that there are exactly two parameters.
+                assert_eq!(
+                    callee.params.len(),
+                    2,
+                    "CountedFor body currently supported only with (i, loop_carry) params"
+                );
+
+                let ind_ty = &callee.params[0].ty;
+                let ind_width = ind_ty.bit_count();
+                // Statically ensure the induction variable cannot overflow given
+                // trip_count/stride. Minimal bits needed is ceil(log2(max_i +
+                // 1)), where max_i = (trip_count-1)*stride.
+                let max_i: u128 = (*trip_count as u128)
+                    .saturating_sub(1)
+                    .saturating_mul(*stride as u128);
+                let min_i_bits: usize = min_bits_u128(max_i);
+                assert!(
+                    matches!(ind_ty, ir::Type::Bits(w) if *w >= min_i_bits),
+                    "CountedFor induction variable too narrow: have {:?}, need >= {} for trip_count={} stride={}",
+                    ind_ty,
+                    min_i_bits,
+                    trip_count,
+                    stride
+                );
+
+                // Prepare callee wrapper and induction-constant builder.
+                let callee_ir_fn = IrFn {
+                    fn_ref: callee,
+                    pkg_ref: inputs.ir_fn.pkg_ref,
+                    fixed_implicit_activation: false,
+                };
+                let mk_ind_var_bv = |solver: &mut S, k: usize| -> BitVec<S::Term> {
+                    let val = (k as u128) * (*stride as u128);
+                    solver.numerical_u128(ind_width, val)
+                };
+
+                for k in 0..*trip_count {
+                    let callee_input_map = HashMap::from_iter(
+                        callee
+                            .params
+                            .iter()
+                            .zip(vec![mk_ind_var_bv(solver, k), acc.bitvec])
+                            .map(|(p, bv)| {
+                                (
+                                    p.name.clone(),
+                                    IrTypedBitVec {
+                                        ir_type: &p.ty,
+                                        bitvec: bv,
+                                    },
+                                )
+                            }),
+                    );
+
+                    let callee_inputs = FnInputs {
+                        ir_fn: &callee_ir_fn,
+                        inputs: callee_input_map,
+                    };
+                    let callee_smt = ir_to_smt(solver, &callee_inputs);
+                    acc = IrTypedBitVec {
+                        ir_type: &node.ty,
+                        bitvec: callee_smt.output.bitvec,
+                    };
+                }
+
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: acc.bitvec,
+                }
             }
             NodePayload::TupleIndex { tuple, index } => {
                 let tuple_bv = env.get(tuple).expect("Tuple operand must be present");
@@ -748,13 +845,7 @@ pub fn ir_to_smt<'a, S: Solver>(
                 }
             }
             NodePayload::Invoke { to_apply, operands } => {
-                let pkg = inputs
-                    .ir_fn
-                    .pkg_ref
-                    .expect("Invoke encountered but no package context available");
-                let callee = pkg
-                    .get_fn(to_apply)
-                    .unwrap_or_else(|| panic!("Invoke target '{}' not found in package", to_apply));
+                let callee = inputs.get_fn(to_apply);
 
                 // Build callee inputs by mapping current env operands to callee params.
                 assert_eq!(
@@ -1549,6 +1640,143 @@ pub mod test_utils {
             },
             &IrFn {
                 fn_ref: inline_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res, super::EquivResult::Proved));
+    }
+
+    pub fn test_counted_for_basic<S: Solver>(solver_config: &S::Config) {
+        // Package with a simple body that accumulates the induction variable into acc.
+        // Loop it three times; compare to a manually unrolled implementation.
+        let ir_pkg_text = r#"
+            package p_cf
+
+            fn body(i: bits[8], acc: bits[8]) -> bits[8] {
+              ret add.1: bits[8] = add(acc, i, id=1)
+            }
+
+            fn looped(init: bits[8]) -> bits[8] {
+              ret cf: bits[8] = counted_for(init, trip_count=3, stride=1, body=body, id=2)
+            }
+
+            fn inline(init: bits[8]) -> bits[8] {
+              z: bits[8] = literal(value=0, id=3)
+              a0: bits[8] = add(init, z, id=4)
+              o1: bits[8] = literal(value=1, id=5)
+              a1: bits[8] = add(a0, o1, id=6)
+              o2: bits[8] = literal(value=2, id=7)
+              ret a2: bits[8] = add(a1, o2, id=8)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let looped = pkg.get_fn("looped").expect("looped not found");
+        let inline = pkg.get_fn("inline").expect("inline not found");
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn {
+                fn_ref: looped,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &IrFn {
+                fn_ref: inline,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res, super::EquivResult::Proved));
+    }
+
+    pub fn test_counted_for_stride<S: Solver>(solver_config: &S::Config) {
+        // Stride=2 for 3 trips: add 0,2,4
+        let ir_pkg_text = r#"
+            package p_cf2
+
+            fn body(i: bits[8], acc: bits[8]) -> bits[8] {
+              ret add.1: bits[8] = add(acc, i, id=1)
+            }
+
+            fn looped(init: bits[8]) -> bits[8] {
+              ret cf: bits[8] = counted_for(init, trip_count=3, stride=2, body=body, id=2)
+            }
+
+            fn inline(init: bits[8]) -> bits[8] {
+              i0: bits[8] = literal(value=0, id=3)
+              a0: bits[8] = add(init, i0, id=4)
+              i1: bits[8] = literal(value=2, id=5)
+              a1: bits[8] = add(a0, i1, id=6)
+              i2: bits[8] = literal(value=4, id=7)
+              ret a2: bits[8] = add(a1, i2, id=8)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let looped = pkg.get_fn("looped").expect("looped not found");
+        let inline = pkg.get_fn("inline").expect("inline not found");
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn {
+                fn_ref: looped,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &IrFn {
+                fn_ref: inline,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res, super::EquivResult::Proved));
+    }
+
+    pub fn test_counted_for_zero_trip<S: Solver>(solver_config: &S::Config) {
+        // Zero trips should produce the init unchanged.
+        let ir_pkg_text = r#"
+            package p_cf3
+
+            fn body(i: bits[8], acc: bits[8]) -> bits[8] {
+              ret add.1: bits[8] = add(acc, i, id=1)
+            }
+
+            fn looped(init: bits[8]) -> bits[8] {
+              ret cf: bits[8] = counted_for(init, trip_count=0, stride=1, body=body, id=2)
+            }
+
+            fn inline(init: bits[8]) -> bits[8] {
+              ret id.1: bits[8] = identity(init, id=1)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let looped = pkg.get_fn("looped").expect("looped not found");
+        let inline = pkg.get_fn("inline").expect("inline not found");
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn {
+                fn_ref: looped,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &IrFn {
+                fn_ref: inline,
                 pkg_ref: Some(&pkg),
                 fixed_implicit_activation: false,
             },
@@ -2929,6 +3157,18 @@ macro_rules! test_with_solver {
             #[test]
             fn test_invoke_two_args_equiv() {
                 test_utils::test_invoke_two_args::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_counted_for_basic() {
+                test_utils::test_counted_for_basic::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_counted_for_stride() {
+                test_utils::test_counted_for_stride::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_counted_for_zero_trip() {
+                test_utils::test_counted_for_zero_trip::<$solver_type>($solver_config);
             }
             #[test]
             fn test_ir_bits() {
