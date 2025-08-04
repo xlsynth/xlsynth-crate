@@ -57,6 +57,7 @@ impl Drop for RawBtor {
 #[derive(Clone)]
 pub struct Boolector {
     btor: Arc<RawBtor>,
+    fresh_counter: u64,
 }
 
 impl Boolector {
@@ -207,6 +208,7 @@ impl Solver for Boolector {
         }
         Ok(Boolector {
             btor: Arc::new(btor),
+            fresh_counter: 0,
         })
     }
 
@@ -221,6 +223,12 @@ impl Solver for Boolector {
             width,
             rep: BoolectorTerm { raw: n },
         })
+    }
+
+    fn fresh_symbol(&mut self, name: &str) -> io::Result<String> {
+        let symbol = format!("__boolector_fresh_{}_{}", name, self.fresh_counter);
+        self.fresh_counter += 1;
+        Ok(symbol)
     }
 
     fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<Self::Term> {
