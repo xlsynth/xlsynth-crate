@@ -88,13 +88,16 @@ pub fn ir_value_to_bv<'a, S: Solver>(
 #[derive(Debug, Clone)]
 pub struct IrFn<'a> {
     pub fn_ref: &'a ir::Fn,
+    // This is allowed to be None for IRs without invoke.
+    pub pkg_ref: Option<&'a ir::Package>,
     pub fixed_implicit_activation: bool,
 }
 
 impl<'a> IrFn<'a> {
-    pub fn new_plain(fn_ref: &'a ir::Fn) -> Self {
+    pub fn new(fn_ref: &'a ir::Fn, pkg_ref: Option<&'a ir::Package>) -> Self {
         Self {
             fn_ref,
+            pkg_ref: pkg_ref,
             fixed_implicit_activation: false,
         }
     }
@@ -147,7 +150,9 @@ pub fn get_fn_inputs<'a, S: Solver>(
     }
     for p in params_iter {
         let name = prefix_name(&p.name);
-        let bv = solver.declare(&name, p.ty.bit_count() as usize).unwrap();
+        let bv = solver
+            .declare_fresh(&name, p.ty.bit_count() as usize)
+            .unwrap();
         inputs.insert(
             p.name.clone(),
             IrTypedBitVec {
@@ -262,7 +267,7 @@ pub fn align_fn_inputs<'a, S: Solver>(
         rhs_inputs.name()
     );
     let flattened = solver
-        .declare(&params_name, lhs_inputs_total_width)
+        .declare_fresh(&params_name, lhs_inputs_total_width)
         .unwrap();
     // Split into individual param symbols
     let mut split_map =
@@ -742,9 +747,52 @@ pub fn ir_to_smt<'a, S: Solver>(
                     bitvec: bvs,
                 }
             }
-            NodePayload::Invoke { .. } => {
-                // TODO: add support for Invoke
-                panic!("Invoke not supported in SMT conversion");
+            NodePayload::Invoke { to_apply, operands } => {
+                let pkg = inputs
+                    .ir_fn
+                    .pkg_ref
+                    .expect("Invoke encountered but no package context available");
+                let callee = pkg
+                    .get_fn(to_apply)
+                    .unwrap_or_else(|| panic!("Invoke target '{}' not found in package", to_apply));
+
+                // Build callee inputs by mapping current env operands to callee params.
+                assert_eq!(
+                    callee.params.len(),
+                    operands.len(),
+                    "Invoke operand count does not match callee params"
+                );
+
+                let mut callee_input_map: HashMap<String, IrTypedBitVec<'a, S::Term>> =
+                    HashMap::new();
+                for (param, arg_ref) in callee.params.iter().zip(operands.iter()) {
+                    let arg_bv = env
+                        .get(arg_ref)
+                        .unwrap_or_else(|| panic!("Invoke arg BV missing for {}", param.name));
+                    callee_input_map.insert(
+                        param.name.clone(),
+                        IrTypedBitVec {
+                            ir_type: &param.ty,
+                            bitvec: arg_bv.bitvec.clone(),
+                        },
+                    );
+                }
+
+                let callee_ir_fn = IrFn {
+                    fn_ref: callee,
+                    pkg_ref: inputs.ir_fn.pkg_ref,
+                    fixed_implicit_activation: false,
+                };
+                let callee_inputs = FnInputs {
+                    ir_fn: &callee_ir_fn,
+                    inputs: callee_input_map,
+                };
+                // This effectively inlines the callee in the SMT artifact.
+                let callee_smt = ir_to_smt(solver, &callee_inputs);
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: callee_smt.output.bitvec,
+                }
             }
             NodePayload::OneHot { arg, lsb_prio } => {
                 let a = env.get(arg).expect("OneHot arg must be present").clone();
@@ -1425,6 +1473,90 @@ pub mod test_utils {
         xls_ir::ir,
     };
 
+    pub fn test_invoke_basic<S: Solver>(solver_config: &S::Config) {
+        // Package with a callee that doubles its input and two wrappers:
+        // one using invoke, the other inlining the computation.
+        let ir_pkg_text = r#"
+            package p
+
+            fn g(x: bits[8]) -> bits[8] {
+              ret add.1: bits[8] = add(x, x, id=1)
+            }
+
+            fn call(x: bits[8]) -> bits[8] {
+              ret r: bits[8] = invoke(x, to_apply=g, id=1)
+            }
+
+            fn inline(x: bits[8]) -> bits[8] {
+              ret add.2: bits[8] = add(x, x, id=2)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let call_fn = pkg.get_fn("call").expect("call not found");
+        let inline_fn = pkg.get_fn("inline").expect("inline not found");
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn {
+                fn_ref: call_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &IrFn {
+                fn_ref: inline_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res, super::EquivResult::Proved));
+    }
+
+    pub fn test_invoke_two_args<S: Solver>(solver_config: &S::Config) {
+        // Callee adds two 4-bit args. Compare invoke wrapper vs inline.
+        let ir_pkg_text = r#"
+            package p2
+
+            fn g(a: bits[4], b: bits[4]) -> bits[4] {
+              ret add.1: bits[4] = add(a, b, id=1)
+            }
+
+            fn call(a: bits[4], b: bits[4]) -> bits[4] {
+              ret r: bits[4] = invoke(a, b, to_apply=g, id=2)
+            }
+
+            fn inline(a: bits[4], b: bits[4]) -> bits[4] {
+              ret add.3: bits[4] = add(a, b, id=3)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let call_fn = pkg.get_fn("call").expect("call not found");
+        let inline_fn = pkg.get_fn("inline").expect("inline not found");
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn {
+                fn_ref: call_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &IrFn {
+                fn_ref: inline_fn,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res, super::EquivResult::Proved));
+    }
     pub fn align_zero_width_fn_inputs<S: Solver>(solver_config: &S::Config) {
         let ir_text = r#"
             fn lhs(tok: token) -> token {
@@ -1435,7 +1567,7 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
@@ -1451,7 +1583,7 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
@@ -1465,7 +1597,7 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
         let expected_result = expected(&mut solver, &fn_inputs);
@@ -1507,10 +1639,12 @@ pub mod test_utils {
             solver_config,
             &IrFn {
                 fn_ref: &lhs_ir_fn,
+                pkg_ref: None,
                 fixed_implicit_activation: lhs_fixed_implicit_activation,
             },
             &IrFn {
                 fn_ref: &rhs_ir_fn,
+                pkg_ref: None,
                 fixed_implicit_activation: rhs_fixed_implicit_activation,
             },
             assertion_semantics,
@@ -1713,7 +1847,7 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(&ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
         let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
@@ -2122,7 +2256,7 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // This call should not panic
         let _ = ir_to_smt(&mut solver, &inputs);
@@ -2315,7 +2449,7 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Should panic during conversion due to missing default
         let _ = ir_to_smt(&mut solver, &inputs);
@@ -2335,7 +2469,7 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let _ = ir_to_smt(&mut solver, &inputs);
     }
@@ -2675,8 +2809,8 @@ pub mod test_utils {
         // Run equivalence prover – expect a counter-example (Disproved).
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn::new_plain(&lhs_fn_ir),
-            &IrFn::new_plain(&rhs_fn_ir),
+            &IrFn::new(&lhs_fn_ir, None),
+            &IrFn::new(&rhs_fn_ir, None),
             AssertionSemantics::Same,
             false,
         );
@@ -2728,8 +2862,8 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(rhs_ir);
         let rhs_fn_ir = parser.parse_fn().unwrap();
 
-        let lhs_ir_fn = IrFn::new_plain(&lhs_fn_ir);
-        let rhs_ir_fn = IrFn::new_plain(&rhs_fn_ir);
+        let lhs_ir_fn = IrFn::new(&lhs_fn_ir, None);
+        let rhs_ir_fn = IrFn::new(&rhs_fn_ir, None);
 
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
@@ -2762,6 +2896,7 @@ pub mod test_utils {
     }
 }
 
+#[cfg(test)]
 macro_rules! test_with_solver {
     ($mod_ident:ident, $solver_type:ty, $solver_config:expr) => {
         #[cfg(test)]
@@ -2786,6 +2921,14 @@ macro_rules! test_with_solver {
             #[test]
             fn test_ir_value_bits() {
                 test_utils::test_ir_value_bits::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_invoke_basic_equiv() {
+                test_utils::test_invoke_basic::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_invoke_two_args_equiv() {
+                test_utils::test_invoke_two_args::<$solver_type>($solver_config);
             }
             #[test]
             fn test_ir_bits() {
@@ -3348,6 +3491,7 @@ macro_rules! test_with_solver {
     };
 }
 
+#[cfg(test)]
 #[cfg(feature = "with-bitwuzla-binary-test")]
 test_with_solver!(
     bitwuzla_tests,
@@ -3355,6 +3499,7 @@ test_with_solver!(
     &crate::equiv::easy_smt_backend::EasySmtConfig::bitwuzla()
 );
 
+#[cfg(test)]
 #[cfg(feature = "with-boolector-binary-test")]
 test_with_solver!(
     boolector_tests,
@@ -3362,6 +3507,7 @@ test_with_solver!(
     &crate::equiv::easy_smt_backend::EasySmtConfig::boolector()
 );
 
+#[cfg(test)]
 #[cfg(feature = "with-z3-binary-test")]
 test_with_solver!(
     z3_tests,
@@ -3369,6 +3515,7 @@ test_with_solver!(
     &crate::equiv::easy_smt_backend::EasySmtConfig::z3()
 );
 
+#[cfg(test)]
 #[cfg(feature = "with-bitwuzla-built")]
 test_with_solver!(
     bitwuzla_built_tests,

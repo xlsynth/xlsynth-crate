@@ -190,6 +190,7 @@ mod test_utils {
         let f = parser.parse_fn().expect("Failed to parse IR function");
         let ir_fn = IrFn {
             fn_ref: &f,
+            pkg_ref: None,
             fixed_implicit_activation,
         };
         let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem);
@@ -223,6 +224,7 @@ mod test_utils {
         let f = parser.parse_fn().expect("Failed to parse IR function");
         let ir_fn = IrFn {
             fn_ref: &f,
+            pkg_ref: None,
             fixed_implicit_activation,
         };
         let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem);
@@ -310,6 +312,7 @@ mod test_utils {
         let f = parser.parse_fn().expect("Failed to parse IR function");
         let ir_fn = IrFn {
             fn_ref: &f,
+            pkg_ref: None,
             fixed_implicit_activation: false,
         };
 

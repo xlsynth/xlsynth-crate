@@ -182,6 +182,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
             let ir_fn = IrFn {
                 fn_ref: ir_fn_ref,
+                pkg_ref: Some(&g8_pkg),
                 fixed_implicit_activation: *has_itok,
             };
             let start_time = std::time::Instant::now();

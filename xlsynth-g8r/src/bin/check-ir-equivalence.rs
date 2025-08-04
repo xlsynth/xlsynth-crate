@@ -53,10 +53,12 @@ fn main_has_bitwuzla(args: Args) {
         &BitwuzlaOptions::new(),
         &IrFn {
             fn_ref: f1,
+            pkg_ref: Some(&pkg1),
             fixed_implicit_activation: false,
         },
         &IrFn {
             fn_ref: f2,
+            pkg_ref: Some(&pkg2),
             fixed_implicit_activation: false,
         },
         AssertionSemantics::Same,

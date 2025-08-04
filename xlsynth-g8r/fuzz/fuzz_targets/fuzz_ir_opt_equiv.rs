@@ -104,8 +104,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let bitwuzla_result = prove_ir_fn_equiv::<Bitwuzla>(
             &BitwuzlaOptions::new(),
-            &IrFn::new_plain(orig_fn),
-            &IrFn::new_plain(opt_fn),
+            &IrFn::new(orig_fn, None),
+            &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
             false,
         );
@@ -122,8 +122,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let boolector_result = prove_ir_fn_equiv::<Boolector>(
             &BoolectorConfig::new(),
-            &IrFn::new_plain(orig_fn),
-            &IrFn::new_plain(opt_fn),
+            &IrFn::new(orig_fn, None),
+            &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
             false,
         );
@@ -140,8 +140,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let boolector_result = prove_ir_fn_equiv::<EasySmtSolver>(
             &EasySmtConfig::boolector(),
-            &IrFn::new_plain(orig_fn),
-            &IrFn::new_plain(opt_fn),
+            &IrFn::new(orig_fn, None),
+            &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
             false,
         );
@@ -158,8 +158,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let bitwuzla_result = prove_ir_fn_equiv::<EasySmtSolver>(
             &EasySmtConfig::bitwuzla(),
-            &IrFn::new_plain(orig_fn),
-            &IrFn::new_plain(opt_fn),
+            &IrFn::new(orig_fn, None),
+            &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
             false,
         );
@@ -176,8 +176,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let z3_result = prove_ir_fn_equiv::<EasySmtSolver>(
             &EasySmtConfig::z3(),
-            &IrFn::new_plain(orig_fn),
-            &IrFn::new_plain(opt_fn),
+            &IrFn::new(orig_fn, None),
+            &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
             false,
         );
@@ -190,8 +190,8 @@ fuzz_target!(|sample: FuzzSample| {
         if output_bit_count <= 64 {
             let bitwuzla_parallel_result = prove_ir_fn_equiv_output_bits_parallel::<Bitwuzla>(
                 &BitwuzlaOptions::new(),
-                &IrFn::new_plain(orig_fn),
-                &IrFn::new_plain(opt_fn),
+                &IrFn::new(orig_fn, None),
+                &IrFn::new(opt_fn, None),
                 AssertionSemantics::Same,
                 false,
             );

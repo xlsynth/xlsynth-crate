@@ -47,7 +47,10 @@ pub struct EquivInputs<'a> {
     pub rhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
 }
 
-// Helper: parse IR text, pick top (explicit or package top), drop params.
+// Helper: parse IR text into a Package, pick top (explicit or package top),
+// drop params. Returns the parsed package and an owned function (potentially
+// modified by drop_params). It is okay to keep the unmodified package as we do
+// not allow recursion in the IR.
 fn parse_and_prepare_fn(
     ir_text: &str,
     top: Option<&str>,
@@ -55,7 +58,10 @@ fn parse_and_prepare_fn(
     subcommand: &str,
     origin: &str,
     side: &str,
-) -> xlsynth_g8r::xls_ir::ir::Fn {
+) -> (
+    xlsynth_g8r::xls_ir::ir::Package,
+    xlsynth_g8r::xls_ir::ir::Fn,
+) {
     let pkg = match ir_parser::Parser::new(ir_text).parse_package() {
         Ok(pkg) => pkg,
         Err(e) => {
@@ -83,9 +89,10 @@ fn parse_and_prepare_fn(
             std::process::exit(1);
         })
     };
-    fn_owned
+    let fn_owned = fn_owned
         .drop_params(drop_params)
-        .expect("Dropped parameter used in function body")
+        .expect("Dropped parameter used in function body");
+    (pkg, fn_owned)
 }
 
 /// Toolchain top name unifier (exposed so DSLX path can reuse identical logic).
@@ -116,7 +123,7 @@ fn run_equiv_check_native<S: Solver>(
     solver_config: &S::Config,
     inputs: &EquivInputs,
 ) -> EquivOutcome {
-    let lhs_fn_dropped = parse_and_prepare_fn(
+    let (lhs_pkg, lhs_fn_dropped) = parse_and_prepare_fn(
         inputs.lhs_ir_text,
         inputs.lhs_top,
         inputs.drop_params,
@@ -124,7 +131,7 @@ fn run_equiv_check_native<S: Solver>(
         inputs.lhs_origin,
         "LHS",
     );
-    let rhs_fn_dropped = parse_and_prepare_fn(
+    let (rhs_pkg, rhs_fn_dropped) = parse_and_prepare_fn(
         inputs.rhs_ir_text,
         inputs.rhs_top,
         inputs.drop_params,
@@ -135,10 +142,12 @@ fn run_equiv_check_native<S: Solver>(
 
     let lhs_ir_fn = IrFn {
         fn_ref: &lhs_fn_dropped,
+        pkg_ref: Some(&lhs_pkg),
         fixed_implicit_activation: inputs.lhs_fixed_implicit_activation,
     };
     let rhs_ir_fn = IrFn {
         fn_ref: &rhs_fn_dropped,
+        pkg_ref: Some(&rhs_pkg),
         fixed_implicit_activation: inputs.rhs_fixed_implicit_activation,
     };
 
@@ -213,7 +222,7 @@ fn run_boolector_legacy_native(inputs: &EquivInputs) -> EquivOutcome {
         std::process::exit(1);
     }
 
-    let lhs_fn_dropped = parse_and_prepare_fn(
+    let (_lhs_pkg_unused, lhs_fn_dropped) = parse_and_prepare_fn(
         inputs.lhs_ir_text,
         inputs.lhs_top,
         inputs.drop_params,
@@ -221,7 +230,7 @@ fn run_boolector_legacy_native(inputs: &EquivInputs) -> EquivOutcome {
         inputs.lhs_origin,
         "LHS",
     );
-    let rhs_fn_dropped = parse_and_prepare_fn(
+    let (_rhs_pkg_unused, rhs_fn_dropped) = parse_and_prepare_fn(
         inputs.rhs_ir_text,
         inputs.rhs_top,
         inputs.drop_params,
