@@ -93,18 +93,10 @@ pub struct IrFn<'a> {
 }
 
 impl<'a> IrFn<'a> {
-    pub fn new_plain(fn_ref: &'a ir::Fn) -> Self {
+    pub fn new(fn_ref: &'a ir::Fn, pkg_ref: Option<&'a ir::Package>) -> Self {
         Self {
             fn_ref,
-            pkg_ref: None,
-            fixed_implicit_activation: false,
-        }
-    }
-
-    pub fn new_with_pkg(fn_ref: &'a ir::Fn, pkg_ref: &'a ir::Package) -> Self {
-        Self {
-            fn_ref,
-            pkg_ref: Some(pkg_ref),
+            pkg_ref: pkg_ref,
             fixed_implicit_activation: false,
         }
     }
@@ -1555,7 +1547,7 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
@@ -1571,7 +1563,7 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
@@ -1585,7 +1577,7 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
         let expected_result = expected(&mut solver, &fn_inputs);
@@ -1835,7 +1827,7 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(&ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
         let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
@@ -2244,7 +2236,7 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // This call should not panic
         let _ = ir_to_smt(&mut solver, &inputs);
@@ -2437,7 +2429,7 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Should panic during conversion due to missing default
         let _ = ir_to_smt(&mut solver, &inputs);
@@ -2457,7 +2449,7 @@ pub mod test_utils {
             .parse_fn()
             .unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new_plain(&f);
+        let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         let _ = ir_to_smt(&mut solver, &inputs);
     }
@@ -2797,8 +2789,8 @@ pub mod test_utils {
         // Run equivalence prover – expect a counter-example (Disproved).
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn::new_plain(&lhs_fn_ir),
-            &IrFn::new_plain(&rhs_fn_ir),
+            &IrFn::new(&lhs_fn_ir, None),
+            &IrFn::new(&rhs_fn_ir, None),
             AssertionSemantics::Same,
             false,
         );
@@ -2850,8 +2842,8 @@ pub mod test_utils {
         let mut parser = crate::xls_ir::ir_parser::Parser::new(rhs_ir);
         let rhs_fn_ir = parser.parse_fn().unwrap();
 
-        let lhs_ir_fn = IrFn::new_plain(&lhs_fn_ir);
-        let rhs_ir_fn = IrFn::new_plain(&rhs_fn_ir);
+        let lhs_ir_fn = IrFn::new(&lhs_fn_ir, None);
+        let rhs_ir_fn = IrFn::new(&rhs_fn_ir, None);
 
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
