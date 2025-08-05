@@ -39,6 +39,17 @@ pub trait Solver: Sized {
     type Config: Send + Sync;
     fn new(config: &Self::Config) -> io::Result<Self>;
     fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>>;
+    fn declare_uf(
+        &mut self,
+        name: &str,
+        arg_widths: Vec<usize>,
+        result_width: usize,
+    ) -> io::Result<Uf<Self::Term>>;
+    fn apply_uf(
+        &mut self,
+        uf: &Uf<Self::Term>,
+        args: Vec<&BitVec<Self::Term>>,
+    ) -> BitVec<Self::Term>;
     fn fresh_symbol(&mut self, name: &str) -> io::Result<String>;
     fn declare_fresh(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>> {
         let symbol = self.fresh_symbol(name)?;
@@ -624,6 +635,40 @@ impl<Term> BitVec<Term> {
         match self {
             BitVec::BitVec { rep, .. } => Some(rep),
             BitVec::ZeroWidth => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Uf<Term> {
+    Uf {
+        rep: Term,
+        arg_widths: Vec<usize>,
+        result_width: usize,
+    },
+    UfZeroWidth {
+        arg_widths: Vec<usize>,
+    },
+}
+
+impl<Term> Uf<Term> {
+    pub fn get_arg_widths(&self) -> &[usize] {
+        match self {
+            Uf::Uf { arg_widths, .. } => arg_widths,
+            Uf::UfZeroWidth { arg_widths } => arg_widths,
+        }
+    }
+
+    pub fn check_arg_widths(&self, args: &[&BitVec<Term>]) {
+        let arg_widths = self.get_arg_widths();
+        assert_eq!(args.len(), arg_widths.len(), "UF arity mismatch");
+        for (i, (arg_bv, w)) in args.iter().zip(arg_widths.iter()).enumerate() {
+            let bw = arg_bv.get_width();
+            assert_eq!(
+                bw, *w,
+                "UF arg {} width mismatch: expected {}, got {}",
+                i, w, bw
+            );
         }
     }
 }
@@ -2088,6 +2133,141 @@ macro_rules! test_solver {
             crate::test_solver_encode!(test_xls_encode_single_hot, $solver, 8, 0x20, 3, 0x05);
             crate::test_solver_encode!(test_xls_encode_multiple_hot, $solver, 16, 0x0028, 4, 0x07);
             crate::test_solver_encode!(test_xls_encode_zero, $solver, 16, 0x0000, 4, 0x00);
+
+            // ------------------------------------------------------------------
+            // Uninterpreted function (UF) tests
+            // ------------------------------------------------------------------
+
+            #[test]
+            fn test_uf_zero_width_result() {
+                let mut solver = $solver;
+                let uf = solver.declare_uf("f_zwr", vec![8, 4], 0).unwrap();
+                let a = solver.declare("a", 8).unwrap();
+                let b = solver.declare("b", 4).unwrap();
+                let app1 = solver.apply_uf(&uf, vec![&a, &b]);
+                let app2 = solver.apply_uf(&uf, vec![&a, &b]);
+                // Zero-width results compare equal
+                crate::equiv::solver_interface::test_utils::assert_solver_eq(
+                    &mut solver,
+                    &app1,
+                    &app2,
+                );
+            }
+
+            #[test]
+            fn test_uf_zero_width_arg_is_ignored() {
+                let mut solver = $solver;
+                // Middle argument is zero-width
+                let uf = solver.declare_uf("f_zwa", vec![8, 0, 4], 3).unwrap();
+                let a8 = solver.declare("a8", 8).unwrap();
+                let a4 = solver.declare("a4", 4).unwrap();
+                let zw1 = solver.zero_width();
+                let zw2 = solver.zero_width();
+                let app1 = solver.apply_uf(&uf, vec![&a8, &zw1, &a4]);
+                let app2 = solver.apply_uf(&uf, vec![&a8, &zw2, &a4]);
+                // Different zero-width operands must not affect the application
+                crate::equiv::solver_interface::test_utils::assert_solver_eq(
+                    &mut solver,
+                    &app1,
+                    &app2,
+                );
+                // Result width should be exactly 3
+                let three = solver.numerical(3, 0b101);
+                let _ = solver.eq(&app1, &three); // Type-checking side-effect
+            }
+
+            #[test]
+            fn test_uf_basic_application_and_equality() {
+                let mut solver = $solver;
+                let uf = solver.declare_uf("f_basic", vec![8, 8], 8).unwrap();
+                let x = solver.declare("x", 8).unwrap();
+                let y = solver.declare("y", 8).unwrap();
+                let app1 = solver.apply_uf(&uf, vec![&x, &y]);
+                let app2 = solver.apply_uf(&uf, vec![&x, &y]);
+                crate::equiv::solver_interface::test_utils::assert_solver_eq(
+                    &mut solver,
+                    &app1,
+                    &app2,
+                );
+            }
+
+            #[test]
+            #[should_panic]
+            fn test_uf_arity_mismatch_panics() {
+                let mut solver = $solver;
+                let uf = solver.declare_uf("arity", vec![8, 8], 8).unwrap();
+                let x = solver.declare("x", 8).unwrap();
+                // Missing one argument
+                let _ = solver.apply_uf(&uf, vec![&x]);
+            }
+
+            #[test]
+            #[should_panic]
+            fn test_uf_width_mismatch_panics() {
+                let mut solver = $solver;
+                let uf = solver.declare_uf("width", vec![8], 8).unwrap();
+                let x16 = solver.declare("x16", 16).unwrap();
+                let _ = solver.apply_uf(&uf, vec![&x16]);
+            }
+
+            #[test]
+            fn test_uf_all_zero_args_nonzero_result() {
+                let mut solver = $solver;
+                let uf = solver.declare_uf("const_like", vec![0, 0], 5).unwrap();
+                let zw1 = solver.zero_width();
+                let zw2 = solver.zero_width();
+                let app1 = solver.apply_uf(&uf, vec![&zw1, &zw2]);
+                let app2 = solver.apply_uf(&uf, vec![&zw1, &zw2]);
+                crate::equiv::solver_interface::test_utils::assert_solver_eq(
+                    &mut solver,
+                    &app1,
+                    &app2,
+                );
+                // Ensure type width matches
+                let _ = solver.zero_extend_to(&app1, 5);
+            }
+
+            #[test]
+            fn test_uf_different_inputs_can_have_different_results() {
+                let mut solver = $solver;
+                let uf = solver.declare_uf("g_diff", vec![8], 8).unwrap();
+                let a = solver.declare("a", 8).unwrap();
+                let b = solver.declare("b", 8).unwrap();
+                let fa = solver.apply_uf(&uf, vec![&a]);
+                let fb = solver.apply_uf(&uf, vec![&b]);
+                solver.push().unwrap();
+                let a_ne_b = solver.ne(&a, &b);
+                let fa_ne_fb = solver.ne(&fa, &fb);
+                solver.assert(&a_ne_b).unwrap();
+                solver.assert(&fa_ne_fb).unwrap();
+                assert_eq!(
+                    solver.check().unwrap(),
+                    crate::equiv::solver_interface::Response::Sat
+                );
+                solver.pop().unwrap();
+            }
+
+            #[test]
+            fn test_uf_equal_inputs_same_result() {
+                let mut solver = $solver;
+                let uf = solver.declare_uf("g_eq", vec![8], 8).unwrap();
+                let a = solver.declare("a", 8).unwrap();
+                let b = solver.declare("b", 8).unwrap();
+                let fa = solver.apply_uf(&uf, vec![&a]);
+                let fb = solver.apply_uf(&uf, vec![&b]);
+
+                // Enforce a == b, then require f(a) != f(b) → should be UNSAT by congruence
+                solver.push().unwrap();
+                let a_eq_b = solver.eq(&a, &b);
+                let fa_ne_fb = solver.ne(&fa, &fb);
+                solver.assert(&a_eq_b).unwrap();
+                solver.assert(&fa_ne_fb).unwrap();
+                assert_eq!(
+                    solver.check().unwrap(),
+                    crate::equiv::solver_interface::Response::Unsat
+                );
+                solver.pop().unwrap();
+            }
 
             use crate::xls_ir::ir;
             use xlsynth::IrValue;
