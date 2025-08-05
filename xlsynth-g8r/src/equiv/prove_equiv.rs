@@ -421,6 +421,7 @@ pub fn ir_to_smt<'a, S: Solver>(
                 trip_count,
                 stride,
                 body,
+                invariant_args,
             } => {
                 // Evaluate the initial accumulator value.
                 let mut acc = env
@@ -431,13 +432,13 @@ pub fn ir_to_smt<'a, S: Solver>(
                 // Resolve the body function via shared helper.
                 let callee = inputs.get_fn(body);
 
-                // If the body has extra parameters (e.g., invariant args), we currently
-                // do not support providing them at the counted_for site in this IR.
-                // Enforce that there are exactly two parameters.
+                // Body params must be: (i, loop_carry, [invariant_args...])
                 assert_eq!(
                     callee.params.len(),
-                    2,
-                    "CountedFor body currently supported only with (i, loop_carry) params"
+                    2 + invariant_args.len(),
+                    "CountedFor body expects 2 + |invariant_args| params; have {} but invariant_args has {}",
+                    callee.params.len(),
+                    invariant_args.len()
                 );
 
                 let ind_ty = &callee.params[0].ty;
@@ -472,13 +473,30 @@ pub fn ir_to_smt<'a, S: Solver>(
                     solver.numerical_u128(ind_width, val)
                 };
 
+                // Pre-fetch invariant arg BVs once; they do not change across iterations.
+                let invariant_bvs: Vec<IrTypedBitVec<'_, S::Term>> = invariant_args
+                    .iter()
+                    .map(|nr| {
+                        env.get(nr)
+                            .expect("Invariant arg BV must be present")
+                            .clone()
+                    })
+                    .collect();
+
                 for k in 0..*trip_count {
-                    let callee_input_map = HashMap::from_iter(
-                        callee
-                            .params
-                            .iter()
-                            .zip(vec![mk_ind_var_bv(solver, k), acc.bitvec])
-                            .map(|(p, bv)| {
+                    // Build the input vector in callee param order.
+                    let mut actual_bvs: Vec<BitVec<S::Term>> =
+                        Vec::with_capacity(callee.params.len());
+                    actual_bvs.push(mk_ind_var_bv(solver, k));
+                    actual_bvs.push(acc.bitvec.clone());
+                    for iv in &invariant_bvs {
+                        actual_bvs.push(iv.bitvec.clone());
+                    }
+
+                    // Map by param name with types from callee signature.
+                    let callee_input_map =
+                        HashMap::from_iter(callee.params.iter().zip(actual_bvs.into_iter()).map(
+                            |(p, bv)| {
                                 (
                                     p.name.clone(),
                                     IrTypedBitVec {
@@ -486,8 +504,8 @@ pub fn ir_to_smt<'a, S: Solver>(
                                         bitvec: bv,
                                     },
                                 )
-                            }),
-                    );
+                            },
+                        ));
 
                     let callee_inputs = FnInputs {
                         ir_fn: &callee_ir_fn,
@@ -1762,6 +1780,58 @@ pub mod test_utils {
 
             fn inline(init: bits[8]) -> bits[8] {
               ret id.1: bits[8] = identity(init, id=1)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let looped = pkg.get_fn("looped").expect("looped not found");
+        let inline = pkg.get_fn("inline").expect("inline not found");
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn {
+                fn_ref: looped,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &IrFn {
+                fn_ref: inline,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res, super::EquivResult::Proved));
+    }
+
+    pub fn test_counted_for_invariant_args<S: Solver>(solver_config: &S::Config) {
+        // Body uses an invariant offset 'k' added to the induction variable each
+        // iteration. Compare counted_for vs inline unrolling.
+        let ir_pkg_text = r#"
+            package p_cf_inv
+
+            fn body(i: bits[8], acc: bits[8], k: bits[8]) -> bits[8] {
+              t0: bits[8] = add(i, k, id=1)
+              ret a: bits[8] = add(acc, t0, id=2)
+            }
+
+            fn looped(init: bits[8], k: bits[8]) -> bits[8] {
+              ret cf: bits[8] = counted_for(init, trip_count=3, stride=1, body=body, invariant_args=[k], id=3)
+            }
+
+            fn inline(init: bits[8], k: bits[8]) -> bits[8] {
+              z: bits[8] = literal(value=0, id=4)
+              s0: bits[8] = add(z, k, id=5)
+              a0: bits[8] = add(init, s0, id=6)
+              one: bits[8] = literal(value=1, id=7)
+              s1: bits[8] = add(one, k, id=8)
+              a1: bits[8] = add(a0, s1, id=9)
+              two: bits[8] = literal(value=2, id=10)
+              s2: bits[8] = add(two, k, id=11)
+              ret a2: bits[8] = add(a1, s2, id=12)
             }
         "#;
 
@@ -3172,6 +3242,10 @@ macro_rules! test_with_solver {
             #[test]
             fn test_counted_for_zero_trip() {
                 test_utils::test_counted_for_zero_trip::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_counted_for_invariant_args() {
+                test_utils::test_counted_for_invariant_args::<$solver_type>($solver_config);
             }
             #[test]
             fn test_ir_bits() {

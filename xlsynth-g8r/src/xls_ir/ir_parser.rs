@@ -1063,7 +1063,7 @@ impl Parser {
                 }                (ir::NodePayload::Decode { arg, width }, maybe_id.unwrap())
             }
             "counted_for" => {
-                // counted_for(init, trip_count=..., stride=..., body=...)
+                // counted_for(init, trip_count=..., stride=..., body=..., invariant_args=[...])
                 let init = self.parse_node_ref(&node_env, "counted_for init")?;
                 self.drop_or_error(",")?;
                 self.drop_or_error("trip_count=")?;
@@ -1074,10 +1074,26 @@ impl Parser {
                 self.drop_or_error(",")?;
                 self.drop_or_error("body=")?;
                 let body = self.pop_identifier_or_error("counted_for body")?;
-                if self.peek_is(",") {
-                    self.dropc()?;
-                    let id_attr = self.parse_id_attribute()?;
-                    maybe_id = Some(id_attr);
+
+                // Optional attributes: invariant_args=[...] and id=...
+                let mut invariant_args: Vec<ir::NodeRef> = Vec::new();
+                if self.try_drop(",") {
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("invariant_args=") {
+                        let inv = self.parse_node_ref_array_attribute(
+                            "invariant_args",
+                            &node_env,
+                            "counted_for invariant_args",
+                        )?;
+                        invariant_args = inv;
+                        if self.try_drop(",") {
+                            let id_attr = self.parse_id_attribute()?;
+                            maybe_id = Some(id_attr);
+                        }
+                    } else {
+                        let id_attr = self.parse_id_attribute()?;
+                        maybe_id = Some(id_attr);
+                    }
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
@@ -1091,6 +1107,7 @@ impl Parser {
                         trip_count,
                         stride,
                         body,
+                        invariant_args,
                     },
                     maybe_id.unwrap(),
                 )
@@ -1861,11 +1878,45 @@ top fn main(t: token id=1) -> token {
                 trip_count,
                 stride,
                 body,
+                invariant_args,
             } => {
                 assert_eq!(init.index, 5);
                 assert_eq!(trip_count, 7);
                 assert_eq!(stride, 1);
                 assert_eq!(body, "body1");
+                assert_eq!(invariant_args.len(), 0);
+            }
+            _ => panic!("expected counted_for payload"),
+        }
+    }
+
+    #[test]
+    fn test_parse_counted_for_node_with_invariant_args() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut node_env = IrNodeEnv::new();
+        node_env.add(Some("init_lit".to_string()), 5, ir::NodeRef { index: 5 });
+        node_env.add(Some("x".to_string()), 7, ir::NodeRef { index: 7 });
+        node_env.add(Some("y".to_string()), 8, ir::NodeRef { index: 8 });
+        let input = "counted_for.6: bits[11] = counted_for(init_lit.5, trip_count=4, stride=2, body=body2, invariant_args=[x, y], id=6)";
+        let mut parser = Parser::new(input);
+        let node = parser
+            .parse_node(&mut node_env)
+            .expect("parse counted_for node with invariant_args");
+        match node.payload {
+            ir::NodePayload::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+                invariant_args,
+            } => {
+                assert_eq!(init.index, 5);
+                assert_eq!(trip_count, 4);
+                assert_eq!(stride, 2);
+                assert_eq!(body, "body2");
+                assert_eq!(invariant_args.len(), 2);
+                assert_eq!(invariant_args[0].index, 7);
+                assert_eq!(invariant_args[1].index, 8);
             }
             _ => panic!("expected counted_for payload"),
         }
