@@ -442,6 +442,9 @@ pub fn ir_to_smt<'a, S: Solver>(
 
                 let ind_ty = &callee.params[0].ty;
                 let ind_width = ind_ty.bit_count();
+                // TODO: Make an independent verify_ir function that verifies a package to have
+                // all these invariants hold.
+                //
                 // Statically ensure the induction variable cannot overflow given
                 // trip_count/stride. Minimal bits needed is ceil(log2(max_i +
                 // 1)), where max_i = (trip_count-1)*stride.
