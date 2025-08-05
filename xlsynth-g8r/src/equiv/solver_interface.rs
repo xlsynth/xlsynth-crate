@@ -55,6 +55,15 @@ pub trait Solver: Sized {
         let symbol = self.fresh_symbol(name)?;
         self.declare(&symbol, width)
     }
+    fn declare_fresh_uf(
+        &mut self,
+        name: &str,
+        arg_widths: Vec<usize>,
+        result_width: usize,
+    ) -> io::Result<Uf<Self::Term>> {
+        let symbol = self.fresh_symbol(name)?;
+        self.declare_uf(&symbol, arg_widths, result_width)
+    }
     fn numerical(&mut self, width: usize, value: u64) -> BitVec<Self::Term>;
     /// Create a numerical bit-vector constant from a u128 value at an arbitrary
     /// width. Always produces exactly `width` bits (zero-extended or
