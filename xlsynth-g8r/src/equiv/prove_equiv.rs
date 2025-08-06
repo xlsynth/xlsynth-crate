@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use xlsynth::IrValue;
 
+use crate::equiv::solver_interface::Uf;
 use crate::{
     equiv::solver_interface::{BitVec, Response, Solver},
     xls_ir::{
@@ -365,6 +366,8 @@ pub struct SmtFn<'a, R> {
 pub fn ir_to_smt<'a, S: Solver>(
     solver: &mut S,
     inputs: &'a FnInputs<'a, S::Term>,
+    uf_map: &HashMap<String, String>,
+    uf_registry: &UfRegistry<S>,
 ) -> SmtFn<'a, S::Term> {
     let topo = get_topological(inputs.ir_fn.fn_ref);
     let mut env: HashMap<NodeRef, IrTypedBitVec<'a, S::Term>> = HashMap::new();
@@ -511,7 +514,7 @@ pub fn ir_to_smt<'a, S: Solver>(
                         ir_fn: &callee_ir_fn,
                         inputs: callee_input_map,
                     };
-                    let callee_smt = ir_to_smt(solver, &callee_inputs);
+                    let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
                     acc = IrTypedBitVec {
                         ir_type: &node.ty,
                         bitvec: callee_smt.output.bitvec,
@@ -530,12 +533,19 @@ pub fn ir_to_smt<'a, S: Solver>(
                     .tuple_get_flat_bit_slice_for_index(*index)
                     .expect("TupleIndex: not a tuple type");
                 let width = slice.limit - slice.start;
-                assert!(width > 0, "TupleIndex: width must be > 0");
-                let high = (slice.limit - 1) as i32;
-                let low = slice.start as i32;
-                IrTypedBitVec {
-                    ir_type: &node.ty,
-                    bitvec: solver.extract(&tuple_bv.bitvec, high, low),
+                if width == 0 {
+                    IrTypedBitVec {
+                        ir_type: &node.ty,
+                        bitvec: BitVec::ZeroWidth,
+                    }
+                } else {
+                    // assert!(width > 0, "TupleIndex: width must be > 0");
+                    let high = (slice.limit - 1) as i32;
+                    let low = slice.start as i32;
+                    IrTypedBitVec {
+                        ir_type: &node.ty,
+                        bitvec: solver.extract(&tuple_bv.bitvec, high, low),
+                    }
                 }
             }
             NodePayload::Binop(op, lhs, rhs) => {
@@ -890,20 +900,74 @@ pub fn ir_to_smt<'a, S: Solver>(
                     );
                 }
 
-                let callee_ir_fn = IrFn {
-                    fn_ref: callee,
-                    pkg_ref: inputs.ir_fn.pkg_ref,
-                    fixed_implicit_activation: false,
+                // Kind of hacky as this is just determining whether it is implicit token
+                // calling convention based on the name of the function. But
+                // this seems to be the only way to determine it from the IR.
+                let has_itok = callee.name.starts_with("__itok");
+                let no_itok_name = if has_itok {
+                    callee.name[6..].to_string()
+                } else {
+                    callee.name.clone()
                 };
-                let callee_inputs = FnInputs {
-                    ir_fn: &callee_ir_fn,
-                    inputs: callee_input_map,
-                };
-                // This effectively inlines the callee in the SMT artifact.
-                let callee_smt = ir_to_smt(solver, &callee_inputs);
-                IrTypedBitVec {
-                    ir_type: &node.ty,
-                    bitvec: callee_smt.output.bitvec,
+                // If this callee is configured to be treated as an uninterpreted function,
+                // apply the UF instead of inlining the body.
+                if let Some(uf_sym) = uf_map.get(&no_itok_name) {
+                    let uf = uf_registry
+                        .ufs
+                        .get(uf_sym)
+                        .unwrap_or_else(|| panic!("UF symbol '{}' not declared", uf_sym));
+
+                    if has_itok {
+                        log::warn!(
+                            "Warning: calling uf {} for {}, any side effects are ignored.",
+                            uf_sym,
+                            callee.name
+                        );
+                        assert!(
+                            callee.params.len() >= 2,
+                            "Implicit token calling convention requires at least 2 params"
+                        );
+                        let args: Vec<&BitVec<S::Term>> = callee
+                            .params
+                            .iter()
+                            .skip(2)
+                            .map(|p| &callee_input_map.get(&p.name).unwrap().bitvec)
+                            .collect();
+                        let app = solver.apply_uf(uf, &args);
+                        // It is okay to use this result as token has zero width
+                        IrTypedBitVec {
+                            ir_type: &node.ty,
+                            bitvec: app,
+                        }
+                    } else {
+                        // Build argument vector in callee param order.
+                        let args: Vec<&BitVec<S::Term>> = callee
+                            .params
+                            .iter()
+                            .map(|p| &callee_input_map.get(&p.name).unwrap().bitvec)
+                            .collect();
+                        let app = solver.apply_uf(uf, &args);
+                        IrTypedBitVec {
+                            ir_type: &node.ty,
+                            bitvec: app,
+                        }
+                    }
+                } else {
+                    // Otherwise inline the callee recursively.
+                    let callee_ir_fn = IrFn {
+                        fn_ref: callee,
+                        pkg_ref: inputs.ir_fn.pkg_ref,
+                        fixed_implicit_activation: false,
+                    };
+                    let callee_inputs = FnInputs {
+                        ir_fn: &callee_ir_fn,
+                        inputs: callee_input_map,
+                    };
+                    let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
+                    IrTypedBitVec {
+                        ir_type: &node.ty,
+                        bitvec: callee_smt.output.bitvec,
+                    }
                 }
             }
             NodePayload::OneHot { arg, lsb_prio } => {
@@ -1325,7 +1389,33 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
 }
 
 // Map param name -> allowed IrValues for domain constraints.
-pub type ParamDomains = std::collections::HashMap<String, Vec<IrValue>>;
+pub type ParamDomains = HashMap<String, Vec<IrValue>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UfSignature {
+    pub arg_widths: Vec<usize>,
+    pub ret_width: usize,
+}
+
+pub struct UfRegistry<S: Solver> {
+    pub ufs: HashMap<String, Uf<S::Term>>,
+}
+
+impl<S: Solver> UfRegistry<S> {
+    pub fn from_uf_signatures(
+        solver: &mut S,
+        uf_signatures: &HashMap<String, UfSignature>,
+    ) -> Self {
+        let mut ufs = HashMap::new();
+        for (name, signature) in uf_signatures {
+            let uf = solver
+                .declare_fresh_uf(&name, &signature.arg_widths, signature.ret_width)
+                .unwrap();
+            ufs.insert(name.clone(), uf);
+        }
+        Self { ufs }
+    }
+}
 
 /// Prove equivalence like `prove_ir_fn_equiv` but constraining parameters that
 /// are enums to lie within their defined value sets.
@@ -1337,6 +1427,9 @@ pub fn prove_ir_fn_equiv_with_domains<'a, S: Solver>(
     allow_flatten: bool,
     lhs_domains: Option<&ParamDomains>,
     rhs_domains: Option<&ParamDomains>,
+    lhs_uf_map: &HashMap<String, String>,
+    rhs_uf_map: &HashMap<String, String>,
+    uf_signatures: &HashMap<String, UfSignature>,
 ) -> EquivResult {
     let mut solver = S::new(solver_config).unwrap();
     let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs, Some("lhs"));
@@ -1368,9 +1461,11 @@ pub fn prove_ir_fn_equiv_with_domains<'a, S: Solver>(
     assert_domains(&fn_inputs_lhs, lhs_domains);
     assert_domains(&fn_inputs_rhs, rhs_domains);
 
+    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, uf_signatures);
+
     let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
-    let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs);
-    let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs);
+    let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs_uf_map, &uf_registry);
+    let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs_uf_map, &uf_registry);
     check_aligned_fn_equiv_internal(&mut solver, &smt_lhs, &smt_rhs, assertion_semantics)
 }
 
@@ -1389,6 +1484,9 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
         allow_flatten,
         None,
         None,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
     )
 }
 
@@ -1544,8 +1642,12 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs, Some("lhs"));
         let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs, Some("rhs"));
         let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
-        let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs);
-        let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs);
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let empty_registry = UfRegistry {
+            ufs: HashMap::new(),
+        };
+        let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &empty_map, &empty_registry);
+        let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &empty_map, &empty_registry);
 
         // Locate the chosen parameter on the LHS side.
         let param_name = &lhs.fn_ref.params[split_input_index].name;
@@ -1570,6 +1672,8 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
 
 #[cfg(test)]
 pub mod test_utils {
+
+    use std::collections::HashMap;
 
     use xlsynth::IrValue;
 
@@ -1626,6 +1730,253 @@ pub mod test_utils {
             false,
         );
         assert!(matches!(res, super::EquivResult::Proved));
+    }
+
+    /// Uninterpreted-function (UF) handling tests
+    ///
+    /// Construct a package with two different callees `g` and `h` and two
+    /// wrappers that invoke them. Without UF mapping they are not
+    /// equivalent; with UF mapping to the same UF symbol and signature they
+    /// become equivalent.
+    pub fn test_uf_basic_equiv<S: Solver>(solver_config: &S::Config) {
+        let ir_pkg_text = r#"
+            package p_uf
+
+            fn g(x: bits[8]) -> bits[8] {
+              ret add.1: bits[8] = add(x, x, id=1)
+            }
+
+            fn h(x: bits[8]) -> bits[8] {
+              ret sub.2: bits[8] = sub(x, x, id=2)
+            }
+
+            fn call_g(x: bits[8]) -> bits[8] {
+              ret r: bits[8] = invoke(x, to_apply=g, id=3)
+            }
+
+            fn call_h(x: bits[8]) -> bits[8] {
+              ret r: bits[8] = invoke(x, to_apply=h, id=4)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let call_g = pkg.get_fn("call_g").expect("call_g not found");
+        let call_h = pkg.get_fn("call_h").expect("call_h not found");
+
+        // 1) Without UF mapping: should be inequivalent (add(x,x) vs 0)
+        let res_no_uf = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &super::IrFn {
+                fn_ref: call_g,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &super::IrFn {
+                fn_ref: call_h,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            super::AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res_no_uf, super::EquivResult::Disproved { .. }));
+
+        // 2) With UF mapping: map g (LHS) and h (RHS) to the same UF symbol "F".
+        let mut lhs_uf_map: HashMap<String, String> = HashMap::new();
+        lhs_uf_map.insert("g".to_string(), "F".to_string());
+        let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
+        rhs_uf_map.insert("h".to_string(), "F".to_string());
+        let mut uf_sigs: HashMap<String, super::UfSignature> = HashMap::new();
+        uf_sigs.insert(
+            "F".to_string(),
+            super::UfSignature {
+                arg_widths: vec![8],
+                ret_width: 8,
+            },
+        );
+
+        let res_uf = super::prove_ir_fn_equiv_with_domains::<S>(
+            solver_config,
+            &super::IrFn {
+                fn_ref: call_g,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &super::IrFn {
+                fn_ref: call_h,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            super::AssertionSemantics::Same,
+            false,
+            None,
+            None,
+            &lhs_uf_map,
+            &rhs_uf_map,
+            &uf_sigs,
+        );
+        assert!(matches!(res_uf, super::EquivResult::Proved));
+    }
+
+    /// Nested invoke case: inner callees differ, but both sides map inner to
+    /// the same UF.
+    pub fn test_uf_nested_invoke_equiv<S: Solver>(solver_config: &S::Config) {
+        let ir_pkg_text = r#"
+            package p_uf_nested
+
+            fn inner_g(x: bits[4]) -> bits[4] {
+              ret add.1: bits[4] = add(x, x, id=1)
+            }
+
+            fn inner_h(x: bits[4]) -> bits[4] {
+              ret lit7.2: bits[4] = literal(value=7, id=2)
+            }
+
+            fn mid_g(x: bits[4]) -> bits[4] {
+              ret r: bits[4] = invoke(x, to_apply=inner_g, id=3)
+            }
+
+            fn mid_h(x: bits[4]) -> bits[4] {
+              ret r: bits[4] = invoke(x, to_apply=inner_h, id=4)
+            }
+
+            fn top_g(x: bits[4]) -> bits[4] {
+              ret r: bits[4] = invoke(x, to_apply=mid_g, id=5)
+            }
+
+            fn top_h(x: bits[4]) -> bits[4] {
+              ret r: bits[4] = invoke(x, to_apply=mid_h, id=6)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let top_g = pkg.get_fn("top_g").expect("top_g not found");
+        let top_h = pkg.get_fn("top_h").expect("top_h not found");
+
+        // With UF mapping on inner functions, equality should hold at the top.
+        let mut lhs_uf_map: HashMap<String, String> = HashMap::new();
+        lhs_uf_map.insert("inner_g".to_string(), "F".to_string());
+        let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
+        rhs_uf_map.insert("inner_h".to_string(), "F".to_string());
+        let mut uf_sigs: HashMap<String, super::UfSignature> = HashMap::new();
+        uf_sigs.insert(
+            "F".to_string(),
+            super::UfSignature {
+                arg_widths: vec![4],
+                ret_width: 4,
+            },
+        );
+
+        let res = super::prove_ir_fn_equiv_with_domains::<S>(
+            solver_config,
+            &super::IrFn {
+                fn_ref: top_g,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &super::IrFn {
+                fn_ref: top_h,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            super::AssertionSemantics::Same,
+            false,
+            None,
+            None,
+            &lhs_uf_map,
+            &rhs_uf_map,
+            &uf_sigs,
+        );
+        assert!(matches!(res, super::EquivResult::Proved));
+    }
+
+    /// UF + implicit-token with two data args to ensure we slice args after the
+    /// first two params.
+    pub fn test_uf_implicit_token_two_args_equiv<S: Solver>(solver_config: &S::Config) {
+        let ir_pkg_text = r#"
+            package p_uf_itok2
+
+            fn __itokg(__token: token, __activate: bits[1], a: bits[4], b: bits[4]) -> (token, bits[8]) {
+              s: bits[8] = umul(a, b, id=1)
+              ret t: (token, bits[8]) = tuple(__token, s, id=2)
+            }
+
+            fn h(a: bits[4], b: bits[4]) -> bits[8] {
+              x: bits[4] = xor(a, b, id=3)
+              ret z: bits[8] = zero_ext(x, new_bit_count=8, id=4)
+            }
+
+            fn call_g(tok: token, act: bits[1], a: bits[4], b: bits[4]) -> (token, bits[8]) {
+              ret r: (token, bits[8]) = invoke(tok, act, a, b, to_apply=__itokg, id=6)
+            }
+
+            fn call_h(tok: token, act: bits[1], a: bits[4], b: bits[4]) -> bits[8] {
+              ret r: bits[8] = invoke(a, b, to_apply=h, id=7)
+            }
+        "#;
+
+        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let call_g = pkg.get_fn("call_g").expect("call_g not found");
+        let call_h = pkg.get_fn("call_h").expect("call_h not found");
+
+        let res_no_uf = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &super::IrFn {
+                fn_ref: call_g,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &super::IrFn {
+                fn_ref: call_h,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            super::AssertionSemantics::Same,
+            false,
+        );
+        assert!(matches!(res_no_uf, super::EquivResult::Disproved { .. }));
+
+        let mut lhs_uf_map: HashMap<String, String> = HashMap::new();
+        lhs_uf_map.insert("g".to_string(), "F".to_string());
+        let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
+        rhs_uf_map.insert("h".to_string(), "F".to_string());
+        // Two 4-bit data args, 8-bit result.
+        let mut uf_sigs: HashMap<String, super::UfSignature> = HashMap::new();
+        uf_sigs.insert(
+            "F".to_string(),
+            super::UfSignature {
+                arg_widths: vec![4, 4],
+                ret_width: 8,
+            },
+        );
+
+        let res_uf = super::prove_ir_fn_equiv_with_domains::<S>(
+            solver_config,
+            &super::IrFn {
+                fn_ref: call_g,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &super::IrFn {
+                fn_ref: call_h,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            super::AssertionSemantics::Same,
+            false,
+            None,
+            None,
+            &lhs_uf_map,
+            &rhs_uf_map,
+            &uf_sigs,
+        );
+        assert!(matches!(res_uf, super::EquivResult::Proved));
     }
 
     pub fn test_invoke_two_args<S: Solver>(solver_config: &S::Config) {
@@ -1900,7 +2251,11 @@ pub mod test_utils {
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
-        let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let empty_registry = super::UfRegistry {
+            ufs: HashMap::new(),
+        };
+        let smt_fn = ir_to_smt(&mut solver, &fn_inputs, &empty_map, &empty_registry);
         let expected_result = expected(&mut solver, &fn_inputs);
         assert_solver_eq(&mut solver, &smt_fn.output.bitvec, &expected_result);
     }
@@ -2150,7 +2505,11 @@ pub mod test_utils {
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
         let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
-        let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let empty_registry = super::UfRegistry {
+            ufs: HashMap::new(),
+        };
+        let smt_fn = ir_to_smt(&mut solver, &fn_inputs, &empty_map, &empty_registry);
         let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
         let y = fn_inputs.inputs.get("y").unwrap().bitvec.clone();
         let expected = binop(&mut solver, &x, &y);
@@ -2560,7 +2919,11 @@ pub mod test_utils {
         let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // This call should not panic
-        let _ = ir_to_smt(&mut solver, &inputs);
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let empty_registry = super::UfRegistry {
+            ufs: HashMap::new(),
+        };
+        let _ = ir_to_smt(&mut solver, &inputs, &empty_map, &empty_registry);
     }
 
     pub fn test_fuzz_ir_opt_equiv_regression_bit_slice_update_oob<S: Solver>(
@@ -2753,7 +3116,11 @@ pub mod test_utils {
         let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
         // Should panic during conversion due to missing default
-        let _ = ir_to_smt(&mut solver, &inputs);
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let empty_registry = super::UfRegistry {
+            ufs: HashMap::new(),
+        };
+        let _ = ir_to_smt(&mut solver, &inputs, &empty_map, &empty_registry);
     }
 
     pub fn test_sel_unexpected_default_panics<S: Solver>(solver_config: &S::Config) {
@@ -2772,7 +3139,11 @@ pub mod test_utils {
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
-        let _ = ir_to_smt(&mut solver, &inputs);
+        let empty_map: HashMap<String, String> = HashMap::new();
+        let empty_registry = super::UfRegistry {
+            ufs: HashMap::new(),
+        };
+        let _ = ir_to_smt(&mut solver, &inputs, &empty_map, &empty_registry);
     }
 
     // one_hot_sel: multiple bits
@@ -3192,6 +3563,9 @@ pub mod test_utils {
             false,
             Some(&doms),
             Some(&doms),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
         );
         assert!(matches!(res2, super::EquivResult::Proved));
     }
@@ -3803,6 +4177,18 @@ macro_rules! test_with_solver {
             #[test]
             fn test_counterexample_input_order() {
                 test_utils::test_counterexample_input_order::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_uf_basic_equiv() {
+                test_utils::test_uf_basic_equiv::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_uf_nested_invoke_equiv() {
+                test_utils::test_uf_nested_invoke_equiv::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_uf_implicit_token_two_args_equiv() {
+                test_utils::test_uf_implicit_token_two_args_equiv::<$solver_type>($solver_config);
             }
         }
     };

@@ -161,6 +161,11 @@ fn run_equiv_check_native<S: Solver>(
             inputs.flatten_aggregates,
             inputs.lhs_param_domains.as_ref(),
             inputs.rhs_param_domains.as_ref(),
+            // TODO: Use empty uf_map and uf_signatures for now. Will support ufs in the driver in
+            // the next PR.
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
         ),
         ParallelismStrategy::OutputBits => prove_ir_fn_equiv_output_bits_parallel::<S>(
             solver_config,
