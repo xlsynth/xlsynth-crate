@@ -228,11 +228,13 @@ impl Solver for Boolector {
     fn declare_uf(
         &mut self,
         name: &str,
-        arg_widths: Vec<usize>,
+        arg_widths: &[usize],
         result_width: usize,
     ) -> io::Result<Uf<Self::Term>> {
         if result_width == 0 {
-            return Ok(Uf::UfZeroWidth { arg_widths });
+            return Ok(Uf::UfZeroWidth {
+                arg_widths: arg_widths.to_vec(),
+            });
         }
         let non_zero_arg_widths = arg_widths
             .iter()
@@ -259,7 +261,7 @@ impl Solver for Boolector {
             let raw = unsafe { boolector_uf(self.raw_btor(), sort, c_name.as_ptr()) };
             Ok(Uf::Uf {
                 rep: BoolectorTerm { raw },
-                arg_widths,
+                arg_widths: arg_widths.to_vec(),
                 result_width,
             })
         } else {
@@ -268,7 +270,7 @@ impl Solver for Boolector {
             let n = unsafe { boolector_var(self.raw_btor(), sort, c_name.as_ptr()) };
             Ok(Uf::Uf {
                 rep: BoolectorTerm { raw: n },
-                arg_widths,
+                arg_widths: arg_widths.to_vec(),
                 result_width,
             })
         }
@@ -277,7 +279,7 @@ impl Solver for Boolector {
     fn apply_uf(
         &mut self,
         uf: &Uf<Self::Term>,
-        args: Vec<&BitVec<Self::Term>>,
+        args: &[&BitVec<Self::Term>],
     ) -> BitVec<Self::Term> {
         uf.check_arg_widths(&args);
         match uf {

@@ -42,14 +42,11 @@ pub trait Solver: Sized {
     fn declare_uf(
         &mut self,
         name: &str,
-        arg_widths: Vec<usize>,
+        arg_widths: &[usize],
         result_width: usize,
     ) -> io::Result<Uf<Self::Term>>;
-    fn apply_uf(
-        &mut self,
-        uf: &Uf<Self::Term>,
-        args: Vec<&BitVec<Self::Term>>,
-    ) -> BitVec<Self::Term>;
+    fn apply_uf(&mut self, uf: &Uf<Self::Term>, args: &[&BitVec<Self::Term>])
+    -> BitVec<Self::Term>;
     fn fresh_symbol(&mut self, name: &str) -> io::Result<String>;
     fn declare_fresh(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>> {
         let symbol = self.fresh_symbol(name)?;
@@ -58,7 +55,7 @@ pub trait Solver: Sized {
     fn declare_fresh_uf(
         &mut self,
         name: &str,
-        arg_widths: Vec<usize>,
+        arg_widths: &[usize],
         result_width: usize,
     ) -> io::Result<Uf<Self::Term>> {
         let symbol = self.fresh_symbol(name)?;
@@ -2150,11 +2147,11 @@ macro_rules! test_solver {
             #[test]
             fn test_uf_zero_width_result() {
                 let mut solver = $solver;
-                let uf = solver.declare_uf("f_zwr", vec![8, 4], 0).unwrap();
+                let uf = solver.declare_uf("f_zwr", &[8, 4], 0).unwrap();
                 let a = solver.declare("a", 8).unwrap();
                 let b = solver.declare("b", 4).unwrap();
-                let app1 = solver.apply_uf(&uf, vec![&a, &b]);
-                let app2 = solver.apply_uf(&uf, vec![&a, &b]);
+                let app1 = solver.apply_uf(&uf, &[&a, &b]);
+                let app2 = solver.apply_uf(&uf, &[&a, &b]);
                 // Zero-width results compare equal
                 crate::equiv::solver_interface::test_utils::assert_solver_eq(
                     &mut solver,
@@ -2167,13 +2164,13 @@ macro_rules! test_solver {
             fn test_uf_zero_width_arg_is_ignored() {
                 let mut solver = $solver;
                 // Middle argument is zero-width
-                let uf = solver.declare_uf("f_zwa", vec![8, 0, 4], 3).unwrap();
+                let uf = solver.declare_uf("f_zwa", &[8, 0, 4], 3).unwrap();
                 let a8 = solver.declare("a8", 8).unwrap();
                 let a4 = solver.declare("a4", 4).unwrap();
                 let zw1 = solver.zero_width();
                 let zw2 = solver.zero_width();
-                let app1 = solver.apply_uf(&uf, vec![&a8, &zw1, &a4]);
-                let app2 = solver.apply_uf(&uf, vec![&a8, &zw2, &a4]);
+                let app1 = solver.apply_uf(&uf, &[&a8, &zw1, &a4]);
+                let app2 = solver.apply_uf(&uf, &[&a8, &zw2, &a4]);
                 // Different zero-width operands must not affect the application
                 crate::equiv::solver_interface::test_utils::assert_solver_eq(
                     &mut solver,
@@ -2188,11 +2185,11 @@ macro_rules! test_solver {
             #[test]
             fn test_uf_basic_application_and_equality() {
                 let mut solver = $solver;
-                let uf = solver.declare_uf("f_basic", vec![8, 8], 8).unwrap();
+                let uf = solver.declare_uf("f_basic", &[8, 8], 8).unwrap();
                 let x = solver.declare("x", 8).unwrap();
                 let y = solver.declare("y", 8).unwrap();
-                let app1 = solver.apply_uf(&uf, vec![&x, &y]);
-                let app2 = solver.apply_uf(&uf, vec![&x, &y]);
+                let app1 = solver.apply_uf(&uf, &[&x, &y]);
+                let app2 = solver.apply_uf(&uf, &[&x, &y]);
                 crate::equiv::solver_interface::test_utils::assert_solver_eq(
                     &mut solver,
                     &app1,
@@ -2204,29 +2201,29 @@ macro_rules! test_solver {
             #[should_panic]
             fn test_uf_arity_mismatch_panics() {
                 let mut solver = $solver;
-                let uf = solver.declare_uf("arity", vec![8, 8], 8).unwrap();
+                let uf = solver.declare_uf("arity", &[8, 8], 8).unwrap();
                 let x = solver.declare("x", 8).unwrap();
                 // Missing one argument
-                let _ = solver.apply_uf(&uf, vec![&x]);
+                let _ = solver.apply_uf(&uf, &[&x]);
             }
 
             #[test]
             #[should_panic]
             fn test_uf_width_mismatch_panics() {
                 let mut solver = $solver;
-                let uf = solver.declare_uf("width", vec![8], 8).unwrap();
+                let uf = solver.declare_uf("width", &[8], 8).unwrap();
                 let x16 = solver.declare("x16", 16).unwrap();
-                let _ = solver.apply_uf(&uf, vec![&x16]);
+                let _ = solver.apply_uf(&uf, &[&x16]);
             }
 
             #[test]
             fn test_uf_all_zero_args_nonzero_result() {
                 let mut solver = $solver;
-                let uf = solver.declare_uf("const_like", vec![0, 0], 5).unwrap();
+                let uf = solver.declare_uf("const_like", &[0, 0], 5).unwrap();
                 let zw1 = solver.zero_width();
                 let zw2 = solver.zero_width();
-                let app1 = solver.apply_uf(&uf, vec![&zw1, &zw2]);
-                let app2 = solver.apply_uf(&uf, vec![&zw1, &zw2]);
+                let app1 = solver.apply_uf(&uf, &[&zw1, &zw2]);
+                let app2 = solver.apply_uf(&uf, &[&zw1, &zw2]);
                 crate::equiv::solver_interface::test_utils::assert_solver_eq(
                     &mut solver,
                     &app1,
@@ -2239,11 +2236,11 @@ macro_rules! test_solver {
             #[test]
             fn test_uf_different_inputs_can_have_different_results() {
                 let mut solver = $solver;
-                let uf = solver.declare_uf("g_diff", vec![8], 8).unwrap();
+                let uf = solver.declare_uf("g_diff", &[8], 8).unwrap();
                 let a = solver.declare("a", 8).unwrap();
                 let b = solver.declare("b", 8).unwrap();
-                let fa = solver.apply_uf(&uf, vec![&a]);
-                let fb = solver.apply_uf(&uf, vec![&b]);
+                let fa = solver.apply_uf(&uf, &[&a]);
+                let fb = solver.apply_uf(&uf, &[&b]);
                 solver.push().unwrap();
                 let a_ne_b = solver.ne(&a, &b);
                 let fa_ne_fb = solver.ne(&fa, &fb);
@@ -2259,11 +2256,11 @@ macro_rules! test_solver {
             #[test]
             fn test_uf_equal_inputs_same_result() {
                 let mut solver = $solver;
-                let uf = solver.declare_uf("g_eq", vec![8], 8).unwrap();
+                let uf = solver.declare_uf("g_eq", &[8], 8).unwrap();
                 let a = solver.declare("a", 8).unwrap();
                 let b = solver.declare("b", 8).unwrap();
-                let fa = solver.apply_uf(&uf, vec![&a]);
-                let fb = solver.apply_uf(&uf, vec![&b]);
+                let fa = solver.apply_uf(&uf, &[&a]);
+                let fb = solver.apply_uf(&uf, &[&b]);
 
                 // Enforce a == b, then require f(a) != f(b) → should be UNSAT by congruence
                 solver.push().unwrap();

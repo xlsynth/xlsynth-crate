@@ -323,11 +323,13 @@ impl Solver for EasySmtSolver {
     fn declare_uf(
         &mut self,
         name: &str,
-        arg_widths: Vec<usize>,
+        arg_widths: &[usize],
         result_width: usize,
     ) -> io::Result<Uf<SExpr>> {
         if result_width == 0 {
-            return Ok(Uf::UfZeroWidth { arg_widths });
+            return Ok(Uf::UfZeroWidth {
+                arg_widths: arg_widths.to_vec(),
+            });
         } else {
             let shared = Arc::clone(&self.context);
             let mut context = shared.lock().unwrap();
@@ -345,13 +347,13 @@ impl Solver for EasySmtSolver {
             let rep = context.declare_fun(name, arg_sorts, result_sort)?;
             Ok(Uf::Uf {
                 rep,
-                arg_widths,
+                arg_widths: arg_widths.to_vec(),
                 result_width,
             })
         }
     }
 
-    fn apply_uf(&mut self, uf: &Uf<SExpr>, args: Vec<&BitVec<SExpr>>) -> BitVec<SExpr> {
+    fn apply_uf(&mut self, uf: &Uf<SExpr>, args: &[&BitVec<SExpr>]) -> BitVec<SExpr> {
         uf.check_arg_widths(&args);
         match uf {
             Uf::UfZeroWidth { .. } => BitVec::ZeroWidth,

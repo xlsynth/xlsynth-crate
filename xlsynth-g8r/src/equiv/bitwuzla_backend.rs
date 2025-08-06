@@ -699,11 +699,13 @@ impl Solver for Bitwuzla {
     fn declare_uf(
         &mut self,
         name: &str,
-        arg_widths: Vec<usize>,
+        arg_widths: &[usize],
         result_width: usize,
     ) -> io::Result<Uf<Self::Term>> {
         if result_width == 0 {
-            return Ok(Uf::UfZeroWidth { arg_widths });
+            return Ok(Uf::UfZeroWidth {
+                arg_widths: arg_widths.to_vec(),
+            });
         }
         // Build function sort over non-zero-width arguments. If arity is zero,
         // fall back to a constant of result sort.
@@ -739,7 +741,7 @@ impl Solver for Bitwuzla {
 
         Ok(Uf::Uf {
             rep: BitwuzlaTerm { raw: rep },
-            arg_widths,
+            arg_widths: arg_widths.to_vec(),
             result_width,
         })
     }
@@ -747,7 +749,7 @@ impl Solver for Bitwuzla {
     fn apply_uf(
         &mut self,
         uf: &Uf<Self::Term>,
-        args: Vec<&BitVec<Self::Term>>,
+        args: &[&BitVec<Self::Term>],
     ) -> BitVec<Self::Term> {
         uf.check_arg_widths(&args);
         match uf {
