@@ -85,6 +85,11 @@ pub struct DslxEquivConfig {
     pub assume_enum_in_bound: Option<bool>,
     pub type_inference_v2: Option<bool>, // external toolchain only
 
+    /// Treat DSLX function on the LHS/RHS as uninterpreted function (repeated).
+    /// Each entry is "func_name:uf_name".
+    pub lhs_uf: Option<Vec<String>>, // each entry is "func_name:uf_name"
+    pub rhs_uf: Option<Vec<String>>, // each entry is "func_name:uf_name"
+
     pub json: Option<bool>,
 }
 
@@ -94,6 +99,9 @@ pub struct ProveQuickcheckConfig {
     pub test_filter: Option<String>,
     pub solver: Option<SolverChoice>,
     pub assertion_semantics: Option<QuickCheckAssertionSemantics>,
+    /// Treat DSLX function as uninterpreted function (repeated), entries
+    /// "func_name:uf_name".
+    pub uf: Option<Vec<String>>,
     pub json: Option<bool>,
 }
 
@@ -205,6 +213,18 @@ impl ToDriverCommand for DslxEquivConfig {
         );
         add_bool(&mut cmd, "assume-enum-in-bound", self.assume_enum_in_bound);
         add_bool(&mut cmd, "type_inference_v2", self.type_inference_v2);
+
+        if let Some(list) = &self.lhs_uf {
+            for entry in list {
+                add_flag(&mut cmd, "lhs_uf", entry);
+            }
+        }
+        if let Some(list) = &self.rhs_uf {
+            for entry in list {
+                add_flag(&mut cmd, "rhs_uf", entry);
+            }
+        }
+
         add_bool(&mut cmd, "json", self.json);
         cmd
     }
@@ -228,6 +248,11 @@ impl ToDriverCommand for ProveQuickcheckConfig {
         }
         if let Some(sem) = &self.assertion_semantics {
             add_flag(&mut cmd, "assertion-semantics", &sem.to_string());
+        }
+        if let Some(list) = &self.uf {
+            for entry in list {
+                add_flag(&mut cmd, "uf", entry);
+            }
         }
         add_bool(&mut cmd, "json", self.json);
         cmd

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::common::{infer_uf_signature, merge_uf_signature};
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
@@ -45,6 +46,8 @@ pub struct EquivInputs<'a> {
     pub rhs_origin: &'a str,
     pub lhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
     pub rhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
+    pub lhs_uf_map: HashMap<String, String>,
+    pub rhs_uf_map: HashMap<String, String>,
 }
 
 // Helper: parse IR text into a Package, pick top (explicit or package top),
@@ -151,6 +154,10 @@ fn run_equiv_check_native<S: Solver>(
         fixed_implicit_activation: inputs.rhs_fixed_implicit_activation,
     };
 
+    let lhs_uf_sigs = infer_uf_signature(&lhs_pkg, &inputs.lhs_uf_map);
+    let rhs_uf_sigs = infer_uf_signature(&rhs_pkg, &inputs.rhs_uf_map);
+    let uf_sigs = merge_uf_signature(lhs_uf_sigs, &rhs_uf_sigs);
+
     let start_time = std::time::Instant::now();
     let result = match inputs.strategy {
         ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv_with_domains::<S>(
@@ -161,6 +168,9 @@ fn run_equiv_check_native<S: Solver>(
             inputs.flatten_aggregates,
             inputs.lhs_param_domains.as_ref(),
             inputs.rhs_param_domains.as_ref(),
+            &inputs.lhs_uf_map,
+            &inputs.rhs_uf_map,
+            &uf_sigs,
         ),
         ParallelismStrategy::OutputBits => prove_ir_fn_equiv_output_bits_parallel::<S>(
             solver_config,
@@ -519,6 +529,8 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         rhs_origin: rhs,
         lhs_param_domains: None,
         rhs_param_domains: None,
+        lhs_uf_map: std::collections::HashMap::new(),
+        rhs_uf_map: std::collections::HashMap::new(),
     };
 
     let outcome = dispatch_ir_equiv(solver, tool_path, &inputs);

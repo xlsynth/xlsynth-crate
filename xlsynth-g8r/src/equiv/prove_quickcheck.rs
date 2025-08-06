@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::equiv::{
-    prove_equiv::{AssertionViolation, FnInput, IrFn, get_fn_inputs, ir_to_smt},
+    prove_equiv::{
+        AssertionViolation, FnInput, IrFn, UfRegistry, UfSignature, get_fn_inputs, ir_to_smt,
+    },
     solver_interface::{BitVec, Response, Solver},
 };
 
 use crate::equiv::prove_equiv::FnOutput;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -70,6 +72,27 @@ where
     S: Solver,
     S::Term: 'a,
 {
+    prove_ir_fn_always_true_with_ufs::<S>(
+        solver_config,
+        ir_fn,
+        assertion_semantics,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+/// UF-enabled variant of `prove_ir_fn_always_true`.
+pub fn prove_ir_fn_always_true_with_ufs<'a, S>(
+    solver_config: &S::Config,
+    ir_fn: &IrFn<'a>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    uf_map: &HashMap<String, String>,
+    uf_sigs: &HashMap<String, UfSignature>,
+) -> BoolPropertyResult
+where
+    S: Solver,
+    S::Term: 'a,
+{
     // Ensure the function indeed returns a single-bit value.
     assert_eq!(
         ir_fn.fn_ref.ret_ty.bit_count(),
@@ -79,9 +102,10 @@ where
 
     let mut solver = S::new(solver_config).unwrap();
 
-    // Generate SMT representation.
+    // Generate SMT representation with UF mapping/registry.
     let fn_inputs = get_fn_inputs(&mut solver, ir_fn, None);
-    let smt_fn = ir_to_smt(&mut solver, &fn_inputs);
+    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, uf_sigs);
+    let smt_fn = ir_to_smt(&mut solver, &fn_inputs, &uf_map, &uf_registry);
 
     // Build a 1-bit flag that is `1` iff *all* in-function assertions pass.
     let success_flag: BitVec<S::Term> = if smt_fn.assertions.is_empty() {
@@ -343,6 +367,59 @@ mod test_utils {
             ),
         }
     }
+
+    /// QuickCheck with UF mapping: prove f(x) == (invoke g x) == (invoke h x)
+    /// is always true when g/h are abstracted to the same UF.
+    pub fn test_quickcheck_uf_basic<S: Solver>(solver_config: &S::Config) {
+        let ir_pkg_text = r#"
+            package p_qc_uf
+
+            fn g(x: bits[8]) -> bits[8] {
+              ret add.1: bits[8] = add(x, x, id=1)
+            }
+
+            fn h(x: bits[8]) -> bits[8] {
+              ret sub.2: bits[8] = sub(x, x, id=2)
+            }
+
+            fn f(x: bits[8]) -> bits[1] {
+              a: bits[8] = invoke(x, to_apply=g, id=3)
+              b: bits[8] = invoke(x, to_apply=h, id=4)
+              ret eq.5: bits[1] = eq(a, b, id=5)
+            }
+        "#;
+
+        let pkg = Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("parse package");
+        let f = pkg.get_fn("f").expect("f not found");
+        let ir_fn = IrFn {
+            fn_ref: f,
+            pkg_ref: Some(&pkg),
+            fixed_implicit_activation: false,
+        };
+
+        let mut uf_map: HashMap<String, String> = HashMap::new();
+        uf_map.insert("g".to_string(), "F".to_string());
+        uf_map.insert("h".to_string(), "F".to_string());
+        let mut uf_sigs: HashMap<String, crate::equiv::prove_equiv::UfSignature> = HashMap::new();
+        uf_sigs.insert(
+            "F".to_string(),
+            crate::equiv::prove_equiv::UfSignature {
+                arg_widths: vec![8],
+                ret_width: 8,
+            },
+        );
+
+        let res = super::prove_ir_fn_always_true_with_ufs::<S>(
+            solver_config,
+            &ir_fn,
+            QuickCheckAssertionSemantics::Assume,
+            &uf_map,
+            &uf_sigs,
+        );
+        assert!(matches!(res, super::BoolPropertyResult::Proved));
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +557,11 @@ macro_rules! quickcheck_test_with_solver {
             #[test]
             fn counterexample_input_order() {
                 test_utils::test_counterexample_input_order::<$solver_type>($solver_config);
+            }
+
+            #[test]
+            fn quickcheck_uf_basic() {
+                test_utils::test_quickcheck_uf_basic::<$solver_type>($solver_config);
             }
         }
     };

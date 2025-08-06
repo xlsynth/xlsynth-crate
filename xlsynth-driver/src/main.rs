@@ -912,6 +912,13 @@ fn main() {
                         .value_name("PATH")
                         .help("Write the JSON result to PATH")
                         .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("uf")
+                        .long("uf")
+                        .value_name("func_name:uf_name")
+                        .help("Treat DSLX function as uninterpreted: format <func_name>:<uf_name> (repeatable). Functions sharing the same uf_name are assumed equivalent; assertions inside them are ignored.")
+                        .action(clap::ArgAction::Append),
                 ),
         )
         .subcommand(
@@ -1052,6 +1059,20 @@ fn main() {
                 .add_bool_arg(
                     "assume-enum-in-bound",
                     "Constrain enum-typed parameters to their defined values during equivalence proving",
+                )
+                .arg(
+                    clap::Arg::new("lhs_uf")
+                        .long("lhs_uf")
+                        .value_name("func_name:uf_name")
+                        .help("Treat LHS DSLX function as uninterpreted: format <func_name>:<uf_name> (repeatable). Mappings to the same uf_name across sides are assumed equivalent; assertions inside them are ignored.")
+                        .action(clap::ArgAction::Append),
+                )
+                .arg(
+                    clap::Arg::new("rhs_uf")
+                        .long("rhs_uf")
+                        .value_name("func_name:uf_name")
+                        .help("Treat RHS DSLX function as uninterpreted: format <func_name>:<uf_name> (repeatable). Mappings to the same uf_name across sides are assumed equivalent; assertions inside them are ignored.")
+                        .action(clap::ArgAction::Append),
                 )
                 .arg(
                     clap::Arg::new("output_json")
