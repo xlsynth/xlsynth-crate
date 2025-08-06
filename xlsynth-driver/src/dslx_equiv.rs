@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::common::get_function_enum_param_domains;
+use crate::common::{get_function_enum_param_domains, parse_uf_spec};
 use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
 use crate::solver_choice::SolverChoice;
@@ -17,7 +17,9 @@ pub struct OptimizedIrText {
     pub param_domains: Option<ParamDomains>,
 }
 
-/// Builds (always optimized) IR text plus mangled top name for a DSLX module.
+/// Builds IR text plus mangled top name for a DSLX module.
+/// If `optimize` is true, returns optimized IR; otherwise returns unoptimized
+/// IR.
 fn build_ir_for_dslx(
     input_path: &std::path::Path,
     dslx_top: &str,
@@ -28,6 +30,7 @@ fn build_ir_for_dslx(
     tool_path: Option<&str>,
     type_inference_v2: Option<bool>,
     want_enum_domains: bool,
+    optimize: bool,
 ) -> OptimizedIrText {
     let module_name = input_path.file_stem().unwrap().to_str().unwrap();
     let mangled_top = mangle_dslx_name(module_name, dslx_top).unwrap();
@@ -48,9 +51,11 @@ fn build_ir_for_dslx(
             disable_warnings,
             type_inference_v2,
         );
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), &ir_text).unwrap();
-        ir_text = run_opt_main(tmp.path(), Some(&mangled_top), tool_path);
+        if optimize {
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), &ir_text).unwrap();
+            ir_text = run_opt_main(tmp.path(), Some(&mangled_top), tool_path);
+        }
         OptimizedIrText {
             ir_text,
             mangled_top,
@@ -82,8 +87,14 @@ fn build_ir_for_dslx(
             },
         )
         .expect("successful DSLX->IR conversion");
-        let pkg = IrPackage::parse_ir(&result.ir, Some(&mangled_top)).unwrap();
-        let optimized = xlsynth::optimize_ir(&pkg, &mangled_top).unwrap();
+        let ir_text = if optimize {
+            let pkg = IrPackage::parse_ir(&result.ir, Some(&mangled_top)).unwrap();
+            xlsynth::optimize_ir(&pkg, &mangled_top)
+                .unwrap()
+                .to_string()
+        } else {
+            result.ir
+        };
 
         // Optionally collect enum param domains from the DSLX typechecked module (parse
         // again here to avoid duplicating logic deep inside the converter path;
@@ -107,7 +118,7 @@ fn build_ir_for_dslx(
             None
         };
         OptimizedIrText {
-            ir_text: optimized.to_string(),
+            ir_text,
             mangled_top,
             param_domains: domains,
         }
@@ -232,6 +243,24 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
 
     let want_enum_domains = assume_enum_in_bound && support_domain_constraints;
 
+    let lhs_module_name = lhs_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("valid LHS module name");
+    let rhs_module_name = rhs_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("valid RHS module name");
+
+    // Parse uninterpreted function mappings (lhs/rhs).
+    // Format: <func_name>:<uf_name>
+    // Semantics: Functions mapped to the same <uf_name> are assumed equivalent
+    // (treated as the same uninterpreted symbol) and assertions inside them are
+    // ignored.
+    let lhs_uf_map = parse_uf_spec(lhs_module_name, matches.get_many::<String>("lhs_uf"));
+    let rhs_uf_map = parse_uf_spec(rhs_module_name, matches.get_many::<String>("rhs_uf"));
+    let use_unoptimized_ir = !lhs_uf_map.is_empty() || !rhs_uf_map.is_empty();
+
     let OptimizedIrText {
         ir_text: lhs_ir_text,
         mangled_top: lhs_mangled_top,
@@ -246,6 +275,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         tool_path,
         type_inference_v2,
         want_enum_domains,
+        !use_unoptimized_ir,
     );
     let OptimizedIrText {
         ir_text: rhs_ir_text,
@@ -261,6 +291,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         tool_path,
         type_inference_v2,
         want_enum_domains,
+        !use_unoptimized_ir,
     );
     let (lhs_param_domains, rhs_param_domains) = if want_enum_domains {
         (lhs_domains, rhs_domains)
@@ -284,6 +315,8 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         rhs_origin: rhs_file,
         lhs_param_domains,
         rhs_param_domains,
+        lhs_uf_map: lhs_uf_map,
+        rhs_uf_map: rhs_uf_map,
     };
 
     let outcome = dispatch_ir_equiv(solver_choice, tool_path, &inputs);

@@ -33,7 +33,7 @@ use std::process::Stdio;
 use serde::Serialize;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
-enum TaskOutcome {
+pub enum TaskOutcome {
     Success,
     Failed,
     Canceled,
@@ -129,7 +129,7 @@ pub struct Scheduler {
 }
 
 #[derive(Debug)]
-enum ProverReportNode {
+pub enum ProverReportNode {
     Task {
         cmdline: Option<String>,
         outcome: Option<TaskOutcome>,

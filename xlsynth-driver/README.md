@@ -275,7 +275,14 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
   - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
   - `--assume-enum-in-bound=<BOOL>`
   - `--type_inference_v2=<BOOL>` (requires `--toolchain`)
+  - `--lhs_uf <func_name:uf_name>` (may be specified multiple times)
+  - `--rhs_uf <func_name:uf_name>` (may be specified multiple times)
   - `--output_json <PATH>`
+
+UF semantics:
+
+- Functions mapped to the same uf_name are treated as the same uninterpreted symbol and are assumed equivalent at call sites.
+- Assertions inside uninterpreted functions are ignored during proving.
 
 ### `prove-quickcheck`
 
@@ -285,7 +292,13 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
 - Backend: `--solver <...>` selects the solver/toolchain.
 - Semantics: `--assertion-semantics <ignore|never|assume>`.
+- UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
 - Output: `--output_json <PATH>` to write results as JSON.
+
+UF semantics:
+
+- Functions mapped to the same uf_name are treated as the same uninterpreted symbol and are assumed equivalent at call sites.
+- Assertions inside uninterpreted functions are ignored during proving.
 
 ### `prover`
 
@@ -426,6 +439,8 @@ Schema details
     - `rhs_fixed_implicit_activation`: bool
     - `assume_enum_in_bound`: bool
     - `type_inference_v2`: bool (requires external toolchain)
+    - `lhs_uf`: array of strings, each "`<func_name>:<uf_name>`" (repeats map to repeated CLI flags). Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
+    - `rhs_uf`: array of strings, each "`<func_name>:<uf_name>`". Same semantics as above.
     - `json`: bool
 
 - `kind: "prove-quickcheck"` (ProveQuickcheckConfig)
@@ -435,6 +450,7 @@ Schema details
     - `test_filter`: string (regex)
     - `solver`: same values as above
     - `assertion_semantics`: `ignore` | `never` | `assume`
+    - `uf`: array of strings, each "`<func_name>:<uf_name>`". Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
     - `json`: bool
 
 Mapping to CLI
