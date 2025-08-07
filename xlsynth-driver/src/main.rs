@@ -841,6 +841,12 @@ fn main() {
                 )
                 .add_bool_arg("reset_active_low", "Reset is active low")
                 .arg(
+                    Arg::new("clk")
+                        .long("clk")
+                        .value_name("NAME")
+                        .help("Clock signal name for the DUT (default 'clk')"),
+                )
+                .arg(
                     Arg::new("latency")
                         .long("latency")
                         .value_name("CYCLES")
