@@ -33,7 +33,7 @@ use std::process::Stdio;
 use serde::Serialize;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
-enum TaskOutcome {
+pub enum TaskOutcome {
     Success,
     Failed,
     Canceled,
@@ -74,6 +74,12 @@ struct GroupNode {
     kind: GroupKind,
     children: Vec<NodeId>,
     outcome: Option<TaskOutcome>,
+    // When true, resolved groups do not cancel or prune sibling subtrees; all
+    // descendants are allowed to finish naturally.
+    keep_running_till_finish: bool,
+    // For GroupKind::First when keep_running_till_finish=true, remember the
+    // first child's outcome, then finalize only after all children complete.
+    first_winner_outcome: Option<TaskOutcome>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -129,7 +135,7 @@ pub struct Scheduler {
 }
 
 #[derive(Debug)]
-enum ProverReportNode {
+pub enum ProverReportNode {
     Task {
         cmdline: Option<String>,
         outcome: Option<TaskOutcome>,
@@ -617,7 +623,7 @@ impl Scheduler {
         child_outcome: TaskOutcome,
     ) -> io::Result<()> {
         let child_result = child_outcome.is_success();
-        let (kind, idx, all_done, any_success, all_success) = {
+        let (kind, idx, all_done, any_success, all_success, keep_running) = {
             match &self.nodes[gid.0].inner {
                 NodeInner::Group(g) => {
                     if g.outcome.is_some() {
@@ -640,44 +646,60 @@ impl Scheduler {
                             None => all_done = false,
                         }
                     }
-                    (g.kind, idx, all_done, any_success, all_success)
+                    (
+                        g.kind,
+                        idx,
+                        all_done,
+                        any_success,
+                        all_success,
+                        g.keep_running_till_finish,
+                    )
                 }
                 _ => unreachable!(),
             }
         };
         match kind {
             GroupKind::First => {
-                info!(
-                    "prover: group resolved kind=first result={} (by child idx={})",
-                    child_result, idx
-                );
-                self.finalize_group_resolution(gid, child_result, Some(idx))
+                if !keep_running {
+                    info!("prover: group resolved kind=first result={}", child_result);
+                    self.finalize_group_resolution(gid, child_result, Some(idx))
+                } else {
+                    if let NodeInner::Group(g) = &mut self.nodes[gid.0].inner {
+                        g.first_winner_outcome.get_or_insert(child_outcome);
+                        if all_done {
+                            let winner = g.first_winner_outcome.unwrap();
+                            info!(
+                                "prover: group resolved kind=first result={}",
+                                winner.is_success()
+                            );
+                            self.finalize_group_resolution(gid, winner.is_success(), None)
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        unreachable!();
+                    }
+                }
             }
             GroupKind::Any => {
-                if child_result {
-                    info!(
-                        "prover: group resolved kind=any result=true (by child idx={})",
-                        idx
-                    );
+                if !keep_running && child_result {
+                    info!("prover: group resolved kind=any result=true");
                     return self.finalize_group_resolution(gid, true, Some(idx));
                 }
-                if all_done && !any_success {
-                    info!("prover: group resolved kind=any result=false (all children failed)");
-                    return self.finalize_group_resolution(gid, false, None);
+                if all_done {
+                    info!("prover: group resolved kind=any result={}", any_success);
+                    return self.finalize_group_resolution(gid, any_success, None);
                 }
                 Ok(())
             }
             GroupKind::All => {
-                if !child_result {
-                    info!(
-                        "prover: group resolved kind=all result=false (child idx={} failed)",
-                        idx
-                    );
+                if !keep_running && !child_result {
+                    info!("prover: group resolved kind=all result=false");
                     return self.finalize_group_resolution(gid, false, Some(idx));
                 }
-                if all_done && all_success {
-                    info!("prover: group resolved kind=all result=true (all children succeeded)");
-                    return self.finalize_group_resolution(gid, true, None);
+                if all_done {
+                    info!("prover: group resolved kind=all result={}", all_success);
+                    return self.finalize_group_resolution(gid, all_success, None);
                 }
                 Ok(())
             }
@@ -919,13 +941,19 @@ impl PlanBuilder {
                     completed_stderr: None,
                 }),
             ),
-            ProverPlan::Group { kind, tasks } => {
+            ProverPlan::Group {
+                kind,
+                tasks,
+                keep_running_till_finish,
+            } => {
                 let gid = self.push(
                     parent,
                     NodeInner::Group(GroupNode {
                         kind,
                         children: Vec::new(),
                         outcome: None,
+                        keep_running_till_finish,
+                        first_winner_outcome: None,
                     }),
                 );
                 let child_ids: Vec<NodeId> = tasks

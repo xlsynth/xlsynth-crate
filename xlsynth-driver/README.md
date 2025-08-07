@@ -345,6 +345,7 @@ Example: group composition
 ```json
 {
   "kind": "all",
+  "keep_running_till_finish": false,
   "tasks": [
     { "kind": "ir-equiv", "lhs_ir_file": "lhs.ir", "rhs_ir_file": "rhs.ir" },
     { "kind": "dslx-equiv", "lhs_dslx_file": "lhs.x", "rhs_dslx_file": "rhs.x", "dslx_top": "foo" },
@@ -359,15 +360,21 @@ Groups: all / any / first
 - `any`: overall success if at least one child succeeds; schedulers may stop at the first success.
 - `first`: evaluate children in order; stop at the first child that completes successfully; if none succeed, the overall result is failure.
 
+Optional group flag
+
+- `keep_running_till_finish` (default `false`): when `true`, the scheduler does not cancel or prune sibling tasks when this group becomes resolved according to its semantics. All child tasks continue to run to completion, and the group's outcome is only set after all of its children have finished. If this flag is set on the root group, the prover run will wait for all tasks in the plan to finish before exiting, while the overall success is still determined by the group's semantics.
+
 Tree structure example
 
 ```json
 {
   "kind": "first",
+  "keep_running_till_finish": true,
   "tasks": [
     { "kind": "ir-equiv", "lhs_ir_file": "lhs.ir", "rhs_ir_file": "rhs.ir", "top": "main" },
     {
       "kind": "any",
+      "keep_running_till_finish": false,
       "tasks": [
         { "kind": "dslx-equiv", "lhs_dslx_file": "lhs.x", "rhs_dslx_file": "rhs.x", "dslx_top": "foo" },
         { "kind": "prove-quickcheck", "dslx_input_file": "qc.x", "test_filter": ".*prop" }

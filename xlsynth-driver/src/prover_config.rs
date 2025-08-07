@@ -362,6 +362,10 @@ pub enum ProverPlan {
     Group {
         kind: GroupKind,
         tasks: Vec<ProverPlan>,
+        // When true, do not cancel or prune sibling tasks upon this group's
+        // resolution; allow them to continue running until they naturally
+        // complete. Default is false.
+        keep_running_till_finish: bool,
     },
 }
 
@@ -372,11 +376,16 @@ impl serde::Serialize for ProverPlan {
     {
         match self {
             ProverPlan::Task { task } => task.serialize(serializer),
-            ProverPlan::Group { kind, tasks } => {
+            ProverPlan::Group {
+                kind,
+                tasks,
+                keep_running_till_finish,
+            } => {
                 use serde::ser::SerializeStruct;
-                let mut s = serializer.serialize_struct("ProverPlan", 2)?;
+                let mut s = serializer.serialize_struct("ProverPlan", 3)?;
                 s.serialize_field("kind", kind)?;
                 s.serialize_field("tasks", tasks)?;
+                s.serialize_field("keep_running_till_finish", keep_running_till_finish)?;
                 s.end()
             }
         }
@@ -392,6 +401,8 @@ impl<'de> serde::Deserialize<'de> for ProverPlan {
         struct GroupWrap {
             kind: GroupKind,
             tasks: Vec<ProverPlan>,
+            #[serde(default)]
+            keep_running_till_finish: bool,
         }
 
         #[derive(serde::Deserialize)]
@@ -402,7 +413,15 @@ impl<'de> serde::Deserialize<'de> for ProverPlan {
         }
 
         match Wrapper::deserialize(deserializer)? {
-            Wrapper::Group(GroupWrap { kind, tasks }) => Ok(ProverPlan::Group { kind, tasks }),
+            Wrapper::Group(GroupWrap {
+                kind,
+                tasks,
+                keep_running_till_finish,
+            }) => Ok(ProverPlan::Group {
+                kind,
+                tasks,
+                keep_running_till_finish,
+            }),
             Wrapper::Task(task) => Ok(ProverPlan::Task { task }),
         }
     }
@@ -626,10 +645,12 @@ mod tests {
             ProverPlan::Group {
                 kind: GroupKind::All,
                 tasks,
+                keep_running_till_finish,
             } => {
                 assert_eq!(tasks.len(), 3);
                 let heads: Vec<String> = tasks.iter().map(head_of).collect();
                 assert_eq!(heads, vec!["ir-equiv", "dslx-equiv", "prove-quickcheck"]);
+                assert!(!keep_running_till_finish);
             }
             _ => panic!("expected ProverPlan::Group(All)"),
         }
@@ -642,17 +663,20 @@ mod tests {
           "tasks": [
             { "kind": "ir-equiv", "lhs_ir_file": "lhs.ir", "rhs_ir_file": "rhs.ir" },
             { "kind": "prove-quickcheck", "dslx_input_file": "qc.x" }
-          ]
+          ],
+          "keep_running_till_finish": true
         }"#;
         let plan: ProverPlan = serde_json::from_str(json).unwrap();
         match plan {
             ProverPlan::Group {
                 kind: GroupKind::Any,
                 tasks,
+                keep_running_till_finish,
             } => {
                 assert_eq!(tasks.len(), 2);
                 let heads: Vec<String> = tasks.iter().map(head_of).collect();
                 assert_eq!(heads, vec!["ir-equiv", "prove-quickcheck"]);
+                assert!(keep_running_till_finish);
             }
             _ => panic!("expected ProverPlan::Group(Any)"),
         }
@@ -672,6 +696,7 @@ mod tests {
             ProverPlan::Group {
                 kind: GroupKind::First,
                 tasks,
+                ..
             } => {
                 assert_eq!(tasks.len(), 2);
                 let heads: Vec<String> = tasks.iter().map(head_of).collect();
@@ -694,6 +719,7 @@ mod tests {
                     },
                 },
             }],
+            keep_running_till_finish: false,
         };
         let v = serde_json::to_value(&plan).unwrap();
         assert_eq!(v["kind"], "all");

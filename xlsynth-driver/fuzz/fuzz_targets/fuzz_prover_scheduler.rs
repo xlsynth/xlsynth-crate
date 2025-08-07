@@ -27,7 +27,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_driver::prover::run_prover_plan;
+use xlsynth_driver::prover::{run_prover_plan, ProverReportNode, TaskOutcome};
 use xlsynth_driver::prover_config::{GroupKind, ProverPlan, ProverTask};
 
 #[derive(Clone, Copy, Debug)]
@@ -45,7 +45,7 @@ fn eval(plan: &ProverPlan) -> Eval {
                 "non-Fake task encountered in fuzz plan; builder should only emit Fake tasks"
             ),
         },
-        ProverPlan::Group { kind, tasks } => {
+        ProverPlan::Group { kind, tasks, .. } => {
             let kids: Vec<Eval> = tasks.iter().map(eval).collect();
             match kind {
                 GroupKind::All => {
@@ -105,6 +105,39 @@ fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
     // Compute expected outcome with First support; None means both possible.
     let expected = eval(&plan).outcome;
 
+    // Helper: verify the tasks that must be kept running are not canceled.
+    fn assert_keep_running_corridor(plan: &ProverPlan, report: &ProverReportNode) {
+        match (plan, report) {
+            (ProverPlan::Task { .. }, ProverReportNode::Task { outcome, .. }) => match outcome {
+                Some(TaskOutcome::Success) | Some(TaskOutcome::Failed) => {}
+                _ => panic!("leaf in keep-running corridor did not finish with Success/Failed"),
+            },
+            (
+                ProverPlan::Group {
+                    kind,
+                    tasks,
+                    keep_running_till_finish,
+                    ..
+                },
+                ProverReportNode::Group {
+                    kind: report_kind,
+                    tasks: report_tasks,
+                    ..
+                },
+            ) => {
+                assert!(kind == report_kind, "group kind mismatch");
+                assert!(report_tasks.len() == tasks.len(), "report shape mismatch");
+                if !(*keep_running_till_finish || tasks.len() == 1) {
+                    return;
+                }
+                for (t, r) in tasks.iter().zip(report_tasks.iter()) {
+                    assert_keep_running_corridor(t, r);
+                }
+            }
+            _ => {}
+        }
+    }
+
     // Run the scheduler across 1..=4 cores. If expected is Some(v), all must match
     // v.
     for cores in 1..=4 {
@@ -115,5 +148,7 @@ fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
         if let Some(v) = expected {
             assert_eq!(report.success, v);
         }
+
+        assert_keep_running_corridor(&plan, &report.plan);
     }
 });
