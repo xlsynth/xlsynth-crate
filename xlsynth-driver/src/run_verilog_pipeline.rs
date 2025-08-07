@@ -278,6 +278,10 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         .get_one::<String>("reset_active_low")
         .map(|s| s == "true")
         .unwrap_or(false);
+    let clk_signal_name = matches
+        .get_one::<String>("clk")
+        .map(String::as_str)
+        .unwrap_or("clk");
     let latency_opt = matches.get_one::<String>("latency");
     let waves_path = matches.get_one::<String>("waves");
 
@@ -300,13 +304,16 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
         0
     };
 
-    // Require an explicit clock port named `clk`.
+    // Require an explicit clock port (default name `clk`, overridable via --clk).
     if ports
         .iter()
-        .find(|p| p.name == "clk" && p.is_input)
+        .find(|p| p.name == clk_signal_name && p.is_input)
         .is_none()
     {
-        eprintln!("run-verilog-pipeline: top module must have an input port named `clk`");
+        eprintln!(
+            "run-verilog-pipeline: top module must have an input port named `{}` (override with --clk)",
+            clk_signal_name
+        );
         std::process::exit(1);
     }
 
@@ -317,7 +324,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             if !p.is_input {
                 return false;
             }
-            if p.name == "clk" {
+            if p.name == clk_signal_name {
                 return false;
             }
             if let Some(s) = input_valid_signal {
@@ -503,7 +510,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     }
 
     // Instantiate DUT.
-    tb_src.push_str(&format!("  {} dut(.clk(clk)", module_name));
+    tb_src.push_str(&format!("  {} dut(.{}(clk)", module_name, clk_signal_name));
     if let Some(reset) = reset_signal {
         tb_src.push_str(&format!(", .{}({})", reset, reset));
     }
