@@ -24,11 +24,14 @@ pub struct FuzzPlanNode {
     pub kind: FuzzNodeKind,
     pub children: Vec<FuzzPlanNode>,
     pub fake: Option<FuzzFakeTaskCfg>,
+    pub keep_running_till_finish: bool,
 }
 
 impl FuzzPlanNode {
     fn clamp(mut self, max_nodes: &mut usize, max_depth: usize) -> Option<Self> {
-        if *max_nodes == 0 { return None; }
+        if *max_nodes == 0 {
+            return None;
+        }
         *max_nodes -= 1;
         if max_depth == 0 {
             // Force to task
@@ -36,14 +39,18 @@ impl FuzzPlanNode {
             self.children.clear();
         }
         // Limit fanout
-        if self.children.len() > 4 { self.children.truncate(4); }
+        if self.children.len() > 4 {
+            self.children.truncate(4);
+        }
         // Recurse with depth budget
         let mut new_children = Vec::new();
         for c in self.children.into_iter() {
             if let Some(kid) = c.clamp(max_nodes, max_depth.saturating_sub(1)) {
                 new_children.push(kid);
             }
-            if new_children.len() >= 4 { break; }
+            if new_children.len() >= 4 {
+                break;
+            }
         }
         self.children = new_children;
         Some(self)
@@ -72,16 +79,24 @@ pub fn build_plan_from_fuzz(root: FuzzPlanNode) -> Option<ProverPlan> {
             FuzzNodeKind::GroupAll | FuzzNodeKind::GroupAny | FuzzNodeKind::GroupFirst => {
                 let mut tasks = Vec::new();
                 for c in &n.children {
-                    if let Some(p) = to_plan(c) { tasks.push(p); }
+                    if let Some(p) = to_plan(c) {
+                        tasks.push(p);
+                    }
                 }
-                if tasks.is_empty() { return None; }
+                if tasks.is_empty() {
+                    return None;
+                }
                 let kind = match n.kind {
                     FuzzNodeKind::GroupAll => GroupKind::All,
                     FuzzNodeKind::GroupAny => GroupKind::Any,
                     FuzzNodeKind::GroupFirst => GroupKind::First,
                     _ => unreachable!(),
                 };
-                Some(ProverPlan::Group { kind, tasks })
+                Some(ProverPlan::Group {
+                    kind,
+                    tasks,
+                    keep_running_till_finish: n.keep_running_till_finish,
+                })
             }
         }
     }

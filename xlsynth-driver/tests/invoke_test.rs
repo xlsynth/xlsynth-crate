@@ -5133,6 +5133,155 @@ fn test_prover_any_mixed_succeeds() {
 }
 
 #[test]
+fn test_prover_any_keep_running_mixed_children_finish() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    // Prepare IR texts with explicit top my_main.
+    let lhs_equiv = "package add_then_sub\nfn my_main(x: bits[32]) -> bits[32] {\n    add.2: bits[32] = add(x, x)\n    ret sub.3: bits[32] = sub(add.2, x)\n}";
+    let rhs_equiv = "package identity\nfn my_main(x: bits[32]) -> bits[32] {\n    ret identity.2: bits[32] = identity(x)\n}";
+    let lhs_ne = "package add_then_sub\nfn my_main(x: bits[32]) -> bits[32] {\n    umul.2: bits[32] = umul(x, x)\n    ret udiv.3: bits[32] = udiv(umul.2, x)\n}";
+
+    // Files: one success pair, one failure pair.
+    let lhs1 = dir.join("lhs1.ir");
+    let rhs1 = dir.join("rhs1.ir");
+    let lhs2 = dir.join("lhs2.ir");
+    let rhs2 = dir.join("rhs2.ir");
+    std::fs::write(&lhs1, lhs_equiv).unwrap();
+    std::fs::write(&rhs1, rhs_equiv).unwrap();
+    std::fs::write(&lhs2, lhs_ne).unwrap();
+    std::fs::write(&rhs2, rhs_equiv).unwrap();
+
+    let toolchain_toml = dir.join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    // Any with keep_running_till_finish=true: expect overall success, and both
+    // children completed (no Canceled).
+    let plan = format!(
+        r#"{{
+  "kind": "any",
+  "keep_running_till_finish": true,
+  "tasks": [
+    {{ "kind": "ir-equiv", "lhs_ir_file": "{}", "rhs_ir_file": "{}", "top": "my_main", "solver": "toolchain" }},
+    {{ "kind": "ir-equiv", "lhs_ir_file": "{}", "rhs_ir_file": "{}", "top": "my_main", "solver": "toolchain" }}
+  ]
+}}"#,
+        lhs1.display(),
+        rhs1.display(),
+        lhs2.display(),
+        rhs2.display()
+    );
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_any_keep_running.json");
+    let output = Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("2")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "prover any(keep_running, mixed) should succeed; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    assert_eq!(v["success"].as_bool(), Some(true));
+    // Verify both children finished with concrete outcomes, not Canceled.
+    let tasks = &v["plan"]["tasks"];
+    assert!(tasks.is_array());
+    let t0 = &tasks[0];
+    let t1 = &tasks[1];
+    assert_eq!(t0["outcome"].as_str(), Some("Success"));
+    assert_eq!(t1["outcome"].as_str(), Some("Failed"));
+}
+
+#[test]
+fn test_prover_first_keep_running_both_nonequiv_finish() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    let lhs_ne = "package add_then_sub\nfn my_main(x: bits[32]) -> bits[32] {\n    umul.2: bits[32] = umul(x, x)\n    ret udiv.3: bits[32] = udiv(umul.2, x)\n}";
+    let rhs_equiv = "package identity\nfn my_main(x: bits[32]) -> bits[32] {\n    ret identity.2: bits[32] = identity(x)\n}";
+    let lhs1 = dir.join("lhs1.ir");
+    let rhs1 = dir.join("rhs1.ir");
+    let lhs2 = dir.join("lhs2.ir");
+    let rhs2 = dir.join("rhs2.ir");
+    for (p, s) in [
+        (&lhs1, lhs_ne),
+        (&rhs1, rhs_equiv),
+        (&lhs2, lhs_ne),
+        (&rhs2, rhs_equiv),
+    ] {
+        std::fs::write(p, s).unwrap();
+    }
+
+    let toolchain_toml = dir.join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    let plan = format!(
+        r#"{{
+  "kind": "first",
+  "keep_running_till_finish": true,
+  "tasks": [
+    {{ "kind": "ir-equiv", "lhs_ir_file": "{}", "rhs_ir_file": "{}", "top": "my_main", "solver": "toolchain" }},
+    {{ "kind": "ir-equiv", "lhs_ir_file": "{}", "rhs_ir_file": "{}", "top": "my_main", "solver": "toolchain" }}
+  ]
+}}"#,
+        lhs1.display(),
+        rhs1.display(),
+        lhs2.display(),
+        rhs2.display()
+    );
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_first_keep_running.json");
+    let output = Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("2")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "prover first(keep_running, both nonequiv) should fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    assert_eq!(v["success"].as_bool(), Some(false));
+    let tasks = &v["plan"]["tasks"];
+    assert!(tasks.is_array());
+    let t0 = &tasks[0];
+    let t1 = &tasks[1];
+    assert_eq!(t0["outcome"].as_str(), Some("Failed"));
+    assert_eq!(t1["outcome"].as_str(), Some("Failed"));
+}
+
+#[test]
 fn test_prover_nested_all_any_succeeds() {
     let _ = env_logger::builder().is_test(true).try_init();
     let temp_dir = tempfile::tempdir().unwrap();
