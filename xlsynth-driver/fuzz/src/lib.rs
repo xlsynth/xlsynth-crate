@@ -96,6 +96,7 @@ pub fn build_plan_from_fuzz(root: FuzzPlanNode) -> ProverPlan {
                 ProverPlan::Task {
                     task: ProverTask::Fake { config: cfg },
                     timeout_ms,
+                    task_id: None,
                 }
             }
             FuzzNodeKind::GroupAll | FuzzNodeKind::GroupAny | FuzzNodeKind::GroupFirst => {
