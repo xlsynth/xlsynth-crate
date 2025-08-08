@@ -12,11 +12,11 @@ pub enum FuzzNodeKind {
 
 #[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzFakeTaskCfg {
-    pub min_delay_ms: u32,
-    pub max_delay_ms: u32,
+    pub delay_ms: u32,
     pub success: bool,
     pub stdout_len: u8,
     pub stderr_len: u8,
+    pub timeout_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -28,7 +28,7 @@ pub struct FuzzPlanNode {
 }
 
 impl FuzzPlanNode {
-    fn clamp(mut self, max_nodes: &mut usize, max_depth: usize) -> Option<Self> {
+    pub fn clamp(mut self, max_nodes: &mut usize, max_depth: usize) -> Option<Self> {
         if *max_nodes == 0 {
             return None;
         }
@@ -53,50 +53,73 @@ impl FuzzPlanNode {
             }
         }
         self.children = new_children;
-        Some(self)
+        match self.kind {
+            FuzzNodeKind::Task => {
+                if self.fake.is_some() {
+                    Some(self)
+                } else {
+                    None
+                }
+            }
+            FuzzNodeKind::GroupAll | FuzzNodeKind::GroupAny | FuzzNodeKind::GroupFirst => {
+                if self.children.is_empty() {
+                    None
+                } else {
+                    Some(self)
+                }
+            }
+        }
     }
 }
 
-pub fn build_plan_from_fuzz(root: FuzzPlanNode) -> Option<ProverPlan> {
-    let mut budget = 64usize;
-    let root = root.clamp(&mut budget, 5)?;
-    fn to_plan(n: &FuzzPlanNode) -> Option<ProverPlan> {
+pub fn build_plan_from_fuzz(root: FuzzPlanNode) -> ProverPlan {
+    fn to_plan(n: &FuzzPlanNode) -> ProverPlan {
         match n.kind {
             FuzzNodeKind::Task => {
-                // Build a fake task; default values if missing.
-                let f = n.fake.as_ref()?;
+                // Assume normalized: Task must have a fake config.
+                let f = n.fake.as_ref().expect(
+                    "build_plan_from_fuzz: Task node missing fake config after normalization",
+                );
                 let cfg = xlsynth_driver::prover_config::FakeTaskConfig {
-                    min_delay_ms: (f.min_delay_ms % 20).min(f.max_delay_ms.max(1)),
-                    max_delay_ms: (f.max_delay_ms % 40).max(1),
+                    // If a timeout is present, make the task indefinite so it deterministically
+                    // times out. Otherwise, use a bounded small delay so fuzz runs complete.
+                    delay_ms: if f.timeout_ms.is_some() {
+                        None
+                    } else {
+                        Some((f.delay_ms % 120).max(1))
+                    },
                     success: f.success,
                     stdout_len: f.stdout_len as u16,
                     stderr_len: f.stderr_len as u16,
                 };
-                Some(ProverPlan::Task {
+                let timeout_ms = f.timeout_ms.map(|t| (t % 120) as u64); // keep small
+                ProverPlan::Task {
                     task: ProverTask::Fake { config: cfg },
-                })
+                    timeout_ms,
+                }
             }
             FuzzNodeKind::GroupAll | FuzzNodeKind::GroupAny | FuzzNodeKind::GroupFirst => {
                 let mut tasks = Vec::new();
                 for c in &n.children {
-                    if let Some(p) = to_plan(c) {
-                        tasks.push(p);
-                    }
+                    // Assume normalized: children should always convert.
+                    let p = to_plan(c);
+                    tasks.push(p);
                 }
-                if tasks.is_empty() {
-                    return None;
-                }
+                assert!(
+                    !tasks.is_empty(),
+                    "build_plan_from_fuzz: Group has zero children after normalization"
+                );
                 let kind = match n.kind {
                     FuzzNodeKind::GroupAll => GroupKind::All,
                     FuzzNodeKind::GroupAny => GroupKind::Any,
                     FuzzNodeKind::GroupFirst => GroupKind::First,
                     _ => unreachable!(),
                 };
-                Some(ProverPlan::Group {
+                ProverPlan::Group {
                     kind,
                     tasks,
                     keep_running_till_finish: n.keep_running_till_finish,
-                })
+                }
             }
         }
     }

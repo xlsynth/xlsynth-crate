@@ -28,27 +28,37 @@
 use libfuzzer_sys::fuzz_target;
 
 use xlsynth_driver::prover::{run_prover_plan, ProverReportNode, TaskOutcome};
-use xlsynth_driver::prover_config::{GroupKind, ProverPlan, ProverTask};
+use xlsynth_driver::prover_config::ProverPlan;
+use xlsynth_driver_fuzz::FuzzPlanNode;
 
 #[derive(Clone, Copy, Debug)]
 struct Eval {
     outcome: Option<bool>,
 }
 
-fn eval(plan: &ProverPlan) -> Eval {
-    match plan {
-        ProverPlan::Task { task } => match task {
-            ProverTask::Fake { config } => Eval {
-                outcome: Some(config.success),
-            },
-            _ => panic!(
-                "non-Fake task encountered in fuzz plan; builder should only emit Fake tasks"
-            ),
-        },
-        ProverPlan::Group { kind, tasks, .. } => {
-            let kids: Vec<Eval> = tasks.iter().map(eval).collect();
-            match kind {
-                GroupKind::All => {
+fn eval_fuzz(node: &FuzzPlanNode) -> Eval {
+    match node.kind {
+        xlsynth_driver_fuzz::FuzzNodeKind::Task => {
+            if let Some(f) = &node.fake {
+                // Builder makes tasks indefinite when a timeout is present, so they must
+                // timeout. Otherwise, tasks complete and return the success
+                // flag.
+                match f.timeout_ms {
+                    Some(_) => Eval { outcome: None },
+                    None => Eval {
+                        outcome: Some(f.success),
+                    },
+                }
+            } else {
+                Eval { outcome: None }
+            }
+        }
+        xlsynth_driver_fuzz::FuzzNodeKind::GroupAll
+        | xlsynth_driver_fuzz::FuzzNodeKind::GroupAny
+        | xlsynth_driver_fuzz::FuzzNodeKind::GroupFirst => {
+            let kids: Vec<Eval> = node.children.iter().map(eval_fuzz).collect();
+            match node.kind {
+                xlsynth_driver_fuzz::FuzzNodeKind::GroupAll => {
                     if kids.iter().any(|k| k.outcome == Some(false)) {
                         Eval {
                             outcome: Some(false),
@@ -61,7 +71,7 @@ fn eval(plan: &ProverPlan) -> Eval {
                         Eval { outcome: None }
                     }
                 }
-                GroupKind::Any => {
+                xlsynth_driver_fuzz::FuzzNodeKind::GroupAny => {
                     if kids.iter().any(|k| k.outcome == Some(true)) {
                         Eval {
                             outcome: Some(true),
@@ -74,9 +84,7 @@ fn eval(plan: &ProverPlan) -> Eval {
                         Eval { outcome: None }
                     }
                 }
-                GroupKind::First => {
-                    // Do not assume earliest completion; only determinate if all children share the
-                    // same outcome.
+                xlsynth_driver_fuzz::FuzzNodeKind::GroupFirst => {
                     if kids.iter().any(|k| k.outcome.is_none()) {
                         Eval { outcome: None }
                     } else if kids.iter().all(|k| k.outcome == Some(true)) {
@@ -91,26 +99,29 @@ fn eval(plan: &ProverPlan) -> Eval {
                         Eval { outcome: None }
                     }
                 }
+                _ => unreachable!(),
             }
         }
     }
 }
 
 fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
-    // Build a ProverPlan from fuzz input with bounds.
-    let Some(plan) = xlsynth_driver_fuzz::build_plan_from_fuzz(root) else {
+    let mut budget = 64usize;
+    let Some(root) = root.clamp(&mut budget, 5) else {
         return;
     };
+    // Build a ProverPlan from normalized fuzz input (clamp already normalizes).
+    let plan = xlsynth_driver_fuzz::build_plan_from_fuzz(root.clone());
 
-    // Compute expected outcome with First support; None means both possible.
-    let expected = eval(&plan).outcome;
+    // Compute expected outcome on the normalized tree; None means both possible.
+    let expected = eval_fuzz(&root).outcome;
 
     // Helper: verify the tasks that must be kept running are not canceled.
     fn assert_keep_running_corridor(plan: &ProverPlan, report: &ProverReportNode) {
         match (plan, report) {
             (ProverPlan::Task { .. }, ProverReportNode::Task { outcome, .. }) => match outcome {
-                Some(TaskOutcome::Success) | Some(TaskOutcome::Failed) => {}
-                _ => panic!("leaf in keep-running corridor did not finish with Success/Failed"),
+                Some(TaskOutcome::Normal { .. }) | Some(TaskOutcome::Indefinite { .. }) => {}
+                _ => panic!("leaf in keep-running corridor has no outcome"),
             },
             (
                 ProverPlan::Group {
