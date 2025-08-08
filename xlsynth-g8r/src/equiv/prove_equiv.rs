@@ -539,7 +539,6 @@ pub fn ir_to_smt<'a, S: Solver>(
                         bitvec: BitVec::ZeroWidth,
                     }
                 } else {
-                    // assert!(width > 0, "TupleIndex: width must be > 0");
                     let high = (slice.limit - 1) as i32;
                     let low = slice.start as i32;
                     IrTypedBitVec {
@@ -903,7 +902,25 @@ pub fn ir_to_smt<'a, S: Solver>(
                 // Kind of hacky as this is just determining whether it is implicit token
                 // calling convention based on the name of the function. But
                 // this seems to be the only way to determine it from the IR.
-                let has_itok = callee.name.starts_with("__itok");
+                let has_itok_in_name = callee.name.starts_with("__itok");
+                let has_itok_calling_convention_in_param = callee.params.len() >= 2
+                    && matches!(callee.params[0].ty, ir::Type::Token)
+                    && matches!(callee.params[1].ty, ir::Type::Bits(1));
+                let has_itok_calling_convention_in_ret = match &callee.ret_ty {
+                    ir::Type::Tuple(types) => {
+                        types.len() >= 2 && matches!(*types[0], ir::Type::Token)
+                    }
+                    _ => false,
+                };
+                let has_itok = has_itok_in_name
+                    || has_itok_calling_convention_in_param
+                    || has_itok_calling_convention_in_ret;
+                if has_itok_in_name && !has_itok {
+                    log::warn!(
+                        "Warning: function {} has __itok in name but does not conform to implicit token calling convention",
+                        callee.name
+                    );
+                }
                 let no_itok_name = if has_itok {
                     callee.name[6..].to_string()
                 } else {
