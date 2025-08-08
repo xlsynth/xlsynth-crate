@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from typing import Tuple
 import hashlib
 import shutil
 import tempfile
@@ -69,7 +70,7 @@ def get_latest_release(max_attempts):
     return latest_version
 
 
-def parse_semver_tag(tag: str) -> tuple[int, int, int]:
+def parse_semver_tag(tag: str) -> Tuple[int, int, int]:
     """
     Parses a version tag like 'v0.0.219' into a tuple (0, 0, 219).
     """
