@@ -7,6 +7,7 @@ import tempfile
 import requests
 import time
 from optparse import OptionParser
+import gzip
 
 GITHUB_API_URL = "https://api.github.com/repos/xlsynth/xlsynth/releases"
 # TODO(cdleary): add releases that cover the intersections of architecture and OS
@@ -141,6 +142,14 @@ def high_integrity_download(
         if is_binary:
             os.chmod(target_path, 0o755)
 
+        # If the downloaded artifact is a .gz file, decompress it next to the .gz
+        if filename.endswith(".gz"):
+            decompressed_path = target_path[:-3]
+            with gzip.open(target_path, "rb") as gz_in, open(
+                decompressed_path, "wb"
+            ) as f_out:
+                shutil.copyfileobj(gz_in, f_out)
+
         elapsed_time = time.time() - start_time
         file_size = os.path.getsize(target_path) / (1024 * 1024)  # Size in MiB
         print(
@@ -211,7 +220,10 @@ def main():
     if options.dso:
         # lib suffix (.so, .dylib, etc.) depends on the platform
         artifacts.append(
-            (f"libxls-{options.platform}{SUPPORTED_PLATFORMS[options.platform]}", False)
+            (
+                f"libxls-{options.platform}{SUPPORTED_PLATFORMS[options.platform]}.gz",
+                False,
+            )
         )
 
     os.makedirs(options.output_dir, exist_ok=True)
