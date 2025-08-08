@@ -15,10 +15,11 @@
 //!
 //! Implementation detail: strictly uses processes; no threads. Unix-only.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::prover_config::{GroupKind, ProverPlan, ProverTask, ToDriverCommand};
 use crate::report_cli_error::report_cli_error_and_exit;
@@ -33,23 +34,79 @@ use std::process::Stdio;
 use serde::Serialize;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+pub enum IndefiniteReason {
+    GroupCriteriaAlreadyMet,
+    IndefiniteChildren,
+    Timeout,
+    Cleanup,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TaskOutcome {
-    Success,
-    Failed,
-    Canceled,
+    Normal { success: bool },
+    Indefinite { reason: IndefiniteReason },
 }
 
 impl TaskOutcome {
-    fn is_success(self) -> bool {
-        matches!(self, TaskOutcome::Success)
+    fn normal(success: bool) -> Self {
+        TaskOutcome::Normal { success }
     }
 
-    fn finish(success: bool) -> Self {
-        if success {
-            TaskOutcome::Success
-        } else {
-            TaskOutcome::Failed
+    fn indefinite(reason: IndefiniteReason) -> Self {
+        TaskOutcome::Indefinite { reason }
+    }
+
+    fn success() -> Self {
+        TaskOutcome::normal(true)
+    }
+
+    fn failed() -> Self {
+        TaskOutcome::normal(false)
+    }
+
+    #[allow(dead_code)]
+    fn timeout() -> Self {
+        TaskOutcome::indefinite(IndefiniteReason::Timeout)
+    }
+
+    fn is_success(&self) -> bool {
+        match self {
+            TaskOutcome::Normal { success } => *success,
+            _ => false,
         }
+    }
+
+    fn is_failed(&self) -> bool {
+        match self {
+            TaskOutcome::Normal { success } => !*success,
+            _ => false,
+        }
+    }
+
+    fn is_indefinite(&self) -> bool {
+        match self {
+            TaskOutcome::Indefinite { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+impl serde::Serialize for TaskOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let label: &str = match self {
+            TaskOutcome::Normal { success: true } => "Success",
+            TaskOutcome::Normal { success: false } => "Failed",
+            TaskOutcome::Indefinite { reason } => match reason {
+                IndefiniteReason::GroupCriteriaAlreadyMet => "GroupCriteriaAlreadyMet",
+                IndefiniteReason::IndefiniteChildren => "IndefiniteChildren",
+                IndefiniteReason::Timeout => "Timeout",
+                IndefiniteReason::Cleanup => "Cleanup",
+            },
+        };
+        serializer.serialize_str(label)
     }
 }
 
@@ -132,6 +189,7 @@ pub struct Scheduler {
     cmdlines: HashMap<NodeId, String>,
     // Run-scoped cancellation flag, toggled by CLI signal handlers or callers.
     cancel_flag: Arc<AtomicBool>,
+    deadlines: BTreeMap<Instant, Vec<NodeId>>,
 }
 
 #[derive(Debug)]
@@ -197,6 +255,7 @@ impl Scheduler {
     /// - `running`, `pid_to_node`, and `json_files` are empty.
     /// - `root` indexes a node inside `nodes`.
     pub fn new(plan: ProverPlan, max_procs: usize, cancel_flag: Arc<AtomicBool>) -> Scheduler {
+        log::info!("prover: new scheduler");
         let mut builder = PlanBuilder::default();
         let root = builder.build_plan(None, plan);
         let nodes = builder.nodes;
@@ -221,6 +280,7 @@ impl Scheduler {
             outputs: HashMap::new(),
             cmdlines: HashMap::new(),
             cancel_flag,
+            deadlines: BTreeMap::new(),
         };
         // Precompute planned cmdlines for all tasks so short-circuited tasks still
         // report one.
@@ -262,12 +322,13 @@ impl Scheduler {
                 return Ok(false);
             }
 
+            // Check for timeouts.
+            self.check_and_handle_timeouts()?;
+
             // If the root is already resolved, finish immediately.
-            if let Some(outcome) = self.node_outcome(self.root) {
-                let done = outcome.is_success();
-                info!("prover: plan resolved: success={}", done);
+            if let Some(root_outcome) = self.node_outcome(self.root) {
                 self.cleanup_tasks()?;
-                return Ok(done);
+                return Ok(root_outcome.is_success());
             }
 
             // Fill available slots next.
@@ -278,8 +339,7 @@ impl Scheduler {
             if self.running.is_empty() {
                 // No running processes; if root not resolved and no runnable left, consider
                 // failure.
-                info!("prover: no running tasks remain and root unresolved; failing");
-                return Ok(false);
+                panic!("prover: no running tasks remain and root unresolved; should not happen");
             }
 
             // Block until any child process changes state; handle one completion at a time.
@@ -287,6 +347,23 @@ impl Scheduler {
                 return Err(io::Error::new(io::ErrorKind::Other, "waitpid failed"));
             }
         }
+    }
+
+    fn check_and_handle_timeouts(&mut self) -> io::Result<()> {
+        while let Some(entry) = self.deadlines.first_entry() {
+            let now = Instant::now();
+            if now < *entry.key() {
+                break;
+            }
+            let tids = entry.get().iter().copied().collect::<Vec<_>>();
+            entry.remove();
+            for tid in tids {
+                log::info!("timeout task={:?}", tid);
+                self.cancel_subtree(tid, IndefiniteReason::Timeout)?;
+                self.on_child_plan_finished(tid)?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns true iff the node is a `Task` in `NotStarted`.
@@ -313,13 +390,13 @@ impl Scheduler {
     // Removed is_task_success and is_task_failed; prefer using
     // node_outcome(...).is_success()
 
-    fn is_task_canceled(&self, task_id: NodeId) -> bool {
+    fn is_task_indefinite(&self, task_id: NodeId) -> bool {
         let node = &self.nodes[task_id.0];
         match &node.inner {
             NodeInner::Task(t) => matches!(
                 t.state,
                 TaskState::Completed {
-                    outcome: TaskOutcome::Canceled,
+                    outcome: TaskOutcome::Indefinite { .. },
                 }
             ),
             _ => false,
@@ -365,58 +442,62 @@ impl Scheduler {
     fn spawn_task(&mut self, task_id: NodeId) -> io::Result<()> {
         let node = &mut self.nodes[task_id.0];
         // Build command and tempfiles; only insert into maps after successful spawn.
-        let (mut cmd, stdout_tmp, stderr_tmp, json_tmp, json_path, cmdline) = match &mut node.inner
-        {
-            NodeInner::Task(t) => match t.state {
-                TaskState::NotStarted => {
-                    let mut cmd = t.task.to_command();
-                    // Create a temp path for JSON results and pass it to the child.
-                    let json_tmp = tempfile::Builder::new().suffix(".json").tempfile()?;
-                    let json_path = json_tmp.path().to_path_buf();
-                    cmd.arg("--output_json").arg(&json_path);
-                    let json_path = json_path.display().to_string();
+        let (mut cmd, stdout_tmp, stderr_tmp, json_tmp, json_path, timeout_ms, cmdline) =
+            match &mut node.inner {
+                NodeInner::Task(t) => match t.state {
+                    TaskState::NotStarted => {
+                        let mut cmd = t.task.to_command();
+                        // Create a temp path for JSON results and pass it to the child.
+                        let json_tmp = tempfile::Builder::new().suffix(".json").tempfile()?;
+                        let json_path = json_tmp.path().to_path_buf();
+                        cmd.arg("--output_json").arg(&json_path);
+                        let json_path = json_path.display().to_string();
 
-                    // Create temp files to capture stdout/stderr; pass fds to child.
-                    let stdout_tmp = tempfile::Builder::new().suffix(".stdout").tempfile()?;
-                    let stderr_tmp = tempfile::Builder::new().suffix(".stderr").tempfile()?;
-                    let stdout_file = stdout_tmp.as_file().try_clone()?;
-                    let stderr_file = stderr_tmp.as_file().try_clone()?;
-                    cmd.stdout(Stdio::from(stdout_file));
-                    cmd.stderr(Stdio::from(stderr_file));
+                        // Create temp files to capture stdout/stderr; pass fds to child.
+                        let stdout_tmp = tempfile::Builder::new().suffix(".stdout").tempfile()?;
+                        let stderr_tmp = tempfile::Builder::new().suffix(".stderr").tempfile()?;
+                        let stdout_file = stdout_tmp.as_file().try_clone()?;
+                        let stderr_file = stderr_tmp.as_file().try_clone()?;
+                        cmd.stdout(Stdio::from(stdout_file));
+                        cmd.stderr(Stdio::from(stderr_file));
 
-                    // Build a human-readable cmdline snapshot.
-                    let program = cmd.get_program().to_string_lossy().into_owned();
-                    let args = cmd
-                        .get_args()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .collect::<Vec<_>>();
-                    let cmdline = if args.is_empty() {
-                        program.clone()
-                    } else {
-                        format!("{} {}", program, args.join(" "))
-                    };
+                        // Build a human-readable cmdline snapshot.
+                        let program = cmd.get_program().to_string_lossy().into_owned();
+                        let args = cmd
+                            .get_args()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>();
+                        let cmdline = if args.is_empty() {
+                            program.clone()
+                        } else {
+                            format!("{} {}", program, args.join(" "))
+                        };
 
-                    // Ensure child is leader of its own process group so we can kill the
-                    // subtree.
-                    unsafe {
-                        cmd.pre_exec(|| {
-                            let rc = libc::setpgid(0, 0);
-                            if rc != 0 {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::Other,
-                                    "Failed to setpgid",
-                                ));
-                            }
-                            Ok(())
-                        })
-                    };
+                        // Ensure child is leader of its own process group so we can kill the
+                        // subtree.
+                        unsafe {
+                            cmd.pre_exec(|| {
+                                let rc = libc::setpgid(0, 0);
+                                if rc != 0 {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::Other,
+                                        "Failed to setpgid",
+                                    ));
+                                }
+                                Ok(())
+                            })
+                        };
 
-                    (cmd, stdout_tmp, stderr_tmp, json_tmp, json_path, cmdline)
-                }
+                        let timeout_ms = t.task.timeout_ms();
+
+                        (
+                            cmd, stdout_tmp, stderr_tmp, json_tmp, json_path, timeout_ms, cmdline,
+                        )
+                    }
+                    _ => return Ok(()),
+                },
                 _ => return Ok(()),
-            },
-            _ => return Ok(()),
-        };
+            };
 
         let child = cmd.spawn()?;
         let pid_i32 = child.id() as i32;
@@ -425,6 +506,10 @@ impl Scheduler {
         self.outputs
             .insert(task_id, (stdout_tmp, stderr_tmp, cmdline.clone()));
         self.json_files.insert(task_id, json_tmp);
+        if let Some(timeout_ms) = timeout_ms {
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            self.deadlines.entry(deadline).or_default().push(task_id);
+        }
 
         if let NodeInner::Task(t) = &mut self.nodes[task_id.0].inner {
             t.state = TaskState::Running { pid: pid_i32 };
@@ -489,7 +574,14 @@ impl Scheduler {
     /// Note: For canceled tasks, result does not propagate.
     fn wait_for_one_child_and_handle(&mut self) -> io::Result<()> {
         let mut status: libc::c_int = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status as *mut libc::c_int, 0) };
+        let pid = unsafe { libc::waitpid(-1, &mut status as *mut libc::c_int, libc::WNOHANG) };
+        if pid == 0 {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 100 * 1000000,
+            };
+            unsafe { libc::nanosleep(&ts, &mut ts) };
+        }
         if pid < 0 {
             let err = io::Error::last_os_error();
             if let Some(raw) = err.raw_os_error() {
@@ -512,11 +604,11 @@ impl Scheduler {
             None
         };
         if let Some(tid) = self.pid_to_node.remove(&pid) {
-            // If the task was already canceled, do not convert it to Completed or bubble
+            // If the task was already indefinite, do not convert it to normal or bubble
             // up.
-            let was_canceled = self.is_task_canceled(tid);
-            if was_canceled {
-                debug!("prover: reaped canceled task pid={}", pid);
+            let was_indefinite = self.is_task_indefinite(tid);
+            if was_indefinite {
+                debug!("prover: reaped indefinite task pid={}", pid);
                 return Ok(());
             }
             // If terminated by signal, log it with context
@@ -546,7 +638,7 @@ impl Scheduler {
 
             if let NodeInner::Task(t) = &mut self.nodes[tid.0].inner {
                 t.state = TaskState::Completed {
-                    outcome: TaskOutcome::finish(success),
+                    outcome: TaskOutcome::normal(success),
                 };
                 t.completed_stdout = captured_stdout;
                 t.completed_stderr = captured_stderr;
@@ -556,9 +648,11 @@ impl Scheduler {
                     pid,
                     success
                 );
+            } else {
+                panic!("not a task node");
             }
             self.remove_task_bookkeeping(tid);
-            self.on_child_plan_finished(tid, success)?;
+            self.on_child_plan_finished(tid)?;
         }
         Ok(())
     }
@@ -584,29 +678,12 @@ impl Scheduler {
 
     /// Bubbles child completion into ancestor groups, possibly resolving them,
     /// canceling sibling subtrees, and pruning queues.
-    fn on_child_plan_finished(&mut self, node_id: NodeId, success: bool) -> io::Result<()> {
+    fn on_child_plan_finished(&mut self, node_id: NodeId) -> io::Result<()> {
         // Climb up towards root, resolving groups as needed.
         let mut cur_id = node_id;
         let mut parent = self.nodes[cur_id.0].parent;
-        let mut cur_success = success;
         while let Some(pid) = parent {
-            self.resolve_group_child(
-                pid,
-                cur_id,
-                if cur_success {
-                    TaskOutcome::Success
-                } else {
-                    TaskOutcome::Failed
-                },
-            )?;
-            match self.node_outcome(pid) {
-                None => break,
-                Some(TaskOutcome::Success) => cur_success = true,
-                Some(TaskOutcome::Failed) => cur_success = false,
-                Some(TaskOutcome::Canceled) => {
-                    panic!("Should not happen for now.");
-                }
-            }
+            self.resolve_group_child(pid, cur_id)?;
             cur_id = pid;
             parent = self.nodes[pid.0].parent;
         }
@@ -630,81 +707,135 @@ impl Scheduler {
     /// Precondition: `child_id` is a direct child of `gid` whose result is
     /// known. Behavior: Inspects current child outcomes, possibly resolves
     /// the group, cancels siblings according to `kind`, and prunes queues.
-    fn resolve_group_child(
-        &mut self,
-        gid: NodeId,
-        child_id: NodeId,
-        child_outcome: TaskOutcome,
-    ) -> io::Result<()> {
-        let child_success = child_outcome.is_success();
-        let (kind, idx, all_done, any_success, all_success, keep_running) = {
+    fn resolve_group_child(&mut self, gid: NodeId, child_id: NodeId) -> io::Result<()> {
+        let (kind, idx, num_children, finished, success, failed, indefinite, keep_running) = {
             let g = self.get_group_node(gid);
             if g.outcome.is_some() {
                 return Ok(());
             }
+            let num_children = g.children.len();
             let idx = g
                 .children
                 .iter()
                 .position(|&id| id == child_id)
                 .expect("child must be in group's children");
-            let mut all_done = true;
-            let mut any_success = false;
-            let mut all_success = true;
+            let mut finished = 0;
+            let mut success = 0;
+            let mut failed = 0;
+            let mut indefinite = 0;
             for &cid in &g.children {
                 let child_outcomes = self.node_outcome(cid);
                 match child_outcomes {
-                    Some(TaskOutcome::Success) => any_success = true,
-                    Some(TaskOutcome::Failed) => all_success = false,
-                    Some(TaskOutcome::Canceled) => panic!("Should not happen for now."),
-                    None => all_done = false,
+                    Some(TaskOutcome::Normal { success: true }) => {
+                        finished += 1;
+                        success += 1;
+                    }
+                    Some(TaskOutcome::Normal { success: false }) => {
+                        finished += 1;
+                        failed += 1;
+                    }
+                    Some(TaskOutcome::Indefinite { .. }) => {
+                        finished += 1;
+                        indefinite += 1;
+                    }
+                    None => {}
                 }
             }
             (
                 g.kind,
                 idx,
-                all_done,
-                any_success,
-                all_success,
+                num_children,
+                finished,
+                success,
+                failed,
+                indefinite,
                 g.keep_running_till_finish,
             )
         };
+
+        // Only consider the direct child's actual resolved outcome (if any) for early
+        // resolution.
+        let child_outcome = self.node_outcome(child_id);
+
         match kind {
             GroupKind::First => {
                 let g = self.get_group_node_mut(gid);
-                g.first_winner_outcome.get_or_insert(child_outcome);
-                if all_done {
-                    let winner = g.first_winner_outcome.unwrap();
-                    info!(
-                        "prover: group resolved kind=first result={}",
-                        winner.is_success()
-                    );
-                    return self.finalize_group_resolution(gid, winner.is_success(), None);
+                if let Some(co) = child_outcome {
+                    if !co.is_indefinite() {
+                        g.first_winner_outcome.get_or_insert(co);
+                    }
+                }
+                if finished == num_children {
+                    if let Some(winner) = g.first_winner_outcome {
+                        info!("prover: group resolved kind=first outcome={:?}", winner);
+                        return self.finalize_group_resolution(gid, winner, None);
+                    } else {
+                        return self.finalize_group_resolution(
+                            gid,
+                            TaskOutcome::indefinite(IndefiniteReason::IndefiniteChildren),
+                            None,
+                        );
+                    }
                 }
                 if !keep_running {
-                    info!("prover: group resolved kind=first result={}", child_success);
-                    return self.finalize_group_resolution(gid, child_success, Some(idx));
+                    if let Some(co) = child_outcome {
+                        if !co.is_indefinite() {
+                            info!("prover: group resolved kind=first result={:?}", co);
+                            return self.finalize_group_resolution(gid, co, Some(idx));
+                        }
+                    }
                 }
                 return Ok(());
             }
             GroupKind::Any => {
-                if all_done {
-                    info!("prover: group resolved kind=any result={}", any_success);
-                    return self.finalize_group_resolution(gid, any_success, None);
+                if finished == num_children {
+                    let outcome = if success > 0 {
+                        TaskOutcome::success()
+                    } else if indefinite > 0 {
+                        TaskOutcome::indefinite(IndefiniteReason::IndefiniteChildren)
+                    } else {
+                        TaskOutcome::failed()
+                    };
+                    info!("prover: group resolved kind=any result={:?}", outcome);
+                    return self.finalize_group_resolution(gid, outcome, None);
                 }
-                if !keep_running && child_success {
-                    info!("prover: group resolved kind=any result=true");
-                    return self.finalize_group_resolution(gid, true, Some(idx));
+                if !keep_running {
+                    if let Some(co) = child_outcome {
+                        if co.is_success() {
+                            info!("prover: group resolved kind=any result=true");
+                            return self.finalize_group_resolution(
+                                gid,
+                                TaskOutcome::success(),
+                                Some(idx),
+                            );
+                        }
+                    }
                 }
                 Ok(())
             }
             GroupKind::All => {
-                if all_done {
-                    info!("prover: group resolved kind=all result={}", all_success);
-                    return self.finalize_group_resolution(gid, all_success, None);
+                if finished == num_children {
+                    let outcome = if failed > 0 {
+                        TaskOutcome::failed()
+                    } else if indefinite > 0 {
+                        TaskOutcome::indefinite(IndefiniteReason::IndefiniteChildren)
+                    } else {
+                        TaskOutcome::success()
+                    };
+                    info!("prover: group resolved kind=all result={:?}", outcome);
+                    return self.finalize_group_resolution(gid, outcome, None);
                 }
-                if !keep_running && !child_success {
-                    info!("prover: group resolved kind=all result=false");
-                    return self.finalize_group_resolution(gid, false, Some(idx));
+                if !keep_running {
+                    if let Some(co) = child_outcome {
+                        if co.is_failed() {
+                            info!("prover: group resolved kind=all result=false");
+                            return self.finalize_group_resolution(
+                                gid,
+                                TaskOutcome::failed(),
+                                Some(idx),
+                            );
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -714,11 +845,11 @@ impl Scheduler {
     fn finalize_group_resolution(
         &mut self,
         gid: NodeId,
-        resolved: bool,
+        outcome: TaskOutcome,
         cancel_siblings_of: Option<usize>,
     ) -> io::Result<()> {
         if let NodeInner::Group(g) = &mut self.nodes[gid.0].inner {
-            g.outcome = Some(TaskOutcome::finish(resolved));
+            g.outcome = Some(outcome);
         }
         if let Some(idx) = cancel_siblings_of {
             self.cancel_group_siblings(gid, idx)?;
@@ -757,12 +888,12 @@ impl Scheduler {
             );
         }
         for cid in cancel_ids.iter().copied() {
-            self.cancel_subtree(cid)?;
+            self.cancel_subtree(cid, IndefiniteReason::GroupCriteriaAlreadyMet)?;
         }
         Ok(())
     }
 
-    fn set_node_outcome(&mut self, id: NodeId, outcome: TaskOutcome) {
+    fn set_outcome(&mut self, id: NodeId, outcome: TaskOutcome) {
         match &mut self.nodes[id.0].inner {
             NodeInner::Task(t) => t.state = TaskState::Completed { outcome },
             NodeInner::Group(g) => g.outcome = Some(outcome),
@@ -777,14 +908,18 @@ impl Scheduler {
     /// - Completed (Success/Failed) -> no-op bookkeeping.
     /// Groups: mark `canceled`, cancel children, then prune their tasks from
     /// queues.
-    fn cancel_subtree(&mut self, id: NodeId) -> io::Result<()> {
+    fn cancel_subtree(
+        &mut self,
+        id: NodeId,
+        indefinite_reason: IndefiniteReason,
+    ) -> io::Result<()> {
         match &self.nodes[id.0].inner {
             NodeInner::Task(t) => {
                 let prior_state = t.state.clone();
                 if matches!(prior_state, TaskState::Completed { .. }) {
                     return Ok(());
                 }
-                self.set_node_outcome(id, TaskOutcome::Canceled);
+                self.set_outcome(id, TaskOutcome::indefinite(indefinite_reason));
                 match prior_state {
                     TaskState::NotStarted => {
                         debug!("prover: canceled (not-started) task");
@@ -809,9 +944,12 @@ impl Scheduler {
                 let kind = g.kind;
                 let children = g.children.clone();
                 for cid in children {
-                    self.cancel_subtree(cid)?;
+                    self.cancel_subtree(cid, IndefiniteReason::GroupCriteriaAlreadyMet)?;
                 }
-                self.set_node_outcome(id, TaskOutcome::Canceled);
+                self.set_outcome(
+                    id,
+                    TaskOutcome::indefinite(IndefiniteReason::GroupCriteriaAlreadyMet),
+                );
                 // Prune entire group subtree tasks from queues.
                 self.prune_subtree_tasks(id);
                 warn!("prover: canceled group subtree kind={:?} ", kind);
@@ -886,7 +1024,7 @@ impl Scheduler {
         // Prevent any further scheduling if this instance somehow continues.
         self.cancel_flag.store(true, Ordering::Relaxed);
         info!("prover: cleanup starting (best-effort) ");
-        let _ = self.cancel_subtree(self.root);
+        let _ = self.cancel_subtree(self.root, IndefiniteReason::Cleanup);
         while !self.pid_to_node.is_empty() {
             let mut status: libc::c_int = 0;
             let pid = unsafe { libc::waitpid(-1, &mut status as *mut libc::c_int, 0) };
@@ -1013,6 +1151,51 @@ pub fn run_prover_plan(plan: ProverPlan, max_procs: usize) -> io::Result<ProverR
     })
 }
 
+/// Best-effort: write a minimal error JSON if `--output_json` was requested.
+/// Shape:
+/// { "success": false, "error": { "message": <msg>, "exception": <exc>,
+/// "stage": <stage> } }
+fn write_error_json(
+    output_json_path: &Option<String>,
+    message: &str,
+    exception: &str,
+    stage: &str,
+) {
+    if let Some(path) = output_json_path {
+        let obj = serde_json::json!({
+            "success": false,
+            "error": {
+                "message": message,
+                "exception": exception,
+                "stage": stage,
+            }
+        });
+        if let Err(write_err) = std::fs::write(path, obj.to_string()) {
+            warn!(
+                "prover: failed writing output_json error to {}: {}",
+                path, write_err
+            );
+        }
+    }
+}
+
+/// Helper to both emit JSON (when requested) and print CLI error then exit.
+fn fail_and_exit(
+    output_json_path: &Option<String>,
+    stage: &str,
+    message: &str,
+    exception: &str,
+    extra_details: &[(&str, &str)],
+) -> ! {
+    write_error_json(output_json_path, message, exception, stage);
+    // Assemble CLI details
+    let mut details: Vec<(&str, &str)> = Vec::with_capacity(2 + extra_details.len());
+    details.push(("stage", stage));
+    details.push(("exception", exception));
+    details.extend_from_slice(extra_details);
+    report_cli_error_and_exit(message, Some("prover"), details)
+}
+
 /// Implements the `prover` sub-command.
 /// CLI behavior:
 /// - Installs signal handlers that set a global cancel flag.
@@ -1042,11 +1225,12 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
         use std::io::Read;
         let mut buf = String::new();
         if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
-            let err_msg = e.to_string();
-            report_cli_error_and_exit(
+            fail_and_exit(
+                &output_json_path,
+                "read-plan",
                 "Failed to read plan from stdin",
-                Some("prover"),
-                vec![("error", &err_msg)],
+                &e.to_string(),
+                &[],
             );
         }
         buf
@@ -1054,11 +1238,12 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
         match std::fs::read_to_string(plan_path) {
             Ok(s) => s,
             Err(e) => {
-                let err_msg = e.to_string();
-                report_cli_error_and_exit(
+                fail_and_exit(
+                    &output_json_path,
+                    "read-plan",
                     "Failed to read plan JSON file",
-                    Some("prover"),
-                    vec![("path", plan_path), ("error", &err_msg)],
+                    &e.to_string(),
+                    &[("path", plan_path)],
                 );
             }
         }
@@ -1067,11 +1252,12 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
     let plan: ProverPlan = match serde_json::from_str(&plan_json) {
         Ok(p) => p,
         Err(e) => {
-            let err_msg = e.to_string();
-            report_cli_error_and_exit(
+            fail_and_exit(
+                &output_json_path,
+                "parse-plan",
                 "Failed to parse ProverPlan JSON",
-                Some("prover"),
-                vec![("error", &err_msg)],
+                &e.to_string(),
+                &[],
             );
         }
     };
@@ -1129,12 +1315,9 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
             }
         }
         Err(e) => {
-            let err_msg = e.to_string();
-            report_cli_error_and_exit(
-                "prover run failed",
-                Some("prover"),
-                vec![("error", &err_msg)],
-            )
+            let exc = e.to_string();
+            // Best-effort JSON + CLI error with context, then exit.
+            fail_and_exit(&output_json_path, "run", "prover run failed", &exc, &[]);
         }
     }
 }
