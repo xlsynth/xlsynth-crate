@@ -360,7 +360,8 @@ pub enum ProverTask {
     },
 }
 
-impl ProverTask {}
+// No common fields on ProverTask variants; common per-task metadata lives on
+// the ProverPlan::Task node for consolidation.
 
 impl ToDriverCommand for ProverTask {
     fn to_command(&self) -> Command {
@@ -388,8 +389,12 @@ pub enum ProverPlan {
     Task {
         #[serde(flatten)]
         task: ProverTask,
-        #[serde(default)]
+        /// Optional timeout for this task node.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
+        /// Optional user-provided identifier for tracking/reporting.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
     Group {
         kind: GroupKind,
@@ -401,8 +406,6 @@ pub enum ProverPlan {
         keep_running_till_finish: bool,
     },
 }
-
-// Default serde derives with untagged + flatten handle (de)serialization.
 
 #[cfg(test)]
 mod tests {
@@ -696,6 +699,7 @@ mod tests {
                     },
                 },
                 timeout_ms: None,
+                task_id: None,
             }],
             keep_running_till_finish: false,
         };
@@ -705,6 +709,66 @@ mod tests {
         assert_eq!(v["tasks"][0]["kind"], "ir-equiv");
         assert_eq!(v["tasks"][0]["lhs_ir_file"], "lhs.ir");
         assert_eq!(v["tasks"][0]["rhs_ir_file"], "rhs.ir");
+    }
+
+    #[test]
+    fn test_prover_plan_task_with_metadata_serde() {
+        // Build a task plan with metadata and ensure it serializes and parses
+        // correctly.
+        let plan = ProverPlan::Task {
+            task: ProverTask::IrEquiv {
+                config: IrEquivConfig {
+                    lhs_ir_file: "lhs.ir".into(),
+                    rhs_ir_file: "rhs.ir".into(),
+                    ..Default::default()
+                },
+            },
+            timeout_ms: Some(1234),
+            task_id: Some("task-xyz".to_string()),
+        };
+        let v = serde_json::to_value(&plan).unwrap();
+        assert_eq!(v["kind"], "ir-equiv");
+        assert_eq!(v["lhs_ir_file"], "lhs.ir");
+        assert_eq!(v["rhs_ir_file"], "rhs.ir");
+        assert_eq!(v["timeout_ms"], 1234);
+        assert_eq!(v["task_id"], "task-xyz");
+
+        // Round-trip back to ProverPlan and verify fields.
+        let parsed: ProverPlan = serde_json::from_value(v).unwrap();
+        match parsed {
+            ProverPlan::Task {
+                task: ProverTask::IrEquiv { .. },
+                timeout_ms,
+                task_id,
+            } => {
+                assert_eq!(timeout_ms, Some(1234));
+                assert_eq!(task_id.as_deref(), Some("task-xyz"));
+            }
+            _ => panic!("expected ProverPlan::Task::IrEquiv"),
+        }
+    }
+
+    #[test]
+    fn test_prover_plan_task_parse_metadata_from_json() {
+        let json = r#"{
+            "kind": "ir-equiv",
+            "lhs_ir_file": "lhs.ir",
+            "rhs_ir_file": "rhs.ir",
+            "timeout_ms": 5000,
+            "task_id": "tid-123"
+        }"#;
+        let plan: ProverPlan = serde_json::from_str(json).unwrap();
+        match plan {
+            ProverPlan::Task {
+                task: ProverTask::IrEquiv { .. },
+                timeout_ms,
+                task_id,
+            } => {
+                assert_eq!(timeout_ms, Some(5000));
+                assert_eq!(task_id.as_deref(), Some("tid-123"));
+            }
+            _ => panic!("expected ProverPlan::Task::IrEquiv"),
+        }
     }
 
     #[test]
@@ -718,6 +782,7 @@ mod tests {
                 },
             },
             timeout_ms: None,
+            task_id: None,
         };
         let v = serde_json::to_value(&plan).unwrap();
         // The inner task tag is used on serialization.
