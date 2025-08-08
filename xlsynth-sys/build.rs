@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.218";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.219";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
 
 struct DsoInfo {
@@ -27,7 +27,9 @@ impl DsoInfo {
     }
 
     fn get_dso_url(&self, url_base: &str) -> String {
-        format!("{url_base}libxls-{}.{}", self.lib_suffix, self.extension)
+        // As of v0.0.219 release assets are gzipped; we download the .gz and
+        // decompress locally after checksum verification.
+        format!("{url_base}libxls-{}.{}.gz", self.lib_suffix, self.extension)
     }
 }
 
@@ -140,6 +142,10 @@ fn high_integrity_download(
     Ok(())
 }
 
+/// Performs a high-integrity download of a gzipped file, verifies the checksum
+/// of the compressed bytes (against `<url_gz>.sha256`), then decompresses it to
+/// `out_path`.
+///
 /// Attempts to download a file with exponential backoff `max_attempts` times.
 /// If the file is downloaded successfully, returns `Ok(())`. If the file is not
 /// downloaded successfully after `max_attempts` attempts, returns an error.
@@ -170,6 +176,30 @@ fn high_integrity_download_with_retries(
         max_attempts
     )
     .into())
+}
+
+/// Attempts to download a gzipped file with exponential backoff `max_attempts`
+/// times, verifying the checksum of the compressed bytes and decompressing to
+/// `out_path`.
+fn high_integrity_download_gz_and_decompress_with_retries(
+    url_gz: &str,
+    out_path: &std::path::Path,
+    max_attempts: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Download the compressed asset with the existing retry helper, then
+    // decompress locally once.
+    let out_dir = out_path.parent().unwrap();
+    let out_filename = out_path.file_name().unwrap().to_str().unwrap();
+    let gz_path = out_dir.join(format!("{out_filename}.gz"));
+
+    high_integrity_download_with_retries(url_gz, &gz_path, max_attempts)?;
+
+    let gz_file = std::fs::File::open(&gz_path)?;
+    let mut decoder = flate2::read::GzDecoder::new(gz_file);
+    let mut out_file = std::fs::File::create(out_path)?;
+    std::io::copy(&mut decoder, &mut out_file)?;
+    std::fs::remove_file(&gz_path)?;
+    Ok(())
 }
 
 /// Download a file from a URL using ureq.
@@ -271,9 +301,13 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
         dso_path.display()
     );
 
-    // Download the DSO
-    high_integrity_download_with_retries(&dso_url, &dso_path, MAX_DOWNLOAD_ATTEMPTS)
-        .expect("download of DSO should succeed");
+    // Download the gzipped DSO, verify checksum, and decompress to destination.
+    high_integrity_download_gz_and_decompress_with_retries(
+        &dso_url,
+        &dso_path,
+        MAX_DOWNLOAD_ATTEMPTS,
+    )
+    .expect("download of DSO should succeed");
 
     if cfg!(target_os = "macos") {
         let dso_filename = dso_info.get_dso_filename();
