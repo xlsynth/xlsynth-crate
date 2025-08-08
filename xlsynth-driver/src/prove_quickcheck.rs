@@ -4,6 +4,9 @@
 //! `#[quickcheck]` function in a DSLX file (or a selected one) always
 //! returns `true` for every possible input using an SMT solver.
 
+use std::collections::HashMap;
+
+use crate::common::{infer_uf_signature, parse_uf_spec};
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 
@@ -14,9 +17,9 @@ use serde::Serialize;
 use xlsynth::{
     mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
 };
-use xlsynth_g8r::equiv::prove_equiv::IrFn;
+use xlsynth_g8r::equiv::prove_equiv::{IrFn, UfSignature};
 use xlsynth_g8r::equiv::prove_quickcheck::{
-    prove_ir_fn_always_true, BoolPropertyResult, QuickCheckAssertionSemantics,
+    prove_ir_fn_always_true_with_ufs, BoolPropertyResult, QuickCheckAssertionSemantics,
 };
 use xlsynth_g8r::equiv::solver_interface::Solver;
 
@@ -155,13 +158,29 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         .get_one::<QuickCheckAssertionSemantics>("assertion_semantics")
         .unwrap_or(&QuickCheckAssertionSemantics::Ignore);
 
+    let module_name = input_path.file_stem().unwrap().to_str().unwrap();
+    let uf_map = parse_uf_spec(module_name, matches.get_many::<String>("uf"));
+    // UF semantics: functions mapped to the same <uf_name> are treated as the
+    // same uninterpreted symbol (assumed equivalent) and assertions inside them
+    // are ignored during proving.
+    let use_unoptimized_ir = !uf_map.is_empty();
+    let pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&ir_text_result)
+        .parse_package()
+        .unwrap();
+
+    let uf_sigs = infer_uf_signature(&pkg, &uf_map);
+
     // Helper that runs proof for a given solver type and collects outcomes.
     fn run_for_solver<S: Solver>(
         config: &S::Config,
         quickchecks: &[(String, bool)],
-        ir_text: &str,
         module_name: &str,
         semantics: QuickCheckAssertionSemantics,
+        uf_map: &HashMap<String, String>,
+        uf_sigs: &HashMap<String, UfSignature>,
+        unoptimized_pkg: &xlsynth_g8r::xls_ir::ir::Package,
+        ir_text: &str,
+        use_unoptimized_ir: bool,
     ) -> Vec<QuickCheckTestOutcome> {
         let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(quickchecks.len());
         for (qc_name, has_itok) in quickchecks {
@@ -172,22 +191,40 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             };
             let mangled =
                 mangle_dslx_name_with_calling_convention(module_name, qc_name, cc).unwrap();
-            let base_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
-            let optimized_pkg = xlsynth::optimize_ir(&base_pkg, &mangled).unwrap();
-            let optimized_text = optimized_pkg.to_string();
-            let g8_pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&optimized_text)
-                .parse_package()
-                .unwrap();
-            let ir_fn_ref = g8_pkg.get_fn(&mangled).unwrap();
 
-            let ir_fn = IrFn {
-                fn_ref: ir_fn_ref,
-                pkg_ref: Some(&g8_pkg),
-                fixed_implicit_activation: *has_itok,
+            let run = |pkg: &xlsynth_g8r::xls_ir::ir::Package| {
+                let ir_fn_ref = pkg.get_fn(&mangled).unwrap();
+
+                let ir_fn = IrFn {
+                    fn_ref: ir_fn_ref,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: *has_itok,
+                };
+                let start_time = std::time::Instant::now();
+
+                let res = prove_ir_fn_always_true_with_ufs::<S>(
+                    config,
+                    &ir_fn,
+                    semantics.clone(),
+                    &uf_map,
+                    &uf_sigs,
+                );
+                let micros = start_time.elapsed().as_micros();
+                (res, micros)
             };
-            let start_time = std::time::Instant::now();
-            let res = prove_ir_fn_always_true::<S>(config, &ir_fn, semantics.clone());
-            let micros = start_time.elapsed().as_micros();
+
+            let (res, micros) = if use_unoptimized_ir {
+                run(unoptimized_pkg)
+            } else {
+                let base_pkg = xlsynth::IrPackage::parse_ir(&ir_text, None).unwrap();
+                let optimized_pkg = xlsynth::optimize_ir(&base_pkg, &mangled).unwrap();
+                let optimized_text = optimized_pkg.to_string();
+                let g8_pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&optimized_text)
+                    .parse_package()
+                    .unwrap();
+                run(&g8_pkg)
+            };
+
             match res {
                 BoolPropertyResult::Proved => {
                     results.push(QuickCheckTestOutcome {
@@ -251,9 +288,13 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             run_for_solver::<Boolector>(
                 &cfg,
                 &quickchecks,
-                &ir_text_result,
                 module_name,
                 *assertion_semantics,
+                &uf_map,
+                &uf_sigs,
+                &pkg,
+                &ir_text_result,
+                use_unoptimized_ir,
             )
         }
         #[cfg(feature = "has-bitwuzla")]
@@ -263,9 +304,13 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             run_for_solver::<Bitwuzla>(
                 &opts,
                 &quickchecks,
-                &ir_text_result,
                 module_name,
                 *assertion_semantics,
+                &uf_map,
+                &uf_sigs,
+                &pkg,
+                &ir_text_result,
+                use_unoptimized_ir,
             )
         }
         #[cfg(feature = "has-easy-smt")]
@@ -280,9 +325,13 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             run_for_solver::<EasySmtSolver>(
                 &cfg,
                 &quickchecks,
-                &ir_text_result,
                 module_name,
                 *assertion_semantics,
+                &uf_map,
+                &uf_sigs,
+                &pkg,
+                &ir_text_result,
+                use_unoptimized_ir,
             )
         }
     };

@@ -5333,3 +5333,165 @@ fn test_prover_nested_any_all_fails() {
     println!("{}", json_str);
     assert_eq!(v["success"].as_bool(), Some(false));
 }
+
+// -----------------------------------------------------------------------------
+// Uninterpreted function (UF) tests for dslx-equiv
+// -----------------------------------------------------------------------------
+
+#[cfg_attr(feature="has-boolector", test_case::test_case("boolector"; "dslx_equiv_uf_boolector"))]
+#[cfg_attr(feature="has-bitwuzla", test_case::test_case("bitwuzla"; "dslx_equiv_uf_bitwuzla"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case::test_case("z3-binary"; "dslx_equiv_uf_z3_binary"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "dslx_equiv_uf_bitwuzla_binary"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case::test_case("boolector-binary"; "dslx_equiv_uf_boolector_binary"))]
+fn test_dslx_equiv_uninterpreted_functions_solver_param(solver: &str) {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // LHS calls g(x) = x + x; RHS calls h(x) = x - x. Not equivalent unless both
+    // g and h are mapped to the same uninterpreted function symbol.
+    let lhs_dslx = "fn g(x: u8) -> u8 { x + x }\nfn main(x: u8) -> u8 { g(x) }";
+    let rhs_dslx = "fn h(x: u8) -> u8 { x - x }\nfn main(x: u8) -> u8 { h(x) }";
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_path = temp_dir.path().join("lhs.x");
+    let rhs_path = temp_dir.path().join("rhs.x");
+    std::fs::write(&lhs_path, lhs_dslx).unwrap();
+    std::fs::write(&rhs_path, rhs_dslx).unwrap();
+
+    // Provide a toolchain.toml so any external binary backends (if selected)
+    // can run; native SMT backends will ignore it.
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // 1) Without UF mapping: should fail (functions compute different results).
+    let output_no_uf = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .unwrap();
+    assert!(
+        !output_no_uf.status.success(),
+        "dslx-equiv without UF mapping should fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output_no_uf.stdout),
+        String::from_utf8_lossy(&output_no_uf.stderr)
+    );
+
+    // 2) With UF mapping: map LHS g and RHS h to the same UF symbol "F".
+    let output_with_uf = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--solver")
+        .arg(solver)
+        .arg("--lhs_uf")
+        .arg("g:F")
+        .arg("--rhs_uf")
+        .arg("h:F")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output_with_uf.stdout);
+    let stderr = String::from_utf8_lossy(&output_with_uf.stderr);
+    assert!(
+        output_with_uf.status.success(),
+        "dslx-equiv with UF mapping should succeed for solver {}.\nstdout: {}\nstderr: {}",
+        solver,
+        stdout,
+        stderr
+    );
+    assert!(stdout.contains("success"), "stdout: {}", stdout);
+}
+
+// -----------------------------------------------------------------------------
+// Uninterpreted function (UF) tests for prove-quickcheck
+// -----------------------------------------------------------------------------
+
+#[cfg_attr(feature="has-boolector", test_case::test_case("boolector"; "qc_uf_boolector"))]
+#[cfg_attr(feature="has-bitwuzla", test_case::test_case("bitwuzla"; "qc_uf_bitwuzla"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case::test_case("z3-binary"; "qc_uf_z3_binary"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "qc_uf_bitwuzla_binary"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case::test_case("boolector-binary"; "qc_uf_boolector_binary"))]
+fn test_prove_quickcheck_uninterpreted_functions_solver_param(solver: &str) {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Property compares two different helper functions; false without UF mapping,
+    // true when both helpers are mapped to the same uninterpreted function symbol.
+    let dslx = "fn g(x: u8) -> u8 { x + x }\nfn h(x: u8) -> u8 { x - x }\n#[quickcheck] fn qc_equiv(x: u8) -> bool { g(x) == h(x) }\n";
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("qc.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    // Toolchain file for parity with other tests (native solvers don't require it).
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // 1) Without UF mapping: expect failure (property is false).
+    let out_no_uf = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("prove-quickcheck")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--test_filter")
+        .arg("qc_equiv")
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .unwrap();
+    assert!(
+        !out_no_uf.status.success(),
+        "prove-quickcheck without UF mapping should fail. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out_no_uf.stdout),
+        String::from_utf8_lossy(&out_no_uf.stderr)
+    );
+
+    // 2) With UF mapping: compute mangled helper names and map both to symbol F.
+    let out_with_uf = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("prove-quickcheck")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--test_filter")
+        .arg("qc_equiv")
+        .arg("--solver")
+        .arg(solver)
+        .arg("--uf")
+        .arg(&"g:F")
+        .arg("--uf")
+        .arg(&"h:F")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out_with_uf.stdout);
+    let stderr = String::from_utf8_lossy(&out_with_uf.stderr);
+    assert!(
+        out_with_uf.status.success(),
+        "prove-quickcheck with UF mapping should succeed for solver {}.\nstdout: {}\nstderr: {}",
+        solver,
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("Success: All QuickChecks proved"),
+        "stdout: {}",
+        stdout
+    );
+}
