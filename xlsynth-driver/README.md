@@ -356,13 +356,19 @@ Example: group composition
 
 Groups: all / any / first
 
-- `all`: run every child task; overall success if and only if all children succeed.
-- `any`: overall success if at least one child succeeds; schedulers may stop at the first success.
-- `first`: evaluate children in order; stop at the first child that completes successfully; if none succeed, the overall result is failure.
+- `all`: overall success if and only if all children succeed.
+- `any`: overall success if at least one child succeeds.
+- `first`: the first finished children dominates the result.
 
 Optional group flag
 
-- `keep_running_till_finish` (default `false`): when `true`, the scheduler does not cancel or prune sibling tasks when this group becomes resolved according to its semantics. All child tasks continue to run to completion, and the group's outcome is only set after all of its children have finished. If this flag is set on the root group, the prover run will wait for all tasks in the plan to finish before exiting, while the overall success is still determined by the group's semantics.
+- `keep_running_till_finish` (default `false`):
+  By default, the scheduler prunes the sibling tasks when the group result can
+  be resolved to accelerate the overall proof.
+  This can be turned off by setting `keep_running_till_finish` to `true`.
+  In this case, all child tasks continue to run to completion, and the group's outcome is only set after all of its children have finished. If this flag is set on the root group, the prover run will wait for all tasks in the plan to finish before exiting, while the overall success is still determined by the group's semantics.
+  This is useful for debugging to diagnose all the tasks without proactively pruning
+  them for overall proving speed.
 
 Tree structure example
 
