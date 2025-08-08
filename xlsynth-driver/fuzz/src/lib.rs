@@ -94,10 +94,8 @@ pub fn build_plan_from_fuzz(root: FuzzPlanNode) -> ProverPlan {
                 };
                 let timeout_ms = f.timeout_ms.map(|t| (t % 120) as u64); // keep small
                 ProverPlan::Task {
-                    task: ProverTask::Fake {
-                        config: cfg,
-                        timeout_ms,
-                    },
+                    task: ProverTask::Fake { config: cfg },
+                    timeout_ms,
                 }
             }
             FuzzNodeKind::GroupAll | FuzzNodeKind::GroupAny | FuzzNodeKind::GroupFirst => {

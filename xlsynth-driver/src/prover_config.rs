@@ -341,40 +341,26 @@ pub enum ProverTask {
     IrEquiv {
         #[serde(flatten)]
         config: IrEquivConfig,
-        timeout_ms: Option<u64>,
     },
     #[serde(rename = "dslx-equiv")]
     DslxEquiv {
         #[serde(flatten)]
         config: DslxEquivConfig,
-        timeout_ms: Option<u64>,
     },
     #[serde(rename = "prove-quickcheck")]
     ProveQuickcheck {
         #[serde(flatten)]
         config: ProveQuickcheckConfig,
-        timeout_ms: Option<u64>,
     },
     #[cfg(feature = "enable-fake-task")]
     #[serde(rename = "fake")]
     Fake {
         #[serde(flatten)]
         config: FakeTaskConfig,
-        timeout_ms: Option<u64>,
     },
 }
 
-impl ProverTask {
-    pub fn timeout_ms(&self) -> Option<u64> {
-        match self {
-            ProverTask::IrEquiv { timeout_ms, .. } => *timeout_ms,
-            ProverTask::DslxEquiv { timeout_ms, .. } => *timeout_ms,
-            ProverTask::ProveQuickcheck { timeout_ms, .. } => *timeout_ms,
-            #[cfg(feature = "enable-fake-task")]
-            ProverTask::Fake { timeout_ms, .. } => *timeout_ms,
-        }
-    }
-}
+impl ProverTask {}
 
 impl ToDriverCommand for ProverTask {
     fn to_command(&self) -> Command {
@@ -400,6 +386,7 @@ pub enum GroupKind {
 pub enum ProverPlan {
     Task {
         task: ProverTask,
+        timeout_ms: Option<u64>,
     },
     Group {
         kind: GroupKind,
@@ -417,7 +404,22 @@ impl serde::Serialize for ProverPlan {
         S: serde::Serializer,
     {
         match self {
-            ProverPlan::Task { task } => task.serialize(serializer),
+            ProverPlan::Task { task, timeout_ms } => {
+                // Serialize the inner task first, then optionally inject timeout_ms
+                // into the same object to maintain the flat JSON shape.
+                let mut v = serde_json::to_value(task).map_err(|e| {
+                    serde::ser::Error::custom(format!("failed to serialize task to value: {}", e))
+                })?;
+                if let Some(ms) = timeout_ms {
+                    if let serde_json::Value::Object(ref mut map) = v {
+                        map.insert(
+                            "timeout_ms".to_string(),
+                            serde_json::Value::Number((*ms).into()),
+                        );
+                    }
+                }
+                v.serialize(serializer)
+            }
             ProverPlan::Group {
                 kind,
                 tasks,
@@ -447,25 +449,40 @@ impl<'de> serde::Deserialize<'de> for ProverPlan {
             keep_running_till_finish: bool,
         }
 
-        #[derive(serde::Deserialize)]
-        #[serde(untagged)]
-        enum Wrapper {
-            Group(GroupWrap),
-            Task(ProverTask),
+        // We need to support two shapes:
+        // - Group object: { kind: "all"|"any"|"first", tasks: [...],
+        //   keep_running_till_finish?: bool }
+        // - Task object:  { kind: <task-kind>, <task-fields>..., timeout_ms?: <u64> }
+        // Parse as a Value, inspect kind, then route accordingly.
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        // Determine whether this is a group or a task by examining kind.
+        let kind_str = value
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .ok_or_else(|| serde::de::Error::custom("missing kind field"))?;
+
+        // If kind is a group kind, deserialize directly into GroupWrap.
+        if matches!(kind_str, "all" | "any" | "first") {
+            let GroupWrap {
+                kind,
+                tasks,
+                keep_running_till_finish,
+            } = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            return Ok(ProverPlan::Group {
+                kind,
+                tasks,
+                keep_running_till_finish,
+            });
         }
 
-        match Wrapper::deserialize(deserializer)? {
-            Wrapper::Group(GroupWrap {
-                kind,
-                tasks,
-                keep_running_till_finish,
-            }) => Ok(ProverPlan::Group {
-                kind,
-                tasks,
-                keep_running_till_finish,
-            }),
-            Wrapper::Task(task) => Ok(ProverPlan::Task { task }),
+        // Otherwise, this is a task-like object; extract timeout_ms if present, then
+        // parse the remainder as a ProverTask.
+        let timeout_ms = value.get("timeout_ms").and_then(|v| v.as_u64());
+        if let serde_json::Value::Object(ref mut map) = value {
+            map.remove("timeout_ms");
         }
+        let task: ProverTask = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(ProverPlan::Task { task, timeout_ms })
     }
 }
 
@@ -481,7 +498,7 @@ mod tests {
 
     fn head_of(plan: &ProverPlan) -> String {
         match plan {
-            ProverPlan::Task { task } => args_of(task.to_command())[0].clone(),
+            ProverPlan::Task { task, .. } => args_of(task.to_command())[0].clone(),
             ProverPlan::Group { kind, .. } => match kind {
                 GroupKind::All => "all".to_string(),
                 GroupKind::Any => "any".to_string(),
@@ -759,8 +776,8 @@ mod tests {
                         rhs_ir_file: "rhs.ir".into(),
                         ..Default::default()
                     },
-                    timeout_ms: None,
                 },
+                timeout_ms: None,
             }],
             keep_running_till_finish: false,
         };
@@ -781,8 +798,8 @@ mod tests {
                     rhs_ir_file: "rhs.ir".into(),
                     ..Default::default()
                 },
-                timeout_ms: None,
             },
+            timeout_ms: None,
         };
         let v = serde_json::to_value(&plan).unwrap();
         // The inner task tag is used on serialization.
@@ -798,6 +815,7 @@ mod tests {
         match plan2 {
             ProverPlan::Task {
                 task: ProverTask::IrEquiv { .. },
+                ..
             } => {}
             _ => panic!("expected ProverPlan::Task::IrEquiv"),
         }
