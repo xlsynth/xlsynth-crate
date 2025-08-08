@@ -69,6 +69,17 @@ def get_latest_release(max_attempts):
     return latest_version
 
 
+def parse_semver_tag(tag: str) -> tuple[int, int, int]:
+    """
+    Parses a version tag like 'v0.0.219' into a tuple (0, 0, 219).
+    """
+    assert tag.startswith("v"), f"expected tag to start with 'v', got: {tag}"
+    parts = tag[1:].split(".")
+    assert len(parts) == 3, f"expected semantic version 'vX.Y.Z', got: {tag}"
+    major, minor, patch = parts
+    return (int(major), int(minor), int(patch))
+
+
 def check_sha256sum(artifact_path: str, sha256_path: str) -> bool:
     """
     Checks if the artifact at `artifact_path` has the same sha256sum as the file at `sha256_path`.
@@ -105,6 +116,16 @@ def high_integrity_download(
         target_filename = filename
         if is_binary and platform and filename.endswith(f"-{platform}"):
             target_filename = filename[: -(len(platform) + 1)]  # Remove '-platform'
+
+        # Detect gzipped DSO assets (libxls-*.{so,dylib}.gz). For these we will
+        # decompress to a library without the trailing '.gz'. Other .gz files
+        # (e.g. tarballs) are left intact for the caller to unpack.
+        is_gz_dso = target_filename.endswith(".dylib.gz") or target_filename.endswith(
+            ".so.gz"
+        )
+        if is_gz_dso:
+            target_filename = target_filename[:-3]  # strip '.gz'
+
         target_path = os.path.join(target_dir, target_filename)
 
         headers = get_headers()
@@ -116,13 +137,20 @@ def high_integrity_download(
             with open(sha256_path, "wb") as f:
                 shutil.copyfileobj(r.raw, f)
 
-        # If the file already exists at the target location with the correct sha256sum, skip the
-        # download.
-        if os.path.exists(target_path) and check_sha256sum(target_path, sha256_path):
-            print(
-                f"Skipping download of {filename} because it already exists and has the correct sha256sum"
-            )
-            return
+        # Skip policy:
+        # - For gzipped DSOs: skip if decompressed artifact already exists.
+        # - For other files: skip if checksum matches the sha256 file.
+        if os.path.exists(target_path):
+            if is_gz_dso:
+                print(
+                    f"Skipping download of {filename} because decompressed artifact already exists at {target_path}"
+                )
+                return
+            if check_sha256sum(target_path, sha256_path):
+                print(
+                    f"Skipping download of {filename} because it already exists and has the correct sha256sum"
+                )
+                return
 
         # Download the artifact with retry support
         with request_with_retry(
@@ -135,7 +163,14 @@ def high_integrity_download(
         if not check_sha256sum(artifact_path, sha256_path):
             raise ValueError(f"Checksum mismatch for {filename}")
 
-        shutil.move(artifact_path, target_path)
+        if is_gz_dso:
+            import gzip
+
+            with gzip.open(artifact_path, "rb") as fin, open(target_path, "wb") as fout:
+                shutil.copyfileobj(fin, fout)
+            os.remove(artifact_path)
+        else:
+            shutil.move(artifact_path, target_path)
 
         # Make binary artifacts executable
         if is_binary:
@@ -201,6 +236,7 @@ def main():
         options.version if options.version else get_latest_release(options.max_attempts)
     )
     base_url = f"https://github.com/xlsynth/xlsynth/releases/download/{version}"
+    ver_tuple = parse_semver_tag(version)
 
     # Tuples of `(artifact_to_download, is_binary)` -- if it's noted to be a binary it is marked
     # as executable.
@@ -210,9 +246,12 @@ def main():
 
     if options.dso:
         # lib suffix (.so, .dylib, etc.) depends on the platform
-        artifacts.append(
-            (f"libxls-{options.platform}{SUPPORTED_PLATFORMS[options.platform]}", False)
-        )
+        lib_suffix = SUPPORTED_PLATFORMS[options.platform]
+        dso_name = f"libxls-{options.platform}{lib_suffix}"
+        # As of v0.0.219, dynamic libraries are gzipped in the release assets.
+        if ver_tuple >= (0, 0, 219):
+            dso_name += ".gz"
+        artifacts.append((dso_name, False))
 
     os.makedirs(options.output_dir, exist_ok=True)
 
