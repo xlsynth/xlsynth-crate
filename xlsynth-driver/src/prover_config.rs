@@ -382,10 +382,13 @@ pub enum GroupKind {
     First,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum ProverPlan {
     Task {
+        #[serde(flatten)]
         task: ProverTask,
+        #[serde(default)]
         timeout_ms: Option<u64>,
     },
     Group {
@@ -394,97 +397,12 @@ pub enum ProverPlan {
         // When true, do not cancel or prune sibling tasks upon this group's
         // resolution; allow them to continue running until they naturally
         // complete. Default is false.
+        #[serde(default)]
         keep_running_till_finish: bool,
     },
 }
 
-impl serde::Serialize for ProverPlan {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            ProverPlan::Task { task, timeout_ms } => {
-                // Serialize the inner task first, then optionally inject timeout_ms
-                // into the same object to maintain the flat JSON shape.
-                let mut v = serde_json::to_value(task).map_err(|e| {
-                    serde::ser::Error::custom(format!("failed to serialize task to value: {}", e))
-                })?;
-                if let Some(ms) = timeout_ms {
-                    if let serde_json::Value::Object(ref mut map) = v {
-                        map.insert(
-                            "timeout_ms".to_string(),
-                            serde_json::Value::Number((*ms).into()),
-                        );
-                    }
-                }
-                v.serialize(serializer)
-            }
-            ProverPlan::Group {
-                kind,
-                tasks,
-                keep_running_till_finish,
-            } => {
-                use serde::ser::SerializeStruct;
-                let mut s = serializer.serialize_struct("ProverPlan", 3)?;
-                s.serialize_field("kind", kind)?;
-                s.serialize_field("tasks", tasks)?;
-                s.serialize_field("keep_running_till_finish", keep_running_till_finish)?;
-                s.end()
-            }
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ProverPlan {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct GroupWrap {
-            kind: GroupKind,
-            tasks: Vec<ProverPlan>,
-            #[serde(default)]
-            keep_running_till_finish: bool,
-        }
-
-        // We need to support two shapes:
-        // - Group object: { kind: "all"|"any"|"first", tasks: [...],
-        //   keep_running_till_finish?: bool }
-        // - Task object:  { kind: <task-kind>, <task-fields>..., timeout_ms?: <u64> }
-        // Parse as a Value, inspect kind, then route accordingly.
-        let mut value = serde_json::Value::deserialize(deserializer)?;
-        // Determine whether this is a group or a task by examining kind.
-        let kind_str = value
-            .get("kind")
-            .and_then(|k| k.as_str())
-            .ok_or_else(|| serde::de::Error::custom("missing kind field"))?;
-
-        // If kind is a group kind, deserialize directly into GroupWrap.
-        if matches!(kind_str, "all" | "any" | "first") {
-            let GroupWrap {
-                kind,
-                tasks,
-                keep_running_till_finish,
-            } = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-            return Ok(ProverPlan::Group {
-                kind,
-                tasks,
-                keep_running_till_finish,
-            });
-        }
-
-        // Otherwise, this is a task-like object; extract timeout_ms if present, then
-        // parse the remainder as a ProverTask.
-        let timeout_ms = value.get("timeout_ms").and_then(|v| v.as_u64());
-        if let serde_json::Value::Object(ref mut map) = value {
-            map.remove("timeout_ms");
-        }
-        let task: ProverTask = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(ProverPlan::Task { task, timeout_ms })
-    }
-}
+// Default serde derives with untagged + flatten handle (de)serialization.
 
 #[cfg(test)]
 mod tests {
