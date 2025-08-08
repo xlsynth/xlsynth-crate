@@ -124,6 +124,8 @@ struct TaskNode {
     // Captured outputs after task completion; None until completed.
     completed_stdout: Option<String>,
     completed_stderr: Option<String>,
+    // Optional per-task timeout in milliseconds
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -488,7 +490,7 @@ impl Scheduler {
                             })
                         };
 
-                        let timeout_ms = t.task.timeout_ms();
+                        let timeout_ms = t.timeout_ms;
 
                         (
                             cmd, stdout_tmp, stderr_tmp, json_tmp, json_path, timeout_ms, cmdline,
@@ -1075,13 +1077,14 @@ impl PlanBuilder {
     /// Post: For `Group` nodes, `children.len()` is set to the number of tasks.
     fn build_plan(&mut self, parent: Option<NodeId>, plan: ProverPlan) -> NodeId {
         match plan {
-            ProverPlan::Task { task } => self.push(
+            ProverPlan::Task { task, timeout_ms } => self.push(
                 parent,
                 NodeInner::Task(TaskNode {
                     task,
                     state: TaskState::NotStarted,
                     completed_stdout: None,
                     completed_stderr: None,
+                    timeout_ms,
                 }),
             ),
             ProverPlan::Group {
