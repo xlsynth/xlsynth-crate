@@ -385,7 +385,7 @@ Runs a prover plan described by a JSON file with a process-based scheduler.
 - Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.
 - Output: `--output_json <PATH>` writes a full JSON report:
   - Top-level `{ "success": <bool>, "plan": <tree> }`.
-  - Each task node includes `cmdline`, `outcome`, `stdout`, `stderr`.
+  - Each task node includes `cmdline`, `outcome`, `stdout`, `stderr`, and `task_id` (when provided).
   - `outcome` is one of `Success`, `Failed`, or an indefinite reason such as `Timeout`, `IndefiniteChildren`, `GroupCriteriaAlreadyMet`, or `Cleanup`.
 
 ### Equivalence/proving flags: meanings
@@ -430,7 +430,8 @@ Example: single task
   "flatten_aggregates": true,
   "drop_params": ["p0", "p1"],
   "json": true,
-  "timeout_ms": 30000
+  "timeout_ms": 30000,
+  "task_id": "my-task-1"
 }
 ```
 
@@ -462,6 +463,11 @@ Timeouts
   - `any`: resolves `Success` as soon as any child succeeds; if all children finish without a success and at least one is indefinite (e.g., `Timeout`), the group resolves to `IndefiniteChildren`.
   - `all`: resolves `Failed` if any child fails; if none failed but at least one is indefinite, resolves to `IndefiniteChildren`; otherwise `Success`.
   - `first`: only the first non-indefinite child determines the result; timeouts do not resolve the group. If all children finish and none produced a definite result, the group resolves to `IndefiniteChildren`.
+
+Task identifiers
+
+- Any task may specify `"task_id": <string>`.
+- The `task_id` is echoed into the final report on the corresponding task node to make it easy to correlate results with the original task specification.
 
 Optional group flag
 
