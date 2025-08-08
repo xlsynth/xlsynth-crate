@@ -11,20 +11,20 @@ use std::{
 
 use boolector_sys::{
     BTOR_OPT_INCREMENTAL, BTOR_OPT_MODEL_GEN, BoolectorNode, Btor, BtorOption, boolector_add,
-    boolector_and, boolector_assert, boolector_bitvec_sort, boolector_bv_assignment,
-    boolector_concat, boolector_cond, boolector_const, boolector_consth, boolector_delete,
-    boolector_eq, boolector_free_bv_assignment, boolector_get_refs, boolector_mul, boolector_nand,
-    boolector_ne, boolector_neg, boolector_new, boolector_nor, boolector_not, boolector_one,
-    boolector_or, boolector_pop, boolector_push, boolector_release_all, boolector_sat,
-    boolector_sdiv, boolector_set_opt, boolector_sext, boolector_sgt, boolector_sgte,
-    boolector_slice, boolector_sll, boolector_slt, boolector_slte, boolector_sra, boolector_srem,
-    boolector_srl, boolector_sub, boolector_udiv, boolector_uext, boolector_ugt, boolector_ugte,
-    boolector_ult, boolector_ulte, boolector_unsigned_int, boolector_urem, boolector_var,
-    boolector_xor, boolector_zero,
+    boolector_and, boolector_apply, boolector_assert, boolector_bitvec_sort,
+    boolector_bv_assignment, boolector_concat, boolector_cond, boolector_const, boolector_consth,
+    boolector_delete, boolector_eq, boolector_free_bv_assignment, boolector_fun_sort,
+    boolector_get_refs, boolector_mul, boolector_nand, boolector_ne, boolector_neg, boolector_new,
+    boolector_nor, boolector_not, boolector_one, boolector_or, boolector_pop, boolector_push,
+    boolector_release_all, boolector_sat, boolector_sdiv, boolector_set_opt, boolector_sext,
+    boolector_sgt, boolector_sgte, boolector_slice, boolector_sll, boolector_slt, boolector_slte,
+    boolector_sra, boolector_srem, boolector_srl, boolector_sub, boolector_udiv, boolector_uext,
+    boolector_uf, boolector_ugt, boolector_ugte, boolector_ult, boolector_ulte,
+    boolector_unsigned_int, boolector_urem, boolector_var, boolector_xor, boolector_zero,
 };
 
 use crate::{
-    equiv::solver_interface::{BitVec, Response, Solver},
+    equiv::solver_interface::{BitVec, Response, Solver, Uf},
     ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
     xls_ir::ir,
 };
@@ -223,6 +223,100 @@ impl Solver for Boolector {
             width,
             rep: BoolectorTerm { raw: n },
         })
+    }
+
+    fn declare_uf(
+        &mut self,
+        name: &str,
+        arg_widths: &[usize],
+        result_width: usize,
+    ) -> io::Result<Uf<Self::Term>> {
+        if result_width == 0 {
+            return Ok(Uf::UfZeroWidth {
+                arg_widths: arg_widths.to_vec(),
+            });
+        }
+        let non_zero_arg_widths = arg_widths
+            .iter()
+            .copied()
+            .filter(|w| *w > 0)
+            .collect::<Vec<_>>();
+        let mut domain_sorts = non_zero_arg_widths
+            .iter()
+            .map(|w| unsafe { boolector_bitvec_sort(self.raw_btor(), *w as u32) })
+            .collect::<Vec<_>>();
+        let arity = non_zero_arg_widths.len() as u32;
+        if arity != 0 {
+            let codomain_sort =
+                unsafe { boolector_bitvec_sort(self.raw_btor(), result_width as u32) };
+            let sort = unsafe {
+                boolector_fun_sort(
+                    self.raw_btor(),
+                    domain_sorts.as_mut_ptr(),
+                    arity,
+                    codomain_sort,
+                )
+            };
+            let c_name = CString::new(name).unwrap();
+            let raw = unsafe { boolector_uf(self.raw_btor(), sort, c_name.as_ptr()) };
+            Ok(Uf::Uf {
+                rep: BoolectorTerm { raw },
+                arg_widths: arg_widths.to_vec(),
+                result_width,
+            })
+        } else {
+            let sort = unsafe { boolector_bitvec_sort(self.raw_btor(), result_width as u32) };
+            let c_name = CString::new(name).unwrap();
+            let n = unsafe { boolector_var(self.raw_btor(), sort, c_name.as_ptr()) };
+            Ok(Uf::Uf {
+                rep: BoolectorTerm { raw: n },
+                arg_widths: arg_widths.to_vec(),
+                result_width,
+            })
+        }
+    }
+
+    fn apply_uf(
+        &mut self,
+        uf: &Uf<Self::Term>,
+        args: &[&BitVec<Self::Term>],
+    ) -> BitVec<Self::Term> {
+        uf.check_arg_widths(&args);
+        match uf {
+            Uf::UfZeroWidth { .. } => BitVec::ZeroWidth,
+            Uf::Uf {
+                rep,
+                arg_widths,
+                result_width,
+            } => {
+                let mut arg_nodes: Vec<*mut BoolectorNode> = Vec::new();
+                for (arg, w) in args.iter().zip(arg_widths.iter()) {
+                    if *w == 0 {
+                        continue;
+                    }
+                    match arg {
+                        BitVec::BitVec { rep, .. } => arg_nodes.push(rep.raw),
+                        BitVec::ZeroWidth => {}
+                    }
+                }
+                let app_raw = if arg_nodes.is_empty() {
+                    rep.raw
+                } else {
+                    unsafe {
+                        boolector_apply(
+                            self.raw_btor(),
+                            arg_nodes.as_mut_ptr(),
+                            arg_nodes.len() as u32,
+                            rep.raw,
+                        )
+                    }
+                };
+                BitVec::BitVec {
+                    width: *result_width,
+                    rep: BoolectorTerm { raw: app_raw },
+                }
+            }
+        }
     }
 
     fn fresh_symbol(&mut self, name: &str) -> io::Result<String> {

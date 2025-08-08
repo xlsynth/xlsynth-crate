@@ -12,7 +12,7 @@ use std::{
 use easy_smt::{Context, ContextBuilder, SExpr};
 
 use crate::{
-    equiv::solver_interface::{BitVec, Solver},
+    equiv::solver_interface::{BitVec, Solver, Uf},
     ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
     xls_ir::ir,
 };
@@ -125,6 +125,26 @@ impl EasySmtSolver {
         }
         name
     }
+
+    fn cache_sexpr<F>(&mut self, rep: SExpr, def_gen: F, context: &mut MutexGuard<Context>) -> SExpr
+    where
+        F: Fn(&mut Context, &str, SExpr) -> SExpr,
+    {
+        if rep.is_atom() {
+            return rep;
+        }
+        if self.reverse_cache.contains_key(&rep) {
+            let name = self.reverse_cache.get(&rep).unwrap();
+            return context.atom(name);
+        }
+        let name = self.get_next_available_name();
+        self.term_cache.insert(name.clone(), rep.clone());
+        let new_expr = def_gen(context, &name, rep.clone());
+        self.reverse_cache.insert(rep.clone(), name.clone());
+        self.reverse_cache.insert(new_expr.clone(), name.clone());
+        new_expr
+    }
+
     fn cache_term(
         &mut self,
         bit_vec: BitVec<SExpr>,
@@ -136,29 +156,20 @@ impl EasySmtSolver {
                 return bit_vec;
             }
         };
-        if rep.is_atom() {
-            return bit_vec;
-        }
-        if self.reverse_cache.contains_key(&rep) {
-            let name = self.reverse_cache.get(&rep).unwrap();
-            return BitVec::BitVec {
-                width: bit_vec.get_width(),
-                rep: context.atom(name),
-            };
-        }
-        let name = self.get_next_available_name();
-        self.term_cache.insert(name.clone(), rep.clone());
-        let bv_sort = context.bit_vec_sort(context.numeral(bit_vec.get_width()));
-        let new_expr = context
-            .define_const(name.clone(), bv_sort, rep.clone())
-            .unwrap();
-        self.reverse_cache.insert(rep.clone(), name.clone());
-        self.reverse_cache.insert(new_expr.clone(), name.clone());
+        let new_expr = self.cache_sexpr(
+            rep,
+            |context, name, rep| {
+                let bv_sort = context.bit_vec_sort(context.numeral(bit_vec.get_width()));
+                context.define_const(name, bv_sort, rep).unwrap()
+            },
+            context,
+        );
         BitVec::BitVec {
             width: bit_vec.get_width(),
             rep: new_expr,
         }
     }
+
     fn bool_to(&mut self, context: &mut MutexGuard<Context>, value: SExpr) -> BitVec<SExpr> {
         self.cache_term(
             BitVec::BitVec {
@@ -307,6 +318,84 @@ impl Solver for EasySmtSolver {
         let sort = context.bit_vec_sort(width_numeral);
         let rep = context.declare_const(format!("_{}", name), sort)?;
         Ok(self.cache_term(BitVec::BitVec { width, rep }, &mut context))
+    }
+
+    fn declare_uf(
+        &mut self,
+        name: &str,
+        arg_widths: &[usize],
+        result_width: usize,
+    ) -> io::Result<Uf<SExpr>> {
+        if result_width == 0 {
+            return Ok(Uf::UfZeroWidth {
+                arg_widths: arg_widths.to_vec(),
+            });
+        } else {
+            let shared = Arc::clone(&self.context);
+            let mut context = shared.lock().unwrap();
+            let width_numerals: Vec<SExpr> = arg_widths
+                .iter()
+                .copied()
+                .filter(|w| *w > 0)
+                .map(|w| context.numeral(w as i64))
+                .collect();
+            let arg_sorts = width_numerals
+                .iter()
+                .map(|w| context.bit_vec_sort(w.clone()))
+                .collect();
+            let result_sort = context.bit_vec_sort(context.numeral(result_width as i64));
+            let rep = context.declare_fun(name, arg_sorts, result_sort)?;
+            Ok(Uf::Uf {
+                rep,
+                arg_widths: arg_widths.to_vec(),
+                result_width,
+            })
+        }
+    }
+
+    fn apply_uf(&mut self, uf: &Uf<SExpr>, args: &[&BitVec<SExpr>]) -> BitVec<SExpr> {
+        uf.check_arg_widths(&args);
+        match uf {
+            Uf::UfZeroWidth { .. } => BitVec::ZeroWidth,
+            Uf::Uf {
+                rep,
+                arg_widths,
+                result_width,
+            } => {
+                // Build the actual argument list containing only non-zero-width bitvectors,
+                // since the EasySMT UF was declared skipping zero-width arguments.
+                let shared = Arc::clone(&self.context);
+                let mut context = shared.lock().unwrap();
+
+                let mut sexprs: Vec<SExpr> = Vec::new();
+                for (arg_bv, w) in args.iter().zip(arg_widths.iter()) {
+                    if *w == 0 {
+                        continue;
+                    }
+                    match arg_bv {
+                        BitVec::BitVec { rep, .. } => sexprs.push(rep.clone()),
+                        BitVec::ZeroWidth => {}
+                    }
+                }
+
+                let app = if sexprs.is_empty() {
+                    rep.clone()
+                } else {
+                    let mut items = Vec::with_capacity(1 + sexprs.len());
+                    items.push(rep.clone());
+                    items.extend(sexprs);
+                    context.list(items)
+                };
+
+                self.cache_term(
+                    BitVec::BitVec {
+                        width: *result_width,
+                        rep: app,
+                    },
+                    &mut context,
+                )
+            }
+        }
     }
 
     fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<SExpr> {

@@ -9,11 +9,11 @@ use std::{
 };
 
 use bitwuzla_sys::{
-    BITWUZLA_KIND_BV_ADD, BITWUZLA_KIND_BV_AND, BITWUZLA_KIND_BV_ASHR, BITWUZLA_KIND_BV_CONCAT,
-    BITWUZLA_KIND_BV_EXTRACT, BITWUZLA_KIND_BV_MUL, BITWUZLA_KIND_BV_NAND, BITWUZLA_KIND_BV_NEG,
-    BITWUZLA_KIND_BV_NOR, BITWUZLA_KIND_BV_NOT, BITWUZLA_KIND_BV_OR, BITWUZLA_KIND_BV_SDIV,
-    BITWUZLA_KIND_BV_SGE, BITWUZLA_KIND_BV_SGT, BITWUZLA_KIND_BV_SHL, BITWUZLA_KIND_BV_SHR,
-    BITWUZLA_KIND_BV_SIGN_EXTEND, BITWUZLA_KIND_BV_SLE, BITWUZLA_KIND_BV_SLT,
+    BITWUZLA_KIND_APPLY, BITWUZLA_KIND_BV_ADD, BITWUZLA_KIND_BV_AND, BITWUZLA_KIND_BV_ASHR,
+    BITWUZLA_KIND_BV_CONCAT, BITWUZLA_KIND_BV_EXTRACT, BITWUZLA_KIND_BV_MUL, BITWUZLA_KIND_BV_NAND,
+    BITWUZLA_KIND_BV_NEG, BITWUZLA_KIND_BV_NOR, BITWUZLA_KIND_BV_NOT, BITWUZLA_KIND_BV_OR,
+    BITWUZLA_KIND_BV_SDIV, BITWUZLA_KIND_BV_SGE, BITWUZLA_KIND_BV_SGT, BITWUZLA_KIND_BV_SHL,
+    BITWUZLA_KIND_BV_SHR, BITWUZLA_KIND_BV_SIGN_EXTEND, BITWUZLA_KIND_BV_SLE, BITWUZLA_KIND_BV_SLT,
     BITWUZLA_KIND_BV_SREM, BITWUZLA_KIND_BV_SUB, BITWUZLA_KIND_BV_UDIV, BITWUZLA_KIND_BV_UGE,
     BITWUZLA_KIND_BV_UGT, BITWUZLA_KIND_BV_ULE, BITWUZLA_KIND_BV_ULT, BITWUZLA_KIND_BV_UREM,
     BITWUZLA_KIND_BV_XOR, BITWUZLA_KIND_BV_ZERO_EXTEND, BITWUZLA_KIND_EQUAL, BITWUZLA_KIND_ITE,
@@ -41,15 +41,15 @@ use bitwuzla_sys::{
     BITWUZLA_OPT_WRITE_CNF, BITWUZLA_SAT, BITWUZLA_UNKNOWN, BITWUZLA_UNSAT, BitwuzlaKind,
     bitwuzla_assert, bitwuzla_check_sat, bitwuzla_delete, bitwuzla_get_value, bitwuzla_mk_bv_one,
     bitwuzla_mk_bv_sort, bitwuzla_mk_bv_value, bitwuzla_mk_bv_value_uint64, bitwuzla_mk_bv_zero,
-    bitwuzla_mk_const, bitwuzla_mk_term1, bitwuzla_mk_term1_indexed1, bitwuzla_mk_term1_indexed2,
-    bitwuzla_mk_term2, bitwuzla_mk_term3, bitwuzla_new, bitwuzla_options_delete,
-    bitwuzla_options_new, bitwuzla_pop, bitwuzla_push, bitwuzla_set_option,
-    bitwuzla_set_option_mode, bitwuzla_term_manager_delete, bitwuzla_term_manager_new,
-    bitwuzla_term_to_string, bitwuzla_term_value_get_str,
+    bitwuzla_mk_const, bitwuzla_mk_fun_sort, bitwuzla_mk_term, bitwuzla_mk_term1,
+    bitwuzla_mk_term1_indexed1, bitwuzla_mk_term1_indexed2, bitwuzla_mk_term2, bitwuzla_mk_term3,
+    bitwuzla_new, bitwuzla_options_delete, bitwuzla_options_new, bitwuzla_pop, bitwuzla_push,
+    bitwuzla_set_option, bitwuzla_set_option_mode, bitwuzla_term_manager_delete,
+    bitwuzla_term_manager_new, bitwuzla_term_to_string, bitwuzla_term_value_get_str,
 };
 
 use crate::{
-    equiv::solver_interface::{BitVec, Response, Solver},
+    equiv::solver_interface::{BitVec, Response, Solver, Uf},
     ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
     xls_ir::ir,
 };
@@ -694,6 +694,108 @@ impl Solver for Bitwuzla {
             width,
             rep: BitwuzlaTerm { raw: rep },
         })
+    }
+
+    fn declare_uf(
+        &mut self,
+        name: &str,
+        arg_widths: &[usize],
+        result_width: usize,
+    ) -> io::Result<Uf<Self::Term>> {
+        if result_width == 0 {
+            return Ok(Uf::UfZeroWidth {
+                arg_widths: arg_widths.to_vec(),
+            });
+        }
+        // Build function sort over non-zero-width arguments. If arity is zero,
+        // fall back to a constant of result sort.
+        let non_zero_arg_widths = arg_widths
+            .iter()
+            .copied()
+            .filter(|w| *w > 0)
+            .collect::<Vec<_>>();
+
+        let arity = non_zero_arg_widths.len() as u64;
+        let rep = if arity > 0 {
+            let mut domain_sorts: Vec<bitwuzla_sys::BitwuzlaSort> = non_zero_arg_widths
+                .iter()
+                .map(|w| unsafe { bitwuzla_mk_bv_sort(self.raw_term_manager(), *w as u64) })
+                .collect();
+            let codomain_sort =
+                unsafe { bitwuzla_mk_bv_sort(self.raw_term_manager(), result_width as u64) };
+            let fun_sort = unsafe {
+                bitwuzla_mk_fun_sort(
+                    self.raw_term_manager(),
+                    arity,
+                    domain_sorts.as_mut_ptr(),
+                    codomain_sort,
+                )
+            };
+            let c_name = CString::new(name).unwrap();
+            unsafe { bitwuzla_mk_const(self.raw_term_manager(), fun_sort, c_name.as_ptr()) }
+        } else {
+            let sort = unsafe { bitwuzla_mk_bv_sort(self.raw_term_manager(), result_width as u64) };
+            let c_name = CString::new(name).unwrap();
+            unsafe { bitwuzla_mk_const(self.raw_term_manager(), sort, c_name.as_ptr()) }
+        };
+
+        Ok(Uf::Uf {
+            rep: BitwuzlaTerm { raw: rep },
+            arg_widths: arg_widths.to_vec(),
+            result_width,
+        })
+    }
+
+    fn apply_uf(
+        &mut self,
+        uf: &Uf<Self::Term>,
+        args: &[&BitVec<Self::Term>],
+    ) -> BitVec<Self::Term> {
+        uf.check_arg_widths(&args);
+        match uf {
+            Uf::UfZeroWidth { .. } => BitVec::ZeroWidth,
+            Uf::Uf {
+                rep,
+                arg_widths,
+                result_width,
+            } => {
+                // Collect only non-zero-width argument terms, since the UF was
+                // declared skipping zero-width arguments in the sort.
+                let mut items: Vec<bitwuzla_sys::BitwuzlaTerm> = Vec::new();
+                // First element is the function term itself.
+                items.push(rep.raw);
+
+                for (arg_bv, w) in args.iter().zip(arg_widths.iter()) {
+                    if *w == 0 {
+                        continue;
+                    }
+                    match arg_bv {
+                        BitVec::BitVec { rep, .. } => items.push(rep.raw),
+                        BitVec::ZeroWidth => {}
+                    }
+                }
+
+                let app_raw = if items.len() == 1 {
+                    // No non-zero arguments (possibly zero-arity uf declared as constant);
+                    // just return the function term itself.
+                    items[0]
+                } else {
+                    unsafe {
+                        bitwuzla_mk_term(
+                            self.raw_term_manager(),
+                            BITWUZLA_KIND_APPLY,
+                            items.len() as u32,
+                            items.as_mut_ptr(),
+                        )
+                    }
+                };
+
+                BitVec::BitVec {
+                    width: *result_width,
+                    rep: BitwuzlaTerm { raw: app_raw },
+                }
+            }
+        }
     }
 
     fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<Self::Term> {
