@@ -260,15 +260,17 @@ impl ToDriverCommand for ProveQuickcheckConfig {
 }
 
 // -------------------------------
-// Fuzz-only fake task definition
+// Fake task definition (available for fuzzing, tests, and local use)
 // -------------------------------
-#[cfg(feature = "prover-fuzz")]
+#[cfg(feature = "enable-fake-task")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FakeTaskConfig {
-    /// Inclusive min delay in milliseconds before writing result.
-    pub min_delay_ms: u32,
-    /// Inclusive max delay in milliseconds before writing result.
-    pub max_delay_ms: u32,
+    /// Optional delay before the fake task reports a result.
+    /// - When `Some(d)`, sleeps for `d` milliseconds then exits and writes
+    ///   JSON.
+    /// - When `None`, sleeps indefinitely and never finishes (until
+    ///   canceled/timeout).
+    pub delay_ms: Option<u32>,
     /// Whether the task should report success.
     pub success: bool,
     /// Number of bytes to write to stdout.
@@ -277,21 +279,19 @@ pub struct FakeTaskConfig {
     pub stderr_len: u16,
 }
 
-#[cfg(feature = "prover-fuzz")]
+#[cfg(feature = "enable-fake-task")]
 impl ToDriverCommand for FakeTaskConfig {
     fn to_command(&self) -> Command {
         // Use a POSIX shell snippet to sleep and then locate the --output_json path
         // from argv.
         let script = r#"
-min=${FAKE_MIN_MS:-1}
-max=${FAKE_MAX_MS:-5}
-# Clamp to small values suitable for fuzzing; avoid floating races.
-[ "$min" -gt 100 ] && min=100
-[ "$max" -gt 100 ] && max=100
-[ "$min" -gt "$max" ] && max=$min
-# Use min as the delay to keep determinism under fuzzing.
-delay_ms=$min
-# Sleep in seconds with fractional part.
+delay_ms="${FAKE_DELAY_MS:-}"
+# If delay_ms is empty, sleep indefinitely (never complete).
+if [ -z "$delay_ms" ]; then
+  # Sleep forever to simulate a non-terminating task; will be killed on timeout/cancel.
+  tail -f /dev/null
+fi
+# Otherwise, sleep for the requested milliseconds.
 secs=$(printf "%s" "$delay_ms" | awk '{ printf("%.3f", $1/1000.0) }')
 sleep "$secs"
 # Emit stdout noise
@@ -320,8 +320,9 @@ fi
 "#;
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(script).arg("sh");
-        cmd.env("FAKE_MIN_MS", self.min_delay_ms.to_string());
-        cmd.env("FAKE_MAX_MS", self.max_delay_ms.to_string());
+        if let Some(ms) = self.delay_ms {
+            cmd.env("FAKE_DELAY_MS", ms.to_string());
+        }
         cmd.env("FAKE_SUCCESS", if self.success { "1" } else { "0" });
         cmd.env("FAKE_STDOUT_LEN", self.stdout_len.to_string());
         cmd.env("FAKE_STDERR_LEN", self.stderr_len.to_string());
@@ -340,33 +341,49 @@ pub enum ProverTask {
     IrEquiv {
         #[serde(flatten)]
         config: IrEquivConfig,
+        timeout_ms: Option<u64>,
     },
     #[serde(rename = "dslx-equiv")]
     DslxEquiv {
         #[serde(flatten)]
         config: DslxEquivConfig,
+        timeout_ms: Option<u64>,
     },
     #[serde(rename = "prove-quickcheck")]
     ProveQuickcheck {
         #[serde(flatten)]
         config: ProveQuickcheckConfig,
+        timeout_ms: Option<u64>,
     },
-    #[cfg(feature = "prover-fuzz")]
+    #[cfg(feature = "enable-fake-task")]
     #[serde(rename = "fake")]
     Fake {
         #[serde(flatten)]
         config: FakeTaskConfig,
+        timeout_ms: Option<u64>,
     },
+}
+
+impl ProverTask {
+    pub fn timeout_ms(&self) -> Option<u64> {
+        match self {
+            ProverTask::IrEquiv { timeout_ms, .. } => *timeout_ms,
+            ProverTask::DslxEquiv { timeout_ms, .. } => *timeout_ms,
+            ProverTask::ProveQuickcheck { timeout_ms, .. } => *timeout_ms,
+            #[cfg(feature = "enable-fake-task")]
+            ProverTask::Fake { timeout_ms, .. } => *timeout_ms,
+        }
+    }
 }
 
 impl ToDriverCommand for ProverTask {
     fn to_command(&self) -> Command {
         match self {
-            ProverTask::IrEquiv { config } => config.to_command(),
-            ProverTask::DslxEquiv { config } => config.to_command(),
-            ProverTask::ProveQuickcheck { config } => config.to_command(),
-            #[cfg(feature = "prover-fuzz")]
-            ProverTask::Fake { config } => config.to_command(),
+            ProverTask::IrEquiv { config, .. } => config.to_command(),
+            ProverTask::DslxEquiv { config, .. } => config.to_command(),
+            ProverTask::ProveQuickcheck { config, .. } => config.to_command(),
+            #[cfg(feature = "enable-fake-task")]
+            ProverTask::Fake { config, .. } => config.to_command(),
         }
     }
 }
@@ -742,6 +759,7 @@ mod tests {
                         rhs_ir_file: "rhs.ir".into(),
                         ..Default::default()
                     },
+                    timeout_ms: None,
                 },
             }],
             keep_running_till_finish: false,
@@ -763,6 +781,7 @@ mod tests {
                     rhs_ir_file: "rhs.ir".into(),
                     ..Default::default()
                 },
+                timeout_ms: None,
             },
         };
         let v = serde_json::to_value(&plan).unwrap();
