@@ -207,7 +207,21 @@ fn download_file_via_https(
     url: &str,
     dest: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let response = ureq::get(url).call()?;
+    use ureq::config::Config;
+    use ureq::tls::{RootCerts, TlsConfig};
+
+    // Use the OS trust store so that if, for example, this build is occurring on
+    // a VM behind a MITM proxy, the download will still work.
+    let agent = Config::builder()
+        .tls_config(
+            TlsConfig::builder()
+                .root_certs(RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .build()
+        .new_agent();
+
+    let response = agent.get(url).call()?;
     if response.status() != 200 {
         return Err(format!("Failed to download {}: HTTP {}", url, response.status()).into());
     }
