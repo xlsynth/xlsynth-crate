@@ -214,8 +214,8 @@ fn download_file_via_https(
     let agent = Config::builder()
         .tls_config(
             TlsConfig::builder()
-                // requires the native-tls feature
                 .provider(TlsProvider::NativeTls)
+                .root_certs(RootCerts::PlatformVerifier)
                 .build(),
         )
         .build()
