@@ -5,6 +5,8 @@ use std::io::BufRead;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use ureq::config::Config;
+use ureq::tls::{TlsConfig, TlsProvider};
 
 const RELEASE_LIB_VERSION_TAG: &str = "v0.0.219";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
@@ -207,7 +209,19 @@ fn download_file_via_https(
     url: &str,
     dest: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let response = ureq::get(url).call()?;
+    // Use native-tls so that if, for example, this build is occurring on a VM
+    // behind a MITM proxy, the download will still work.
+    let agent = Config::builder()
+        .tls_config(
+            TlsConfig::builder()
+                // requires the native-tls feature
+                .provider(TlsProvider::NativeTls)
+                .build(),
+        )
+        .build()
+        .new_agent();
+
+    let response = agent.get(url).call()?;
     if response.status() != 200 {
         return Err(format!("Failed to download {}: HTTP {}", url, response.status()).into());
     }
