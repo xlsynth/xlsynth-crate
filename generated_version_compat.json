@@ -1,0 +1,558 @@
+{
+  "0.0.177": {
+    "xlsynth_release_version": "0.0.219",
+    "crate_release_datetime": "2025-08-08 19:21:19 PDT"
+  },
+  "0.0.176": {
+    "xlsynth_release_version": "0.0.219",
+    "crate_release_datetime": "2025-08-08 12:54:46 PDT"
+  },
+  "0.0.175": {
+    "xlsynth_release_version": "0.0.218",
+    "crate_release_datetime": "2025-07-31 23:00:06 PDT"
+  },
+  "0.0.174": {
+    "xlsynth_release_version": "0.0.218",
+    "crate_release_datetime": "2025-07-29 04:49:05 PDT"
+  },
+  "0.0.173": {
+    "xlsynth_release_version": "0.0.216",
+    "crate_release_datetime": "2025-07-22 22:46:15 PDT"
+  },
+  "0.0.172": {
+    "xlsynth_release_version": "0.0.216",
+    "crate_release_datetime": "2025-07-22 21:05:40 PDT"
+  },
+  "0.0.171": {
+    "xlsynth_release_version": "0.0.215",
+    "crate_release_datetime": "2025-07-20 20:28:24 PDT"
+  },
+  "0.0.170": {
+    "xlsynth_release_version": "0.0.215",
+    "crate_release_datetime": "2025-07-19 18:09:37 PDT"
+  },
+  "0.0.169": {
+    "xlsynth_release_version": "0.0.215",
+    "crate_release_datetime": "2025-07-17 15:09:24 PDT"
+  },
+  "0.0.168": {
+    "xlsynth_release_version": "0.0.215",
+    "crate_release_datetime": "2025-07-17 00:23:24 PDT"
+  },
+  "0.0.167": {
+    "xlsynth_release_version": "0.0.215",
+    "crate_release_datetime": "2025-07-15 15:00:56 PDT"
+  },
+  "0.0.166": {
+    "xlsynth_release_version": "0.0.212",
+    "crate_release_datetime": "2025-07-14 16:53:00 PDT"
+  },
+  "0.0.165": {
+    "xlsynth_release_version": "0.0.211",
+    "crate_release_datetime": "2025-07-11 13:57:39 PDT"
+  },
+  "0.0.164": {
+    "xlsynth_release_version": "0.0.211",
+    "crate_release_datetime": "2025-07-10 11:30:52 PDT"
+  },
+  "0.0.163": {
+    "xlsynth_release_version": "0.0.208",
+    "crate_release_datetime": "2025-06-24 22:47:16 PDT"
+  },
+  "0.0.162": {
+    "xlsynth_release_version": "0.0.208",
+    "crate_release_datetime": "2025-06-24 10:02:31 PDT"
+  },
+  "0.0.161": {
+    "xlsynth_release_version": "0.0.207",
+    "crate_release_datetime": "2025-06-22 14:33:51 PDT"
+  },
+  "0.0.160": {
+    "xlsynth_release_version": "0.0.207",
+    "crate_release_datetime": "2025-06-19 16:46:40 PDT"
+  },
+  "0.0.159": {
+    "xlsynth_release_version": "0.0.207",
+    "crate_release_datetime": "2025-06-18 08:58:14 PDT"
+  },
+  "0.0.156": {
+    "xlsynth_release_version": "0.0.203",
+    "crate_release_datetime": "2025-06-11 16:35:20 PDT"
+  },
+  "0.0.155": {
+    "xlsynth_release_version": "0.0.203",
+    "crate_release_datetime": "2025-06-11 09:41:42 PDT"
+  },
+  "0.0.154": {
+    "xlsynth_release_version": "0.0.202",
+    "crate_release_datetime": "2025-06-10 19:29:38 PDT"
+  },
+  "0.0.153": {
+    "xlsynth_release_version": "0.0.202",
+    "crate_release_datetime": "2025-06-10 17:35:46 PDT"
+  },
+  "0.0.152": {
+    "xlsynth_release_version": "0.0.200",
+    "crate_release_datetime": "2025-06-09 12:01:21 PDT"
+  },
+  "0.0.151": {
+    "xlsynth_release_version": "0.0.200",
+    "crate_release_datetime": "2025-06-05 13:09:11 PDT"
+  },
+  "0.0.150": {
+    "xlsynth_release_version": "0.0.200",
+    "crate_release_datetime": "2025-06-04 22:39:33 PDT"
+  },
+  "0.0.149": {
+    "xlsynth_release_version": "0.0.196",
+    "crate_release_datetime": "2025-06-02 10:32:22 PDT"
+  },
+  "0.0.148": {
+    "xlsynth_release_version": "0.0.194",
+    "crate_release_datetime": "2025-05-26 21:05:06 PDT"
+  },
+  "0.0.147": {
+    "xlsynth_release_version": "0.0.194",
+    "crate_release_datetime": "2025-05-25 11:23:15 PDT"
+  },
+  "0.0.146": {
+    "xlsynth_release_version": "0.0.192",
+    "crate_release_datetime": "2025-05-22 14:40:43 PDT"
+  },
+  "0.0.141": {
+    "xlsynth_release_version": "0.0.184",
+    "crate_release_datetime": "2025-05-17 09:17:19 PDT"
+  },
+  "0.0.140": {
+    "xlsynth_release_version": "0.0.184",
+    "crate_release_datetime": "2025-05-15 19:41:08 PDT"
+  },
+  "0.0.139": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-14 01:27:52 PDT"
+  },
+  "0.0.138": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-12 19:47:54 PDT"
+  },
+  "0.0.137": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-10 14:50:21 PDT"
+  },
+  "0.0.136": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-09 20:06:08 PDT"
+  },
+  "0.0.135": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-09 15:36:14 PDT"
+  },
+  "0.0.134": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-09 13:30:06 PDT"
+  },
+  "0.0.133": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-09 00:10:52 PDT"
+  },
+  "0.0.132": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-07 22:28:11 PDT"
+  },
+  "0.0.131": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-05-01 21:20:41 PDT"
+  },
+  "0.0.130": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-29 22:20:52 PDT"
+  },
+  "0.0.129": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-29 18:24:55 PDT"
+  },
+  "0.0.128": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-28 01:47:18 PDT"
+  },
+  "0.0.127": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-25 20:53:40 PDT"
+  },
+  "0.0.126": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-25 14:12:40 PDT"
+  },
+  "0.0.125": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-25 10:32:03 PDT"
+  },
+  "0.0.124": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-24 20:46:25 PDT"
+  },
+  "0.0.123": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-24 15:09:48 PDT"
+  },
+  "0.0.122": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-24 02:11:23 PDT"
+  },
+  "0.0.121": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-23 10:18:34 PDT"
+  },
+  "0.0.120": {
+    "xlsynth_release_version": "0.0.181",
+    "crate_release_datetime": "2025-04-20 18:11:21 PDT"
+  },
+  "0.0.119": {
+    "xlsynth_release_version": "0.0.174",
+    "crate_release_datetime": "2025-04-19 01:26:14 PDT"
+  },
+  "0.0.118": {
+    "xlsynth_release_version": "0.0.174",
+    "crate_release_datetime": "2025-04-18 17:32:16 PDT"
+  },
+  "0.0.117": {
+    "xlsynth_release_version": "0.0.174",
+    "crate_release_datetime": "2025-04-16 14:32:05 PDT"
+  },
+  "0.0.116": {
+    "xlsynth_release_version": "0.0.174",
+    "crate_release_datetime": "2025-04-15 19:19:29 PDT"
+  },
+  "0.0.115": {
+    "xlsynth_release_version": "0.0.174",
+    "crate_release_datetime": "2025-04-11 11:33:48 PDT"
+  },
+  "0.0.114": {
+    "xlsynth_release_version": "0.0.174",
+    "crate_release_datetime": "2025-04-11 08:28:09 PDT"
+  },
+  "0.0.113": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-04-07 19:17:46 PDT"
+  },
+  "0.0.112": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-04-02 11:27:16 PDT"
+  },
+  "0.0.111": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-04-02 07:58:13 PDT"
+  },
+  "0.0.110": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-04-02 07:21:16 PDT"
+  },
+  "0.0.107": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-04-01 21:44:32 PDT"
+  },
+  "0.0.106": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-04-01 11:16:41 PDT"
+  },
+  "0.0.105": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-30 00:00:40 PDT"
+  },
+  "0.0.104": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-29 11:01:05 PDT"
+  },
+  "0.0.103": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-27 22:15:36 PDT"
+  },
+  "0.0.102": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-22 19:28:22 PDT"
+  },
+  "0.0.101": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-20 13:37:22 PDT"
+  },
+  "0.0.100": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-19 18:35:18 PDT"
+  },
+  "0.0.99": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-19 12:26:40 PDT"
+  },
+  "0.0.98": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-19 11:08:04 PDT"
+  },
+  "0.0.97": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-19 01:08:14 PDT"
+  },
+  "0.0.96": {
+    "xlsynth_release_version": "0.0.173",
+    "crate_release_datetime": "2025-03-19 00:54:37 PDT"
+  },
+  "0.0.95": {
+    "xlsynth_release_version": "0.0.171",
+    "crate_release_datetime": "2025-03-16 21:19:51 PDT"
+  },
+  "0.0.94": {
+    "xlsynth_release_version": "0.0.171",
+    "crate_release_datetime": "2025-03-16 19:20:02 PDT"
+  },
+  "0.0.93": {
+    "xlsynth_release_version": "0.0.171",
+    "crate_release_datetime": "2025-03-13 16:56:17 PDT"
+  },
+  "0.0.92": {
+    "xlsynth_release_version": "0.0.171",
+    "crate_release_datetime": "2025-03-13 15:12:21 PDT"
+  },
+  "0.0.91": {
+    "xlsynth_release_version": "0.0.171",
+    "crate_release_datetime": "2025-03-13 11:06:21 PDT"
+  },
+  "0.0.90": {
+    "xlsynth_release_version": "0.0.171",
+    "crate_release_datetime": "2025-03-12 09:04:31 PDT"
+  },
+  "0.0.88": {
+    "xlsynth_release_version": "0.0.170",
+    "crate_release_datetime": "2025-03-11 20:11:17 PDT"
+  },
+  "0.0.87": {
+    "xlsynth_release_version": "0.0.170",
+    "crate_release_datetime": "2025-03-08 15:43:52 PST"
+  },
+  "0.0.85": {
+    "xlsynth_release_version": "0.0.169",
+    "crate_release_datetime": "2025-03-07 22:29:08 PST"
+  },
+  "0.0.84": {
+    "xlsynth_release_version": "0.0.169",
+    "crate_release_datetime": "2025-03-07 21:28:54 PST"
+  },
+  "0.0.83": {
+    "xlsynth_release_version": "0.0.169",
+    "crate_release_datetime": "2025-03-07 19:50:58 PST"
+  },
+  "0.0.82": {
+    "xlsynth_release_version": "0.0.168",
+    "crate_release_datetime": "2025-03-06 11:18:28 PST"
+  },
+  "0.0.81": {
+    "xlsynth_release_version": "0.0.168",
+    "crate_release_datetime": "2025-03-06 10:24:19 PST"
+  },
+  "0.0.80": {
+    "xlsynth_release_version": "0.0.168",
+    "crate_release_datetime": "2025-03-06 09:36:29 PST"
+  },
+  "0.0.79": {
+    "xlsynth_release_version": "0.0.167",
+    "crate_release_datetime": "2025-03-05 19:30:11 PST"
+  },
+  "0.0.78": {
+    "xlsynth_release_version": "0.0.164",
+    "crate_release_datetime": "2025-03-02 16:59:45 PST"
+  },
+  "0.0.77": {
+    "xlsynth_release_version": "0.0.163",
+    "crate_release_datetime": "2025-03-01 16:26:54 PST"
+  },
+  "0.0.76": {
+    "xlsynth_release_version": "0.0.159",
+    "crate_release_datetime": "2025-02-24 15:55:12 PST"
+  },
+  "0.0.75": {
+    "xlsynth_release_version": "0.0.146",
+    "crate_release_datetime": "2025-02-21 10:27:41 PST"
+  },
+  "0.0.74": {
+    "xlsynth_release_version": "0.0.146",
+    "crate_release_datetime": "2025-02-20 13:47:09 PST"
+  },
+  "0.0.73": {
+    "xlsynth_release_version": "0.0.146",
+    "crate_release_datetime": "2025-02-14 08:56:01 PST"
+  },
+  "0.0.72": {
+    "xlsynth_release_version": "0.0.144",
+    "crate_release_datetime": "2025-02-13 13:25:01 PST"
+  },
+  "0.0.71": {
+    "xlsynth_release_version": "0.0.143",
+    "crate_release_datetime": "2025-02-12 16:41:05 PST"
+  },
+  "0.0.70": {
+    "xlsynth_release_version": "0.0.142",
+    "crate_release_datetime": "2025-02-11 19:23:39 PST"
+  },
+  "0.0.69": {
+    "xlsynth_release_version": "0.0.140",
+    "crate_release_datetime": "2025-02-08 20:38:08 PST"
+  },
+  "0.0.66": {
+    "xlsynth_release_version": "0.0.139",
+    "crate_release_datetime": "2025-02-07 16:08:10 PST"
+  },
+  "0.0.65": {
+    "xlsynth_release_version": "0.0.133",
+    "crate_release_datetime": "2025-01-29 22:59:42 PST"
+  },
+  "0.0.62": {
+    "xlsynth_release_version": "0.0.133",
+    "crate_release_datetime": "2025-01-29 21:40:49 PST"
+  },
+  "0.0.61": {
+    "xlsynth_release_version": "0.0.133",
+    "crate_release_datetime": "2025-01-29 21:13:42 PST"
+  },
+  "0.0.60": {
+    "xlsynth_release_version": "0.0.133",
+    "crate_release_datetime": "2025-01-29 19:59:03 PST"
+  },
+  "0.0.59": {
+    "xlsynth_release_version": "0.0.126",
+    "crate_release_datetime": "2025-01-12 20:48:10 PST"
+  },
+  "0.0.58": {
+    "xlsynth_release_version": "0.0.124",
+    "crate_release_datetime": "2025-01-10 17:18:40 PST"
+  },
+  "0.0.56": {
+    "xlsynth_release_version": "0.0.124",
+    "crate_release_datetime": "2025-01-10 15:23:27 PST"
+  },
+  "0.0.55": {
+    "xlsynth_release_version": "0.0.121",
+    "crate_release_datetime": "2024-12-17 20:31:24 PST"
+  },
+  "0.0.54": {
+    "xlsynth_release_version": "0.0.121",
+    "crate_release_datetime": "2024-12-17 20:17:44 PST"
+  },
+  "0.0.53": {
+    "xlsynth_release_version": "0.0.120",
+    "crate_release_datetime": "2024-12-13 14:50:45 PST"
+  },
+  "0.0.52": {
+    "xlsynth_release_version": "0.0.120",
+    "crate_release_datetime": "2024-12-13 09:40:45 PST"
+  },
+  "0.0.51": {
+    "xlsynth_release_version": "0.0.118",
+    "crate_release_datetime": "2024-12-11 23:29:17 PST"
+  },
+  "0.0.50": {
+    "xlsynth_release_version": "0.0.117",
+    "crate_release_datetime": "2024-12-10 22:39:41 PST"
+  },
+  "0.0.49": {
+    "xlsynth_release_version": "0.0.114",
+    "crate_release_datetime": "2024-12-06 20:33:40 PST"
+  },
+  "0.0.48": {
+    "xlsynth_release_version": "0.0.114",
+    "crate_release_datetime": "2024-12-06 10:45:25 PST"
+  },
+  "0.0.47": {
+    "xlsynth_release_version": "0.0.114",
+    "crate_release_datetime": "2024-12-04 16:59:06 PST"
+  },
+  "0.0.46": {
+    "xlsynth_release_version": "0.0.114",
+    "crate_release_datetime": "2024-12-04 16:54:14 PST"
+  },
+  "0.0.43": {
+    "xlsynth_release_version": "0.0.114",
+    "crate_release_datetime": "2024-12-02 01:56:52 PST"
+  },
+  "0.0.42": {
+    "xlsynth_release_version": "0.0.112",
+    "crate_release_datetime": "2024-11-18 19:32:58 PST"
+  },
+  "0.0.41": {
+    "xlsynth_release_version": "0.0.112",
+    "crate_release_datetime": "2024-11-17 21:35:37 PST"
+  },
+  "0.0.40": {
+    "xlsynth_release_version": "0.0.109",
+    "crate_release_datetime": "2024-11-13 09:16:47 PST"
+  },
+  "0.0.38": {
+    "xlsynth_release_version": "0.0.109",
+    "crate_release_datetime": "2024-11-13 07:03:08 PST"
+  },
+  "0.0.37": {
+    "xlsynth_release_version": "0.0.109",
+    "crate_release_datetime": "2024-11-13 00:05:01 PST"
+  },
+  "0.0.36": {
+    "xlsynth_release_version": "0.0.109",
+    "crate_release_datetime": "2024-11-11 16:16:49 PST"
+  },
+  "0.0.35": {
+    "xlsynth_release_version": "0.0.105",
+    "crate_release_datetime": "2024-10-28 18:20:33 PDT"
+  },
+  "0.0.34": {
+    "xlsynth_release_version": "0.0.101",
+    "crate_release_datetime": "2024-10-27 21:00:12 PDT"
+  },
+  "0.0.33": {
+    "xlsynth_release_version": "0.0.101",
+    "crate_release_datetime": "2024-10-19 21:41:20 PDT"
+  },
+  "0.0.32": {
+    "xlsynth_release_version": "0.0.101",
+    "crate_release_datetime": "2024-10-19 18:20:23 PDT"
+  },
+  "0.0.31": {
+    "xlsynth_release_version": "0.0.95",
+    "crate_release_datetime": "2024-10-15 23:57:10 PDT"
+  },
+  "0.0.30": {
+    "xlsynth_release_version": "0.0.95",
+    "crate_release_datetime": "2024-10-11 15:02:53 PDT"
+  },
+  "0.0.29": {
+    "xlsynth_release_version": "0.0.93",
+    "crate_release_datetime": "2024-10-06 11:00:59 PDT"
+  },
+  "0.0.28": {
+    "xlsynth_release_version": "0.0.93",
+    "crate_release_datetime": "2024-10-05 21:45:22 PDT"
+  },
+  "0.0.27": {
+    "xlsynth_release_version": "0.0.87",
+    "crate_release_datetime": "2024-09-23 15:45:28 PDT"
+  },
+  "0.0.26": {
+    "xlsynth_release_version": "0.0.87",
+    "crate_release_datetime": "2024-09-17 15:38:50 PDT"
+  },
+  "0.0.25": {
+    "xlsynth_release_version": "0.0.87",
+    "crate_release_datetime": "2024-09-16 18:35:52 PDT"
+  },
+  "0.0.24": {
+    "xlsynth_release_version": "0.0.87",
+    "crate_release_datetime": "2024-09-15 16:52:11 PDT"
+  },
+  "0.0.23": {
+    "xlsynth_release_version": "0.0.79",
+    "crate_release_datetime": "2024-09-05 22:23:31 PDT"
+  },
+  "0.0.22": {
+    "xlsynth_release_version": "0.0.77",
+    "crate_release_datetime": "2024-09-03 17:10:23 PDT"
+  },
+  "0.0.21": {
+    "xlsynth_release_version": "0.0.69",
+    "crate_release_datetime": "2024-08-21 17:37:23 PDT"
+  }
+}

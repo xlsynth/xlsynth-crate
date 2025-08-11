@@ -307,9 +307,18 @@ def mappings_to_json_object(
         },
         ...
       }
+
+    Entries are ordered by descending semantic version of the crate version
+    (e.g. 0.0.172 before 0.0.101 before 0.0.99). Python dicts preserve
+    insertion order, and we rely on that when writing JSON to keep a
+    human-friendly ordering.
     """
+
+    def version_key(vm: VersionMapping) -> tuple[int, int, int]:
+        return tuple(int(x) for x in vm.crate_version.split("."))  # type: ignore[return-value]
+
     result: Dict[str, Dict[str, str]] = {}
-    for vm in mappings:
+    for vm in sorted(mappings, key=version_key, reverse=True):
         # Later entries for the same crate version would overwrite earlier ones.
         result[vm.crate_version] = {
             "xlsynth_release_version": vm.lib_version,
@@ -338,7 +347,8 @@ def main() -> None:
     json_obj = mappings_to_json_object(mappings)
     json_output_path = "generated_version_compat.json"
     with open(json_output_path, "w") as jf:
-        json.dump(json_obj, jf, indent=2, sort_keys=True)
+        # Preserve insertion order to keep semantic sorting in the file.
+        json.dump(json_obj, jf, indent=2)
         jf.write("\n")
     print(f"JSON mapping written to {json_output_path}")
 
@@ -400,6 +410,32 @@ def test_mappings_to_json_object() -> None:
     }
     got = mappings_to_json_object(mappings)
     assert got == want, f"JSON mapping mismatch.\nwant={want}\n got={got}"
+
+
+def test_mappings_to_json_object_ordering() -> None:
+    mappings = [
+        VersionMapping(
+            crate_version="0.0.99",
+            lib_version="0.0.170",
+            crate_release_datetime="2024-01-03 00:00:00 PST",
+        ),
+        VersionMapping(
+            crate_version="0.0.101",
+            lib_version="0.0.173",
+            crate_release_datetime="2024-01-05 00:00:00 PST",
+        ),
+        VersionMapping(
+            crate_version="0.0.100",
+            lib_version="0.0.173",
+            crate_release_datetime="2024-01-04 00:00:00 PST",
+        ),
+    ]
+    obj = mappings_to_json_object(mappings)
+    got_keys = list(obj.keys())
+    want_keys = ["0.0.101", "0.0.100", "0.0.99"]
+    assert (
+        got_keys == want_keys
+    ), f"Ordering mismatch.\nwant={want_keys}\n got={got_keys}"
 
 
 if __name__ == "__main__":
