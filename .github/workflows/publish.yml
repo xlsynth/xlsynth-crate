@@ -162,6 +162,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"
-          git add docs/version_metadata.md
+          git add docs/version_metadata.md generated_version_compat.json
           git commit -m "Update version metadata after successful publish"
           git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
