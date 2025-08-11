@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "xlsynth-spdx-test"
+version = "0.0.178"
+edition = "2021"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "Config-driven SPDX header checker for xlsynth workspaces"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth"
+homepage = "https://github.com/xlsynth/xlsynth-crate"
+
+[dependencies]
+cargo_metadata = "0.18"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3.20"

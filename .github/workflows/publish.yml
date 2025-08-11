@@ -107,6 +107,16 @@ jobs:
       - name: Wait for xlsynth on crates.io
         run: python3 sleep_until_version_seen.py xlsynth "${{ steps.version_vars.outputs.version_no_v }}"
 
+      - name: Publish xlsynth-spdx-test
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cd xlsynth-spdx-test
+          cargo publish --token $CARGO_REGISTRY_TOKEN
+
+      - name: Wait for xlsynth-spdx-test on crates.io
+        run: python3 sleep_until_version_seen.py xlsynth-spdx-test "${{ steps.version_vars.outputs.version_no_v }}"
+
       - name: Publish xlsynth-test-helpers
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

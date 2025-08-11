@@ -5,6 +5,7 @@ members = [
     "xlsynth-driver",
     "xlsynth-estimator",
     "xlsynth-g8r",
+    "xlsynth-spdx-test",
     "sample-usage",
 ]
 resolver = "2"

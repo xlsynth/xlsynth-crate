@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+
+license = "Apache-2.0"
+
+# Files with these extensions will expect "#" comment prefix for SPDX.
+hash_comment_extensions = ["yml", "yaml", "py"]
+
+# Specific filenames (no extension match) that should use "#".
+hash_comment_filenames = ["requirements.txt"]
+
+# For these extensions, a shebang line may precede SPDX.
+expect_shebang_extensions = ["py"]
+
+# Directory names to skip while walking the tree.
+exclude_dir_names = [
+  "target",
+  ".git",
+  ".venv",
+  "xlsynth_tools",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".vscode",
+]
+
+# If a path ends with any of these suffixes, skip it.
+exclude_path_suffixes = [
+  ".golden.sv",
+  ".golden.v",
+  ".golden.txt",
+  ".so",
+  ".bin",
+]
+
+# Exact filenames to skip.
+exclude_exact_filenames = ["estimator_model.proto"]
+
+# Skip any file with these extensions entirely.
+exclude_extensions = ["md", "lock", "toml", "supp"]
+
+# Skip files whose filename starts with the given prefix and has the given extension.
+[[exclude_prefix_with_extension]]
+prefix = "generated_"
+extension = "json"
