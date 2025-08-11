@@ -20,6 +20,10 @@ The cells link to the corresponding release:
   - Right cell: "https://github.com/xlsynth/xlsynth/releases/tag/v{version}"
 
 We place this result into `docs/version_metadata.md`.
+
+Additionally, we emit a machine-readable mapping at repo root:
+`generated_version_compat.json`, which is an object keyed by crate version
+with values that contain the corresponding xlsynth release version.
 """
 
 import re
@@ -29,7 +33,7 @@ import sys
 import urllib.request
 import json
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from datetime import datetime, timezone
 
@@ -45,7 +49,7 @@ class VersionMapping:
     crate_version: str
     lib_version: str
     # Human-readable commit/tag datetime in America/Los_Angeles.
-    release_datetime: str
+    crate_release_datetime: str
 
 
 def get_file_content_at_commit(commit: str, file_path: str) -> Optional[str]:
@@ -132,13 +136,13 @@ def generate_markdown_table(mappings: List[VersionMapping]) -> str:
 
     left_header = "xlsynth crate version"
     mid_header = "xlsynth release version"
-    right_header = "release datetime (Los_Angeles)"
+    right_header = "crate release datetime (Los_Angeles)"
 
     rows = []
     for vm in sorted_mappings:
         left_cell = f"[{vm.crate_version}]({crate_base_url.format(vm.crate_version)})"
         mid_cell = f"[{vm.lib_version}]({lib_base_url.format(vm.lib_version)})"
-        right_cell = vm.release_datetime
+        right_cell = vm.crate_release_datetime
         rows.append((left_cell, mid_cell, right_cell))
 
     left_width = max(len(left_header), *(len(r[0]) for r in rows))
@@ -218,7 +222,7 @@ def get_version_mapping() -> List[VersionMapping]:
             VersionMapping(
                 crate_version=crate_version,
                 lib_version=lib_version,
-                release_datetime=release_dt,
+                crate_release_datetime=release_dt,
             )
         )
         print(
@@ -283,11 +287,44 @@ def get_single_version_mapping(crate_version: str) -> Optional[VersionMapping]:
     return VersionMapping(
         crate_version=crate_version,
         lib_version=lib_version,
-        release_datetime=release_dt,
+        crate_release_datetime=release_dt,
     )
 
 
 # -- Entry point
+
+
+def mappings_to_json_object(
+    mappings: List[VersionMapping],
+) -> Dict[str, Dict[str, str]]:
+    """Convert VersionMapping list to the JSON object we persist.
+
+    Shape:
+      {
+        "<crate_version>": {
+          "xlsynth_release_version": "<lib_version>",
+          "crate_release_datetime": "<crate_release_datetime>"
+        },
+        ...
+      }
+
+    Entries are ordered by descending semantic version of the crate version
+    (e.g. 0.0.172 before 0.0.101 before 0.0.99). Python dicts preserve
+    insertion order, and we rely on that when writing JSON to keep a
+    human-friendly ordering.
+    """
+
+    def version_key(vm: VersionMapping) -> tuple[int, int, int]:
+        return tuple(int(x) for x in vm.crate_version.split("."))  # type: ignore[return-value]
+
+    result: Dict[str, Dict[str, str]] = {}
+    for vm in sorted(mappings, key=version_key, reverse=True):
+        # Later entries for the same crate version would overwrite earlier ones.
+        result[vm.crate_version] = {
+            "xlsynth_release_version": vm.lib_version,
+            "crate_release_datetime": vm.crate_release_datetime,
+        }
+    return result
 
 
 def main() -> None:
@@ -306,6 +343,15 @@ def main() -> None:
         f.write(full_content)
     print(f"Version compatibility table written to {output_path}")
 
+    # Also emit a machine-readable JSON mapping at repo root.
+    json_obj = mappings_to_json_object(mappings)
+    json_output_path = "generated_version_compat.json"
+    with open(json_output_path, "w") as jf:
+        # Preserve insertion order to keep semantic sorting in the file.
+        json.dump(json_obj, jf, indent=2)
+        jf.write("\n")
+    print(f"JSON mapping written to {json_output_path}")
+
 
 def test_mapping_for_v0_0_101() -> None:
     mapping = get_single_version_mapping("0.0.101")
@@ -319,8 +365,8 @@ def test_mapping_for_v0_0_101() -> None:
     expected_dt = get_tag_datetime("v0.0.101")
     assert expected_dt is not None, "Could not determine expected datetime for v0.0.101"
     assert (
-        mapping.release_datetime == expected_dt
-    ), f"Expected datetime '{expected_dt}', got {mapping.release_datetime}"
+        mapping.crate_release_datetime == expected_dt
+    ), f"Expected datetime '{expected_dt}', got {mapping.crate_release_datetime}"
 
 
 def test_mapping_for_v0_0_100() -> None:
@@ -335,8 +381,61 @@ def test_mapping_for_v0_0_100() -> None:
     expected_dt = get_tag_datetime("v0.0.100")
     assert expected_dt is not None, "Could not determine expected datetime for v0.0.100"
     assert (
-        mapping.release_datetime == expected_dt
-    ), f"Expected datetime '{expected_dt}', got {mapping.release_datetime}"
+        mapping.crate_release_datetime == expected_dt
+    ), f"Expected datetime '{expected_dt}', got {mapping.crate_release_datetime}"
+
+
+def test_mappings_to_json_object() -> None:
+    mappings = [
+        VersionMapping(
+            crate_version="0.0.1",
+            lib_version="0.0.10",
+            crate_release_datetime="2024-01-01 00:00:00 PST",
+        ),
+        VersionMapping(
+            crate_version="0.0.2",
+            lib_version="0.0.11",
+            crate_release_datetime="2024-01-02 00:00:00 PST",
+        ),
+    ]
+    want = {
+        "0.0.1": {
+            "xlsynth_release_version": "0.0.10",
+            "crate_release_datetime": "2024-01-01 00:00:00 PST",
+        },
+        "0.0.2": {
+            "xlsynth_release_version": "0.0.11",
+            "crate_release_datetime": "2024-01-02 00:00:00 PST",
+        },
+    }
+    got = mappings_to_json_object(mappings)
+    assert got == want, f"JSON mapping mismatch.\nwant={want}\n got={got}"
+
+
+def test_mappings_to_json_object_ordering() -> None:
+    mappings = [
+        VersionMapping(
+            crate_version="0.0.99",
+            lib_version="0.0.170",
+            crate_release_datetime="2024-01-03 00:00:00 PST",
+        ),
+        VersionMapping(
+            crate_version="0.0.101",
+            lib_version="0.0.173",
+            crate_release_datetime="2024-01-05 00:00:00 PST",
+        ),
+        VersionMapping(
+            crate_version="0.0.100",
+            lib_version="0.0.173",
+            crate_release_datetime="2024-01-04 00:00:00 PST",
+        ),
+    ]
+    obj = mappings_to_json_object(mappings)
+    got_keys = list(obj.keys())
+    want_keys = ["0.0.101", "0.0.100", "0.0.99"]
+    assert (
+        got_keys == want_keys
+    ), f"Ordering mismatch.\nwant={want_keys}\n got={got_keys}"
 
 
 if __name__ == "__main__":
