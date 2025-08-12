@@ -87,6 +87,7 @@ pub fn run_ir_converter_main(
     enable_warnings: Option<&[String]>,
     disable_warnings: Option<&[String]>,
     type_inference_v2: Option<bool>,
+    convert_tests: bool,
 ) -> String {
     log::info!(
         "run_ir_converter_main; enable_warnings: {:?}; disable_warnings: {:?}",
@@ -124,6 +125,12 @@ pub fn run_ir_converter_main(
         command
             .arg("--disable_warnings")
             .arg(disable_warnings.join(","));
+    }
+
+    if convert_tests {
+        command.arg("--convert_tests=true");
+    } else {
+        command.arg("--convert_tests=false");
     }
 
     // Pass through the experimental type inference flag if requested.

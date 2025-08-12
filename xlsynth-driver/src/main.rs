@@ -437,7 +437,11 @@ fn main() {
                 .add_bool_arg(
                     "type_inference_v2",
                     "Enable the experimental type-inference v2 algorithm",
-                ),
+                )
+                .add_bool_arg(
+                    "convert_tests",
+                    "Convert test procs/functions to IR",
+                )
         )
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(

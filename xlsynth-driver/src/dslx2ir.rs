@@ -18,6 +18,7 @@ fn dslx2ir(
     disable_warnings: Option<&[String]>,
     type_inference_v2: Option<bool>,
     opt: bool,
+    convert_tests: bool,
 ) {
     log::info!("dslx2ir");
 
@@ -33,6 +34,7 @@ fn dslx2ir(
             enable_warnings,
             disable_warnings,
             type_inference_v2,
+            convert_tests,
         );
         if opt {
             // Write the output of conversion to a temp file and then pass that.
@@ -120,6 +122,15 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         _ => false,
     };
 
+    let convert_tests = match matches
+        .get_one::<String>("convert_tests")
+        .map(|s| s.as_str())
+    {
+        Some("true") => true,
+        Some("false") => false,
+        _ => false,
+    };
+
     let type_inference_v2 = match matches
         .get_one::<String>("type_inference_v2")
         .map(|s| s.as_str())
@@ -141,5 +152,6 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         disable_warnings,
         type_inference_v2,
         opt,
+        convert_tests,
     );
 }

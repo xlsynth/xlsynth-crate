@@ -58,6 +58,7 @@ fn dslx2pipeline(
             enable_warnings,
             disable_warnings,
             type_inference_v2,
+            /* convert_tests= */ false,
         );
         let unopt_ir_path = temp_dir.path().join("unopt.ir");
         std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
