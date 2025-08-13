@@ -128,7 +128,7 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     {
         Some("true") => true,
         Some("false") => false,
-        _ => false,
+        _ => crate::flag_defaults::IR_CONVERTER_CONVERT_TESTS,
     };
 
     let type_inference_v2 = match matches
