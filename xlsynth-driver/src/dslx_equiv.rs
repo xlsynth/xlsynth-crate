@@ -50,6 +50,7 @@ fn build_ir_for_dslx(
             enable_warnings,
             disable_warnings,
             type_inference_v2,
+            /* convert_tests= */ false,
         );
         if optimize {
             let tmp = tempfile::NamedTempFile::new().unwrap();

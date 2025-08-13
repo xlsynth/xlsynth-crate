@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Central definition of default flag values we expect the external
-//! `codegen_main` tool to use. Keeping them here lets us use these
+//! Central definition of default flag values we expect external tools to use.
+//! Keeping them here lets us use these
 //! values consistently across the driver code and test that they stay
 //! in sync with the underlying tool implementation.
 //!
 //! NOTE: The single source of truth is still the external tool — these
-//! constants must reflect its behaviour. See the unit test at the
-//! bottom of this file which automatically checks that the values
-//! match the defaults reported by `codegen_main --helpfull` so we do
+//! constants must reflect its behaviour. See the unit tests at the
+//! bottom of this file which automatically check that the values
+//! match the defaults reported by the tools' `--helpfull` so we do
 //! not silently diverge.
 
 // -- Codegen flag defaults
@@ -39,6 +39,12 @@ pub const CODEGEN_FLOP_INPUTS: bool = true;
 
 /// Flop (register) all module outputs, `--flop_outputs` (pipeline generator).
 pub const CODEGEN_FLOP_OUTPUTS: bool = true;
+
+// -- IR converter flag defaults
+
+/// Whether to convert DSLX tests to IR (`--convert_tests`).
+/// Help output snippet from `ir_converter_main --helpfull` shows the default.
+pub const IR_CONVERTER_CONVERT_TESTS: bool = false;
 
 // -- Tests --------------------------------------------------------------
 
@@ -106,6 +112,44 @@ mod tests {
             ("flop_inputs", CODEGEN_FLOP_INPUTS),
             ("flop_outputs", CODEGEN_FLOP_OUTPUTS),
         ];
+
+        for (flag, expected) in checks {
+            let actual = extract_default(&help, flag);
+            assert_eq!(
+                actual, *expected,
+                "Default mismatch for flag '--{}': expected {}, got {}",
+                flag, expected, actual
+            );
+        }
+    }
+
+    /// Panics if preconditions are not met.
+    fn get_ir_converter_help() -> String {
+        let tool_path = std::env::var("XLSYNTH_TOOLS")
+            .expect("XLSYNTH_TOOLS environment variable must be set for tests");
+
+        let tool = std::path::Path::new(&tool_path).join("ir_converter_main");
+        assert!(tool.exists(), "ir_converter_main not found at {:?}", tool);
+
+        let output = Command::new(&tool)
+            .arg("--helpfull")
+            .output()
+            .expect("failed to run ir_converter_main");
+
+        assert!(
+            matches!(output.status.code(), Some(0) | Some(1)),
+            "unexpected exit code {:?}",
+            output.status
+        );
+
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[test]
+    fn defaults_match_ir_converter_main() {
+        let help = get_ir_converter_help();
+
+        let checks: &[(&str, bool)] = &[("convert_tests", IR_CONVERTER_CONVERT_TESTS)];
 
         for (flag, expected) in checks {
             let actual = extract_default(&help, flag);

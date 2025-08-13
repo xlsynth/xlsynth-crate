@@ -52,6 +52,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
             enable_warnings,
             disable_warnings,
             type_inference_v2,
+            /* convert_tests= */ false,
         );
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), &output).unwrap();

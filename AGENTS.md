@@ -35,12 +35,22 @@ Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid need
 Avoid `use` statements inside local function scopes; place all imports at the
 module level (or at the top of a `mod tests` section) for clarity.
 
+When using C-style inline comments to document a named argument style in function calls, prefer:
+
+```text
+foo(/*kwarg=*/false)
+```
+
+Note there is no space before the value: `/*kwarg=*/false` (not `/*kwarg=*/ false`).
+
 ## Documentation
 
 When adding a **new** `xlsynth-driver` subcommand you **must** add a corresponding
 section to `xlsynth-driver/README.md` that follows the style of the existing
 entries (name, short description, flag list, example usage, etc.). Pull requests
 that introduce a command without updating the README are subject to rejection.
+
+When adding or changing flags for an existing `xlsynth-driver` subcommand, update the corresponding section in `xlsynth-driver/README.md` to document the new/changed flags and their defaults.
 
 ## Test
 
