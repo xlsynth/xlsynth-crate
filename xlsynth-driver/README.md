@@ -158,6 +158,10 @@ Optional optimization:
 
 - `--opt=true` – run the IR optimizer before emitting. When set, `--dslx_top` becomes required.
 
+Additional flags:
+
+- `--convert_tests=<BOOL>` – convert DSLX `#[test]` procs/functions to IR as regular IR functions (default `false`).
+
 ### `dslx2sv-types`: DSLX type definitions to SystemVerilog
 
 Generates SystemVerilog type declarations for the definitions in a DSLX file.

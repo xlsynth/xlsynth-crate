@@ -50,6 +50,8 @@ section to `xlsynth-driver/README.md` that follows the style of the existing
 entries (name, short description, flag list, example usage, etc.). Pull requests
 that introduce a command without updating the README are subject to rejection.
 
+When adding or changing flags for an existing `xlsynth-driver` subcommand, update the corresponding section in `xlsynth-driver/README.md` to document the new/changed flags and their defaults.
+
 ## Test
 
 For changes related to boolector, you should test with
