@@ -78,3 +78,46 @@ fn my_test() { inc(u32:41); }
         );
     }
 }
+
+#[test]
+fn test_dslx2ir_error_on_convert_tests_with_top() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx_source = "fn main(x: u32) -> u32 { x }";
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml).unwrap();
+
+    let dslx_path = temp_dir.path().join("mod_under_test.x");
+    std::fs::write(&dslx_path, dslx_source).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--convert_tests")
+        .arg("true")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "Expected failure when --convert_tests and --dslx_top are both provided. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be combined"),
+        "Expected helpful error message; got: {}",
+        stderr
+    );
+}

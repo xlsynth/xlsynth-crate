@@ -131,6 +131,17 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         _ => crate::flag_defaults::IR_CONVERTER_CONVERT_TESTS,
     };
 
+    if convert_tests && top.is_some() {
+        crate::report_cli_error::report_cli_error_and_exit(
+            "`--convert_tests=true` cannot be combined with `--dslx_top` (upstream ir_converter_main ignores tests when a top is specified). Remove `--dslx_top` or set `--convert_tests=false`.",
+            Some("dslx2ir"),
+            vec![
+                ("dslx_top", top.unwrap()),
+                ("convert_tests", "true"),
+            ],
+        );
+    }
+
     let type_inference_v2 = match matches
         .get_one::<String>("type_inference_v2")
         .map(|s| s.as_str())
