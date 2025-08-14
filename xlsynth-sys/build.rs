@@ -72,7 +72,7 @@ fn high_integrity_download(
         checksum_path.display()
     );
 
-    download_file_via_https(&checksum_url, &checksum_path)?;
+    download_file(&checksum_url, &checksum_path)?;
 
     let want_checksum_str = std::fs::read_to_string(&checksum_path)?;
     let want_checksum_str = want_checksum_str.split_whitespace().next().unwrap();
@@ -90,7 +90,7 @@ fn high_integrity_download(
         tmp_out_path.display()
     );
 
-    download_file_via_https(url, &tmp_out_path)?;
+    download_file(url, &tmp_out_path)?;
 
     if !tmp_out_path.exists() {
         return Err(format!(
@@ -202,8 +202,22 @@ fn high_integrity_download_gz_and_decompress_with_retries(
     Ok(())
 }
 
+/// Download a file from a URL.
+fn download_file(url: &str, dest: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Try to download with ureq.  If that fails, try by shelling out to curl.
+    download_file_with_ureq(url, dest).or_else(|e| {
+        println!("cargo:error=failed to download file with ureq (will try curl): {e}");
+        download_file_with_curl(url, dest)
+    })
+}
+
 /// Download a file from a URL using ureq.
-fn download_file_via_https(
+///
+/// This can fail e.g. if the machine is behind a TLS MITM proxy, because our
+/// ureq setup does not read the machine's root CA certs.  It's possible to
+/// configure ureq to do this, but that causes us to link in additional native
+/// libraries, which complicates the build.
+fn download_file_with_ureq(
     url: &str,
     dest: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -216,6 +230,28 @@ fn download_file_via_https(
     let mut reader = body.into_reader();
     std::io::copy(&mut reader, &mut file)?;
     Ok(())
+}
+
+/// Download a file from a URL by shelling out to curl.
+fn download_file_with_curl(
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("curl")
+        .arg("--location") // follow redirects
+        .arg("--fail")
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--output")
+        .arg(dest)
+        .arg(url)
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Failed to download {url}: curl returned non-zero exit status",).into())
+    }
 }
 
 fn is_rocky() -> bool {
