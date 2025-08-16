@@ -257,6 +257,21 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `ir-strip-pos-data`
+
+Reads an `.ir` file and emits the same IR with all position data removed. This drops:
+
+- `file_number` lines (the file table)
+- any `pos=[(fileno, line, col), ...]` attributes on nodes
+
+Output is written to **stdout**.
+
+Example:
+
+```shell
+xlsynth-driver ir-strip-pos-data input.ir > input.nopos.ir
+```
+
 ### `g8r-equiv`
 
 Checks two GateFns for functional equivalence using the available engines. A
