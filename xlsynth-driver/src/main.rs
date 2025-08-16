@@ -53,6 +53,7 @@ mod ir2pipeline;
 mod ir_equiv;
 mod ir_fn_eval;
 mod ir_ged;
+mod ir_strip_pos_data;
 mod lib2proto;
 mod parallelism;
 mod prove_quickcheck;
@@ -822,6 +823,16 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("ir-strip-pos-data")
+                .about("Reads an .ir file and emits the same IR with all position data removed (file table and pos= attributes)")
+                .arg(
+                    clap::Arg::new("ir_file")
+                        .help("Path to the IR file")
+                        .required(true)
+                        .index(1),
+                ),
+        )
+        .subcommand(
             clap::Command::new("run-verilog-pipeline")
                 .about("Runs a SystemVerilog pipeline via iverilog with a single input value")
                 .long_about("Runs a SystemVerilog pipeline simulation using iverilog.\n\nUsage: xlsynth-driver run-verilog-pipeline <SV_PATH> [INPUT_VALUE]\n  SV_PATH: Path to SystemVerilog file (or '-' for stdin)\n  INPUT_VALUE: XLS IR typed value (e.g., 'bits[32]:5', 'tuple(bits[8]:1, bits[16]:2)')\n               If not provided, zero values will be used and displayed.")
@@ -1179,6 +1190,8 @@ fn main() {
         g8r_equiv::handle_g8r_equiv(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("run-verilog-pipeline") {
         run_verilog_pipeline::handle_run_verilog_pipeline(matches);
+    } else if let Some(matches) = matches.subcommand_matches("ir-strip-pos-data") {
+        ir_strip_pos_data::handle_ir_strip_pos_data(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("prove-quickcheck") {
         prove_quickcheck::handle_prove_quickcheck(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("prover") {

@@ -1659,6 +1659,35 @@ pub fn main(x: u8, y: u8) -> (u8, u8) { if y == u8:0 { (all_ones!<u8>(), zero!<u
     assert!(stdout.contains("Solver proved equivalence"));
 }
 
+#[test]
+fn test_ir_strip_pos_data_subcommand() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("with_pos.ir");
+
+    let ir = "package pos_pkg\nfile_number 0 \"foo.x\"\n\n\
+top fn main() -> bits[32] {\n  ret literal.1: bits[32] = literal(value=1, id=1, pos=[(0,0,0)])\n}\n";
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-strip-pos-data")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-strip-pos-data failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let got = String::from_utf8_lossy(&output.stdout);
+    let want = "package pos_pkg\n\n\
+top fn main() -> bits[32] {\n  ret literal.1: bits[32] = literal(value=1, id=1)\n}\n";
+    assert_eq!(got, want);
+}
+
 macro_rules! test_irequiv_subcommand_solver_base {
     ($solver:ident, $feature:expr, $choice:expr) => {
         paste::paste! {
