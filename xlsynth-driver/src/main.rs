@@ -54,6 +54,7 @@ mod ir_equiv;
 mod ir_fn_eval;
 mod ir_ged;
 mod ir_strip_pos_data;
+mod ir_structural_similarity;
 mod lib2proto;
 mod parallelism;
 mod prove_quickcheck;
@@ -651,6 +652,36 @@ fn main() {
                 .add_bool_arg("json", "Output in JSON format"),
         )
         .subcommand(
+            clap::Command::new("ir-structural-similarity")
+                .about("Computes a depth-to-discrepancy histogram between two IR functions")
+                .arg(
+                    Arg::new("lhs_ir_file")
+                        .help("The left-hand side IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("rhs_ir_file")
+                        .help("The right-hand side IR file")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("lhs_ir_top")
+                        .long("lhs_ir_top")
+                        .help("The top-level entry point for the left-hand side IR"),
+                )
+                .arg(
+                    Arg::new("rhs_ir_top")
+                        .long("rhs_ir_top")
+                        .help("The top-level entry point for the right-hand side IR"),
+                )
+                .add_bool_arg(
+                    "show_discrepancies",
+                    "Show per-depth discrepancy signatures in verbose form",
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir2gates")
                 .about("Converts IR to GateFn and emits it to stdout as JSON")
                 .arg(
@@ -1172,6 +1203,8 @@ fn main() {
         dslx_equiv::handle_dslx_equiv(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-ged") {
         ir_ged::handle_ir_ged(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir-structural-similarity") {
+        ir_structural_similarity::handle_ir_structural_similarity(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
         ir2gates::handle_ir2gates(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2g8r") {
