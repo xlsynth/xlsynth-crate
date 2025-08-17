@@ -224,6 +224,46 @@ Computes the Graph-Edit-Distance between two IR functions. Without further
 flags a summary line like `Distance: N` is printed on **stdout**. With
 `--json=true` the result is emitted as JSON.
 
+### `ir-structural-similarity`
+
+Computes a structural similarity summary between two IR functions by hashing node structure per depth and comparing multisets.
+
+- Positional arguments: `<lhs.ir> <rhs.ir>`
+- Entry-point selection (optional): `--lhs_ir_top <NAME>` and `--rhs_ir_top <NAME>`; if omitted, the package `top` or first function is used on each side.
+- Output:
+  - Always prints the return-node depth for each side, then one line per discrepant depth with the total discrepancy count, followed by concise opcode summaries on separate lines for LHS and RHS.
+  - With `--show_discrepancies=true`, also prints detailed signature lines for items present only on one side.
+
+Example:
+
+```shell
+xlsynth-driver ir-structural-similarity lhs.opt.ir rhs.opt.ir
+```
+
+Sample output (truncated):
+
+```text
+LHS return depth: 53
+RHS return depth: 53
+depth 12: 2
+  lhs: {}
+  rhs: {nor: 1, or: 1}
+depth 13: 5
+  lhs: {and: 1, or: 1}
+  rhs: {and: 1, or: 2}
+```
+
+Verbose details:
+
+```shell
+xlsynth-driver ir-structural-similarity lhs.opt.ir rhs.opt.ir --show_discrepancies=true
+```
+
+Notes:
+
+- Structural hashing ignores position metadata, assertion/trace strings, and parameter text ids (params are keyed by ordinal position in the signature). It includes node kinds, types, selected attributes (e.g., widths), and child structure.
+- Opcode summaries group discrepancies by operator per depth to make eyeballing easier; detailed signatures include operand/attribute types for precise diagnosis.
+
 ### `ir2gates`: IR to GateFn statistics
 
 Maps an IR function to a gate-level representation and prints a structural
