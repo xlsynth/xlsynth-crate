@@ -8,4 +8,6 @@ pub mod ir;
 pub mod ir_node_env;
 pub mod ir_parser;
 pub mod ir_utils;
+pub mod ir_verify;
+pub mod localized_eco;
 pub mod structural_similarity;

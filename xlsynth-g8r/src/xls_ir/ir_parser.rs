@@ -2101,6 +2101,25 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     }
 
     #[test]
+    fn test_parse_after_all_node_nullary() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut node_env = IrNodeEnv::new();
+        let input = "after_all.19: token = after_all(id=19)";
+        let mut parser = Parser::new(input);
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert_eq!(node.payload, ir::NodePayload::AfterAll(Vec::new()));
+    }
+
+    #[test]
+    fn test_round_trip_fn_with_nullary_after_all() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = "fn f() -> token {\n  ret after_all.19: token = after_all(id=19)\n}\n";
+        let mut parser = Parser::new(input);
+        let f = parser.parse_fn().unwrap();
+        assert_eq!(f.to_string(), input.trim_end());
+    }
+
+    #[test]
     fn test_parse_bit_slice_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();

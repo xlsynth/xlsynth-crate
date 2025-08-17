@@ -5650,6 +5650,182 @@ fn test_dslx_equiv_uninterpreted_functions_solver_param(solver: &str) {
     assert!(stdout.contains("success"), "stdout: {}", stdout);
 }
 
+#[test]
+fn test_ir_localized_eco_midlevel_insert_and_substitute() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Build the "old" IR function per description.
+    let old_ir = r#"package eco_pkg
+
+top fn eco_top(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  and.3: bits[1] = and(x, y, id=3)
+  not.4: bits[1] = not(and.3, id=4)
+  not.5: bits[1] = not(and.3, id=5)
+  not.6: bits[1] = not(not.4, id=6)
+  and.7: bits[1] = and(not.4, not.5, id=7)
+  not.8: bits[1] = not(not.5, id=8)
+  and.9: bits[1] = and(not.6, and.7, id=9)
+  and.10: bits[1] = and(and.7, not.8, id=10)
+  ret and.11: bits[1] = and(and.9, and.10, id=11)
+}
+"#;
+
+    // Build the "new" IR where we insert n1p5_0 = and(n1_0, n1_1) and
+    // substitute one operand of n2_1 (and.7) to be that new node.
+    // Concretely: change and.7 from and(not.4, not.5) to and(not.4, and.12).
+    let new_ir = r#"package eco_pkg
+
+top fn eco_top(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  and.3: bits[1] = and(x, y, id=3)
+  not.4: bits[1] = not(and.3, id=4)
+  not.5: bits[1] = not(and.3, id=5)
+  and.12: bits[1] = and(not.4, not.5, id=12)
+  not.6: bits[1] = not(not.4, id=6)
+  and.7: bits[1] = and(not.4, and.12, id=7)
+  not.8: bits[1] = not(not.5, id=8)
+  and.9: bits[1] = and(not.6, and.7, id=9)
+  and.10: bits[1] = and(and.7, not.8, id=10)
+  ret and.11: bits[1] = and(and.9, and.10, id=11)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let old_path = temp_dir.path().join("old.ir");
+    let new_path = temp_dir.path().join("new.ir");
+    std::fs::write(&old_path, old_ir).unwrap();
+    std::fs::write(&new_path, new_ir).unwrap();
+
+    let json_out = temp_dir.path().join("eco_report.json");
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-localized-eco")
+        .arg(old_path.to_str().unwrap())
+        .arg(new_path.to_str().unwrap())
+        .arg("--json_out")
+        .arg(json_out.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Load JSON and check that we have a substitution at the and.7 node for one
+    // operand where the new operand signature is an and(...) and the old
+    // operand signature is a not(...).
+    let json_bytes = std::fs::read(&json_out).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
+    let edits = v
+        .get("edits")
+        .and_then(|e| e.get("edits"))
+        .and_then(|e| e.as_array())
+        .expect("edits array present");
+    let mut saw_sub = false;
+    for e in edits.iter() {
+        if let Some(sub) = e.get("OperandSubstituted") {
+            let old_sig = sub
+                .get("old_signature")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let new_sig = sub
+                .get("new_signature")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            if old_sig.starts_with("not(") && new_sig.starts_with("and(") {
+                saw_sub = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_sub,
+        "Expected an OperandSubstituted from not(...) to and(...). JSON: {}",
+        String::from_utf8_lossy(&json_bytes)
+    );
+
+    // As a final step, create a "patched old" IR (for now identical to new_ir) and
+    // prove equivalence to new_ir via the ir-equiv subcommand to validate the
+    // proving pipeline/flags.
+    let patched_old_path = temp_dir.path().join("patched_old.ir");
+    std::fs::write(&patched_old_path, new_ir).unwrap();
+    // Provide a toolchain toml for ir-equiv's toolchain solver.
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_contents).unwrap();
+
+    let eq_out = std::process::Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg(patched_old_path.to_str().unwrap())
+        .arg(new_path.to_str().unwrap())
+        .arg("--top")
+        .arg("eco_top")
+        .output()
+        .unwrap();
+    assert!(
+        eq_out.status.success(),
+        "ir-equiv should succeed for patched_old vs new; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&eq_out.stdout),
+        String::from_utf8_lossy(&eq_out.stderr)
+    );
+}
+
+#[test]
+fn test_ir_round_trip_strip_pos_attrs_flag() {
+    let ir_with_file = r#"package p
+
+file_number 0 "foo.x"
+
+top fn main(x: bits[8]) -> bits[8] {
+  arr: bits[8][4] = literal(value=[0, 1, 2, 3], id=1)
+  ai: bits[8] = array_index(arr, indices=[x], assumed_in_bounds=false, id=2)
+  ret identity.3: bits[8] = identity(ai)
+}
+"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let ir_path = tmp.path().join("in.ir");
+    std::fs::write(&ir_path, ir_with_file).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    // Default: should preserve file_number lines.
+    let out_preserve = std::process::Command::new(driver)
+        .arg("ir-round-trip")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out_preserve.status.success());
+    let s_preserve = String::from_utf8_lossy(&out_preserve.stdout);
+    assert!(
+        s_preserve.contains("file_number"),
+        "should preserve file_number by default: {}",
+        s_preserve
+    );
+    // array_index assumed_in_bounds=false should not be printed explicitly
+    assert!(
+        !s_preserve.contains("assumed_in_bounds=false"),
+        "should omit default false assumed_in_bounds"
+    );
+
+    // With --strip-pos-attrs=true: should not include file_number lines.
+    let out_strip = std::process::Command::new(driver)
+        .arg("ir-round-trip")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--strip-pos-attrs")
+        .arg("true")
+        .output()
+        .unwrap();
+    assert!(out_strip.status.success());
+    let s_strip = String::from_utf8_lossy(&out_strip.stdout);
+    assert!(
+        !s_strip.contains("file_number"),
+        "should strip file_number with flag: {}",
+        s_strip
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Uninterpreted function (UF) tests for prove-quickcheck
 // -----------------------------------------------------------------------------
