@@ -107,19 +107,38 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             update_hash_u64(hasher, *new_bit_count as u64)
         }
         NodePayload::ArrayUpdate {
-            assumed_in_bounds, ..
+            array: _,
+            value: _,
+            indices: _,
+            assumed_in_bounds,
         } => update_hash_bool(hasher, *assumed_in_bounds),
         NodePayload::ArrayIndex {
-            assumed_in_bounds, ..
+            array: _,
+            indices: _,
+            assumed_in_bounds,
         } => update_hash_bool(hasher, *assumed_in_bounds),
         NodePayload::DynamicBitSlice { width, .. } => update_hash_u64(hasher, *width as u64),
         NodePayload::BitSlice { start, width, .. } => {
             update_hash_u64(hasher, *start as u64);
             update_hash_u64(hasher, *width as u64);
         }
-        NodePayload::BitSliceUpdate { .. } => {}
-        NodePayload::Assert { .. } => {}
-        NodePayload::Trace { .. } => {}
+        NodePayload::BitSliceUpdate {
+            arg: _,
+            start: _,
+            update_value: _,
+        } => {}
+        NodePayload::Assert {
+            token: _,
+            activate: _,
+            message: _,
+            label: _,
+        } => {}
+        NodePayload::Trace {
+            token: _,
+            activated: _,
+            format: _,
+            operands: _,
+        } => {}
         NodePayload::AfterAll(nodes) => update_hash_u64(hasher, nodes.len() as u64),
         NodePayload::Nary(op, nodes) => {
             update_hash_str(hasher, crate::xls_ir::ir::nary_op_to_operator(*op));
@@ -129,25 +148,38 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             update_hash_str(hasher, to_apply);
             update_hash_u64(hasher, operands.len() as u64);
         }
-        NodePayload::PrioritySel { default, cases, .. } => {
+        NodePayload::PrioritySel {
+            selector: _,
+            default,
+            cases,
+        } => {
             update_hash_bool(hasher, default.is_some());
             update_hash_u64(hasher, cases.len() as u64);
         }
-        NodePayload::OneHotSel { cases, .. } => update_hash_u64(hasher, cases.len() as u64),
-        NodePayload::OneHot { lsb_prio, .. } => update_hash_bool(hasher, *lsb_prio),
-        NodePayload::Sel { default, cases, .. } => {
+        NodePayload::OneHotSel { selector: _, cases } => {
+            update_hash_u64(hasher, cases.len() as u64)
+        }
+        NodePayload::OneHot { arg: _, lsb_prio } => update_hash_bool(hasher, *lsb_prio),
+        NodePayload::Sel {
+            selector: _,
+            default,
+            cases,
+        } => {
             update_hash_bool(hasher, default.is_some());
             update_hash_u64(hasher, cases.len() as u64);
         }
-        NodePayload::Cover { .. } => {}
-        NodePayload::Decode { width, .. } => update_hash_u64(hasher, *width as u64),
-        NodePayload::Encode { .. } => {}
+        NodePayload::Cover {
+            predicate: _,
+            label: _,
+        } => {}
+        NodePayload::Decode { arg: _, width } => update_hash_u64(hasher, *width as u64),
+        NodePayload::Encode { arg: _ } => {}
         NodePayload::CountedFor {
+            init: _,
             trip_count,
             stride,
             body,
             invariant_args,
-            ..
         } => {
             update_hash_u64(hasher, *trip_count as u64);
             update_hash_u64(hasher, *stride as u64);
