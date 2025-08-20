@@ -274,3 +274,43 @@ pub fn run_codegen_combinational(
 
     String::from_utf8_lossy(&output.stdout).to_string()
 }
+
+/// Runs codegen_main in combinational mode to emit block IR for a specific
+/// function top, capturing the block IR text from a requested output path.
+pub fn run_codegen_block_ir_to_string(
+    input_file: &std::path::Path,
+    top: &str,
+    tool_path: &str,
+    output_block_ir_path: &std::path::Path,
+) -> String {
+    log::info!("run_codegen_block_ir_to_string");
+    let codegen_main_path = format!("{}/codegen_main", tool_path);
+    if !std::path::Path::new(&codegen_main_path).exists() {
+        eprintln!("codegen_main tool not found at: {}", codegen_main_path);
+        process::exit(1);
+    }
+
+    let mut command = Command::new(codegen_main_path);
+    command
+        .arg(input_file)
+        .arg("--delay_model")
+        .arg("unit")
+        .arg("--generator=combinational")
+        .arg("--top")
+        .arg(top)
+        .arg("--output_block_ir_path")
+        .arg(output_block_ir_path);
+
+    log::info!("Running command: {:?}", command);
+    let output = command
+        .output()
+        .expect("codegen_main (block IR) should succeed");
+
+    if !output.status.success() {
+        eprintln!("Block IR generation failed with status: {}", output.status);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        process::exit(1);
+    }
+
+    std::fs::read_to_string(output_block_ir_path).expect("reading output block IR should succeed")
+}

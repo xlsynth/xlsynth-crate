@@ -87,6 +87,7 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             if path_str.ends_with(".golden.sv")
                 || path_str.ends_with(".golden.v")
                 || path_str.ends_with(".golden.txt")
+                || path_str.ends_with(".golden.ir")
                 || (filename.starts_with("generated_") && filename.ends_with(".json"))
             {
                 continue;
