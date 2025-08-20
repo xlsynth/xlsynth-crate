@@ -10,6 +10,33 @@ pub use simulate_sv::{
 
 pub mod ir_fuzz;
 
+/// Compare arbitrary text against a golden file on disk, with an opt-in
+/// update mechanism controlled by the XLSYNTH_UPDATE_GOLDEN environment
+/// variable. Uses full-string equality (no trimming) for exactness.
+pub fn compare_golden_text(got: &str, relpath: &str) {
+    let golden_path = std::path::Path::new(relpath);
+    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok()
+        || !golden_path.exists()
+        || golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0
+    {
+        log::info!(
+            "compare_golden_text; writing golden file to {}",
+            golden_path.display()
+        );
+        std::fs::write(golden_path, got).expect("write golden");
+    } else {
+        log::info!(
+            "compare_golden_text; reading golden file from {}",
+            golden_path.display()
+        );
+        let want = std::fs::read_to_string(golden_path).expect("read golden");
+        assert_eq!(
+            got, want,
+            "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
+        );
+    }
+}
+
 pub fn compare_golden_sv(got: &str, relpath: &str) {
     let golden_path = std::path::Path::new(relpath);
     if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok()

@@ -2407,18 +2407,30 @@ top fn my_main(x: bits[8]) -> bits[8] {
   one: bits[8] = literal(value=1, id=1)
   ret add.2: bits[8] = add(x, one, id=2)
 }
+
+"#;
+}
+
+#[test]
+fn test_ir_fn_to_block_golden() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    const SIMPLE_IR: &str = r#"package simple_pkg
+
+top fn my_main(x: bits[8]) -> bits[8] {
+  one: bits[8] = literal(value=1, id=1)
+  ret add.2: bits[8] = add(x, one, id=2)
+}
 "#;
 
     let temp_dir = tempfile::tempdir().unwrap();
     let ir_path = temp_dir.path().join("simple.ir");
     std::fs::write(&ir_path, SIMPLE_IR).unwrap();
 
-    // Toolchain path is required for this subcommand.
     let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
 
-    // Invoke the driver.
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
         .arg("--toolchain")
@@ -2437,16 +2449,8 @@ top fn my_main(x: bits[8]) -> bits[8] {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
-    assert!(
-        !stdout.trim().is_empty(),
-        "Expected non-empty block IR output"
-    );
-    assert!(
-        stdout.contains("block") && stdout.contains("my_main"),
-        "Expected block IR to reference the top function name; got: {}",
-        stdout
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::compare_golden_text(&stdout, "tests/test_ir_fn_to_block_smoke.golden.ir");
 }
 
 #[test_case(true; "with_tool_path")]
