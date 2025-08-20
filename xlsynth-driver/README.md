@@ -212,6 +212,24 @@ xlsynth-driver --toolchain=$HOME/xlsynth-toolchain.toml \
   --use_system_verilog=true > my_design.sv
 ```
 
+### `ir-fn-to-block`: IR function to Block IR (toolchain-only)
+
+Emits the Block IR for a single IR function using the external toolchain.
+
+_Implementation note:_ This is a thin wrapper over `codegen_main` with `--generator=combinational`, `--delay_model=unit`, and `--output_block_ir` directed to a temporary file that is then printed to **stdout**.
+
+- Requires a `--toolchain` whose TOML points to a valid `tool_path` containing `codegen_main`.
+- Positional arguments and flags:
+  - `<ir_input_file>` – path to the package IR file.
+  - `--top <NAME>` – name of the IR function to emit as a block.
+
+Example:
+
+```shell
+xlsynth-driver --toolchain=$HOME/xlsynth-toolchain.toml \
+  ir-fn-to-block my_pkg.ir --top my_main > my_main.block.ir
+```
+
 ### `ir2delayinfo`
 
 Runs the `delay_info_main` tool for a given IR entry point and delay model.

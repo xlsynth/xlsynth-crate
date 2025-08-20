@@ -52,6 +52,7 @@ mod ir2opt;
 mod ir2pipeline;
 mod ir_equiv;
 mod ir_fn_eval;
+mod ir_fn_to_block;
 mod ir_ged;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
@@ -513,6 +514,17 @@ fn main() {
                 .add_codegen_args()
                 .add_bool_arg("opt", "Optimize the IR before codegen")
                 .add_bool_arg("keep_temps", "Keep temporary files"),
+        )
+        .subcommand(
+            clap::Command::new("ir-fn-to-block")
+                .about("Converts an IR function to Block IR (requires external toolchain)")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(true),
         )
         .subcommand(
             clap::Command::new("ir2delayinfo")
@@ -1203,6 +1215,8 @@ fn main() {
         dslx_equiv::handle_dslx_equiv(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-ged") {
         ir_ged::handle_ir_ged(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir-fn-to-block") {
+        ir_fn_to_block::handle_ir_fn_to_block(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-structural-similarity") {
         ir_structural_similarity::handle_ir_structural_similarity(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
