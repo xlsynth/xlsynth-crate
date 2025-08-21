@@ -2314,10 +2314,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         log::info!("xlsynth package str:\n{}", xlsynth_package_str);
         let mut parser = Parser::new(xlsynth_package_str.as_str());
         let parsed_package = parser.parse_package().unwrap();
-        assert_eq!(
-            parsed_package.to_string(),
-            strip_pos_data(&xlsynth_package_str)
-        );
+        assert_eq!(parsed_package.to_string(), xlsynth_package_str);
     }
 
     #[test]
@@ -2709,7 +2706,9 @@ block my_main(x: bits[8], out: bits[8]) {
 }"#;
         let mut parser = Parser::new(input);
         let f = parser.parse_block_to_fn().unwrap();
-        let want = "fn my_block(a: bits[32] id=1, b: bits[32] id=3) -> (bits[32], bits[32]) {\n  ret tuple.4: (bits[32], bits[32]) = tuple(a, b)\n}";
+        let want = "fn my_block(a: bits[32] id=1, b: bits[32] id=3) -> (bits[32], bits[32]) {
+  ret tuple.4: (bits[32], bits[32]) = tuple(a, b, id=4)
+}";
         assert_eq!(f.to_string(), want);
     }
 

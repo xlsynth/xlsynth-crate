@@ -1550,10 +1550,14 @@ mod tests {
     #[test]
     fn tuple_extra_operand_localized_insert() {
         let old = parse_fn(
-            "fn t(a: bits[1] id=1) -> (bits[1], bits[1]) {\n  ret tuple.3: (bits[1], bits[1]) = tuple(a, a, id=3)\n}",
+            "fn t(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {\n\
+  ret or.3: bits[1] = or(a, b, id=3)\n\
+}",
         );
         let new = parse_fn(
-            "fn t(a: bits[1] id=1) -> (bits[1], bits[1], bits[1]) {\n  ret tuple.4: (bits[1], bits[1], bits[1]) = tuple(a, a, a, id=4)\n}",
+            "fn t(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {\n\
+  ret or.3: bits[1] = or(a, b, b, id=3)\n\
+}",
         );
         let diff = compute_localized_eco(&old, &new);
         // Expect at least one insertion at the return node path [].
