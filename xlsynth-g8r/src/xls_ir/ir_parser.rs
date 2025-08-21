@@ -1355,6 +1355,12 @@ impl Parser {
     ///   function return.
     /// - Other nodes are parsed as normal IR nodes.
     pub fn parse_block_to_fn(&mut self) -> Result<ir::Fn, ParseError> {
+        // Backward-compatible API: discard port info.
+        let (f, _) = self.parse_block_to_fn_with_ports()?;
+        Ok(f)
+    }
+
+    pub fn parse_block_to_fn_with_ports(&mut self) -> Result<(ir::Fn, BlockPortInfo), ParseError> {
         // Skip optional outer attributes like `#[signature("""...""")]`.
         loop {
             self.drop_whitespace_and_comments();
@@ -1414,6 +1420,8 @@ impl Parser {
         let mut input_params: Vec<(String, ir::Type, usize)> = Vec::new();
         // Track outputs discovered: (output port name, node ref)
         let mut outputs: Vec<(String, ir::NodeRef)> = Vec::new();
+        let mut output_ids_by_name: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         // Helper to maybe skip inner attributes like `#![provenance(...)]`.
         let skip_inner_attribute = |this: &mut Parser| -> Result<bool, ParseError> {
@@ -1520,6 +1528,7 @@ impl Parser {
                     let value_ref = self.parse_node_ref(&node_env, "output_port value")?;
                     // Consume any additional attributes in any order until we hit ')'.
                     let mut out_name_opt: Option<String> = None;
+                    let mut out_id_opt: Option<usize> = None;
                     loop {
                         self.drop_whitespace_and_comments();
                         if !self.try_drop(",") {
@@ -1533,7 +1542,7 @@ impl Parser {
                             continue;
                         }
                         if self.peek_is("id=") {
-                            let _ = self.parse_id_attribute()?;
+                            out_id_opt = Some(self.parse_id_attribute()?);
                             continue;
                         }
                         if self.peek_is("pos=") {
@@ -1547,7 +1556,11 @@ impl Parser {
                     let out_name = out_name_opt.ok_or_else(|| {
                         ParseError::new("output_port missing name attribute".to_string())
                     })?;
-                    outputs.push((out_name, value_ref));
+                    let out_id = out_id_opt.ok_or_else(|| {
+                        ParseError::new("output_port missing id attribute".to_string())
+                    })?;
+                    outputs.push((out_name.clone(), value_ref));
+                    output_ids_by_name.insert(out_name, out_id);
                     Ok(Some(()))
                 } else {
                     Ok(None)
@@ -1629,13 +1642,22 @@ impl Parser {
                     ret_ty, ret_node_ty, nodes[ret_node_ref.index].text_id
                 )));
             }
-            return Ok(ir::Fn {
-                name: block_name,
-                params,
-                ret_ty,
-                nodes,
-                ret_node_ref: Some(ret_node_ref),
-            });
+            return Ok((
+                ir::Fn {
+                    name: block_name,
+                    params,
+                    ret_ty,
+                    nodes,
+                    ret_node_ref: Some(ret_node_ref),
+                },
+                BlockPortInfo {
+                    input_port_ids: input_params
+                        .iter()
+                        .map(|(n, _t, id)| (n.clone(), *id))
+                        .collect(),
+                    output_port_ids: output_ids_by_name,
+                },
+            ));
         }
 
         // Multiple outputs: build a tuple node and return it.
@@ -1657,13 +1679,22 @@ impl Parser {
         node_env.add(None, next_id, ret_node_ref);
         nodes.push(tuple_node);
 
-        Ok(ir::Fn {
-            name: block_name,
-            params,
-            ret_ty,
-            nodes,
-            ret_node_ref: Some(ret_node_ref),
-        })
+        Ok((
+            ir::Fn {
+                name: block_name,
+                params,
+                ret_ty,
+                nodes,
+                ret_node_ref: Some(ret_node_ref),
+            },
+            BlockPortInfo {
+                input_port_ids: input_params
+                    .iter()
+                    .map(|(n, _t, id)| (n.clone(), *id))
+                    .collect(),
+                output_port_ids: output_ids_by_name,
+            },
+        ))
     }
 
     pub fn parse_package(&mut self) -> Result<ir::Package, ParseError> {
@@ -1712,6 +1743,146 @@ impl Parser {
             top_name,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockPortInfo {
+    pub input_port_ids: std::collections::HashMap<String, usize>,
+    pub output_port_ids: std::collections::HashMap<String, usize>,
+}
+
+/// Emits a combinational block text from an `ir::Fn`.
+///
+/// If `output_names` is provided, it determines the names and order of outputs
+/// in the block header and `output_port` lines. If not provided, a single
+/// output is named `out`, and multiple outputs are named `out0`, `out1`, ...
+pub fn emit_fn_as_block(
+    f: &ir::Fn,
+    output_names: Option<&[String]>,
+    port_ids: Option<&BlockPortInfo>,
+) -> String {
+    // Helper to get reference name for a node as used in operand positions.
+    let get_ref_name = |nr: ir::NodeRef| -> String {
+        let n = f.get_node(nr);
+        match n.payload {
+            ir::NodePayload::GetParam(_) => n.name.clone().unwrap(),
+            _ => {
+                if let Some(ref name) = n.name {
+                    name.clone()
+                } else {
+                    format!("{}.{}", n.payload.get_operator(), n.text_id)
+                }
+            }
+        }
+    };
+
+    // Determine outputs: single value or tuple elements.
+    let (ret_nodes, ret_types, ret_tuple_index): (Vec<ir::NodeRef>, Vec<ir::Type>, Option<usize>) =
+        if let Some(ret_nr) = f.ret_node_ref {
+            let ret_node = f.get_node(ret_nr);
+            match &ret_node.payload {
+                ir::NodePayload::Tuple(elems) => {
+                    let mut types = Vec::new();
+                    if let ir::Type::Tuple(tys) = &ret_node.ty {
+                        for t in tys.iter() {
+                            types.push((**t).clone());
+                        }
+                    } else {
+                        // Strong invariant: tuple payload must have tuple type.
+                        panic!("tuple return node must have tuple type");
+                    }
+                    (elems.clone(), types, Some(ret_nr.index))
+                }
+                _ => (vec![ret_nr], vec![ret_node.ty.clone()], None),
+            }
+        } else {
+            // No explicit return node; treat as zero outputs.
+            (Vec::new(), Vec::new(), None)
+        };
+
+    // Decide output names.
+    let decided_out_names: Vec<String> = if let Some(names) = output_names {
+        assert!(
+            names.len() == ret_nodes.len(),
+            "output_names length must match number of outputs"
+        );
+        names.to_vec()
+    } else if ret_nodes.len() == 1 {
+        vec!["out".to_string()]
+    } else {
+        (0..ret_nodes.len()).map(|i| format!("out{}", i)).collect()
+    };
+
+    // Construct header: inputs first, then outputs.
+    let mut header_parts: Vec<String> = Vec::new();
+    for p in f.params.iter() {
+        header_parts.push(format!("{}: {}", p.name, p.ty));
+    }
+    for (i, ty) in ret_types.iter().enumerate() {
+        header_parts.push(format!("{}: {}", decided_out_names[i], ty));
+    }
+
+    // Emit body lines.
+    let mut lines: Vec<String> = Vec::new();
+    // input_port lines for each param (in order).
+    for p in f.params.iter() {
+        let input_id = if let Some(pi) = port_ids {
+            *pi.input_port_ids
+                .get(&p.name)
+                .expect("input id missing in BlockPortInfo for parameter")
+        } else {
+            p.id.get_wrapped_id()
+        };
+        lines.push(format!(
+            "  {}: {} = input_port(name={}, id={})",
+            p.name, p.ty, p.name, input_id
+        ));
+    }
+    // Emit non-param nodes as IR lines.
+    for (i, n) in f.nodes.iter().enumerate() {
+        if i == 0 {
+            continue;
+        }
+        if matches!(n.payload, ir::NodePayload::GetParam(_)) {
+            continue;
+        }
+        if let Some(idx) = ret_tuple_index {
+            if i == idx {
+                continue;
+            }
+        }
+        if let Some(s) = n.to_string(f) {
+            lines.push(format!("  {}", s));
+        }
+    }
+
+    // Compute output ids: prefer provided ids; otherwise choose fresh ids after
+    // max.
+    let mut next_id: usize = f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0) + 1;
+    for (i, nr) in ret_nodes.iter().enumerate() {
+        let out_name = &decided_out_names[i];
+        let val_name = get_ref_name(*nr);
+        let out_id = if let Some(pi) = port_ids {
+            *pi.output_port_ids
+                .get(out_name)
+                .expect("output id missing in BlockPortInfo for output name")
+        } else {
+            let id = next_id;
+            next_id += 1;
+            id
+        };
+        lines.push(format!(
+            "  {}: () = output_port({}, name={}, id={})",
+            out_name, val_name, out_name, out_id
+        ));
+    }
+
+    format!(
+        "block {}({}) {{\n{}\n}}",
+        f.name,
+        header_parts.join(", "),
+        lines.join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -2429,6 +2600,47 @@ block my_main(x: bits[8], out: bits[8]) {
         assert_eq!(f.to_string(), want);
     }
 
+    // -- Test constants for round-trip
+    const BLK_ADD_TWO_INPUTS_ONE_OUTPUT: &str = r#"block my_block(a: bits[32], b: bits[32], out: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=2)
+  add.3: bits[32] = add(a, b, id=3)
+  out: () = output_port(add.3, name=out, id=4)
+}"#;
+
+    const BLK_TWO_INPUTS_TWO_OUTPUTS_RT: &str = r#"block my_block(a: bits[32], b: bits[32], a_out: bits[32], b_out: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=3)
+  a_out: () = output_port(a, name=a_out, id=5)
+  b_out: () = output_port(b, name=b_out, id=6)
+}"#;
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_single_output() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        // Parse -> Fn
+        let mut parser = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
+        let f = parser.parse_block_to_fn().unwrap();
+        // Emit -> block text (provide output name to match header)
+        // When parsing from block, preserve original port ids via BlockPortInfo.
+        let mut parser2 = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
+        let (_f2, port_info) = parser2.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&port_info));
+        assert_eq!(emitted, BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
+    }
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_multi_output() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut parser = Parser::new(BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
+        let (f, port_info) = parser.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(
+            &f,
+            Some(&["a_out".to_string(), "b_out".to_string()]),
+            Some(&port_info),
+        );
+        assert_eq!(emitted, BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
+    }
     #[test]
     fn test_parse_block_to_fn_add_two_inputs_one_output() {
         let _ = env_logger::builder().is_test(true).try_init();
