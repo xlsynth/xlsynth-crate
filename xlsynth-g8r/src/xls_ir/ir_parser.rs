@@ -1347,6 +1347,325 @@ impl Parser {
         })
     }
 
+    /// Parses a combinational `block` and converts it to an equivalent `fn`.
+    ///
+    /// - `input_port` nodes become parameters (GetParam nodes) with matching
+    ///   ids.
+    /// - `output_port` nodes are discarded and the referenced value becomes the
+    ///   function return.
+    /// - Other nodes are parsed as normal IR nodes.
+    pub fn parse_block_to_fn(&mut self) -> Result<ir::Fn, ParseError> {
+        // Skip optional outer attributes like `#[signature("""...""")]`.
+        loop {
+            self.drop_whitespace_and_comments();
+            if self.peek_is("#![") || self.peek_is("#[") {
+                if self.try_drop("#![") {
+                    // ok
+                } else if self.try_drop("#[") {
+                    // ok
+                } else {
+                    unreachable!("attribute must start with '#![' or '#[' after peek");
+                }
+                // Scan until ']'.
+                while let Some(c) = self.peekc() {
+                    self.dropc()?;
+                    if c == ']' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            break;
+        }
+
+        self.drop_or_error("block")?;
+        let block_name = self.pop_identifier_or_error("block name")?;
+
+        // Parse port list from the block header: `name: type, ...` (no ids).
+        let mut header_ports: Vec<(String, ir::Type)> = Vec::new();
+        self.drop_or_error("(")?;
+        loop {
+            if self.try_drop(")") {
+                break;
+            }
+            let pname = self.pop_identifier_or_error("block port name")?;
+            self.drop_or_error(":")?;
+            let pty = self.parse_type()?;
+            header_ports.push((pname, pty));
+            if !self.try_drop(",") {
+                self.drop_or_error(")")?;
+                break;
+            }
+        }
+
+        self.drop_or_error("{")?;
+
+        // Nodes start with a reserved zero node.
+        let mut nodes = vec![ir::Node {
+            text_id: 0,
+            name: Some("reserved_zero_node".to_string()),
+            ty: ir::Type::nil(),
+            payload: ir::NodePayload::Nil,
+            pos: None,
+        }];
+        let mut node_env = IrNodeEnv::new();
+
+        // Track input parameters discovered in the body: name -> (ty, id)
+        let mut input_params: Vec<(String, ir::Type, usize)> = Vec::new();
+        // Track outputs discovered: (output port name, node ref)
+        let mut outputs: Vec<(String, ir::NodeRef)> = Vec::new();
+
+        // Helper to maybe skip inner attributes like `#![provenance(...)]`.
+        let skip_inner_attribute = |this: &mut Parser| -> Result<bool, ParseError> {
+            this.drop_whitespace_and_comments();
+            if this.peek_is("#![") || this.peek_is("#[") {
+                if this.try_drop("#![") {
+                    // ok
+                } else if this.try_drop("#[") {
+                    // ok
+                } else {
+                    unreachable!("attribute must start with '#![' or '#[' after peek");
+                }
+                while let Some(c) = this.peekc() {
+                    this.dropc()?;
+                    if c == ']' {
+                        break;
+                    }
+                }
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        };
+
+        // Parse body lines until '}'.
+        while !self.try_drop("}") {
+            // Skip attributes and blank/comment lines.
+            if skip_inner_attribute(self)? {
+                continue;
+            }
+            self.drop_whitespace_and_comments();
+            // If this is an input_port or output_port, handle specially.
+            // Peek ahead to capture the operator by temporarily parsing the LHS name and
+            // type. Save current offset to backtrack for normal node parsing.
+            let saved_offset = self.offset;
+            // If we can't parse a node header (name: type = ...), fall back to normal
+            // parsing which will error with a helpful message.
+            let parse_port_line = || -> Result<Option<()>, ParseError> {
+                // name or id.
+                let name_or_id = self.pop_node_name_or_error("node name")?;
+                self.drop_or_error(":")?;
+                let node_ty = self.parse_type()?;
+                self.drop_or_error("=")?;
+                let operator = self.pop_identifier_or_error("node operator")?;
+                if operator == "input_port" {
+                    self.drop_or_error("(")?;
+                    self.drop_or_error("name=")?;
+                    let port_name = self.pop_identifier_or_error("input_port name")?;
+                    let mut id_opt: Option<usize> = None;
+                    if self.try_drop(",") {
+                        self.drop_whitespace_and_comments();
+                        if self.peek_is("id=") {
+                            id_opt = Some(self.parse_id_attribute()?);
+                        }
+                    }
+                    // Optionally allow a trailing pos attribute, then ')'
+                    if self.try_drop(",") {
+                        let _ = self.maybe_drop_pos_attribute()?;
+                    }
+                    self.drop_or_error(")")?;
+                    // Validate and construct a GetParam node with the given id.
+                    let id_val = id_opt.ok_or_else(|| {
+                        ParseError::new(format!(
+                            "expected id for input_port; rest_of_line: {:?}",
+                            self.rest_of_line()
+                        ))
+                    })?;
+                    // Name must be provided on LHS.
+                    let lhs_name = match name_or_id {
+                        NameOrId::Name(n) => n,
+                        NameOrId::Id(_) => {
+                            return Err(ParseError::new(
+                                "input_port must have a name on LHS".to_string(),
+                            ));
+                        }
+                    };
+                    // Optional consistency check: header declared this port.
+                    let _ = header_ports
+                        .iter()
+                        .find(|(n, _)| n == &lhs_name)
+                        .ok_or_else(|| {
+                            ParseError::new(format!(
+                                "input_port '{}' not found in block header ports",
+                                lhs_name
+                            ))
+                        })?;
+                    let pid = ir::ParamId::new(id_val);
+                    let node = ir::Node {
+                        text_id: id_val,
+                        name: Some(lhs_name.clone()),
+                        ty: node_ty.clone(),
+                        payload: ir::NodePayload::GetParam(pid),
+                        pos: None,
+                    };
+                    let node_ref = ir::NodeRef { index: nodes.len() };
+                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    nodes.push(node);
+                    // Record input param for fn signature.
+                    input_params.push((port_name, node_ty, id_val));
+                    Ok(Some(()))
+                } else if operator == "output_port" {
+                    self.drop_or_error("(")?;
+                    // First arg is the value being output.
+                    let value_ref = self.parse_node_ref(&node_env, "output_port value")?;
+                    // Consume any additional attributes in any order until we hit ')'.
+                    let mut out_name_opt: Option<String> = None;
+                    loop {
+                        self.drop_whitespace_and_comments();
+                        if !self.try_drop(",") {
+                            break;
+                        }
+                        self.drop_whitespace_and_comments();
+                        if self.peek_is("name=") {
+                            self.drop_or_error("name=")?;
+                            let nm = self.pop_identifier_or_error("output_port name")?;
+                            out_name_opt = Some(nm);
+                            continue;
+                        }
+                        if self.peek_is("id=") {
+                            let _ = self.parse_id_attribute()?;
+                            continue;
+                        }
+                        if self.peek_is("pos=") {
+                            let _ = self.maybe_drop_pos_attribute()?;
+                            continue;
+                        }
+                        // Unknown attribute; break and let ')' be checked next.
+                        break;
+                    }
+                    self.drop_or_error(")")?;
+                    let out_name = out_name_opt.ok_or_else(|| {
+                        ParseError::new("output_port missing name attribute".to_string())
+                    })?;
+                    outputs.push((out_name, value_ref));
+                    Ok(Some(()))
+                } else {
+                    Ok(None)
+                }
+            };
+
+            let mut parse_port_line = parse_port_line;
+            match parse_port_line() {
+                Ok(Some(())) => {
+                    // handled specially
+                }
+                Ok(None) => {
+                    // Not a special port op; reset and parse as a normal node.
+                    self.offset = saved_offset;
+                    let node = self.parse_node(&mut node_env)?;
+                    let node_ref = ir::NodeRef { index: nodes.len() };
+                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    nodes.push(node);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Build function parameters in the order they appear in the header, but only
+        // for inputs.
+        let mut params: Vec<ir::Param> = Vec::new();
+        for (hname, hty) in header_ports.iter() {
+            if let Some((_, _, id)) = input_params.iter().find(|(n, _, _)| n == hname) {
+                params.push(ir::Param {
+                    name: hname.clone(),
+                    ty: hty.clone(),
+                    id: ir::ParamId::new(*id),
+                });
+            }
+        }
+
+        // Outputs are header ports that are not inputs.
+        let header_output_names: Vec<String> = header_ports
+            .iter()
+            .map(|(n, _)| n.clone())
+            .filter(|n| input_params.iter().all(|(inn, _, _)| inn != n))
+            .collect();
+        if header_output_names.is_empty() {
+            return Err(ParseError::new(
+                "no outputs declared in block header".to_string(),
+            ));
+        }
+        // Map output_port(name=...) by name.
+        let mut out_map: std::collections::HashMap<String, ir::NodeRef> =
+            std::collections::HashMap::new();
+        for (n, r) in outputs.into_iter() {
+            out_map.insert(n, r);
+        }
+        // Build return node refs and types in header order.
+        let mut ret_nodes_in_order: Vec<ir::NodeRef> = Vec::new();
+        let mut ret_types_in_order: Vec<ir::Type> = Vec::new();
+        for (hn, hty) in header_ports.iter() {
+            if header_output_names.iter().any(|n| n == hn)
+                && input_params.iter().all(|(inn, _, _)| inn != hn)
+            {
+                let nr = out_map.get(hn).ok_or_else(|| {
+                    ParseError::new(format!(
+                        "no output_port for header-declared output '{}'",
+                        hn
+                    ))
+                })?;
+                ret_nodes_in_order.push(*nr);
+                ret_types_in_order.push(hty.clone());
+            }
+        }
+
+        if ret_nodes_in_order.len() == 1 {
+            let ret_node_ref = ret_nodes_in_order[0];
+            let ret_ty = ret_types_in_order.remove(0);
+            let ret_node_ty = nodes[ret_node_ref.index].ty.clone();
+            if ret_node_ty != ret_ty {
+                return Err(ParseError::new(format!(
+                    "return type mismatch; expected: {}, got: {} from node: {}",
+                    ret_ty, ret_node_ty, nodes[ret_node_ref.index].text_id
+                )));
+            }
+            return Ok(ir::Fn {
+                name: block_name,
+                params,
+                ret_ty,
+                nodes,
+                ret_node_ref: Some(ret_node_ref),
+            });
+        }
+
+        // Multiple outputs: build a tuple node and return it.
+        let ret_ty = ir::Type::Tuple(
+            ret_types_in_order
+                .into_iter()
+                .map(|t| Box::new(t))
+                .collect(),
+        );
+        let next_id = nodes.iter().map(|n| n.text_id).max().unwrap_or(0) + 1;
+        let tuple_node = ir::Node {
+            text_id: next_id,
+            name: None,
+            ty: ret_ty.clone(),
+            payload: ir::NodePayload::Tuple(ret_nodes_in_order.clone()),
+            pos: None,
+        };
+        let ret_node_ref = ir::NodeRef { index: nodes.len() };
+        node_env.add(None, next_id, ret_node_ref);
+        nodes.push(tuple_node);
+
+        Ok(ir::Fn {
+            name: block_name,
+            params,
+            ret_ty,
+            nodes,
+            ret_node_ref: Some(ret_node_ref),
+        })
+    }
+
     pub fn parse_package(&mut self) -> Result<ir::Package, ParseError> {
         log::debug!("parse_package");
         let mut fns = Vec::new();
@@ -2091,6 +2410,53 @@ top fn main() -> bits[32] {
         let pkg = parser.parse_package().unwrap();
         let main_fn = pkg.get_top().unwrap();
         assert!(main_fn.nodes[1].pos.is_some());
+    }
+
+    #[test]
+    fn test_parse_block_to_fn_simple() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = r#"#[signature("""module_name: \"my_main\" data_ports { direction: PORT_DIRECTION_INPUT name: \"x\" width: 8 type { type_enum: BITS bit_count: 8 } } data_ports { direction: PORT_DIRECTION_OUTPUT name: \"out\" width: 8 type { type_enum: BITS bit_count: 8 } } combinational { } """)]
+block my_main(x: bits[8], out: bits[8]) {
+  #![provenance(name=\"my_main\", kind=\"function\")]
+  x: bits[8] = input_port(name=x, id=5)
+  one: bits[8] = literal(value=1, id=6)
+  add.7: bits[8] = add(x, one, id=7)
+  out: () = output_port(add.7, name=out, id=8)
+}"#;
+        let mut parser = Parser::new(input);
+        let f = parser.parse_block_to_fn().unwrap();
+        let want = "fn my_main(x: bits[8] id=5) -> bits[8] {\n  one: bits[8] = literal(value=1, id=6)\n  ret add.7: bits[8] = add(x, one, id=7)\n}";
+        assert_eq!(f.to_string(), want);
+    }
+
+    #[test]
+    fn test_parse_block_to_fn_add_two_inputs_one_output() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = r#"block my_block(a: bits[32], b: bits[32], out: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=2)
+  add.3: bits[32] = add(a, b, id=3)
+  out: () = output_port(add.3, name=out, id=4)
+}"#;
+        let mut parser = Parser::new(input);
+        let f = parser.parse_block_to_fn().unwrap();
+        let want = "fn my_block(a: bits[32] id=1, b: bits[32] id=2) -> bits[32] {\n  ret add.3: bits[32] = add(a, b, id=3)\n}";
+        assert_eq!(f.to_string(), want);
+    }
+
+    #[test]
+    fn test_parse_block_to_fn_multi_output_tuple_return() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = r#"block my_block(a: bits[32], a_out: bits[32], b: bits[32], b_out: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=3)
+  a_out: () = output_port(a, name=a_out, id=2)
+  b_out: () = output_port(b, name=b_out, id=4)
+}"#;
+        let mut parser = Parser::new(input);
+        let f = parser.parse_block_to_fn().unwrap();
+        let want = "fn my_block(a: bits[32] id=1, b: bits[32] id=3) -> (bits[32], bits[32]) {\n  ret tuple.4: (bits[32], bits[32]) = tuple(a, b)\n}";
+        assert_eq!(f.to_string(), want);
     }
 
     #[test]
