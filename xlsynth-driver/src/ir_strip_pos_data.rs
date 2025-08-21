@@ -10,7 +10,10 @@ pub fn handle_ir_strip_pos_data(matches: &clap::ArgMatches, _config: &Option<Too
         std::process::exit(1);
     });
 
-    let mut parser = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&file_content);
+    let opts = xlsynth_g8r::xls_ir::ir_parser::ParseOptions {
+        retain_pos_data: false,
+    };
+    let mut parser = xlsynth_g8r::xls_ir::ir_parser::Parser::new_with_options(&file_content, opts);
     let mut package = parser.parse_package().unwrap_or_else(|err| {
         eprintln!("Error encountered parsing XLS IR package: {:?}", err);
         std::process::exit(1);

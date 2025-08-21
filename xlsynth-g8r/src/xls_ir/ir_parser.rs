@@ -44,13 +44,32 @@ impl FileTable {
 pub struct Parser {
     chars: Vec<char>,
     offset: usize,
+    options: ParseOptions,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParseOptions {
+    pub retain_pos_data: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            retain_pos_data: true,
+        }
+    }
 }
 
 impl Parser {
     pub fn new(input: &str) -> Self {
+        Self::new_with_options(input, ParseOptions::default())
+    }
+
+    pub fn new_with_options(input: &str, options: ParseOptions) -> Self {
         Self {
             chars: input.chars().collect(),
             offset: 0,
+            options,
         }
     }
 
@@ -1245,15 +1264,19 @@ impl Parser {
             &format!("end of node: {:?} operator: {:?}", name_or_id, operator),
         )?;
 
-        let pos_data = pos_attr.map(|p| {
-            p.into_iter()
-                .map(|(f, l, c)| ir::Pos {
-                    fileno: f,
-                    lineno: l,
-                    colno: c,
-                })
-                .collect()
-        });
+        let pos_data = if self.options.retain_pos_data {
+            pos_attr.map(|p| {
+                p.into_iter()
+                    .map(|(f, l, c)| ir::Pos {
+                        fileno: f,
+                        lineno: l,
+                        colno: c,
+                    })
+                    .collect()
+            })
+        } else {
+            None
+        };
 
         Ok(ir::Node {
             text_id: id,
