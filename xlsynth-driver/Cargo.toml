@@ -45,8 +45,6 @@ glob = "0.3"
 
 [features]
 default = []
-# Enable a fake task kind and lightweight shell-based worker for scheduler fuzzing.
-prover-fuzz = []
 has-boolector = ["xlsynth-g8r/has-boolector"]
 has-easy-smt = ["xlsynth-g8r/has-easy-smt"]
 has-bitwuzla = ["xlsynth-g8r/has-bitwuzla"]
@@ -64,3 +62,5 @@ with-bitwuzla-binary-test = ["xlsynth-g8r/with-easy-smt", "with-easy-smt"]
 with-z3-binary-test = ["xlsynth-g8r/with-easy-smt", "with-easy-smt"]
 with-bitwuzla-system = ["xlsynth-g8r/with-bitwuzla-system", "has-bitwuzla"]
 with-bitwuzla-built = ["xlsynth-g8r/with-bitwuzla-built", "has-bitwuzla"]
+# Enable a fake task kind and lightweight shell-based worker for scheduler fuzzing and testing.
+enable-fake-task = []

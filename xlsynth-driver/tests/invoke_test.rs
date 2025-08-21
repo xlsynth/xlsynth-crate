@@ -5730,3 +5730,206 @@ fn test_prove_quickcheck_uninterpreted_functions_solver_param(solver: &str) {
         stdout
     );
 }
+
+// -----------------------------------------------------------------------------
+// Timeout behavior tests using fake tasks
+// -----------------------------------------------------------------------------
+
+#[cfg(feature = "enable-fake-task")]
+#[test]
+fn test_prover_single_fake_timeout() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    // Single fake task that will exceed its timeout.
+    let plan = r#"{
+      "kind": "fake",
+      "success": true,
+      "stdout_len": 0,
+      "stderr_len": 0,
+      "timeout_ms": 1
+    }"#;
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_timeout_single.json");
+    let output = std::process::Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("1")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "single fake with timeout should fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    assert_eq!(v["success"].as_bool(), Some(false));
+    assert_eq!(v["plan"]["outcome"].as_str(), Some("Timeout"));
+}
+
+#[cfg(feature = "enable-fake-task")]
+#[test]
+fn test_prover_all_with_timeout_indefinite() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    // all(success within timeout, timeout)
+    let plan = r#"{
+      "kind": "all",
+      "tasks": [
+        { "kind": "fake", "delay_ms": 10, "success": true,  "stdout_len": 0, "stderr_len": 0},
+        { "kind": "fake", "success": true, "stdout_len": 0, "stderr_len": 0, "timeout_ms": 1 }
+      ]
+    }"#;
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_all_timeout.json");
+    let output = std::process::Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("2")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        !output.status.success(),
+        "all(success, timeout) should be overall non-success; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    assert_eq!(v["success"].as_bool(), Some(false));
+    // Group outcome becomes IndefiniteChildren because one child timed out.
+    assert_eq!(v["plan"]["outcome"].as_str(), Some("IndefiniteChildren"));
+    let tasks = &v["plan"]["tasks"];
+    assert_eq!(tasks[0]["outcome"].as_str(), Some("Success"));
+    assert_eq!(tasks[1]["outcome"].as_str(), Some("Timeout"));
+}
+
+#[cfg(feature = "enable-fake-task")]
+#[test]
+fn test_prover_any_with_timeout_indefinite() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    // any(fail within timeout, timeout)
+    let plan = r#"{
+      "kind": "any",
+      "tasks": [
+        { "kind": "fake", "delay_ms": 10, "success": false,  "stdout_len": 0, "stderr_len": 0},
+        { "kind": "fake", "success": true, "stdout_len": 0, "stderr_len": 0, "timeout_ms": 1 }
+      ]
+    }"#;
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_all_timeout.json");
+    let output = std::process::Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("2")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        !output.status.success(),
+        "any(fail, timeout) should be overall non-success; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    assert_eq!(v["success"].as_bool(), Some(false));
+    // Group outcome becomes IndefiniteChildren because one child timed out.
+    assert_eq!(v["plan"]["outcome"].as_str(), Some("IndefiniteChildren"));
+    let tasks = &v["plan"]["tasks"];
+    assert_eq!(tasks[0]["outcome"].as_str(), Some("Failed"));
+    assert_eq!(tasks[1]["outcome"].as_str(), Some("Timeout"));
+}
+
+#[cfg(feature = "enable-fake-task")]
+#[test]
+fn test_prover_first_with_timeout_and_success() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    // first(success after delay, timeout fast)
+    // With 2 cores, the timeout will be observed first but should not resolve
+    // the group (indefinite). The later success should resolve the group to
+    // Success.
+    let plan = r#"{
+      "kind": "first",
+      "tasks": [
+        { "kind": "fake", "delay_ms": 100, "success": true,  "stdout_len": 0, "stderr_len": 0},
+        { "kind": "fake", "success": true, "stdout_len": 0, "stderr_len": 0, "timeout_ms": 1 }
+      ]
+    }"#;
+    let plan_path = dir.join("plan.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_first_timeout_success.json");
+    let output = std::process::Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("2")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "first(success, timeout) should be overall success; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    assert_eq!(v["success"].as_bool(), Some(true));
+    assert_eq!(v["plan"]["outcome"].as_str(), Some("Success"));
+    let tasks = &v["plan"]["tasks"];
+    assert_eq!(tasks[0]["outcome"].as_str(), Some("Success"));
+    assert_eq!(tasks[1]["outcome"].as_str(), Some("Timeout"));
+}

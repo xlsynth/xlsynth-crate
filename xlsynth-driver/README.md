@@ -383,7 +383,10 @@ Runs a prover plan described by a JSON file with a process-based scheduler.
 
 - Concurrency: `--cores <N>` controls maximum concurrent processes.
 - Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.
-- Output: `--output_json <PATH>` writes `{ "success": <bool> }`.
+- Output: `--output_json <PATH>` writes a full JSON report:
+  - Top-level `{ "success": <bool>, "plan": <tree> }`.
+  - Each task node includes `cmdline`, `outcome`, `stdout`, `stderr`.
+  - `outcome` is one of `Success`, `Failed`, or an indefinite reason such as `Timeout`, `IndefiniteChildren`, `GroupCriteriaAlreadyMet`, or `Cleanup`.
 
 ### Equivalence/proving flags: meanings
 
@@ -426,7 +429,8 @@ Example: single task
   "assertion_semantics": "same",
   "flatten_aggregates": true,
   "drop_params": ["p0", "p1"],
-  "json": true
+  "json": true,
+  "timeout_ms": 30000
 }
 ```
 
@@ -449,6 +453,15 @@ Groups: all / any / first
 - `all`: overall success if and only if all children succeed.
 - `any`: overall success if at least one child succeeds.
 - `first`: the first finished children dominates the result.
+
+Timeouts
+
+- Any task may specify `"timeout_ms": <milliseconds>`.
+- When the deadline elapses, the scheduler cancels the task’s process group and marks the task outcome as `"Timeout"` (an indefinite outcome).
+- Group semantics with timeouts (indefinite outcomes):
+  - `any`: resolves `Success` as soon as any child succeeds; if all children finish without a success and at least one is indefinite (e.g., `Timeout`), the group resolves to `IndefiniteChildren`.
+  - `all`: resolves `Failed` if any child fails; if none failed but at least one is indefinite, resolves to `IndefiniteChildren`; otherwise `Success`.
+  - `first`: only the first non-indefinite child determines the result; timeouts do not resolve the group. If all children finish and none produced a definite result, the group resolves to `IndefiniteChildren`.
 
 Optional group flag
 
@@ -511,6 +524,7 @@ Schema details
     - `lhs_fixed_implicit_activation`: bool
     - `rhs_fixed_implicit_activation`: bool
     - `json`: bool
+    - `timeout_ms`: integer (milliseconds) — optional per-task timeout
 
 - `kind: "dslx-equiv"` (DslxEquivConfig)
 
@@ -532,6 +546,7 @@ Schema details
     - `lhs_uf`: array of strings, each "`<func_name>:<uf_name>`" (repeats map to repeated CLI flags). Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
     - `rhs_uf`: array of strings, each "`<func_name>:<uf_name>`". Same semantics as above.
     - `json`: bool
+    - `timeout_ms`: integer (milliseconds) — optional per-task timeout
 
 - `kind: "prove-quickcheck"` (ProveQuickcheckConfig)
 
@@ -542,6 +557,7 @@ Schema details
     - `assertion_semantics`: `ignore` | `never` | `assume`
     - `uf`: array of strings, each "`<func_name>:<uf_name>`". Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
     - `json`: bool
+    - `timeout_ms`: integer (milliseconds) — optional per-task timeout
 
 Mapping to CLI
 

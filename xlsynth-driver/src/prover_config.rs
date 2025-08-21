@@ -260,15 +260,17 @@ impl ToDriverCommand for ProveQuickcheckConfig {
 }
 
 // -------------------------------
-// Fuzz-only fake task definition
+// Fake task definition (available for fuzzing, tests, and local use)
 // -------------------------------
-#[cfg(feature = "prover-fuzz")]
+#[cfg(feature = "enable-fake-task")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FakeTaskConfig {
-    /// Inclusive min delay in milliseconds before writing result.
-    pub min_delay_ms: u32,
-    /// Inclusive max delay in milliseconds before writing result.
-    pub max_delay_ms: u32,
+    /// Optional delay before the fake task reports a result.
+    /// - When `Some(d)`, sleeps for `d` milliseconds then exits and writes
+    ///   JSON.
+    /// - When `None`, sleeps indefinitely and never finishes (until
+    ///   canceled/timeout).
+    pub delay_ms: Option<u32>,
     /// Whether the task should report success.
     pub success: bool,
     /// Number of bytes to write to stdout.
@@ -277,21 +279,19 @@ pub struct FakeTaskConfig {
     pub stderr_len: u16,
 }
 
-#[cfg(feature = "prover-fuzz")]
+#[cfg(feature = "enable-fake-task")]
 impl ToDriverCommand for FakeTaskConfig {
     fn to_command(&self) -> Command {
         // Use a POSIX shell snippet to sleep and then locate the --output_json path
         // from argv.
         let script = r#"
-min=${FAKE_MIN_MS:-1}
-max=${FAKE_MAX_MS:-5}
-# Clamp to small values suitable for fuzzing; avoid floating races.
-[ "$min" -gt 100 ] && min=100
-[ "$max" -gt 100 ] && max=100
-[ "$min" -gt "$max" ] && max=$min
-# Use min as the delay to keep determinism under fuzzing.
-delay_ms=$min
-# Sleep in seconds with fractional part.
+delay_ms="${FAKE_DELAY_MS:-}"
+# If delay_ms is empty, sleep indefinitely (never complete).
+if [ -z "$delay_ms" ]; then
+  # Sleep forever to simulate a non-terminating task; will be killed on timeout/cancel.
+  tail -f /dev/null
+fi
+# Otherwise, sleep for the requested milliseconds.
 secs=$(printf "%s" "$delay_ms" | awk '{ printf("%.3f", $1/1000.0) }')
 sleep "$secs"
 # Emit stdout noise
@@ -320,8 +320,9 @@ fi
 "#;
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(script).arg("sh");
-        cmd.env("FAKE_MIN_MS", self.min_delay_ms.to_string());
-        cmd.env("FAKE_MAX_MS", self.max_delay_ms.to_string());
+        if let Some(ms) = self.delay_ms {
+            cmd.env("FAKE_DELAY_MS", ms.to_string());
+        }
         cmd.env("FAKE_SUCCESS", if self.success { "1" } else { "0" });
         cmd.env("FAKE_STDOUT_LEN", self.stdout_len.to_string());
         cmd.env("FAKE_STDERR_LEN", self.stderr_len.to_string());
@@ -351,7 +352,7 @@ pub enum ProverTask {
         #[serde(flatten)]
         config: ProveQuickcheckConfig,
     },
-    #[cfg(feature = "prover-fuzz")]
+    #[cfg(feature = "enable-fake-task")]
     #[serde(rename = "fake")]
     Fake {
         #[serde(flatten)]
@@ -359,14 +360,16 @@ pub enum ProverTask {
     },
 }
 
+impl ProverTask {}
+
 impl ToDriverCommand for ProverTask {
     fn to_command(&self) -> Command {
         match self {
-            ProverTask::IrEquiv { config } => config.to_command(),
-            ProverTask::DslxEquiv { config } => config.to_command(),
-            ProverTask::ProveQuickcheck { config } => config.to_command(),
-            #[cfg(feature = "prover-fuzz")]
-            ProverTask::Fake { config } => config.to_command(),
+            ProverTask::IrEquiv { config, .. } => config.to_command(),
+            ProverTask::DslxEquiv { config, .. } => config.to_command(),
+            ProverTask::ProveQuickcheck { config, .. } => config.to_command(),
+            #[cfg(feature = "enable-fake-task")]
+            ProverTask::Fake { config, .. } => config.to_command(),
         }
     }
 }
@@ -379,10 +382,14 @@ pub enum GroupKind {
     First,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum ProverPlan {
     Task {
+        #[serde(flatten)]
         task: ProverTask,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
     },
     Group {
         kind: GroupKind,
@@ -390,67 +397,12 @@ pub enum ProverPlan {
         // When true, do not cancel or prune sibling tasks upon this group's
         // resolution; allow them to continue running until they naturally
         // complete. Default is false.
+        #[serde(default)]
         keep_running_till_finish: bool,
     },
 }
 
-impl serde::Serialize for ProverPlan {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            ProverPlan::Task { task } => task.serialize(serializer),
-            ProverPlan::Group {
-                kind,
-                tasks,
-                keep_running_till_finish,
-            } => {
-                use serde::ser::SerializeStruct;
-                let mut s = serializer.serialize_struct("ProverPlan", 3)?;
-                s.serialize_field("kind", kind)?;
-                s.serialize_field("tasks", tasks)?;
-                s.serialize_field("keep_running_till_finish", keep_running_till_finish)?;
-                s.end()
-            }
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ProverPlan {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct GroupWrap {
-            kind: GroupKind,
-            tasks: Vec<ProverPlan>,
-            #[serde(default)]
-            keep_running_till_finish: bool,
-        }
-
-        #[derive(serde::Deserialize)]
-        #[serde(untagged)]
-        enum Wrapper {
-            Group(GroupWrap),
-            Task(ProverTask),
-        }
-
-        match Wrapper::deserialize(deserializer)? {
-            Wrapper::Group(GroupWrap {
-                kind,
-                tasks,
-                keep_running_till_finish,
-            }) => Ok(ProverPlan::Group {
-                kind,
-                tasks,
-                keep_running_till_finish,
-            }),
-            Wrapper::Task(task) => Ok(ProverPlan::Task { task }),
-        }
-    }
-}
+// Default serde derives with untagged + flatten handle (de)serialization.
 
 #[cfg(test)]
 mod tests {
@@ -464,7 +416,7 @@ mod tests {
 
     fn head_of(plan: &ProverPlan) -> String {
         match plan {
-            ProverPlan::Task { task } => args_of(task.to_command())[0].clone(),
+            ProverPlan::Task { task, .. } => args_of(task.to_command())[0].clone(),
             ProverPlan::Group { kind, .. } => match kind {
                 GroupKind::All => "all".to_string(),
                 GroupKind::Any => "any".to_string(),
@@ -743,6 +695,7 @@ mod tests {
                         ..Default::default()
                     },
                 },
+                timeout_ms: None,
             }],
             keep_running_till_finish: false,
         };
@@ -764,6 +717,7 @@ mod tests {
                     ..Default::default()
                 },
             },
+            timeout_ms: None,
         };
         let v = serde_json::to_value(&plan).unwrap();
         // The inner task tag is used on serialization.
@@ -779,6 +733,7 @@ mod tests {
         match plan2 {
             ProverPlan::Task {
                 task: ProverTask::IrEquiv { .. },
+                ..
             } => {}
             _ => panic!("expected ProverPlan::Task::IrEquiv"),
         }
