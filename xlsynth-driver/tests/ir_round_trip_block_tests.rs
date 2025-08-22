@@ -152,3 +152,33 @@ block attr_test(a: bits[1], out: bits[1]) {
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert_eq!(s2, want);
 }
+
+#[test]
+fn test_ir_round_trip_package_with_fn_and_block_members_in_order() {
+    let input_pkg = r#"package mix
+
+fn foo() -> bits[1] {
+  ret literal.1: bits[1] = literal(value=0, id=1)
+}
+
+block myb(a: bits[1], out: bits[1]) {
+  a: bits[1] = input_port(name=a, id=2)
+  out: () = output_port(a, name=out, id=3)
+}
+"#;
+    let want = input_pkg;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("mix.ir");
+    std::fs::write(&path, input_pkg).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let out = std::process::Command::new(driver)
+        .arg("ir-round-trip")
+        .arg(path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout, want);
+}
