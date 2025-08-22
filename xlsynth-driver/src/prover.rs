@@ -120,12 +120,12 @@ enum TaskState {
 #[derive(Debug)]
 struct TaskNode {
     task: ProverTask,
+    timeout_ms: Option<u64>,
+    task_id: Option<String>,
     state: TaskState,
     // Captured outputs after task completion; None until completed.
     completed_stdout: Option<String>,
     completed_stderr: Option<String>,
-    // Optional per-task timeout in milliseconds
-    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -194,9 +194,11 @@ pub struct Scheduler {
     deadlines: BTreeMap<Instant, Vec<NodeId>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
 pub enum ProverReportNode {
     Task {
+        task_id: Option<String>,
         cmdline: Option<String>,
         outcome: Option<TaskOutcome>,
         stdout: Option<String>,
@@ -207,41 +209,6 @@ pub enum ProverReportNode {
         outcome: Option<TaskOutcome>,
         tasks: Vec<ProverReportNode>,
     },
-}
-
-impl serde::Serialize for ProverReportNode {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        match self {
-            ProverReportNode::Task {
-                cmdline,
-                outcome,
-                stdout,
-                stderr,
-            } => {
-                let mut s = serializer.serialize_struct("Task", 4)?;
-                s.serialize_field("cmdline", cmdline)?;
-                s.serialize_field("outcome", outcome)?;
-                s.serialize_field("stdout", stdout)?;
-                s.serialize_field("stderr", stderr)?;
-                s.end()
-            }
-            ProverReportNode::Group {
-                kind,
-                outcome,
-                tasks,
-            } => {
-                let mut s = serializer.serialize_struct("Group", 3)?;
-                s.serialize_field("kind", kind)?;
-                s.serialize_field("outcome", outcome)?;
-                s.serialize_field("tasks", tasks)?;
-                s.end()
-            }
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -989,11 +956,13 @@ impl Scheduler {
     fn build_report_node(&self, id: NodeId) -> ProverReportNode {
         match &self.nodes[id.0].inner {
             NodeInner::Task(t) => {
+                let task_id = t.task_id.clone();
                 let cmdline = self.cmdlines.get(&id).cloned();
                 let outcome = self.node_outcome(id);
                 let stdout = t.completed_stdout.clone();
                 let stderr = t.completed_stderr.clone();
                 ProverReportNode::Task {
+                    task_id,
                     cmdline,
                     outcome,
                     stdout,
@@ -1077,14 +1046,19 @@ impl PlanBuilder {
     /// Post: For `Group` nodes, `children.len()` is set to the number of tasks.
     fn build_plan(&mut self, parent: Option<NodeId>, plan: ProverPlan) -> NodeId {
         match plan {
-            ProverPlan::Task { task, timeout_ms } => self.push(
+            ProverPlan::Task {
+                task,
+                timeout_ms,
+                task_id,
+            } => self.push(
                 parent,
                 NodeInner::Task(TaskNode {
                     task,
+                    timeout_ms,
+                    task_id,
                     state: TaskState::NotStarted,
                     completed_stdout: None,
                     completed_stderr: None,
-                    timeout_ms,
                 }),
             ),
             ProverPlan::Group {

@@ -4818,6 +4818,67 @@ fn test_prover_all_two_equiv_tasks_succeeds() {
 }
 
 #[test]
+fn test_prover_single_task_reports_task_id() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dir = temp_dir.path();
+
+    // Prepare an equivalent IR pair with explicit top.
+    let lhs_equiv = "package add_then_sub\nfn my_main(x: bits[32]) -> bits[32] {\n    add.2: bits[32] = add(x, x)\n    ret sub.3: bits[32] = sub(add.2, x)\n}";
+    let rhs_equiv = "package identity\nfn my_main(x: bits[32]) -> bits[32] {\n    ret identity.2: bits[32] = identity(x)\n}";
+    let lhs = dir.join("lhs.ir");
+    let rhs = dir.join("rhs.ir");
+    std::fs::write(&lhs, lhs_equiv).unwrap();
+    std::fs::write(&rhs, rhs_equiv).unwrap();
+
+    // Toolchain config so child subcommands can run.
+    let toolchain_toml = dir.join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    // Build a single-task plan with task_id.
+    let plan = format!(
+        r#"{{
+  "kind": "ir-equiv",
+  "lhs_ir_file": "{}",
+  "rhs_ir_file": "{}",
+  "top": "my_main",
+  "solver": "toolchain",
+  "task_id": "tid-xyz"
+}}"#,
+        lhs.display(),
+        rhs.display()
+    );
+    let plan_path = dir.join("plan_single.json");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let json_path = dir.join("prover_single.json");
+    let output = Command::new(driver)
+        .arg("prover")
+        .arg("--cores")
+        .arg("1")
+        .arg("--plan_json_file")
+        .arg(plan_path.to_str().unwrap())
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "prover single task should succeed; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_str = std::fs::read_to_string(&json_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(json_str.trim()).unwrap();
+    assert_eq!(v["success"].as_bool(), Some(true));
+    assert_eq!(v["plan"]["task_id"].as_str(), Some("tid-xyz"));
+}
+
+#[test]
 fn test_prover_all_mixed_tasks_fails() {
     let _ = env_logger::builder().is_test(true).try_init();
     let temp_dir = tempfile::tempdir().unwrap();
