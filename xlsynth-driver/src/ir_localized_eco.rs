@@ -96,7 +96,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     };
 
     // If both packages contain at least one block member, operate on blocks.
-    if let (Some((old_block_fn, old_ports)), Some((new_block_fn, _new_ports))) = (
+    if let (Some((old_block_fn, old_ports)), Some((new_block_fn, new_ports))) = (
         select_block_from_package(&old_pkg, old_ir_top.as_deref().map(|x| x.as_str())),
         select_block_from_package(&new_pkg, new_ir_top.as_deref().map(|x| x.as_str())),
     ) {
@@ -109,6 +109,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
             old_block_fn,
             old_ports,
             new_block_fn,
+            new_ports,
         );
     }
 
@@ -211,7 +212,9 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     // Patched IR path: emit the NEW IR with IDs remapped to preserve old IDs where
     // subgraphs are structurally equal; allocate fresh IDs for new nodes.
     let patched_ir_path = out_dir.join("patched_old.ir");
-    let old_ir_text_verbatim = old_text;
+    // Re-emit both old and patched packages to ensure a comparable formatting
+    // baseline.
+    let old_ir_text_emitted = old_pkg.to_string();
     // Build patched package by applying localized ECO edits to the old function,
     // preserving existing node IDs and allocating new ones only for inserted
     // subgraphs.
@@ -221,8 +224,8 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
             xlsynth_g8r::xls_ir::localized_eco::apply_localized_eco(old_fn, new_fn, &report.edits);
         *target_fn = applied;
     }
-    let new_ir_text_verbatim = patched_pkg.to_string();
-    std::fs::write(&patched_ir_path, new_ir_text_verbatim.as_bytes()).unwrap();
+    let patched_ir_text_emitted = patched_pkg.to_string();
+    std::fs::write(&patched_ir_path, patched_ir_text_emitted.as_bytes()).unwrap();
     // Inform the user where outputs are going before expensive text diffing.
     println!("  Output dir: {}", out_dir.display());
     println!("  Patched IR written to: {}", patched_ir_path.display());
@@ -325,8 +328,8 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
         "  Computing text diff char count (Myers, inserts+deletes) for IR text old → patched(old)..."
     );
     let text_diff_chars = myers_insdel_distance_bytes(
-        old_ir_text_verbatim.as_bytes(),
-        new_ir_text_verbatim.as_bytes(),
+        old_ir_text_emitted.as_bytes(),
+        patched_ir_text_emitted.as_bytes(),
     );
     println!(
         "  Text diff char count (old → patched(old)): {}",
@@ -335,11 +338,11 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
 
     // Emit RTL (Verilog) for old and patched IR, and compute RTL text diff.
     let old_pkg_x = xlsynth::IrPackage::parse_ir(
-        &old_ir_text_verbatim,
+        &old_ir_text_emitted,
         old_path.file_name().and_then(|s| s.to_str()),
     )
     .expect("parse old IR for RTL codegen");
-    let patched_pkg_x = xlsynth::IrPackage::parse_ir(&new_ir_text_verbatim, None)
+    let patched_pkg_x = xlsynth::IrPackage::parse_ir(&patched_ir_text_emitted, None)
         .expect("parse patched IR for RTL codegen");
     let mut old_pkg_x = old_pkg_x;
     let mut patched_pkg_x = patched_pkg_x;
@@ -393,7 +396,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
         .unwrap_or(0);
     if sanity_samples > 0 {
         match sanity_check_interpret(
-            &new_ir_text_verbatim,
+            &patched_ir_text_emitted,
             new_fn,
             &patched_ir_path,
             sanity_samples,
@@ -688,26 +691,21 @@ fn handle_ir_localized_eco_blocks(
     }
     println!("  Edits listed.");
 
-    // Simple text diff sizes for block text.
-    println!("  Computing text diff (old → patched(old))...");
-    let a = old_text.as_bytes();
+    // Simple text diff sizes for block text: compare re-emitted old block vs
+    // patched block to avoid incidental formatting differences.
+    let old_block_text = emit_fn_as_block(&old_fn, None, Some(&old_ports));
+    println!(
+        "  Computing text diff {} bytes vs {} bytes...",
+        old_block_text.as_bytes().len(),
+        patched_block_text.as_bytes().len()
+    );
+    let a = old_block_text.as_bytes();
     let b = patched_block_text.as_bytes();
-    let sum = a.len().saturating_add(b.len());
-    let product_too_large = (a.len() as u128) * (b.len() as u128) > 50_000_000u128;
-    if sum > 2_000_000 {
-        println!(
-            "  Text diff: skipped (sum too large: {} + {} bytes)",
-            a.len(),
-            b.len()
-        );
-    }
-    let text_diff_chars = if product_too_large || sum > 2_000_000 {
-        0
-    } else {
-        let d = myers_insdel_distance_bytes(a, b);
-        println!("  Text diff char count (old → patched(old)): {}", d);
-        d
-    };
+    let text_diff_chars = myers_insdel_distance_bytes(a, b);
+    println!(
+        "  Text diff char count (old → patched(old)): {}",
+        text_diff_chars
+    );
 
     // Serialize JSON report analogous to package path.
     let json_path = if let Some(json_out) = matches.get_one::<String>("json_out") {
@@ -773,6 +771,7 @@ fn handle_ir_localized_eco_blocks_in_packages(
     old_fn: &ir_mod::Fn,
     old_ports: &BlockPortInfo,
     new_fn: &ir_mod::Fn,
+    new_ports: &BlockPortInfo,
 ) {
     // Compute diff.
     let diff = xlsynth_g8r::xls_ir::localized_eco::compute_localized_eco(old_fn, new_fn);
@@ -829,11 +828,13 @@ fn handle_ir_localized_eco_blocks_in_packages(
     std::fs::write(&patched_ir_path, patched_block_text.as_bytes()).unwrap();
     println!("  Patched IR written to: {}", patched_ir_path.display());
 
-    // Copy old/new for convenience.
+    // Copy old/new for convenience: write ONLY the selected blocks.
     let old_copy_path = out_dir.join("old.ir");
     let new_copy_path = out_dir.join("new.ir");
-    std::fs::write(&old_copy_path, old_text.as_bytes()).unwrap();
-    std::fs::write(&new_copy_path, new_text.as_bytes()).unwrap();
+    let old_block_text = emit_fn_as_block(old_fn, None, Some(old_ports));
+    let new_block_text = emit_fn_as_block(new_fn, None, Some(new_ports));
+    std::fs::write(&old_copy_path, old_block_text.as_bytes()).unwrap();
+    std::fs::write(&new_copy_path, new_block_text.as_bytes()).unwrap();
     println!("  Old IR copied to: {}", old_copy_path.display());
     println!("  New IR copied to: {}", new_copy_path.display());
 
@@ -907,26 +908,20 @@ fn handle_ir_localized_eco_blocks_in_packages(
         }
     }
 
-    // Simple text diff sizes for block text.
-    println!("  Computing text diff (old → patched(old))...");
-    let a = old_text.as_bytes();
+    // Simple text diff sizes for block text: compare re-emitted old block vs
+    // patched block.
+    println!(
+        "  Computing text diff {} bytes vs {} bytes...",
+        old_block_text.as_bytes().len(),
+        patched_block_text.as_bytes().len()
+    );
+    let a = old_block_text.as_bytes();
     let b = patched_block_text.as_bytes();
-    let sum = a.len().saturating_add(b.len());
-    let product_too_large = (a.len() as u128) * (b.len() as u128) > 50_000_000u128;
-    if sum > 2_000_000 {
-        println!(
-            "  Text diff: skipped (sum too large: {} + {} bytes)",
-            a.len(),
-            b.len()
-        );
-    }
-    let text_diff_chars = if product_too_large || sum > 2_000_000 {
-        0
-    } else {
-        let d = myers_insdel_distance_bytes(a, b);
-        println!("  Text diff char count (old → patched(old)): {}", d);
-        d
-    };
+    let text_diff_chars = myers_insdel_distance_bytes(a, b);
+    println!(
+        "  Text diff char count (old → patched(old)): {}",
+        text_diff_chars
+    );
 
     // Serialize JSON report analogous to package path.
     let json_path = if let Some(json_out) = matches.get_one::<String>("json_out") {
