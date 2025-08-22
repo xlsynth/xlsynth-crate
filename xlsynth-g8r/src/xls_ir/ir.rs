@@ -1138,27 +1138,88 @@ pub type PosData = Vec<Pos>;
 pub struct Package {
     pub name: String,
     pub file_table: FileTable,
-    pub fns: Vec<Fn>,
+    pub members: Vec<PackageMember>,
     pub top_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PackageMember {
+    Function(Fn),
+    Block { func: Fn, port_info: BlockPortInfo },
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockPortInfo {
+    pub input_port_ids: std::collections::HashMap<String, usize>,
+    pub output_port_ids: std::collections::HashMap<String, usize>,
 }
 
 impl Package {
     pub fn get_top(&self) -> Option<&Fn> {
         match &self.top_name {
-            Some(name) => self.fns.iter().find(|f| f.name == *name),
-            None => self.fns.first(),
+            Some(name) => self
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => Some(f),
+                    PackageMember::Block { .. } => None,
+                })
+                .find(|f| f.name == *name),
+            None => self
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => Some(f),
+                    PackageMember::Block { .. } => None,
+                })
+                .next(),
         }
     }
 
     pub fn get_top_mut(&mut self) -> Option<&mut Fn> {
         match &mut self.top_name {
-            Some(name) => self.fns.iter_mut().find(|f| f.name == *name),
-            None => self.fns.first_mut(),
+            Some(name) => self
+                .members
+                .iter_mut()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => Some(f),
+                    PackageMember::Block { .. } => None,
+                })
+                .find(|f| f.name == *name),
+            None => self
+                .members
+                .iter_mut()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => Some(f),
+                    PackageMember::Block { .. } => None,
+                })
+                .next(),
         }
     }
 
     pub fn get_fn(&self, name: &str) -> Option<&Fn> {
-        self.fns.iter().find(|f| f.name == name)
+        self.members.iter().find_map(|m| match m {
+            PackageMember::Function(f) if f.name == name => Some(f),
+            PackageMember::Block { .. } => None,
+            _ => None,
+        })
+    }
+
+    pub fn get_fn_mut(&mut self, name: &str) -> Option<&mut Fn> {
+        self.members.iter_mut().find_map(|m| match m {
+            PackageMember::Function(f) if f.name == name => Some(f),
+            PackageMember::Block { .. } => None,
+            _ => None,
+        })
+    }
+
+    pub fn for_each_fn_mut<F: FnMut(&mut Fn)>(&mut self, mut f: F) {
+        for m in self.members.iter_mut() {
+            match m {
+                PackageMember::Function(func) => f(func),
+                PackageMember::Block { func, .. } => f(func),
+            }
+        }
     }
 }
 
@@ -1166,7 +1227,6 @@ impl std::fmt::Display for Package {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "package {}\n\n", self.name)?;
 
-        // Emit the file table.
         let mut sorted_file_ids = self.file_table.id_to_path.keys().collect::<Vec<_>>();
         sorted_file_ids.sort();
         for file_id in sorted_file_ids {
@@ -1177,15 +1237,25 @@ impl std::fmt::Display for Package {
             write!(f, "\n")?;
         }
 
-        for (i, func) in self.fns.iter().enumerate() {
-            if let Some(top_name) = &self.top_name
-                && func.name == top_name.as_str()
-            {
-                write!(f, "top {}", func)?;
-            } else {
-                write!(f, "{}", func)?;
+        for (i, member) in self.members.iter().enumerate() {
+            match member {
+                PackageMember::Function(func) => {
+                    if let Some(top_name) = &self.top_name
+                        && func.name == top_name.as_str()
+                    {
+                        write!(f, "top {}", func)?;
+                    } else {
+                        write!(f, "{}", func)?;
+                    }
+                }
+                PackageMember::Block { func, port_info } => {
+                    // Emit as a block using helper from the parser module.
+                    let block_text =
+                        crate::xls_ir::ir_parser::emit_fn_as_block(func, None, Some(port_info));
+                    write!(f, "{}", block_text)?;
+                }
             }
-            if i < self.fns.len() - 1 {
+            if i < self.members.len() - 1 {
                 write!(f, "\n\n")?;
             } else {
                 write!(f, "\n")?;
