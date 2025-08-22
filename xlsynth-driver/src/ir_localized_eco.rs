@@ -109,7 +109,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     // preserving existing node IDs and allocating new ones only for inserted
     // subgraphs.
     let mut patched_pkg = old_pkg.clone();
-    if let Some(target_fn) = patched_pkg.fns.iter_mut().find(|f| f.name == old_fn.name) {
+    if let Some(target_fn) = patched_pkg.get_fn_mut(&old_fn.name) {
         let applied =
             xlsynth_g8r::xls_ir::localized_eco::apply_localized_eco(old_fn, new_fn, &report.edits);
         *target_fn = applied;

@@ -2,7 +2,9 @@
 
 //! Parser for XLS IR (just functions for the time being).
 
-use crate::xls_ir::ir::{self, ArrayTypeData, FileTable, operator_to_nary_op};
+use crate::xls_ir::ir::{
+    self, ArrayTypeData, BlockPortInfo, FileTable, PackageMember, operator_to_nary_op,
+};
 use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
@@ -1722,7 +1724,7 @@ impl Parser {
 
     pub fn parse_package(&mut self) -> Result<ir::Package, ParseError> {
         log::debug!("parse_package");
-        let mut fns = Vec::new();
+        let mut members: Vec<PackageMember> = Vec::new();
         let mut top_name: Option<String> = None;
 
         self.drop_or_error("package")?;
@@ -1733,12 +1735,29 @@ impl Parser {
 
         while !self.at_eof() {
             if self.try_drop("top") {
-                let f = self.parse_fn()?;
-                top_name = Some(f.name.clone());
-                fns.push(f);
+                // Allow whitespace/comments between `top` and the next keyword.
+                self.drop_whitespace_and_comments();
+                if self.peek_is("fn") {
+                    let f = self.parse_fn()?;
+                    top_name = Some(f.name.clone());
+                    members.push(PackageMember::Function(f));
+                } else if self.peek_is("block") {
+                    // Allow top block (even if not present in inputs yet).
+                    let (f, port_info) = self.parse_block_to_fn_with_ports()?;
+                    top_name = Some(f.name.clone());
+                    members.push(PackageMember::Block { func: f, port_info });
+                } else {
+                    return Err(ParseError::new(format!(
+                        "expected fn or block after top; rest: {:?}",
+                        self.rest()
+                    )));
+                }
             } else if self.peek_is("fn") {
                 let f = self.parse_fn()?;
-                fns.push(f);
+                members.push(PackageMember::Function(f));
+            } else if self.peek_is("block") {
+                let (f, port_info) = self.parse_block_to_fn_with_ports()?;
+                members.push(PackageMember::Block { func: f, port_info });
             } else if self.peek_is("proc") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got proc; rest: {:?}",
@@ -1753,7 +1772,7 @@ impl Parser {
                 self.parse_file_number(&mut file_table)?;
             } else {
                 return Err(ParseError::new(format!(
-                    "expected top or fn, got {:?}; rest: {:?}",
+                    "expected top, fn, block, or file_number, got {:?}; rest: {:?}",
                     self.peekc(),
                     self.rest()
                 )));
@@ -1762,16 +1781,10 @@ impl Parser {
         Ok(ir::Package {
             name: package_name,
             file_table,
-            fns,
+            members,
             top_name,
         })
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct BlockPortInfo {
-    pub input_port_ids: std::collections::HashMap<String, usize>,
-    pub output_port_ids: std::collections::HashMap<String, usize>,
 }
 
 /// Emits a combinational block text from an `ir::Fn`.
