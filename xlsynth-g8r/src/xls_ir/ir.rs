@@ -1152,6 +1152,7 @@ pub enum PackageMember {
 pub struct BlockPortInfo {
     pub input_port_ids: std::collections::HashMap<String, usize>,
     pub output_port_ids: std::collections::HashMap<String, usize>,
+    pub output_names: Vec<String>,
 }
 
 impl Package {
