@@ -527,20 +527,22 @@ impl NodePayload {
         };
         let result = match self {
             NodePayload::Tuple(nodes) => format!(
-                "tuple({})",
+                "tuple({}, id={})",
                 nodes
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                id
             ),
             NodePayload::Array(nodes) => format!(
-                "array({})",
+                "array({}, id={})",
                 nodes
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                id
             ),
             NodePayload::TupleIndex { tuple, index } => {
                 format!(
@@ -583,31 +585,56 @@ impl NodePayload {
                 value,
                 indices,
                 assumed_in_bounds,
-            } => format!(
-                "array_update({}, {}, {}, assumed_in_bounds={})",
-                get_name(*array),
-                get_name(*value),
-                indices
+            } => {
+                let idx_str = indices
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", "),
-                assumed_in_bounds
-            ),
+                    .join(", ");
+                if *assumed_in_bounds {
+                    format!(
+                        "array_update({}, {}, {}, assumed_in_bounds=true, id={})",
+                        get_name(*array),
+                        get_name(*value),
+                        idx_str,
+                        id
+                    )
+                } else {
+                    format!(
+                        "array_update({}, {}, {}, id={})",
+                        get_name(*array),
+                        get_name(*value),
+                        idx_str,
+                        id
+                    )
+                }
+            }
             NodePayload::ArrayIndex {
                 array,
                 indices,
                 assumed_in_bounds,
-            } => format!(
-                "array_index({}, indices=[{}], assumed_in_bounds={})",
-                get_name(*array),
-                indices
+            } => {
+                let idx_str = indices
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", "),
-                assumed_in_bounds
-            ),
+                    .join(", ");
+                if *assumed_in_bounds {
+                    format!(
+                        "array_index({}, indices=[{}], assumed_in_bounds=true, id={})",
+                        get_name(*array),
+                        idx_str,
+                        id
+                    )
+                } else {
+                    format!(
+                        "array_index({}, indices=[{}], id={})",
+                        get_name(*array),
+                        idx_str,
+                        id
+                    )
+                }
+            }
             NodePayload::DynamicBitSlice { arg, start, width } => format!(
                 "dynamic_bit_slice({}, {}, width={}, id={})",
                 get_name(*arg),
@@ -629,10 +656,11 @@ impl NodePayload {
                 start,
                 update_value,
             } => format!(
-                "bit_slice_update({}, {}, {})",
+                "bit_slice_update({}, {}, {}, id={})",
                 get_name(*arg),
                 get_name(*start),
-                get_name(*update_value)
+                get_name(*update_value),
+                id
             ),
             NodePayload::Assert {
                 token,
@@ -655,7 +683,7 @@ impl NodePayload {
                 format,
                 operands,
             } => format!(
-                "trace({}, {}, {}, {})",
+                "trace({}, {}, {}, {}, id={})",
                 get_name(*token),
                 get_name(*activated),
                 format,
@@ -663,16 +691,24 @@ impl NodePayload {
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                id
             ),
-            NodePayload::AfterAll(nodes) => format!(
-                "after_all({})",
-                nodes
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", ")
-            ),
+            NodePayload::AfterAll(nodes) => {
+                if nodes.is_empty() {
+                    format!("after_all(id={})", id)
+                } else {
+                    format!(
+                        "after_all({}, id={})",
+                        nodes
+                            .iter()
+                            .map(|n| get_name(*n))
+                            .collect::<Vec<String>>()
+                            .join(", "),
+                        id
+                    )
+                }
+            }
             NodePayload::Nary(op, nodes) => format!(
                 "{}({}, id={})",
                 nary_op_to_operator(*op),
@@ -684,13 +720,14 @@ impl NodePayload {
                 id
             ),
             NodePayload::Invoke { to_apply, operands } => format!(
-                "invoke({}, {})",
+                "invoke({}, {}, id={})",
                 to_apply,
                 operands
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                id
             ),
             NodePayload::PrioritySel {
                 selector,
@@ -703,27 +740,34 @@ impl NodePayload {
                     "".to_string()
                 };
                 format!(
-                    "priority_sel({}, cases=[{}]{})",
+                    "priority_sel({}, cases=[{}]{}, id={})",
                     get_name(*selector),
                     cases
                         .iter()
                         .map(|n| get_name(*n))
                         .collect::<Vec<String>>()
                         .join(", "),
-                    default_str
+                    default_str,
+                    id
                 )
             }
             NodePayload::OneHotSel { selector, cases } => format!(
-                "one_hot_sel({}, cases=[{}])",
+                "one_hot_sel({}, cases=[{}], id={})",
                 get_name(*selector),
                 cases
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                id
             ),
             NodePayload::OneHot { arg, lsb_prio } => {
-                format!("one_hot({}, lsb_prio={})", get_name(*arg), lsb_prio)
+                format!(
+                    "one_hot({}, lsb_prio={}, id={})",
+                    get_name(*arg),
+                    lsb_prio,
+                    id
+                )
             }
             NodePayload::Sel {
                 selector,
@@ -736,18 +780,19 @@ impl NodePayload {
                     "".to_string()
                 };
                 format!(
-                    "sel({}, cases=[{}]{})",
+                    "sel({}, cases=[{}]{}, id={})",
                     get_name(*selector),
                     cases
                         .iter()
                         .map(|n| get_name(*n))
                         .collect::<Vec<String>>()
                         .join(", "),
-                    default_str
+                    default_str,
+                    id
                 )
             }
             NodePayload::Cover { predicate, label } => {
-                format!("cover({}, {})", get_name(*predicate), label)
+                format!("cover({}, {}, id={})", get_name(*predicate), label, id)
             }
             NodePayload::Decode { arg, width } => {
                 format!("decode({}, width={}, id={})", get_name(*arg), width, id)
@@ -811,7 +856,30 @@ impl Node {
                 } else {
                     format!("{}.{}", self.payload.get_operator(), self.text_id)
                 };
-                Some(format!("{}: {} = {}", name_str, self.ty, result))
+                let mut payload_str = result;
+                if let Some(pos_list) = &self.pos {
+                    if !pos_list.is_empty() {
+                        // Format pos as: pos=[(a,b,c), (d,e,f)] with no spaces inside tuples
+                        let items: Vec<String> = pos_list
+                            .iter()
+                            .map(|p| format!("({},{},{})", p.fileno, p.lineno, p.colno))
+                            .collect();
+                        let pos_attr = format!(", pos=[{}]", items.join(", "));
+                        if let Some(idx) = payload_str.rfind(')') {
+                            // Insert before the final ')'
+                            payload_str = format!(
+                                "{}{}{}",
+                                &payload_str[..idx],
+                                pos_attr,
+                                &payload_str[idx..]
+                            );
+                        } else {
+                            // Fallback: append
+                            payload_str.push_str(&pos_attr);
+                        }
+                    }
+                }
+                Some(format!("{}: {} = {}", name_str, self.ty, payload_str))
             }
             None => None,
         }
@@ -1037,7 +1105,7 @@ impl std::fmt::Display for Fn {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileTable {
     pub id_to_path: HashMap<usize, String>,
 }
@@ -1066,7 +1134,7 @@ impl Pos {
 
 pub type PosData = Vec<Pos>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Package {
     pub name: String,
     pub file_table: FileTable,

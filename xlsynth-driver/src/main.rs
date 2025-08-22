@@ -54,6 +54,8 @@ mod ir_equiv;
 mod ir_fn_eval;
 mod ir_fn_to_block;
 mod ir_ged;
+mod ir_localized_eco;
+mod ir_round_trip;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
 mod lib2proto;
@@ -694,6 +696,77 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("ir-localized-eco")
+                .about("Computes a localized ECO diff (old → new) and emits JSON edits and a summary")
+                .arg(
+                    Arg::new("old_ir_file")
+                        .help("The old/original IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("new_ir_file")
+                        .help("The new/target IR file")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("old_ir_top")
+                        .long("old_ir_top")
+                        .help("Top-level entry point for the old IR"),
+                )
+                .arg(
+                    Arg::new("new_ir_top")
+                        .long("new_ir_top")
+                        .help("Top-level entry point for the new IR"),
+                )
+                .arg(
+                    Arg::new("json_out")
+                        .long("json_out")
+                        .value_name("PATH")
+                        .help("Write the JSON report to PATH; if omitted a temp file is created and its path is printed"),
+                )
+                .arg(
+                    Arg::new("output_dir")
+                        .long("output_dir")
+                        .value_name("DIR")
+                        .help("Directory to write outputs (JSON, patched .ir). If omitted, a temp directory is created and printed."),
+                )
+                .arg(
+                    Arg::new("sanity_samples")
+                        .long("sanity-samples")
+                        .value_name("N")
+                        .help("If > 0, run N randomized interpreter samples (in addition to all-zeros and all-ones) to sanity-check patched(old) vs new.")
+                        .default_value("0"),
+                )
+                .arg(
+                    Arg::new("sanity_seed")
+                        .long("sanity-seed")
+                        .value_name("SEED")
+                        .help("Seed for randomized interpreter samples (default 0)")
+                        .default_value("0"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-round-trip")
+                .about("Parses an IR file and writes it back out to stdout")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("strip_pos_attrs")
+                        .long("strip-pos-attrs")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("If true, strip file_number and (future) node pos attributes from output"),
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir2gates")
                 .about("Converts IR to GateFn and emits it to stdout as JSON")
                 .arg(
@@ -1219,6 +1292,10 @@ fn main() {
         ir_fn_to_block::handle_ir_fn_to_block(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-structural-similarity") {
         ir_structural_similarity::handle_ir_structural_similarity(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir-localized-eco") {
+        ir_localized_eco::handle_ir_localized_eco(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir-round-trip") {
+        ir_round_trip::handle_ir_round_trip(matches);
     } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
         ir2gates::handle_ir2gates(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2g8r") {

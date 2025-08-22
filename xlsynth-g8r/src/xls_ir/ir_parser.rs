@@ -44,13 +44,32 @@ impl FileTable {
 pub struct Parser {
     chars: Vec<char>,
     offset: usize,
+    options: ParseOptions,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParseOptions {
+    pub retain_pos_data: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            retain_pos_data: true,
+        }
+    }
 }
 
 impl Parser {
     pub fn new(input: &str) -> Self {
+        Self::new_with_options(input, ParseOptions::default())
+    }
+
+    pub fn new_with_options(input: &str, options: ParseOptions) -> Self {
         Self {
             chars: input.chars().collect(),
             offset: 0,
+            options,
         }
     }
 
@@ -1245,15 +1264,19 @@ impl Parser {
             &format!("end of node: {:?} operator: {:?}", name_or_id, operator),
         )?;
 
-        let pos_data = pos_attr.map(|p| {
-            p.into_iter()
-                .map(|(f, l, c)| ir::Pos {
-                    fileno: f,
-                    lineno: l,
-                    colno: c,
-                })
-                .collect()
-        });
+        let pos_data = if self.options.retain_pos_data {
+            pos_attr.map(|p| {
+                p.into_iter()
+                    .map(|(f, l, c)| ir::Pos {
+                        fileno: f,
+                        lineno: l,
+                        colno: c,
+                    })
+                    .collect()
+            })
+        } else {
+            None
+        };
 
         Ok(ir::Node {
             text_id: id,
@@ -2101,6 +2124,25 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     }
 
     #[test]
+    fn test_parse_after_all_node_nullary() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut node_env = IrNodeEnv::new();
+        let input = "after_all.19: token = after_all(id=19)";
+        let mut parser = Parser::new(input);
+        let node = parser.parse_node(&mut node_env).unwrap();
+        assert_eq!(node.payload, ir::NodePayload::AfterAll(Vec::new()));
+    }
+
+    #[test]
+    fn test_round_trip_fn_with_nullary_after_all() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = "fn f() -> token {\n  ret after_all.19: token = after_all(id=19)\n}\n";
+        let mut parser = Parser::new(input);
+        let f = parser.parse_fn().unwrap();
+        assert_eq!(f.to_string(), input.trim_end());
+    }
+
+    #[test]
     fn test_parse_bit_slice_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
@@ -2272,10 +2314,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         log::info!("xlsynth package str:\n{}", xlsynth_package_str);
         let mut parser = Parser::new(xlsynth_package_str.as_str());
         let parsed_package = parser.parse_package().unwrap();
-        assert_eq!(
-            parsed_package.to_string(),
-            strip_pos_data(&xlsynth_package_str)
-        );
+        assert_eq!(parsed_package.to_string(), xlsynth_package_str);
     }
 
     #[test]
@@ -2667,7 +2706,9 @@ block my_main(x: bits[8], out: bits[8]) {
 }"#;
         let mut parser = Parser::new(input);
         let f = parser.parse_block_to_fn().unwrap();
-        let want = "fn my_block(a: bits[32] id=1, b: bits[32] id=3) -> (bits[32], bits[32]) {\n  ret tuple.4: (bits[32], bits[32]) = tuple(a, b)\n}";
+        let want = "fn my_block(a: bits[32] id=1, b: bits[32] id=3) -> (bits[32], bits[32]) {
+  ret tuple.4: (bits[32], bits[32]) = tuple(a, b, id=4)
+}";
         assert_eq!(f.to_string(), want);
     }
 

@@ -1,0 +1,851 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use clap::ArgMatches;
+
+use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
+use crate::parallelism::ParallelismStrategy;
+use crate::toolchain_config::ToolchainConfig;
+use rand::Rng;
+use rand::SeedableRng;
+use xlsynth::IrValue;
+use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
+use xlsynth_g8r::xls_ir::edit_distance::compute_edit_distance;
+use xlsynth_g8r::xls_ir::ir::Type;
+
+#[derive(serde::Serialize)]
+struct AddedOpsSummaryItem {
+    op: String,
+    count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct LocalizedEcoReport {
+    added_node_count: usize,
+    added_ops: Vec<AddedOpsSummaryItem>,
+    edits: xlsynth_g8r::xls_ir::localized_eco::LocalizedEcoDiff,
+    edit_distance_old_to_patched: u64,
+    text_edit_distance_old_to_patched: usize,
+    rtl_text_edit_distance_old_to_patched: usize,
+}
+
+pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
+    let old_path = std::path::Path::new(matches.get_one::<String>("old_ir_file").unwrap());
+    let new_path = std::path::Path::new(matches.get_one::<String>("new_ir_file").unwrap());
+    let old_ir_top = matches.get_one::<String>("old_ir_top");
+    let new_ir_top = matches.get_one::<String>("new_ir_top");
+
+    let old_pkg = xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(old_path).unwrap();
+    let new_pkg = xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(new_path).unwrap();
+
+    let old_fn = match old_ir_top {
+        Some(top) => old_pkg.get_fn(top).unwrap(),
+        None => old_pkg.get_top().unwrap(),
+    };
+    let new_fn = match new_ir_top {
+        Some(top) => new_pkg.get_fn(top).unwrap(),
+        None => new_pkg.get_top().unwrap(),
+    };
+
+    let diff = xlsynth_g8r::xls_ir::localized_eco::compute_localized_eco(old_fn, new_fn);
+
+    // Summarize additions by operator name from inserted operands.
+    let mut added_count: usize = 0;
+    let mut op_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in diff.edits.iter() {
+        if let xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted { new_signature, .. } = e {
+            added_count += 1;
+            let op = extract_op_from_signature(new_signature);
+            *op_counts.entry(op).or_insert(0) += 1;
+        }
+    }
+    let mut added_ops: Vec<AddedOpsSummaryItem> = op_counts
+        .into_iter()
+        .map(|(op, count)| AddedOpsSummaryItem { op, count })
+        .collect();
+    added_ops.sort_by(|a, b| a.op.cmp(&b.op));
+
+    let edit_distance = compute_edit_distance(old_fn, new_fn);
+    let report = LocalizedEcoReport {
+        added_node_count: added_count,
+        added_ops,
+        edits: diff,
+        edit_distance_old_to_patched: edit_distance,
+        text_edit_distance_old_to_patched: 0, // placeholder; set below when we have texts
+        rtl_text_edit_distance_old_to_patched: 0,
+    };
+
+    // Decide output directory: user-provided or temp directory we keep.
+    let out_dir = if let Some(dir_str) = matches.get_one::<String>("output_dir") {
+        let p = std::path::PathBuf::from(dir_str);
+        if !p.exists() {
+            std::fs::create_dir_all(&p).unwrap();
+        }
+        p
+    } else {
+        let td = tempfile::tempdir().unwrap();
+        let p = td.path().to_path_buf();
+        std::mem::forget(td); // persist directory
+        p
+    };
+
+    // JSON path: use explicit --json_out if given, else write into
+    // out_dir/eco_report.json
+    let json_path = if let Some(json_out) = matches.get_one::<String>("json_out") {
+        let path = std::path::PathBuf::from(json_out);
+        // We'll serialize after computing text edit distance below; write later.
+        // For now, just return the path.
+        path
+    } else {
+        let path = out_dir.join("eco_report.json");
+        // We'll serialize after computing text edit distance below.
+        path
+    };
+
+    // Patched IR path: emit the NEW IR with IDs remapped to preserve old IDs where
+    // subgraphs are structurally equal; allocate fresh IDs for new nodes.
+    let patched_ir_path = out_dir.join("patched_old.ir");
+    let old_ir_text_verbatim = std::fs::read_to_string(old_path).unwrap();
+    // Build patched package by applying localized ECO edits to the old function,
+    // preserving existing node IDs and allocating new ones only for inserted
+    // subgraphs.
+    let mut patched_pkg = old_pkg.clone();
+    if let Some(target_fn) = patched_pkg.fns.iter_mut().find(|f| f.name == old_fn.name) {
+        let applied =
+            xlsynth_g8r::xls_ir::localized_eco::apply_localized_eco(old_fn, new_fn, &report.edits);
+        *target_fn = applied;
+    }
+    let new_ir_text_verbatim = patched_pkg.to_string();
+    std::fs::write(&patched_ir_path, new_ir_text_verbatim.as_bytes()).unwrap();
+    // Inform the user where outputs are going before expensive text diffing.
+    println!("  Output dir: {}", out_dir.display());
+    println!("  Patched IR written to: {}", patched_ir_path.display());
+    // Copy input IRs into the output directory for convenience.
+    let old_copy_path = out_dir.join("old.ir");
+    let new_copy_path = out_dir.join("new.ir");
+    std::fs::copy(&old_path, &old_copy_path).expect("copy old IR");
+    std::fs::copy(&new_path, &new_copy_path).expect("copy new IR");
+    println!("  Old IR copied to: {}", old_copy_path.display());
+    println!("  New IR copied to: {}", new_copy_path.display());
+
+    // Run local validations on the 'new' function (mirrors patched IR) to catch
+    // common issues like duplicate IDs before invoking the external toolchain.
+    if let Err(e) = xlsynth_g8r::xls_ir::ir_verify::verify_fn_unique_node_ids(new_fn) {
+        println!("  WARNING: verification failed (duplicate IDs): {}", e);
+    }
+    if let Err(e) = xlsynth_g8r::xls_ir::ir_verify::verify_fn_operand_indices_in_bounds(new_fn) {
+        println!("  WARNING: verification failed (operand indices): {}", e);
+    }
+
+    // Human-readable output
+    println!("Localized ECO diff (old → new)");
+    println!(
+        "  Added nodes (by inserted operand): {}",
+        report.added_node_count
+    );
+    if !report.added_ops.is_empty() {
+        println!("  Added ops:");
+        for item in report.added_ops.iter() {
+            println!("    {}: {}", item.op, item.count);
+        }
+    }
+    println!("  Edits:");
+    for e in report.edits.edits.iter() {
+        match e {
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperatorChanged {
+                path,
+                old_op,
+                new_op,
+            } => {
+                println!("    path {:?}: operator {} -> {}", path.0, old_op, new_op);
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::TypeChanged {
+                path,
+                old_ty,
+                new_ty,
+            } => {
+                println!("    path {:?}: type {} -> {}", path.0, old_ty, new_ty);
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::ArityChanged {
+                path,
+                old_arity,
+                new_arity,
+            } => {
+                println!(
+                    "    path {:?}: arity {} -> {}",
+                    path.0, old_arity, new_arity
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted {
+                path,
+                index,
+                new_signature,
+            } => {
+                println!(
+                    "    path {:?}: insert operand at {}: {}",
+                    path.0, index, new_signature
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandDeleted {
+                path,
+                index,
+                old_signature,
+            } => {
+                println!(
+                    "    path {:?}: delete operand at {}: {}",
+                    path.0, index, old_signature
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandSubstituted {
+                path,
+                index,
+                old_signature,
+                new_signature,
+            } => {
+                println!(
+                    "    path {:?}: substitute operand at {}: {} -> {}",
+                    path.0, index, old_signature, new_signature
+                );
+            }
+        }
+    }
+    println!(
+        "  IR Graph Edit Distance (old → patched(old)): {}",
+        report.edit_distance_old_to_patched
+    );
+    // Compute text-level Levenshtein distance between IR text(old) and IR
+    // text(patched(old)).
+    println!(
+        "  Computing text diff char count (Myers, inserts+deletes) for IR text old → patched(old)..."
+    );
+    let text_diff_chars = myers_insdel_distance_bytes(
+        old_ir_text_verbatim.as_bytes(),
+        new_ir_text_verbatim.as_bytes(),
+    );
+    println!(
+        "  Text diff char count (old → patched(old)): {}",
+        text_diff_chars
+    );
+
+    // Emit RTL (Verilog) for old and patched IR, and compute RTL text diff.
+    let old_pkg_x = xlsynth::IrPackage::parse_ir(
+        &old_ir_text_verbatim,
+        old_path.file_name().and_then(|s| s.to_str()),
+    )
+    .expect("parse old IR for RTL codegen");
+    let patched_pkg_x = xlsynth::IrPackage::parse_ir(&new_ir_text_verbatim, None)
+        .expect("parse patched IR for RTL codegen");
+    let mut old_pkg_x = old_pkg_x;
+    let mut patched_pkg_x = patched_pkg_x;
+    let _ = old_pkg_x.set_top_by_name(&new_fn.name);
+    let _ = patched_pkg_x.set_top_by_name(&new_fn.name);
+    let delay_model = "unit";
+    let sched_proto = format!("delay_model: \"{}\"\npipeline_stages: 1", delay_model);
+    let codegen_proto = format!(
+        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nuse_system_verilog: true\nmodule_name: \"{}\"\ncodegen_version: 1",
+        new_fn.name
+    );
+    let old_sv = xlsynth::schedule_and_codegen(&old_pkg_x, &sched_proto, &codegen_proto)
+        .and_then(|res| res.get_verilog_text())
+        .expect("schedule/codegen old IR");
+    let patched_sv = xlsynth::schedule_and_codegen(&patched_pkg_x, &sched_proto, &codegen_proto)
+        .and_then(|res| res.get_verilog_text())
+        .expect("schedule/codegen patched IR");
+    let old_sv_path = out_dir.join("rtl_old.sv");
+    let patched_sv_path = out_dir.join("rtl_patched_old.sv");
+    std::fs::write(&old_sv_path, old_sv.as_bytes()).expect("write rtl_old.sv");
+    std::fs::write(&patched_sv_path, patched_sv.as_bytes()).expect("write rtl_patched_old.sv");
+    println!("  RTL (old) written to: {}", old_sv_path.display());
+    println!(
+        "  RTL (patched(old)) written to: {}",
+        patched_sv_path.display()
+    );
+    let rtl_diff_chars = myers_insdel_distance_bytes(old_sv.as_bytes(), patched_sv.as_bytes());
+    println!(
+        "  RTL text diff char count (old → patched(old)): {}",
+        rtl_diff_chars
+    );
+
+    // Serialize report with both IR and RTL text edit distances now known.
+    {
+        let mut report_with_text = report;
+        report_with_text.text_edit_distance_old_to_patched = text_diff_chars;
+        report_with_text.rtl_text_edit_distance_old_to_patched = rtl_diff_chars;
+        let s = serde_json::to_string_pretty(&report_with_text).unwrap();
+        std::fs::write(&json_path, s).unwrap();
+    }
+    println!("  JSON written to: {}", json_path.display());
+
+    // Optional: quick interpreter sanity check before expensive proof.
+    let sanity_samples = matches
+        .get_one::<String>("sanity_samples")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let sanity_seed = matches
+        .get_one::<String>("sanity_seed")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    if sanity_samples > 0 {
+        match sanity_check_interpret(
+            &new_ir_text_verbatim,
+            new_fn,
+            &patched_ir_path,
+            sanity_samples,
+            sanity_seed,
+        ) {
+            Ok(()) => {
+                // The function prints its own summary including skipped counts.
+            }
+            Err(e) => {
+                println!("  Sanity check: FAILED: {}", e);
+                println!("  Equivalence: skipped due to failing interpreter sanity check");
+                return;
+            }
+        }
+    }
+    // Optional: Prove old vs new equivalence using toolchain if available.
+    // Determine tool_path: prefer --toolchain config; otherwise use XLSYNTH_TOOLS
+    // env var if set.
+    let mut tool_path_opt: Option<String> = config.as_ref().and_then(|c| c.tool_path.clone());
+    if tool_path_opt.is_none() {
+        if let Ok(env_tools) = std::env::var("XLSYNTH_TOOLS") {
+            if !env_tools.trim().is_empty() {
+                tool_path_opt = Some(env_tools);
+            }
+        }
+    }
+
+    if let Some(tool_path) = tool_path_opt.as_deref() {
+        // Prove: patched_old.ir ≡ new.ir
+        let patched_ir_text = std::fs::read_to_string(&patched_ir_path).unwrap();
+        let new_ir_text = std::fs::read_to_string(new_path).unwrap();
+        // Use the new function's name as the top on both sides (patched equals new
+        // package text).
+        let lhs_top = Some(new_fn.name.as_str());
+        let rhs_top = Some(new_fn.name.as_str());
+        println!(
+            "  Starting equivalence proof using toolchain at {}: patched='{}' top='{}' vs new='{}' top='{}'",
+            tool_path,
+            patched_ir_path.display(),
+            lhs_top.unwrap_or("") ,
+            new_path.display(),
+            rhs_top.unwrap_or("")
+        );
+        let inputs = EquivInputs {
+            lhs_ir_text: &patched_ir_text,
+            rhs_ir_text: &new_ir_text,
+            lhs_top,
+            rhs_top,
+            flatten_aggregates: false,
+            drop_params: &[],
+            strategy: ParallelismStrategy::SingleThreaded,
+            assertion_semantics: AssertionSemantics::Same,
+            lhs_fixed_implicit_activation: false,
+            rhs_fixed_implicit_activation: false,
+            subcommand: "ir-localized-eco",
+            lhs_origin: old_path.to_str().unwrap_or(""),
+            rhs_origin: new_path.to_str().unwrap_or(""),
+            lhs_param_domains: None,
+            rhs_param_domains: None,
+            lhs_uf_map: std::collections::HashMap::new(),
+            rhs_uf_map: std::collections::HashMap::new(),
+        };
+        let outcome = dispatch_ir_equiv(None, Some(tool_path), &inputs);
+        let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
+        if outcome.success {
+            println!("  Equivalence: proved (patched(old) ≡ new) in {:?}", dur);
+        } else {
+            println!("  Equivalence: FAILED (patched(old) vs new) in {:?}", dur);
+            if let Some(cex) = outcome.counterexample {
+                println!("    counterexample: {}", cex);
+                // Attempt to replay the counterexample via interpreter.
+                if let Some(input_idx) = cex.find("input:") {
+                    let arg_text = cex[input_idx + "input:".len()..].trim();
+                    match try_interpret_cex(&new_ir_text, new_fn, &patched_ir_path, arg_text) {
+                        Ok(()) => {}
+                        Err(e) => println!("    interpreter replay: skipped ({})", e),
+                    }
+                }
+            }
+        }
+    } else {
+        println!("  Equivalence: skipped (no --toolchain config and no XLSYNTH_TOOLS env var)");
+    }
+}
+
+// Compute Levenshtein distance over bytes (ASCII-safe for IR text), O(n*m).
+// Myers' O(ND) diff distance over bytes (insert+delete only); returns minimal
+// number of inserted + deleted bytes to transform a into b.
+fn myers_insdel_distance_bytes(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len() as isize;
+    let m = b.len() as isize;
+    if n == 0 {
+        return m as usize;
+    }
+    if m == 0 {
+        return n as usize;
+    }
+    let max = (n + m) as usize;
+    let offset = max as isize;
+    let mut v: Vec<isize> = vec![0; 2 * max + 1];
+    for d in 0..=max {
+        let d_isize = d as isize;
+        let mut k = -d_isize;
+        while k <= d_isize {
+            let idx_plus = (k + 1 + offset) as usize;
+            let idx_minus = (k - 1 + offset) as usize;
+            let x = if k == -d_isize || (k != d_isize && v[idx_minus] < v[idx_plus]) {
+                v[idx_plus]
+            } else {
+                v[idx_minus] + 1
+            };
+            let mut x_mut = x;
+            let mut y_mut = x_mut - k;
+            while x_mut < n && y_mut < m && a[x_mut as usize] == b[y_mut as usize] {
+                x_mut += 1;
+                y_mut += 1;
+            }
+            v[(k + offset) as usize] = x_mut;
+            if x_mut >= n && y_mut >= m {
+                return d;
+            }
+            k += 2;
+        }
+    }
+    max
+}
+
+fn type_zero_value_text(ty: &Type) -> String {
+    match ty {
+        Type::Bits(w) => format!("bits[{}]:0", w),
+        Type::Tuple(elems) => {
+            let parts: Vec<String> = elems.iter().map(|t| type_zero_value_text(t)).collect();
+            format!("({})", parts.join(", "))
+        }
+        Type::Array(arr) => {
+            let part = type_zero_value_text(&arr.element_type);
+            let parts = std::iter::repeat(part)
+                .take(arr.element_count)
+                .collect::<Vec<_>>();
+            format!("[{}]", parts.join(", "))
+        }
+        Type::Token => "()".to_string(),
+    }
+}
+
+fn ones_hex_for_width(width: usize) -> String {
+    if width == 0 {
+        return "0x0".to_string();
+    }
+    let full = width / 4;
+    let rem = width % 4;
+    let mut s = String::from("0x");
+    if rem > 0 {
+        let mask = (1u8 << rem) - 1;
+        s.push_str(&format!("{:x}", mask));
+    }
+    if full > 0 {
+        s.push_str(&"f".repeat(full));
+    }
+    s
+}
+
+fn type_ones_value_text(ty: &Type) -> String {
+    match ty {
+        Type::Bits(w) => format!("bits[{}]:{}", w, ones_hex_for_width(*w)),
+        Type::Tuple(elems) => {
+            let parts: Vec<String> = elems.iter().map(|t| type_ones_value_text(t)).collect();
+            format!("({})", parts.join(", "))
+        }
+        Type::Array(arr) => {
+            let part = type_ones_value_text(&arr.element_type);
+            let parts = std::iter::repeat(part)
+                .take(arr.element_count)
+                .collect::<Vec<_>>();
+            format!("[{}]", parts.join(", "))
+        }
+        Type::Token => "()".to_string(),
+    }
+}
+
+fn rnd_hex_for_width(rng: &mut rand::rngs::StdRng, width: usize) -> String {
+    if width == 0 {
+        return "0x0".to_string();
+    }
+    let full = width / 4;
+    let rem = width % 4;
+    let mut s = String::from("0x");
+    if rem > 0 {
+        let max = (1u8 << rem) - 1;
+        let val: u8 = rng.gen_range(0..=max);
+        s.push_str(&format!("{:x}", val));
+    }
+    for _ in 0..full {
+        let v: u8 = rng.gen_range(0..=15);
+        s.push_str(&format!("{:x}", v));
+    }
+    s
+}
+
+fn type_random_value_text(ty: &Type, rng: &mut rand::rngs::StdRng) -> String {
+    match ty {
+        Type::Bits(w) => format!("bits[{}]:{}", w, rnd_hex_for_width(rng, *w)),
+        Type::Tuple(elems) => {
+            let parts: Vec<String> = elems
+                .iter()
+                .map(|t| type_random_value_text(t, rng))
+                .collect();
+            format!("({})", parts.join(", "))
+        }
+        Type::Array(arr) => {
+            let part = type_random_value_text(&arr.element_type, rng);
+            let parts = (0..arr.element_count)
+                .map(|_| part.clone())
+                .collect::<Vec<_>>();
+            format!("[{}]", parts.join(", "))
+        }
+        Type::Token => "()".to_string(),
+    }
+}
+
+fn has_token_param(f: &xlsynth_g8r::xls_ir::ir::Fn) -> bool {
+    f.params.iter().any(|p| matches!(p.ty, Type::Token))
+}
+
+fn build_args_text(
+    f: &xlsynth_g8r::xls_ir::ir::Fn,
+    mode: &str,
+    mut rng: Option<&mut rand::rngs::StdRng>,
+) -> String {
+    let parts: Vec<String> = f
+        .params
+        .iter()
+        .map(|p| match mode {
+            "zeros" => type_zero_value_text(&p.ty),
+            "ones" => type_ones_value_text(&p.ty),
+            _ => {
+                let mut_ref = rng.as_deref_mut().unwrap();
+                type_random_value_text(&p.ty, mut_ref)
+            }
+        })
+        .collect();
+    format!("({})", parts.join(", "))
+}
+
+fn sanity_check_interpret(
+    new_ir_text: &str,
+    new_fn: &xlsynth_g8r::xls_ir::ir::Fn,
+    patched_ir_path: &std::path::Path,
+    random_samples: usize,
+    seed: u64,
+) -> Result<(), String> {
+    if has_token_param(new_fn) {
+        return Err("token parameters not supported in interpreter sanity check".to_string());
+    }
+    let patched_pkg = xlsynth::IrPackage::parse_ir_from_path(patched_ir_path)
+        .map_err(|e| format!("parse patched IR failed: {}", e))?;
+    let new_pkg = xlsynth::IrPackage::parse_ir(new_ir_text, None)
+        .map_err(|e| format!("parse new IR failed: {}", e))?;
+    let top_name = &new_fn.name;
+    let patched_f = patched_pkg
+        .get_function(top_name)
+        .map_err(|e| format!("get patched top failed: {}", e))?;
+    let new_f = new_pkg
+        .get_function(top_name)
+        .map_err(|e| format!("get new top failed: {}", e))?;
+
+    let zeros_text = build_args_text(new_fn, "zeros", None);
+    let ones_text = build_args_text(new_fn, "ones", None);
+    let zeros_tuple = xlsynth::IrValue::parse_typed(&zeros_text)
+        .map_err(|e| format!("parse zeros args failed: {}", e))?;
+    let ones_tuple = xlsynth::IrValue::parse_typed(&ones_text)
+        .map_err(|e| format!("parse ones args failed: {}", e))?;
+    let zeros_args = zeros_tuple
+        .get_elements()
+        .map_err(|e| format!("decompose zeros tuple failed: {}", e))?;
+    let ones_args = ones_tuple
+        .get_elements()
+        .map_err(|e| format!("decompose ones tuple failed: {}", e))?;
+    let mut skipped_due_to_asserts: usize = 0;
+    // zeros
+    let zv_p_res = patched_f.interpret(&zeros_args);
+    let zv_n_res = new_f.interpret(&zeros_args);
+    let zeros_assert = zv_p_res.is_err() || zv_n_res.is_err();
+    if zeros_assert {
+        skipped_due_to_asserts += 1;
+    } else {
+        let zv_p = zv_p_res.unwrap();
+        let zv_n = zv_n_res.unwrap();
+        if zv_p != zv_n {
+            return Err(format!("mismatch on zeros: patched={} new={}", zv_p, zv_n));
+        }
+    }
+    // ones
+    let ov_p_res = patched_f.interpret(&ones_args);
+    let ov_n_res = new_f.interpret(&ones_args);
+    let ones_assert = ov_p_res.is_err() || ov_n_res.is_err();
+    if ones_assert {
+        skipped_due_to_asserts += 1;
+    } else {
+        let ov_p = ov_p_res.unwrap();
+        let ov_n = ov_n_res.unwrap();
+        if ov_p != ov_n {
+            return Err(format!("mismatch on ones: patched={} new={}", ov_p, ov_n));
+        }
+    }
+
+    if random_samples > 0 {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut valid_done: usize = 0;
+        let mut attempts: usize = 0;
+        let max_attempts: usize = random_samples * 10 + 10;
+        while valid_done < random_samples && attempts < max_attempts {
+            attempts += 1;
+            let arg_text = build_args_text(new_fn, "random", Some(&mut rng));
+            let arg_tuple = xlsynth::IrValue::parse_typed(&arg_text)
+                .map_err(|e| format!("parse random args failed: {}", e))?;
+            let args = arg_tuple
+                .get_elements()
+                .map_err(|e| format!("decompose random tuple failed: {}", e))?;
+            let pv_res = patched_f.interpret(&args);
+            let nv_res = new_f.interpret(&args);
+            if pv_res.is_err() || nv_res.is_err() {
+                skipped_due_to_asserts += 1;
+                continue;
+            }
+            let pv = pv_res.unwrap();
+            let nv = nv_res.unwrap();
+            if pv != nv {
+                return Err(format!(
+                    "mismatch on random input {}: patched={} new={}",
+                    arg_text, pv, nv
+                ));
+            }
+            valid_done += 1;
+        }
+        println!("  Sanity check: random valid samples: {}/{} (attempts: {}, skipped due to assertions: {})", valid_done, random_samples, attempts, skipped_due_to_asserts);
+    }
+    println!("  Sanity check: zeros/ones compared successfully");
+    Ok(())
+}
+
+fn try_interpret_cex(
+    new_ir_text: &str,
+    new_fn: &xlsynth_g8r::xls_ir::ir::Fn,
+    patched_ir_path: &std::path::Path,
+    arg_text: &str,
+) -> Result<(), String> {
+    if has_token_param(new_fn) {
+        return Err("token parameters present".to_string());
+    }
+    let patched_pkg = xlsynth::IrPackage::parse_ir_from_path(patched_ir_path)
+        .map_err(|e| format!("parse patched IR failed: {}", e))?;
+    let new_pkg = xlsynth::IrPackage::parse_ir(new_ir_text, None)
+        .map_err(|e| format!("parse new IR failed: {}", e))?;
+    let top_name = &new_fn.name;
+    let patched_f = patched_pkg
+        .get_function(top_name)
+        .map_err(|e| format!("get patched top failed: {}", e))?;
+    let new_f = new_pkg
+        .get_function(top_name)
+        .map_err(|e| format!("get new top failed: {}", e))?;
+    // Extract the top-level tuple text after "input:" using balanced paren/bracket
+    // parsing.
+    let tuple_text = extract_tuple_text(arg_text)
+        .ok_or_else(|| "could not extract tuple from counterexample text".to_string())?;
+    let arg_tuple = xlsynth::IrValue::parse_typed(&tuple_text)
+        .map_err(|e| format!("parse cex arg tuple failed: {}", e))?;
+    // Prefer type-based mapping of the parsed value to function parameters.
+    let f_type = new_f
+        .get_type()
+        .map_err(|e| format!("get new fn type failed: {}", e))?;
+    let param_count = f_type.param_count();
+    let expected_args_type: xlsynth::IrType = if param_count == 0 {
+        new_pkg.get_tuple_type(&[])
+    } else if param_count == 1 {
+        f_type
+            .param_type(0)
+            .map_err(|e| format!("get param type failed: {}", e))?
+    } else {
+        let expected_param_types: Vec<xlsynth::IrType> = (0..param_count)
+            .map(|i| {
+                f_type
+                    .param_type(i)
+                    .map_err(|e| format!("get param type failed: {}", e))
+            })
+            .collect::<Result<_, _>>()?;
+        new_pkg.get_tuple_type(&expected_param_types)
+    };
+    let candidate_type = new_pkg
+        .get_type_for_value(&arg_tuple)
+        .map_err(|e| format!("get type for cex value failed: {}", e))?;
+    let args: Vec<IrValue> = if param_count == 0 {
+        Vec::new()
+    } else if param_count == 1 {
+        // Single-parameter function: allow the whole value to be the argument.
+        vec![arg_tuple]
+    } else if new_pkg
+        .types_eq(&candidate_type, &expected_args_type)
+        .unwrap_or(false)
+    {
+        // Top value is a tuple exactly matching the param tuple type.
+        arg_tuple
+            .get_elements()
+            .map_err(|e| format!("decompose cex tuple failed: {}", e))?
+    } else if let Ok(top_elems) = arg_tuple.get_elements() {
+        // If the top-level is a singleton that itself matches the arg tuple type,
+        // unwrap it.
+        if top_elems.len() == 1 {
+            let inner = &top_elems[0];
+            if let Ok(inner_ty) = new_pkg.get_type_for_value(inner) {
+                if new_pkg
+                    .types_eq(&inner_ty, &expected_args_type)
+                    .unwrap_or(false)
+                {
+                    inner
+                        .get_elements()
+                        .map_err(|e| format!("decompose inner tuple failed: {}", e))?
+                } else {
+                    // Fallback: try reshaping from flat sequence.
+                    reshape_args_to_params(&top_elems, &new_fn.params)
+                        .map_err(|e| format!("reshape cex args failed: {}", e))?
+                }
+            } else {
+                reshape_args_to_params(&top_elems, &new_fn.params)
+                    .map_err(|e| format!("reshape cex args failed: {}", e))?
+            }
+        } else if top_elems.len() == new_fn.params.len() {
+            top_elems
+        } else {
+            reshape_args_to_params(&top_elems, &new_fn.params)
+                .map_err(|e| format!("reshape cex args failed: {}", e))?
+        }
+    } else {
+        // Last resort: treat the parsed tuple elements as a flat list and try to
+        // assemble by type.
+        let flat = arg_tuple
+            .get_elements()
+            .map_err(|e| format!("decompose cex tuple failed: {}", e))?;
+        reshape_args_to_params(&flat, &new_fn.params)
+            .map_err(|e| format!("reshape cex args failed: {}", e))?
+    };
+    let pv = patched_f
+        .interpret(&args)
+        .map_err(|e| format!("patched interpret failed: {}", e))?;
+    let nv = new_f
+        .interpret(&args)
+        .map_err(|e| format!("new interpret failed: {}", e))?;
+    if pv == nv {
+        println!("    interpreter replay: outputs equal: {}", pv);
+    } else {
+        println!(
+            "    interpreter replay: mismatch: patched(old)={} new={}",
+            pv, nv
+        );
+    }
+    Ok(())
+}
+
+fn extract_tuple_text(s: &str) -> Option<String> {
+    let bytes: Vec<char> = s.chars().collect();
+    // Find first '(' character
+    let mut i = 0usize;
+    while i < bytes.len() && bytes[i] != '(' {
+        i += 1;
+    }
+    if i == bytes.len() {
+        return None;
+    }
+    let mut depth_paren: i32 = 0;
+    let mut depth_bracket: i32 = 0;
+    let start = i;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            '(' => depth_paren += 1,
+            ')' => {
+                depth_paren -= 1;
+                if depth_paren == 0 && depth_bracket == 0 {
+                    let end = i + 1;
+                    return Some(bytes[start..end].iter().collect());
+                }
+            }
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn value_kind(v: &IrValue) -> &'static str {
+    // Use string prefix as a lightweight discriminator.
+    let s = v.to_string();
+    if s.starts_with('[') {
+        return "array";
+    }
+    if s.starts_with('(') {
+        return "tuple";
+    }
+    "bits"
+}
+
+fn consume_value_for_type(
+    expected: &Type,
+    flat: &[IrValue],
+    idx: &mut usize,
+) -> Result<IrValue, String> {
+    match expected {
+        Type::Bits(_w) => {
+            if *idx >= flat.len() {
+                return Err("ran out of values while matching bits param".to_string());
+            }
+            let v = flat[*idx].clone();
+            *idx += 1;
+            Ok(v)
+        }
+        Type::Tuple(elems) => {
+            // Build tuple by consuming elements for each field type.
+            let mut fields: Vec<IrValue> = Vec::with_capacity(elems.len());
+            for t in elems.iter() {
+                let fv = consume_value_for_type(t, flat, idx)?;
+                fields.push(fv);
+            }
+            Ok(IrValue::make_tuple(&fields))
+        }
+        Type::Array(arr) => {
+            let mut elems: Vec<IrValue> = Vec::with_capacity(arr.element_count);
+            for _ in 0..arr.element_count {
+                let ev = consume_value_for_type(&arr.element_type, flat, idx)?;
+                elems.push(ev);
+            }
+            IrValue::make_array(&elems).map_err(|e| format!("make_array failed: {}", e))
+        }
+        Type::Token => Err("token parameter not supported".to_string()),
+    }
+}
+
+fn reshape_args_to_params(
+    flat: &[IrValue],
+    params: &[xlsynth_g8r::xls_ir::ir::Param],
+) -> Result<Vec<IrValue>, String> {
+    let mut idx: usize = 0;
+    let mut out: Vec<IrValue> = Vec::with_capacity(params.len());
+    for p in params.iter() {
+        let v = consume_value_for_type(&p.ty, flat, &mut idx)?;
+        out.push(v);
+    }
+    Ok(out)
+}
+
+fn extract_op_from_signature(s: &str) -> String {
+    // Try to extract an operator-like token from node signature, e.g. before '(' or
+    // before first ':'
+    if let Some(idx) = s.find('(') {
+        return s[..idx].to_string();
+    }
+    if let Some(idx) = s.find(':') {
+        return s[..idx].to_string();
+    }
+    s.to_string()
+}

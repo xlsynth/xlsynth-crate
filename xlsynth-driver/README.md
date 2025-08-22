@@ -127,6 +127,20 @@ xlsynth-driver g8r2v my_module.g8r \
   --module-name=my_module_g8r > my_module.ugv
 ```
 
+### `ir-round-trip`
+
+Parses an IR file and writes it back to stdout. Useful for validating round-trip stability and (optionally) removing position metadata.
+
+- Positional arguments: `<ir_input_file>`
+- Option:
+  - `--strip-pos-attrs=<BOOL>` – when `true`, strip `file_number` lines and any `pos=[(fileno,line,col), ...]` attributes from the output.
+
+Example:
+
+```shell
+xlsynth-driver ir-round-trip my_pkg.ir --strip-pos-attrs=true > my_pkg.nopos.ir
+```
+
 ### `version`
 
 Prints the driver version string to **stdout**.
@@ -281,6 +295,27 @@ Notes:
 
 - Structural hashing ignores position metadata, assertion/trace strings, and parameter text ids (params are keyed by ordinal position in the signature). It includes node kinds, types, selected attributes (e.g., widths), and child structure.
 - Opcode summaries group discrepancies by operator per depth to make eyeballing easier; detailed signatures include operand/attribute types for precise diagnosis.
+
+### `ir-localized-eco`
+
+Computes a localized ECO diff (old → new) between two IR functions and emits a JSON edit list plus a brief summary. Optionally writes outputs to a directory and runs quick interpreter sanity checks.
+
+- Positional arguments: `<old.ir> <new.ir>`
+- Entry-point selection (optional): `--old_ir_top <NAME>` and `--new_ir_top <NAME>`; if omitted, the package `top` or first function is used on each side.
+- Output controls:
+  - `--json_out <PATH>` – write the JSON edit list to this file; if omitted, a temp file is created and its path printed.
+  - `--output_dir <DIR>` – write outputs (JSON, patched old .ir) to this directory; if omitted, a temp dir is created and printed.
+- Sanity checks:
+  - `--sanity-samples <N>` – if > 0, run N randomized interpreter samples (in addition to all-zeros and all-ones) to sanity-check that patched(old) ≡ new.
+  - `--sanity-seed <SEED>` – seed for randomized interpreter samples.
+
+Example:
+
+```shell
+xlsynth-driver ir-localized-eco old.opt.ir new.opt.ir \
+  --old_ir_top=main --new_ir_top=main \
+  --output_dir=eco_out --sanity-samples=10 --sanity-seed=0
+```
 
 ### `ir2gates`: IR to GateFn statistics
 
