@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Use some pragmas since when the configuration does not all have engines
+// enabled we would get a bunch of warnings.
+#![allow(unused)]
+
 use clap::Parser;
 use std::time::Instant;
 use xlsynth_g8r::check_equivalence::check_equivalence_with_top;

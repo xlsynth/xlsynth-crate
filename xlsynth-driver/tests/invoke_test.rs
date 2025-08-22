@@ -2409,6 +2409,34 @@ top fn my_main(x: bits[8]) -> bits[8] {
 }
 
 "#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("simple.ir");
+    std::fs::write(&ir_path, SIMPLE_IR).unwrap();
+
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
+        .arg("ir-fn-to-block")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-fn-to-block failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::compare_golden_text(&stdout, "tests/test_ir_fn_to_block_smoke.golden.ir");
 }
 
 #[test]

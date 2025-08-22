@@ -217,6 +217,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let output_json = matches.get_one::<String>("output_json");
 
     // Enable enum-domain constraints only when supported by the selected solver.
+    #[allow(unreachable_patterns)]
     let support_domain_constraints = match solver_choice {
         #[cfg(feature = "has-boolector")]
         Some(SolverChoice::BoolectorLegacy) => false,

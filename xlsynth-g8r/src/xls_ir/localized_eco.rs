@@ -571,20 +571,6 @@ fn node_ref_at_path(f: &Fn, start: NodeRef, path: &[usize]) -> NodeRef {
     nr
 }
 
-fn find_getparam_node_ref_by_param_id(
-    f: &Fn,
-    param_id: crate::xls_ir::ir::ParamId,
-) -> Option<NodeRef> {
-    for (i, n) in f.nodes.iter().enumerate() {
-        if let NodePayload::GetParam(pid) = n.payload {
-            if pid == param_id {
-                return Some(NodeRef { index: i });
-            }
-        }
-    }
-    None
-}
-
 fn import_subtree(
     patched: &mut Fn,
     old: &Fn,

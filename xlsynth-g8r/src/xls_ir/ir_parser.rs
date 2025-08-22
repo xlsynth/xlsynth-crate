@@ -593,14 +593,7 @@ impl Parser {
                         self.rest()
                     )));
                 }
-                Ok(xlsynth::IrValue::make_tuple(&[]))
-            }
-            _ => {
-                return Err(ParseError::new(format!(
-                    "cannot parse value with type: {}; rest: {:?}",
-                    ty,
-                    self.rest()
-                )));
+                Ok(xlsynth::IrValue::make_token())
             }
         }
     }
@@ -2385,13 +2378,6 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
         println!("{:?}", node);
-    }
-
-    /// Replaces all instances of `, pos=[...]` in the text with the empty
-    /// string.
-    fn strip_pos_data(s: &str) -> String {
-        let regex = regex::Regex::new(r", pos=\[(\(\d+,\d+,\d+\),?)+\]").unwrap();
-        regex.replace_all(s, "").to_string()
     }
 
     #[test]
