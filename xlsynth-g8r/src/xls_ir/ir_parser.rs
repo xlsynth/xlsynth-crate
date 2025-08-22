@@ -500,7 +500,10 @@ impl Parser {
         &mut self,
     ) -> Result<Option<Vec<(usize, usize, usize)>>, ParseError> {
         self.drop_whitespace_and_comments();
-        if !self.try_drop(", pos=") {
+        // Accept optional leading comma and whitespace before pos=
+        let _ = self.try_drop(",");
+        self.drop_whitespace_and_comments();
+        if !self.try_drop("pos=") {
             return Ok(None);
         }
         let mut pos_attr = Vec::new();
