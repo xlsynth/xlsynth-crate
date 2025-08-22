@@ -4,6 +4,7 @@ use clap::ArgMatches;
 
 use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
+use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use rand::Rng;
 use rand::SeedableRng;
@@ -11,6 +12,8 @@ use xlsynth::IrValue;
 use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
 use xlsynth_g8r::xls_ir::edit_distance::compute_edit_distance;
 use xlsynth_g8r::xls_ir::ir::Type;
+use xlsynth_g8r::xls_ir::ir::{self as ir_mod, BlockPortInfo, PackageMember};
+use xlsynth_g8r::xls_ir::ir_parser::emit_fn_as_block;
 
 #[derive(serde::Serialize)]
 struct AddedOpsSummaryItem {
@@ -34,16 +37,120 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     let old_ir_top = matches.get_one::<String>("old_ir_top");
     let new_ir_top = matches.get_one::<String>("new_ir_top");
 
-    let old_pkg = xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(old_path).unwrap();
-    let new_pkg = xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(new_path).unwrap();
+    // Read inputs to detect whether they are package IR or standalone block IR.
+    let old_text = match std::fs::read_to_string(old_path) {
+        Ok(s) => s,
+        Err(e) => report_cli_error_and_exit(
+            &format!(
+                "could not read old IR file; path: {}; error: {}",
+                old_path.display(),
+                e
+            ),
+            Some("ir-localized-eco"),
+            vec![],
+        ),
+    };
+    let new_text = match std::fs::read_to_string(new_path) {
+        Ok(s) => s,
+        Err(e) => report_cli_error_and_exit(
+            &format!(
+                "could not read new IR file; path: {}; error: {}",
+                new_path.display(),
+                e
+            ),
+            Some("ir-localized-eco"),
+            vec![],
+        ),
+    };
+    let old_trimmed = old_text.trim_start();
+    let new_trimmed = new_text.trim_start();
+    if !old_trimmed.starts_with("package") && !new_trimmed.starts_with("package") {
+        return handle_ir_localized_eco_blocks(matches, old_path, new_path, &old_text, &new_text);
+    }
+
+    let old_pkg = match xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(old_path) {
+        Ok(p) => p,
+        Err(e) => {
+            let path_str = old_path.display().to_string();
+            let err_str = e.to_string();
+            let trunc = truncate_for_cli(&err_str, 1024);
+            let msg = format!(
+                "failed to parse old IR package; path: {}; error: {}",
+                path_str, trunc
+            );
+            report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![])
+        }
+    };
+    let new_pkg = match xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(new_path) {
+        Ok(p) => p,
+        Err(e) => {
+            let path_str = new_path.display().to_string();
+            let err_str = e.to_string();
+            let trunc = truncate_for_cli(&err_str, 1024);
+            let msg = format!(
+                "failed to parse new IR package; path: {}; error: {}",
+                path_str, trunc
+            );
+            report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![])
+        }
+    };
+
+    // If both packages contain at least one block member, operate on blocks.
+    if let (Some((old_block_fn, old_ports)), Some((new_block_fn, _new_ports))) = (
+        select_block_from_package(&old_pkg, old_ir_top.as_deref().map(|x| x.as_str())),
+        select_block_from_package(&new_pkg, new_ir_top.as_deref().map(|x| x.as_str())),
+    ) {
+        return handle_ir_localized_eco_blocks_in_packages(
+            matches,
+            old_path,
+            new_path,
+            &old_text,
+            &new_text,
+            old_block_fn,
+            old_ports,
+            new_block_fn,
+        );
+    }
 
     let old_fn = match old_ir_top {
-        Some(top) => old_pkg.get_fn(top).unwrap(),
-        None => old_pkg.get_top().unwrap(),
+        Some(top) => match old_pkg.get_fn(top) {
+            Some(f) => f,
+            None => report_cli_error_and_exit(
+                "old entry function not found",
+                Some("ir-localized-eco"),
+                vec![("name", top)],
+            ),
+        },
+        None => match old_pkg.get_top() {
+            Some(f) => f,
+            None => {
+                let msg = format!(
+                    "no top function found in old package; path: {}",
+                    old_path.display()
+                );
+                report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![])
+            }
+        },
     };
     let new_fn = match new_ir_top {
-        Some(top) => new_pkg.get_fn(top).unwrap(),
-        None => new_pkg.get_top().unwrap(),
+        Some(top) => match new_pkg.get_fn(top) {
+            Some(f) => f,
+            None => report_cli_error_and_exit(
+                "new entry function not found",
+                Some("ir-localized-eco"),
+                vec![("name", top)],
+            ),
+        },
+        None => match new_pkg.get_top() {
+            Some(f) => f,
+            None => {
+                let msg = format!(
+                    "no top function found in new package; path: {}",
+                    new_path.display()
+                );
+                report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![])
+            }
+        },
     };
 
     let diff = xlsynth_g8r::xls_ir::localized_eco::compute_localized_eco(old_fn, new_fn);
@@ -104,7 +211,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     // Patched IR path: emit the NEW IR with IDs remapped to preserve old IDs where
     // subgraphs are structurally equal; allocate fresh IDs for new nodes.
     let patched_ir_path = out_dir.join("patched_old.ir");
-    let old_ir_text_verbatim = std::fs::read_to_string(old_path).unwrap();
+    let old_ir_text_verbatim = old_text;
     // Build patched package by applying localized ECO edits to the old function,
     // preserving existing node IDs and allocating new ones only for inserted
     // subgraphs.
@@ -370,6 +477,479 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     } else {
         println!("  Equivalence: skipped (no --toolchain config and no XLSYNTH_TOOLS env var)");
     }
+}
+
+fn truncate_for_cli(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    // Find a valid UTF-8 boundary at or before max_len.
+    let mut cut = 0;
+    for (i, _) in s.char_indices() {
+        if i <= max_len {
+            cut = i;
+        } else {
+            break;
+        }
+    }
+    format!("{} ... [{} bytes truncated]", &s[..cut], s.len() - cut)
+}
+
+fn get_output_types_for_emission(f: &ir_mod::Fn, expected_outputs: usize) -> Vec<ir_mod::Type> {
+    if expected_outputs == 0 {
+        return Vec::new();
+    }
+    if let Some(ret_nr) = f.ret_node_ref {
+        let ret_node = f.get_node(ret_nr);
+        if expected_outputs == 1 {
+            return vec![ret_node.ty.clone()];
+        }
+        match &ret_node.payload {
+            ir_mod::NodePayload::Tuple(_elems) => {
+                if let ir_mod::Type::Tuple(tys) = &ret_node.ty {
+                    return tys.iter().map(|t| (**t).clone()).collect();
+                }
+                vec![ret_node.ty.clone()]
+            }
+            _ => vec![ret_node.ty.clone()],
+        }
+    } else {
+        Vec::new()
+    }
+}
+
+fn handle_ir_localized_eco_blocks(
+    matches: &ArgMatches,
+    old_path: &std::path::Path,
+    new_path: &std::path::Path,
+    old_text: &str,
+    new_text: &str,
+) {
+    // Parse both as block IRs into functions.
+    let (old_fn, old_ports) = match xlsynth_g8r::xls_ir::ir_parser::Parser::new(old_text)
+        .parse_block_to_fn_with_ports()
+    {
+        Ok(x) => x,
+        Err(e) => {
+            let msg = format!(
+                "failed to parse old block IR; path: {}; error: {}",
+                old_path.display(),
+                truncate_for_cli(&e.to_string(), 1024)
+            );
+            report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![])
+        }
+    };
+    let (new_fn, new_ports) = match xlsynth_g8r::xls_ir::ir_parser::Parser::new(new_text)
+        .parse_block_to_fn_with_ports()
+    {
+        Ok(x) => x,
+        Err(e) => {
+            let msg = format!(
+                "failed to parse new block IR; path: {}; error: {}",
+                new_path.display(),
+                truncate_for_cli(&e.to_string(), 1024)
+            );
+            report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![])
+        }
+    };
+
+    // Compute diff.
+    let diff = xlsynth_g8r::xls_ir::localized_eco::compute_localized_eco(&old_fn, &new_fn);
+
+    // Summaries.
+    let mut added_count: usize = 0;
+    let mut op_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in diff.edits.iter() {
+        if let xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted { new_signature, .. } = e {
+            added_count += 1;
+            let op = extract_op_from_signature(new_signature);
+            *op_counts.entry(op).or_insert(0) += 1;
+        }
+    }
+    let mut added_ops: Vec<AddedOpsSummaryItem> = op_counts
+        .into_iter()
+        .map(|(op, count)| AddedOpsSummaryItem { op, count })
+        .collect();
+    added_ops.sort_by(|a, b| a.op.cmp(&b.op));
+
+    // Prepare output directory.
+    let out_dir = if let Some(dir_str) = matches.get_one::<String>("output_dir") {
+        let p = std::path::PathBuf::from(dir_str);
+        if !p.exists() {
+            std::fs::create_dir_all(&p).unwrap();
+        }
+        p
+    } else {
+        let td = tempfile::tempdir().unwrap();
+        let p = td.path().to_path_buf();
+        std::mem::forget(td);
+        p
+    };
+    println!("  Output dir: {}", out_dir.display());
+
+    // Apply edits to old fn to produce patched(old) fn.
+    println!("  Applying localized ECO edits to old block...");
+    let applied = xlsynth_g8r::xls_ir::localized_eco::apply_localized_eco(&old_fn, &new_fn, &diff);
+
+    // Validate output arity compatibility with old block port info.
+    let applied_out_types = get_output_types_for_emission(&applied, old_ports.output_names.len());
+    if old_ports.output_names.len() != applied_out_types.len() {
+        let msg = format!(
+            "output arity mismatch: old block had output ports {:?}; function outputs are {:?} ({}).",
+            old_ports.output_names,
+            applied_out_types.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+            applied_out_types.len()
+        );
+        report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![]);
+    }
+    println!("  Emitting patched block text...");
+    let patched_block_text =
+        xlsynth_g8r::xls_ir::ir_parser::emit_fn_as_block(&applied, None, Some(&old_ports));
+    let patched_ir_path = out_dir.join("patched_old.block.ir");
+    std::fs::write(&patched_ir_path, patched_block_text.as_bytes()).unwrap();
+    println!("  Patched IR written to: {}", patched_ir_path.display());
+
+    // Copy old/new for convenience.
+    let old_copy_path = out_dir.join("old.block.ir");
+    let new_copy_path = out_dir.join("new.block.ir");
+    std::fs::write(&old_copy_path, old_text.as_bytes()).unwrap();
+    std::fs::write(&new_copy_path, new_text.as_bytes()).unwrap();
+    println!("  Old IR copied to: {}", old_copy_path.display());
+    println!("  New IR copied to: {}", new_copy_path.display());
+
+    // Human-readable summary.
+    println!("Localized ECO diff (old → new)");
+    println!("  Added nodes (by inserted operand): {}", added_count);
+    if !added_ops.is_empty() {
+        println!("  Added ops:");
+        for item in added_ops.iter() {
+            println!("    {}: {}", item.op, item.count);
+        }
+    }
+    println!("  Edits:");
+    for e in diff.edits.iter() {
+        match e {
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperatorChanged {
+                path,
+                old_op,
+                new_op,
+            } => {
+                println!("    path {:?}: operator {} -> {}", path.0, old_op, new_op);
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::TypeChanged {
+                path,
+                old_ty,
+                new_ty,
+            } => {
+                println!("    path {:?}: type {} -> {}", path.0, old_ty, new_ty);
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::ArityChanged {
+                path,
+                old_arity,
+                new_arity,
+            } => {
+                println!(
+                    "    path {:?}: arity {} -> {}",
+                    path.0, old_arity, new_arity
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted {
+                path,
+                index,
+                new_signature,
+            } => {
+                println!(
+                    "    path {:?}: insert operand at {}: {}",
+                    path.0, index, new_signature
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandDeleted {
+                path,
+                index,
+                old_signature,
+            } => {
+                println!(
+                    "    path {:?}: delete operand at {}: {}",
+                    path.0, index, old_signature
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandSubstituted {
+                path,
+                index,
+                old_signature,
+                new_signature,
+            } => {
+                println!(
+                    "    path {:?}: substitute operand at {}: {} -> {}",
+                    path.0, index, old_signature, new_signature
+                );
+            }
+        }
+    }
+    println!("  Edits listed.");
+
+    // Simple text diff sizes for block text.
+    println!("  Computing text diff (old → patched(old))...");
+    let a = old_text.as_bytes();
+    let b = patched_block_text.as_bytes();
+    let sum = a.len().saturating_add(b.len());
+    let product_too_large = (a.len() as u128) * (b.len() as u128) > 50_000_000u128;
+    if sum > 2_000_000 {
+        println!(
+            "  Text diff: skipped (sum too large: {} + {} bytes)",
+            a.len(),
+            b.len()
+        );
+    }
+    let text_diff_chars = if product_too_large || sum > 2_000_000 {
+        0
+    } else {
+        let d = myers_insdel_distance_bytes(a, b);
+        println!("  Text diff char count (old → patched(old)): {}", d);
+        d
+    };
+
+    // Serialize JSON report analogous to package path.
+    let json_path = if let Some(json_out) = matches.get_one::<String>("json_out") {
+        std::path::PathBuf::from(json_out)
+    } else {
+        out_dir.join("eco_report.json")
+    };
+    println!("  Serializing JSON report...");
+    let report = LocalizedEcoReport {
+        added_node_count: added_count,
+        added_ops,
+        edits: diff,
+        edit_distance_old_to_patched: 0,
+        text_edit_distance_old_to_patched: text_diff_chars,
+        rtl_text_edit_distance_old_to_patched: 0,
+    };
+    let s = serde_json::to_string_pretty(&report).unwrap();
+    std::fs::write(&json_path, s).unwrap();
+    println!("  JSON written to: {}", json_path.display());
+    println!("  Done.");
+
+    // Skip RTL/codegen and equivalence for block-only inputs.
+    println!("  Equivalence: skipped (block IR inputs not supported for RTL/codegen)");
+}
+
+fn select_block_from_package<'a>(
+    pkg: &'a ir_mod::Package,
+    name_opt: Option<&str>,
+) -> Option<(&'a ir_mod::Fn, &'a BlockPortInfo)> {
+    if let Some(name) = name_opt {
+        for m in pkg.members.iter() {
+            if let PackageMember::Block { func, port_info } = m {
+                if func.name == name {
+                    return Some((func, port_info));
+                }
+            }
+        }
+        return None;
+    }
+    if let Some(top_name) = &pkg.top_name {
+        for m in pkg.members.iter() {
+            if let PackageMember::Block { func, port_info } = m {
+                if &func.name == top_name {
+                    return Some((func, port_info));
+                }
+            }
+        }
+    }
+    for m in pkg.members.iter() {
+        if let PackageMember::Block { func, port_info } = m {
+            return Some((func, port_info));
+        }
+    }
+    None
+}
+
+fn handle_ir_localized_eco_blocks_in_packages(
+    matches: &ArgMatches,
+    old_path: &std::path::Path,
+    new_path: &std::path::Path,
+    old_text: &str,
+    new_text: &str,
+    old_fn: &ir_mod::Fn,
+    old_ports: &BlockPortInfo,
+    new_fn: &ir_mod::Fn,
+) {
+    // Compute diff.
+    let diff = xlsynth_g8r::xls_ir::localized_eco::compute_localized_eco(old_fn, new_fn);
+
+    // Summaries.
+    let mut added_count: usize = 0;
+    let mut op_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in diff.edits.iter() {
+        if let xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted { new_signature, .. } = e {
+            added_count += 1;
+            let op = extract_op_from_signature(new_signature);
+            *op_counts.entry(op).or_insert(0) += 1;
+        }
+    }
+    let mut added_ops: Vec<AddedOpsSummaryItem> = op_counts
+        .into_iter()
+        .map(|(op, count)| AddedOpsSummaryItem { op, count })
+        .collect();
+    added_ops.sort_by(|a, b| a.op.cmp(&b.op));
+
+    // Prepare output directory.
+    let out_dir = if let Some(dir_str) = matches.get_one::<String>("output_dir") {
+        let p = std::path::PathBuf::from(dir_str);
+        if !p.exists() {
+            std::fs::create_dir_all(&p).unwrap();
+        }
+        p
+    } else {
+        let td = tempfile::tempdir().unwrap();
+        let p = td.path().to_path_buf();
+        std::mem::forget(td);
+        p
+    };
+    println!("  Output dir: {}", out_dir.display());
+
+    // Apply edits to old fn to produce patched(old) fn.
+    println!("  Applying localized ECO edits to old block...");
+    let applied = xlsynth_g8r::xls_ir::localized_eco::apply_localized_eco(old_fn, new_fn, &diff);
+
+    // Validate output arity compatibility with old block port info.
+    let applied_out_types = get_output_types_for_emission(&applied, old_ports.output_names.len());
+    if old_ports.output_names.len() != applied_out_types.len() {
+        let msg = format!(
+            "output arity mismatch: old block had output ports {:?}; function outputs are {:?} ({}).",
+            old_ports.output_names,
+            applied_out_types.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+            applied_out_types.len()
+        );
+        report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![]);
+    }
+    println!("  Emitting patched block text...");
+    let patched_block_text = emit_fn_as_block(&applied, None, Some(old_ports));
+    let patched_ir_path = out_dir.join("patched_old.block.ir");
+    std::fs::write(&patched_ir_path, patched_block_text.as_bytes()).unwrap();
+    println!("  Patched IR written to: {}", patched_ir_path.display());
+
+    // Copy old/new for convenience.
+    let old_copy_path = out_dir.join("old.ir");
+    let new_copy_path = out_dir.join("new.ir");
+    std::fs::write(&old_copy_path, old_text.as_bytes()).unwrap();
+    std::fs::write(&new_copy_path, new_text.as_bytes()).unwrap();
+    println!("  Old IR copied to: {}", old_copy_path.display());
+    println!("  New IR copied to: {}", new_copy_path.display());
+
+    // Human-readable summary.
+    println!("Localized ECO diff (old → new)");
+    println!("  Added nodes (by inserted operand): {}", added_count);
+    if !added_ops.is_empty() {
+        println!("  Added ops:");
+        for item in added_ops.iter() {
+            println!("    {}: {}", item.op, item.count);
+        }
+    }
+    println!("  Edits:");
+    for e in diff.edits.iter() {
+        match e {
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperatorChanged {
+                path,
+                old_op,
+                new_op,
+            } => {
+                println!("    path {:?}: operator {} -> {}", path.0, old_op, new_op);
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::TypeChanged {
+                path,
+                old_ty,
+                new_ty,
+            } => {
+                println!("    path {:?}: type {} -> {}", path.0, old_ty, new_ty);
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::ArityChanged {
+                path,
+                old_arity,
+                new_arity,
+            } => {
+                println!(
+                    "    path {:?}: arity {} -> {}",
+                    path.0, old_arity, new_arity
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted {
+                path,
+                index,
+                new_signature,
+            } => {
+                println!(
+                    "    path {:?}: insert operand at {}: {}",
+                    path.0, index, new_signature
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandDeleted {
+                path,
+                index,
+                old_signature,
+            } => {
+                println!(
+                    "    path {:?}: delete operand at {}: {}",
+                    path.0, index, old_signature
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandSubstituted {
+                path,
+                index,
+                old_signature,
+                new_signature,
+            } => {
+                println!(
+                    "    path {:?}: substitute operand at {}: {} -> {}",
+                    path.0, index, old_signature, new_signature
+                );
+            }
+        }
+    }
+
+    // Simple text diff sizes for block text.
+    println!("  Computing text diff (old → patched(old))...");
+    let a = old_text.as_bytes();
+    let b = patched_block_text.as_bytes();
+    let sum = a.len().saturating_add(b.len());
+    let product_too_large = (a.len() as u128) * (b.len() as u128) > 50_000_000u128;
+    if sum > 2_000_000 {
+        println!(
+            "  Text diff: skipped (sum too large: {} + {} bytes)",
+            a.len(),
+            b.len()
+        );
+    }
+    let text_diff_chars = if product_too_large || sum > 2_000_000 {
+        0
+    } else {
+        let d = myers_insdel_distance_bytes(a, b);
+        println!("  Text diff char count (old → patched(old)): {}", d);
+        d
+    };
+
+    // Serialize JSON report analogous to package path.
+    let json_path = if let Some(json_out) = matches.get_one::<String>("json_out") {
+        std::path::PathBuf::from(json_out)
+    } else {
+        out_dir.join("eco_report.json")
+    };
+    println!("  Serializing JSON report...");
+    let report = LocalizedEcoReport {
+        added_node_count: added_count,
+        added_ops,
+        edits: diff,
+        edit_distance_old_to_patched: 0,
+        text_edit_distance_old_to_patched: text_diff_chars,
+        rtl_text_edit_distance_old_to_patched: 0,
+    };
+    let s = serde_json::to_string_pretty(&report).unwrap();
+    std::fs::write(&json_path, s).unwrap();
+    println!("  JSON written to: {}", json_path.display());
+    println!("  Done.");
+
+    // Skip RTL/codegen/proof for block-only selection.
+    println!("  Equivalence: skipped (selected block members)");
 }
 
 // Compute Levenshtein distance over bytes (ASCII-safe for IR text), O(n*m).

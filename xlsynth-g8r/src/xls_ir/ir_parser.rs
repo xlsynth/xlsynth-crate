@@ -582,6 +582,19 @@ impl Parser {
                 self.drop_or_error(")")?;
                 Ok(xlsynth::IrValue::make_tuple(&values))
             }
+            ir::Type::Token => {
+                // Expect the keyword `token` for token literals.
+                let ident = self.pop_identifier_or_error("token literal")?;
+                if ident != "token" {
+                    return Err(ParseError::new(format!(
+                        "expected token literal keyword `token`, got {:?} in {}; rest: {:?}",
+                        ident,
+                        ctx,
+                        self.rest()
+                    )));
+                }
+                Ok(xlsynth::IrValue::make_tuple(&[]))
+            }
             _ => {
                 return Err(ParseError::new(format!(
                     "cannot parse value with type: {}; rest: {:?}",
@@ -1684,6 +1697,7 @@ impl Parser {
                         .map(|(n, _t, id)| (n.clone(), *id))
                         .collect(),
                     output_port_ids: output_ids_by_name,
+                    output_names: header_output_names,
                 },
             ));
         }
@@ -1721,6 +1735,7 @@ impl Parser {
                     .map(|(n, _t, id)| (n.clone(), *id))
                     .collect(),
                 output_port_ids: output_ids_by_name,
+                output_names: header_output_names,
             },
         ))
     }
@@ -1737,6 +1752,23 @@ impl Parser {
         let mut file_table = FileTable::new();
 
         while !self.at_eof() {
+            // Allow standalone attributes between members (commonly preceding a block).
+            self.drop_whitespace_and_comments();
+            if self.peek_is("#![") || self.peek_is("#[") {
+                if self.try_drop("#![") {
+                    // ok
+                } else if self.try_drop("#[") {
+                    // ok
+                }
+                while let Some(c) = self.peekc() {
+                    self.dropc()?;
+                    if c == ']' {
+                        break;
+                    }
+                }
+                // Continue scanning for the next member after the attribute.
+                self.drop_whitespace_and_comments();
+            }
             if self.try_drop("top") {
                 // Allow whitespace/comments between `top` and the next keyword.
                 self.drop_whitespace_and_comments();
@@ -1815,9 +1847,44 @@ pub fn emit_fn_as_block(
         }
     };
 
-    // Determine outputs: single value or tuple elements.
+    // Determine outputs, guided by provided port ids if present.
     let (ret_nodes, ret_types, ret_tuple_index): (Vec<ir::NodeRef>, Vec<ir::Type>, Option<usize>) =
-        if let Some(ret_nr) = f.ret_node_ref {
+        if let Some(pi) = port_ids {
+            let expected = pi.output_names.len();
+            if expected == 0 {
+                (Vec::new(), Vec::new(), None)
+            } else if expected == 1 {
+                if let Some(ret_nr) = f.ret_node_ref {
+                    let ret_node = f.get_node(ret_nr);
+                    (vec![ret_nr], vec![ret_node.ty.clone()], None)
+                } else {
+                    (Vec::new(), Vec::new(), None)
+                }
+            } else {
+                if let Some(ret_nr) = f.ret_node_ref {
+                    let ret_node = f.get_node(ret_nr);
+                    match &ret_node.payload {
+                        ir::NodePayload::Tuple(elems) => {
+                            let mut types = Vec::new();
+                            if let ir::Type::Tuple(tys) = &ret_node.ty {
+                                for t in tys.iter() {
+                                    types.push((**t).clone());
+                                }
+                            } else {
+                                panic!("tuple return node must have tuple type");
+                            }
+                            (elems.clone(), types, Some(ret_nr.index))
+                        }
+                        _ => panic!(
+                            "expected tuple return matching {} outputs, found non-tuple",
+                            expected
+                        ),
+                    }
+                } else {
+                    (Vec::new(), Vec::new(), None)
+                }
+            }
+        } else if let Some(ret_nr) = f.ret_node_ref {
             let ret_node = f.get_node(ret_nr);
             match &ret_node.payload {
                 ir::NodePayload::Tuple(elems) => {
@@ -1846,6 +1913,12 @@ pub fn emit_fn_as_block(
             "output_names length must match number of outputs"
         );
         names.to_vec()
+    } else if let Some(pi) = port_ids {
+        assert!(
+            pi.output_names.len() == ret_nodes.len(),
+            "BlockPortInfo.output_names length must match number of outputs"
+        );
+        pi.output_names.clone()
     } else if ret_nodes.len() == 1 {
         vec!["out".to_string()]
     } else {
@@ -1896,15 +1969,21 @@ pub fn emit_fn_as_block(
     }
 
     // Compute output ids: prefer provided ids; otherwise choose fresh ids after
-    // max.
+    // max. If a provided BlockPortInfo is missing a name we decided, allocate
+    // a fresh id for that output instead of panicking.
     let mut next_id: usize = f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0) + 1;
     for (i, nr) in ret_nodes.iter().enumerate() {
         let out_name = &decided_out_names[i];
         let val_name = get_ref_name(*nr);
         let out_id = if let Some(pi) = port_ids {
-            *pi.output_port_ids
-                .get(out_name)
-                .expect("output id missing in BlockPortInfo for output name")
+            match pi.output_port_ids.get(out_name) {
+                Some(id) => *id,
+                None => {
+                    let id = next_id;
+                    next_id += 1;
+                    id
+                }
+            }
         } else {
             let id = next_id;
             next_id += 1;
