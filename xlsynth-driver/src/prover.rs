@@ -194,7 +194,8 @@ pub struct Scheduler {
     deadlines: BTreeMap<Instant, Vec<NodeId>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
 pub enum ProverReportNode {
     Task {
         task_id: Option<String>,
@@ -208,43 +209,6 @@ pub enum ProverReportNode {
         outcome: Option<TaskOutcome>,
         tasks: Vec<ProverReportNode>,
     },
-}
-
-impl serde::Serialize for ProverReportNode {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        match self {
-            ProverReportNode::Task {
-                task_id,
-                cmdline,
-                outcome,
-                stdout,
-                stderr,
-            } => {
-                let mut s = serializer.serialize_struct("Task", 5)?;
-                s.serialize_field("task_id", task_id)?;
-                s.serialize_field("cmdline", cmdline)?;
-                s.serialize_field("outcome", outcome)?;
-                s.serialize_field("stdout", stdout)?;
-                s.serialize_field("stderr", stderr)?;
-                s.end()
-            }
-            ProverReportNode::Group {
-                kind,
-                outcome,
-                tasks,
-            } => {
-                let mut s = serializer.serialize_struct("Group", 3)?;
-                s.serialize_field("kind", kind)?;
-                s.serialize_field("outcome", outcome)?;
-                s.serialize_field("tasks", tasks)?;
-                s.end()
-            }
-        }
-    }
 }
 
 #[derive(Serialize)]
