@@ -64,8 +64,16 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     };
     let old_trimmed = old_text.trim_start();
     let new_trimmed = new_text.trim_start();
-    if !old_trimmed.starts_with("package") && !new_trimmed.starts_with("package") {
-        return handle_ir_localized_eco_blocks(matches, old_path, new_path, &old_text, &new_text);
+    if !old_trimmed.starts_with("package") || !new_trimmed.starts_with("package") {
+        report_cli_error_and_exit(
+            &format!(
+                "expected package-form IR starting with 'package'; got old starts_with_package={} new starts_with_package={}",
+                old_trimmed.starts_with("package"),
+                new_trimmed.starts_with("package")
+            ),
+            Some("ir-localized-eco"),
+            vec![],
+        );
     }
 
     let old_pkg = match xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(old_path) {
