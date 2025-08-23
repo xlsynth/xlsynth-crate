@@ -25,7 +25,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     };
 
     let (recs, lhs_ret_depth, rhs_ret_depth) =
-        xlsynth_g8r::xls_ir::structural_similarity::compute_structural_discrepancies(
+        xlsynth_g8r::xls_ir::structural_similarity::compute_structural_discrepancies_dual(
             lhs_fn, rhs_fn,
         );
 
