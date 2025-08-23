@@ -89,4 +89,19 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
             }
         }
     }
+
+    // Also emit minimized subgraphs capturing only the unmatched parts (dual
+    // matching).
+    let (lhs_sub, rhs_sub) =
+        xlsynth_g8r::xls_ir::structural_similarity::extract_dual_difference_subgraphs(
+            lhs_fn, rhs_fn,
+        );
+    println!(
+        "\nLHS diff subgraph:\n{}",
+        xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&lhs_sub, &lhs_pkg.file_table)
+    );
+    println!(
+        "\nRHS diff subgraph:\n{}",
+        xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&rhs_sub, &rhs_pkg.file_table)
+    );
 }
