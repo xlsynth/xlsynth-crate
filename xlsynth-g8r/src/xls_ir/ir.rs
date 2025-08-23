@@ -1105,6 +1105,72 @@ impl std::fmt::Display for Fn {
     }
 }
 
+/// Emits a function as text, allowing an optional end-of-line comment per node.
+/// The comment is produced by `comment_fn` given the function and the node ref.
+pub fn emit_fn_with_node_comments<F>(func: &Fn, mut comment_fn: F) -> String
+where
+    F: FnMut(&Fn, NodeRef) -> Option<String>,
+{
+    let params_str = func
+        .params
+        .iter()
+        .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.get_wrapped_id()))
+        .collect::<Vec<String>>()
+        .join(", ");
+    let return_type_str = func.ret_ty.to_string();
+    let mut out = String::new();
+    out.push_str(&format!(
+        "fn {}({}) -> {} {{\n",
+        func.name, params_str, return_type_str
+    ));
+
+    for (i, node) in func.nodes.iter().enumerate() {
+        let node_ref = NodeRef { index: i };
+        let ret_prefix = if let Some(ret_node_ref) = func.ret_node_ref
+            && ret_node_ref == node_ref
+        {
+            "ret "
+        } else {
+            ""
+        };
+        if let Some(node_str) = node.to_string(func) {
+            out.push_str("  ");
+            out.push_str(ret_prefix);
+            out.push_str(&node_str);
+            if let Some(comment) = comment_fn(func, node_ref) {
+                out.push_str("  // ");
+                out.push_str(&comment);
+            }
+            out.push('\n');
+        }
+    }
+    out.push('}');
+    out
+}
+
+/// Convenience: Emits a function with a human-readable position comment per
+/// node, if `pos` exists. The comment lists humanized positions (file:line:col)
+/// space-separated.
+pub fn emit_fn_with_human_pos_comments(func: &Fn, file_table: &FileTable) -> String {
+    emit_fn_with_node_comments(func, |f, nr| {
+        let node = f.get_node(nr);
+        match &node.pos {
+            Some(pos_list) if !pos_list.is_empty() => {
+                let parts: Vec<String> = pos_list
+                    .iter()
+                    .filter_map(|p| p.to_human_string(file_table))
+                    .collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join(" "))
+                }
+            }
+            _ => None,
+        }
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct FileTable {
     pub id_to_path: HashMap<usize, String>,
