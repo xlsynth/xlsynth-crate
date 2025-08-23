@@ -34,7 +34,7 @@ easy-smt = { version = "0.3.1", optional = true }
 prost = "0.12.6"
 prost-types = "0.12.6"
 prost-reflect = { version = "0.12.0", features = ["text-format"] }
-string-interner = "0.14"
+string-interner = "0.15"
 anyhow = "1.0.86"
 rand_pcg = "0.3.1"
 ahash = "0.8.12"
