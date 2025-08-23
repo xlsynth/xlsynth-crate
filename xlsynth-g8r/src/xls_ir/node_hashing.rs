@@ -71,7 +71,7 @@ fn payload_tag(payload: &NodePayload) -> &'static str {
     }
 }
 
-fn get_param_ordinal(f: &Fn, param_id: ParamId) -> usize {
+pub(crate) fn get_param_ordinal(f: &Fn, param_id: ParamId) -> usize {
     f.params
         .iter()
         .position(|p| p.id == param_id)
@@ -199,5 +199,15 @@ pub(crate) fn compute_node_structural_hash(
     for ch in child_hashes.iter() {
         hasher.update(ch.as_bytes());
     }
+    hasher.finalize()
+}
+
+pub(crate) fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> blake3::Hash {
+    // Hash operator tag + type + payload attributes only; ignore children.
+    let node = f.get_node(node_ref);
+    let mut hasher = blake3::Hasher::new();
+    update_hash_str(&mut hasher, payload_tag(&node.payload));
+    update_hash_type(&mut hasher, &node.ty);
+    hash_payload_attributes(f, &node.payload, &mut hasher);
     hasher.finalize()
 }
