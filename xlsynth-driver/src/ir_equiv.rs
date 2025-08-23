@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Use some pragmas since when the configuration does not have certain
+// configured engines on we would get a bunch of warnings.
+#![allow(unused)]
+
 use crate::common::{infer_uf_signature, merge_uf_signature};
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
@@ -387,12 +391,14 @@ pub fn dispatch_ir_equiv(
         );
         std::process::exit(1);
     }
+    #[allow(unreachable_patterns)]
     let use_toolchain = match solver_choice {
         Some(SolverChoice::Toolchain) => true,
         Some(_) => false,
         None => tool_path.is_some(),
     };
 
+    #[allow(unreachable_patterns)]
     let support_domain_constraints = match solver_choice {
         #[cfg(feature = "has-boolector")]
         Some(SolverChoice::BoolectorLegacy) => false,

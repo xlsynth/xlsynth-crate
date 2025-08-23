@@ -24,7 +24,7 @@ pub fn verify_fn_unique_node_ids(f: &Fn) -> Result<(), String> {
 /// Verifies that all NodeRef indices referenced by payloads are within bounds.
 pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
     let n = f.nodes.len();
-    let mut check = |nr: crate::xls_ir::ir::NodeRef, ctx: &str| -> Result<(), String> {
+    let check = |nr: crate::xls_ir::ir::NodeRef, ctx: &str| -> Result<(), String> {
         if nr.index >= n {
             return Err(format!(
                 "operand index {} out of bounds in {}; function '{}' has {} nodes",

@@ -593,14 +593,7 @@ impl Parser {
                         self.rest()
                     )));
                 }
-                Ok(xlsynth::IrValue::make_tuple(&[]))
-            }
-            _ => {
-                return Err(ParseError::new(format!(
-                    "cannot parse value with type: {}; rest: {:?}",
-                    ty,
-                    self.rest()
-                )));
+                Ok(xlsynth::IrValue::make_token())
             }
         }
     }
@@ -2181,7 +2174,29 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let input = "tuple.7: (token, bits[32]) = tuple(x, y, id=7)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
-        println!("{:?}", node);
+        match node.payload {
+            ir::NodePayload::Tuple(elems) => {
+                assert_eq!(elems.len(), 2);
+                assert_eq!(elems[0], ir::NodeRef { index: 1 });
+                assert_eq!(elems[1], ir::NodeRef { index: 2 });
+            }
+            other => panic!("expected tuple node, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_token_literal_node_value() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut node_env = IrNodeEnv::new();
+        let input = "literal.7: token = literal(value=token, id=7)";
+        let mut parser = Parser::new(input);
+        let node = parser.parse_node(&mut node_env).unwrap();
+        match node.payload {
+            ir::NodePayload::Literal(v) => {
+                assert_eq!(v.to_string(), "token");
+            }
+            other => panic!("expected literal node, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2190,7 +2205,15 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let input = "literal.4: bits[8][5] = literal(value=[119, 111, 114, 108, 100], id=4)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut IrNodeEnv::new()).unwrap();
-        println!("{:?}", node);
+        if let ir::NodePayload::Literal(v) = node.payload {
+            assert_eq!(
+                v.to_string(),
+                "[bits[8]:119, bits[8]:111, bits[8]:114, bits[8]:108, bits[8]:100]"
+            );
+            assert_eq!(v.get_element_count().unwrap(), 5);
+        } else {
+            panic!("expected literal node");
+        }
     }
 
     #[test]
@@ -2201,7 +2224,10 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let input = "after_all.19: token = after_all(trace.17, id=19)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
-        println!("{:?}", node);
+        assert_eq!(
+            node.payload,
+            ir::NodePayload::AfterAll(vec![ir::NodeRef { index: 17 }])
+        );
     }
 
     #[test]
@@ -2245,7 +2271,14 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let input = "bit_slice.6: bits[2] = bit_slice(x, start=0, width=2, id=6)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
-        println!("{:?}", node);
+        match node.payload {
+            ir::NodePayload::BitSlice { arg, start, width } => {
+                assert_eq!(arg, ir::NodeRef { index: 1 });
+                assert_eq!(start, 0);
+                assert_eq!(width, 2);
+            }
+            other => panic!("expected bit_slice node, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2257,7 +2290,18 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let input = "priority_sel.8: bits[2] = priority_sel(selector, cases=[one_case], default=my_default, id=8)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
-        println!("{:?}", node);
+        match node.payload {
+            ir::NodePayload::PrioritySel {
+                selector,
+                cases,
+                default,
+            } => {
+                assert_eq!(selector, ir::NodeRef { index: 1 });
+                assert_eq!(cases, vec![ir::NodeRef { index: 2 }]);
+                assert_eq!(default, Some(ir::NodeRef { index: 3 }));
+            }
+            other => panic!("expected priority_sel node, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2385,13 +2429,6 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
         println!("{:?}", node);
-    }
-
-    /// Replaces all instances of `, pos=[...]` in the text with the empty
-    /// string.
-    fn strip_pos_data(s: &str) -> String {
-        let regex = regex::Regex::new(r", pos=\[(\(\d+,\d+,\d+\),?)+\]").unwrap();
-        regex.replace_all(s, "").to_string()
     }
 
     #[test]
