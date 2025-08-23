@@ -10,4 +10,5 @@ pub mod ir_parser;
 pub mod ir_utils;
 pub mod ir_verify;
 pub mod localized_eco;
+pub mod node_hashing;
 pub mod structural_similarity;

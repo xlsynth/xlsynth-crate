@@ -8,183 +8,12 @@
 use serde::Serialize;
 use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn, NodePayload, NodeRef, Type};
+use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 use crate::xls_ir::ir::{binop_to_operator, nary_op_to_operator, unop_to_operator};
 use crate::xls_ir::ir_utils::get_topological;
-
-// -- Hashing helpers (shape hash: op tag + type + op attributes + ordered child
-// hashes)
-
-fn update_hash_str(hasher: &mut blake3::Hasher, s: &str) {
-    hasher.update(s.as_bytes());
-}
-
-fn update_hash_u64(hasher: &mut blake3::Hasher, x: u64) {
-    hasher.update(&x.to_le_bytes());
-}
-
-fn update_hash_bool(hasher: &mut blake3::Hasher, x: bool) {
-    update_hash_u64(hasher, if x { 1 } else { 0 });
-}
-
-fn update_hash_type(hasher: &mut blake3::Hasher, ty: &Type) {
-    match ty {
-        Type::Token => update_hash_str(hasher, "token"),
-        Type::Bits(width) => {
-            update_hash_str(hasher, "bits");
-            update_hash_u64(hasher, *width as u64);
-        }
-        Type::Tuple(elems) => {
-            update_hash_str(hasher, "tuple");
-            update_hash_u64(hasher, elems.len() as u64);
-            for e in elems.iter() {
-                update_hash_type(hasher, e);
-            }
-        }
-        Type::Array(arr) => {
-            update_hash_str(hasher, "array");
-            update_hash_u64(hasher, arr.element_count as u64);
-            update_hash_type(hasher, &arr.element_type);
-        }
-    }
-}
-
-fn payload_tag(payload: &NodePayload) -> &'static str {
-    match payload {
-        NodePayload::Nil => "nil",
-        NodePayload::GetParam(_) => "get_param",
-        NodePayload::Tuple(_) => "tuple",
-        NodePayload::Array(_) => "array",
-        NodePayload::TupleIndex { .. } => "tuple_index",
-        NodePayload::Binop(_, _, _) => "binop",
-        NodePayload::Unop(_, _) => "unop",
-        NodePayload::Literal(_) => "literal",
-        NodePayload::SignExt { .. } => "sign_ext",
-        NodePayload::ZeroExt { .. } => "zero_ext",
-        NodePayload::ArrayUpdate { .. } => "array_update",
-        NodePayload::ArrayIndex { .. } => "array_index",
-        NodePayload::DynamicBitSlice { .. } => "dynamic_bit_slice",
-        NodePayload::BitSlice { .. } => "bit_slice",
-        NodePayload::BitSliceUpdate { .. } => "bit_slice_update",
-        NodePayload::Assert { .. } => "assert",
-        NodePayload::Trace { .. } => "trace",
-        NodePayload::AfterAll(_) => "after_all",
-        NodePayload::Nary(_, _) => "nary",
-        NodePayload::Invoke { .. } => "invoke",
-        NodePayload::PrioritySel { .. } => "priority_sel",
-        NodePayload::OneHotSel { .. } => "one_hot_sel",
-        NodePayload::OneHot { .. } => "one_hot",
-        NodePayload::Sel { .. } => "sel",
-        NodePayload::Cover { .. } => "cover",
-        NodePayload::Decode { .. } => "decode",
-        NodePayload::Encode { .. } => "encode",
-        NodePayload::CountedFor { .. } => "counted_for",
-    }
-}
-
-fn get_param_ordinal(f: &Fn, param_id: crate::xls_ir::ir::ParamId) -> usize {
-    f.params
-        .iter()
-        .position(|p| p.id == param_id)
-        .expect("ParamId must correspond to a function parameter")
-}
-
-fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::Hasher) {
-    match payload {
-        NodePayload::Nil => {}
-        NodePayload::GetParam(param_id) => {
-            let ordinal = get_param_ordinal(f, *param_id) as u64 + 1;
-            update_hash_u64(hasher, ordinal);
-        }
-        NodePayload::Tuple(nodes) | NodePayload::Array(nodes) => {
-            update_hash_u64(hasher, nodes.len() as u64);
-        }
-        NodePayload::TupleIndex { tuple: _, index } => update_hash_u64(hasher, *index as u64),
-        NodePayload::Binop(op, _, _) => update_hash_str(hasher, binop_to_operator(*op)),
-        NodePayload::Unop(op, _) => update_hash_str(hasher, unop_to_operator(*op)),
-        NodePayload::Literal(value) => update_hash_str(hasher, &value.to_string()),
-        NodePayload::SignExt { new_bit_count, .. } => {
-            update_hash_u64(hasher, *new_bit_count as u64)
-        }
-        NodePayload::ZeroExt { new_bit_count, .. } => {
-            update_hash_u64(hasher, *new_bit_count as u64)
-        }
-        NodePayload::ArrayUpdate {
-            assumed_in_bounds, ..
-        } => update_hash_bool(hasher, *assumed_in_bounds),
-        NodePayload::ArrayIndex {
-            assumed_in_bounds, ..
-        } => update_hash_bool(hasher, *assumed_in_bounds),
-        NodePayload::DynamicBitSlice { width, .. } => update_hash_u64(hasher, *width as u64),
-        NodePayload::BitSlice { start, width, .. } => {
-            update_hash_u64(hasher, *start as u64);
-            update_hash_u64(hasher, *width as u64);
-        }
-        NodePayload::BitSliceUpdate { .. } => {}
-        NodePayload::Assert { .. } => {}
-        NodePayload::Trace { .. } => {}
-        NodePayload::AfterAll(nodes) => update_hash_u64(hasher, nodes.len() as u64),
-        NodePayload::Nary(op, nodes) => {
-            update_hash_str(hasher, nary_op_to_operator(*op));
-            update_hash_u64(hasher, nodes.len() as u64);
-        }
-        NodePayload::Invoke { to_apply, operands } => {
-            update_hash_str(hasher, to_apply);
-            update_hash_u64(hasher, operands.len() as u64);
-        }
-        NodePayload::PrioritySel { default, cases, .. } => {
-            update_hash_bool(hasher, default.is_some());
-            update_hash_u64(hasher, cases.len() as u64);
-        }
-        NodePayload::OneHotSel { cases, .. } => update_hash_u64(hasher, cases.len() as u64),
-        NodePayload::OneHot { lsb_prio, .. } => update_hash_bool(hasher, *lsb_prio),
-        NodePayload::Sel { default, cases, .. } => {
-            update_hash_bool(hasher, default.is_some());
-            update_hash_u64(hasher, cases.len() as u64);
-        }
-        NodePayload::Cover { .. } => {}
-        NodePayload::Decode { width, .. } => update_hash_u64(hasher, *width as u64),
-        NodePayload::Encode { .. } => {}
-        NodePayload::CountedFor {
-            trip_count,
-            stride,
-            body,
-            invariant_args,
-            ..
-        } => {
-            update_hash_u64(hasher, *trip_count as u64);
-            update_hash_u64(hasher, *stride as u64);
-            update_hash_str(hasher, body);
-            update_hash_u64(hasher, invariant_args.len() as u64);
-        }
-    }
-}
-
-fn compute_node_shape_hash(
-    f: &Fn,
-    node_ref: NodeRef,
-    child_hashes: &[blake3::Hash],
-) -> blake3::Hash {
-    let node = f.get_node(node_ref);
-    let mut hasher = blake3::Hasher::new();
-    update_hash_str(&mut hasher, payload_tag(&node.payload));
-    update_hash_type(&mut hasher, &node.ty);
-    hash_payload_attributes(f, &node.payload, &mut hasher);
-    for ch in child_hashes.iter() {
-        hasher.update(ch.as_bytes());
-    }
-    hasher.finalize()
-}
-
-fn compute_node_local_shape_hash(f: &Fn, node_ref: NodeRef) -> blake3::Hash {
-    // Hash operator tag + type + payload attributes only; ignore children.
-    let node = f.get_node(node_ref);
-    let mut hasher = blake3::Hasher::new();
-    update_hash_str(&mut hasher, payload_tag(&node.payload));
-    update_hash_type(&mut hasher, &node.ty);
-    hash_payload_attributes(f, &node.payload, &mut hasher);
-    hasher.finalize()
-}
+use crate::xls_ir::node_hashing::{
+    compute_node_local_structural_hash, compute_node_structural_hash, get_param_ordinal,
+};
 
 fn children_in_order(f: &Fn, node_ref: NodeRef) -> Vec<NodeRef> {
     let node = f.get_node(node_ref);
@@ -292,7 +121,7 @@ fn collect_shape_hashes(f: &Fn) -> Vec<blake3::Hash> {
         for c in children.iter() {
             child_hashes.push(hashes[c.index]);
         }
-        let h = compute_node_shape_hash(f, nr, &child_hashes);
+        let h = compute_node_structural_hash(f, nr, &child_hashes);
         hashes[nr.index] = h;
     }
     hashes
@@ -303,7 +132,7 @@ fn collect_local_shape_hashes(f: &Fn) -> Vec<blake3::Hash> {
     let mut hashes: Vec<blake3::Hash> = vec![blake3::Hash::from([0u8; 32]); n];
     for i in 0..n {
         let nr = NodeRef { index: i };
-        hashes[i] = compute_node_local_shape_hash(f, nr);
+        hashes[i] = compute_node_local_structural_hash(f, nr);
     }
     hashes
 }
