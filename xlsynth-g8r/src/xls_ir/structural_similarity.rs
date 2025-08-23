@@ -905,7 +905,18 @@ fn compute_dual_unmatched_masks(lhs: &Fn, rhs: &Fn) -> (Vec<bool>, Vec<bool>) {
     (lhs_unmatched_mask, rhs_unmatched_mask)
 }
 
-fn build_subgraph_fn_from_unmatched(orig: &Fn, unmatched_mask: &[bool]) -> Fn {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ConsumerKey {
+    local_hash: blake3::Hash,
+    bwd_hash: blake3::Hash,
+    operand_index: usize,
+}
+
+fn build_subgraph_fn_from_unmatched(
+    orig: &Fn,
+    unmatched_mask: &[bool],
+    consumer_keys: Option<&[ConsumerKey]>,
+) -> Fn {
     let n = orig.nodes.len();
     let mut include: Vec<bool> = vec![false; n];
     for i in 0..n {
@@ -1007,7 +1018,7 @@ fn build_subgraph_fn_from_unmatched(orig: &Fn, unmatched_mask: &[bool]) -> Fn {
         inc_to_new.insert(i, new_idx);
     }
 
-    // Determine sinks in the included subgraph to create return value.
+    // Determine sinks in the included subgraph (used if no consumer_keys provided)
     let mut used_count: HashMap<usize, usize> = HashMap::new();
     for (i, node) in orig.nodes.iter().enumerate() {
         if !include[i] {
@@ -1027,10 +1038,128 @@ fn build_subgraph_fn_from_unmatched(orig: &Fn, unmatched_mask: &[bool]) -> Fn {
         }
     }
 
-    // Build the function, choosing a return based on sinks.
+    // Build the function return.
     let mut ret_ty: Type = Type::nil();
     let mut ret_node_ref: Option<NodeRef> = None;
-    if sink_new_refs.len() == 1 {
+    if let Some(keys) = consumer_keys {
+        // Build outputs following the provided consumer keys. For each key, we
+        // find a matching consumer in the original function that consumes some
+        // source value and map that source into the new function, creating a
+        // parameter if it is external.
+        // Build a quick index: for each included node, enumerate users outside.
+        let users = collect_users_with_operand_indices(orig);
+        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(orig);
+        let mut out_refs: Vec<NodeRef> = Vec::new();
+        for key in keys.iter() {
+            // Locate any consumer edge that matches this key.
+            let mut found_src: Option<NodeRef> = None;
+            'outer: for (src_idx, inc) in include.iter().enumerate() {
+                if !*inc {
+                    continue;
+                }
+                for (user_ref, op_index) in users[src_idx].iter().copied() {
+                    if include[user_ref.index] {
+                        continue;
+                    }
+                    if op_index != key.operand_index {
+                        continue;
+                    }
+                    let local_h = compute_node_local_structural_hash(orig, user_ref);
+                    let bwd_h = bwd_entries[user_ref.index].hash;
+                    if local_h == key.local_hash && bwd_h == key.bwd_hash {
+                        // The source feeding this operand is src_idx.
+                        found_src = Some(NodeRef { index: src_idx });
+                        break 'outer;
+                    }
+                }
+            }
+            if let Some(src) = found_src {
+                // Map src into new function space; if external, add a param.
+                let mapped = if include[src.index] {
+                    let ni = *inc_to_new
+                        .get(&src.index)
+                        .expect("included node must be mapped");
+                    NodeRef { index: ni }
+                } else if let Some(&ni) = ext_to_new_node.get(&src.index) {
+                    NodeRef { index: ni }
+                } else {
+                    // Create a new param for this external source
+                    let src_node = &orig.nodes[src.index];
+                    let mut pname = src_node
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("x{}", src_node.text_id));
+                    if name_used.contains(&pname) {
+                        let mut k = 1usize;
+                        while name_used.contains(&format!("{}__{}", pname, k)) {
+                            k += 1;
+                        }
+                        pname = format!("{}__{}", pname, k);
+                    }
+                    name_used.insert(pname.clone());
+                    let pid = ParamId::new(next_param_id);
+                    next_param_id += 1;
+                    params.push(Param {
+                        name: pname.clone(),
+                        ty: src_node.ty.clone(),
+                        id: pid,
+                    });
+                    let get_param_node = Node {
+                        text_id: new_nodes.len() + 1,
+                        name: Some(pname.clone()),
+                        ty: src_node.ty.clone(),
+                        payload: NodePayload::GetParam(pid),
+                        pos: src_node.pos.clone(),
+                    };
+                    let new_idx = new_nodes.len();
+                    new_nodes.push(get_param_node);
+                    ext_to_new_node.insert(src.index, new_idx);
+                    NodeRef { index: new_idx }
+                };
+                out_refs.push(mapped);
+            } else {
+                // If no match found on this side, pass through a unit literal as placeholder.
+                // However, to maintain return arity, use a nil tuple element by skipping; we
+                // choose to map to a zero-width tuple which is invalid; instead, fallback to
+                // using a GetParam created above by adding a new param with nil type. Since
+                // Type::Tuple(vec![]) is valid, but we have no literal Nil node; use an empty
+                // tuple node.
+                let nil_ty = Type::nil();
+                let nil_node = Node {
+                    text_id: new_nodes.len() + 1,
+                    name: None,
+                    ty: nil_ty.clone(),
+                    payload: NodePayload::Tuple(vec![]),
+                    pos: None,
+                };
+                let idx = new_nodes.len();
+                new_nodes.push(nil_node);
+                out_refs.push(NodeRef { index: idx });
+            }
+        }
+        if out_refs.len() == 1 {
+            let nref = out_refs[0];
+            ret_ty = new_nodes[nref.index].ty.clone();
+            ret_node_ref = Some(nref);
+        } else {
+            let elem_tys: Vec<Box<Type>> = out_refs
+                .iter()
+                .map(|r| Box::new(new_nodes[r.index].ty.clone()))
+                .collect();
+            let tuple_ty = Type::Tuple(elem_tys);
+            let tuple_node = Node {
+                text_id: new_nodes.len() + 1,
+                name: None,
+                ty: tuple_ty.clone(),
+                payload: NodePayload::Tuple(out_refs.clone()),
+                pos: None,
+            };
+            let tuple_idx = new_nodes.len();
+            new_nodes.push(tuple_node);
+            ret_ty = tuple_ty;
+            ret_node_ref = Some(NodeRef { index: tuple_idx });
+        }
+    } else if sink_new_refs.len() == 1 {
         let nref = sink_new_refs[0];
         ret_ty = new_nodes[nref.index].ty.clone();
         ret_node_ref = Some(nref);
@@ -1072,8 +1201,67 @@ pub fn extract_dual_difference_subgraphs(lhs: &Fn, rhs: &Fn) -> (Fn, Fn) {
         "Function signatures must match for structural comparison",
     );
     let (lhs_mask, rhs_mask) = compute_dual_unmatched_masks(lhs, rhs);
-    let lhs_sub = build_subgraph_fn_from_unmatched(lhs, &lhs_mask);
-    let rhs_sub = build_subgraph_fn_from_unmatched(rhs, &rhs_mask);
+
+    // Compute common consumer keys across LHS and RHS from boundary edges.
+    let users_lhs = collect_users_with_operand_indices(lhs);
+    let users_rhs = collect_users_with_operand_indices(rhs);
+    let (lhs_bwd_entries, _ld) = collect_backward_structural_entries(lhs);
+    let (rhs_bwd_entries, _rd) = collect_backward_structural_entries(rhs);
+
+    let mut lhs_keys: std::collections::HashSet<ConsumerKey> = std::collections::HashSet::new();
+    for (i, inc) in lhs_mask.iter().enumerate() {
+        if !*inc {
+            continue;
+        }
+        for (user_ref, op_index) in users_lhs[i].iter().copied() {
+            if lhs_mask[user_ref.index] {
+                continue;
+            }
+            let local_h = compute_node_local_structural_hash(lhs, user_ref);
+            let bwd_h = lhs_bwd_entries[user_ref.index].hash;
+            lhs_keys.insert(ConsumerKey {
+                local_hash: local_h,
+                bwd_hash: bwd_h,
+                operand_index: op_index,
+            });
+        }
+    }
+
+    let mut rhs_keys: std::collections::HashSet<ConsumerKey> = std::collections::HashSet::new();
+    for (i, inc) in rhs_mask.iter().enumerate() {
+        if !*inc {
+            continue;
+        }
+        for (user_ref, op_index) in users_rhs[i].iter().copied() {
+            if rhs_mask[user_ref.index] {
+                continue;
+            }
+            let local_h = compute_node_local_structural_hash(rhs, user_ref);
+            let bwd_h = rhs_bwd_entries[user_ref.index].hash;
+            rhs_keys.insert(ConsumerKey {
+                local_hash: local_h,
+                bwd_hash: bwd_h,
+                operand_index: op_index,
+            });
+        }
+    }
+
+    let mut common_keys: Vec<ConsumerKey> = lhs_keys.intersection(&rhs_keys).copied().collect();
+    // Stable order: by local_hash bytes, then bwd_hash bytes, then operand index
+    common_keys.sort_by(|a, b| {
+        let ord1 = a.local_hash.as_bytes().cmp(b.local_hash.as_bytes());
+        if ord1 != std::cmp::Ordering::Equal {
+            return ord1;
+        }
+        let ord2 = a.bwd_hash.as_bytes().cmp(b.bwd_hash.as_bytes());
+        if ord2 != std::cmp::Ordering::Equal {
+            return ord2;
+        }
+        a.operand_index.cmp(&b.operand_index)
+    });
+
+    let lhs_sub = build_subgraph_fn_from_unmatched(lhs, &lhs_mask, Some(&common_keys));
+    let rhs_sub = build_subgraph_fn_from_unmatched(rhs, &rhs_mask, Some(&common_keys));
     (lhs_sub, rhs_sub)
 }
 
