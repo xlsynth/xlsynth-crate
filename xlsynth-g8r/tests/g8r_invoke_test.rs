@@ -4,6 +4,7 @@
 
 use std::io::Write;
 use std::process::Command;
+use xlsynth_test_helpers::compare_golden_text;
 
 #[test]
 fn test_ir2gates_invoke_golden() {
@@ -37,15 +38,5 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let golden_path = std::path::Path::new("tests/goldens/g8r_invoke_ir2gates.golden.txt");
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
-        println!("INFO: Updating golden file: {}", golden_path.display());
-        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
-    } else {
-        let golden = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-        assert_eq!(
-            stdout, golden,
-            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+    compare_golden_text(&stdout, "tests/goldens/g8r_invoke_ir2gates.golden.txt");
 }

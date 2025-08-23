@@ -425,7 +425,6 @@ pub fn stitch_pipeline<'a>(
 mod tests {
     use super::*;
     use env_logger;
-    use pretty_assertions::assert_eq;
     use xlsynth::ir_value::IrBits;
     use xlsynth_test_helpers::{self, compare_golden_sv};
 
@@ -442,19 +441,7 @@ mod tests {
         // Validate generated SV.
         xlsynth_test_helpers::assert_valid_sv(&result);
 
-        let golden_path = std::path::Path::new("tests/goldens/mul_add.golden.sv");
-        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-            std::fs::write(golden_path, &result).expect("write golden");
-        } else if golden_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-            std::fs::write(golden_path, &result).expect("write golden");
-        } else {
-            let want = std::fs::read_to_string(golden_path).expect("read golden");
-            assert_eq!(
-                result.trim(),
-                want.trim(),
-                "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-            );
-        }
+        compare_golden_sv(&result, "tests/goldens/mul_add.golden.sv");
     }
 
     #[test]

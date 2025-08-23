@@ -139,17 +139,10 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
-    let golden_path = std::path::Path::new("tests/test_ir2gates_show_source.golden.txt");
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
-        println!("INFO: Updating golden file: {}", golden_path.display());
-        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
-    } else {
-        let golden = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-        assert_eq!(
-            stdout, golden,
-            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+    xlsynth_test_helpers::compare_golden_text(
+        &stdout,
+        "tests/test_ir2gates_show_source.golden.txt",
+    );
 }
 
 /// Simple test that converts a DSLX module with an enum into a SV definition.
@@ -359,20 +352,10 @@ fn main(x: MyStruct[4]) -> MyStruct[4] {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     xlsynth_test_helpers::assert_valid_sv(&stdout);
 
-    let golden_path =
-        std::path::Path::new("tests/test_dslx2pipeline_with_update_of_1d_array.golden.sv");
-
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
-        println!("INFO: Updating golden file: {}", golden_path.display());
-        std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
-    } else {
-        let golden_sv = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-        assert_eq!(
-            stdout.trim(),
-            golden_sv.trim(),
-            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+    compare_golden_sv(
+        &stdout,
+        "tests/test_dslx2pipeline_with_update_of_1d_array.golden.sv",
+    );
 }
 
 // To get the redundant match arm to flag a warning we have to enable a
@@ -1809,20 +1792,10 @@ fn main(pred: bool, x: u1) -> u1 {
 
     if !use_tool_path {
         // Compare against golden for runtime API path.
-        let golden_path =
-            std::path::Path::new("tests/test_toolchain_common_codegen_flags_resolve.golden.sv");
-        if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() {
-            println!("INFO: Updating golden file: {}", golden_path.display());
-            std::fs::write(golden_path, &stdout).expect("Failed to write golden file");
-        } else {
-            let golden_sv =
-                std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-            assert_eq!(
-                stdout.trim(),
-                golden_sv.trim(),
-                "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-            );
-        }
+        compare_golden_sv(
+            &stdout,
+            "tests/test_toolchain_common_codegen_flags_resolve.golden.sv",
+        );
     }
 }
 
@@ -2879,19 +2852,10 @@ dslx_path = ["{}", "{}"]
     xlsynth_test_helpers::assert_valid_sv(&sv);
 
     // Compare against golden in all modes.
-    let golden_path =
-        std::path::Path::new("tests/test_dslx_stitch_pipeline_with_dslx_path_two_entries.golden.v");
-    if std::env::var("XLSYNTH_UPDATE_GOLDEN").is_ok() || !golden_path.exists() {
-        println!("INFO: Updating golden file: {}", golden_path.display());
-        std::fs::write(golden_path, &sv).expect("Failed to write golden file");
-    } else {
-        let want = std::fs::read_to_string(golden_path).expect("Failed to read golden file");
-        assert_eq!(
-            sv.trim(),
-            want.trim(),
-            "Golden file mismatch. Run with XLSYNTH_UPDATE_GOLDEN=1 to update."
-        );
-    }
+    compare_golden_sv(
+        &sv,
+        "tests/test_dslx_stitch_pipeline_with_dslx_path_two_entries.golden.v",
+    );
 }
 
 #[test]
