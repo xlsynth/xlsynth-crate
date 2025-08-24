@@ -3,6 +3,7 @@
 use clap::ArgMatches;
 
 use crate::toolchain_config::ToolchainConfig;
+use crate::tools::tool_path_or_exit;
 use std::process;
 use std::process::Command;
 
@@ -13,12 +14,7 @@ fn run_delay_info_main(
     tool_path: &str,
 ) -> String {
     log::info!("run_delay_info_main");
-    let delay_info_path = format!("{}/delay_info_main", tool_path);
-    if !std::path::Path::new(&delay_info_path).exists() {
-        eprintln!("Delay info tool not found at: {}", delay_info_path);
-        process::exit(1);
-    }
-
+    let delay_info_path = tool_path_or_exit(tool_path, "delay_info_main", "Delay info");
     let mut command = Command::new(delay_info_path);
     command.arg(input_file);
     command.arg("--delay_model").arg(delay_model);

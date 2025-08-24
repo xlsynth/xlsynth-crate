@@ -7,6 +7,17 @@ use crate::common::{add_codegen_flags, CodegenFlags, PipelineSpec};
 use std::process;
 use std::process::Command;
 
+/// Constructs the path to `binary_name` inside `tool_dir` and exits the process
+/// with an error if the binary does not exist.
+pub fn tool_path_or_exit(tool_dir: &str, binary_name: &str, pretty_name: &str) -> String {
+    let path = format!("{}/{}", tool_dir, binary_name);
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("{} tool not found at: {}", pretty_name, path);
+        process::exit(1);
+    }
+    path
+}
+
 pub fn run_codegen_pipeline(
     input_file: &std::path::Path,
     delay_model: &str,
@@ -15,13 +26,7 @@ pub fn run_codegen_pipeline(
     tool_path: &str,
 ) -> String {
     log::info!("run_codegen_pipeline");
-    // Give an error if the codegen_main tool is not found.
-    let codegen_main_path = format!("{}/codegen_main", tool_path);
-    if !std::path::Path::new(&codegen_main_path).exists() {
-        eprintln!("codegen_main tool not found at: {}", codegen_main_path);
-        process::exit(1);
-    }
-
+    let codegen_main_path = tool_path_or_exit(tool_path, "codegen_main", "codegen_main");
     let mut command = Command::new(codegen_main_path);
     command
         .arg(input_file)
@@ -54,12 +59,7 @@ pub fn run_codegen_pipeline(
 /// Runs the IR optimization command line tool and returns the output.
 pub fn run_opt_main(input_file: &std::path::Path, ir_top: Option<&str>, tool_path: &str) -> String {
     log::info!("run_opt_main; ir_top: {:?}", ir_top);
-    let opt_main_path = format!("{}/opt_main", tool_path);
-    if !std::path::Path::new(&opt_main_path).exists() {
-        eprintln!("IR optimization tool not found at: {}", opt_main_path);
-        process::exit(1);
-    }
-
+    let opt_main_path = tool_path_or_exit(tool_path, "opt_main", "IR optimization");
     let mut command = Command::new(opt_main_path);
     command.arg(input_file);
     if ir_top.is_some() {
@@ -94,12 +94,7 @@ pub fn run_ir_converter_main(
         enable_warnings,
         disable_warnings
     );
-    let ir_convert_path = format!("{}/ir_converter_main", tool_path);
-    if !std::path::Path::new(&ir_convert_path).exists() {
-        eprintln!("IR conversion tool not found at: {}", ir_convert_path);
-        process::exit(1);
-    }
-
+    let ir_convert_path = tool_path_or_exit(tool_path, "ir_converter_main", "IR conversion");
     let mut command = Command::new(ir_convert_path);
     command.arg(input_file);
 
@@ -159,12 +154,7 @@ pub fn run_check_ir_equivalence_main(
     tool_path: &str,
 ) -> Result<String, std::process::Output> {
     log::info!("run_check_ir_equivalence_main");
-    let irequiv_path = format!("{}/check_ir_equivalence_main", tool_path);
-    if !std::path::Path::new(&irequiv_path).exists() {
-        eprintln!("IR equivalence tool not found at: {}", irequiv_path);
-        process::exit(1);
-    }
-
+    let irequiv_path = tool_path_or_exit(tool_path, "check_ir_equivalence_main", "IR equivalence");
     let mut command = Command::new(irequiv_path);
     command.arg(lhs);
     command.arg(rhs);
@@ -206,13 +196,7 @@ pub fn run_prove_quickcheck_main(
         test_filter,
         tool_path
     );
-
-    let qc_path = format!("{}/prove_quickcheck_main", tool_path);
-    if !std::path::Path::new(&qc_path).exists() {
-        eprintln!("prove_quickcheck_main tool not found at: {}", qc_path);
-        std::process::exit(1);
-    }
-
+    let qc_path = tool_path_or_exit(tool_path, "prove_quickcheck_main", "prove_quickcheck_main");
     let mut command = Command::new(qc_path);
     if let Some(test_filter) = test_filter {
         command.arg("--test_filter").arg(test_filter);
@@ -243,12 +227,7 @@ pub fn run_codegen_combinational(
     tool_path: &str,
 ) -> String {
     log::info!("run_codegen_combinational");
-    let codegen_main_path = format!("{}/codegen_main", tool_path);
-    if !std::path::Path::new(&codegen_main_path).exists() {
-        eprintln!("codegen_main tool not found at: {}", codegen_main_path);
-        process::exit(1);
-    }
-
+    let codegen_main_path = tool_path_or_exit(tool_path, "codegen_main", "codegen_main");
     let mut command = Command::new(codegen_main_path);
     command
         .arg(input_file)
@@ -284,12 +263,7 @@ pub fn run_codegen_block_ir_to_string(
     output_block_ir_path: &std::path::Path,
 ) -> String {
     log::info!("run_codegen_block_ir_to_string");
-    let codegen_main_path = format!("{}/codegen_main", tool_path);
-    if !std::path::Path::new(&codegen_main_path).exists() {
-        eprintln!("codegen_main tool not found at: {}", codegen_main_path);
-        process::exit(1);
-    }
-
+    let codegen_main_path = tool_path_or_exit(tool_path, "codegen_main", "codegen_main");
     let mut command = Command::new(codegen_main_path);
     command
         .arg(input_file)
