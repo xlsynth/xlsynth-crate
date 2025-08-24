@@ -3,3 +3,4 @@
 pub mod gatefn_from_netlist;
 pub mod integrity;
 pub mod parse;
+pub mod stats;

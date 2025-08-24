@@ -45,6 +45,7 @@ mod flag_defaults;
 mod g8r2v;
 mod g8r_equiv;
 mod gv2ir;
+mod gv_read_stats;
 mod ir2combo;
 mod ir2delayinfo;
 mod ir2gates;
@@ -860,6 +861,16 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("gv-read-stats")
+                .about("Reads a gate-level netlist and prints summary statistics")
+                .arg(
+                    clap::Arg::new("netlist")
+                        .help("Input gate-level netlist (.gv or .gv.gz)")
+                        .required(true)
+                        .index(1),
+                ),
+        )
+        .subcommand(
             clap::Command::new("g8r2v")
                 .about("Converts a .g8r or .g8rbin file to a .ugv netlist on stdout, optionally adding a clock port as the first input.")
                 .arg(
@@ -1304,6 +1315,8 @@ fn main() {
         lib2proto::handle_lib2proto(matches);
     } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
         gv2ir::handle_gv2ir(matches);
+    } else if let Some(matches) = matches.subcommand_matches("gv-read-stats") {
+        gv_read_stats::handle_gv_read_stats(matches);
     } else if let Some(matches) = matches.subcommand_matches("g8r2v") {
         if let Err(e) = g8r2v::handle_g8r2v(matches) {
             report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
