@@ -186,6 +186,12 @@ impl ConstantDef {
     }
 }
 
+impl std::fmt::Display for ConstantDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
+    }
+}
+
 pub struct ModuleMember {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxModuleMember,
@@ -203,13 +209,19 @@ pub enum MatchableModuleMember {
 impl MatchableModuleMember {
     pub fn to_string(&self) -> String {
         match self {
-            MatchableModuleMember::EnumDef(e) => e.to_string(),
-            MatchableModuleMember::StructDef(s) => s.to_string(),
-            MatchableModuleMember::TypeAlias(t) => t.to_string(),
-            MatchableModuleMember::ConstantDef(c) => c.to_string(),
-            MatchableModuleMember::Function(f) => f.to_string(),
-            MatchableModuleMember::Quickcheck(qc) => qc.to_string(),
+            MatchableModuleMember::EnumDef(e) => format!("{}", e),
+            MatchableModuleMember::StructDef(s) => format!("{}", s),
+            MatchableModuleMember::TypeAlias(t) => format!("{}", t),
+            MatchableModuleMember::ConstantDef(c) => format!("{}", c),
+            MatchableModuleMember::Function(f) => format!("{}", f),
+            MatchableModuleMember::Quickcheck(qc) => format!("{}", qc),
         }
+    }
+}
+
+impl std::fmt::Display for MatchableModuleMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 
@@ -296,6 +308,12 @@ impl Quickcheck {
         } else {
             None
         }
+    }
+}
+
+impl std::fmt::Display for Quickcheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 
@@ -450,6 +468,12 @@ impl EnumDef {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_enum_def_get_underlying(self.ptr) },
         }
+    }
+}
+
+impl std::fmt::Display for EnumDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 
@@ -644,6 +668,12 @@ impl StructDef {
     }
 }
 
+impl std::fmt::Display for StructDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
+    }
+}
+
 pub struct TypeAlias {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxTypeAlias,
@@ -665,6 +695,12 @@ impl TypeAlias {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_type_alias_get_type_annotation(self.ptr) },
         }
+    }
+}
+
+impl std::fmt::Display for TypeAlias {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 
@@ -720,6 +756,12 @@ impl Function {
             parent: self.parent.clone(),
             ptr: p,
         }
+    }
+}
+
+impl std::fmt::Display for Function {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 

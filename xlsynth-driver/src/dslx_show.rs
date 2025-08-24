@@ -148,7 +148,7 @@ fn run_show(
 
     let module = tcm.get_module();
     match find_member_by_name(&module, &target_ident) {
-        Some(m) => print!("{}", m.to_string()),
+        Some(m) => print!("{}", m),
         None => {
             eprintln!(
                 "Symbol '{}' not found in module '{}'",
