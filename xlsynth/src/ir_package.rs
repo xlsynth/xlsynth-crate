@@ -81,6 +81,14 @@ unsafe impl Send for IrPackage {}
 unsafe impl Sync for IrPackage {}
 
 impl IrPackage {
+    fn with_read<T>(&self, f: impl FnOnce(RwLockReadGuard<IrPackagePtr>) -> T) -> T {
+        f(self.ptr.read().unwrap())
+    }
+
+    fn with_write<T>(&self, f: impl FnOnce(RwLockWriteGuard<IrPackagePtr>) -> T) -> T {
+        f(self.ptr.write().unwrap())
+    }
+
     pub fn new(name: &str) -> Result<Self, XlsynthError> {
         lib_support::xls_package_new(name)
     }
@@ -102,48 +110,43 @@ impl IrPackage {
     }
 
     pub fn set_top_by_name(&mut self, name: &str) -> Result<(), XlsynthError> {
-        let write_guard = self.ptr.write().unwrap();
-        lib_support::xls_package_set_top_by_name(write_guard.mut_c_ptr(), name)
+        self.with_write(|guard| lib_support::xls_package_set_top_by_name(guard.mut_c_ptr(), name))
     }
 
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
-        let read_guard = self.ptr.read().unwrap();
-        xls_package_get_function(&self.ptr, read_guard, name)
+        self.with_read(|guard| xls_package_get_function(&self.ptr, guard, name))
     }
 
     pub fn to_string(&self) -> String {
-        let read_guard = self.ptr.read().unwrap();
-        xls_package_to_string(read_guard.const_c_ptr()).unwrap()
+        self.with_read(|guard| xls_package_to_string(guard.const_c_ptr()).unwrap())
     }
 
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
-        let write_guard = self.ptr.write().unwrap();
-        xls_package_get_type_for_value(write_guard.mut_c_ptr(), value.ptr)
+        self.with_write(|guard| xls_package_get_type_for_value(guard.mut_c_ptr(), value.ptr))
     }
 
     pub fn get_bits_type(&self, bit_count: u64) -> IrType {
-        let write_guard = self.ptr.write().unwrap();
-        lib_support::xls_package_get_bits_type(write_guard.mut_c_ptr(), bit_count)
+        self.with_write(|guard| {
+            lib_support::xls_package_get_bits_type(guard.mut_c_ptr(), bit_count)
+        })
     }
 
     pub fn get_tuple_type(&self, members: &[IrType]) -> IrType {
-        let write_guard = self.ptr.write().unwrap();
-        lib_support::xls_package_get_tuple_type(write_guard.mut_c_ptr(), members)
+        self.with_write(|guard| lib_support::xls_package_get_tuple_type(guard.mut_c_ptr(), members))
     }
 
     pub fn types_eq(&self, a: &IrType, b: &IrType) -> Result<bool, XlsynthError> {
-        let _read_guard = self.ptr.read().unwrap();
-        Ok(a.ptr == b.ptr)
+        self.with_read(|_| Ok(a.ptr == b.ptr))
     }
 
     pub fn get_token_type(&self) -> IrType {
-        let write_guard = self.ptr.write().unwrap();
-        lib_support::xls_package_get_token_type(write_guard.mut_c_ptr())
+        self.with_write(|guard| lib_support::xls_package_get_token_type(guard.mut_c_ptr()))
     }
 
     pub fn get_array_type(&self, element_type: &IrType, size: i64) -> IrType {
-        let write_guard = self.ptr.write().unwrap();
-        lib_support::xls_package_get_array_type(write_guard.mut_c_ptr(), element_type.ptr, size)
+        self.with_write(|guard| {
+            lib_support::xls_package_get_array_type(guard.mut_c_ptr(), element_type.ptr, size)
+        })
     }
 
     pub fn filename(&self) -> Option<&str> {
