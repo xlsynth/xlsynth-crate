@@ -57,6 +57,17 @@ xlsynth-driver gv2ir \
 - Optional flags:
   - `--dff_cells <CSV>` – comma-separated list of DFF cell names to treat as identity (D->Q).
 
+### `gv-read-stats`: netlist statistics
+
+Reads a gate-level netlist (optionally gzipped) and prints summary statistics such as
+instance counts, net counts, memory usage, parse time, and per-cell instance histogram.
+
+```shell
+xlsynth-driver gv-read-stats my_module.gv.gz
+```
+
+This command has no flags.
+
 ### `ir2g8r`: IR to gate-level representation
 
 Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist in AIG form).

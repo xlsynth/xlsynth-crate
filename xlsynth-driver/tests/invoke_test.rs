@@ -6059,6 +6059,39 @@ fn test_prover_all_with_timeout_indefinite() {
     assert_eq!(tasks[1]["outcome"].as_str(), Some("Timeout"));
 }
 
+#[test]
+fn test_gv_read_stats_basic() {
+    let netlist = r#"module top(a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire w;
+  INV i0 (.A(a), .Y(w));
+  INV i1 (.A(w), .Y(y));
+endmodule
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let gv_path = temp_dir.path().join("test.gv");
+    std::fs::write(&gv_path, netlist).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("gv-read-stats")
+        .arg(gv_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Instances: 2"), "{}", stdout);
+    assert!(stdout.contains("INV"), "{}", stdout);
+}
+
 #[cfg(feature = "enable-fake-task")]
 #[test]
 fn test_prover_any_with_timeout_indefinite() {
