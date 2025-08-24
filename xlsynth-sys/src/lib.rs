@@ -934,7 +934,7 @@ extern "C" {
         result_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
 
-    // Pretty-printing for DSLX AST nodes
+    // Stringification for DSLX AST nodes
     pub fn xls_dslx_function_to_string(function: *const CDslxFunction)
         -> *mut std::os::raw::c_char;
     pub fn xls_dslx_struct_def_to_string(
