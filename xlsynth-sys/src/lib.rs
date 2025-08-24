@@ -934,6 +934,21 @@ extern "C" {
         result_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
 
+    // Pretty-printing for DSLX AST nodes
+    pub fn xls_dslx_function_to_string(function: *const CDslxFunction)
+        -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_struct_def_to_string(
+        struct_def: *const CDslxStructDef,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_enum_def_to_string(enum_def: *const CDslxEnumDef) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_type_alias_to_string(
+        type_alias: *const CDslxTypeAlias,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_constant_def_to_string(
+        constant_def: *const CDslxConstantDef,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_quickcheck_to_string(qc: *const CDslxQuickcheck) -> *mut std::os::raw::c_char;
+
     pub fn xls_dslx_type_info_get_const_expr(
         type_info: *mut CDslxTypeInfo,
         expr: *mut CDslxExpr,

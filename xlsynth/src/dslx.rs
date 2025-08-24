@@ -168,6 +168,9 @@ pub struct ConstantDef {
 }
 
 impl ConstantDef {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_constant_def_to_string(self.ptr)) }
+    }
     pub fn get_name(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_constant_def_get_name(self.ptr);
@@ -195,6 +198,19 @@ pub enum MatchableModuleMember {
     ConstantDef(ConstantDef),
     Function(Function),
     Quickcheck(Quickcheck),
+}
+
+impl MatchableModuleMember {
+    pub fn to_string(&self) -> String {
+        match self {
+            MatchableModuleMember::EnumDef(e) => e.to_string(),
+            MatchableModuleMember::StructDef(s) => s.to_string(),
+            MatchableModuleMember::TypeAlias(t) => t.to_string(),
+            MatchableModuleMember::ConstantDef(c) => c.to_string(),
+            MatchableModuleMember::Function(f) => f.to_string(),
+            MatchableModuleMember::Quickcheck(qc) => qc.to_string(),
+        }
+    }
 }
 
 impl ModuleMember {
@@ -257,6 +273,9 @@ pub struct Quickcheck {
 }
 
 impl Quickcheck {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_quickcheck_to_string(self.ptr)) }
+    }
     pub fn get_function(&self) -> Function {
         let func_ptr = unsafe { sys::xls_dslx_quickcheck_get_function(self.ptr) };
         Function {
@@ -405,6 +424,9 @@ pub struct EnumDef {
 }
 
 impl EnumDef {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_enum_def_to_string(self.ptr)) }
+    }
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_enum_def_get_identifier(self.ptr);
@@ -593,6 +615,9 @@ pub struct StructDef {
 }
 
 impl StructDef {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_struct_def_to_string(self.ptr)) }
+    }
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_struct_def_get_identifier(self.ptr);
@@ -625,6 +650,9 @@ pub struct TypeAlias {
 }
 
 impl TypeAlias {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_type_alias_to_string(self.ptr)) }
+    }
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_type_alias_get_identifier(self.ptr);
@@ -665,6 +693,9 @@ impl Param {
 }
 
 impl Function {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_function_to_string(self.ptr)) }
+    }
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_function_get_identifier(self.ptr);
