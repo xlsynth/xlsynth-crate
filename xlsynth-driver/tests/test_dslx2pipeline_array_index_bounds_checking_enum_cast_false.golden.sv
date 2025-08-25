@@ -11,16 +11,16 @@ module __enum_index__main(
   assign arr_unflattened[3] = arr[127:96];
 
   // ===== Pipe stage 0:
-  wire p0_literal_26_comb;
-  wire [2:0] p0_concat_29_comb;
-  wire [2:0] p0_literal_27_comb;
-  wire [2:0] p0_add_31_comb;
-  wire [31:0] p0_array_index_32_comb;
-  assign p0_literal_26_comb = 1'h0;
-  assign p0_concat_29_comb = {p0_literal_26_comb, sel};
-  assign p0_literal_27_comb = 3'h1;
-  assign p0_add_31_comb = p0_concat_29_comb + p0_literal_27_comb;
-  assign p0_array_index_32_comb = arr_unflattened[p0_add_31_comb];
-  assign out = p0_array_index_32_comb;
+  wire p0_literal_22_comb;
+  wire [2:0] p0_concat_25_comb;
+  wire [2:0] p0_literal_23_comb;
+  wire [2:0] p0_add_27_comb;
+  wire [31:0] p0_array_index_28_comb;
+  assign p0_literal_22_comb = 1'h0;
+  assign p0_concat_25_comb = {p0_literal_22_comb, sel};
+  assign p0_literal_23_comb = 3'h1;
+  assign p0_add_27_comb = p0_concat_25_comb + p0_literal_23_comb;
+  assign p0_array_index_28_comb = arr_unflattened[p0_add_27_comb];
+  assign out = p0_array_index_28_comb;
 endmodule
 
