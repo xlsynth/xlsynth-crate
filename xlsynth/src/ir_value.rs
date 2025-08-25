@@ -68,6 +68,11 @@ impl IrBits {
         format!("bits[{}]:{}", self.get_bit_count(), value)
     }
 
+    pub fn add(&self, rhs: &IrBits) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_add(self.ptr, rhs.ptr) };
+        IrBits { ptr: result }
+    }
+
     pub fn umul(&self, rhs: &IrBits) -> IrBits {
         let result = unsafe { xlsynth_sys::xls_bits_umul(self.ptr, rhs.ptr) };
         IrBits { ptr: result }
@@ -194,8 +199,7 @@ impl std::ops::Add for IrBits {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        let result = unsafe { xlsynth_sys::xls_bits_add(self.ptr, rhs.ptr) };
-        Self { ptr: result }
+        IrBits::add(&self, &rhs)
     }
 }
 
@@ -696,11 +700,19 @@ mod tests {
     }
 
     #[test]
-    fn test_ir_bits_add_two_plus_three() {
+    fn test_ir_bits_add() {
         let two = IrBits::u32(2);
         let three = IrBits::u32(3);
-        let sum = two + three;
+        let sum = two.add(&three);
         assert_eq!(sum.to_string(), "bits[32]:5");
+
+        // Ensure the originals were not consumed by the add method.
+        assert_eq!(two.to_string(), "bits[32]:2");
+        assert_eq!(three.to_string(), "bits[32]:3");
+
+        // The `+` operator should behave equivalently.
+        let sum_op = two.clone() + three.clone();
+        assert_eq!(sum, sum_op);
     }
 
     #[test]
@@ -718,6 +730,20 @@ mod tests {
         let product = two.smul(&neg_three);
         assert!(product.msb());
         assert_eq!(product.abs().to_string(), "bits[64]:6");
+    }
+
+    #[test]
+    fn test_ir_bits_negate() {
+        let three = IrBits::u32(3);
+        let neg = three.negate();
+        assert_eq!(neg.to_hex_string(), "bits[32]:0xffff_fffd");
+    }
+
+    #[test]
+    fn test_ir_bits_abs() {
+        let neg_three = IrBits::u32(3).negate();
+        let abs = neg_three.abs();
+        assert_eq!(abs.to_string(), "bits[32]:3");
     }
 
     #[test]
