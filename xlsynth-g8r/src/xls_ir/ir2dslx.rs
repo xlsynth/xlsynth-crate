@@ -164,6 +164,13 @@ mod tests {
     use super::*;
     use crate::xls_ir::ir_parser::Parser;
     use test_case::test_case;
+    use xlsynth::dslx;
+
+    fn assert_parses_and_typechecks(dslx_text: &str) {
+        let mut import_data = dslx::ImportData::default();
+        dslx::parse_and_typecheck(dslx_text, "/fake/path.x", "m", &mut import_data)
+            .expect("parse-and-typecheck success");
+    }
 
     #[test]
     fn test_add_literal() {
@@ -180,6 +187,7 @@ mod tests {
   add_3
 }"#;
         assert_eq!(dslx, want);
+        assert_parses_and_typechecks(&dslx);
     }
 
     fn make_ir_with_binop(op: &str) -> String {
@@ -203,5 +211,84 @@ mod tests {
             "fn f(x: u32) -> u32 {{\n  let one: u32 = u32:1;\n  let {name}: u32 = {expr};\n  {name}\n}}"
         );
         assert_eq!(dslx, want);
+        assert_parses_and_typechecks(&dslx);
+    }
+
+    fn make_ir_with_unop(op: &str) -> String {
+        format!(
+            "fn f(x: bits[32] id=1) -> bits[32] {{\n  ret {}.2: bits[32] = {}(x, id=2)\n}}",
+            op, op
+        )
+    }
+
+    #[test_case("not", "!x", "not_2"; "not")]
+    #[test_case("neg", "-x", "neg_2"; "neg")]
+    #[test_case("identity", "x", "identity_2"; "identity")]
+    fn test_unop_emission(op: &str, expr: &str, name: &str) {
+        let ir_text = make_ir_with_unop(op);
+        let mut p = Parser::new(&ir_text);
+        let f = p.parse_fn().unwrap();
+        let dslx = emit_fn_as_dslx(&f).unwrap();
+        let want = format!("fn f(x: u32) -> u32 {{\n  let {name}: u32 = {expr};\n  {name}\n}}");
+        assert_eq!(dslx, want);
+        assert_parses_and_typechecks(&dslx);
+    }
+
+    fn make_ir_with_nary(op: &str) -> String {
+        format!(
+            "fn f(x: bits[32] id=1) -> bits[32] {{\n  one: bits[32] = literal(value=1, id=2)\n  two: bits[32] = literal(value=2, id=3)\n  ret {}.4: bits[32] = {}(x, one, two, id=4)\n}}",
+            op, op
+        )
+    }
+
+    #[test_case("and", "x & one & two", "and_4"; "and")]
+    #[test_case("or",  "x | one | two", "or_4";  "or")]
+    #[test_case("xor", "x ^ one ^ two", "xor_4"; "xor")]
+    fn test_nary_emission(op: &str, expr: &str, name: &str) {
+        let ir_text = make_ir_with_nary(op);
+        let mut p = Parser::new(&ir_text);
+        let f = p.parse_fn().unwrap();
+        let dslx = emit_fn_as_dslx(&f).unwrap();
+        let want = format!(
+            "fn f(x: u32) -> u32 {{\n  let one: u32 = u32:1;\n  let two: u32 = u32:2;\n  let {name}: u32 = {expr};\n  {name}\n}}"
+        );
+        assert_eq!(dslx, want);
+        assert_parses_and_typechecks(&dslx);
+    }
+
+    #[test]
+    fn test_tuple_construction() {
+        let ir_text = r#"fn f(x: bits[32] id=1) -> (bits[32], bits[32]) {
+  one: bits[32] = literal(value=1, id=2)
+  ret tuple.4: (bits[32], bits[32]) = tuple(x, one, id=4)
+}"#;
+        let mut p = Parser::new(ir_text);
+        let f = p.parse_fn().unwrap();
+        let dslx = emit_fn_as_dslx(&f).unwrap();
+        let want = r#"fn f(x: u32) -> (u32, u32) {
+  let one: u32 = u32:1;
+  let tuple_4: (u32, u32) = (x, one);
+  tuple_4
+}"#;
+        assert_eq!(dslx, want);
+        assert_parses_and_typechecks(&dslx);
+    }
+
+    #[test]
+    fn test_array_construction() {
+        let ir_text = r#"fn f(x: bits[32] id=1) -> bits[32][2] {
+  one: bits[32] = literal(value=1, id=2)
+  ret array.4: bits[32][2] = array(x, one, id=4)
+}"#;
+        let mut p = Parser::new(ir_text);
+        let f = p.parse_fn().unwrap();
+        let dslx = emit_fn_as_dslx(&f).unwrap();
+        let want = r#"fn f(x: u32) -> u32[2] {
+  let one: u32 = u32:1;
+  let array_4: u32[2] = [x, one];
+  array_4
+}"#;
+        assert_eq!(dslx, want);
+        assert_parses_and_typechecks(&dslx);
     }
 }
