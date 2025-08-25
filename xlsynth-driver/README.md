@@ -192,6 +192,39 @@ Additional flags:
 Generates SystemVerilog type declarations for the definitions in a DSLX file.
 The output is written to **stdout**.
 
+### `dslx-show`: Show a DSLX symbol definition
+
+Resolves and prints a DSLX symbol definition (enums, structs, type aliases, constants, functions, quickchecks).
+
+- Positional: `SYMBOL` – either unqualified (`Name`) or qualified with a dotted module path plus `::member` (e.g., `foo.bar::Name`, `foo.bar.baz::Name`).
+- Optional flags:
+  - `--dslx_input_file <FILE>` – required when `SYMBOL` is unqualified; the file’s directory is added to the search path.
+  - `--dslx_path <P1;P2;...>` – semicolon-separated list of additional DSLX search directories.
+  - `--dslx_stdlib_path <PATH>` – path to the DSLX standard library root.
+
+Note: In DSLX source files, imports use dot-separated module paths (e.g., `import foo.bar.baz;`). On the CLI, qualify symbols as `<dotted.module.path>::<Member>`, e.g., `foo.bar.baz::Name`.
+
+Examples:
+
+```shell
+# Show a struct defined in a local file
+xlsynth-driver dslx-show \
+  --dslx_input_file sample-usage/src/sample_with_struct_def.x \
+  Point
+
+# Show an enum defined in another module by qualifying the symbol
+xlsynth-driver dslx-show \
+  --dslx_path=sample-usage/src \
+  sample_with_enum_def::MyEnum
+
+# Modules under nested directories (example)
+xlsynth-driver dslx-show \
+  --dslx_path=/path/to/dslx/libs \
+  foo.bar.baz::Baz
+```
+
+The definition is printed to stdout; errors are written to stderr and a non-zero status is returned if the symbol cannot be resolved.
+
 ### `dslx-g8r-stats`: DSLX GateFn statistics
 
 Converts a DSLX entry point all the way to a gate-level representation and

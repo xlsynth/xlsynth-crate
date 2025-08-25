@@ -168,6 +168,9 @@ pub struct ConstantDef {
 }
 
 impl ConstantDef {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_constant_def_to_string(self.ptr)) }
+    }
     pub fn get_name(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_constant_def_get_name(self.ptr);
@@ -183,6 +186,12 @@ impl ConstantDef {
     }
 }
 
+impl std::fmt::Display for ConstantDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
+    }
+}
+
 pub struct ModuleMember {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxModuleMember,
@@ -195,6 +204,25 @@ pub enum MatchableModuleMember {
     ConstantDef(ConstantDef),
     Function(Function),
     Quickcheck(Quickcheck),
+}
+
+impl MatchableModuleMember {
+    pub fn to_string(&self) -> String {
+        match self {
+            MatchableModuleMember::EnumDef(e) => format!("{}", e),
+            MatchableModuleMember::StructDef(s) => format!("{}", s),
+            MatchableModuleMember::TypeAlias(t) => format!("{}", t),
+            MatchableModuleMember::ConstantDef(c) => format!("{}", c),
+            MatchableModuleMember::Function(f) => format!("{}", f),
+            MatchableModuleMember::Quickcheck(qc) => format!("{}", qc),
+        }
+    }
+}
+
+impl std::fmt::Display for MatchableModuleMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
+    }
 }
 
 impl ModuleMember {
@@ -257,6 +285,9 @@ pub struct Quickcheck {
 }
 
 impl Quickcheck {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_quickcheck_to_string(self.ptr)) }
+    }
     pub fn get_function(&self) -> Function {
         let func_ptr = unsafe { sys::xls_dslx_quickcheck_get_function(self.ptr) };
         Function {
@@ -277,6 +308,12 @@ impl Quickcheck {
         } else {
             None
         }
+    }
+}
+
+impl std::fmt::Display for Quickcheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 
@@ -405,6 +442,9 @@ pub struct EnumDef {
 }
 
 impl EnumDef {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_enum_def_to_string(self.ptr)) }
+    }
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_enum_def_get_identifier(self.ptr);
@@ -428,6 +468,12 @@ impl EnumDef {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_enum_def_get_underlying(self.ptr) },
         }
+    }
+}
+
+impl std::fmt::Display for EnumDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 
@@ -593,6 +639,9 @@ pub struct StructDef {
 }
 
 impl StructDef {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_struct_def_to_string(self.ptr)) }
+    }
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_struct_def_get_identifier(self.ptr);
@@ -619,12 +668,21 @@ impl StructDef {
     }
 }
 
+impl std::fmt::Display for StructDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
+    }
+}
+
 pub struct TypeAlias {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxTypeAlias,
 }
 
 impl TypeAlias {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_type_alias_to_string(self.ptr)) }
+    }
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_type_alias_get_identifier(self.ptr);
@@ -637,6 +695,12 @@ impl TypeAlias {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_type_alias_get_type_annotation(self.ptr) },
         }
+    }
+}
+
+impl std::fmt::Display for TypeAlias {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 
@@ -665,6 +729,9 @@ impl Param {
 }
 
 impl Function {
+    pub fn to_string(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_function_to_string(self.ptr)) }
+    }
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_function_get_identifier(self.ptr);
@@ -689,6 +756,12 @@ impl Function {
             parent: self.parent.clone(),
             ptr: p,
         }
+    }
+}
+
+impl std::fmt::Display for Function {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", Self::to_string(self))
     }
 }
 

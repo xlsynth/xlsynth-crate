@@ -25,6 +25,387 @@ tool_path = \"{}\"",
     )
 }
 
+// dslx-show tests
+
+#[test]
+fn test_dslx_show_function() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"fn f(a: u32, b: u8) -> u32 { a + (b as u32) }"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("f.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("f")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = "fn f(a: u32, b: u8) -> u32 {\n    a + (b as u32)\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+#[test]
+fn test_dslx_show_enum() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"enum E : u8 { A = 0, B = 10 }"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("e.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("E")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = "enum E : u8 {\n    A = 0,\n    B = 10,\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+#[test]
+fn test_dslx_show_struct() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"struct S {
+    a: u32,
+    b: u8,
+}"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("s.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("S")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = "struct S {\n    a: u32,\n    b: u8,\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+#[test]
+fn test_dslx_show_std_max() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Create a local std.x so resolution works without external stdlib.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let std_path = temp_dir.path().join("std.x");
+    let std_text = r#"pub fn max<S: bool, N: u32>(x: xN[S][N], y: xN[S][N]) -> xN[S][N] { if x > y { x } else { y } }"#;
+    std::fs::write(&std_path, std_text).unwrap();
+    let main_path = temp_dir.path().join("main.x");
+    std::fs::write(&main_path, "").unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(main_path.to_str().unwrap())
+        .arg("std::max")
+        .arg("--dslx_stdlib_path")
+        .arg(temp_dir.path().to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = "pub fn max<S: bool, N: u32>(x: xN[S][N], y: xN[S][N]) -> xN[S][N] {\n    if x > y { x } else { y }\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+#[test]
+fn test_dslx_show_imported_function_from_dslx_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Create separate lib and client dirs to ensure we exercise --dslx_path
+    // resolution.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lib_dir = temp_dir.path().join("lib");
+    let client_dir = temp_dir.path().join("client");
+    std::fs::create_dir(&lib_dir).unwrap();
+    std::fs::create_dir(&client_dir).unwrap();
+
+    // Library module providing a public function.
+    let lib_path = lib_dir.join("mylib.x");
+    let lib_text = r#"pub fn inc(x: u8) -> u8 {
+    x + u8:1
+}
+"#;
+    std::fs::write(&lib_path, lib_text).unwrap();
+
+    // Client module that imports the library.
+    let main_path = client_dir.join("main.x");
+    std::fs::write(&main_path, "import mylib;").unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(main_path.to_str().unwrap())
+        .arg("mylib::inc")
+        .arg("--dslx_path")
+        .arg(lib_dir.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = "pub fn inc(x: u8) -> u8 {\n    x + u8:1\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+#[test]
+fn test_dslx_show_imported_function_without_input_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Library-only query: no input file provided; resolve via --dslx_path.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lib_dir = temp_dir.path().join("lib");
+    std::fs::create_dir(&lib_dir).unwrap();
+    let lib_path = lib_dir.join("mylib.x");
+    let lib_text = r#"pub fn inc(x: u8) -> u8 {
+    x + u8:1
+}
+"#;
+    std::fs::write(&lib_path, lib_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("mylib::inc")
+        .arg("--dslx_path")
+        .arg(lib_dir.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = "pub fn inc(x: u8) -> u8 {\n    x + u8:1\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+#[test]
+fn test_dslx_show_dotted_module_path_nested_type() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Library root with nested module path: foo/bar/baz.x
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lib_root = temp_dir.path().join("lib");
+    std::fs::create_dir_all(lib_root.join("foo/bar")).unwrap();
+
+    let baz_path = lib_root.join("foo/bar/baz.x");
+    let baz_text = r#"pub type T = u8;
+pub fn inc(x: u8) -> u8 { x + u8:1 }
+"#;
+    std::fs::write(&baz_path, baz_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    // Use dotted module path with :: for the member name.
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("foo.bar.baz::T")
+        .arg("--dslx_path")
+        .arg(lib_root.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(stdout.trim(), "pub type T = u8;".trim());
+}
+
+#[test]
+fn test_dslx_show_type_alias() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"type Alias = u8;"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("a.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let out = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("Alias")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        stdout.trim(),
+        "type Alias = u8;".trim(),
+        "stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_dslx_show_constant() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"const TEN = u8:10;"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("c.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let out = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("TEN")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        stdout.trim(),
+        "const TEN = u8:10;".trim(),
+        "stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_dslx_show_quickcheck() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"#[quickcheck] fn qc(x: u8) -> bool { x == x }"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("q.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("qc")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = "#[quickcheck]\nfn qc(x: u8) -> bool {\n    x == x\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+#[test]
+fn test_dslx_show_quickcheck_exhaustive() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"#[quickcheck(exhaustive)] fn qc_exh(x: u1) -> bool { x == x }"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("q_exh.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("qc_exh")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = "#[quickcheck(exhaustive)]\nfn qc_exh(x: u1) -> bool {\n    x == x\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+#[test]
+fn test_dslx_show_quickcheck_count() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"#[quickcheck(test_count=7)] fn qc_cnt(x: u8) -> bool { x == x }"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("q_cnt.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("dslx-show")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("qc_cnt")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected =
+        "#[quickcheck(test_count=7)]\nfn qc_cnt(x: u8) -> bool {\n    x == x\n}\n".trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
 #[test]
 fn test_ir2gates_adder_mapping_flag() {
     let _ = env_logger::builder().is_test(true).try_init();

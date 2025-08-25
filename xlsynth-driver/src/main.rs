@@ -40,6 +40,7 @@ mod dslx2pipeline;
 mod dslx2sv_types;
 mod dslx_equiv;
 mod dslx_g8r_stats;
+mod dslx_show;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod g8r2v;
@@ -450,6 +451,40 @@ fn main() {
                 )
         )
         // dslx2sv-types converts all the definitions in the .x file to SV types
+        .subcommand(
+            clap::Command::new("dslx-show")
+                .about("Resolve and print a DSLX symbol definition (enums/structs/type aliases/constants/functions/quickchecks)")
+                .arg(
+                    clap::Arg::new("dslx_input_file")
+                        .long("dslx_input_file")
+                        .value_name("DSLX_INPUT_FILE")
+                        .help("Optional input DSLX file - if omitted, symbol must be qualified like 'path.with.dots::Name'")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("dslx_path")
+                        .long("dslx_path")
+                        .value_name("DSLX_PATH_SEMI_SEPARATED")
+                        .help("Semi-separated paths for DSLX lookup (used for imported/library symbols)")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("dslx_stdlib_path")
+                        .long("dslx_stdlib_path")
+                        .value_name("DSLX_STDLIB_PATH")
+                        .help("Path to the DSLX standard library")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("symbol")
+                        .value_name("SYMBOL")
+                        .help("Symbol to show; supports dotted module path + member like 'foo.bar.baz::Name', or just 'Name' with --dslx_input_file")
+                        .required(true)
+                        .index(1)
+                        .action(ArgAction::Set),
+                ),
+        )
         .subcommand(
             clap::Command::new("dslx2sv-types")
                 .about("Converts DSLX type definitions to SystemVerilog")
@@ -1295,6 +1330,8 @@ fn main() {
         ir2pipeline::handle_ir2pipeline(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
         dslx2sv_types::handle_dslx2sv_types(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("dslx-show") {
+        dslx_show::handle_dslx_show(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx-g8r-stats") {
         dslx_g8r_stats::handle_dslx_g8r_stats(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2delayinfo") {
