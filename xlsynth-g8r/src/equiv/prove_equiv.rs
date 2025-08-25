@@ -1354,8 +1354,13 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
                 None
             };
 
-            let lhs_violation = { get_assertion(solver, &lhs.assertions) };
-            let rhs_violation = { get_assertion(solver, &rhs.assertions) };
+            let (lhs_violation, rhs_violation) = match assertion_semantics {
+                AssertionSemantics::Ignore => (None, None),
+                _ => (
+                    get_assertion(solver, &lhs.assertions),
+                    get_assertion(solver, &rhs.assertions),
+                ),
+            };
 
             // Now we can safely create a helper closure that borrows `solver` again
             let get_value = |solver: &mut S, i: &IrTypedBitVec<'a, S::Term>| -> IrValue {
@@ -3313,6 +3318,40 @@ pub mod test_utils {
         );
     }
 
+    /// Under Ignore semantics, counterexamples must not report assertion
+    /// violations.
+    pub fn test_assert_semantics_ignore_disproved_no_violation<S: Solver>(
+        solver_config: &S::Config,
+    ) {
+        let lhs = lt_ir(8, 1);
+        let rhs = lt_ir(8, 2);
+
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(&lhs);
+        let lhs_ir_fn = parser.parse_fn().unwrap();
+        let mut parser = crate::xls_ir::ir_parser::Parser::new(&rhs);
+        let rhs_ir_fn = parser.parse_fn().unwrap();
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &IrFn::new(&lhs_ir_fn, None),
+            &IrFn::new(&rhs_ir_fn, None),
+            AssertionSemantics::Ignore,
+            false,
+        );
+
+        match res {
+            super::EquivResult::Disproved {
+                lhs_output,
+                rhs_output,
+                ..
+            } => {
+                assert!(lhs_output.assertion_violation.is_none());
+                assert!(rhs_output.assertion_violation.is_none());
+            }
+            other => panic!("Expected Disproved, got {:?}", other),
+        }
+    }
+
     // ----- Never -----
     pub fn test_assert_semantics_never_proved<S: Solver>(solver_config: &S::Config) {
         let lhs = no_assertion_ir(1);
@@ -4134,6 +4173,12 @@ macro_rules! test_with_solver {
             #[test]
             fn test_assert_semantics_ignore_different_result() {
                 test_utils::test_assert_semantics_ignore_different_result::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn test_assert_semantics_ignore_disproved_no_violation() {
+                test_utils::test_assert_semantics_ignore_disproved_no_violation::<$solver_type>(
                     $solver_config,
                 );
             }
