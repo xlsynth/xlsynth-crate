@@ -1,3 +1,18 @@
+## Engineering conventions for xlsynth-crate
+
+- Prefer placing reusable functionality in library crates (e.g., `xlsynth-g8r`) rather than inside `xlsynth-driver`.
+
+  - Library code should expose typed APIs that can be invoked from other tools and tests.
+  - Parsing, transformation, and conversion logic should live alongside related modules (e.g., netlist parsing and conversions under `xlsynth-g8r/src/netlist/`).
+
+- The `xlsynth-driver` crate should remain a thin shim:
+
+  - Command-line definition and argument parsing
+  - Invoking library functions
+  - Human-friendly error reporting and exit codes
+
+This separation makes functionality testable without a CLI, keeps dependencies focused, and avoids duplication across binaries.
+
 # AGENTS.md
 
 All pull requests must be clean with respect to `pre-commit`.
