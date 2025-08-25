@@ -4,7 +4,8 @@ use xlsynth_sys::{CIrBits, CIrValue};
 
 use crate::{
     lib_support::{
-        xls_bits_make_sbits, xls_bits_make_ubits, xls_bits_to_debug_str, xls_bits_to_string,
+        xls_bits_make_sbits, xls_bits_make_ubits, xls_bits_to_bytes, xls_bits_to_debug_str,
+        xls_bits_to_int64, xls_bits_to_string, xls_bits_to_uint64,
         xls_format_preference_from_string, xls_value_eq, xls_value_free, xls_value_get_bits,
         xls_value_get_element, xls_value_get_element_count, xls_value_make_array,
         xls_value_make_sbits, xls_value_make_token, xls_value_make_tuple, xls_value_make_ubits,
@@ -68,8 +69,25 @@ impl IrBits {
         format!("bits[{}]:{}", self.get_bit_count(), value)
     }
 
+    pub fn to_u64(&self) -> Result<u64, XlsynthError> {
+        xls_bits_to_uint64(self.ptr)
+    }
+
+    pub fn to_i64(&self) -> Result<i64, XlsynthError> {
+        xls_bits_to_int64(self.ptr)
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, XlsynthError> {
+        xls_bits_to_bytes(self.ptr)
+    }
+
     pub fn add(&self, rhs: &IrBits) -> IrBits {
         let result = unsafe { xlsynth_sys::xls_bits_add(self.ptr, rhs.ptr) };
+        IrBits { ptr: result }
+    }
+
+    pub fn sub(&self, rhs: &IrBits) -> IrBits {
+        let result = unsafe { xlsynth_sys::xls_bits_sub(self.ptr, rhs.ptr) };
         IrBits { ptr: result }
     }
 
@@ -200,6 +218,14 @@ impl std::ops::Add for IrBits {
 
     fn add(self, rhs: Self) -> Self::Output {
         IrBits::add(&self, &rhs)
+    }
+}
+
+impl std::ops::Sub for IrBits {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        IrBits::sub(&self, &rhs)
     }
 }
 
