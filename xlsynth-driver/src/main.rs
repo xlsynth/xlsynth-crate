@@ -859,6 +859,12 @@ fn main() {
                         .help("Comma-separated list of DFF cell names to treat as identity (D->Q)")
                         .action(ArgAction::Set),
                 )
+                .arg(
+                    Arg::new("dff_cell_formula")
+                        .long("dff_cell_formula")
+                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF for D->Q identity override.")
+                        .action(ArgAction::Set),
+                )
         )
         .subcommand(
             clap::Command::new("gv-read-stats")

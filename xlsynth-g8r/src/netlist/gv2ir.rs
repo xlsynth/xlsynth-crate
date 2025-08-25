@@ -61,6 +61,7 @@ pub fn convert_gv2ir_paths(
     netlist_path: &Path,
     liberty_proto_path: &Path,
     dff_cells: &HashSet<String>,
+    dff_cell_formula: Option<&str>,
 ) -> Result<String> {
     // Netlist parse
     let (reader, is_gz) = open_reader(netlist_path)?;
@@ -89,13 +90,30 @@ pub fn convert_gv2ir_paths(
     // Liberty
     let liberty_lib = load_liberty_proto(liberty_proto_path)?;
 
+    // Build DFF cell set: start from provided names, then add by matching formula
+    // (if provided)
+    let mut dff_cells_merged: HashSet<String> = dff_cells.clone();
+    if let Some(target_formula) = dff_cell_formula {
+        for cell in &liberty_lib.cells {
+            // If any output pin function exactly matches the target string, consider this
+            // cell a DFF
+            if cell
+                .pins
+                .iter()
+                .any(|p| p.direction == 1 && p.function == target_formula)
+            {
+                dff_cells_merged.insert(cell.name.clone());
+            }
+        }
+    }
+
     // Project GateFn
     let gate_fn = project_gatefn_from_netlist_and_liberty(
         module,
         &parser.nets,
         &parser.interner,
         &liberty_lib,
-        dff_cells,
+        &dff_cells_merged,
     )
     .map_err(|e| anyhow!(e))?;
 

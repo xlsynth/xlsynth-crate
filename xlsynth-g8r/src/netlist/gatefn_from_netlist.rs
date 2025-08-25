@@ -203,8 +203,14 @@ pub fn project_gatefn_from_netlist_and_liberty(
             for pin in &cell.pins {
                 pin_directions.insert(pin.name.as_str(), pin.direction);
             }
-            let (input_map, missing_inputs, port_map) =
-                build_instance_input_map(inst, &pin_directions, interner, nets, &net_to_bv);
+            let (input_map, missing_inputs, port_map) = build_instance_input_map(
+                inst,
+                &pin_directions,
+                interner,
+                nets,
+                &net_to_bv,
+                &mut gb,
+            );
             if !missing_inputs.is_empty() {
                 log::trace!(
                     "Skipping instance '{}' (cell '{}') due to missing input nets: {:?}",
@@ -303,6 +309,7 @@ fn build_instance_input_map(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     nets: &[Net],
     net_to_bv: &HashMap<NetIndex, AigBitVector>,
+    gb: &mut GateBuilder,
 ) -> (
     HashMap<String, AigOperand>,
     Vec<String>,
@@ -377,6 +384,17 @@ fn build_instance_input_map(
                             port_name, net_idx.0, net_name, bit
                         ));
                     }
+                }
+                crate::netlist::parse::NetRef::Literal(bits) => {
+                    let bit_count = bits.get_bit_count();
+                    assert_eq!(bit_count, 1);
+                    let is_one = bits.get_bit(0).unwrap();
+                    let val = if is_one {
+                        gb.get_true()
+                    } else {
+                        gb.get_false()
+                    };
+                    input_map.insert(port_name.to_string(), val);
                 }
                 _ => {}
             }
@@ -796,6 +814,98 @@ mod tests {
         assert_eq!(
             q_input.bit_vector.get_lsb(0),
             q_output.bit_vector.get_lsb(0)
+        );
+    }
+
+    #[test]
+    fn test_instance_input_tied_to_literal() {
+        // Build a netlist and Liberty proto for a 2-input AND gate, with one input tied
+        // to 1'b0
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let y = interner.get_or_intern("y");
+        let and2 = interner.get_or_intern("AND2");
+        let u1 = interner.get_or_intern("u1");
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
+        ];
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: y,
+            },
+        ];
+        let instances = vec![NetlistInstance {
+            type_name: and2,
+            instance_name: u1,
+            connections: vec![
+                // .A(a), .B(1'b0), .Y(y)
+                (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
+                (
+                    interner.get_or_intern("B"),
+                    NetRef::Literal(xlsynth::IrBits::make_ubits(1, 0).unwrap()),
+                ),
+                (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(1))),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+        let module = NetlistModule {
+            name: interner.get_or_intern("top"),
+            ports,
+            wires: vec![],
+            instances,
+        };
+        let liberty_lib = crate::liberty_proto::Library {
+            cells: vec![crate::liberty_proto::Cell {
+                name: "AND2".to_string(),
+                pins: vec![
+                    crate::liberty_proto::Pin {
+                        name: "A".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "B".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "Y".to_string(),
+                        direction: 1,
+                        function: "(A & B)".to_string(),
+                    },
+                ],
+                area: 1.0,
+            }],
+        };
+        let gate_fn = project_gatefn_from_netlist_and_liberty(
+            &module,
+            &nets,
+            &interner,
+            &liberty_lib,
+            &HashSet::new(),
+        )
+        .unwrap();
+        let s = gate_fn.to_string();
+        // The output should be always false (since B is tied to 0)
+        assert!(
+            s.contains("literal(false)") || s.contains("= %0"),
+            "GateFn output: {}",
+            s
         );
     }
 }
