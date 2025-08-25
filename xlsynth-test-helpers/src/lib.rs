@@ -62,7 +62,7 @@ pub fn compare_golden_sv(got: &str, relpath: &str) {
     }
 
     // Validate generated Verilog is syntactically correct after golden check.
-    assert_valid_sv(&got);
+    assert_valid_sv(got);
 }
 
 /// Creates a unique temporary directory for tests under the system temp dir,
@@ -77,7 +77,7 @@ pub fn make_test_tmpdir(base_prefix: &str) -> tempfile::TempDir {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let prefix = format!("{}_{}_{}", base_prefix, pid, nanos);
+    let prefix = format!("{base_prefix}_{pid}_{nanos}");
     tempfile::Builder::new()
         .prefix(&prefix)
         .tempdir_in(std::env::temp_dir())

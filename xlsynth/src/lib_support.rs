@@ -5,6 +5,7 @@
 //!
 //! (Things in this module are generally crate-visible vs public to provide that
 //! support.)
+#![allow(clippy::arc_with_non_send_sync)]
 
 use std::{
     ffi::{CStr, CString},
@@ -665,8 +666,7 @@ pub(crate) fn xls_function_jit_run(
     if !success {
         let error_message = unsafe { c_str_to_rust(error_out) };
         return Err(XlsynthError(format!(
-            "Failed to run JIT function: {}",
-            error_message
+            "Failed to run JIT function: {error_message}"
         )));
     }
     let trace_messages =

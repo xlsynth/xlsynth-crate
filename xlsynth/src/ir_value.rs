@@ -300,11 +300,11 @@ impl IrValue {
 
     pub fn u64(value: u64) -> Self {
         // Unwrap should be ok since the u64 always fits.
-        xls_value_make_ubits(value as u64, 64).unwrap()
+        xls_value_make_ubits(value, 64).unwrap()
     }
 
     pub fn make_ubits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
-        xls_value_make_ubits(value as u64, bit_count)
+        xls_value_make_ubits(value, bit_count)
     }
 
     pub fn make_sbits(bit_count: usize, value: i64) -> Result<Self, XlsynthError> {
@@ -337,8 +337,7 @@ impl IrValue {
         let bits = self.to_bits()?;
         if bits.get_bit_count() != 1 {
             return Err(XlsynthError(format!(
-                "IrValue {} is not single-bit; must be bits[1] to convert to bool",
-                self.to_string()
+                "IrValue {self} is not single-bit; must be bits[1] to convert to bool"
             )));
         }
         bits.get_bit(0)
@@ -349,8 +348,7 @@ impl IrValue {
         let width = bits.get_bit_count();
         if width > 64 {
             return Err(XlsynthError(format!(
-                "IrValue::to_i64(): width {} exceeds 64 bits",
-                width
+                "IrValue::to_i64(): width {width} exceeds 64 bits"
             )));
         }
         let unsigned = self.to_u64()?;
@@ -363,8 +361,7 @@ impl IrValue {
         let width = bits.get_bit_count();
         if width > 64 {
             return Err(XlsynthError(format!(
-                "IrValue::to_u64(): width {} exceeds 64 bits",
-                width
+                "IrValue::to_u64(): width {width} exceeds 64 bits"
             )));
         }
         let mut val: u64 = 0;
@@ -378,8 +375,7 @@ impl IrValue {
         let val = self.to_u64()?;
         if val > u32::MAX as u64 {
             return Err(XlsynthError(format!(
-                "IrValue::to_u32() value {} does not fit in u32",
-                val
+                "IrValue::to_u32() value {val} does not fit in u32"
             )));
         }
         Ok(val as u32)
@@ -414,21 +410,19 @@ impl IrValue {
 unsafe impl Send for IrValue {}
 unsafe impl Sync for IrValue {}
 
-impl Into<IrValue> for bool {
-    fn into(self) -> IrValue {
-        IrValue::bool(self)
+impl From<bool> for IrValue {
+    fn from(val: bool) -> Self {
+        IrValue::bool(val)
     }
 }
-
-impl Into<IrValue> for u32 {
-    fn into(self) -> IrValue {
-        IrValue::u32(self)
+impl From<u32> for IrValue {
+    fn from(val: u32) -> Self {
+        IrValue::u32(val)
     }
 }
-
-impl Into<IrValue> for u64 {
-    fn into(self) -> IrValue {
-        IrValue::u64(self)
+impl From<u64> for IrValue {
+    fn from(val: u64) -> Self {
+        IrValue::u64(val)
     }
 }
 
@@ -552,13 +546,13 @@ mod tests {
     #[test]
     fn test_ir_value_display() {
         let v = IrValue::parse_typed("bits[32]:42").expect("parse success");
-        assert_eq!(format!("{}", v), "bits[32]:42");
+        assert_eq!(format!("{v}"), "bits[32]:42");
     }
 
     #[test]
     fn test_ir_value_debug() {
         let v = IrValue::parse_typed("bits[32]:42").expect("parse success");
-        assert_eq!(format!("{:?}", v), "bits[32]:42");
+        assert_eq!(format!("{v:?}"), "bits[32]:42");
     }
 
     #[test]
@@ -628,10 +622,10 @@ mod tests {
         assert_eq!(v_i64, 42);
 
         let f = IrValue::parse_typed("bits[1]:0").expect("parse success");
-        assert_eq!(f.to_bool().unwrap(), false);
+        assert!(!f.to_bool().unwrap());
 
         let t = IrValue::parse_typed("bits[1]:1").expect("parse success");
-        assert_eq!(t.to_bool().unwrap(), true);
+        assert!(t.to_bool().unwrap());
     }
 
     #[test]
@@ -644,15 +638,15 @@ mod tests {
         assert_eq!(v, v2);
 
         // Getting at bit values; 42 = 0b101010.
-        assert_eq!(bits.get_bit(0).unwrap(), false);
-        assert_eq!(bits.get_bit(1).unwrap(), true);
-        assert_eq!(bits.get_bit(2).unwrap(), false);
-        assert_eq!(bits.get_bit(3).unwrap(), true);
-        assert_eq!(bits.get_bit(4).unwrap(), false);
-        assert_eq!(bits.get_bit(5).unwrap(), true);
-        assert_eq!(bits.get_bit(6).unwrap(), false);
+        assert!(!bits.get_bit(0).unwrap());
+        assert!(bits.get_bit(1).unwrap());
+        assert!(!bits.get_bit(2).unwrap());
+        assert!(bits.get_bit(3).unwrap());
+        assert!(!bits.get_bit(4).unwrap());
+        assert!(bits.get_bit(5).unwrap());
+        assert!(!bits.get_bit(6).unwrap());
         for i in 7..32 {
-            assert_eq!(bits.get_bit(i).unwrap(), false);
+            assert!(!bits.get_bit(i).unwrap());
         }
         assert!(
             bits.get_bit(32).is_err(),
@@ -664,7 +658,7 @@ mod tests {
             .to_string()
             .contains("Index 32 out of bounds for bits[32]:0b00000000000000000000000000101010"));
 
-        let debug_fmt = format!("{:?}", bits);
+        let debug_fmt = format!("{bits:?}");
         assert_eq!(debug_fmt, "0b00000000000000000000000000101010");
     }
 
@@ -722,7 +716,7 @@ mod tests {
         let two = IrBits::u32(2);
         let neg_three = IrBits::u32(3).negate();
         let product = two.smul(&neg_three);
-        assert_eq!(product.msb(), true);
+        assert!(product.msb());
         assert_eq!(product.abs().to_string(), "bits[64]:6");
     }
 

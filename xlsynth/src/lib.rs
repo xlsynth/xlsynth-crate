@@ -32,33 +32,19 @@ use xlsynth_sys::CIrValue;
 pub fn dslx_path_to_module_name(path: &std::path::Path) -> Result<&str, XlsynthError> {
     let stem = path.file_stem();
     match stem {
-        None => {
-            return Err(XlsynthError(
-                "Failed to extract module name from path".to_string(),
-            ));
-        }
-        Some(stem) => {
-            return Ok(stem.to_str().unwrap());
-        }
+        None => Err(XlsynthError(
+            "Failed to extract module name from path".to_string(),
+        )),
+        Some(stem) => Ok(stem.to_str().unwrap()),
     }
 }
 
+#[derive(Default)]
 pub struct DslxConvertOptions<'a> {
     pub dslx_stdlib_path: Option<&'a std::path::Path>,
     pub additional_search_paths: Vec<&'a std::path::Path>,
     pub enable_warnings: Option<&'a [String]>,
     pub disable_warnings: Option<&'a [String]>,
-}
-
-impl<'a> Default for DslxConvertOptions<'a> {
-    fn default() -> Self {
-        DslxConvertOptions {
-            dslx_stdlib_path: None,
-            additional_search_paths: vec![],
-            enable_warnings: None,
-            disable_warnings: None,
-        }
-    }
 }
 
 pub struct DslxToIrTextResult {
@@ -168,13 +154,13 @@ pub fn convert_dslx_to_ir_text(
         xlsynth_sys::xls_c_strs_free(warnings_out, warnings_out_count);
 
         if success {
-            return Ok(DslxToIrTextResult {
+            Ok(DslxToIrTextResult {
                 ir: c_str_to_rust(ir_out),
                 warnings,
-            });
+            })
         } else {
             let error_out_str = c_str_to_rust(error_out);
-            return Err(XlsynthError(error_out_str));
+            Err(XlsynthError(error_out_str))
         }
     }
 }
@@ -187,10 +173,10 @@ pub fn xls_parse_typed_value(s: &str) -> Result<IrValue, XlsynthError> {
         let success =
             xlsynth_sys::xls_parse_typed_value(c_str.as_ptr(), &mut error_out, &mut ir_value_out);
         if success {
-            return Ok(IrValue { ptr: ir_value_out });
+            Ok(IrValue { ptr: ir_value_out })
         } else {
             let error_out_str: String = c_str_to_rust(error_out);
-            return Err(XlsynthError(error_out_str));
+            Err(XlsynthError(error_out_str))
         }
     }
 }
@@ -263,7 +249,7 @@ pub fn mangle_dslx_name_with_calling_convention(
     let base = mangle_dslx_name(module, name)?;
     Ok(match cc {
         DslxCallingConvention::Normal => base,
-        DslxCallingConvention::ImplicitToken => format!("__itok{}", base),
+        DslxCallingConvention::ImplicitToken => format!("__itok{base}"),
     })
 }
 
@@ -282,8 +268,8 @@ pub fn x_path_to_rs_bridge(
 ) -> std::path::PathBuf {
     let mut import_data = dslx::ImportData::new(None, &[root_dir]);
     let path = std::path::PathBuf::from(relpath);
-    let dslx =
-        std::fs::read_to_string(&path).expect(&format!("DSLX file should be readable: {path:?}"));
+    let dslx = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("DSLX file should be readable: {:?}", path));
 
     // Generate the bridge code.
     let mut builder = rust_bridge_builder::RustBridgeBuilder::new();

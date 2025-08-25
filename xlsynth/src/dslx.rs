@@ -77,10 +77,6 @@ pub struct ImportData {
 }
 
 impl ImportData {
-    pub fn default() -> Self {
-        Self::new(None, &[])
-    }
-
     pub fn new(
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
@@ -115,6 +111,12 @@ impl ImportData {
                 },
             }),
         }
+    }
+}
+
+impl Default for ImportData {
+    fn default() -> Self {
+        Self::new(None, &[])
     }
 }
 
@@ -155,9 +157,9 @@ impl TypecheckedModule {
     pub fn get_type_info_for_module(&self, module: &Module) -> Option<TypeInfo> {
         let self_type_info = self.get_type_info();
         if module.ptr == self.get_module().ptr {
-            return Some(self_type_info);
+            Some(self_type_info)
         } else {
-            return self_type_info.get_imported_type_info(module);
+            self_type_info.get_imported_type_info(module)
         }
     }
 }
@@ -527,7 +529,7 @@ impl Import {
         let subject_count = unsafe { sys::xls_dslx_import_get_subject_count(self.ptr) };
         for i in 0..subject_count {
             let s = unsafe {
-                let c_str = sys::xls_dslx_import_get_subject(self.ptr, i as i64);
+                let c_str = sys::xls_dslx_import_get_subject(self.ptr, i);
                 c_str_to_rust(c_str)
             };
             result.push(s);
@@ -1118,17 +1120,17 @@ pub fn parse_and_typecheck(
         if success {
             assert!(error_out.is_null());
             assert!(!result_out.is_null());
-            return Ok(TypecheckedModule {
+            Ok(TypecheckedModule {
                 ptr: Rc::new(TypecheckedModulePtr {
                     parent: import_data.ptr.clone(),
                     ptr: result_out,
                 }),
-            });
+            })
+        } else {
+            assert!(!error_out.is_null());
+            let error_out_str: String = c_str_to_rust(error_out);
+            Err(XlsynthError(error_out_str))
         }
-
-        assert!(!error_out.is_null());
-        let error_out_str: String = c_str_to_rust(error_out);
-        return Err(XlsynthError(error_out_str));
     }
 }
 

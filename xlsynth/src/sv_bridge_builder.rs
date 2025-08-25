@@ -82,7 +82,7 @@ fn make_bit_span_suffix(bit_count: usize) -> String {
 fn import_to_pkg_name(import: &dslx::Import) -> String {
     let subject = import.get_subject();
     assert!(
-        subject.len() > 0,
+        !subject.is_empty(),
         "import subjects always have at least one token"
     );
     format!("{}_sv_pkg", subject.last().unwrap())
@@ -205,22 +205,22 @@ fn convert_type(ty: &dslx::Type, array_sizes: Option<Vec<usize>>) -> Result<Stri
             Ok(format!(
                 "{}{}{}",
                 leader,
-                make_array_span_suffix(array_sizes.unwrap_or(vec![])),
+                make_array_span_suffix(array_sizes.unwrap_or_default()),
                 make_bit_span_suffix(bit_count)
             ))
         }
         MatchableDslxType::Enum(enum_def) => Ok(format!(
             "{}{}",
             enum_name_to_sv(&enum_def.get_identifier()),
-            make_array_span_suffix(array_sizes.unwrap_or(vec![]))
+            make_array_span_suffix(array_sizes.unwrap_or_default())
         )),
         MatchableDslxType::Struct(struct_def) => Ok(format!(
             "{}{}",
             struct_name_to_sv(&struct_def.get_identifier()),
-            make_array_span_suffix(array_sizes.unwrap_or(vec![]))
+            make_array_span_suffix(array_sizes.unwrap_or_default())
         )),
         MatchableDslxType::Array { element_ty, size } => {
-            let mut array_sizes = array_sizes.unwrap_or(vec![]);
+            let mut array_sizes = array_sizes.unwrap_or_default();
             array_sizes.push(size);
             convert_type(&element_ty.ty, Some(array_sizes))
         }
@@ -254,7 +254,7 @@ fn convert_extern_type(
             ty_name = struct_name_to_sv(&struct_def.get_identifier())
         )),
         MatchableDslxType::Array { element_ty, size } => {
-            let mut array_sizes = array_sizes.unwrap_or(vec![]);
+            let mut array_sizes = array_sizes.unwrap_or_default();
             array_sizes.push(size);
             Ok(convert_extern_type(
                 pkg_name,
@@ -298,6 +298,12 @@ impl SvBridgeBuilder {
     }
 }
 
+impl Default for SvBridgeBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BridgeBuilder for SvBridgeBuilder {
     fn start_module(&mut self, _module_name: &str) -> Result<(), XlsynthError> {
         Ok(())
@@ -333,11 +339,10 @@ impl BridgeBuilder for SvBridgeBuilder {
             let sv_member_name = Self::enum_member_name_to_sv(member_name);
             self.define_or_error(&sv_member_name, &ctx)?;
             lines.push(format!(
-                "    {} = {}'d{}{}",
-                sv_member_name, underlying_bit_count, digits, maybe_comma
+                "    {sv_member_name} = {underlying_bit_count}'d{digits}{maybe_comma}"
             ));
         }
-        lines.push(format!("}} {};\n", sv_name));
+        lines.push(format!("}} {sv_name};\n"));
         self.lines.push(lines.join("\n"));
         Ok(())
     }
@@ -348,7 +353,7 @@ impl BridgeBuilder for SvBridgeBuilder {
         members: &[StructMemberData],
     ) -> Result<(), XlsynthError> {
         let mut lines = vec![];
-        lines.push(format!("typedef struct packed {{"));
+        lines.push("typedef struct packed {".to_string());
         for member in members {
             let member_name = &member.name;
 
@@ -360,7 +365,7 @@ impl BridgeBuilder for SvBridgeBuilder {
             let member_annotated_ty = &member.type_annotation;
 
             if let Some(extern_ref) = get_extern_type_ref(member_annotated_ty, member_concrete_ty) {
-                lines.push(format!("    {} {};", extern_ref, member_name));
+                lines.push(format!("    {extern_ref} {member_name};"));
                 continue;
             }
 
@@ -373,13 +378,13 @@ impl BridgeBuilder for SvBridgeBuilder {
                 let type_def = type_ref.get_type_definition();
                 if let Some(type_alias) = type_def.to_type_alias() {
                     let sv_type_name = struct_name_to_sv(&type_alias.get_identifier());
-                    lines.push(format!("    {} {};", sv_type_name, member_name));
+                    lines.push(format!("    {sv_type_name} {member_name};"));
                     continue;
                 }
             }
 
             let member_sv_ty = convert_type(member_concrete_ty, None)?;
-            lines.push(format!("    {} {};", member_sv_ty, member_name));
+            lines.push(format!("    {member_sv_ty} {member_name};"));
         }
         lines.push(format!("}} {};\n", struct_name_to_sv(dslx_name)));
         self.lines.push(lines.join("\n"));
@@ -395,10 +400,10 @@ impl BridgeBuilder for SvBridgeBuilder {
         let sv_name = format!("{}{}", camel_to_snake(dslx_name), TYPE_ALIAS_SUFFIX);
         if let Some(extern_ref) = get_extern_type_ref(type_annotation, ty) {
             self.lines
-                .push(format!("typedef {} {};\n", extern_ref, sv_name));
+                .push(format!("typedef {extern_ref} {sv_name};\n"));
         } else {
             let sv_ty = convert_type(ty, None)?;
-            self.lines.push(format!("typedef {} {};\n", sv_ty, sv_name));
+            self.lines.push(format!("typedef {sv_ty} {sv_name};\n"));
         }
         Ok(())
     }
@@ -421,7 +426,7 @@ impl BridgeBuilder for SvBridgeBuilder {
                 .to_string_fmt_no_prefix(IrFormatPreference::ZeroPaddedHex)?
                 .replace("_", "");
 
-            let value_str = format!("{}'{}{}", bit_count, hex_prefix, hex_digits,);
+            let value_str = format!("{bit_count}'{hex_prefix}{hex_digits}",);
             self.lines.push(format!(
                 "localparam bit {signedness} [{}:0] {name} = {value_str};\n",
                 bit_count - 1,
@@ -430,7 +435,7 @@ impl BridgeBuilder for SvBridgeBuilder {
             ));
             Ok(())
         } else {
-            log::warn!("Unsupported constant type: {:?}", ir_value);
+            log::warn!("Unsupported constant type: {ir_value:?}");
             Ok(())
         }
     }

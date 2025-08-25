@@ -3,6 +3,7 @@
 //! APIs that wrap the Verilog AST building facilities inside of XLS.
 
 #![allow(unused)]
+#![allow(clippy::arc_with_non_send_sync)]
 
 use xlsynth_sys::{self as sys};
 
@@ -61,10 +62,9 @@ impl ModulePort {
 
     /// Returns the width (bit count) of this port if determinable; otherwise 0.
     pub fn width(&self) -> i64 {
-        match self.data_type().flat_bit_count_as_int64() {
-            Ok(w) => w,
-            Err(_) => 0,
-        }
+        self.data_type()
+            .flat_bit_count_as_int64()
+            .unwrap_or_default()
     }
 }
 
@@ -129,12 +129,12 @@ impl VastModule {
     /// Returns all ports (both inputs and outputs) on this module.
     pub fn ports(&self) -> Vec<ModulePort> {
         let _locked = self.parent.lock().unwrap();
-        let mut count = 0;
+        let mut count: usize = 0;
         let ports_ptr = unsafe { sys::xls_vast_verilog_module_get_ports(self.inner, &mut count) };
         if ports_ptr.is_null() || count == 0 {
             return Vec::new();
         }
-        let slice = unsafe { std::slice::from_raw_parts(ports_ptr, count as usize) };
+        let slice = unsafe { std::slice::from_raw_parts(ports_ptr, count) };
         let result = slice
             .iter()
             .map(|&ptr| ModulePort {

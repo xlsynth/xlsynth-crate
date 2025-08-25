@@ -210,13 +210,11 @@ pub fn generate_ir_fn(
 
     // Process each operation
     for op in ops {
-        if let Err(e) = fn_builder.last_value() {
-            return Err(e);
-        }
+        fn_builder.last_value()?;
         match op {
             FuzzOp::Literal { bits, value } => {
                 assert!(bits > 0, "literal op has no bits");
-                let ir_value = xlsynth::IrValue::make_ubits(bits as usize, value as u64)?;
+                let ir_value = xlsynth::IrValue::make_ubits(bits as usize, value)?;
                 let node = fn_builder.literal(&ir_value, None);
                 available_nodes.push(node);
             }
