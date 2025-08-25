@@ -86,6 +86,7 @@ pub enum TokenPayload {
     Semi,
     Comma,
     Dot,
+    Equals,
     Comment(String),
     Annotation { key: String, value: AnnotationValue },
     VerilogInt { width: Option<usize>, value: IrBits },
@@ -174,12 +175,24 @@ impl<R: Read + 'static> TokenScanner<R> {
         if self.char_buf.is_empty() && !self.done {
             let mut buf = [0u8; 1024];
             match self.reader.read(&mut buf) {
-                Ok(0) => self.done = true,
+                Ok(0) => {
+                    log::trace!("TokenScanner.fill_char_buf: read=0 -> EOF");
+                    self.done = true
+                }
                 Ok(n) => {
+                    log::trace!("TokenScanner.fill_char_buf: read={} bytes", n);
                     let s = String::from_utf8_lossy(&buf[..n]);
+                    log::trace!(
+                        "TokenScanner.fill_char_buf: decoded chunk len={} first='{}'",
+                        s.len(),
+                        s.chars().next().unwrap_or('\0')
+                    );
                     self.char_buf.extend(s.chars());
                 }
-                Err(_) => self.done = true,
+                Err(e) => {
+                    log::trace!("TokenScanner.fill_char_buf: read error: {}", e);
+                    self.done = true
+                }
             }
         }
     }
@@ -703,6 +716,10 @@ impl<R: Read + 'static> TokenScanner<R> {
                 self.popc();
                 TokenPayload::Dot
             }
+            '=' => {
+                self.popc();
+                TokenPayload::Equals
+            }
             '\n' => {
                 self.popc();
                 return match self.next_token()? {
@@ -757,24 +774,187 @@ impl<R: Read + 'static> Parser<R> {
         }
     }
 
+    /// Parses: assign <ident>([msb:lsb]|[idx]) = <literal>;
+    /// Only accepts RHS as a Verilog integer literal; errors otherwise.
+    fn parse_assign_literal(&mut self) -> Result<(), ScanError> {
+        // consume 'assign' identifier
+        let t_assign = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected 'assign'".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        match t_assign.payload {
+            TokenPayload::Identifier(ref s) if s == "assign" => {}
+            _ => {
+                return Err(ScanError {
+                    message: "expected 'assign'".to_string(),
+                    span: t_assign.span,
+                });
+            }
+        }
+
+        // LHS base identifier
+        let t_name = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected identifier on left-hand side of assign".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(t_name.payload, TokenPayload::Identifier(_)) {
+            return Err(ScanError {
+                message: "expected identifier on left-hand side of assign".to_string(),
+                span: t_name.span,
+            });
+        }
+
+        // Optional bit- or part-select on the LHS: [idx] or [msb:lsb]
+        if let Some(next) = self.scanner.peekt()? {
+            if matches!(next.payload, TokenPayload::OBrack) {
+                // consume '['
+                self.scanner.popt()?;
+                // parse msb or idx
+                let t0 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: "expected index or msb in assign bit/part-select".to_string(),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                match t0.payload {
+                    TokenPayload::VerilogInt { .. } => {}
+                    _ => {
+                        return Err(ScanError {
+                            message: "expected integer in assign bit/part-select".to_string(),
+                            span: t0.span,
+                        });
+                    }
+                }
+                // Optional : lsb
+                if let Some(peek) = self.scanner.peekt()? {
+                    if matches!(peek.payload, TokenPayload::Colon) {
+                        self.scanner.popt()?; // consume ':'
+                        let t1 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: "expected lsb in part-select".to_string(),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        match t1.payload {
+                            TokenPayload::VerilogInt { .. } => {}
+                            _ => {
+                                return Err(ScanError {
+                                    message: "expected integer for lsb in part-select".to_string(),
+                                    span: t1.span,
+                                });
+                            }
+                        }
+                    }
+                }
+                // expect ']'
+                let t_cb = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: "expected ']' after bit/part-select".to_string(),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                if !matches!(t_cb.payload, TokenPayload::CBrack) {
+                    return Err(ScanError {
+                        message: "expected ']' after bit/part-select".to_string(),
+                        span: t_cb.span,
+                    });
+                }
+            }
+        }
+
+        // expect '='
+        let t_eq = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected '=' in assign".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(t_eq.payload, TokenPayload::Equals) {
+            return Err(ScanError {
+                message: "expected '=' in assign".to_string(),
+                span: t_eq.span,
+            });
+        }
+
+        // RHS literal
+        let t_rhs = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected literal on right-hand side of assign".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        match t_rhs.payload {
+            TokenPayload::VerilogInt { .. } => {}
+            _ => {
+                return Err(ScanError {
+                    message: "only literal RHS supported in assign".to_string(),
+                    span: t_rhs.span,
+                });
+            }
+        }
+
+        // expect ';'
+        let t_semi = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected ';' after assign".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(t_semi.payload, TokenPayload::Semi) {
+            return Err(ScanError {
+                message: "expected ';' after assign".to_string(),
+                span: t_semi.span,
+            });
+        }
+        Ok(())
+    }
     pub fn parse_file(&mut self) -> Result<Vec<NetlistModule>, ScanError> {
+        log::trace!("parse_file: start");
         let mut modules = Vec::new();
         loop {
             match self.scanner.peekt()? {
-                Some(tok) => match &tok.payload {
-                    TokenPayload::Keyword(Keyword::Module) => {
-                        modules.push(self.parse_module()?);
+                Some(tok) => {
+                    log::trace!(
+                        "parse_file: top-level token: {:?} at {:?}",
+                        tok.payload,
+                        tok.span
+                    );
+                    match &tok.payload {
+                        TokenPayload::Keyword(Keyword::Module) => {
+                            log::trace!("parse_file: found 'module', parsing module body");
+                            modules.push(self.parse_module()?);
+                        }
+                        // Skip comments and annotations at file scope
+                        TokenPayload::Comment(_) | TokenPayload::Annotation { .. } => {
+                            log::trace!("parse_file: skipping comment/annotation at top level");
+                            self.scanner.popt()?;
+                        }
+                        // Unexpected token at file scope: stop.
+                        _ => {
+                            log::trace!(
+                                "parse_file: stopping on unexpected top-level token: {:?}",
+                                tok.payload
+                            );
+                            break;
+                        }
                     }
-                    // Skip comments and annotations at file scope
-                    TokenPayload::Comment(_) | TokenPayload::Annotation { .. } => {
-                        self.scanner.popt()?;
-                    }
-                    // EOF
-                    _ => break,
-                },
+                }
                 None => break,
             }
         }
+        log::trace!("parse_file: done; modules parsed: {}", modules.len());
         Ok(modules)
     }
 
@@ -895,6 +1075,9 @@ impl<R: Read + 'static> Parser<R> {
                     TokenPayload::Keyword(Keyword::Endmodule) => {
                         self.scanner.popt()?; // consume 'endmodule'
                         break;
+                    }
+                    TokenPayload::Identifier(s) if s == "assign" => {
+                        self.parse_assign_literal()?;
                     }
                     TokenPayload::Identifier(_) => {
                         let instance = self.parse_instance()?;
@@ -1564,6 +1747,34 @@ mod tests {
         let t = scanner.popt().expect("no scan error").unwrap();
         assert!(matches!(t.payload, TokenPayload::Comment(ref s) if s == " hello world"));
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_parse_module_with_assign_literal_bit() {
+        let src = r#"
+module m(a, out);
+  input a;
+  output [3:0] out;
+  assign out[1] = 1'b0;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_module_with_assign_literal_partselect() {
+        let src = r#"
+module m(a, out);
+  input a;
+  output [7:0] out;
+  assign out[7:4] = 4'h0;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
     }
 
     #[test]
