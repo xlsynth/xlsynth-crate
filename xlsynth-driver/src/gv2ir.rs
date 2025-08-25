@@ -13,10 +13,16 @@ pub fn handle_gv2ir(matches: &clap::ArgMatches) {
         .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
 
+    // Optional formula to auto-classify DFF cells by output pin function string
+    let dff_cell_formula: Option<String> = matches
+        .get_one::<String>("dff_cell_formula")
+        .map(|s| s.to_string());
+
     match convert_gv2ir_paths(
         Path::new(netlist_path),
         Path::new(liberty_proto_path),
         &dff_cells,
+        dff_cell_formula.as_deref(),
     ) {
         Ok(ir_text) => println!("{}", ir_text),
         Err(e) => {
