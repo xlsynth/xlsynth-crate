@@ -12,7 +12,8 @@ pub fn handle_gv_read_stats(matches: &ArgMatches) {
         Ok(s) => {
             println!("Instances: {}", s.num_instances);
             println!("Nets: {}", s.num_nets);
-            println!("Approx. memory: {} bytes", s.memory_bytes);
+            let approx_mib = (s.memory_bytes as f64) / (1024.0 * 1024.0);
+            println!("Approx. memory: {:.2} MiB", approx_mib);
             println!("Parse time: {} ms", s.parse_duration.as_millis());
             println!("Cell counts:");
             for (cell, count) in s.cell_counts {
