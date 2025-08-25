@@ -34,6 +34,7 @@ anyhow = "1.0"
 which = "5.0"
 libc = "0.2"
 signal-hook = "0.3"
+flate2 = "1.0"
 
 [dev-dependencies]
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
