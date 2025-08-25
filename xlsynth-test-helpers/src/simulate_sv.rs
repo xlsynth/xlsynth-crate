@@ -86,12 +86,12 @@ impl std::fmt::Display for SimulateSvError {
                 write!(f, "Icarus Verilog (iverilog) not found in PATH")
             }
             SimulateSvError::CompileFailed { status, .. } => {
-                write!(f, "iverilog failed with status {:?}", status)
+                write!(f, "iverilog failed with status {status:?}")
             }
             SimulateSvError::SimulationFailed { status, .. } => {
-                write!(f, "vvp failed with status {:?}", status)
+                write!(f, "vvp failed with status {status:?}")
             }
-            SimulateSvError::Io(e) => write!(f, "IO error: {}", e),
+            SimulateSvError::Io(e) => write!(f, "IO error: {e}"),
         }
     }
 }
@@ -145,7 +145,7 @@ fn compile_with_iverilog(
     }
 
     // Log the command we are about to run.
-    log::info!("Running: {:?}", cmd);
+    log::info!("Running: {cmd:?}");
 
     let output = cmd.output()?;
     if !output.status.success() {
@@ -155,7 +155,7 @@ fn compile_with_iverilog(
             stderr: String::from_utf8_lossy(&output.stderr).into(),
         });
     }
-    log::info!("iverilog finished OK, output {:?}", out_path);
+    log::info!("iverilog finished OK, output {out_path:?}");
     Ok(out_path)
 }
 
@@ -165,7 +165,7 @@ fn run_vvp(vvp_path: &Path, work_dir: &Path) -> Result<(), SimulateSvError> {
     let mut cmd = Command::new("vvp");
     cmd.current_dir(work_dir).arg(vvp_path);
 
-    log::info!("Running: {:?}", cmd);
+    log::info!("Running: {cmd:?}");
 
     let output = cmd.current_dir(work_dir).output()?;
 
@@ -252,6 +252,7 @@ pub fn simulate_sv_flist(
 ///   pins.
 /// * `reset_signal` – reset pin name.
 /// * `reset_active_low` – if true, reset asserts when `0`.
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_pipeline_single_pulse_custom(
     pipeline_sv: &str,
     module_name: &str,

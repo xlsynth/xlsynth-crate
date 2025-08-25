@@ -76,7 +76,7 @@ mod tests {
         }
         let invalid_sv = "module foo; garbage; endmodule";
         // This call should panic on the invalid SV.
-        let result = std::panic::catch_unwind(|| assert_valid_sv(&invalid_sv));
+        let result = std::panic::catch_unwind(|| assert_valid_sv(invalid_sv));
         assert!(result.is_err());
         let error = result.err().unwrap();
         let error_message = error.downcast_ref::<String>().unwrap();

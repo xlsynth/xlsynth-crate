@@ -22,8 +22,7 @@ lazy_static! {
         .unwrap();
         let package: xlsynth::IrPackage = convert_result.ir;
         let mangled = xlsynth::mangle_dslx_name("make_f32", "make_f32").unwrap();
-        let function = package.get_function(&mangled).unwrap();
-        function
+        package.get_function(&mangled).unwrap()
     };
 }
 

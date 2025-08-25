@@ -27,7 +27,7 @@ impl RustBridgeBuilder {
     fn convert_type(ty: &dslx::Type) -> Result<String, XlsynthError> {
         if let Some((is_signed, bit_count)) = ty.is_bits_like() {
             let signed_str = if is_signed { "S" } else { "U" };
-            Ok(format!("Ir{}Bits<{}>", signed_str, bit_count))
+            Ok(format!("Ir{signed_str}Bits<{bit_count}>"))
         } else if ty.is_enum() {
             let enum_def = ty.get_enum_def().unwrap();
             Ok(enum_def.get_identifier().to_string())
@@ -38,13 +38,19 @@ impl RustBridgeBuilder {
             let array_ty = ty.get_array_element_type();
             let array_size = ty.get_array_size();
             let rust_ty = Self::convert_type(&array_ty)?;
-            Ok(format!("[{}; {}]", rust_ty, array_size))
+            Ok(format!("[{rust_ty}; {array_size}]"))
         } else {
             Err(XlsynthError(format!(
                 "Unsupported type for conversion from DSLX to Rust: {:?}",
                 ty.to_string()?
             )))
         }
+    }
+}
+
+impl Default for RustBridgeBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -80,7 +86,7 @@ impl BridgeBuilder for RustBridgeBuilder {
             }
         };
 
-        self.lines.push(format!("pub enum {} {{", dslx_name));
+        self.lines.push(format!("pub enum {dslx_name} {{"));
         for (name, value) in members.iter() {
             self.lines
                 .push(format!("    {} = {},", name, value_to_string(value)?));
@@ -90,7 +96,7 @@ impl BridgeBuilder for RustBridgeBuilder {
         // Now we emit the converter so we can easily pass our generated Rust enum to IR
         // interpreter functions.
         self.lines
-            .push(format!("impl Into<IrValue> for {} {{", dslx_name));
+            .push(format!("impl Into<IrValue> for {dslx_name} {{"));
         self.lines
             .push("    fn into(self) -> IrValue {".to_string());
         self.lines.push("        match self {".to_string());
@@ -116,7 +122,7 @@ impl BridgeBuilder for RustBridgeBuilder {
         dslx_name: &str,
         members: &[StructMemberData],
     ) -> Result<(), XlsynthError> {
-        self.lines.push(format!("pub struct {} {{", dslx_name));
+        self.lines.push(format!("pub struct {dslx_name} {{"));
         for member in members {
             let rust_ty = Self::convert_type(&member.concrete_type)?;
             self.lines
@@ -134,7 +140,7 @@ impl BridgeBuilder for RustBridgeBuilder {
     ) -> Result<(), XlsynthError> {
         let rust_ty = Self::convert_type(bits_type)?;
         self.lines
-            .push(format!("pub type {} = {};\n", dslx_name, rust_ty));
+            .push(format!("pub type {dslx_name} = {rust_ty};\n"));
         Ok(())
     }
 

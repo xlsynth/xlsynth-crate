@@ -29,10 +29,7 @@ fn test_sv_bridge_structure_zoo() {
         let mut builder = SvBridgeBuilder::new();
         convert_imported_module(&common_zoo, &mut builder).unwrap();
         let contents = builder.build();
-        format!(
-            "package common_zoo_sv_pkg;\n{}endpackage : common_zoo_sv_pkg",
-            contents
-        )
+        format!("package common_zoo_sv_pkg;\n{contents}endpackage : common_zoo_sv_pkg")
     };
 
     // Check that our generated `imported_sv` matches a golden expectation too,
@@ -45,7 +42,7 @@ fn test_sv_bridge_structure_zoo() {
     let mut builder = SvBridgeBuilder::new();
     convert_imported_module(&zoo, &mut builder).unwrap();
     let got_sv = builder.build();
-    log::info!("structure_zoo.sv:\n{}", got_sv);
+    log::info!("structure_zoo.sv:\n{got_sv}");
 
     // Check that the SV we got is also valid SV.
     xlsynth_test_helpers::assert_valid_sv_flist(&[

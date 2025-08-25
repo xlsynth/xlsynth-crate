@@ -53,6 +53,13 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: clippy-core-crates
+        name: clippy (xlsynth, xlsynth-test-helpers)
+        description: Run cargo clippy on core crates with warnings as errors
+        entry: cargo clippy -p xlsynth -p xlsynth-test-helpers --all-targets --all-features -- -D warnings
+        language: system
+        pass_filenames: false
+
   - repo: https://github.com/executablebooks/mdformat
     rev: 0.7.17 # Use a version that supports Python 3.8
     hooks:

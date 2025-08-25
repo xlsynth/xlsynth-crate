@@ -21,8 +21,7 @@ lazy_static! {
         .unwrap();
         let package: xlsynth::IrPackage = convert_result.ir;
         let mangled = xlsynth::mangle_dslx_name("main", "main").unwrap();
-        let function = package.get_function(&mangled).unwrap();
-        function
+        package.get_function(&mangled).unwrap()
     };
 }
 
@@ -34,7 +33,7 @@ fn bench_f32_add_nojit(c: &mut Criterion) {
     let f = IrValue::make_tuple(&[sign, bexp, frac]);
     c.bench_function("f32_add_nojit", |b| {
         b.iter(|| {
-            let result: IrValue = MAIN.interpret(&[f.clone()]).unwrap();
+            let result: IrValue = MAIN.interpret(std::slice::from_ref(&f)).unwrap();
             black_box(result);
         });
     });
@@ -49,7 +48,7 @@ fn bench_f32_add_jit(c: &mut Criterion) {
     let main_jit = xlsynth::IrFunctionJit::new(&MAIN).unwrap();
     c.bench_function("f32_add_jit", |b| {
         b.iter(|| {
-            let result: xlsynth::RunResult = main_jit.run(&[f.clone()]).unwrap();
+            let result: xlsynth::RunResult = main_jit.run(std::slice::from_ref(&f)).unwrap();
             black_box(result);
         });
     });

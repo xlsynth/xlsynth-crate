@@ -42,9 +42,9 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
         }
     };
     if ok {
-        println!("Found SPDX identifier in file: {:?}", file_path);
+        println!("Found SPDX identifier in file: {file_path:?}");
     } else {
-        eprintln!("Missing SPDX identifier in file: {:?}", file_path);
+        eprintln!("Missing SPDX identifier in file: {file_path:?}");
     }
     ok
 }
@@ -53,11 +53,7 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
     let mut missing_spdx_files = Vec::new();
     let mut dir_worklist: Vec<PathBuf> = vec![root.into()];
 
-    loop {
-        let dir = match dir_worklist.pop() {
-            Some(dir) => dir,
-            None => break,
-        };
+    while let Some(dir) = dir_worklist.pop() {
         for entry in fs::read_dir(dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
@@ -74,7 +70,7 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
                     && entry.file_name() != ".ruff_cache"
                     && entry.file_name() != ".vscode"
                 {
-                    println!("Adding to directory worklist: {:?}", path);
+                    println!("Adding to directory worklist: {path:?}");
                     dir_worklist.push(path.clone());
                 }
                 continue;

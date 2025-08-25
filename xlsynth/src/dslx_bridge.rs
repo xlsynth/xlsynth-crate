@@ -53,7 +53,7 @@ pub trait BridgeBuilder {
     /// - `type_annotation`: The type annotation for the alias (i.e. `Bar` in
     ///   `type Foo = Bar`).
     /// - `ty`: The concrete type that this resolves to; i.e. after types have
-    /// been resolved to concrete values.
+    ///   been resolved to concrete values.
     fn add_alias(
         &mut self,
         dslx_name: &str,
@@ -92,9 +92,9 @@ fn convert_enum(
 ) -> Result<(), XlsynthError> {
     let tups = enum_as_tups(enum_def, type_info);
     let enum_underlying = type_info.get_type_for_type_annotation(&enum_def.get_underlying());
-    let (is_signed, underlying_bit_count) = enum_underlying.is_bits_like().expect(&format!(
-        "enum underlying type should be bits-like; got: {enum_underlying}"
-    ));
+    let (is_signed, underlying_bit_count) = enum_underlying
+        .is_bits_like()
+        .unwrap_or_else(|| panic!("enum underlying type should be bits-like"));
     let enum_name = enum_def.get_identifier();
     builder.add_enum_def(&enum_name, is_signed, underlying_bit_count, &tups)
 }
@@ -136,11 +136,11 @@ fn convert_constant(
     type_info: &dslx::TypeInfo,
     builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
-    let ty = type_info.get_type_for_constant_def(&constant_def);
+    let ty = type_info.get_type_for_constant_def(constant_def);
     let value = constant_def.get_value();
     let interp_value = type_info.get_const_expr(&value)?;
     let ir_value = interp_value.convert_to_ir()?;
-    builder.add_constant(&constant_def.get_name(), &constant_def, &ty, &ir_value)
+    builder.add_constant(&constant_def.get_name(), constant_def, &ty, &ir_value)
 }
 
 pub fn convert_imported_module(

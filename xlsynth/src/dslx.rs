@@ -77,10 +77,6 @@ pub struct ImportData {
 }
 
 impl ImportData {
-    pub fn default() -> Self {
-        Self::new(None, &[])
-    }
-
     pub fn new(
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
@@ -115,6 +111,12 @@ impl ImportData {
                 },
             }),
         }
+    }
+}
+
+impl Default for ImportData {
+    fn default() -> Self {
+        Self::new(None, &[])
     }
 }
 
@@ -155,9 +157,9 @@ impl TypecheckedModule {
     pub fn get_type_info_for_module(&self, module: &Module) -> Option<TypeInfo> {
         let self_type_info = self.get_type_info();
         if module.ptr == self.get_module().ptr {
-            return Some(self_type_info);
+            Some(self_type_info)
         } else {
-            return self_type_info.get_imported_type_info(module);
+            self_type_info.get_imported_type_info(module)
         }
     }
 }
@@ -168,7 +170,7 @@ pub struct ConstantDef {
 }
 
 impl ConstantDef {
-    pub fn to_string(&self) -> String {
+    pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_constant_def_to_string(self.ptr)) }
     }
     pub fn get_name(&self) -> String {
@@ -188,7 +190,7 @@ impl ConstantDef {
 
 impl std::fmt::Display for ConstantDef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Self::to_string(self))
+        write!(f, "{}", self.to_text())
     }
 }
 
@@ -207,7 +209,7 @@ pub enum MatchableModuleMember {
 }
 
 impl MatchableModuleMember {
-    pub fn to_string(&self) -> String {
+    pub fn to_text(&self) -> String {
         match self {
             MatchableModuleMember::EnumDef(e) => format!("{}", e),
             MatchableModuleMember::StructDef(s) => format!("{}", s),
@@ -221,7 +223,7 @@ impl MatchableModuleMember {
 
 impl std::fmt::Display for MatchableModuleMember {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Self::to_string(self))
+        write!(f, "{}", self.to_text())
     }
 }
 
@@ -285,7 +287,7 @@ pub struct Quickcheck {
 }
 
 impl Quickcheck {
-    pub fn to_string(&self) -> String {
+    pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_quickcheck_to_string(self.ptr)) }
     }
     pub fn get_function(&self) -> Function {
@@ -313,7 +315,7 @@ impl Quickcheck {
 
 impl std::fmt::Display for Quickcheck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Self::to_string(self))
+        write!(f, "{}", self.to_text())
     }
 }
 
@@ -442,7 +444,7 @@ pub struct EnumDef {
 }
 
 impl EnumDef {
-    pub fn to_string(&self) -> String {
+    pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_enum_def_to_string(self.ptr)) }
     }
     pub fn get_identifier(&self) -> String {
@@ -473,7 +475,7 @@ impl EnumDef {
 
 impl std::fmt::Display for EnumDef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Self::to_string(self))
+        write!(f, "{}", self.to_text())
     }
 }
 
@@ -527,7 +529,7 @@ impl Import {
         let subject_count = unsafe { sys::xls_dslx_import_get_subject_count(self.ptr) };
         for i in 0..subject_count {
             let s = unsafe {
-                let c_str = sys::xls_dslx_import_get_subject(self.ptr, i as i64);
+                let c_str = sys::xls_dslx_import_get_subject(self.ptr, i);
                 c_str_to_rust(c_str)
             };
             result.push(s);
@@ -639,7 +641,7 @@ pub struct StructDef {
 }
 
 impl StructDef {
-    pub fn to_string(&self) -> String {
+    pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_struct_def_to_string(self.ptr)) }
     }
     pub fn get_identifier(&self) -> String {
@@ -670,7 +672,7 @@ impl StructDef {
 
 impl std::fmt::Display for StructDef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Self::to_string(self))
+        write!(f, "{}", self.to_text())
     }
 }
 
@@ -680,7 +682,7 @@ pub struct TypeAlias {
 }
 
 impl TypeAlias {
-    pub fn to_string(&self) -> String {
+    pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_type_alias_to_string(self.ptr)) }
     }
     pub fn get_identifier(&self) -> String {
@@ -700,7 +702,7 @@ impl TypeAlias {
 
 impl std::fmt::Display for TypeAlias {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Self::to_string(self))
+        write!(f, "{}", self.to_text())
     }
 }
 
@@ -729,7 +731,7 @@ impl Param {
 }
 
 impl Function {
-    pub fn to_string(&self) -> String {
+    pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_function_to_string(self.ptr)) }
     }
     pub fn get_identifier(&self) -> String {
@@ -761,7 +763,7 @@ impl Function {
 
 impl std::fmt::Display for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Self::to_string(self))
+        write!(f, "{}", self.to_text())
     }
 }
 
@@ -1118,17 +1120,17 @@ pub fn parse_and_typecheck(
         if success {
             assert!(error_out.is_null());
             assert!(!result_out.is_null());
-            return Ok(TypecheckedModule {
+            Ok(TypecheckedModule {
                 ptr: Rc::new(TypecheckedModulePtr {
                     parent: import_data.ptr.clone(),
                     ptr: result_out,
                 }),
-            });
+            })
+        } else {
+            assert!(!error_out.is_null());
+            let error_out_str: String = c_str_to_rust(error_out);
+            Err(XlsynthError(error_out_str))
         }
-
-        assert!(!error_out.is_null());
-        let error_out_str: String = c_str_to_rust(error_out);
-        return Err(XlsynthError(error_out_str));
     }
 }
 

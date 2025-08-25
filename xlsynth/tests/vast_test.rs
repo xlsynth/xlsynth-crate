@@ -5,6 +5,8 @@ mod tests {
     use xlsynth::ir_value::*;
     use xlsynth::vast::*;
 
+    type VastBinOp = fn(&mut VastFile, &Expr, &Expr) -> Expr;
+
     #[test]
     fn test_vast() {
         let mut file = VastFile::new(VastFileType::Verilog);
@@ -218,7 +220,7 @@ mod tests {
         let u1 = file.make_bit_vector_type(1, false);
         let lhs = module.add_input("lhs", &u8);
         let rhs = module.add_input("rhs", &u8);
-        let functions: Vec<(&str, fn(&mut VastFile, &Expr, &Expr) -> Expr, &VastDataType)> = vec![
+        let functions: Vec<(&str, VastBinOp, &VastDataType)> = vec![
             ("add", VastFile::make_add, &u8),
             ("logical_and", VastFile::make_logical_and, &u1),
             ("bitwise_and", VastFile::make_bitwise_and, &u8),

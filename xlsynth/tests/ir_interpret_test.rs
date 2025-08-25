@@ -20,7 +20,7 @@ fn test_ir_interpret_array_values() {
             }
         }
     };
-    let result = convert_dslx_to_ir(&dslx, &path, &DslxConvertOptions::default()).unwrap();
+    let result = convert_dslx_to_ir(&dslx, path, &DslxConvertOptions::default()).unwrap();
     assert!(result.warnings.is_empty());
     let ir = result.ir;
 
@@ -34,7 +34,9 @@ fn test_ir_interpret_array_values() {
 
     let sum_elements_2_mangled = mangle_dslx_name("function_zoo", "sum_elements_2").unwrap();
     let sum_elements_2 = ir.get_function(&sum_elements_2_mangled).unwrap();
-    let result = sum_elements_2.interpret(&[array.clone()]).unwrap();
+    let result = sum_elements_2
+        .interpret(std::slice::from_ref(&array))
+        .unwrap();
     assert_eq!(result.to_string(), "bits[32]:3");
 
     let make_u32_3x2_mangled = mangle_dslx_name("function_zoo", "make_u32_3x2").unwrap();

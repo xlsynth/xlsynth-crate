@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub use crate::lib_support::RunResult;
@@ -101,7 +102,7 @@ impl IrPackage {
         let ir = match std::fs::read_to_string(path) {
             Ok(ir) => ir,
             Err(e) => {
-                return Err(XlsynthError(format!("Failed to read IR from path: {}", e)));
+                return Err(XlsynthError(format!("Failed to read IR from path: {e}")));
             }
         };
         let filename = path.file_name().and_then(|s| s.to_str());
@@ -115,10 +116,6 @@ impl IrPackage {
 
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
         self.with_read(|guard| xls_package_get_function(&self.ptr, guard, name))
-    }
-
-    pub fn to_string(&self) -> String {
-        self.with_read(|guard| xls_package_to_string(guard.const_c_ptr()).unwrap())
     }
 
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
@@ -150,10 +147,7 @@ impl IrPackage {
     }
 
     pub fn filename(&self) -> Option<&str> {
-        match self.filename {
-            Some(ref s) => Some(s),
-            None => None,
-        }
+        self.filename.as_deref()
     }
 }
 
@@ -197,6 +191,13 @@ impl IrFunctionType {
     /// Returns the return type of the function.
     pub fn return_type(&self) -> IrType {
         lib_support::xls_function_type_get_return_type(self.ptr)
+    }
+}
+
+impl fmt::Display for IrPackage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = self.with_read(|guard| xls_package_to_string(guard.const_c_ptr()).unwrap());
+        write!(f, "{s}")
     }
 }
 

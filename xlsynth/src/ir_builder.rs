@@ -1153,7 +1153,7 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let last_value = fb.last_value();
         assert!(last_value.is_err());
         let error_str = last_value.err().unwrap().to_string();
-        log::info!("error_str: {}", error_str);
+        log::info!("error_str: {error_str}");
         assert!(error_str.contains("bits[4], has type bits[5]"));
     }
 

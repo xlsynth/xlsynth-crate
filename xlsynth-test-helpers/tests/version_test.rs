@@ -20,7 +20,7 @@ fn get_workspace_root() -> std::path::PathBuf {
 
 /// Fetches the latest version of a crate named `crate_name` from crates.io.
 fn fetch_latest_version(crate_name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let url = format!("https://crates.io/api/v1/crates/{}", crate_name);
+    let url = format!("https://crates.io/api/v1/crates/{crate_name}");
     let mut data = Vec::new();
     let mut easy = Easy::new();
     easy.url(&url)?;
@@ -35,35 +35,34 @@ fn fetch_latest_version(crate_name: &str) -> Result<String, Box<dyn std::error::
     }
 
     let response: serde_json::Value = serde_json::from_slice(&data)?;
-    log::debug!("Response: {:?}", response);
+    log::debug!("Response: {response:?}");
     let newest_version = response["crate"]["newest_version"].as_str();
     let latest_version = newest_version
-        .ok_or(format!(
-            "Failed to parse latest version: {:?}",
-            newest_version
-        ))?
+        .ok_or_else(|| format!("Failed to parse latest version: {newest_version:?}"))?
         .to_string();
     Ok(latest_version)
 }
 
 /// Fetches the local version of a package given the path to a `Cargo.toml`
 /// file.
-fn fetch_local_version(dirpath: &std::path::PathBuf) -> Result<String, Box<dyn std::error::Error>> {
+fn fetch_local_version(dirpath: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
     let cargo_toml = std::fs::read_to_string(dirpath.join("Cargo.toml"))?;
     let cargo_toml: toml::Value = toml::from_str(&cargo_toml)?;
     let version = cargo_toml["package"]["version"]
         .as_str()
-        .ok_or(format!(
-            "Failed to parse local version: {}",
-            cargo_toml["package"]["version"]
-        ))?
+        .ok_or_else(|| {
+            format!(
+                "Failed to parse local version: {}",
+                cargo_toml["package"]["version"]
+            )
+        })?
         .to_string();
     Ok(version)
 }
 
 fn validate_local_version_gt_released(
     crate_name: &str,
-    workspace_path: &std::path::PathBuf,
+    workspace_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let latest_version = fetch_latest_version(crate_name)?;
     let local_version = fetch_local_version(workspace_path)?;
@@ -72,22 +71,15 @@ fn validate_local_version_gt_released(
     let latest_semver = semver::Version::parse(&latest_version)?;
 
     log::info!(
-        "crate: {} local_version: {} released_version: {}",
-        crate_name,
-        local_version,
-        latest_version
+        "crate: {crate_name} local_version: {local_version} released_version: {latest_version}"
     );
 
     if local_semver <= latest_semver {
         // Technically we're abusing io::Error a bit here just to avoid creating a whole
         // new error type.
-        Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "Local version {} is not greater than the latest version {}",
-                local_version, latest_version
-            ),
-        )))
+        Err(Box::new(std::io::Error::other(format!(
+            "Local version {local_version} is not greater than the latest version {latest_version}"
+        ))))
     } else {
         Ok(())
     }
@@ -102,7 +94,7 @@ fn test_xlsynth_crate_version() {
     }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth");
-    validate_local_version_gt_released("xlsynth", &workspace_path).unwrap();
+    validate_local_version_gt_released("xlsynth", workspace_path.as_path()).unwrap();
 }
 
 #[test]
@@ -114,7 +106,7 @@ fn test_xlsynth_sys_crate_version() {
     }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth-sys");
-    validate_local_version_gt_released("xlsynth-sys", &workspace_path).unwrap();
+    validate_local_version_gt_released("xlsynth-sys", workspace_path.as_path()).unwrap();
 }
 
 #[test]
@@ -126,7 +118,7 @@ fn test_xlsynth_driver_crate_version() {
     }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth-driver");
-    validate_local_version_gt_released("xlsynth-driver", &workspace_path).unwrap();
+    validate_local_version_gt_released("xlsynth-driver", workspace_path.as_path()).unwrap();
 }
 
 #[test]
@@ -140,7 +132,7 @@ fn test_crate_versions_are_equal() {
     ];
     let mut local_versions = vec![];
     for dir in released_crate_dirs {
-        local_versions.push(fetch_local_version(&dir).unwrap());
+        local_versions.push(fetch_local_version(dir.as_path()).unwrap());
     }
     // Check all the local versions are the same.
     let first_version = &local_versions[0];
