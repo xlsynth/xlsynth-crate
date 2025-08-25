@@ -48,6 +48,8 @@ pub struct NetlistInstance {
     pub type_name: PortId,
     pub instance_name: PortId,
     pub connections: Vec<(PortId, NetRef)>, // (port, net ref)
+    pub inst_lineno: u32,
+    pub inst_colno: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1698,6 +1700,8 @@ impl<R: Read + 'static> Parser<R> {
             type_name,
             instance_name,
             connections,
+            inst_lineno: inst_tok.span.start.lineno,
+            inst_colno: inst_tok.span.start.colno,
         })
     }
 
@@ -1775,6 +1779,28 @@ endmodule
         let mut parser = Parser::new(TokenScanner::from_str(src));
         let modules = parser.parse_file().expect("parse ok");
         assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_instance_source_position_is_captured() {
+        let src = r#"
+module m(a, b);
+  input a;
+  output b;
+  wire a, b;
+  INVX1 u1 (.A(a), .Y(b));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let m = &modules[0];
+        assert_eq!(m.instances.len(), 1);
+        let inst = &m.instances[0];
+        // 'u1' starts on line 6 (leading newline in the raw string), after two spaces +
+        // 'INVX1' (5 chars) + one space => column 9.
+        assert_eq!(inst.inst_lineno, 6);
+        assert_eq!(inst.inst_colno, 9);
     }
 
     #[test]

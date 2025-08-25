@@ -583,6 +583,8 @@ mod tests {
                     NetRef::Simple(crate::netlist::parse::NetIndex(1)),
                 ),
             ],
+            inst_lineno: 0,
+            inst_colno: 0,
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
@@ -664,6 +666,8 @@ mod tests {
                     NetRef::BitSelect(crate::netlist::parse::NetIndex(1), 3),
                 ),
             ],
+            inst_lineno: 0,
+            inst_colno: 0,
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
@@ -743,6 +747,8 @@ mod tests {
                 (interner.get_or_intern("d"), NetRef::Simple(NetIndex(0))),
                 (interner.get_or_intern("q"), NetRef::Simple(NetIndex(1))),
             ],
+            inst_lineno: 0,
+            inst_colno: 0,
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
