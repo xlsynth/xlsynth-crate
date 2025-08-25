@@ -239,6 +239,21 @@ optimization, and gatification using either the toolchain or the runtime APIs.
 Runs the XLS optimizer on an IR file and prints the optimized IR to **stdout**.
 Requires `--top <NAME>` to select the entry point.
 
+### `ir2dslx`: IR to simple DSLX
+
+Emits a simple DSLX function corresponding to an XLS IR function by walking
+nodes in topological order and producing let-bound expressions. The output is
+printed to **stdout**.
+
+- Positional: `<ir_input_file>` – path to the IR package file
+- Optional: `--top <NAME>` – entry point function (defaults to the package `top` or first function)
+
+Example:
+
+```shell
+xlsynth-driver ir2dslx my_pkg.ir --top add_u32
+```
+
 ### `ir2pipeline`: IR to pipelined Verilog
 
 Produces a pipelined SystemVerilog design from an IR file. The generated code
