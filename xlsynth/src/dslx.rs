@@ -211,12 +211,12 @@ pub enum MatchableModuleMember {
 impl MatchableModuleMember {
     pub fn to_text(&self) -> String {
         match self {
-            MatchableModuleMember::EnumDef(e) => format!("{}", e),
-            MatchableModuleMember::StructDef(s) => format!("{}", s),
-            MatchableModuleMember::TypeAlias(t) => format!("{}", t),
-            MatchableModuleMember::ConstantDef(c) => format!("{}", c),
-            MatchableModuleMember::Function(f) => format!("{}", f),
-            MatchableModuleMember::Quickcheck(qc) => format!("{}", qc),
+            MatchableModuleMember::EnumDef(e) => format!("{e}"),
+            MatchableModuleMember::StructDef(s) => format!("{s}"),
+            MatchableModuleMember::TypeAlias(t) => format!("{t}"),
+            MatchableModuleMember::ConstantDef(c) => format!("{c}"),
+            MatchableModuleMember::Function(f) => format!("{f}"),
+            MatchableModuleMember::Quickcheck(qc) => format!("{qc}"),
         }
     }
 }

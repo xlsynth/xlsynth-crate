@@ -14,18 +14,39 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
             let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
             match binop {
-                ir::Binop::Add => lhs_bits.add(&rhs_bits).into(),
-                ir::Binop::Sub => lhs_bits.sub(&rhs_bits).into(),
-                ir::Binop::Shll => lhs_bits.shll(rhs_bits.to_u64().unwrap()).into(),
-                ir::Binop::Shrl => lhs_bits.shrl(rhs_bits.to_u64().unwrap()).into(),
-                ir::Binop::Shra => lhs_bits.shra(rhs_bits.to_u64().unwrap()).into(),
-                ir::Binop::ArrayConcat => lhs_bits.concat(&rhs_bits).into(),
-                ir::Binop::Smulp => lhs_bits.smul(&rhs_bits).into(),
-                ir::Binop::Umulp => lhs_bits.umul(&rhs_bits).into(),
-                ir::Binop::Eq => lhs_bits.eq(&rhs_bits).into(),
-                ir::Binop::Ne => lhs_bits.ne(&rhs_bits).into(),
-                ir::Binop::Umul => lhs_bits.umul(&rhs_bits).into(),
-                ir::Binop::Smul => lhs_bits.smul(&rhs_bits).into(),
+                ir::Binop::Add => {
+                    let r = lhs_bits.add(&rhs_bits);
+                    IrValue::from_bits(&r)
+                }
+                ir::Binop::Sub => {
+                    let r = lhs_bits.sub(&rhs_bits);
+                    IrValue::from_bits(&r)
+                }
+                ir::Binop::Shll => {
+                    let shift: i64 = rhs_bits.to_u64().unwrap().try_into().unwrap();
+                    let r = lhs_bits.shll(shift);
+                    IrValue::from_bits(&r)
+                }
+                ir::Binop::Shrl => {
+                    let shift: i64 = rhs_bits.to_u64().unwrap().try_into().unwrap();
+                    let r = lhs_bits.shrl(shift);
+                    IrValue::from_bits(&r)
+                }
+                ir::Binop::Shra => {
+                    let shift: i64 = rhs_bits.to_u64().unwrap().try_into().unwrap();
+                    let r = lhs_bits.shra(shift);
+                    IrValue::from_bits(&r)
+                }
+                ir::Binop::Smulp | ir::Binop::Smul => {
+                    let r = lhs_bits.smul(&rhs_bits);
+                    IrValue::from_bits(&r)
+                }
+                ir::Binop::Umulp | ir::Binop::Umul => {
+                    let r = lhs_bits.umul(&rhs_bits);
+                    IrValue::from_bits(&r)
+                }
+                ir::Binop::Eq => IrValue::bool(lhs_bits.equals(&rhs_bits)),
+                ir::Binop::Ne => IrValue::bool(!lhs_bits.equals(&rhs_bits)),
                 _ => panic!("Unsupported binop: {:?}", binop),
             }
         }
@@ -36,6 +57,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maplit::hashmap;
 
     #[test]
     fn test_eval_pure_literal() {
