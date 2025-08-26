@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.223";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.224";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
 
 struct DsoInfo {
@@ -194,11 +194,78 @@ fn high_integrity_download_gz_and_decompress_with_retries(
 
     high_integrity_download_with_retries(url_gz, &gz_path, max_attempts)?;
 
+    // Decompress into a temporary file first to avoid leaving a partial
+    // artifact at the final destination on interruption.
+    let tmp_out_path = out_dir.join(format!("{}.tmp-{}", out_filename, std::process::id()));
+
+    println!(
+        "cargo:info=decompressing {} to temporary {}",
+        gz_path.display(),
+        tmp_out_path.display()
+    );
+
     let gz_file = std::fs::File::open(&gz_path)?;
     let mut decoder = flate2::read::GzDecoder::new(gz_file);
-    let mut out_file = std::fs::File::create(out_path)?;
-    std::io::copy(&mut decoder, &mut out_file)?;
+    let mut tmp_out_file = std::fs::File::create(&tmp_out_path)?;
+    std::io::copy(&mut decoder, &mut tmp_out_file)?;
+
+    // Remove the compressed file after successful decompression.
     std::fs::remove_file(&gz_path)?;
+
+    // Verify the checksum of the decompressed bytes against the provided
+    // uncompressed checksum file (e.g., libxls-ubuntu2004.so.sha256).
+    let url_uncompressed = url_gz
+        .strip_suffix(".gz")
+        .expect("expected gz asset URL to end with .gz");
+    let checksum_url_uncompressed = format!("{url_uncompressed}.sha256");
+
+    // Use a temporary directory for checksum handling.
+    let env_tmp_dir = std::env::temp_dir();
+    let tmp_dir = env_tmp_dir.join(format!("xlsynth-sys-tmp-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).expect("create temp directory should succeed");
+    let checksum_path = tmp_dir.join(format!("{}.sha256", out_filename));
+
+    println!(
+        "cargo:info=downloading uncompressed checksum from {} to {}",
+        checksum_url_uncompressed,
+        checksum_path.display()
+    );
+    download_file(&checksum_url_uncompressed, &checksum_path)?;
+
+    let want_checksum_str = std::fs::read_to_string(&checksum_path)?;
+    let want_checksum_str = want_checksum_str.split_whitespace().next().unwrap();
+    println!(
+        "cargo:info=want checksum for {} to be {}",
+        out_filename, want_checksum_str
+    );
+
+    let sha256 = sha2::Sha256::digest(std::fs::read(&tmp_out_path)?);
+    let got_checksum_str = format!("{sha256:x}");
+
+    if want_checksum_str != got_checksum_str {
+        // Delete the temporary output file if checksum does not match.
+        std::fs::remove_file(&tmp_out_path).ok();
+        return Err(format!(
+            "Checksum mismatch for decompressed file: {} want: {} got: {}",
+            out_path.display(),
+            want_checksum_str,
+            got_checksum_str
+        )
+        .into());
+    }
+
+    println!(
+        "cargo:info=checksums match; moving temporary file {} to destination {}",
+        tmp_out_path.display(),
+        out_path.display()
+    );
+    // Atomically move the verified temporary file into place.
+    std::fs::rename(&tmp_out_path, out_path)?;
+
+    // Best-effort cleanup of checksum temp file and directory.
+    std::fs::remove_file(&checksum_path).ok();
+    std::fs::remove_dir(&tmp_dir).ok();
+
     Ok(())
 }
 
