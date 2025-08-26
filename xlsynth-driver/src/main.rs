@@ -49,6 +49,7 @@ mod gv2ir;
 mod gv_read_stats;
 mod ir2combo;
 mod ir2delayinfo;
+mod ir2dslx;
 mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
@@ -500,6 +501,17 @@ fn main() {
                 ),
         )
         // ir2opt subcommand requires a top symbol
+        .subcommand(
+            clap::Command::new("ir2dslx")
+                .about("Emits a simple DSLX function from IR")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false),
+        )
         .subcommand(
             clap::Command::new("ir2opt")
                 .about("Converts IR to optimized IR")
@@ -1328,6 +1340,8 @@ fn main() {
         ir2opt::handle_ir2opt(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2pipeline") {
         ir2pipeline::handle_ir2pipeline(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir2dslx") {
+        ir2dslx::handle_ir2dslx(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
         dslx2sv_types::handle_dslx2sv_types(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx-show") {

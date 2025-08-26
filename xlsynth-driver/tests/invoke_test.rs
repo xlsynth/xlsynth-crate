@@ -6261,6 +6261,51 @@ top fn main(x: bits[8]) -> bits[8] {
 }
 
 // -----------------------------------------------------------------------------
+// ir2dslx
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_ir2dslx_simple_plus_one() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package p
+
+top fn plus_one(x: bits[32] id=1) -> bits[32] {
+  one: bits[32] = literal(value=1, id=2)
+  ret add.3: bits[32] = add(x, one, id=3)
+}
+"#;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ir_path = tmp.path().join("p.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("ir2dslx")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("plus_one")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let got = stdout.trim();
+    let expected = r#"fn plus_one(x: u32) -> u32 {
+  let one: u32 = u32:1;
+  let add_3: u32 = x + one;
+  add_3
+}"#
+    .trim();
+    assert_eq!(got, expected, "stdout: {}", stdout);
+}
+
+// -----------------------------------------------------------------------------
 // Uninterpreted function (UF) tests for prove-quickcheck
 // -----------------------------------------------------------------------------
 
