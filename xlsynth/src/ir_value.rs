@@ -746,6 +746,33 @@ mod tests {
     }
 
     #[test]
+    fn test_ir_bits_sub() {
+        let five = IrBits::u32(5);
+        let two = IrBits::u32(2);
+        let diff = five.sub(&two);
+        assert_eq!(diff.to_string(), "bits[32]:3");
+
+        // Ensure the originals were not consumed by the sub method.
+        assert_eq!(five.to_string(), "bits[32]:5");
+        assert_eq!(two.to_string(), "bits[32]:2");
+
+        // The `-` operator should behave equivalently.
+        let diff_op = five.clone() - two.clone();
+        assert_eq!(diff, diff_op);
+    }
+
+    #[test]
+    fn test_ir_bits_eq() {
+        let a = IrBits::u32(0x12345678);
+        let b = IrBits::u32(0x12345678);
+        let c = IrBits::u32(0x87654321);
+        assert!(a.equals(&b));
+        assert!(!a.equals(&c));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
     fn test_ir_bits_umul_two_times_three() {
         let two = IrBits::u32(2);
         let three = IrBits::u32(3);
@@ -811,6 +838,33 @@ mod tests {
     }
 
     #[test]
+    fn test_ir_bits_get_bit() {
+        let bits = IrBits::u32(0b1010);
+        assert!(!bits.get_bit(0).unwrap());
+        assert!(bits.get_bit(1).unwrap());
+        assert!(bits.get_bit(3).unwrap());
+        assert!(bits.get_bit(32).is_err());
+    }
+
+    #[test]
+    fn test_ir_bits_to_u64() {
+        let bits = IrBits::u32(0x12345678);
+        assert_eq!(bits.to_u64().unwrap(), 0x12345678);
+    }
+
+    #[test]
+    fn test_ir_bits_to_i64() {
+        let bits = IrBits::make_sbits(8, -5).expect("make_sbits success");
+        assert_eq!(bits.to_i64().unwrap(), -5);
+    }
+
+    #[test]
+    fn test_ir_bits_to_bytes() {
+        let bits = IrBits::u32(0x12345678);
+        assert_eq!(bits.to_bytes().unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
+    }
+
+    #[test]
     fn test_ir_bits_and() {
         let lhs = IrBits::u32(0x5a5a5a5a);
         let rhs = IrBits::u32(0xa5a5a5a5);
@@ -832,6 +886,12 @@ mod tests {
         let rhs = IrBits::u32(0xa5a5a5a5);
         assert_eq!(lhs.xor(&rhs).to_hex_string(), "bits[32]:0xffff_ffff");
         assert_eq!(lhs.xor(&rhs.not()).to_hex_string(), "bits[32]:0x0");
+    }
+
+    #[test]
+    fn test_ir_bits_not() {
+        let zero = IrBits::u32(0);
+        assert_eq!(zero.not().to_hex_string(), "bits[32]:0xffff_ffff");
     }
 
     #[test]
