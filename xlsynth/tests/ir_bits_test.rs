@@ -7,6 +7,8 @@ fn arith_and_logic_ops() -> Result<(), XlsynthError> {
     let a = IrBits::make_ubits(8, 0b0001_1010)?; // 26
     let b = IrBits::make_ubits(8, 0b0000_0011)?; // 3
 
+    assert!(a.equals(&a));
+    assert!(!a.equals(&b));
     assert_eq!(a.clone(), a.clone());
     assert_ne!(a.clone(), b.clone());
     assert!(a.get_bit(1)?);
