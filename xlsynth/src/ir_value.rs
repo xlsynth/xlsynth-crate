@@ -57,6 +57,10 @@ impl IrBits {
         Ok(bit)
     }
 
+    pub fn equals(&self, rhs: &IrBits) -> bool {
+        unsafe { xlsynth_sys::xls_bits_eq(self.ptr, rhs.ptr) }
+    }
+
     pub fn to_string_fmt(&self, format: IrFormatPreference, include_bit_count: bool) -> String {
         let fmt_pref: xlsynth_sys::XlsFormatPreference =
             xls_format_preference_from_string(format.to_string()).unwrap();
@@ -175,7 +179,7 @@ impl Drop for IrBits {
 
 impl std::cmp::PartialEq for IrBits {
     fn eq(&self, other: &Self) -> bool {
-        unsafe { xlsynth_sys::xls_bits_eq(self.ptr, other.ptr) }
+        self.equals(other)
     }
 }
 
