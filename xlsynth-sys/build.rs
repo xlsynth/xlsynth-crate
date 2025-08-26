@@ -223,7 +223,7 @@ fn high_integrity_download_gz_and_decompress_with_retries(
     let env_tmp_dir = std::env::temp_dir();
     let tmp_dir = env_tmp_dir.join(format!("xlsynth-sys-tmp-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).expect("create temp directory should succeed");
-    let checksum_path = tmp_dir.join(format!("{}.sha256", out_filename));
+    let checksum_path = tmp_dir.join(format!("{out_filename}.sha256"));
 
     println!(
         "cargo:info=downloading uncompressed checksum from {} to {}",
@@ -234,10 +234,7 @@ fn high_integrity_download_gz_and_decompress_with_retries(
 
     let want_checksum_str = std::fs::read_to_string(&checksum_path)?;
     let want_checksum_str = want_checksum_str.split_whitespace().next().unwrap();
-    println!(
-        "cargo:info=want checksum for {} to be {}",
-        out_filename, want_checksum_str
-    );
+    println!("cargo:info=want checksum for {out_filename} to be {want_checksum_str}");
 
     let sha256 = sha2::Sha256::digest(std::fs::read(&tmp_out_path)?);
     let got_checksum_str = format!("{sha256:x}");
