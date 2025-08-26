@@ -388,6 +388,7 @@ extern "C" {
     pub fn xls_bits_eq(bits: *const CIrBits, other: *const CIrBits) -> bool;
     pub fn xls_bits_to_debug_string(bits: *const CIrBits) -> *mut std::os::raw::c_char;
     pub fn xls_bits_add(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_sub(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_umul(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_smul(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_negate(bits: *const CIrBits) -> *mut CIrBits;
@@ -406,6 +407,24 @@ extern "C" {
     // start, int64_t width);
 
     pub fn xls_bits_width_slice(bits: *const CIrBits, start: i64, width: i64) -> *mut CIrBits;
+
+    pub fn xls_bits_to_bytes(
+        bits: *const CIrBits,
+        error_out: *mut *mut std::os::raw::c_char,
+        bytes_out: *mut *mut u8,
+        byte_count_out: *mut libc::size_t,
+    ) -> bool;
+    pub fn xls_bytes_free(bytes: *mut u8);
+    pub fn xls_bits_to_uint64(
+        bits: *const CIrBits,
+        error_out: *mut *mut std::os::raw::c_char,
+        value_out: *mut u64,
+    ) -> bool;
+    pub fn xls_bits_to_int64(
+        bits: *const CIrBits,
+        error_out: *mut *mut std::os::raw::c_char,
+        value_out: *mut i64,
+    ) -> bool;
 
     pub fn xls_package_free(package: *mut CIrPackage);
     pub fn xls_c_str_free(c_str: *mut std::os::raw::c_char);

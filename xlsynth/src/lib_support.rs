@@ -277,6 +277,35 @@ pub(crate) fn xls_bits_to_string(
     Ok(unsafe { c_str_to_rust(c_str_out) })
 }
 
+pub(crate) fn xls_bits_to_bytes(p: *const CIrBits) -> Result<Vec<u8>, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut bytes_out: *mut u8 = std::ptr::null_mut();
+        let mut byte_count_out: usize = 0;
+        let success =
+            xlsynth_sys::xls_bits_to_bytes(p, &mut error_out, &mut bytes_out, &mut byte_count_out);
+        if !success {
+            return Err(XlsynthError(c_str_to_rust(error_out)));
+        }
+        let slice = std::slice::from_raw_parts(bytes_out, byte_count_out);
+        let vec = slice.to_vec();
+        xlsynth_sys::xls_bytes_free(bytes_out);
+        Ok(vec)
+    }
+}
+
+pub(crate) fn xls_bits_to_uint64(p: *const CIrBits) -> Result<u64, XlsynthError> {
+    let mut value_out: u64 = 0;
+    xls_ffi_call!(xlsynth_sys::xls_bits_to_uint64, p; value_out)?;
+    Ok(value_out)
+}
+
+pub(crate) fn xls_bits_to_int64(p: *const CIrBits) -> Result<i64, XlsynthError> {
+    let mut value_out: i64 = 0;
+    xls_ffi_call!(xlsynth_sys::xls_bits_to_int64, p; value_out)?;
+    Ok(value_out)
+}
+
 pub(crate) fn xls_value_eq(
     lhs: *const CIrValue,
     rhs: *const CIrValue,
