@@ -17,16 +17,20 @@ pub fn handle_gv2ir(matches: &clap::ArgMatches) {
     let dff_cell_formula: Option<String> = matches
         .get_one::<String>("dff_cell_formula")
         .map(|s| s.to_string());
+    let dff_cell_invert_formula: Option<String> = matches
+        .get_one::<String>("dff_cell_invert_formula")
+        .map(|s| s.to_string());
 
     match convert_gv2ir_paths(
         Path::new(netlist_path),
         Path::new(liberty_proto_path),
         &dff_cells,
         dff_cell_formula.as_deref(),
+        dff_cell_invert_formula.as_deref(),
     ) {
         Ok(ir_text) => println!("{}", ir_text),
         Err(e) => {
-            eprintln!("Failed to convert netlist to IR: {}", e);
+            eprintln!("Failed to convert netlist to IR: {:#}", e);
             std::process::exit(1);
         }
     }

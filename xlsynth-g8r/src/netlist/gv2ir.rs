@@ -5,7 +5,7 @@ use crate::liberty::descriptor::liberty_descriptor_pool;
 use crate::liberty_proto::Library;
 use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
 use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use flate2::bufread::MultiGzDecoder as BufMultiGzDecoder;
 use prost::Message;
 use prost_reflect::DynamicMessage;
@@ -17,11 +17,13 @@ use std::path::Path;
 fn open_reader(path: &Path) -> Result<(Box<dyn Read>, bool)> {
     let is_gz = path.extension().map(|e| e == "gz").unwrap_or(false);
     if is_gz {
-        let f = File::open(path)?;
+        let f =
+            File::open(path).with_context(|| format!("opening netlist '{}'", path.display()))?;
         let br = BufReader::new(f);
         Ok((Box::new(BufMultiGzDecoder::new(br)), true))
     } else {
-        let f = File::open(path)?;
+        let f =
+            File::open(path).with_context(|| format!("opening netlist '{}'", path.display()))?;
         Ok((Box::new(f), false))
     }
 }
@@ -44,7 +46,9 @@ fn line_lookup(path: &Path, is_gz: bool) -> Box<dyn Fn(u32) -> Option<String>> {
 
 fn load_liberty_proto(path: &Path) -> Result<Library> {
     let mut buf = Vec::new();
-    File::open(path)?.read_to_end(&mut buf)?;
+    File::open(path)
+        .with_context(|| format!("opening liberty proto '{}'", path.display()))?
+        .read_to_end(&mut buf)?;
     let lib = Library::decode(&buf[..]).or_else(|_| {
         let descriptor_pool = liberty_descriptor_pool();
         let msg_desc = descriptor_pool
@@ -62,6 +66,7 @@ pub fn convert_gv2ir_paths(
     liberty_proto_path: &Path,
     dff_cells: &HashSet<String>,
     dff_cell_formula: Option<&str>,
+    dff_cell_invert_formula: Option<&str>,
 ) -> Result<String> {
     // Netlist parse
     let (reader, is_gz) = open_reader(netlist_path)?;
@@ -90,19 +95,29 @@ pub fn convert_gv2ir_paths(
     // Liberty
     let liberty_lib = load_liberty_proto(liberty_proto_path)?;
 
-    // Build DFF cell set: start from provided names, then add by matching formula
-    // (if provided)
-    let mut dff_cells_merged: HashSet<String> = dff_cells.clone();
+    // Build DFF cell sets: identity and inverted. Start from provided names
+    // (identity), then add by matching formula strings (if provided).
+    let mut dff_cells_identity: HashSet<String> = dff_cells.clone();
     if let Some(target_formula) = dff_cell_formula {
         for cell in &liberty_lib.cells {
-            // If any output pin function exactly matches the target string, consider this
-            // cell a DFF
             if cell
                 .pins
                 .iter()
                 .any(|p| p.direction == 1 && p.function == target_formula)
             {
-                dff_cells_merged.insert(cell.name.clone());
+                dff_cells_identity.insert(cell.name.clone());
+            }
+        }
+    }
+    let mut dff_cells_inverted: HashSet<String> = HashSet::new();
+    if let Some(invert_formula) = dff_cell_invert_formula {
+        for cell in &liberty_lib.cells {
+            if cell
+                .pins
+                .iter()
+                .any(|p| p.direction == 1 && p.function == invert_formula)
+            {
+                dff_cells_inverted.insert(cell.name.clone());
             }
         }
     }
@@ -113,7 +128,8 @@ pub fn convert_gv2ir_paths(
         &parser.nets,
         &parser.interner,
         &liberty_lib,
-        &dff_cells_merged,
+        &dff_cells_identity,
+        &dff_cells_inverted,
     )
     .map_err(|e| anyhow!(e))?;
 

@@ -69,7 +69,8 @@ fn process_instance_outputs(
     nets: &[Net],
     gb: &mut GateBuilder,
     net_to_bv: &mut HashMap<NetIndex, AigBitVector>,
-    dff_cells: &std::collections::HashSet<String>,
+    dff_cells_identity: &std::collections::HashSet<String>,
+    dff_cells_inverted: &std::collections::HashSet<String>,
     cell_formula_map: &HashMap<(String, String), (crate::liberty::cell_formula::Term, String)>,
     input_map: &HashMap<String, AigOperand>,
     port_map: &HashMap<String, String>,
@@ -80,7 +81,16 @@ fn process_instance_outputs(
         let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
         if pin_dir == 1 {
             if handle_dff_identity_override(
-                type_name, inst_name, port_name, inst, interner, gb, net_to_bv, dff_cells, nets,
+                type_name,
+                inst_name,
+                port_name,
+                inst,
+                interner,
+                gb,
+                net_to_bv,
+                dff_cells_identity,
+                dff_cells_inverted,
+                nets,
             ) {
                 processed_any_output = true;
                 continue;
@@ -143,7 +153,8 @@ pub fn project_gatefn_from_netlist_and_liberty(
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     liberty_lib: &Library,
-    dff_cells: &std::collections::HashSet<String>,
+    dff_cells_identity: &std::collections::HashSet<String>,
+    dff_cells_inverted: &std::collections::HashSet<String>,
 ) -> Result<GateFn, String> {
     let cell_formula_map = build_cell_formula_map(liberty_lib);
     let module_name = interner.resolve(module.name).unwrap();
@@ -163,7 +174,7 @@ pub fn project_gatefn_from_netlist_and_liberty(
             .cells
             .iter()
             .find(|c| c.name == type_name)
-            .unwrap();
+            .ok_or_else(|| format!("Cell '{}' not found in liberty data", type_name))?;
         let mut pin_directions = std::collections::HashMap::new();
         for pin in &cell.pins {
             pin_directions.insert(pin.name.as_str(), pin.direction);
@@ -230,7 +241,8 @@ pub fn project_gatefn_from_netlist_and_liberty(
                 nets,
                 &mut gb,
                 &mut net_to_bv,
-                dff_cells,
+                dff_cells_identity,
+                dff_cells_inverted,
                 &cell_formula_map,
                 &input_map,
                 &port_map,
@@ -243,10 +255,62 @@ pub fn project_gatefn_from_netlist_and_liberty(
             }
         }
         if !processed_any && !unprocessed.is_empty() {
-            return Err(format!(
-                "Could not resolve all instance dependencies (possible cycle or missing driver). Remaining instances: {}",
+            // Build a short, actionable diagnostic to help pinpoint why instances
+            // could not be resolved. We show up to a bounded number of examples
+            // with their missing inputs.
+            let mut diag_lines: Vec<String> = Vec::new();
+            let example_limit = 10usize.min(unprocessed.len());
+            for inst in unprocessed.iter().take(example_limit) {
+                let type_name = interner.resolve(inst.type_name).unwrap_or("<unknown>");
+                let inst_name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
+                // Determine pin directions for this cell type (to identify inputs).
+                let mut pin_directions = HashMap::new();
+                if let Some(cell) = liberty_lib.cells.iter().find(|c| c.name == type_name) {
+                    for pin in &cell.pins {
+                        pin_directions.insert(pin.name.as_str(), pin.direction);
+                    }
+                }
+                // Recompute missing inputs for this instance w.r.t. current net_to_bv.
+                let (_input_map, missing_inputs, _port_map) = build_instance_input_map(
+                    inst,
+                    &pin_directions,
+                    interner,
+                    nets,
+                    &net_to_bv,
+                    &mut gb,
+                );
+                if missing_inputs.is_empty() {
+                    diag_lines.push(format!(
+                        "- cell '{}' instance '{}' at {}:{} has no missing inputs detected; unresolved due to dependency cycle or unknown output formula",
+                        type_name, inst_name, inst.inst_lineno, inst.inst_colno
+                    ));
+                } else {
+                    diag_lines.push(format!(
+                        "- cell '{}' instance '{}' at {}:{} missing inputs: [{}]",
+                        type_name,
+                        inst_name,
+                        inst.inst_lineno,
+                        inst.inst_colno,
+                        missing_inputs.join(", ")
+                    ));
+                }
+            }
+
+            let mut msg = String::new();
+            msg.push_str(&format!(
+                "Could not resolve all instance dependencies (possible cycle or missing driver). Remaining instances: {}\n",
                 unprocessed.len()
             ));
+            msg.push_str(&format!(
+                "Examples of unresolved instances (showing up to {}):\n",
+                example_limit
+            ));
+            for line in diag_lines {
+                msg.push_str(&line);
+                msg.push('\n');
+            }
+            msg.push_str(r#"Hint: re-run with RUST_LOG=trace to log skipped instances and their missing nets during processing."#);
+            return Err(msg);
         }
     }
     for port in &module.ports {
@@ -402,29 +466,146 @@ fn build_instance_input_map(
     }
     (input_map, missing_inputs, port_map)
 }
-/// Implements a D→Q identity wiring for cells recognized as DFFs.
+// Helpers for DFF identity/inverted overrides.
+fn invert_bv(gb: &mut GateBuilder, src: &AigBitVector) -> AigBitVector {
+    let width = src.get_bit_count();
+    let mut out = AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); width]);
+    for i in 0..width {
+        out.set_lsb(i, gb.add_not(*src.get_lsb(i)));
+    }
+    out
+}
+
+fn build_d_bv(
+    d_netref: &crate::netlist::parse::NetRef,
+    gb: &mut GateBuilder,
+    net_to_bv: &HashMap<NetIndex, AigBitVector>,
+    invert: bool,
+) -> Option<AigBitVector> {
+    match d_netref {
+        crate::netlist::parse::NetRef::Simple(d_netidx) => net_to_bv.get(d_netidx).map(|bv| {
+            if invert {
+                invert_bv(gb, bv)
+            } else {
+                bv.clone()
+            }
+        }),
+        crate::netlist::parse::NetRef::BitSelect(d_netidx, bit) => {
+            net_to_bv.get(d_netidx).map(|bv| {
+                let mut bv1 = AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); 1]);
+                let bit_op = *bv.get_lsb(*bit as usize);
+                bv1.set_lsb(0, if invert { gb.add_not(bit_op) } else { bit_op });
+                bv1
+            })
+        }
+        crate::netlist::parse::NetRef::PartSelect(d_netidx, msb, lsb) => {
+            net_to_bv.get(d_netidx).map(|bv| {
+                let width = (*msb as usize) - (*lsb as usize) + 1;
+                let mut bv_part = AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); width]);
+                for i in 0..width {
+                    let op = *bv.get_lsb(*lsb as usize + i);
+                    bv_part.set_lsb(i, if invert { gb.add_not(op) } else { op });
+                }
+                bv_part
+            })
+        }
+        crate::netlist::parse::NetRef::Literal(_) => None,
+    }
+}
+
+fn write_bv_to_port_destination(
+    inst: &crate::netlist::parse::NetlistInstance,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    gb: &mut GateBuilder,
+    net_to_bv: &mut HashMap<NetIndex, AigBitVector>,
+    nets: &[Net],
+    target_port_ci: &str,
+    src_bv: &AigBitVector,
+) {
+    for (p, dst_ref) in &inst.connections {
+        let pname = interner.resolve(*p).unwrap();
+        if !pname.eq_ignore_ascii_case(target_port_ci) {
+            continue;
+        }
+        match dst_ref {
+            crate::netlist::parse::NetRef::Simple(q_netidx) => {
+                let full_width = nets[q_netidx.0]
+                    .width
+                    .map(|(msb, lsb)| (msb as usize) - (lsb as usize) + 1)
+                    .unwrap_or(1);
+                assert_eq!(
+                    src_bv.get_bit_count(),
+                    full_width,
+                    "DFF override: width mismatch assigning to simple; expected {} bits for net but got {}",
+                    full_width,
+                    src_bv.get_bit_count()
+                );
+                net_to_bv.insert(*q_netidx, src_bv.clone());
+            }
+            crate::netlist::parse::NetRef::BitSelect(q_netidx, bit) => {
+                let full_width = nets[q_netidx.0]
+                    .width
+                    .map(|(msb, lsb)| (msb as usize) - (lsb as usize) + 1)
+                    .unwrap_or(1);
+                assert!((*bit as usize) < full_width);
+                let mut bv = net_to_bv.remove(q_netidx).unwrap_or_else(|| {
+                    AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); full_width])
+                });
+                if bv.get_bit_count() < full_width {
+                    let mut new_bv =
+                        AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); full_width]);
+                    for i in 0..bv.get_bit_count() {
+                        new_bv.set_lsb(i, *bv.get_lsb(i));
+                    }
+                    bv = new_bv;
+                }
+                bv.set_lsb(*bit as usize, *src_bv.get_lsb(0));
+                net_to_bv.insert(*q_netidx, bv);
+            }
+            crate::netlist::parse::NetRef::PartSelect(q_netidx, msb, lsb) => {
+                let slice_width = (*msb as usize) - (*lsb as usize) + 1;
+                let full_width = nets[q_netidx.0]
+                    .width
+                    .map(|(w_msb, w_lsb)| (w_msb as usize) - (w_lsb as usize) + 1)
+                    .unwrap_or(1);
+                assert!(slice_width <= full_width);
+                let mut bv = net_to_bv.remove(q_netidx).unwrap_or_else(|| {
+                    AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); full_width])
+                });
+                if bv.get_bit_count() < full_width {
+                    let mut new_bv =
+                        AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); full_width]);
+                    for i in 0..bv.get_bit_count() {
+                        new_bv.set_lsb(i, *bv.get_lsb(i));
+                    }
+                    bv = new_bv;
+                }
+                for i in 0..slice_width {
+                    bv.set_lsb((*lsb as usize) + i, *src_bv.get_lsb(i));
+                }
+                net_to_bv.insert(*q_netidx, bv);
+            }
+            crate::netlist::parse::NetRef::Literal(_) => {
+                log::warn!(
+                    "DFF override: destination output as literal not supported for port '{}'",
+                    pname
+                );
+            }
+        }
+    }
+}
+
+/// Implements DFF output overrides for identity (Q=D) and inverted (QN=NOT(D)).
 ///
-/// This bypasses formula emission for the Q output by directly routing bits
-/// from the connected `D` netref into the `Q` destination, supporting simple
-/// nets, bit-selects, and part-selects on the Q side. Destination bitvectors
-/// are sized to the full declared width of the Q net, and part-selects are
-/// written at the correct least-significant-bit offset.
+/// This bypasses formula emission by directly wiring from the connected `D`
+/// netref into the `Q`/`QN` destination, supporting Simple, BitSelect, and
+/// PartSelect on the destination side. Destination bitvectors are sized to the
+/// full declared width of the destination net, and part-selects are written at
+/// the correct least-significant-bit offset.
 ///
-/// - `type_name`: Cell type name for this instance.
-/// - `inst_name`: Instance name.
-/// - `port_name`: Output port currently being processed; only handled when it
-///   is "Q" (case-insensitive).
-/// - `inst`: Netlist instance providing the connection map (including D and Q).
-/// - `interner`: For resolving symbol identifiers to strings.
-/// - `gb`: Gate builder used to construct or look up nodes and constants.
-/// - `net_to_bv`: Mapping under construction from `NetIndex` to bitvectors for
-///   nets.
-/// - `dff_cells`: Set of cell type names to treat as DFFs.
-/// - `nets`: Net table for width lookups when sizing destinations.
-///
-/// Returns `true` when this function fully handled the Q wiring for this output
-/// port, `false` when the instance is not a recognized DFF and normal handling
-/// should proceed.
+/// Returns `true` when this function fully handled this output port; `false`
+/// when the instance is not a recognized DFF and normal handling should
+/// proceed.
 fn handle_dff_identity_override(
     type_name: &str,
     inst_name: &str,
@@ -433,13 +614,14 @@ fn handle_dff_identity_override(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     gb: &mut GateBuilder,
     net_to_bv: &mut HashMap<NetIndex, AigBitVector>,
-    dff_cells: &std::collections::HashSet<String>,
+    dff_cells_identity: &std::collections::HashSet<String>,
+    dff_cells_inverted: &std::collections::HashSet<String>,
     nets: &[Net],
 ) -> bool {
-    if !dff_cells.contains(type_name) {
+    if !dff_cells_identity.contains(type_name) && !dff_cells_inverted.contains(type_name) {
         return false;
     }
-    // Find D input and Q output
+    // Resolve D input
     let d_input = inst.connections.iter().find_map(|(p, nref)| {
         let pname = interner.resolve(*p).unwrap();
         if pname.eq_ignore_ascii_case("d") {
@@ -448,146 +630,37 @@ fn handle_dff_identity_override(
             None
         }
     });
-    if let Some(d_netref) = d_input {
-        log::trace!(
-            "DFF identity override: cell '{}' (instance '{}'), wiring D->Q for output '{}'",
+    if d_input.is_none() {
+        log::warn!(
+            "DFF identity override: D input not found for cell '{}' instance '{}'",
+            type_name,
+            inst_name
+        );
+        return true;
+    }
+    // Decide identity vs inverted based on the current output port name and
+    // membership.
+    let (target_port, invert) = if port_name.eq_ignore_ascii_case("q")
+        && dff_cells_identity.contains(type_name)
+    {
+        ("q", false)
+    } else if port_name.eq_ignore_ascii_case("qn") && dff_cells_inverted.contains(type_name) {
+        ("qn", true)
+    } else {
+        log::warn!(
+            "DFF identity override: unexpected D/Q pin mapping for cell '{}' instance '{}' output '{}'",
             type_name,
             inst_name,
             port_name
         );
-        match port_name {
-            q if q.eq_ignore_ascii_case("q") => {
-                // Get the bitvector for the D input netref
-                let d_bv = match d_netref {
-                    crate::netlist::parse::NetRef::Simple(d_netidx) => {
-                        net_to_bv.get(d_netidx).cloned()
-                    }
-                    crate::netlist::parse::NetRef::BitSelect(d_netidx, bit) => {
-                        net_to_bv.get(d_netidx).map(|bv| {
-                            let mut bv1 =
-                                AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); 1]);
-                            bv1.set_lsb(0, *bv.get_lsb(*bit as usize));
-                            bv1
-                        })
-                    }
-                    crate::netlist::parse::NetRef::PartSelect(d_netidx, msb, lsb) => {
-                        net_to_bv.get(d_netidx).map(|bv| {
-                            let width = (*msb as usize) - (*lsb as usize) + 1;
-                            let mut bv_part =
-                                AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); width]);
-                            for i in 0..width {
-                                bv_part.set_lsb(i, *bv.get_lsb(*lsb as usize + i));
-                            }
-                            bv_part
-                        })
-                    }
-                    crate::netlist::parse::NetRef::Literal(_) => None, // Not supported for D
-                };
-                if let Some(d_bv) = d_bv {
-                    for (p, q_ref) in &inst.connections {
-                        let pname = interner.resolve(*p).unwrap();
-                        if pname.eq_ignore_ascii_case("q") {
-                            match q_ref {
-                                crate::netlist::parse::NetRef::Simple(q_netidx) => {
-                                    let full_width = nets[q_netidx.0]
-                                        .width
-                                        .map(|(msb, lsb)| (msb as usize) - (lsb as usize) + 1)
-                                        .unwrap_or(1);
-                                    assert_eq!(
-                                        d_bv.get_bit_count(),
-                                        full_width,
-                                        "DFF identity override: width mismatch assigning D to Q simple; expected {} bits for net but got {}",
-                                        full_width,
-                                        d_bv.get_bit_count()
-                                    );
-                                    net_to_bv.insert(*q_netidx, d_bv.clone());
-                                }
-                                crate::netlist::parse::NetRef::BitSelect(q_netidx, bit) => {
-                                    let full_width = nets[q_netidx.0]
-                                        .width
-                                        .map(|(msb, lsb)| (msb as usize) - (lsb as usize) + 1)
-                                        .unwrap_or(1);
-                                    assert!((*bit as usize) < full_width);
-                                    let mut bv = net_to_bv.remove(q_netidx).unwrap_or_else(|| {
-                                        AigBitVector::from_lsb_is_index_0(&vec![
-                                            gb.get_false();
-                                            full_width
-                                        ])
-                                    });
-                                    if bv.get_bit_count() < full_width {
-                                        let mut new_bv = AigBitVector::from_lsb_is_index_0(&vec![
-                                            gb.get_false();
-                                            full_width
-                                        ]);
-                                        for i in 0..bv.get_bit_count() {
-                                            new_bv.set_lsb(i, *bv.get_lsb(i));
-                                        }
-                                        bv = new_bv;
-                                    }
-                                    bv.set_lsb(*bit as usize, *d_bv.get_lsb(0));
-                                    net_to_bv.insert(*q_netidx, bv);
-                                }
-                                crate::netlist::parse::NetRef::PartSelect(q_netidx, msb, lsb) => {
-                                    let slice_width = (*msb as usize) - (*lsb as usize) + 1;
-                                    let full_width = nets[q_netidx.0]
-                                        .width
-                                        .map(|(w_msb, w_lsb)| {
-                                            (w_msb as usize) - (w_lsb as usize) + 1
-                                        })
-                                        .unwrap_or(1);
-                                    assert!(slice_width <= full_width);
-                                    let mut bv = net_to_bv.remove(q_netidx).unwrap_or_else(|| {
-                                        AigBitVector::from_lsb_is_index_0(&vec![
-                                            gb.get_false();
-                                            full_width
-                                        ])
-                                    });
-                                    if bv.get_bit_count() < full_width {
-                                        let mut new_bv = AigBitVector::from_lsb_is_index_0(&vec![
-                                            gb.get_false();
-                                            full_width
-                                        ]);
-                                        for i in 0..bv.get_bit_count() {
-                                            new_bv.set_lsb(i, *bv.get_lsb(i));
-                                        }
-                                        bv = new_bv;
-                                    }
-                                    for i in 0..slice_width {
-                                        bv.set_lsb((*lsb as usize) + i, *d_bv.get_lsb(i));
-                                    }
-                                    net_to_bv.insert(*q_netidx, bv);
-                                }
-                                crate::netlist::parse::NetRef::Literal(_) => {
-                                    log::warn!(
-                                        "DFF identity override: Q output as literal not supported for cell '{}' instance '{}'",
-                                        type_name,
-                                        inst_name
-                                    );
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    log::warn!(
-                        "DFF identity override: D net not found for cell '{}' instance '{}'",
-                        type_name,
-                        inst_name
-                    );
-                }
-                return true;
-            }
-            _ => {
-                log::warn!(
-                    "DFF identity override: unexpected D/Q pin mapping for cell '{}' instance '{}' output '{}'",
-                    type_name,
-                    inst_name,
-                    port_name
-                );
-            }
-        }
+        return true;
+    };
+    // Build D (optionally inverted) and write to destination port.
+    if let Some(d_bv) = build_d_bv(d_input.unwrap(), gb, net_to_bv, invert) {
+        write_bv_to_port_destination(inst, interner, gb, net_to_bv, nets, target_port, &d_bv);
     } else {
         log::warn!(
-            "DFF identity override: D input not found for cell '{}' instance '{}'",
+            "DFF override: D net not available for cell '{}' instance '{}'",
             type_name,
             inst_name
         );
@@ -679,6 +752,7 @@ mod tests {
             &interner,
             &liberty_lib,
             &HashSet::new(),
+            &HashSet::new(),
         )
         .unwrap();
         let s = gate_fn.to_string();
@@ -761,6 +835,7 @@ mod tests {
             &nets,
             &interner,
             &liberty_lib,
+            &HashSet::new(),
             &HashSet::new(),
         )
         .expect("BitSelect output should be supported");
@@ -859,6 +934,7 @@ mod tests {
             &interner,
             &liberty_lib,
             &dff_cells,
+            &HashSet::new(),
         )
         .expect("projection should succeed without width mismatch");
 
@@ -952,6 +1028,7 @@ mod tests {
             &interner,
             &liberty_lib,
             &dff_cells,
+            &HashSet::new(),
         )
         .expect("projection should succeed without width mismatch");
 
@@ -1041,6 +1118,7 @@ mod tests {
             &interner,
             &liberty_lib,
             &dff_cells,
+            &HashSet::new(),
         )
         .unwrap();
         // The output should be wired directly from D
@@ -1050,6 +1128,256 @@ mod tests {
             q_input.bit_vector.get_lsb(0),
             q_output.bit_vector.get_lsb(0)
         );
+    }
+
+    #[test]
+    fn test_dff_inverted_qn_simple() {
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let d = interner.get_or_intern("d");
+        let qn = interner.get_or_intern("qn");
+        let dffn = interner.get_or_intern("DFFN1");
+        let u1 = interner.get_or_intern("u1");
+
+        let nets = vec![
+            Net {
+                name: d,
+                width: None,
+            },
+            Net {
+                name: qn,
+                width: None,
+            },
+        ];
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: d,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: qn,
+            },
+        ];
+        let instances = vec![NetlistInstance {
+            type_name: dffn,
+            instance_name: u1,
+            connections: vec![
+                (interner.get_or_intern("D"), NetRef::Simple(NetIndex(0))),
+                (interner.get_or_intern("QN"), NetRef::Simple(NetIndex(1))),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+        let module = NetlistModule {
+            name: interner.get_or_intern("top"),
+            ports,
+            wires: vec![],
+            instances,
+        };
+        let liberty_lib = crate::liberty_proto::Library {
+            cells: vec![crate::liberty_proto::Cell {
+                name: "DFFN1".to_string(),
+                pins: vec![
+                    crate::liberty_proto::Pin {
+                        name: "D".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "QN".to_string(),
+                        direction: 1,
+                        function: "IQN".to_string(),
+                    },
+                ],
+                area: 1.0,
+            }],
+        };
+        let dff_cells_identity = HashSet::new();
+        let mut dff_cells_inverted = HashSet::new();
+        dff_cells_inverted.insert("DFFN1".to_string());
+        let gate_fn = project_gatefn_from_netlist_and_liberty(
+            &module,
+            &nets,
+            &interner,
+            &liberty_lib,
+            &dff_cells_identity,
+            &dff_cells_inverted,
+        )
+        .unwrap();
+        let s = gate_fn.to_string();
+        assert!(s.contains("qn[0] = not("), "GateFn output: {}", s);
+    }
+
+    #[test]
+    fn test_dff_inverted_qn_bitselect() {
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let d = interner.get_or_intern("d");
+        let y = interner.get_or_intern("y");
+        let dffn = interner.get_or_intern("DFFN1");
+        let u1 = interner.get_or_intern("u1");
+
+        let nets = vec![
+            Net {
+                name: d,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: Some((3, 0)),
+            },
+        ];
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: d,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: Some((3, 0)),
+                name: y,
+            },
+        ];
+        let instances = vec![NetlistInstance {
+            type_name: dffn,
+            instance_name: u1,
+            connections: vec![
+                (interner.get_or_intern("D"), NetRef::Simple(NetIndex(0))),
+                (
+                    interner.get_or_intern("QN"),
+                    NetRef::BitSelect(NetIndex(1), 2),
+                ),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+        let module = NetlistModule {
+            name: interner.get_or_intern("top"),
+            ports,
+            wires: vec![],
+            instances,
+        };
+        let liberty_lib = crate::liberty_proto::Library {
+            cells: vec![crate::liberty_proto::Cell {
+                name: "DFFN1".to_string(),
+                pins: vec![
+                    crate::liberty_proto::Pin {
+                        name: "D".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "QN".to_string(),
+                        direction: 1,
+                        function: "IQN".to_string(),
+                    },
+                ],
+                area: 1.0,
+            }],
+        };
+        let dff_cells_identity = HashSet::new();
+        let mut dff_cells_inverted = HashSet::new();
+        dff_cells_inverted.insert("DFFN1".to_string());
+        let gate_fn = project_gatefn_from_netlist_and_liberty(
+            &module,
+            &nets,
+            &interner,
+            &liberty_lib,
+            &dff_cells_identity,
+            &dff_cells_inverted,
+        )
+        .unwrap();
+        let s = gate_fn.to_string();
+        assert!(s.contains("  y[2] = not("), "GateFn output: {}", s);
+    }
+
+    #[test]
+    fn test_dff_inverted_qn_partselect() {
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let x = interner.get_or_intern("x");
+        let y = interner.get_or_intern("y");
+        let dffn = interner.get_or_intern("DFFN1");
+        let u1 = interner.get_or_intern("u1");
+
+        let nets = vec![
+            Net {
+                name: x,
+                width: Some((7, 0)),
+            },
+            Net {
+                name: y,
+                width: Some((7, 0)),
+            },
+        ];
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: Some((7, 0)),
+                name: x,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: Some((7, 0)),
+                name: y,
+            },
+        ];
+        let instances = vec![NetlistInstance {
+            type_name: dffn,
+            instance_name: u1,
+            connections: vec![
+                (
+                    interner.get_or_intern("D"),
+                    NetRef::PartSelect(NetIndex(0), 7, 4),
+                ),
+                (
+                    interner.get_or_intern("QN"),
+                    NetRef::PartSelect(NetIndex(1), 7, 4),
+                ),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+        let module = NetlistModule {
+            name: interner.get_or_intern("top"),
+            ports,
+            wires: vec![],
+            instances,
+        };
+        let liberty_lib = crate::liberty_proto::Library {
+            cells: vec![crate::liberty_proto::Cell {
+                name: "DFFN1".to_string(),
+                pins: vec![
+                    crate::liberty_proto::Pin {
+                        name: "D".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "QN".to_string(),
+                        direction: 1,
+                        function: "IQN".to_string(),
+                    },
+                ],
+                area: 1.0,
+            }],
+        };
+        let dff_cells_identity = HashSet::new();
+        let mut dff_cells_inverted = HashSet::new();
+        dff_cells_inverted.insert("DFFN1".to_string());
+        let gate_fn = project_gatefn_from_netlist_and_liberty(
+            &module,
+            &nets,
+            &interner,
+            &liberty_lib,
+            &dff_cells_identity,
+            &dff_cells_inverted,
+        )
+        .unwrap();
+        let s = gate_fn.to_string();
+        assert!(s.contains("  y[4] = not("), "GateFn output: {}", s);
+        assert!(s.contains("  y[7] = not("), "GateFn output: {}", s);
     }
 
     #[test]
@@ -1132,6 +1460,7 @@ mod tests {
             &nets,
             &interner,
             &liberty_lib,
+            &HashSet::new(),
             &HashSet::new(),
         )
         .unwrap();

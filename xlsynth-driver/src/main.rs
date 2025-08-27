@@ -900,6 +900,12 @@ fn main() {
                         .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF for D->Q identity override.")
                         .action(ArgAction::Set),
                 )
+                .arg(
+                    Arg::new("dff_cell_invert_formula")
+                        .long("dff_cell_invert_formula")
+                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF with inverted output (QN = NOT(D)).")
+                        .action(ArgAction::Set),
+                )
         )
         .subcommand(
             clap::Command::new("gv-read-stats")
