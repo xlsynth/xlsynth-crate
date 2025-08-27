@@ -141,7 +141,7 @@ pub enum FuzzOp {
     },
 }
 
-#[derive(Debug, Clone, Arbitrary)]
+#[derive(Debug, Clone, Copy, Arbitrary)]
 pub enum FuzzOpFlat {
     Literal,
     Unop,
@@ -460,14 +460,62 @@ pub fn generate_ir_fn(
     fn_builder.build_with_return_value(available_nodes.last().unwrap())
 }
 
-#[derive(Debug, Clone)]
-pub struct FuzzSample {
-    pub input_bits: u8,
-    pub ops: Vec<FuzzOp>,
+const ALL_OPS: [FuzzOpFlat; 19] = [
+    FuzzOpFlat::Literal,
+    FuzzOpFlat::Unop,
+    FuzzOpFlat::Binop,
+    FuzzOpFlat::ZeroExt,
+    FuzzOpFlat::SignExt,
+    FuzzOpFlat::BitSlice,
+    FuzzOpFlat::OneHot,
+    FuzzOpFlat::Sel,
+    FuzzOpFlat::PrioritySel,
+    FuzzOpFlat::ArrayIndex,
+    FuzzOpFlat::Array,
+    FuzzOpFlat::Decode,
+    FuzzOpFlat::OneHotSel,
+    FuzzOpFlat::UMul,
+    FuzzOpFlat::SMul,
+    FuzzOpFlat::Tuple,
+    FuzzOpFlat::TupleIndex,
+    FuzzOpFlat::DynamicBitSlice,
+    FuzzOpFlat::BitSliceUpdate,
+];
+
+const UNOP_BINOP_OPS: [FuzzOpFlat; 2] = [FuzzOpFlat::Unop, FuzzOpFlat::Binop];
+
+pub trait SampleConfig {
+    fn allowed_ops() -> &'static [FuzzOpFlat];
 }
 
-impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
+pub struct AllOps;
+impl SampleConfig for AllOps {
+    fn allowed_ops() -> &'static [FuzzOpFlat] {
+        &ALL_OPS
+    }
+}
+
+pub struct UnopBinop;
+impl SampleConfig for UnopBinop {
+    fn allowed_ops() -> &'static [FuzzOpFlat] {
+        &UNOP_BINOP_OPS
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfiguredFuzzSample<C: SampleConfig> {
+    pub input_bits: u8,
+    pub ops: Vec<FuzzOp>,
+    _marker: std::marker::PhantomData<C>,
+}
+
+pub type FuzzSample = ConfiguredFuzzSample<AllOps>;
+/// Fuzz sample generator that only uses unary and binary operations.
+pub type FuzzSampleUnopBinop = ConfiguredFuzzSample<UnopBinop>;
+
+impl<'a, C: SampleConfig> arbitrary::Arbitrary<'a> for ConfiguredFuzzSample<C> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let allowed_ops = C::allowed_ops();
         let input_bits = u.int_in_range(1..=8)?;
         // Decide how many operations to generate.
         let num_ops = u.int_in_range(0..=20)?;
@@ -487,7 +535,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
 
         for _ in 0..num_ops {
             // Randomly decide which kind of operation to generate
-            let op_type = u.arbitrary::<FuzzOpFlat>()?;
+            let op_type = *u.choose(allowed_ops)?;
             match op_type {
                 FuzzOpFlat::Literal => {
                     // Literal op: nothing to sample, just generate a literal byte value.
@@ -733,6 +781,10 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
             // Each operation produces one new IR node.
             available_nodes += 1;
         }
-        Ok(FuzzSample { input_bits, ops })
+        Ok(ConfiguredFuzzSample {
+            input_bits,
+            ops,
+            _marker: std::marker::PhantomData,
+        })
     }
 }
