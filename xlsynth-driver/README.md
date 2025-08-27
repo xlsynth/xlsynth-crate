@@ -56,6 +56,18 @@ xlsynth-driver gv2ir \
 
 - Optional flags:
   - `--dff_cells <CSV>` – comma-separated list of DFF cell names to treat as identity (D->Q).
+  - `--dff_cell_formula <STR>` – auto-classify cells as DFFs for identity wiring when any output pin's Liberty function exactly matches this string (e.g., `IQ`). Identity wiring sets `Q = D`.
+  - `--dff_cell_invert_formula <STR>` – auto-classify cells as DFFs with inverted output when any output pin's Liberty function exactly matches this string (e.g., `IQN`). Inverted wiring sets `QN = NOT(D)`.
+
+Example (ASAP7):
+
+```shell
+xlsynth-driver gv2ir \
+  --netlist add_mul.vg \
+  --liberty_proto ~/asap7.proto \
+  --dff_cell_formula IQ \
+  --dff_cell_invert_formula IQN > add_mul.ir
+```
 
 ### `gv-read-stats`: netlist statistics
 
