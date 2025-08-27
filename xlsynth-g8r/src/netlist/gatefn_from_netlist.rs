@@ -163,7 +163,7 @@ pub fn project_gatefn_from_netlist_and_liberty(
             .cells
             .iter()
             .find(|c| c.name == type_name)
-            .unwrap();
+            .ok_or_else(|| format!("Cell '{}' not found in liberty data", type_name))?;
         let mut pin_directions = std::collections::HashMap::new();
         for pin in &cell.pins {
             pin_directions.insert(pin.name.as_str(), pin.direction);
@@ -243,10 +243,62 @@ pub fn project_gatefn_from_netlist_and_liberty(
             }
         }
         if !processed_any && !unprocessed.is_empty() {
-            return Err(format!(
-                "Could not resolve all instance dependencies (possible cycle or missing driver). Remaining instances: {}",
+            // Build a short, actionable diagnostic to help pinpoint why instances
+            // could not be resolved. We show up to a bounded number of examples
+            // with their missing inputs.
+            let mut diag_lines: Vec<String> = Vec::new();
+            let example_limit = 10usize.min(unprocessed.len());
+            for inst in unprocessed.iter().take(example_limit) {
+                let type_name = interner.resolve(inst.type_name).unwrap_or("<unknown>");
+                let inst_name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
+                // Determine pin directions for this cell type (to identify inputs).
+                let mut pin_directions = HashMap::new();
+                if let Some(cell) = liberty_lib.cells.iter().find(|c| c.name == type_name) {
+                    for pin in &cell.pins {
+                        pin_directions.insert(pin.name.as_str(), pin.direction);
+                    }
+                }
+                // Recompute missing inputs for this instance w.r.t. current net_to_bv.
+                let (_input_map, missing_inputs, _port_map) = build_instance_input_map(
+                    inst,
+                    &pin_directions,
+                    interner,
+                    nets,
+                    &net_to_bv,
+                    &mut gb,
+                );
+                if missing_inputs.is_empty() {
+                    diag_lines.push(format!(
+                        "- cell '{}' instance '{}' at {}:{} has no missing inputs detected; unresolved due to dependency cycle or unknown output formula",
+                        type_name, inst_name, inst.inst_lineno, inst.inst_colno
+                    ));
+                } else {
+                    diag_lines.push(format!(
+                        "- cell '{}' instance '{}' at {}:{} missing inputs: [{}]",
+                        type_name,
+                        inst_name,
+                        inst.inst_lineno,
+                        inst.inst_colno,
+                        missing_inputs.join(", ")
+                    ));
+                }
+            }
+
+            let mut msg = String::new();
+            msg.push_str(&format!(
+                "Could not resolve all instance dependencies (possible cycle or missing driver). Remaining instances: {}\n",
                 unprocessed.len()
             ));
+            msg.push_str(&format!(
+                "Examples of unresolved instances (showing up to {}):\n",
+                example_limit
+            ));
+            for line in diag_lines {
+                msg.push_str(&line);
+                msg.push('\n');
+            }
+            msg.push_str(r#"Hint: re-run with RUST_LOG=trace to log skipped instances and their missing nets during processing."#);
+            return Err(msg);
         }
     }
     for port in &module.ports {
