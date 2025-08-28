@@ -47,6 +47,14 @@ All tools, and especially the `xlsynth-driver` subcommands, are expected to prod
 
 Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.
 
+When embedding inline IR text in tests or code, prefer expanded newlines inside raw multi-line strings instead of `\n` escapes, e.g.:
+
+```rust
+let ir = r#"fn id(a: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(a, id=2)
+}"#;
+```
+
 Avoid `use` statements inside local function scopes; place all imports at the
 module level (or at the top of a `mod tests` section) for clarity.
 

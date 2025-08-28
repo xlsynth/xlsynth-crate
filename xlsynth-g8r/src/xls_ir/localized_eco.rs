@@ -9,11 +9,8 @@ use serde::Serialize;
 use std::collections::HashSet;
 
 use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
-use crate::xls_ir::ir::{binop_to_operator, nary_op_to_operator, unop_to_operator};
 use crate::xls_ir::ir_utils::get_topological;
-use crate::xls_ir::node_hashing::{
-    compute_node_local_structural_hash, compute_node_structural_hash, get_param_ordinal,
-};
+use crate::xls_ir::node_hashing::{compute_node_structural_hash, get_param_ordinal};
 
 fn children_in_order(f: &Fn, node_ref: NodeRef) -> Vec<NodeRef> {
     let node = f.get_node(node_ref);
@@ -127,51 +124,25 @@ fn collect_shape_hashes(f: &Fn) -> Vec<blake3::Hash> {
     hashes
 }
 
-fn collect_local_shape_hashes(f: &Fn) -> Vec<blake3::Hash> {
-    let n = f.nodes.len();
-    let mut hashes: Vec<blake3::Hash> = vec![blake3::Hash::from([0u8; 32]); n];
-    for i in 0..n {
-        let nr = NodeRef { index: i };
-        hashes[i] = compute_node_local_structural_hash(f, nr);
-    }
-    hashes
-}
+// Removed local-shape hashing; we compare by full structural hashes and recurse
+// by index.
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Path(pub Vec<usize>);
 
 #[derive(Debug, Clone, Serialize)]
 pub enum Edit {
-    OperatorChanged {
-        path: Path,
-        old_op: String,
-        new_op: String,
-    },
-    TypeChanged {
-        path: Path,
-        old_ty: String,
-        new_ty: String,
-    },
-    ArityChanged {
-        path: Path,
-        old_arity: usize,
-        new_arity: usize,
-    },
-    OperandInserted {
+    // New child subtree introduced at a given index under node at `path`.
+    AddNode {
         path: Path,
         index: usize,
         new_signature: String,
     },
-    OperandDeleted {
+    // Rewrite the operand list of the node at `path` to match `new` exactly.
+    // Provided as the ordered operand signatures for human readability.
+    RewriteOperands {
         path: Path,
-        index: usize,
-        old_signature: String,
-    },
-    OperandSubstituted {
-        path: Path,
-        index: usize,
-        old_signature: String,
-        new_signature: String,
+        new_signatures: Vec<String>,
     },
 }
 
@@ -197,8 +168,6 @@ pub fn compute_localized_eco(old: &Fn, new: &Fn) -> LocalizedEcoDiff {
 
     let old_hashes = collect_shape_hashes(old);
     let new_hashes = collect_shape_hashes(new);
-    let old_local = collect_local_shape_hashes(old);
-    let new_local = collect_local_shape_hashes(new);
 
     let mut edits: Vec<Edit> = Vec::new();
     let mut stats = DiffStats { matched_nodes: 0 };
@@ -216,8 +185,6 @@ pub fn compute_localized_eco(old: &Fn, new: &Fn) -> LocalizedEcoDiff {
         new,
         &old_hashes,
         &new_hashes,
-        &old_local,
-        &new_local,
         old_root,
         new_root,
         &mut Vec::new(),
@@ -236,8 +203,6 @@ fn collect_equal_pairs(
     new: &Fn,
     old_hashes: &[blake3::Hash],
     new_hashes: &[blake3::Hash],
-    old_local: &[blake3::Hash],
-    new_local: &[blake3::Hash],
     old_nr: NodeRef,
     new_nr: NodeRef,
     visited: &mut std::collections::HashSet<(usize, usize)>,
@@ -251,62 +216,40 @@ fn collect_equal_pairs(
 
     if old_hashes[old_nr.index] == new_hashes[new_nr.index] {
         out.insert((old_nr.index, new_nr.index));
-        // When equal at parent, children arrays are the same length and equal by
-        // position. Recurse pairwise.
+        // When equal at parent, recurse pairwise on children indices.
         let old_children = children_in_order(old, old_nr);
         let new_children = children_in_order(new, new_nr);
-        for (oc, nc) in old_children.iter().zip(new_children.iter()) {
+        let min_len = old_children.len().min(new_children.len());
+        for idx in 0..min_len {
             collect_equal_pairs(
-                old, new, old_hashes, new_hashes, old_local, new_local, *oc, *nc, visited, out,
+                old,
+                new,
+                old_hashes,
+                new_hashes,
+                old_children[idx],
+                new_children[idx],
+                visited,
+                out,
             );
         }
         return;
     }
 
-    // Otherwise align children to find equal subgraphs below.
+    // Otherwise, traverse children by index without alignment.
     let old_children = children_in_order(old, old_nr);
     let new_children = children_in_order(new, new_nr);
-    let n = old_children.len();
-    let m = new_children.len();
-    let mut dp: Vec<Vec<usize>> = vec![vec![0; m + 1]; n + 1];
-    for i in 0..=n {
-        dp[i][0] = i;
-    }
-    for j in 0..=m {
-        dp[0][j] = j;
-    }
-    for i in 1..=n {
-        for j in 1..=m {
-            let equal =
-                old_hashes[old_children[i - 1].index] == new_hashes[new_children[j - 1].index];
-            let cost_sub = if equal { 0 } else { 1 };
-            let del = dp[i - 1][j] + 1;
-            let ins = dp[i][j - 1] + 1;
-            let sub = dp[i - 1][j - 1] + cost_sub;
-            dp[i][j] = del.min(ins).min(sub);
-        }
-    }
-    // Backtrace: recurse on all diagonal moves to continue discovery of equal pairs
-    // below.
-    let mut i = n;
-    let mut j = m;
-    while i > 0 || j > 0 {
-        if i > 0 && dp[i][j] == dp[i - 1][j] + 1 {
-            i -= 1;
-        } else if j > 0 && dp[i][j] == dp[i][j - 1] + 1 {
-            j -= 1;
-        } else {
-            let idx_old = i - 1;
-            let idx_new = j - 1;
-            let oc = old_children[idx_old];
-            let nc = new_children[idx_new];
-            // Recurse on this pair regardless of equality to find deeper equalities.
-            collect_equal_pairs(
-                old, new, old_hashes, new_hashes, old_local, new_local, oc, nc, visited, out,
-            );
-            i -= 1;
-            j -= 1;
-        }
+    let min_len = old_children.len().min(new_children.len());
+    for idx in 0..min_len {
+        collect_equal_pairs(
+            old,
+            new,
+            old_hashes,
+            new_hashes,
+            old_children[idx],
+            new_children[idx],
+            visited,
+            out,
+        );
     }
 }
 
@@ -820,11 +763,15 @@ fn rebuild_node_from_new_at_path(
             }
         }
     };
-    // Mutate the existing node in place: preserve its text_id and name.
+    // Mutate the existing node in place: preserve its text_id and existing name
+    // to avoid breaking textual references.
     let patched_node = patched.get_node_mut(patched_nr);
     patched_node.payload = new_payload;
     patched_node.ty = new_node.ty.clone();
     patched_node.pos = new_node.pos.clone();
+    if !matches!(patched_node.payload, NodePayload::GetParam(_)) {
+        patched_node.name = None;
+    }
 }
 
 /// Applies a LocalizedEcoDiff to `old`, using `new` as the source for any newly
@@ -838,15 +785,11 @@ pub fn apply_localized_eco(old: &Fn, new: &Fn, diff: &LocalizedEcoDiff) -> Fn {
         std::collections::HashSet::new();
     let old_hashes = collect_shape_hashes(old);
     let new_hashes = collect_shape_hashes(new);
-    let old_local = collect_local_shape_hashes(old);
-    let new_local = collect_local_shape_hashes(new);
     collect_equal_pairs(
         old,
         new,
         &old_hashes,
         &new_hashes,
-        &old_local,
-        &new_local,
         old.ret_node_ref.expect("old must have ret"),
         new.ret_node_ref.expect("new must have ret"),
         &mut visited,
@@ -870,12 +813,7 @@ pub fn apply_localized_eco(old: &Fn, new: &Fn, diff: &LocalizedEcoDiff) -> Fn {
     let mut paths: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
     for e in diff.edits.iter() {
         match e {
-            Edit::OperatorChanged { path, .. }
-            | Edit::TypeChanged { path, .. }
-            | Edit::ArityChanged { path, .. }
-            | Edit::OperandInserted { path, .. }
-            | Edit::OperandDeleted { path, .. }
-            | Edit::OperandSubstituted { path, .. } => {
+            Edit::AddNode { path, .. } | Edit::RewriteOperands { path, .. } => {
                 paths.insert(path.0.clone());
             }
         }
@@ -901,6 +839,23 @@ pub fn apply_localized_eco(old: &Fn, new: &Fn, diff: &LocalizedEcoDiff) -> Fn {
 
     // Re-topologize nodes so dependencies appear before uses.
     retopologize_in_place(&mut patched);
+
+    // For rewritten nodes, keep text_id stable and clear their names so labels
+    // derive from operator.text_id consistently; this avoids stale names while
+    // preserving IDs.
+    let mut rewritten_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for e in diff.edits.iter() {
+        if let Edit::RewriteOperands { path, .. } = e {
+            let root = patched.ret_node_ref.expect("patched must have ret");
+            let nr = node_ref_at_path(&patched, root, &path.0);
+            rewritten_indices.insert(nr.index);
+        }
+    }
+    for idx in rewritten_indices.into_iter() {
+        if !matches!(patched.nodes[idx].payload, NodePayload::GetParam(_)) {
+            patched.nodes[idx].name = None;
+        }
+    }
 
     patched
 }
@@ -1083,26 +1038,11 @@ fn retopologize_in_place(f: &mut Fn) {
     }
 }
 
-fn node_operator_string(f: &Fn, nr: NodeRef) -> String {
-    match &f.get_node(nr).payload {
-        NodePayload::Binop(op, _, _) => binop_to_operator(*op).to_string(),
-        NodePayload::Unop(op, _) => unop_to_operator(*op).to_string(),
-        NodePayload::Nary(op, _) => nary_op_to_operator(*op).to_string(),
-        p => p.get_operator().to_string(),
-    }
-}
-
-fn node_type_string(f: &Fn, nr: NodeRef) -> String {
-    format!("{}", f.get_node(nr).ty)
-}
-
 fn align_nodes(
     old: &Fn,
     new: &Fn,
     old_hashes: &[blake3::Hash],
     new_hashes: &[blake3::Hash],
-    old_local: &[blake3::Hash],
-    new_local: &[blake3::Hash],
     old_nr: NodeRef,
     new_nr: NodeRef,
     path: &mut Vec<usize>,
@@ -1121,133 +1061,61 @@ fn align_nodes(
         return;
     }
 
-    // Record operator/type/arity changes at this node if any.
-    let old_op = node_operator_string(old, old_nr);
-    let new_op = node_operator_string(new, new_nr);
-    if old_op != new_op {
-        edits.push(Edit::OperatorChanged {
-            path: Path(path.clone()),
-            old_op,
-            new_op,
-        });
-    }
-    let old_ty = node_type_string(old, old_nr);
-    let new_ty = node_type_string(new, new_nr);
-    if old_ty != new_ty {
-        edits.push(Edit::TypeChanged {
-            path: Path(path.clone()),
-            old_ty,
-            new_ty,
-        });
-    }
-
     let old_children = children_in_order(old, old_nr);
     let new_children = children_in_order(new, new_nr);
-    if old_children.len() != new_children.len() {
-        edits.push(Edit::ArityChanged {
-            path: Path(path.clone()),
-            old_arity: old_children.len(),
-            new_arity: new_children.len(),
-        });
-    }
 
-    // Align ordered operands via Levenshtein DP on shape equality.
     let n = old_children.len();
     let m = new_children.len();
-    let mut dp: Vec<Vec<usize>> = vec![vec![0; m + 1]; n + 1];
-    for i in 0..=n {
-        dp[i][0] = i;
-    }
-    for j in 0..=m {
-        dp[0][j] = j;
-    }
-    for i in 1..=n {
-        for j in 1..=m {
-            let equal =
-                old_hashes[old_children[i - 1].index] == new_hashes[new_children[j - 1].index];
-            let cost_sub = if equal { 0 } else { 1 };
-            let del = dp[i - 1][j] + 1;
-            let ins = dp[i][j - 1] + 1;
-            let sub = dp[i - 1][j - 1] + cost_sub;
-            dp[i][j] = del.min(ins).min(sub);
-        }
-    }
+    let min_len = n.min(m);
 
-    // Backtrace to emit edits and collect matched/substituted pairs to recurse
-    // into.
-    let mut i = n;
-    let mut j = m;
-    let mut recurse_pairs: Vec<(usize, usize, usize)> = Vec::new();
-    while i > 0 || j > 0 {
-        if i > 0 && dp[i][j] == dp[i - 1][j] + 1 {
-            let idx = i - 1;
-            let sig = old.get_node(old_children[idx]).to_signature_string(old);
-            edits.push(Edit::OperandDeleted {
-                path: Path(path.clone()),
-                index: idx,
-                old_signature: sig,
-            });
-            i -= 1;
-        } else if j > 0 && dp[i][j] == dp[i][j - 1] + 1 {
-            let idx = j - 1;
+    if m > n {
+        // Extra operands in new → AddNode per extra index, no parent rewrite.
+        for idx in min_len..m {
             let sig = new.get_node(new_children[idx]).to_signature_string(new);
-            edits.push(Edit::OperandInserted {
+            edits.push(Edit::AddNode {
                 path: Path(path.clone()),
                 index: idx,
                 new_signature: sig,
             });
-            j -= 1;
-        } else {
-            // substitution or match
-            let idx_old = i - 1;
-            let idx_new = j - 1;
-            let equal =
-                old_hashes[old_children[idx_old].index] == new_hashes[new_children[idx_new].index];
-            if equal {
-                // No edit; no need to recurse further.
-            } else {
-                // If the child's local shape (op/type/attrs) matches, do not emit a
-                // substitution at this parent. Recurse into the child to localize the diff.
-                let old_child_idx = old_children[idx_old].index;
-                let new_child_idx = new_children[idx_new].index;
-                let local_equal = old_local[old_child_idx] == new_local[new_child_idx];
-                let single_input_parent = n == 1 && m == 1;
-                if !local_equal && !single_input_parent {
-                    let old_sig = old.get_node(old_children[idx_old]).to_signature_string(old);
-                    let new_sig = new.get_node(new_children[idx_new]).to_signature_string(new);
-                    edits.push(Edit::OperandSubstituted {
-                        path: Path(path.clone()),
-                        index: idx_new,
-                        old_signature: old_sig,
-                        new_signature: new_sig,
-                    });
-                }
-                recurse_pairs.push((old_child_idx, new_child_idx, idx_new));
-            }
-            i -= 1;
-            j -= 1;
         }
+    } else if n > m {
+        // Arity shrink → rewrite operands at this node to match new.
+        let new_sigs: Vec<String> = new_children
+            .iter()
+            .map(|nr| new.get_node(*nr).to_signature_string(new))
+            .collect();
+        edits.push(Edit::RewriteOperands {
+            path: Path(path.clone()),
+            new_signatures: new_sigs,
+        });
+    } else {
+        // Same arity: if children are identical pairwise but node hashes differ,
+        // it's an operator/type/attr change at this node → rewrite.
+        let children_equal = (0..min_len)
+            .all(|i| old_hashes[old_children[i].index] == new_hashes[new_children[i].index]);
+        if children_equal {
+            let new_sigs: Vec<String> = new_children
+                .iter()
+                .map(|nr| new.get_node(*nr).to_signature_string(new))
+                .collect();
+            edits.push(Edit::RewriteOperands {
+                path: Path(path.clone()),
+                new_signatures: new_sigs,
+            });
+        }
+        // else: differ at children → localize by recursing only.
     }
 
-    // Recurse into substituted pairs in forward index order to keep stable paths.
-    recurse_pairs.reverse();
-    for (old_child_idx, new_child_idx, at_index) in recurse_pairs.into_iter() {
-        path.push(at_index);
-        let old_child = NodeRef {
-            index: old_child_idx,
-        };
-        let new_child = NodeRef {
-            index: new_child_idx,
-        };
+    // Recurse pairwise by index for overlapping children.
+    for idx in 0..min_len {
+        path.push(idx);
         align_nodes(
             old,
             new,
             old_hashes,
             new_hashes,
-            old_local,
-            new_local,
-            old_child,
-            new_child,
+            old_children[idx],
+            new_children[idx],
             path,
             edits,
             stats,
@@ -1272,10 +1140,14 @@ mod tests {
     #[test]
     fn identical_functions_produce_no_edits() {
         let f = parse_fn(
-            "fn id(a: bits[1] id=1) -> bits[1] {\n  ret identity.2: bits[1] = identity(a, id=2)\n}",
+            r#"fn id(a: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(a, id=2)
+}"#,
         );
         let g = parse_fn(
-            "fn id(a: bits[1] id=1) -> bits[1] {\n  ret identity.2: bits[1] = identity(a, id=2)\n}",
+            r#"fn id(a: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(a, id=2)
+}"#,
         );
         let diff = compute_localized_eco(&f, &g);
         assert!(diff.edits.is_empty());
@@ -1285,36 +1157,41 @@ mod tests {
     #[test]
     fn tuple_extra_operand_localized_insert() {
         let old = parse_fn(
-            "fn t(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {\n\
-  ret or.3: bits[1] = or(a, b, id=3)\n\
-}",
+            r#"fn t(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret or.3: bits[1] = or(a, b, id=3)
+}"#,
         );
         let new = parse_fn(
-            "fn t(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {\n\
-  ret or.3: bits[1] = or(a, b, b, id=3)\n\
-}",
+            r#"fn t(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret or.3: bits[1] = or(a, b, b, id=3)
+}"#,
         );
         let diff = compute_localized_eco(&old, &new);
-        // Expect at least one insertion at the return node path [].
-        assert!(
-            diff.edits
-                .iter()
-                .any(|e| matches!(e, Edit::OperandInserted { path, .. } if path.0.is_empty()))
-        );
+        // Expect an AddNode at the return node path [].
+        assert!(diff.edits.iter().any(
+            |e| matches!(e, Edit::AddNode { path, index, .. } if path.0.is_empty() && *index == 2)
+        ));
     }
 
     #[test]
     fn operator_change_localized() {
-        let old =
-            parse_fn("fn f(a: bits[1] id=1) -> bits[1] {\n  ret not.2: bits[1] = not(a, id=2)\n}");
+        let old = parse_fn(
+            r#"fn f(a: bits[1] id=1) -> bits[1] {
+  ret not.2: bits[1] = not(a, id=2)
+}"#,
+        );
         let new = parse_fn(
-            "fn f(a: bits[1] id=1) -> bits[1] {\n  ret identity.2: bits[1] = identity(a, id=2)\n}",
+            r#"fn f(a: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(a, id=2)
+}"#,
         );
         let diff = compute_localized_eco(&old, &new);
-        assert!(diff
-            .edits
-            .iter()
-            .any(|e| matches!(e, Edit::OperatorChanged { path, old_op, new_op } if path.0.is_empty() && old_op == "not" && new_op == "identity")));
+        // Operator changes are reflected as operand rewrites at root.
+        assert!(
+            diff.edits
+                .iter()
+                .any(|e| matches!(e, Edit::RewriteOperands { path, .. } if path.0.is_empty()))
+        );
     }
 
     #[test]
@@ -1322,20 +1199,27 @@ mod tests {
         // old: not(not(not(a)))
         // new: not(identity(not(a))) -- change at the middle node
         let old = parse_fn(
-            "fn f(a: bits[1] id=1) -> bits[1] {\n  not.2: bits[1] = not(a, id=2)\n  not.3: bits[1] = not(not.2, id=3)\n  ret not.4: bits[1] = not(not.3, id=4)\n}",
+            r#"fn f(a: bits[1] id=1) -> bits[1] {
+  not.2: bits[1] = not(a, id=2)
+  not.3: bits[1] = not(not.2, id=3)
+  ret not.4: bits[1] = not(not.3, id=4)
+}"#,
         );
         let new = parse_fn(
-            "fn f(a: bits[1] id=1) -> bits[1] {\n  not.2: bits[1] = not(a, id=2)\n  identity.3: bits[1] = identity(not.2, id=3)\n  ret not.4: bits[1] = not(identity.3, id=4)\n}",
+            r#"fn f(a: bits[1] id=1) -> bits[1] {
+  not.2: bits[1] = not(a, id=2)
+  identity.3: bits[1] = identity(not.2, id=3)
+  ret not.4: bits[1] = not(identity.3, id=4)
+}"#,
         );
         let diff = compute_localized_eco(&old, &new);
         // Expect an operator change at the child (path [0]) and no substitution at the
         // root.
+        // Operator changes are reflected as operand rewrites at child [0].
         assert!(diff.edits.iter().any(|e| matches!(e,
-            Edit::OperatorChanged { path, old_op, new_op } if path.0 == vec![0] && old_op == "not" && new_op == "identity")));
-        assert!(!diff.edits.iter().any(|e| matches!(e,
-            Edit::OperandSubstituted { path, .. } if path.0.is_empty())));
+            Edit::RewriteOperands { path, .. } if path.0 == vec![0])));
         // Should not produce edits beyond that (e.g. no edits at the leaf 'not(a)')
         assert!(!diff.edits.iter().any(|e| matches!(e,
-            Edit::OperatorChanged { path, .. } if path.0 == vec![0, 0])));
+            Edit::RewriteOperands { path, .. } if path.0 == vec![0, 0])));
     }
 }

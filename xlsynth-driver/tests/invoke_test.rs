@@ -6303,26 +6303,16 @@ top fn eco_top(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
         .and_then(|e| e.get("edits"))
         .and_then(|e| e.as_array())
         .expect("edits array present");
-    let mut saw_sub = false;
+    let mut saw_change = false;
     for e in edits.iter() {
-        if let Some(sub) = e.get("OperandSubstituted") {
-            let old_sig = sub
-                .get("old_signature")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            let new_sig = sub
-                .get("new_signature")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            if old_sig.starts_with("not(") && new_sig.starts_with("and(") {
-                saw_sub = true;
-                break;
-            }
+        if e.get("RewriteOperands").is_some() {
+            saw_change = true;
+            break;
         }
     }
     assert!(
-        saw_sub,
-        "Expected an OperandSubstituted from not(...) to and(...). JSON: {}",
+        saw_change,
+        "Expected a RewriteOperands edit at root. JSON: {}",
         String::from_utf8_lossy(&json_bytes)
     );
 

@@ -169,10 +169,13 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     let mut added_count: usize = 0;
     let mut op_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for e in diff.edits.iter() {
-        if let xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted { new_signature, .. } = e {
-            added_count += 1;
-            let op = extract_op_from_signature(new_signature);
-            *op_counts.entry(op).or_insert(0) += 1;
+        match e {
+            xlsynth_g8r::xls_ir::localized_eco::Edit::AddNode { new_signature, .. } => {
+                added_count += 1;
+                let op = extract_op_from_signature(new_signature);
+                *op_counts.entry(op).or_insert(0) += 1;
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::RewriteOperands { .. } => {}
         }
     }
     let mut added_ops: Vec<AddedOpsSummaryItem> = op_counts
@@ -270,59 +273,24 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     println!("  Edits:");
     for e in report.edits.edits.iter() {
         match e {
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperatorChanged {
-                path,
-                old_op,
-                new_op,
-            } => {
-                println!("    path {:?}: operator {} -> {}", path.0, old_op, new_op);
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::TypeChanged {
-                path,
-                old_ty,
-                new_ty,
-            } => {
-                println!("    path {:?}: type {} -> {}", path.0, old_ty, new_ty);
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::ArityChanged {
-                path,
-                old_arity,
-                new_arity,
-            } => {
-                println!(
-                    "    path {:?}: arity {} -> {}",
-                    path.0, old_arity, new_arity
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted {
+            xlsynth_g8r::xls_ir::localized_eco::Edit::AddNode {
                 path,
                 index,
                 new_signature,
             } => {
                 println!(
-                    "    path {:?}: insert operand at {}: {}",
+                    "    path {:?}: add node at {}: {}",
                     path.0, index, new_signature
                 );
             }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandDeleted {
+            xlsynth_g8r::xls_ir::localized_eco::Edit::RewriteOperands {
                 path,
-                index,
-                old_signature,
+                new_signatures,
             } => {
                 println!(
-                    "    path {:?}: delete operand at {}: {}",
-                    path.0, index, old_signature
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandSubstituted {
-                path,
-                index,
-                old_signature,
-                new_signature,
-            } => {
-                println!(
-                    "    path {:?}: substitute operand at {}: {} -> {}",
-                    path.0, index, old_signature, new_signature
+                    "    path {:?}: rewrite operands to: {}",
+                    path.0,
+                    new_signatures.join(", ")
                 );
             }
         }
@@ -579,7 +547,7 @@ fn handle_ir_localized_eco_blocks_in_packages(
     let mut added_count: usize = 0;
     let mut op_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for e in diff.edits.iter() {
-        if let xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted { new_signature, .. } = e {
+        if let xlsynth_g8r::xls_ir::localized_eco::Edit::AddNode { new_signature, .. } = e {
             added_count += 1;
             let op = extract_op_from_signature(new_signature);
             *op_counts.entry(op).or_insert(0) += 1;
@@ -649,59 +617,24 @@ fn handle_ir_localized_eco_blocks_in_packages(
     println!("  Edits:");
     for e in diff.edits.iter() {
         match e {
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperatorChanged {
-                path,
-                old_op,
-                new_op,
-            } => {
-                println!("    path {:?}: operator {} -> {}", path.0, old_op, new_op);
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::TypeChanged {
-                path,
-                old_ty,
-                new_ty,
-            } => {
-                println!("    path {:?}: type {} -> {}", path.0, old_ty, new_ty);
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::ArityChanged {
-                path,
-                old_arity,
-                new_arity,
-            } => {
-                println!(
-                    "    path {:?}: arity {} -> {}",
-                    path.0, old_arity, new_arity
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted {
+            xlsynth_g8r::xls_ir::localized_eco::Edit::AddNode {
                 path,
                 index,
                 new_signature,
             } => {
                 println!(
-                    "    path {:?}: insert operand at {}: {}",
+                    "    path {:?}: add node at {}: {}",
                     path.0, index, new_signature
                 );
             }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandDeleted {
+            xlsynth_g8r::xls_ir::localized_eco::Edit::RewriteOperands {
                 path,
-                index,
-                old_signature,
+                new_signatures,
             } => {
                 println!(
-                    "    path {:?}: delete operand at {}: {}",
-                    path.0, index, old_signature
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandSubstituted {
-                path,
-                index,
-                old_signature,
-                new_signature,
-            } => {
-                println!(
-                    "    path {:?}: substitute operand at {}: {} -> {}",
-                    path.0, index, old_signature, new_signature
+                    "    path {:?}: rewrite operands to: {}",
+                    path.0,
+                    new_signatures.join(", ")
                 );
             }
         }
