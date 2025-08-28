@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::toolchain_config::ToolchainConfig;
-use crate::solver_choice::SolverChoice;
-use crate::parallelism::ParallelismStrategy;
 use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
+use crate::parallelism::ParallelismStrategy;
+use crate::solver_choice::SolverChoice;
+use crate::toolchain_config::ToolchainConfig;
 
+use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
 use xlsynth_g8r::xls_ir::ir::{FileTable, Package, PackageMember};
 use xlsynth_g8r::xls_ir::ir_parser;
-use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
 
 use std::collections::HashMap;
 
@@ -79,14 +79,20 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
     let mut lhs_fn = match lhs_parser.parse_block_to_fn() {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[{}] Failed to parse LHS block ({}): {}", SUBCOMMAND, lhs_path, e);
+            eprintln!(
+                "[{}] Failed to parse LHS block ({}): {}",
+                SUBCOMMAND, lhs_path, e
+            );
             std::process::exit(1);
         }
     };
     let mut rhs_fn = match rhs_parser.parse_block_to_fn() {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[{}] Failed to parse RHS block ({}): {}", SUBCOMMAND, rhs_path, e);
+            eprintln!(
+                "[{}] Failed to parse RHS block ({}): {}",
+                SUBCOMMAND, rhs_path, e
+            );
             std::process::exit(1);
         }
     };
@@ -94,12 +100,12 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
     if let Some(name) = lhs_top {
         lhs_fn.name = name.to_string();
     } else {
-        lhs_top = Some(&lhs_fn.name.clone());
+        lhs_top = Some(lhs_fn.name.as_str());
     }
     if let Some(name) = rhs_top {
         rhs_fn.name = name.to_string();
     } else {
-        rhs_top = Some(&rhs_fn.name.clone());
+        rhs_top = Some(rhs_fn.name.as_str());
     }
 
     let lhs_pkg = Package {
