@@ -53,6 +53,7 @@ mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
 mod ir_equiv;
+mod ir_equiv_blocks;
 mod ir_fn_eval;
 mod ir_fn_to_block;
 mod ir_ged;
@@ -606,6 +607,103 @@ fn main() {
                     Arg::new("rhs_ir_top")
                         .long("rhs_ir_top")
                         .help("The top-level entry point for the right-hand side IR"),
+                )
+                .arg(
+                    Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
+                        .value_parser([
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector-binary",
+                            #[cfg(feature = "has-bitwuzla")]
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector-legacy",
+                            "toolchain",
+                        ])
+                        .default_value("toolchain")
+                        .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "flatten_aggregates",
+                    "Flatten tuple and array types to bits for equivalence checking",
+                )
+                .arg(
+                    Arg::new("drop_params")
+                        .long("drop_params")
+                        .help("Comma-separated list of parameter names to drop from both functions before equivalence checking")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("parallelism_strategy")
+                        .long("parallelism-strategy")
+                        .value_name("STRATEGY")
+                        .help("Parallelism strategy")
+                        .value_parser(["single-threaded", "output-bits", "input-bit-split"])
+                        .default_value("single-threaded")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("assertion_semantics")
+                        .long("assertion-semantics")
+                        .value_name("SEMANTICS")
+                        .help("Assertion semantics")
+                        .value_parser(clap::value_parser!(AssertionSemantics))
+                        .default_value("same")
+                        .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "lhs_fixed_implicit_activation",
+                    "Fix the implicit activation bit to true for the LHS IR, useful when only LHS or RHS has implicit token",
+                )
+                .add_bool_arg(
+                    "rhs_fixed_implicit_activation",
+                    "Fix the implicit activation bit to true for the RHS IR, useful when only LHS or RHS has implicit token",
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-equiv-blocks")
+                .about("Checks if two IR blocks are equivalent")
+                .arg(
+                    Arg::new("lhs_ir_file")
+                        .help("The left-hand side IR block file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("rhs_ir_file")
+                        .help("The right-hand side IR block file")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("lhs_top")
+                        .long("lhs_top")
+                        .help("Top-level block name for the left-hand side IR"),
+                )
+                .arg(
+                    Arg::new("rhs_top")
+                        .long("rhs_top")
+                        .help("Top-level block name for the right-hand side IR"),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .help("Top-level block name for both IRs"),
                 )
                 .arg(
                     Arg::new("solver")
@@ -1344,6 +1442,8 @@ fn main() {
         ir2delayinfo::handle_ir2delayinfo(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-equiv") {
         ir_equiv::handle_ir_equiv(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("ir-equiv-blocks") {
+        ir_equiv_blocks::handle_ir_equiv_blocks(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx-equiv") {
         dslx_equiv::handle_dslx_equiv(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir-ged") {

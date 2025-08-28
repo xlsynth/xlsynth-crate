@@ -35,6 +35,21 @@ Key flags:
 - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
 - `--output_json <PATH>` to write the JSON result.
 
+### `ir-equiv-blocks`
+
+Proves two IR blocks to be equivalent by first lifting each block into a function and then checking equivalence as in `ir-equiv`.
+
+Key flags:
+
+- `--lhs_top <NAME>` / `--rhs_top <NAME>` or shared `--top <NAME>` to select block entry points.
+- `--solver <toolchain|bitwuzla|boolector|boolector-legacy|z3-binary|bitwuzla-binary|boolector-binary>`
+- `--flatten_aggregates=<BOOL>`
+- `--drop_params <CSV>`
+- `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
+- `--assertion-semantics <ignore|never|same|assume|implies>`
+- `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
+- `--output_json <PATH>` to write the JSON result.
+
 ### `lib2proto`: liberty files to proto
 
 Liberty files can be unwieldy and large in their textual form -- this command reformats the data
