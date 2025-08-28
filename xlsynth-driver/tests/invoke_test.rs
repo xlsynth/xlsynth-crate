@@ -1253,6 +1253,76 @@ fn my_main(x: bits[32]) -> bits[32] {
 }
 
 #[test]
+fn test_irequiv_blocks_subcommand_equivalent() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let block = "block my_block(a: bits[32], b: bits[32], out: bits[32]) {\n  a: bits[32] = input_port(name=a, id=1)\n  b: bits[32] = input_port(name=b, id=2)\n  add.3: bits[32] = add(a, b, id=3)\n  out: () = output_port(add.3, name=out, id=4)\n}";
+    let lhs_path = temp_dir.path().join("lhs.ir");
+    std::fs::write(&lhs_path, block).unwrap();
+    let rhs_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_path, block).unwrap();
+
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = "[toolchain]\n".to_string();
+    let toolchain_toml_contents_with_path = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents_with_path).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv-blocks")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--lhs_top")
+        .arg("my_block")
+        .arg("--rhs_top")
+        .arg("my_block")
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[ir-equiv-blocks] success: Solver proved equivalence"));
+}
+
+#[test]
+fn test_irequiv_blocks_subcommand_non_equivalent() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let lhs_block = "block add_block(a: bits[32], b: bits[32], out: bits[32]) {\n  a: bits[32] = input_port(name=a, id=1)\n  b: bits[32] = input_port(name=b, id=2)\n  add.3: bits[32] = add(a, b, id=3)\n  out: () = output_port(add.3, name=out, id=4)\n}";
+    let rhs_block = "block sub_block(a: bits[32], b: bits[32], out: bits[32]) {\n  a: bits[32] = input_port(name=a, id=1)\n  b: bits[32] = input_port(name=b, id=2)\n  sub.3: bits[32] = sub(a, b, id=3)\n  out: () = output_port(sub.3, name=out, id=4)\n}";
+    let lhs_path = temp_dir.path().join("lhs.ir");
+    std::fs::write(&lhs_path, lhs_block).unwrap();
+    let rhs_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_path, rhs_block).unwrap();
+
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = "[toolchain]\n".to_string();
+    let toolchain_toml_contents_with_path = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents_with_path).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv-blocks")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--lhs_top")
+        .arg("add_block")
+        .arg("--rhs_top")
+        .arg("sub_block")
+        .output()
+        .expect("xlsynth-driver should succeed");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("[ir-equiv-blocks] failure"));
+}
+
+#[test]
 fn test_ir2gates_determinism() {
     let _ = env_logger::try_init();
     log::info!("test_ir2gates_determinism");
