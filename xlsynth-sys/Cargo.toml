@@ -18,3 +18,6 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 flate2 = "1.0"
 tar = "0.4"
 sha2 = "0.10"
+
+[dev-dependencies]
+syn = { version = "2", features = ["full"] }
