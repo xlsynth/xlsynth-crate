@@ -769,9 +769,6 @@ fn rebuild_node_from_new_at_path(
     patched_node.payload = new_payload;
     patched_node.ty = new_node.ty.clone();
     patched_node.pos = new_node.pos.clone();
-    if !matches!(patched_node.payload, NodePayload::GetParam(_)) {
-        patched_node.name = None;
-    }
 }
 
 /// Applies a LocalizedEcoDiff to `old`, using `new` as the source for any newly
@@ -826,36 +823,35 @@ pub fn apply_localized_eco(old: &Fn, new: &Fn, diff: &LocalizedEcoDiff) -> Fn {
     path_list.sort_by_key(|p| p.len());
     let mut memo: std::collections::HashMap<usize, NodeRef> = std::collections::HashMap::new();
     for p in path_list.iter() {
-        rebuild_node_from_new_at_path(
-            &mut patched,
-            old,
-            new,
-            &new_idx_to_old_idx,
-            &mut memo,
-            &mut next_id,
-            p,
-        );
+        // Only rebuild nodes whose operator kind matches between old and new at this
+        // path. If operators differ, this path likely refers to an
+        // inserted/replaced subtree; the correct behavior is to rebuild an
+        // ancestor that rewrites operands to point to the newly imported
+        // subtree, not to change the existing node's operator/identity.
+        let old_root = old.ret_node_ref.expect("old must have ret");
+        let new_root = new.ret_node_ref.expect("new must have ret");
+        let old_nr_at_path = node_ref_at_path(old, old_root, p);
+        let new_nr_at_path = node_ref_at_path(new, new_root, p);
+        let old_op = old.get_node(old_nr_at_path).payload.get_operator();
+        let new_op = new.get_node(new_nr_at_path).payload.get_operator();
+        if old_op == new_op {
+            rebuild_node_from_new_at_path(
+                &mut patched,
+                old,
+                new,
+                &new_idx_to_old_idx,
+                &mut memo,
+                &mut next_id,
+                p,
+            );
+        }
     }
 
     // Re-topologize nodes so dependencies appear before uses.
     retopologize_in_place(&mut patched);
 
-    // For rewritten nodes, keep text_id stable and clear their names so labels
-    // derive from operator.text_id consistently; this avoids stale names while
-    // preserving IDs.
-    let mut rewritten_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for e in diff.edits.iter() {
-        if let Edit::RewriteOperands { path, .. } = e {
-            let root = patched.ret_node_ref.expect("patched must have ret");
-            let nr = node_ref_at_path(&patched, root, &path.0);
-            rewritten_indices.insert(nr.index);
-        }
-    }
-    for idx in rewritten_indices.into_iter() {
-        if !matches!(patched.nodes[idx].payload, NodePayload::GetParam(_)) {
-            patched.nodes[idx].name = None;
-        }
-    }
+    // Preserve original names; we avoid clearing names since we only add nodes
+    // or change operands for existing nodes.
 
     patched
 }
