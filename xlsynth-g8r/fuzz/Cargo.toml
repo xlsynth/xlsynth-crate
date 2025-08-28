@@ -67,6 +67,12 @@ path = "fuzz_targets/fuzz_gate_fn_aiger_roundtrip.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_ir_localized_eco"
+path = "fuzz_targets/fuzz_ir_localized_eco.rs"
+test = false
+doc = false
+
 [features]
 # No default optional features; required solver integrations are always enabled via dependency specification above.
 default = []

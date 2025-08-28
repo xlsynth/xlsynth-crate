@@ -536,6 +536,7 @@ fn rebuild_node_from_new_at_path(
     mut memo: &mut std::collections::HashMap<usize, NodeRef>,
     next_id: &mut usize,
     path: &[usize],
+    preserve_operator: bool,
 ) {
     let old_root = patched.ret_node_ref.expect("patched must have ret node");
     let new_root = new.ret_node_ref.expect("new must have ret node");
@@ -568,7 +569,18 @@ fn rebuild_node_from_new_at_path(
                 NodePayload::Tuple(_) => NodePayload::Tuple(mapped),
                 NodePayload::Array(_) => NodePayload::Array(mapped),
                 NodePayload::AfterAll(_) => NodePayload::AfterAll(mapped),
-                NodePayload::Nary(op, _) => NodePayload::Nary(*op, mapped),
+                NodePayload::Nary(op, _) => {
+                    if preserve_operator {
+                        if let NodePayload::Nary(old_op, _) = &patched.get_node(patched_nr).payload
+                        {
+                            NodePayload::Nary(*old_op, mapped)
+                        } else {
+                            NodePayload::Nary(*op, mapped)
+                        }
+                    } else {
+                        NodePayload::Nary(*op, mapped)
+                    }
+                }
                 _ => unreachable!(),
             }
         }
@@ -576,13 +588,30 @@ fn rebuild_node_from_new_at_path(
             tuple: map_child(*tuple, patched, &mut memo, next_id),
             index: *index,
         },
-        NodePayload::Binop(op, a, b) => NodePayload::Binop(
-            *op,
-            map_child(*a, patched, &mut memo, next_id),
-            map_child(*b, patched, &mut memo, next_id),
-        ),
+        NodePayload::Binop(op, a, b) => {
+            let lhs = map_child(*a, patched, &mut memo, next_id);
+            let rhs = map_child(*b, patched, &mut memo, next_id);
+            if preserve_operator {
+                if let NodePayload::Binop(old_op, _, _) = &patched.get_node(patched_nr).payload {
+                    NodePayload::Binop(*old_op, lhs, rhs)
+                } else {
+                    NodePayload::Binop(*op, lhs, rhs)
+                }
+            } else {
+                NodePayload::Binop(*op, lhs, rhs)
+            }
+        }
         NodePayload::Unop(op, a) => {
-            NodePayload::Unop(*op, map_child(*a, patched, &mut memo, next_id))
+            let arg = map_child(*a, patched, &mut memo, next_id);
+            if preserve_operator {
+                if let NodePayload::Unop(old_op, _) = &patched.get_node(patched_nr).payload {
+                    NodePayload::Unop(*old_op, arg)
+                } else {
+                    NodePayload::Unop(*op, arg)
+                }
+            } else {
+                NodePayload::Unop(*op, arg)
+            }
         }
         NodePayload::Literal(v) => NodePayload::Literal(v.clone()),
         NodePayload::SignExt { arg, new_bit_count } => NodePayload::SignExt {
@@ -843,6 +872,7 @@ pub fn apply_localized_eco(old: &Fn, new: &Fn, diff: &LocalizedEcoDiff) -> Fn {
                 &mut memo,
                 &mut next_id,
                 p,
+                true, // preserve operator at this node
             );
         }
     }
