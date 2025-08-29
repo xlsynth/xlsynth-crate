@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
 use crate::xls_ir::ir_utils::get_topological;
+use crate::xls_ir::ir_validate::validate_fn_no_pkg;
 use crate::xls_ir::node_hashing::{compute_node_structural_hash, get_param_ordinal};
 
 fn children_in_order(f: &Fn, node_ref: NodeRef) -> Vec<NodeRef> {
@@ -919,6 +920,11 @@ pub fn apply_localized_eco(old: &Fn, new: &Fn, diff: &LocalizedEcoDiff) -> Fn {
 
     // Preserve original names; we avoid clearing names since we only add nodes
     // or change operands for existing nodes.
+
+    // Final sanity check using the function-only validator.
+    if let Err(e) = validate_fn_no_pkg(&patched) {
+        panic!("ECO produced invalid IR: {}", e);
+    }
 
     patched
 }
