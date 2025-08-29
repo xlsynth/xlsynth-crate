@@ -1257,7 +1257,15 @@ fn test_irequiv_blocks_subcommand_equivalent() {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let block = "block my_block(a: bits[32], b: bits[32], out: bits[32]) {\n  a: bits[32] = input_port(name=a, id=1)\n  b: bits[32] = input_port(name=b, id=2)\n  add.3: bits[32] = add(a, b, id=3)\n  out: () = output_port(add.3, name=out, id=4)\n}";
+    let block = r#"package test_pkg
+
+block my_block(a: bits[32], b: bits[32], out: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=2)
+  add.3: bits[32] = add(a, b, id=3)
+  out: () = output_port(add.3, name=out, id=4)
+}
+"#;
     let lhs_path = temp_dir.path().join("lhs.ir");
     std::fs::write(&lhs_path, block).unwrap();
     let rhs_path = temp_dir.path().join("rhs.ir");
@@ -1283,7 +1291,19 @@ fn test_irequiv_blocks_subcommand_equivalent() {
         .expect("xlsynth-driver should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[ir-equiv-blocks] success: Solver proved equivalence"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status not success\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("[ir-equiv-blocks] success: Solver proved equivalence"),
+        "stdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
 }
 
 #[test]
@@ -1291,8 +1311,24 @@ fn test_irequiv_blocks_subcommand_non_equivalent() {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let lhs_block = "block add_block(a: bits[32], b: bits[32], out: bits[32]) {\n  a: bits[32] = input_port(name=a, id=1)\n  b: bits[32] = input_port(name=b, id=2)\n  add.3: bits[32] = add(a, b, id=3)\n  out: () = output_port(add.3, name=out, id=4)\n}";
-    let rhs_block = "block sub_block(a: bits[32], b: bits[32], out: bits[32]) {\n  a: bits[32] = input_port(name=a, id=1)\n  b: bits[32] = input_port(name=b, id=2)\n  sub.3: bits[32] = sub(a, b, id=3)\n  out: () = output_port(sub.3, name=out, id=4)\n}";
+    let lhs_block = r#"package lhs_pkg
+
+block add_block(a: bits[32], b: bits[32], out: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=2)
+  add.3: bits[32] = add(a, b, id=3)
+  out: () = output_port(add.3, name=out, id=4)
+}
+"#;
+    let rhs_block = r#"package rhs_pkg
+
+block sub_block(a: bits[32], b: bits[32], out: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=2)
+  sub.3: bits[32] = sub(a, b, id=3)
+  out: () = output_port(sub.3, name=out, id=4)
+}
+"#;
     let lhs_path = temp_dir.path().join("lhs.ir");
     std::fs::write(&lhs_path, lhs_block).unwrap();
     let rhs_path = temp_dir.path().join("rhs.ir");
@@ -1317,9 +1353,20 @@ fn test_irequiv_blocks_subcommand_non_equivalent() {
         .output()
         .expect("xlsynth-driver should succeed");
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success());
-    assert!(stderr.contains("[ir-equiv-blocks] failure"));
+    assert!(
+        !output.status.success(),
+        "expected failure\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stderr.contains("[ir-equiv-blocks] failure"),
+        "stdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
 }
 
 #[test]
