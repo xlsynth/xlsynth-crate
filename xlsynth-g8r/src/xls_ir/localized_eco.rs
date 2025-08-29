@@ -578,9 +578,26 @@ fn rebuild_node_from_new_at_path(
     let new_payload = match &new_node.payload {
         NodePayload::Nil => NodePayload::Nil,
         NodePayload::GetParam(pid_new) => {
+            // Do not convert an existing node into a parameter node; instead,
+            // synthesize an identity of the corresponding parameter to
+            // preserve the invariant that parameter nodes' text_id match their
+            // ParamId and appear only at their original indices.
             let ord = get_param_ordinal(new, *pid_new);
             let pid_old = old.params[ord].id;
-            NodePayload::GetParam(pid_old)
+            // Find the existing parameter node in `patched` carrying this id.
+            let existing_param_idx = patched
+                .nodes
+                .iter()
+                .enumerate()
+                .find_map(|(i, n)| match &n.payload {
+                    NodePayload::GetParam(pid) if *pid == pid_old => Some(i),
+                    _ => None,
+                })
+                .expect("expected existing parameter node in patched function");
+            let param_nr = NodeRef {
+                index: existing_param_idx,
+            };
+            NodePayload::Unop(crate::xls_ir::ir::Unop::Identity, param_nr)
         }
         NodePayload::Tuple(children)
         | NodePayload::Array(children)
