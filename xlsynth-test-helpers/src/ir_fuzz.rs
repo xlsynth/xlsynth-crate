@@ -826,48 +826,6 @@ impl FuzzSample {
         }
     }
 
-    /// Constructs a sample that matches the given XLS IR function type.
-    ///
-    /// Constraints:
-    /// - Exactly one parameter, of type bits[N].
-    /// - Return type must be bits[M].
-    ///
-    /// Returns an error if constraints are not met.
-    pub fn new_with_ir_function_type(
-        fty: &xlsynth::ir_package::IrFunctionType,
-    ) -> Result<FuzzSample, XlsynthError> {
-        // Extract the single parameter width from the function type.
-        if fty.param_count() != 1 {
-            return Err(XlsynthError("expected exactly one parameter".to_string()));
-        }
-        let param_ty = fty.param_type(0)?;
-        let param_ty_str = param_ty.to_string();
-        let input_bits: u8 = if let Some(s) = param_ty_str.strip_prefix("bits[") {
-            let s = s.trim_end_matches(']');
-            s.parse::<u64>()
-                .map_err(|_| XlsynthError("invalid param bits width".to_string()))?
-                as u8
-        } else {
-            return Err(XlsynthError("parameter type must be bits[N]".to_string()));
-        };
-
-        // Extract return type width.
-        let ret_ty = fty.return_type();
-        let ret_ty_str = ret_ty.to_string();
-        let ret_bits: u8 = if let Some(s) = ret_ty_str.strip_prefix("bits[") {
-            let s = s.trim_end_matches(']');
-            s.parse::<u64>()
-                .map_err(|_| XlsynthError("invalid return bits width".to_string()))?
-                as u8
-        } else {
-            return Err(XlsynthError("return type must be bits[M]".to_string()));
-        };
-
-        Ok(FuzzSample::new_with_param_and_ret_bits(
-            input_bits, ret_bits,
-        ))
-    }
-
     /// Convenience: construct a sample from parameter and return bit widths.
     /// This mirrors the shape produced by `generate_ir_fn` (single input named
     /// "input").
@@ -935,28 +893,5 @@ mod tests {
         // Same parameter name.
         assert_eq!(f_a.param_name(0).unwrap(), "input".to_string());
         assert_eq!(f_b.param_name(0).unwrap(), "input".to_string());
-    }
-
-    #[test]
-    fn test_new_with_ir_function_type_roundtrip() {
-        // Build a function type via a real function, then mirror it.
-        let mut pkg = xlsynth::IrPackage::new("make_fty").unwrap();
-        let u6 = pkg.get_bits_type(6);
-        let mut b = xlsynth::FnBuilder::new(&mut pkg, "f", true);
-        let x = b.param("input", &u6);
-        let sliced = b.bit_slice(&x, 0, 4, None);
-        let f = b.build_with_return_value(&sliced).unwrap();
-        let fty = f.get_type().unwrap();
-
-        let sample = FuzzSample::new_with_ir_function_type(&fty).unwrap();
-        let mut pkg2 = xlsynth::IrPackage::new("mirror").unwrap();
-        let f2 = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg2).unwrap();
-        let fty2 = f2.get_type().unwrap();
-
-        assert_eq!(fty2.param_count(), 1);
-        assert_eq!(fty2.param_type(0).unwrap().to_string(), "bits[6]");
-        assert_eq!(fty2.return_type().to_string(), "bits[4]");
-        assert_eq!(f.param_name(0).unwrap(), "input");
-        assert_eq!(f2.param_name(0).unwrap(), "input");
     }
 }
