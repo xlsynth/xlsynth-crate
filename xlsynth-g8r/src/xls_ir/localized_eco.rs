@@ -287,6 +287,28 @@ fn import_subtree(
         return nr;
     }
     let new_node = new.get_node(new_nr);
+    // Special-case: parameters should always map to the existing parameter node
+    // in the patched function; do not create a new GetParam node (which would
+    // lack a bound name and break text emission/parsing).
+    if let NodePayload::GetParam(pid_new) = &new_node.payload {
+        let ord = get_param_ordinal(new, *pid_new);
+        let pid_old = old.params[ord].id;
+        // Find the existing param node in `patched` that carries this ParamId.
+        let existing_param_idx = patched
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(i, n)| match &n.payload {
+                NodePayload::GetParam(pid) if *pid == pid_old => Some(i),
+                _ => None,
+            })
+            .expect("expected existing parameter node in patched function");
+        let existing_nr = NodeRef {
+            index: existing_param_idx,
+        };
+        memo.insert(new_nr.index, existing_nr);
+        return existing_nr;
+    }
     let map_child = |nr_new: NodeRef,
                      patched: &mut Fn,
                      memo: &mut std::collections::HashMap<usize, NodeRef>,
@@ -295,12 +317,8 @@ fn import_subtree(
     };
     let payload = match &new_node.payload {
         NodePayload::Nil => NodePayload::Nil,
-        NodePayload::GetParam(pid_new) => {
-            // Map by ordinal to old param id to preserve param identities.
-            let ord = get_param_ordinal(new, *pid_new);
-            let pid_old = old.params[ord].id;
-            NodePayload::GetParam(pid_old)
-        }
+        // GetParam is handled above and should not reach here.
+        NodePayload::GetParam(_) => unreachable!(),
         NodePayload::Tuple(children) => {
             let mapped: Vec<NodeRef> = children
                 .iter()
@@ -1103,6 +1121,22 @@ fn align_nodes(
 
     if old_hashes[old_nr.index] == new_hashes[new_nr.index] {
         stats.matched_nodes += 1;
+        return;
+    }
+
+    // If the operator at this node has changed between old and new, localize the
+    // edit at this node as a replacement regardless of child arity. This covers
+    // cases where, e.g., a literal (no operands) becomes a bit_slice (one
+    // operand). In such cases, simply adding/removing operands is insufficient;
+    // we must replace the node itself.
+    let old_op = old.get_node(old_nr).payload.get_operator();
+    let new_op = new.get_node(new_nr).payload.get_operator();
+    if old_op != new_op {
+        let sig = new.get_node(new_nr).to_signature_string(new);
+        edits.push(Edit::ReplaceNode {
+            path: Path(path.clone()),
+            new_signature: sig,
+        });
         return;
     }
 
