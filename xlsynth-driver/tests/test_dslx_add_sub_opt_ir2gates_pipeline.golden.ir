@@ -1,0 +1,5 @@
+package f
+
+top fn __f__f(x: bits[8] id=13) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=13)
+}

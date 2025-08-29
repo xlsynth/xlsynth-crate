@@ -13,7 +13,7 @@ use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use test_case::test_case;
 
 use pretty_assertions::assert_eq;
-use xlsynth_test_helpers::compare_golden_sv;
+use xlsynth_test_helpers::{compare_golden_sv, compare_golden_text};
 
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
     let tool_path =
@@ -1562,6 +1562,36 @@ fn f(x: u8) -> u8 { x + x - x }
         String::from_utf8_lossy(&ir2opt_output.stdout),
         String::from_utf8_lossy(&ir2opt_output.stderr)
     );
+
+    // Capture optimized IR and strip position data for deterministic golden.
+    let optimized_ir = String::from_utf8_lossy(&ir2opt_output.stdout).to_string();
+    let opt_ir_path = temp_dir.path().join("f.after_ir2opt.ir");
+    std::fs::write(&opt_ir_path, &optimized_ir).unwrap();
+
+    let ir_round_trip = std::process::Command::new(command_path)
+        .arg("ir-round-trip")
+        .arg(opt_ir_path.to_str().unwrap())
+        .arg("--strip-pos-attrs")
+        .arg("true")
+        .output()
+        .unwrap();
+    assert!(
+        ir_round_trip.status.success(),
+        "ir-round-trip --strip-pos-attrs failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ir_round_trip.stdout),
+        String::from_utf8_lossy(&ir_round_trip.stderr)
+    );
+    let stripped_ir = String::from_utf8_lossy(&ir_round_trip.stdout).to_string();
+    eprintln!(
+        "[ir2opt optimized IR for __f__f (stripped)]:\n{}",
+        stripped_ir
+    );
+
+    // Ensure golden directory exists, then compare/update via helper.
+    let golden_rel = "tests/test_dslx_add_sub_opt_ir2gates_pipeline.golden.ir";
+    let golden_dir = std::path::Path::new(golden_rel).parent().unwrap();
+    let _ = std::fs::create_dir_all(golden_dir);
+    compare_golden_text(&stripped_ir, golden_rel);
     // Overwrite IR with optimized IR for next step
     std::fs::write(&ir_path, &ir2opt_output.stdout).unwrap();
 

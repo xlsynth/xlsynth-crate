@@ -290,7 +290,7 @@ top fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
 }
 ";
         let mut parser = ir_parser::Parser::new(input_ir_text);
-        let ir_package = parser.parse_package().unwrap();
+        let ir_package = parser.parse_and_validate_package().unwrap();
         let ir_top = ir_package.get_top().unwrap();
         let gatify_output = gatify(
             &ir_top,
@@ -316,7 +316,7 @@ top fn do_not(a: bits[1] id=1) -> bits[1] {
 }
 ";
         let mut parser = ir_parser::Parser::new(input_ir_text);
-        let ir_package = parser.parse_package().unwrap();
+        let ir_package = parser.parse_and_validate_package().unwrap();
         let ir_top = ir_package.get_top().unwrap();
         let gatify_output = gatify(
             &ir_top,
@@ -344,7 +344,7 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
 }
 ";
         let mut parser = ir_parser::Parser::new(input_ir_text);
-        let ir_package = parser.parse_package().unwrap();
+        let ir_package = parser.parse_and_validate_package().unwrap();
         let ir_top = ir_package.get_top().unwrap();
         let gatify_output = gatify(
             &ir_top,

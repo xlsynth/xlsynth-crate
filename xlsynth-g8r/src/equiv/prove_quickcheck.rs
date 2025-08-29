@@ -390,7 +390,7 @@ mod test_utils {
         "#;
 
         let pkg = Parser::new(ir_pkg_text)
-            .parse_package()
+            .parse_and_validate_package()
             .expect("parse package");
         let f = pkg.get_fn("f").expect("f not found");
         let ir_fn = IrFn {

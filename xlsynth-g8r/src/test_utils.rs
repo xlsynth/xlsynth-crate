@@ -123,7 +123,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
 
     // Parse with xlsynth-g8r's parser to get its internal IR representation
     let mut parser = ir_parser::Parser::new(&ir_text);
-    let g8r_ir_package = parser.parse_package().unwrap();
+    let g8r_ir_package = parser.parse_and_validate_package().unwrap();
     let g8r_ir_fn = g8r_ir_package.get_fn(&mangled_name).unwrap();
 
     // Convert the internal IR function to a GateFn
@@ -169,7 +169,7 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
 
     // Parse with xlsynth-g8r's parser to get its internal IR representation
     let mut parser = ir_parser::Parser::new(&ir_text);
-    let g8r_ir_package = parser.parse_package().unwrap();
+    let g8r_ir_package = parser.parse_and_validate_package().unwrap();
     let g8r_ir_fn = g8r_ir_package.get_fn(&mangled_name).unwrap();
 
     // Convert the internal IR function to a GateFn

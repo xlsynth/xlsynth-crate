@@ -30,7 +30,7 @@ fn parse_package(path: &str) -> Package {
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
     let mut parser = IrParser::new(&file_content);
     parser
-        .parse_package()
+        .parse_and_validate_package()
         .unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e))
 }
 

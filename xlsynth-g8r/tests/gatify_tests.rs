@@ -28,7 +28,7 @@ fn do_test_ir_conversion_with_top(
 ) -> SummaryStats {
     // Now we'll parse the IR and turn it into a gate function.
     let mut parser = ir_parser::Parser::new(&ir_package_text);
-    let ir_package = parser.parse_package().unwrap();
+    let ir_package = parser.parse_and_validate_package().unwrap();
     let ir_fn = match top_name {
         Some(name) => ir_package.get_fn(name).unwrap(),
         None => ir_package.get_top().unwrap(),
@@ -65,7 +65,7 @@ fn do_test_ir_conversion(ir_package_text: &str, opt: Opt) -> SummaryStats {
 fn do_test_ir_conversion_no_equiv(ir_package_text: &str, opt: Opt) {
     let _ = env_logger::builder().is_test(true).try_init();
     let mut parser = ir_parser::Parser::new(&ir_package_text);
-    let ir_package = parser.parse_package().unwrap();
+    let ir_package = parser.parse_and_validate_package().unwrap();
     let ir_fn = ir_package.get_top().unwrap();
     let _ = gatify(
         &ir_fn,
@@ -417,8 +417,8 @@ bit_count_test_cases!(test_bit_slice_update, |input_bits: u32, opt: Opt| -> () {
 #[test]
 fn test_array_update_ir_to_gates() {
     let ir_text = "package sample
-fn f(arr: bits[8][4], value: bits[8], index: bits[1]) -> bits[8][4] {
-  ret result: bits[8][4] = array_update(arr, value, indices=[index], id=3)
+fn f(arr: bits[8][4] id=1, value: bits[8] id=2, index: bits[1] id=3) -> bits[8][4] {
+  ret result: bits[8][4] = array_update(arr, value, indices=[index], id=4)
 }";
     do_test_ir_conversion_no_equiv(ir_text, Opt::No);
 }
@@ -426,8 +426,8 @@ fn f(arr: bits[8][4], value: bits[8], index: bits[1]) -> bits[8][4] {
 #[test]
 fn test_array_update_multidim_ir_to_gates() {
     let ir_text = "package sample
-fn f(arr: bits[8][2][2], value: bits[8], i0: bits[1], i1: bits[1]) -> bits[8][2][2] {
-  ret result: bits[8][2][2] = array_update(arr, value, indices=[i0, i1], id=3)
+fn f(arr: bits[8][2][2] id=1, value: bits[8] id=2, i0: bits[1] id=3, i1: bits[1] id=4) -> bits[8][2][2] {
+  ret result: bits[8][2][2] = array_update(arr, value, indices=[i0, i1], id=5)
 }";
     do_test_ir_conversion_no_equiv(ir_text, Opt::No);
 }

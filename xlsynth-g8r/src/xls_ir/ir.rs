@@ -1095,8 +1095,29 @@ impl std::fmt::Display for Fn {
             };
 
             // Note: some nodes don't need anything to be emitted, e.g. get param nodes.
-            if let Some(node_str) = node.to_string(self) {
-                write!(f, "  {}{}\n", ret_prefix, node_str)?;
+            // Exception: if the return node is a GetParam, we still emit a param(...) line.
+            match &node.payload {
+                NodePayload::GetParam(pid) if ret_prefix == "ret " => {
+                    let name = node
+                        .name
+                        .as_ref()
+                        .map(|s| s.as_str())
+                        .unwrap_or("<unnamed>");
+                    write!(
+                        f,
+                        "  {}{}: {} = param(name={}, id={})\n",
+                        ret_prefix,
+                        name,
+                        node.ty,
+                        name,
+                        pid.get_wrapped_id()
+                    )?;
+                }
+                _ => {
+                    if let Some(node_str) = node.to_string(self) {
+                        write!(f, "  {}{}\n", ret_prefix, node_str)?;
+                    }
+                }
             }
         }
 
@@ -1133,15 +1154,41 @@ where
         } else {
             ""
         };
-        if let Some(node_str) = node.to_string(func) {
-            out.push_str("  ");
-            out.push_str(ret_prefix);
-            out.push_str(&node_str);
-            if let Some(comment) = comment_fn(func, node_ref) {
-                out.push_str("  // ");
-                out.push_str(&comment);
+        match &node.payload {
+            NodePayload::GetParam(pid) if ret_prefix == "ret " => {
+                let name = node
+                    .name
+                    .as_ref()
+                    .map(|s| s.as_str())
+                    .unwrap_or("<unnamed>");
+                let line = format!(
+                    "{}: {} = param(name={}, id={})",
+                    name,
+                    node.ty,
+                    name,
+                    pid.get_wrapped_id()
+                );
+                out.push_str("  ");
+                out.push_str(ret_prefix);
+                out.push_str(&line);
+                if let Some(comment) = comment_fn(func, node_ref) {
+                    out.push_str("  // ");
+                    out.push_str(&comment);
+                }
+                out.push('\n');
             }
-            out.push('\n');
+            _ => {
+                if let Some(node_str) = node.to_string(func) {
+                    out.push_str("  ");
+                    out.push_str(ret_prefix);
+                    out.push_str(&node_str);
+                    if let Some(comment) = comment_fn(func, node_ref) {
+                        out.push_str("  // ");
+                        out.push_str(&comment);
+                    }
+                    out.push('\n');
+                }
+            }
         }
     }
     out.push('}');
