@@ -417,8 +417,8 @@ bit_count_test_cases!(test_bit_slice_update, |input_bits: u32, opt: Opt| -> () {
 #[test]
 fn test_array_update_ir_to_gates() {
     let ir_text = "package sample
-fn f(arr: bits[8][4], value: bits[8], index: bits[1]) -> bits[8][4] {
-  ret result: bits[8][4] = array_update(arr, value, indices=[index], id=3)
+fn f(arr: bits[8][4] id=1, value: bits[8] id=2, index: bits[1] id=3) -> bits[8][4] {
+  ret result: bits[8][4] = array_update(arr, value, indices=[index], id=4)
 }";
     do_test_ir_conversion_no_equiv(ir_text, Opt::No);
 }
@@ -426,8 +426,8 @@ fn f(arr: bits[8][4], value: bits[8], index: bits[1]) -> bits[8][4] {
 #[test]
 fn test_array_update_multidim_ir_to_gates() {
     let ir_text = "package sample
-fn f(arr: bits[8][2][2], value: bits[8], i0: bits[1], i1: bits[1]) -> bits[8][2][2] {
-  ret result: bits[8][2][2] = array_update(arr, value, indices=[i0, i1], id=3)
+fn f(arr: bits[8][2][2] id=1, value: bits[8] id=2, i0: bits[1] id=3, i1: bits[1] id=4) -> bits[8][2][2] {
+  ret result: bits[8][2][2] = array_update(arr, value, indices=[i0, i1], id=5)
 }";
     do_test_ir_conversion_no_equiv(ir_text, Opt::No);
 }

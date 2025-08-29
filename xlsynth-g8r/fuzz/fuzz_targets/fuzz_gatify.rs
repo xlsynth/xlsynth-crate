@@ -25,7 +25,7 @@ fuzz_target!(|sample: FuzzSample| {
         return;
     }
 
-    let parsed_package = match ir_parser::Parser::new(&package.to_string()).parse_package() {
+    let parsed_package = match ir_parser::Parser::new(&package.to_string()).parse_and_validate_package() {
         Ok(parsed_package) => parsed_package,
         Err(e) => {
             log::error!(

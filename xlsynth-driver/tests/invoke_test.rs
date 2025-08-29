@@ -13,7 +13,7 @@ use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use test_case::test_case;
 
 use pretty_assertions::assert_eq;
-use xlsynth_test_helpers::compare_golden_sv;
+use xlsynth_test_helpers::{compare_golden_sv, compare_golden_text};
 
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
     let tool_path =
@@ -1562,6 +1562,33 @@ fn f(x: u8) -> u8 { x + x - x }
         String::from_utf8_lossy(&ir2opt_output.stdout),
         String::from_utf8_lossy(&ir2opt_output.stderr)
     );
+
+    // Capture optimized IR and compare to golden using test helper.
+    let optimized_ir = String::from_utf8_lossy(&ir2opt_output.stdout).to_string();
+    // Normalize nondeterministic file paths in file_number lines for golden
+    // comparison.
+    let normalized: String = optimized_ir
+        .lines()
+        .map(|l| {
+            if l.starts_with("file_number 0 ") {
+                "file_number 0 \"<stdlib>\"".to_string()
+            } else if l.starts_with("file_number 1 ") {
+                "file_number 1 \"<input>\"".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!(
+        "[ir2opt optimized IR for __f__f (normalized)]:\n{}",
+        normalized
+    );
+    // Ensure golden directory exists, then compare/update via helper.
+    let golden_rel = "tests/test_dslx_add_sub_opt_ir2gates_pipeline.golden.ir";
+    let golden_dir = std::path::Path::new(golden_rel).parent().unwrap();
+    let _ = std::fs::create_dir_all(golden_dir);
+    compare_golden_text(&normalized, golden_rel);
     // Overwrite IR with optimized IR for next step
     std::fs::write(&ir_path, &ir2opt_output.stdout).unwrap();
 
