@@ -15,12 +15,22 @@ pub struct CIrBits {
 }
 
 #[repr(C)]
+pub struct CBitsRope {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CIrPackage {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
 #[repr(C)]
 pub struct CIrFunction {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CIrFunctionBase {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
@@ -68,6 +78,16 @@ pub struct CVastExpression {
 
 #[repr(C)]
 pub struct CVastLiteral {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastConcat {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastComment {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
@@ -259,6 +279,7 @@ pub struct CIrFunctionBuilder {
 }
 
 pub type XlsFormatPreference = i32;
+pub type XlsValueKind = i32;
 
 pub type VastFileType = i32;
 
@@ -284,6 +305,31 @@ extern "C" {
         dslx: *const std::os::raw::c_char,
         path: *const std::os::raw::c_char,
         module_name: *const std::os::raw::c_char,
+        dslx_stdlib_path: *const std::os::raw::c_char,
+        additional_search_paths: *const *const std::os::raw::c_char,
+        additional_search_paths_count: libc::size_t,
+        enable_warnings: *const *const std::os::raw::c_char,
+        enable_warnings_count: libc::size_t,
+        disable_warnings: *const *const std::os::raw::c_char,
+        disable_warnings_count: libc::size_t,
+        warnings_as_errors: bool,
+        warnings_out: *mut *mut *mut std::os::raw::c_char,
+        warnings_out_count: *mut libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        ir_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    pub fn xls_convert_dslx_path_to_ir(
+        path: *const std::os::raw::c_char,
+        dslx_stdlib_path: *const std::os::raw::c_char,
+        additional_search_paths: *const *const std::os::raw::c_char,
+        additional_search_paths_count: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        ir_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    pub fn xls_convert_dslx_path_to_ir_with_warnings(
+        path: *const std::os::raw::c_char,
         dslx_stdlib_path: *const std::os::raw::c_char,
         additional_search_paths: *const *const std::os::raw::c_char,
         additional_search_paths_count: libc::size_t,
@@ -387,6 +433,13 @@ extern "C" {
     pub fn xls_bits_get_bit(bits: *const CIrBits, index: i64) -> bool;
     pub fn xls_bits_eq(bits: *const CIrBits, other: *const CIrBits) -> bool;
     pub fn xls_bits_to_debug_string(bits: *const CIrBits) -> *mut std::os::raw::c_char;
+    pub fn xls_bits_make_bits_from_bytes(
+        bit_count: libc::size_t,
+        bytes: *const u8,
+        byte_count: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        bits_out: *mut *mut CIrBits,
+    ) -> bool;
     pub fn xls_bits_add(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_sub(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_umul(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
@@ -426,6 +479,11 @@ extern "C" {
         value_out: *mut i64,
     ) -> bool;
 
+    pub fn xls_create_bits_rope(bit_count: i64) -> *mut CBitsRope;
+    pub fn xls_bits_rope_append_bits(bits_rope: *mut CBitsRope, bits: *const CIrBits);
+    pub fn xls_bits_rope_get_bits(bits_rope: *mut CBitsRope) -> *mut CIrBits;
+    pub fn xls_bits_rope_free(bits_rope: *mut CBitsRope);
+
     pub fn xls_package_free(package: *mut CIrPackage);
     pub fn xls_c_str_free(c_str: *mut std::os::raw::c_char);
     pub fn xls_c_strs_free(c_strs: *mut *mut std::os::raw::c_char, count: libc::size_t);
@@ -453,6 +511,16 @@ extern "C" {
         str_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
 
+    pub fn xls_value_get_kind(
+        value: *const CIrValue,
+        error_out: *mut *mut std::os::raw::c_char,
+        kind_out: *mut XlsValueKind,
+    ) -> bool;
+    pub fn xls_value_make_true() -> *mut CIrValue;
+    pub fn xls_value_make_false() -> *mut CIrValue;
+    pub fn xls_value_from_bits_owned(bits: *mut CIrBits) -> *mut CIrValue;
+    pub fn xls_value_flatten_to_bits(value: *const CIrValue) -> *mut CIrBits;
+
     pub fn xls_value_eq(value: *const CIrValue, value: *const CIrValue) -> bool;
     pub fn xls_parse_ir_package(
         ir: *const std::os::raw::c_char,
@@ -465,7 +533,13 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_type_get_kind(
+        t: *mut CIrType,
+        error_out: *mut *mut std::os::raw::c_char,
+        kind_out: *mut XlsValueKind,
+    ) -> bool;
     pub fn xls_type_get_flat_bit_count(t: *const CIrType) -> i64;
+    pub fn xls_type_get_leaf_count(t: *mut CIrType) -> i64;
     pub fn xls_package_get_type_for_value(
         package: *const CIrPackage,
         value: *const CIrValue,
@@ -478,6 +552,13 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CIrFunction,
     ) -> bool;
+    pub fn xls_package_get_functions(
+        package: *mut CIrPackage,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut *mut CIrFunction,
+        count_out: *mut libc::size_t,
+    ) -> bool;
+    pub fn xls_function_ptr_array_free(function_pointer_array: *mut *mut CIrFunction);
     pub fn xls_function_get_type(
         function: *const CIrFunction,
         error_out: *mut *mut std::os::raw::c_char,
@@ -492,6 +573,11 @@ extern "C" {
         function: *const CIrFunction,
         error_out: *mut *mut std::os::raw::c_char,
         name_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_function_to_z3_smtlib(
+        function: *mut CIrFunction,
+        error_out: *mut *mut std::os::raw::c_char,
+        string_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
     pub fn xls_interpret_function(
         function: *const CIrFunction,
@@ -512,10 +598,16 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         mangled_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_init_xls(
+        usage: *const std::os::raw::c_char,
+        argc: libc::c_int,
+        argv: *mut *mut std::os::raw::c_char,
+    );
     pub fn xls_package_to_string(
         p: *const CIrPackage,
         string_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_package_get_top(p: *mut CIrPackage) -> *mut CIrFunctionBase;
     pub fn xls_package_set_top_by_name(
         p: *mut CIrPackage,
         name: *const std::os::raw::c_char,
@@ -605,6 +697,12 @@ extern "C" {
         hi: i64,
         lo: i64,
     ) -> *mut CVastSlice;
+    pub fn xls_vast_verilog_file_make_slice(
+        f: *mut CVastFile,
+        subject: *mut CVastIndexableExpression,
+        hi: *mut CVastExpression,
+        lo: *mut CVastExpression,
+    ) -> *mut CVastSlice;
 
     pub fn xls_vast_verilog_file_make_index(
         f: *mut CVastFile,
@@ -648,6 +746,10 @@ extern "C" {
         connection_expressions: *const *const CVastExpression,
         connection_count: libc::size_t,
     ) -> *mut CVastInstantiation;
+    pub fn xls_vast_verilog_file_make_comment(
+        f: *mut CVastFile,
+        text: *const std::os::raw::c_char,
+    ) -> *mut CVastComment;
     pub fn xls_vast_verilog_file_make_literal(
         f: *mut CVastFile,
         bits: *const CIrBits,
@@ -656,6 +758,10 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         literal_out: *mut *mut CVastLiteral,
     ) -> bool;
+    pub fn xls_vast_verilog_file_make_plain_literal(
+        f: *mut CVastFile,
+        value: i32,
+    ) -> *mut CVastLiteral;
 
     // - Module additions
     pub fn xls_vast_verilog_module_add_input(
@@ -681,6 +787,10 @@ extern "C" {
         m: *mut CVastModule,
         ca: *mut CVastContinuousAssignment,
     );
+    pub fn xls_vast_verilog_module_add_member_comment(
+        m: *mut CVastModule,
+        comment: *mut CVastComment,
+    );
 
     pub fn xls_vast_verilog_module_get_name(m: *mut CVastModule) -> *mut std::os::raw::c_char;
 
@@ -693,6 +803,7 @@ extern "C" {
     ) -> *mut CVastIndexableExpression;
 
     pub fn xls_vast_literal_as_expression(v: *mut CVastLiteral) -> *mut CVastExpression;
+    pub fn xls_vast_concat_as_expression(v: *mut CVastConcat) -> *mut CVastExpression;
     pub fn xls_vast_logic_ref_as_expression(v: *mut CVastLogicRef) -> *mut CVastExpression;
     pub fn xls_vast_slice_as_expression(v: *mut CVastSlice) -> *mut CVastExpression;
     pub fn xls_vast_index_as_expression(v: *mut CVastIndex) -> *mut CVastExpression;
@@ -941,6 +1052,10 @@ extern "C" {
 
     pub fn xls_dslx_interp_value_free(value: *mut CDslxInterpValue);
 
+    pub fn xls_dslx_interp_value_to_string(
+        value: *mut CDslxInterpValue,
+    ) -> *mut std::os::raw::c_char;
+
     pub fn xls_dslx_interp_value_convert_to_ir(
         value: *mut CDslxInterpValue,
         error_out: *mut *mut std::os::raw::c_char,
@@ -1175,6 +1290,12 @@ extern "C" {
         value_count: i64,
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_after_all(
+        builder: *mut CIrBuilderBase,
+        dependencies: *mut *mut CIrBValue,
+        dependency_count: i64,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_add(
         builder: *mut CIrBuilderBase,
         lhs: *mut CIrBValue,
@@ -1194,6 +1315,18 @@ extern "C" {
         name: *const std::os::raw::c_char,
     ) -> *mut CIrBValue;
     pub fn xls_builder_base_add_smul(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_umulp(
+        builder: *mut CIrBuilderBase,
+        lhs: *mut CIrBValue,
+        rhs: *mut CIrBValue,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CIrBValue;
+    pub fn xls_builder_base_add_smulp(
         builder: *mut CIrBuilderBase,
         lhs: *mut CIrBValue,
         rhs: *mut CIrBValue,
