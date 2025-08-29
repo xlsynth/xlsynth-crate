@@ -6,7 +6,7 @@ use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 
 use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
-use xlsynth_g8r::xls_ir::ir::{FileTable, Package, PackageMember};
+use xlsynth_g8r::xls_ir::ir::{self as ir_mod, BlockPortInfo, FileTable, Package, PackageMember};
 use xlsynth_g8r::xls_ir::ir_parser;
 
 use std::collections::HashMap;
@@ -65,37 +65,85 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
-    let lhs_block_text = std::fs::read_to_string(lhs_path).unwrap_or_else(|e| {
-        eprintln!("Failed to read lhs IR file: {}", e);
-        std::process::exit(1);
-    });
-    let rhs_block_text = std::fs::read_to_string(rhs_path).unwrap_or_else(|e| {
-        eprintln!("Failed to read rhs IR file: {}", e);
-        std::process::exit(1);
-    });
-
-    let mut lhs_parser = ir_parser::Parser::new(&lhs_block_text);
-    let mut rhs_parser = ir_parser::Parser::new(&rhs_block_text);
-    let mut lhs_fn = match lhs_parser.parse_block_to_fn() {
-        Ok(f) => f,
+    // Parse each input as a package and select a block member (prefer the top
+    // block).
+    let lhs_pkg_parsed = match ir_parser::parse_path_to_package(std::path::Path::new(lhs_path)) {
+        Ok(p) => p,
         Err(e) => {
             eprintln!(
-                "[{}] Failed to parse LHS block ({}): {}",
+                "[{}] Failed to parse LHS IR package ({}): {}",
                 SUBCOMMAND, lhs_path, e
             );
             std::process::exit(1);
         }
     };
-    let mut rhs_fn = match rhs_parser.parse_block_to_fn() {
-        Ok(f) => f,
+    let rhs_pkg_parsed = match ir_parser::parse_path_to_package(std::path::Path::new(rhs_path)) {
+        Ok(p) => p,
         Err(e) => {
             eprintln!(
-                "[{}] Failed to parse RHS block ({}): {}",
+                "[{}] Failed to parse RHS IR package ({}): {}",
                 SUBCOMMAND, rhs_path, e
             );
             std::process::exit(1);
         }
     };
+
+    fn select_block_from_package<'a>(
+        pkg: &'a ir_mod::Package,
+        name_opt: Option<&str>,
+    ) -> Option<(&'a ir_mod::Fn, &'a BlockPortInfo)> {
+        if let Some(name) = name_opt {
+            for m in pkg.members.iter() {
+                if let PackageMember::Block { func, port_info } = m {
+                    if func.name == name {
+                        return Some((func, port_info));
+                    }
+                }
+            }
+            return None;
+        }
+        if let Some(top_name) = &pkg.top_name {
+            for m in pkg.members.iter() {
+                if let PackageMember::Block { func, port_info } = m {
+                    if &func.name == top_name {
+                        return Some((func, port_info));
+                    }
+                }
+            }
+        }
+        for m in pkg.members.iter() {
+            if let PackageMember::Block { func, port_info } = m {
+                return Some((func, port_info));
+            }
+        }
+        None
+    }
+
+    let (lhs_fn_ref, _lhs_ports) = match select_block_from_package(&lhs_pkg_parsed, lhs_top) {
+        Some(pair) => pair,
+        None => {
+            eprintln!(
+                "[{}] No block member found in LHS package (or name not found)",
+                SUBCOMMAND
+            );
+            std::process::exit(1);
+        }
+    };
+    let (rhs_fn_ref, _rhs_ports) = match select_block_from_package(&rhs_pkg_parsed, rhs_top) {
+        Some(pair) => pair,
+        None => {
+            eprintln!(
+                "[{}] No block member found in RHS package (or name not found)",
+                SUBCOMMAND
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Clone selected blocks as functions and build single-fn packages for
+    // equivalence.
+    let mut lhs_fn = lhs_fn_ref.clone();
+    let mut rhs_fn = rhs_fn_ref.clone();
 
     if let Some(name) = lhs_top {
         lhs_fn.name = name.to_string();

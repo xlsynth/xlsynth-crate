@@ -9,6 +9,7 @@ use crate::toolchain_config::ToolchainConfig;
 use rand::Rng;
 use rand::SeedableRng;
 use xlsynth::IrValue;
+use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
 use xlsynth_g8r::xls_ir::edit_distance::compute_edit_distance;
 use xlsynth_g8r::xls_ir::ir::Type;
@@ -741,8 +742,23 @@ fn handle_ir_localized_eco_blocks_in_packages(
     println!("  JSON written to: {}", json_path.display());
     println!("  Done.");
 
-    // Skip RTL/codegen/proof for block-only selection.
-    println!("  Equivalence: skipped (selected block members)");
+    // Attempt equivalence by wrapping the functions into minimal packages and
+    // invoking the external checker, if tools are configured.
+    match std::env::var("XLSYNTH_TOOLS") {
+        Ok(p) if !p.trim().is_empty() => {
+            let lhs_pkg = format!("package lhs\n\ntop {}", applied.to_string());
+            let rhs_pkg = format!("package rhs\n\ntop {}", new_fn.to_string());
+            let top_name = Some(new_fn.name.as_str());
+            match check_equivalence::check_equivalence_with_top(&lhs_pkg, &rhs_pkg, top_name, false)
+            {
+                Ok(()) => println!("  Equivalence: proved (patched(old) ≡ new)"),
+                Err(e) => println!("  Equivalence: FAILED: {}", e),
+            }
+        }
+        _ => {
+            println!("  Equivalence: skipped (no XLSYNTH_TOOLS env var)");
+        }
+    }
 }
 
 // Compute Levenshtein distance over bytes (ASCII-safe for IR text), O(n*m).

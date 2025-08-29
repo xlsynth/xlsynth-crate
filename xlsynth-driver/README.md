@@ -37,11 +37,11 @@ Key flags:
 
 ### `ir-equiv-blocks`
 
-Proves two IR blocks to be equivalent by first lifting each block into a function and then checking equivalence as in `ir-equiv`.
+Proves two IR blocks to be equivalent by selecting block members from package-form IR inputs (both operands must be packages) and checking function-level equivalence on the lifted blocks (as in `ir-equiv`).
 
 Key flags:
 
-- `--lhs_top <NAME>` / `--rhs_top <NAME>` or shared `--top <NAME>` to select block entry points.
+- `--lhs_top <NAME>` / `--rhs_top <NAME>` or shared `--top <NAME>` to select block entry points (by block name in each package). If omitted, the package `top` block is used when present; otherwise the first block member is selected.
 - `--solver <toolchain|bitwuzla|boolector|boolector-legacy|z3-binary|bitwuzla-binary|boolector-binary>`
 - `--flatten_aggregates=<BOOL>`
 - `--drop_params <CSV>`
