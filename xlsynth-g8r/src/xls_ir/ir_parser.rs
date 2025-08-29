@@ -6,12 +6,22 @@ use crate::xls_ir::ir::{
     self, ArrayTypeData, BlockPortInfo, FileTable, PackageMember, operator_to_nary_op,
 };
 use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
+use crate::xls_ir::ir_validate;
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
     let file_content = std::fs::read_to_string(path)
         .map_err(|e| ParseError::new(format!("failed to read file: {}", e)))?;
     let mut parser = Parser::new(&file_content);
     parser.parse_package()
+}
+
+/// Parses a package from `path` and validates the resulting IR.
+pub fn parse_and_validate_path_to_package(
+    path: &std::path::Path,
+) -> Result<ir::Package, ParseOrValidateError> {
+    let pkg = parse_path_to_package(path)?;
+    ir_validate::validate_package(&pkg)?;
+    Ok(pkg)
 }
 
 #[derive(Debug)]
@@ -28,6 +38,36 @@ impl ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ParseError: {}", self.msg)
+    }
+}
+
+/// Unified error for parse-and-validate helpers.
+#[derive(Debug)]
+pub enum ParseOrValidateError {
+    Parse(ParseError),
+    Validate(ir_validate::ValidationError),
+}
+
+impl std::fmt::Display for ParseOrValidateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseOrValidateError::Parse(e) => write!(f, "{}", e),
+            ParseOrValidateError::Validate(e) => write!(f, "ValidationError: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for ParseOrValidateError {}
+
+impl From<ParseError> for ParseOrValidateError {
+    fn from(e: ParseError) -> Self {
+        ParseOrValidateError::Parse(e)
+    }
+}
+
+impl From<ir_validate::ValidationError> for ParseOrValidateError {
+    fn from(e: ir_validate::ValidationError) -> Self {
+        ParseOrValidateError::Validate(e)
     }
 }
 
@@ -1994,6 +2034,15 @@ pub fn emit_fn_as_block(
         header_parts.join(", "),
         lines.join("\n")
     )
+}
+
+impl Parser {
+    /// Parses a package from the input and validates the resulting IR.
+    pub fn parse_and_validate_package(&mut self) -> Result<ir::Package, ParseOrValidateError> {
+        let pkg = self.parse_package()?;
+        ir_validate::validate_package(&pkg)?;
+        Ok(pkg)
+    }
 }
 
 #[cfg(test)]

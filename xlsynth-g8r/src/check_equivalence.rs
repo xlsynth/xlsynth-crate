@@ -244,7 +244,7 @@ top fn my_xor(a: bits[1], b: bits[1]) -> bits[1] {
 }
 ";
         let mut parser = ir_parser::Parser::new(simple_xor_ir);
-        let ir_package = parser.parse_package().unwrap();
+        let ir_package = parser.parse_and_validate_package().unwrap();
         let ir_top = ir_package.get_top().unwrap();
 
         // Now we make a simple one bit gate fn.

@@ -85,10 +85,10 @@ fuzz_target!(|sample: FuzzSample| {
 
     // Parse both packages using the xlsynth-g8r parser
     let orig_pkg = ir_parser::Parser::new(&pkg.to_string())
-        .parse_package()
+        .parse_and_validate_package()
         .unwrap();
     let opt_pkg = ir_parser::Parser::new(&optimized_pkg.to_string())
-        .parse_package()
+        .parse_and_validate_package()
         .unwrap();
 
     let orig_fn = orig_pkg.get_top().unwrap();

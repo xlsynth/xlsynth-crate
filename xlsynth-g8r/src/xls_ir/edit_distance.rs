@@ -124,7 +124,7 @@ mod tests {
 
     fn parse_ir_from_string(s: &str) -> Package {
         let mut parser = Parser::new(s);
-        parser.parse_package().unwrap()
+        parser.parse_and_validate_package().unwrap()
     }
 
     #[test]

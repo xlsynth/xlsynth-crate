@@ -28,7 +28,7 @@ fn do_test_ir_conversion_with_top(
 ) -> SummaryStats {
     // Now we'll parse the IR and turn it into a gate function.
     let mut parser = ir_parser::Parser::new(&ir_package_text);
-    let ir_package = parser.parse_package().unwrap();
+    let ir_package = parser.parse_and_validate_package().unwrap();
     let ir_fn = match top_name {
         Some(name) => ir_package.get_fn(name).unwrap(),
         None => ir_package.get_top().unwrap(),
@@ -65,7 +65,7 @@ fn do_test_ir_conversion(ir_package_text: &str, opt: Opt) -> SummaryStats {
 fn do_test_ir_conversion_no_equiv(ir_package_text: &str, opt: Opt) {
     let _ = env_logger::builder().is_test(true).try_init();
     let mut parser = ir_parser::Parser::new(&ir_package_text);
-    let ir_package = parser.parse_package().unwrap();
+    let ir_package = parser.parse_and_validate_package().unwrap();
     let ir_fn = ir_package.get_top().unwrap();
     let _ = gatify(
         &ir_fn,

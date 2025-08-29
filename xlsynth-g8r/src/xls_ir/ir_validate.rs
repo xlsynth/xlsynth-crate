@@ -34,13 +34,8 @@ pub enum ValidationError {
         expected: Type,
         actual: Type,
     },
-    /// A node's text id does not match its position in the node list.
-    UnexpectedTextId {
-        func: String,
-        node_index: usize,
-        expected: usize,
-        actual: usize,
-    },
+    /// A node's text id is not unique within the function.
+    DuplicateTextId { func: String, text_id: usize },
     /// The function refers to another function that does not exist in the
     /// package.
     UnknownCallee { func: String, callee: String },
@@ -91,17 +86,8 @@ impl std::fmt::Display for ValidationError {
                     func, expected, actual
                 )
             }
-            ValidationError::UnexpectedTextId {
-                func,
-                node_index,
-                expected,
-                actual,
-            } => {
-                write!(
-                    f,
-                    "function '{}' node {} has text id {}, expected {}",
-                    func, node_index, actual, expected
-                )
+            ValidationError::DuplicateTextId { func, text_id } => {
+                write!(f, "function '{}' has duplicate text id {}", func, text_id)
             }
             ValidationError::UnknownCallee { func, callee } => {
                 write!(
@@ -148,15 +134,31 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
 
 /// Validates a function within the context of its parent package.
 pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
+    // Ensure text ids are unique, with the following nuance:
+    // - GetParam nodes (parameters) may share a numeric id with non-parameter
+    //   nodes. This mirrors XLS textual IR where parameter ids live in the header
+    //   and are referenced by name in bodies. We still require that param ids are
+    //   unique among themselves, and non-param ids are unique among themselves.
+    let mut seen_param_ids: HashSet<usize> = HashSet::new();
+    let mut seen_nonparam_ids: HashSet<usize> = HashSet::new();
     for (i, node) in f.nodes.iter().enumerate() {
-        // Ensure text ids are sequential and match indices.
-        if node.text_id != i {
-            return Err(ValidationError::UnexpectedTextId {
-                func: f.name.clone(),
-                node_index: i,
-                expected: i,
-                actual: node.text_id,
-            });
+        match node.payload {
+            NodePayload::GetParam(_) => {
+                if !seen_param_ids.insert(node.text_id) {
+                    return Err(ValidationError::DuplicateTextId {
+                        func: f.name.clone(),
+                        text_id: node.text_id,
+                    });
+                }
+            }
+            _ => {
+                if !seen_nonparam_ids.insert(node.text_id) {
+                    return Err(ValidationError::DuplicateTextId {
+                        func: f.name.clone(),
+                        text_id: node.text_id,
+                    });
+                }
+            }
         }
 
         // Ensure all operands refer to already defined nodes.
@@ -317,12 +319,13 @@ mod tests {
     }
 
     #[test]
-    fn text_id_mismatch_fails() {
+    fn duplicate_text_id_fails() {
         let ir = r#"
         package test
 
         fn foo(x: bits[1]) -> bits[1] {
-          ret add.2: bits[1] = add(x, x)
+          tmp.2: bits[1] = add(x, x)
+          ret neg.3: bits[1] = neg(tmp.2)
         }
         "#;
         let mut parser = Parser::new(ir);
@@ -336,7 +339,22 @@ mod tests {
                     _ => None,
                 })
                 .unwrap();
-            f.nodes[1].text_id = 42;
+            // Collect indices of non-parameter, non-nil nodes.
+            let mut body_idxs: Vec<usize> = Vec::new();
+            for (idx, n) in f.nodes.iter().enumerate() {
+                if idx == 0 {
+                    continue; // skip sentinel
+                }
+                if let NodePayload::GetParam(_) = n.payload {
+                    continue;
+                }
+                body_idxs.push(idx);
+            }
+            assert!(body_idxs.len() >= 2);
+            let first = body_idxs[0];
+            let second = body_idxs[1];
+            let dup = f.nodes[first].text_id;
+            f.nodes[second].text_id = dup;
         }
         let f = pkg
             .members
@@ -348,7 +366,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             validate_fn(f, &pkg),
-            Err(ValidationError::UnexpectedTextId { .. })
+            Err(ValidationError::DuplicateTextId { .. })
         ));
     }
 

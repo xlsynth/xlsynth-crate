@@ -887,7 +887,7 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
             }
             _ => {
                 println!("Loading IR from path: {}", p_str);
-                let package = ir_parser::parse_path_to_package(path).map_err(|e| {
+                let package = ir_parser::parse_and_validate_path_to_package(path).map_err(|e| {
                     anyhow::anyhow!("Failed to parse IR package '{}': {:?}", p_str, e)
                 })?;
 

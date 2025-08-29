@@ -2113,7 +2113,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
 }
 "#;
         let mut parser = ir_parser::Parser::new(ir_text);
-        let pkg = parser.parse_package().unwrap();
+        let pkg = parser.parse_and_validate_package().unwrap();
         let f = pkg.get_fn("fuzz_test").unwrap();
         let result = prove_ir_fn_equiv(f, f, false);
         assert_eq!(
@@ -2431,10 +2431,10 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
 "#;
 
         let pkg_orig = crate::xls_ir::ir_parser::Parser::new(ir_original)
-            .parse_package()
+            .parse_and_validate_package()
             .unwrap();
         let pkg_opt = crate::xls_ir::ir_parser::Parser::new(ir_optimized)
-            .parse_package()
+            .parse_and_validate_package()
             .unwrap();
 
         let f_orig = pkg_orig.get_fn("fuzz_test").unwrap();
