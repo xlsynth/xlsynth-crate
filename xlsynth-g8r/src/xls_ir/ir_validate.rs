@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use super::ir::{self, Fn, NodePayload, Package, PackageMember, Type};
+use super::ir::{Fn, NodePayload, Package, PackageMember, Type};
 use super::ir_utils::operands;
 
 /// Errors that can arise during validation of XLS IR structures.
