@@ -176,6 +176,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
                 *op_counts.entry(op).or_insert(0) += 1;
             }
             xlsynth_g8r::xls_ir::localized_eco::Edit::RewriteOperands { .. } => {}
+            xlsynth_g8r::xls_ir::localized_eco::Edit::ReplaceNode { .. } => {}
         }
     }
     let mut added_ops: Vec<AddedOpsSummaryItem> = op_counts
@@ -291,6 +292,15 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
                     "    path {:?}: rewrite operands to: {}",
                     path.0,
                     new_signatures.join(", ")
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::ReplaceNode {
+                path,
+                new_signature,
+            } => {
+                println!(
+                    "    path {:?}: replace node with: {}",
+                    path.0, new_signature
                 );
             }
         }
@@ -635,6 +645,15 @@ fn handle_ir_localized_eco_blocks_in_packages(
                     "    path {:?}: rewrite operands to: {}",
                     path.0,
                     new_signatures.join(", ")
+                );
+            }
+            xlsynth_g8r::xls_ir::localized_eco::Edit::ReplaceNode {
+                path,
+                new_signature,
+            } => {
+                println!(
+                    "    path {:?}: replace node with: {}",
+                    path.0, new_signature
                 );
             }
         }

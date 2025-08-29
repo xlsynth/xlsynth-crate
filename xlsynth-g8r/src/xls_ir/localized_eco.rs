@@ -144,6 +144,12 @@ pub enum Edit {
         path: Path,
         new_signatures: Vec<String>,
     },
+    // Replace the node at `path` with the corresponding node from `new`,
+    // including its operator and attributes. Children are imported from `new`.
+    ReplaceNode {
+        path: Path,
+        new_signature: String,
+    },
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -835,17 +841,26 @@ pub fn apply_localized_eco(old: &Fn, new: &Fn, diff: &LocalizedEcoDiff) -> Fn {
     }
     let mut next_id = max_old_id + 1;
 
-    // Collect unique paths to modify from diff.
-    let mut paths: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+    // Collect unique paths to modify from diff, with whether to preserve operator.
+    let mut path_to_preserve_op: std::collections::HashMap<Vec<usize>, bool> =
+        std::collections::HashMap::new();
     for e in diff.edits.iter() {
         match e {
-            Edit::AddNode { path, .. } | Edit::RewriteOperands { path, .. } => {
-                paths.insert(path.0.clone());
+            Edit::AddNode { path, .. } => {
+                // At parent path, we only need operand rewrite; preserve operator.
+                path_to_preserve_op.insert(path.0.clone(), true);
+            }
+            Edit::RewriteOperands { path, .. } => {
+                path_to_preserve_op.insert(path.0.clone(), true);
+            }
+            Edit::ReplaceNode { path, .. } => {
+                // Replace node: do not preserve operator.
+                path_to_preserve_op.insert(path.0.clone(), false);
             }
         }
     }
     // Apply modifications: rebuild nodes at these paths from `new`.
-    let mut path_list: Vec<Vec<usize>> = paths.into_iter().collect();
+    let mut path_list: Vec<Vec<usize>> = path_to_preserve_op.keys().cloned().collect();
     // Rebuilding parents first is sufficient since children are imported via
     // import_subtree. Order by path length ascending ensures parent nodes are
     // visited before deeper paths.
@@ -863,18 +878,22 @@ pub fn apply_localized_eco(old: &Fn, new: &Fn, diff: &LocalizedEcoDiff) -> Fn {
         let new_nr_at_path = node_ref_at_path(new, new_root, p);
         let old_op = old.get_node(old_nr_at_path).payload.get_operator();
         let new_op = new.get_node(new_nr_at_path).payload.get_operator();
-        if old_op == new_op {
-            rebuild_node_from_new_at_path(
-                &mut patched,
-                old,
-                new,
-                &new_idx_to_old_idx,
-                &mut memo,
-                &mut next_id,
-                p,
-                true, // preserve operator at this node
-            );
+        let preserve_operator = path_to_preserve_op.get(p).copied().unwrap_or(true);
+        // If we are asked to preserve the operator but operators differ, skip.
+        // Otherwise, rebuild allowing operator replacement.
+        if preserve_operator && old_op != new_op {
+            continue;
         }
+        rebuild_node_from_new_at_path(
+            &mut patched,
+            old,
+            new,
+            &new_idx_to_old_idx,
+            &mut memo,
+            &mut next_id,
+            p,
+            preserve_operator,
+        );
     }
 
     // Re-topologize nodes so dependencies appear before uses.
@@ -1116,17 +1135,14 @@ fn align_nodes(
         });
     } else {
         // Same arity: if children are identical pairwise but node hashes differ,
-        // it's an operator/type/attr change at this node → rewrite.
+        // it's an operator/type/attr change at this node → replace node.
         let children_equal = (0..min_len)
             .all(|i| old_hashes[old_children[i].index] == new_hashes[new_children[i].index]);
         if children_equal {
-            let new_sigs: Vec<String> = new_children
-                .iter()
-                .map(|nr| new.get_node(*nr).to_signature_string(new))
-                .collect();
-            edits.push(Edit::RewriteOperands {
+            let sig = new.get_node(new_nr).to_signature_string(new);
+            edits.push(Edit::ReplaceNode {
                 path: Path(path.clone()),
-                new_signatures: new_sigs,
+                new_signature: sig,
             });
         }
         // else: differ at children → localize by recursing only.
@@ -1212,11 +1228,11 @@ mod tests {
 }"#,
         );
         let diff = compute_localized_eco(&old, &new);
-        // Operator changes are reflected as operand rewrites at root.
+        // Operator changes are reflected as ReplaceNode at root path [].
         assert!(
             diff.edits
                 .iter()
-                .any(|e| matches!(e, Edit::RewriteOperands { path, .. } if path.0.is_empty()))
+                .any(|e| matches!(e, Edit::ReplaceNode { path, .. } if path.0.is_empty()))
         );
     }
 
@@ -1241,9 +1257,9 @@ mod tests {
         let diff = compute_localized_eco(&old, &new);
         // Expect an operator change at the child (path [0]) and no substitution at the
         // root.
-        // Operator changes are reflected as operand rewrites at child [0].
+        // Operator changes are reflected as ReplaceNode at child [0].
         assert!(diff.edits.iter().any(|e| matches!(e,
-            Edit::RewriteOperands { path, .. } if path.0 == vec![0])));
+            Edit::ReplaceNode { path, .. } if path.0 == vec![0])));
         // Should not produce edits beyond that (e.g. no edits at the leaf 'not(a)')
         assert!(!diff.edits.iter().any(|e| matches!(e,
             Edit::RewriteOperands { path, .. } if path.0 == vec![0, 0])));
