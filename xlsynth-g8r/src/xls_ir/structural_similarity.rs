@@ -10,6 +10,15 @@ use crate::xls_ir::node_hashing::{
     compute_node_local_structural_hash, compute_node_structural_hash,
 };
 
+/// Returns true if two IR functions are structurally equivalent (forward and
+/// backward user-context) and have identical signatures.
+pub fn structurally_equivalent_ir(lhs: &Fn, rhs: &Fn) -> bool {
+    if lhs.get_type() != rhs.get_type() {
+        return false;
+    }
+    discrepancies_by_depth(lhs, rhs).is_empty() && discrepancies_by_depth_bwd(lhs, rhs).is_empty()
+}
+
 fn compute_node_depth(f: &Fn, node_ref: NodeRef, child_depths: &[usize]) -> usize {
     match &f.get_node(node_ref).payload {
         NodePayload::Nil
