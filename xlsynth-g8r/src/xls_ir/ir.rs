@@ -514,12 +514,12 @@ impl NodePayload {
     ) -> Option<String> {
         let get_name = |node_ref: NodeRef| -> String {
             let node = f.get_node(node_ref);
-            match node.payload {
-                // Parameters use their declared names from the function signature.
-                NodePayload::GetParam(_) => node.name.clone().unwrap(),
-                // For all non-parameter nodes, emit canonical op.id labels to avoid
-                // stale textual names referring to non-existent/renamed nodes.
-                _ => format!("{}.{}", node.payload.get_operator(), node.text_id),
+            // Prefer the bound name if present; otherwise fall back to canonical op.id.
+            // Parameters always have names; other nodes may optionally have names.
+            if let Some(name) = &node.name {
+                name.clone()
+            } else {
+                format!("{}.{}", node.payload.get_operator(), node.text_id)
             }
         };
         let result = match self {
