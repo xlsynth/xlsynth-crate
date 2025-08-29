@@ -1563,32 +1563,35 @@ fn f(x: u8) -> u8 { x + x - x }
         String::from_utf8_lossy(&ir2opt_output.stderr)
     );
 
-    // Capture optimized IR and compare to golden using test helper.
+    // Capture optimized IR and strip position data for deterministic golden.
     let optimized_ir = String::from_utf8_lossy(&ir2opt_output.stdout).to_string();
-    // Normalize nondeterministic file paths in file_number lines for golden
-    // comparison.
-    let normalized: String = optimized_ir
-        .lines()
-        .map(|l| {
-            if l.starts_with("file_number 0 ") {
-                "file_number 0 \"<stdlib>\"".to_string()
-            } else if l.starts_with("file_number 1 ") {
-                "file_number 1 \"<input>\"".to_string()
-            } else {
-                l.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    eprintln!(
-        "[ir2opt optimized IR for __f__f (normalized)]:\n{}",
-        normalized
+    let opt_ir_path = temp_dir.path().join("f.after_ir2opt.ir");
+    std::fs::write(&opt_ir_path, &optimized_ir).unwrap();
+
+    let ir_round_trip = std::process::Command::new(command_path)
+        .arg("ir-round-trip")
+        .arg(opt_ir_path.to_str().unwrap())
+        .arg("--strip-pos-attrs")
+        .arg("true")
+        .output()
+        .unwrap();
+    assert!(
+        ir_round_trip.status.success(),
+        "ir-round-trip --strip-pos-attrs failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ir_round_trip.stdout),
+        String::from_utf8_lossy(&ir_round_trip.stderr)
     );
+    let stripped_ir = String::from_utf8_lossy(&ir_round_trip.stdout).to_string();
+    eprintln!(
+        "[ir2opt optimized IR for __f__f (stripped)]:\n{}",
+        stripped_ir
+    );
+
     // Ensure golden directory exists, then compare/update via helper.
     let golden_rel = "tests/test_dslx_add_sub_opt_ir2gates_pipeline.golden.ir";
     let golden_dir = std::path::Path::new(golden_rel).parent().unwrap();
     let _ = std::fs::create_dir_all(golden_dir);
-    compare_golden_text(&normalized, golden_rel);
+    compare_golden_text(&stripped_ir, golden_rel);
     // Overwrite IR with optimized IR for next step
     std::fs::write(&ir_path, &ir2opt_output.stdout).unwrap();
 

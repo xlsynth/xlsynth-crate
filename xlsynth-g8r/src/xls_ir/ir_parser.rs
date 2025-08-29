@@ -2767,6 +2767,10 @@ top fn main(t: token id=1) -> token {
         } else {
             panic!("Expected GetParam node payload");
         }
+
+        // Ensure printing retains a non-empty body with the param return.
+        let printed = format!("{}\n", f.to_string());
+        assert_eq!(printed, input);
     }
 
     #[test]
