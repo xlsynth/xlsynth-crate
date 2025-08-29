@@ -736,3 +736,227 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
         Ok(FuzzSample { input_bits, ops })
     }
 }
+
+impl FuzzSample {
+    /// Constructs a new sample that is otherwise arbitrary, but preserves the
+    /// same function signature as `orig` when lowered with `generate_ir_fn`:
+    ///
+    /// - Same parameter count and names
+    /// - Same parameter types
+    /// - Same return type
+    ///
+    /// Note: Currently this function is specialized for bit-typed returns
+    /// (which is what the localized ECO fuzzer uses). If the original sample's
+    /// return type is non-bits, we conservatively mirror the input width as the
+    /// return width so the generated IR remains valid; callers that require
+    /// non-bits support can extend this routine.
+    pub fn new_with_same_signature(orig: &FuzzSample) -> FuzzSample {
+        // Discover the original return type by materializing a tiny package and
+        // building the function, then introspecting its function type.
+        let mut pkg = match xlsynth::IrPackage::new("sig_probe_pkg") {
+            Ok(p) => p,
+            Err(_) => {
+                // In the unlikely event package construction fails, fall back to a
+                // trivial identity with the same input bits; the fuzzer will skip if
+                // it's unusable.
+                return FuzzSample {
+                    input_bits: orig.input_bits,
+                    ops: vec![],
+                };
+            }
+        };
+
+        let (ret_is_bits, ret_bit_width) =
+            match generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg) {
+                Ok(func) => {
+                    let fty = func.get_type().expect("get_type must succeed");
+                    let ret_ty = fty.return_type();
+                    let ret_str = ret_ty.to_string();
+                    if let Some(width_str) = ret_str.strip_prefix("bits[") {
+                        let width_str = width_str.trim_end_matches(']');
+                        let width: u64 = width_str.parse().unwrap_or(orig.input_bits as u64);
+                        (true, width as u8)
+                    } else {
+                        (false, orig.input_bits)
+                    }
+                }
+                Err(_) => {
+                    // If generating the original function failed, mirror input bits.
+                    (true, orig.input_bits)
+                }
+            };
+
+        // Build an "otherwise arbitrary" but simple body. To keep generation
+        // robust and avoid type tracking, we only apply a few identity-style
+        // unary ops to the primary input, then append a final coercion op to
+        // ensure the return width matches exactly when returning bits.
+        let mut ops: Vec<FuzzOp> = Vec::new();
+
+        // Add a few no-op identities to vary the body deterministically based
+        // on original ops count (keeps determinism without RNG deps).
+        let noise_ops: usize = (orig.ops.len() % 3) + 1; // in 1..=3
+        for _ in 0..noise_ops {
+            ops.push(FuzzOp::Unop(FuzzUnop::Identity, 0));
+        }
+
+        if ret_is_bits {
+            // If the desired return width is smaller than or equal to the input,
+            // slice the primary input. Otherwise extend it to the requested width.
+            if ret_bit_width <= orig.input_bits {
+                ops.push(FuzzOp::BitSlice {
+                    operand: FuzzOperand { index: 0 },
+                    start: 0,
+                    width: ret_bit_width,
+                });
+            } else {
+                ops.push(FuzzOp::ZeroExt {
+                    operand: FuzzOperand { index: 0 },
+                    new_bit_count: ret_bit_width,
+                });
+            }
+        } else {
+            // Non-bits return types are not required by current fuzzers; return a
+            // width-preserving identity of the input so the signature remains sane.
+            ops.push(FuzzOp::Unop(FuzzUnop::Identity, 0));
+        }
+
+        FuzzSample {
+            input_bits: orig.input_bits,
+            ops,
+        }
+    }
+
+    /// Constructs a sample that matches the given XLS IR function type.
+    ///
+    /// Constraints:
+    /// - Exactly one parameter, of type bits[N].
+    /// - Return type must be bits[M].
+    ///
+    /// Returns an error if constraints are not met.
+    pub fn new_with_ir_function_type(
+        fty: &xlsynth::ir_package::IrFunctionType,
+    ) -> Result<FuzzSample, XlsynthError> {
+        // Extract the single parameter width from the function type.
+        if fty.param_count() != 1 {
+            return Err(XlsynthError("expected exactly one parameter".to_string()));
+        }
+        let param_ty = fty.param_type(0)?;
+        let param_ty_str = param_ty.to_string();
+        let input_bits: u8 = if let Some(s) = param_ty_str.strip_prefix("bits[") {
+            let s = s.trim_end_matches(']');
+            s.parse::<u64>()
+                .map_err(|_| XlsynthError("invalid param bits width".to_string()))?
+                as u8
+        } else {
+            return Err(XlsynthError("parameter type must be bits[N]".to_string()));
+        };
+
+        // Extract return type width.
+        let ret_ty = fty.return_type();
+        let ret_ty_str = ret_ty.to_string();
+        let ret_bits: u8 = if let Some(s) = ret_ty_str.strip_prefix("bits[") {
+            let s = s.trim_end_matches(']');
+            s.parse::<u64>()
+                .map_err(|_| XlsynthError("invalid return bits width".to_string()))?
+                as u8
+        } else {
+            return Err(XlsynthError("return type must be bits[M]".to_string()));
+        };
+
+        Ok(FuzzSample::new_with_param_and_ret_bits(
+            input_bits, ret_bits,
+        ))
+    }
+
+    /// Convenience: construct a sample from parameter and return bit widths.
+    /// This mirrors the shape produced by `generate_ir_fn` (single input named
+    /// "input").
+    pub fn new_with_param_and_ret_bits(param_bits: u8, ret_bits: u8) -> FuzzSample {
+        let mut ops: Vec<FuzzOp> = Vec::new();
+        let noise_ops: usize = ((param_bits as usize) % 3) + 1;
+        for _ in 0..noise_ops {
+            ops.push(FuzzOp::Unop(FuzzUnop::Identity, 0));
+        }
+        if ret_bits <= param_bits {
+            ops.push(FuzzOp::BitSlice {
+                operand: FuzzOperand { index: 0 },
+                start: 0,
+                width: ret_bits,
+            });
+        } else {
+            ops.push(FuzzOp::ZeroExt {
+                operand: FuzzOperand { index: 0 },
+                new_bit_count: ret_bits,
+            });
+        }
+        FuzzSample {
+            input_bits: param_bits,
+            ops,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_with_same_signature_bits_roundtrip() {
+        // Original sample: 5-bit input, return lower 3 bits via slice.
+        let orig = FuzzSample {
+            input_bits: 5,
+            ops: vec![FuzzOp::BitSlice {
+                operand: FuzzOperand { index: 0 },
+                start: 0,
+                width: 3,
+            }],
+        };
+
+        let mut pkg_a = xlsynth::IrPackage::new("a").unwrap();
+        let f_a = generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg_a).unwrap();
+        let fty_a = f_a.get_type().unwrap();
+        let param_count_a = fty_a.param_count();
+        let param_ty_a = fty_a.param_type(0).unwrap().to_string();
+        let ret_ty_a = fty_a.return_type().to_string();
+
+        let new_sample = FuzzSample::new_with_same_signature(&orig);
+        let mut pkg_b = xlsynth::IrPackage::new("b").unwrap();
+        let f_b =
+            generate_ir_fn(new_sample.input_bits, new_sample.ops.clone(), &mut pkg_b).unwrap();
+        let fty_b = f_b.get_type().unwrap();
+
+        // Same parameter count and type.
+        assert_eq!(fty_b.param_count(), param_count_a);
+        assert_eq!(fty_b.param_type(0).unwrap().to_string(), param_ty_a);
+
+        // Same return type.
+        assert_eq!(fty_b.return_type().to_string(), ret_ty_a);
+
+        // Same parameter name.
+        assert_eq!(f_a.param_name(0).unwrap(), "input".to_string());
+        assert_eq!(f_b.param_name(0).unwrap(), "input".to_string());
+    }
+
+    #[test]
+    fn test_new_with_ir_function_type_roundtrip() {
+        // Build a function type via a real function, then mirror it.
+        let mut pkg = xlsynth::IrPackage::new("make_fty").unwrap();
+        let u6 = pkg.get_bits_type(6);
+        let mut b = xlsynth::FnBuilder::new(&mut pkg, "f", true);
+        let x = b.param("input", &u6);
+        let sliced = b.bit_slice(&x, 0, 4, None);
+        let f = b.build_with_return_value(&sliced).unwrap();
+        let fty = f.get_type().unwrap();
+
+        let sample = FuzzSample::new_with_ir_function_type(&fty).unwrap();
+        let mut pkg2 = xlsynth::IrPackage::new("mirror").unwrap();
+        let f2 = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg2).unwrap();
+        let fty2 = f2.get_type().unwrap();
+
+        assert_eq!(fty2.param_count(), 1);
+        assert_eq!(fty2.param_type(0).unwrap().to_string(), "bits[6]");
+        assert_eq!(fty2.return_type().to_string(), "bits[4]");
+        assert_eq!(f.param_name(0).unwrap(), "input");
+        assert_eq!(f2.param_name(0).unwrap(), "input");
+    }
+}
