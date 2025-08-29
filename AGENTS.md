@@ -29,6 +29,8 @@ PRs that fail this check will not be accepted.
 
 If you are modifying code in the `xlsynth-g8r` crate, you **must** ensure that all related fuzz targets (such as those in `xlsynth-g8r/fuzz/fuzz_targets`) still build. CI will fail if any fuzz target does not build. Always check the build status of these fuzz targets after making changes to `xlsynth-g8r`.
 
+All fuzz targets must be documented in `FUZZ.md` with a short paragraph describing the essential property under test and the main failure modes being surfaced.
+
 ### Fuzz Target Early-Return Documentation
 
 When a fuzz target chooses to early-return on an error (instead of panicking), include a brief comment explaining why the error is not considered a sample failure. Examples: degenerate inputs, known unsupported generator outputs, or infrastructure issues that are not properties of the fuzz sample. This makes intent clear and prevents future regressions from reclassifying benign cases as failures.
