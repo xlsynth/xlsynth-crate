@@ -153,65 +153,11 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
 
 /// Validates a function within the context of its parent package.
 pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
-    // Track ids used by non-parameter nodes to ensure uniqueness.
-    let mut seen_nonparam_ids: HashSet<usize> = HashSet::new();
-    // Map parameter names to their declared ids from the function signature.
-    let mut param_name_to_id: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
-    for p in &f.params {
-        param_name_to_id.insert(p.name.as_str(), p.id.get_wrapped_id());
-    }
-    for (i, node) in f.nodes.iter().enumerate() {
-        match &node.payload {
-            NodePayload::GetParam(pid) => {
-                let declared = node
-                    .name
-                    .as_ref()
-                    .and_then(|n| param_name_to_id.get(n.as_str()))
-                    .copied()
-                    .unwrap_or(pid.get_wrapped_id());
-                let actual_pid = pid.get_wrapped_id();
-                if actual_pid != declared || node.text_id != declared {
-                    let param_name = node
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| "<unnamed-param>".to_string());
-                    return Err(ValidationError::ParamIdMismatch {
-                        func: f.name.clone(),
-                        param_name,
-                        expected: declared,
-                        actual: node.text_id,
-                    });
-                }
-            }
-            _ => {
-                if !seen_nonparam_ids.insert(node.text_id) {
-                    return Err(ValidationError::DuplicateTextId {
-                        func: f.name.clone(),
-                        text_id: node.text_id,
-                    });
-                }
-            }
-        }
-        // Ensure all operands refer to already defined nodes.
-        for op in operands(&node.payload) {
-            if op.index >= f.nodes.len() {
-                return Err(ValidationError::OperandOutOfBounds {
-                    func: f.name.clone(),
-                    node_index: i,
-                    operand: op.index,
-                });
-            }
-            if op.index >= i {
-                return Err(ValidationError::OperandUsesUndefined {
-                    func: f.name.clone(),
-                    node_index: i,
-                    operand: op.index,
-                });
-            }
-        }
+    // Intra-function checks (no package context required)
+    validate_fn_intra(f)?;
 
-        // Validate cross-package references.
+    // Cross-package references
+    for (i, node) in f.nodes.iter().enumerate() {
         match &node.payload {
             NodePayload::Invoke { to_apply, .. } => {
                 if !package_has_fn(parent, to_apply) {
@@ -229,20 +175,10 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
                     });
                 }
             }
-            _ => {}
+            _ => {
+                let _ = i; // silence unused for non-matching arms
+            }
         }
-    }
-
-    let ret_node_ref = f
-        .ret_node_ref
-        .ok_or_else(|| ValidationError::MissingReturnNode(f.name.clone()))?;
-    let ret_node = f.get_node(ret_node_ref);
-    if ret_node.ty != f.ret_ty {
-        return Err(ValidationError::ReturnTypeMismatch {
-            func: f.name.clone(),
-            expected: f.ret_ty.clone(),
-            actual: ret_node.ty.clone(),
-        });
     }
 
     Ok(())
@@ -259,9 +195,14 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
 /// - A return node exists and its type matches the declared function return
 ///   type
 pub fn validate_fn_no_pkg(f: &Fn) -> Result<(), ValidationError> {
+    validate_fn_intra(f)
+}
+
+/// Shared intra-function validation used by both validate_fn and
+/// validate_fn_no_pkg.
+fn validate_fn_intra(f: &Fn) -> Result<(), ValidationError> {
     // Track ids used by non-parameter nodes to ensure uniqueness.
-    let mut seen_nonparam_ids: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
+    let mut seen_nonparam_ids: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // Map parameter names to their declared ids from the function signature.
     let mut param_name_to_id: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
