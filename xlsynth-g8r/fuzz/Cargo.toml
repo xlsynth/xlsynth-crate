@@ -73,6 +73,12 @@ path = "fuzz_targets/fuzz_ir_roundtrip.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_ir_same_sig_pair"
+path = "fuzz_targets/fuzz_ir_same_sig_pair.rs"
+test = false
+doc = false
+
 [features]
 # No default optional features; required solver integrations are always enabled via dependency specification above.
 default = []
