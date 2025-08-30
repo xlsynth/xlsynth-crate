@@ -385,6 +385,12 @@ jobs:
         run: |
           brew install z3
 
+      - name: Configure Z3 env (macOS)
+        run: |
+          echo "Z3_SYS_USE_PKG_CONFIG=1" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix z3)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix z3)/lib:$DYLD_FALLBACK_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Run pre-commit
         env:
           SKIP: no-commit-to-branch
@@ -395,7 +401,7 @@ jobs:
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-built,with-z3-built,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-built,with-z3-system,with-easy-smt,with-z3-binary-test --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
