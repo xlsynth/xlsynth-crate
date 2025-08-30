@@ -39,6 +39,18 @@ When a fuzz target chooses to early-return on an error (instead of panicking), i
 
 It's acceptable (and encouraged) for fuzz targets to flag failures that are not strictly the primary focus of that target, when those failures indicate violations of normal API expectations or invariants (e.g., parse failures on our own pretty-printed text). Our goal is an overall system with strong, composable guarantees; surfacing unexpected failures early helps preserve those guarantees.
 
+### Adding New Fuzz Targets
+
+When adding a new fuzz target under `xlsynth-g8r/fuzz/fuzz_targets/`, you must also register it in `xlsynth-g8r/fuzz/Cargo.toml` by adding a `[[bin]]` entry with `name`, `path`, and `test/doc=false`. Otherwise `cargo fuzz run <target>` will fail with “no bin target named …”. Also add a short entry to `FUZZ.md` describing the target’s property and main failure modes.
+
+## Library Routine Output Policy
+
+- Library functions (especially under `xlsynth-g8r/src/**`) should not print to stdout/stderr.
+- If diagnostics are useful, prefer logging at an appropriate level, or return structured
+  error information to the caller.
+- When invoking external tools from a library routine, capture stdout/stderr and propagate
+  relevant information via return values; do not emit prints directly.
+
 ## License Compliance: SPDX Headers
 
 All source files must carry an Apache-2.0 SPDX license header (for example, `// SPDX-License-Identifier: Apache-2.0`). This is enforced by automated Rust tests (see `xlsynth-test-helpers/tests/spdx_test.rs`). If any file is missing the header, CI will fail and the pull request will not be accepted.

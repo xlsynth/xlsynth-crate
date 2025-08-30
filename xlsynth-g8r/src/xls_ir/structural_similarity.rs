@@ -1277,11 +1277,21 @@ pub fn extract_dual_difference_subgraphs(lhs: &Fn, rhs: &Fn) -> (Fn, Fn) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xls_ir::ir::PackageMember;
     use crate::xls_ir::ir_parser::Parser;
 
     fn parse_fn(ir: &str) -> Fn {
-        let mut p = Parser::new(ir);
-        p.parse_fn().unwrap()
+        let pkg_text = format!("package test\n\n{}\n", ir);
+        let mut p = Parser::new(&pkg_text);
+        let pkg = p.parse_and_validate_package().unwrap();
+        pkg.members
+            .iter()
+            .filter_map(|m| match m {
+                PackageMember::Function(f) => Some(f.clone()),
+                _ => None,
+            })
+            .next()
+            .unwrap()
     }
 
     #[test]
