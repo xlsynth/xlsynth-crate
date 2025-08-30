@@ -383,13 +383,17 @@ jobs:
 
       - name: Install Z3 binary
         run: |
-          brew install z3
+          brew install z3 pkg-config
 
       - name: Configure Z3 env (macOS)
         run: |
           echo "Z3_SYS_USE_PKG_CONFIG=1" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=$(brew --prefix z3)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix z3)/lib:$DYLD_FALLBACK_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "Z3_SYS_Z3_HEADER=$(brew --prefix z3)/include/z3.h" >> $GITHUB_ENV
+          echo "C_INCLUDE_PATH=$(brew --prefix z3)/include:$C_INCLUDE_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$(brew --prefix z3)/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          pkg-config --modversion z3 || true
 
       - name: Run pre-commit
         env:
