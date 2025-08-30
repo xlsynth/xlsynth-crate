@@ -736,3 +736,80 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
         Ok(FuzzSample { input_bits, ops })
     }
 }
+
+impl FuzzSample {
+    pub fn gen_with_same_signature<'a>(
+        orig: &FuzzSample,
+        u: &mut arbitrary::Unstructured<'a>,
+    ) -> arbitrary::Result<Self> {
+        let mut pkg =
+            xlsynth::IrPackage::new("orig").map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let ret_bits = generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg)
+            .ok()
+            .and_then(|f| {
+                f.get_type()
+                    .ok()
+                    .map(|t| t.return_type().get_flat_bit_count() as u8)
+            })
+            .unwrap_or(orig.input_bits);
+
+        let mut sample = FuzzSample::arbitrary(u)?;
+        sample.input_bits = orig.input_bits;
+
+        for op in &mut sample.ops {
+            if let FuzzOp::BitSlice { start, width, .. } = op {
+                if *start >= sample.input_bits {
+                    *start = 0;
+                }
+                let max_width = sample.input_bits - *start;
+                if max_width == 0 {
+                    *width = 1;
+                } else if *width > max_width {
+                    *width = max_width;
+                }
+            }
+        }
+
+        let mut pkg_new =
+            xlsynth::IrPackage::new("new").map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let new_ret_bits = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg_new)
+            .ok()
+            .and_then(|f| {
+                f.get_type()
+                    .ok()
+                    .map(|t| t.return_type().get_flat_bit_count() as u8)
+            })
+            .unwrap_or(ret_bits);
+
+        if new_ret_bits < ret_bits {
+            let idx = sample.ops.len() as u8;
+            sample.ops.push(FuzzOp::ZeroExt {
+                operand: FuzzOperand { index: idx },
+                new_bit_count: ret_bits,
+            });
+        } else if new_ret_bits > ret_bits {
+            let idx = sample.ops.len() as u8;
+            sample.ops.push(FuzzOp::BitSlice {
+                operand: FuzzOperand { index: idx },
+                start: 0,
+                width: ret_bits,
+            });
+        }
+
+        Ok(sample)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FuzzSampleSameTypedPair {
+    pub first: FuzzSample,
+    pub second: FuzzSample,
+}
+
+impl<'a> arbitrary::Arbitrary<'a> for FuzzSampleSameTypedPair {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let first = FuzzSample::arbitrary(u)?;
+        let second = FuzzSample::gen_with_same_signature(&first, u)?;
+        Ok(FuzzSampleSameTypedPair { first, second })
+    }
+}

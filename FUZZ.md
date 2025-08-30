@@ -75,6 +75,15 @@ Primarily tests:
 - Bulk replace operations and invariants
 - Stability of large-scale rewrites
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_same_sig_pair.rs
+
+Builds two XLS IR functions from a `FuzzSampleSameTypedPair` and asserts that both validate and share an identical `FnType`. Panics if either function fails to validate or if their types differ.
+
+Primarily tests:
+
+- `FuzzSample::gen_with_same_signature` produces paired samples with matching function signatures
+- IR validation succeeds for both generated functions
+
 ______________________________________________________________________
 
 Notes:
