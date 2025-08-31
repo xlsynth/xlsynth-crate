@@ -74,16 +74,16 @@ pub enum FuzzOp {
     Binop(FuzzBinop, u8, u8),
     ZeroExt {
         operand: FuzzOperand,
-        new_bit_count: u8,
+        new_bit_count: u64,
     },
     SignExt {
         operand: FuzzOperand,
-        new_bit_count: u8,
+        new_bit_count: u64,
     },
     BitSlice {
         operand: FuzzOperand,
-        start: u8,
-        width: u8,
+        start: u64,
+        width: u64,
     },
     OneHot {
         arg: FuzzOperand,
@@ -112,7 +112,7 @@ pub enum FuzzOp {
     },
     Decode {
         arg: FuzzOperand,
-        width: u8,
+        width: u64,
     },
     UMul {
         lhs: FuzzOperand,
@@ -132,7 +132,7 @@ pub enum FuzzOp {
     DynamicBitSlice {
         arg: FuzzOperand,
         start: FuzzOperand,
-        width: u8,
+        width: u64,
     },
     BitSliceUpdate {
         value: FuzzOperand,
@@ -191,7 +191,8 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
     }
 }
 
-// Generate a random IR function with only AND/NOT operations
+/// Builds an xlsynth function by enqueueing the operations given by `ops` into
+/// a `FnBuilder` and returning the built result.
 pub fn generate_ir_fn(
     input_bits: u8,
     ops: Vec<FuzzOp>,
@@ -291,7 +292,7 @@ pub fn generate_ir_fn(
                 assert!(new_bit_count > 0, "zero extend has new bit count of 0");
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
                 let operand_width =
-                    fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u8;
+                    fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u64;
                 let clamped_new_bit_count = std::cmp::max(new_bit_count, operand_width);
                 let node = fn_builder.zero_extend(operand, clamped_new_bit_count as u64, None);
                 available_nodes.push(node);
@@ -303,7 +304,7 @@ pub fn generate_ir_fn(
                 assert!(new_bit_count > 0, "sign extend has new bit count of 0");
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
                 let operand_width =
-                    fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u8;
+                    fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u64;
                 let clamped_new_bit_count = std::cmp::max(new_bit_count, operand_width);
                 let node = fn_builder.sign_extend(operand, clamped_new_bit_count as u64, None);
                 available_nodes.push(node);
@@ -318,7 +319,7 @@ pub fn generate_ir_fn(
                 let operand_width = fn_builder
                     .get_type(operand_bv)
                     .unwrap()
-                    .get_flat_bit_count() as u8;
+                    .get_flat_bit_count() as u64;
                 assert!(
                     start + width <= operand_width,
                     "The bit-width of operand ({}) must be greater than or equal to start ({}) + width ({})",
@@ -514,7 +515,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 FuzzOpFlat::ZeroExt => {
                     // ZeroExt op: sample an index from [0, available_nodes)
                     let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let new_bit_count = u.int_in_range(1..=8)?;
+                    let new_bit_count = u.int_in_range(1..=8)? as u64;
                     ops.push(FuzzOp::ZeroExt {
                         operand: FuzzOperand { index },
                         new_bit_count,
@@ -523,7 +524,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 FuzzOpFlat::SignExt => {
                     // SignExt op: sample an index from [0, available_nodes)
                     let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let new_bit_count = u.int_in_range(1..=8)?;
+                    let new_bit_count = u.int_in_range(1..=8)? as u64;
                     ops.push(FuzzOp::SignExt {
                         operand: FuzzOperand { index },
                         new_bit_count,
@@ -537,11 +538,11 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     let index: u8 = 0; // primary input
 
                     // Choose a valid start such that 0 <= start < input_bits
-                    let start = u.int_in_range(0..=((input_bits as u64) - 1))? as u8;
+                    let start = u.int_in_range(0..=((input_bits as u64) - 1))? as u64;
 
                     // Width must be at least 1 and satisfy start + width <= input_bits
-                    let max_width = input_bits - start;
-                    let width = u.int_in_range(1..=(max_width as u64))? as u8;
+                    let max_width = (input_bits as u64) - start;
+                    let width = u.int_in_range(1..=(max_width as u64))? as u64;
 
                     ops.push(FuzzOp::BitSlice {
                         operand: FuzzOperand { index },
@@ -593,7 +594,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 FuzzOpFlat::Decode => {
                     // Decode op: sample an index from [0, available_nodes)
                     let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let width = u.int_in_range(1..=8)?;
+                    let width = u.int_in_range(1..=8)? as u64;
                     ops.push(FuzzOp::Decode {
                         arg: FuzzOperand { index },
                         width,
@@ -706,7 +707,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     // DynamicBitSlice op: sample an index from [0, available_nodes)
                     let arg = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
                     let start = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let width = u.int_in_range(1..=8)?;
+                    let width = u.int_in_range(1..=8)? as u64;
                     ops.push(FuzzOp::DynamicBitSlice {
                         arg: FuzzOperand { index: arg },
                         start: FuzzOperand { index: start },
@@ -744,24 +745,24 @@ impl FuzzSample {
     ) -> arbitrary::Result<Self> {
         let mut pkg =
             xlsynth::IrPackage::new("orig").map_err(|_| arbitrary::Error::IncorrectFormat)?;
-        let ret_bits = generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg)
+        let ret_bits: u64 = generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg)
             .ok()
             .and_then(|f| {
                 f.get_type()
                     .ok()
-                    .map(|t| t.return_type().get_flat_bit_count() as u8)
+                    .map(|t| t.return_type().get_flat_bit_count() as u64)
             })
-            .unwrap_or(orig.input_bits);
+            .unwrap_or(orig.input_bits as u64);
 
         let mut sample = FuzzSample::arbitrary(u)?;
         sample.input_bits = orig.input_bits;
 
         for op in &mut sample.ops {
             if let FuzzOp::BitSlice { start, width, .. } = op {
-                if *start >= sample.input_bits {
+                if *start >= sample.input_bits as u64 {
                     *start = 0;
                 }
-                let max_width = sample.input_bits - *start;
+                let max_width = (sample.input_bits as u64) - *start;
                 if max_width == 0 {
                     *width = 1;
                 } else if *width > max_width {
@@ -772,12 +773,12 @@ impl FuzzSample {
 
         let mut pkg_new =
             xlsynth::IrPackage::new("new").map_err(|_| arbitrary::Error::IncorrectFormat)?;
-        let new_ret_bits = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg_new)
+        let new_ret_bits: u64 = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg_new)
             .ok()
             .and_then(|f| {
                 f.get_type()
                     .ok()
-                    .map(|t| t.return_type().get_flat_bit_count() as u8)
+                    .map(|t| t.return_type().get_flat_bit_count() as u64)
             })
             .unwrap_or(ret_bits);
 
