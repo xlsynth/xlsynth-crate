@@ -10,13 +10,14 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
     let comment_prefix = if filename.ends_with(".yml")
         || filename.ends_with(".yaml")
         || filename.ends_with(".py")
+        || filename.ends_with(".sh")
         || filename == "requirements.txt"
     {
         "#"
     } else {
         "//"
     };
-    let expect_shebang = filename.ends_with(".py");
+    let expect_shebang = filename.ends_with(".py") || filename.ends_with(".sh");
     let expected_spdx_identifier = format!("{comment_prefix} SPDX-License-Identifier: Apache-2.0");
 
     let file = fs::File::open(file_path).unwrap();
