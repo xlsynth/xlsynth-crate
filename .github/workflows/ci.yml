@@ -43,6 +43,22 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: ubuntu-latest-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust (local-only)
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=2G" >> $GITHUB_ENV
+
       - name: Set up Python + pre-commit
         run: |
           cd ${GITHUB_WORKSPACE}
@@ -145,6 +161,22 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: ${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Download and set up Boolector
         run: |
           mkdir -p boolector_libs
@@ -165,7 +197,6 @@ jobs:
           BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
           LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
         run: |
-          cargo clean
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           export LD_LIBRARY_PATH="${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
@@ -298,6 +329,22 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: ubuntu-20.04-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Show rustfmt and cargo versions
         run: |
           rustfmt --version
@@ -308,7 +355,6 @@ jobs:
 
       - name: Test crate
         run: |
-          cargo clean
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --features with-z3-system --workspace
 
@@ -361,6 +407,22 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: macos-latest-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install Z3 binary
         run: |
           brew install z3 pkg-config
@@ -394,6 +456,8 @@ jobs:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     container: rockylinux:8
+    env:
+      OS_KEY: rocky8
 
     steps:
       - name: Check out code
@@ -459,7 +523,6 @@ jobs:
       - name: Test crate
         run: |
           source $HOME/.cargo/env
-          cargo clean
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
@@ -479,6 +542,22 @@ jobs:
           profile: minimal
           override: true
           components: clippy
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: ubuntu-22.04-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check out code
         uses: actions/checkout@v2
@@ -562,6 +641,22 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: ubuntu-latest-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Pre-download artifacts using download_release.py
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -601,6 +696,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl pkg-config libssl-dev build-essential meson
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: ubuntu-latest-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install protobuf compiler
         run: |

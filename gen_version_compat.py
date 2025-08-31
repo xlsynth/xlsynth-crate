@@ -33,7 +33,7 @@ import sys
 import urllib.request
 import json
 from dataclasses import dataclass
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 from datetime import datetime, timezone
 
@@ -314,7 +314,7 @@ def mappings_to_json_object(
     human-friendly ordering.
     """
 
-    def version_key(vm: VersionMapping) -> tuple[int, int, int]:
+    def version_key(vm: VersionMapping) -> Tuple[int, int, int]:
         return tuple(int(x) for x in vm.crate_version.split("."))  # type: ignore[return-value]
 
     result: Dict[str, Dict[str, str]] = {}
