@@ -208,7 +208,12 @@ pub fn internal_type_to_xlsynth(pkg: &mut xlsynth::IrPackage, ty: &InternalType)
         }
         InternalType::Array(arr) => {
             let elem_type = internal_type_to_xlsynth(pkg, &arr.element_type);
-            pkg.get_array_type(&elem_type, arr.element_count as u64)
+            // arr.element_count is u64, but get_array_type expects i64. Convert safely.
+            let count_i64: i64 = arr
+                .element_count
+                .try_into()
+                .expect("element_count must fit in i64");
+            pkg.get_array_type(&elem_type, count_i64)
         }
         InternalType::Token => pkg.get_token_type(),
     }
@@ -219,6 +224,7 @@ pub fn internal_type_to_xlsynth(pkg: &mut xlsynth::IrPackage, ty: &InternalType)
 /// Otherwise, attempts to build the type from available components.
 pub fn build_return_value_with_type(
     fn_builder: &mut FnBuilder,
+    pkg: &mut xlsynth::IrPackage,
     type_map: &BTreeMap<InternalType, Vec<BValue>>,
     target_type: &InternalType,
 ) -> Option<BValue> {
@@ -233,7 +239,7 @@ pub fn build_return_value_with_type(
             // Recursively build each element of the tuple.
             let mut elems = Vec::with_capacity(types.len());
             for elem_ty in types {
-                let elem = build_return_value_with_type(fn_builder, type_map, elem_ty)?;
+                let elem = build_return_value_with_type(fn_builder, pkg, type_map, elem_ty)?;
                 elems.push(elem);
             }
             let refs: Vec<&BValue> = elems.iter().collect();
@@ -243,15 +249,22 @@ pub fn build_return_value_with_type(
             // Recursively build each element of the array.
             let mut elems = Vec::with_capacity(array_data.element_count);
             for _ in 0..array_data.element_count {
-                let elem =
-                    build_return_value_with_type(fn_builder, type_map, &array_data.element_type)?;
+                let elem = build_return_value_with_type(
+                    fn_builder,
+                    pkg,
+                    type_map,
+                    &array_data.element_type,
+                )?;
                 elems.push(elem);
             }
             let refs: Vec<&BValue> = elems.iter().collect();
             // Use the correct IrType for the array
-            let pkg = fn_builder.get_package_mut();
             let ir_elem_type = internal_type_to_xlsynth(pkg, &array_data.element_type);
-            let ir_array_type = pkg.get_array_type(&ir_elem_type, array_data.element_count as u64);
+            let count_i64: i64 = array_data
+                .element_count
+                .try_into()
+                .expect("element_count must fit in i64");
+            let ir_array_type = pkg.get_array_type(&ir_elem_type, count_i64);
             Some(fn_builder.array(&ir_array_type, &refs, None))
         }
         InternalType::Bits(width) => {
@@ -569,8 +582,9 @@ pub fn generate_ir_fn(
     let ret_type_str = ret_type.to_string();
     let mut parser = ir_parser::Parser::new(&ret_type_str);
     let internal_ret_type = parser.parse_type().expect("Failed to parse return type");
-    let ret_node = build_return_value_with_type(&mut fn_builder, &type_map, &internal_ret_type)
-        .unwrap_or_else(|| available_nodes.last().unwrap().clone());
+    let ret_node =
+        build_return_value_with_type(&mut fn_builder, package, &type_map, &internal_ret_type)
+            .unwrap_or_else(|| available_nodes.last().unwrap().clone());
     fn_builder.build_with_return_value(&ret_node)
 }
 
@@ -950,7 +964,7 @@ mod tests {
         let ty = parser.parse_type().unwrap();
         let mut map = BTreeMap::new();
         map.entry(ty.clone()).or_insert_with(|| vec![node.clone()]);
-        let out = build_return_value_with_type(&mut fn_builder, &map, &ty);
+        let out = build_return_value_with_type(&mut fn_builder, &mut pkg, &map, &ty);
         assert!(out == Some(node));
     }
 
@@ -969,7 +983,7 @@ mod tests {
         map.entry(node_ty.clone())
             .or_insert_with(|| vec![node.clone()]);
         // Should slice down
-        let out = build_return_value_with_type(&mut fn_builder, &map, &ty);
+        let out = build_return_value_with_type(&mut fn_builder, &mut pkg, &map, &ty);
         assert!(out.is_some());
         // Should extend up
         let node8 = make_bits_node(&mut fn_builder, 8, 0xAA);
@@ -982,7 +996,7 @@ mod tests {
         let ty16_str = "bits[16]";
         let mut parser4 = ir_parser::Parser::new(ty16_str);
         let ty16 = parser4.parse_type().unwrap();
-        let out2 = build_return_value_with_type(&mut fn_builder, &map2, &ty16);
+        let out2 = build_return_value_with_type(&mut fn_builder, &mut pkg, &map2, &ty16);
         assert!(out2.is_some());
     }
 
@@ -1004,7 +1018,7 @@ mod tests {
         let tuple_ty_str = "(bits[3], bits[5])";
         let mut parser_tuple = ir_parser::Parser::new(tuple_ty_str);
         let tuple_ty = parser_tuple.parse_type().unwrap();
-        let out = build_return_value_with_type(&mut fn_builder, &map, &tuple_ty);
+        let out = build_return_value_with_type(&mut fn_builder, &mut pkg, &map, &tuple_ty);
         assert!(out.is_some());
     }
 
@@ -1022,7 +1036,7 @@ mod tests {
         let arr_ty_str = "bits[4][3]";
         let mut parser_arr = ir_parser::Parser::new(arr_ty_str);
         let arr_ty = parser_arr.parse_type().unwrap();
-        let out = build_return_value_with_type(&mut fn_builder, &map, &arr_ty);
+        let out = build_return_value_with_type(&mut fn_builder, &mut pkg, &map, &arr_ty);
         assert!(out.is_some());
     }
 
@@ -1034,7 +1048,7 @@ mod tests {
         let ty_str = "bits[8]";
         let mut parser = ir_parser::Parser::new(ty_str);
         let ty = parser.parse_type().unwrap();
-        let out = build_return_value_with_type(&mut fn_builder, &map, &ty);
+        let out = build_return_value_with_type(&mut fn_builder, &mut pkg, &map, &ty);
         assert!(out.is_none());
     }
 }
