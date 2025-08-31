@@ -61,9 +61,7 @@ export XLS_DSO_PATH=$(ls /usr/lib/libxls*.so)
 [ -f "$XLS_DSO_PATH" ] && echo "DSO found OK"
 
 pip3 install pre-commit
-pre-commit install
-# skip rustfmt for the moment as it's having an issue
-SKIP=rustfmt pre-commit run --all-files
+cargo install cargo-fuzz
 
 # Persist them for later interactive use
 echo "export XLSYNTH_TOOLS=\"$XLSYNTH_TOOLS\""      >> ~/.bashrc
@@ -72,20 +70,7 @@ echo "export SLANG_PATH=\"$SLANG_PATH\""            >> ~/.bashrc
 echo "export XLS_DSO_PATH=\"$XLS_DSO_PATH\""        >> ~/.bashrc
 echo "export PATH=\"$PATH:$PWD\""                   >> ~/.bashrc
 
-echo "==> Prefetching all Cargo dependencies"
-cargo fetch --quiet
-
-cargo install cargo-fuzz
-cd xlsynth-g8r && cargo fuzz run fuzz_gatify --max_seconds=0 && cd ..
-
-echo "==> Pre-building workspace to run all build.rs scripts"
-cargo build --workspace --all-targets --features=with-boolector-system --jobs $(nproc)
-
-echo "==> Going offline (network locked)"
-export CARGO_NET_OFFLINE=true
-echo 'export CARGO_NET_OFFLINE=true' >> ~/.bashrc
-
 echo "==> Showing bashrc"
 cat ~/.bashrc
 
-echo "✅ Setup complete — you can now run 'cargo test --workspace'"
+echo "✅ Setup complete — run './sample_codex_maintenance_script.sh' for project-specific steps"
