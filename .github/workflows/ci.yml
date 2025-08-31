@@ -48,6 +48,16 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust (local-only)
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=2G" >> $GITHUB_ENV
+
       - name: Set up Python + pre-commit
         run: |
           cd ${GITHUB_WORKSPACE}
