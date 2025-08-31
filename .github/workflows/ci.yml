@@ -43,6 +43,20 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       - name: Set up Python + pre-commit
         run: |
           cd ${GITHUB_WORKSPACE}
@@ -145,6 +159,20 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       - name: Download and set up Boolector
         run: |
           mkdir -p boolector_libs
@@ -165,7 +193,6 @@ jobs:
           BOOLECTOR_LIB_DIR: ${{ github.workspace }}/boolector_libs
           LD_LIBRARY_PATH: ${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
         run: |
-          cargo clean
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           export LD_LIBRARY_PATH="${{ github.workspace }}/boolector_libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
@@ -298,6 +325,20 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       - name: Show rustfmt and cargo versions
         run: |
           rustfmt --version
@@ -308,7 +349,6 @@ jobs:
 
       - name: Test crate
         run: |
-          cargo clean
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --features with-z3-system --workspace
 
@@ -360,6 +400,20 @@ jobs:
           profile: minimal
           override: true
           components: clippy
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Install Z3 binary
         run: |
@@ -459,7 +513,6 @@ jobs:
       - name: Test crate
         run: |
           source $HOME/.cargo/env
-          cargo clean
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
@@ -479,6 +532,20 @@ jobs:
           profile: minimal
           override: true
           components: clippy
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Check out code
         uses: actions/checkout@v2
@@ -562,6 +629,20 @@ jobs:
           override: true
           components: clippy
 
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       - name: Pre-download artifacts using download_release.py
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -601,6 +682,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl pkg-config libssl-dev build-essential meson
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Install protobuf compiler
         run: |
