@@ -325,6 +325,7 @@ pub fn generate_ir_fn(
     input_bits: u8,
     ops: Vec<FuzzOp>,
     package: &mut xlsynth::IrPackage,
+    target_return_type: Option<&InternalType>,
 ) -> Result<IrFunction, XlsynthError> {
     assert!(input_bits > 0, "input_bits must be greater than 0");
 
@@ -575,13 +576,19 @@ pub fn generate_ir_fn(
         }
         available_nodes.push(node);
     }
-    // Use the type of the last node as the return type (for now)
-    let ret_type = fn_builder
-        .get_type(available_nodes.last().unwrap())
-        .unwrap();
-    let ret_type_str = ret_type.to_string();
-    let mut parser = ir_parser::Parser::new(&ret_type_str);
-    let internal_ret_type = parser.parse_type().expect("Failed to parse return type");
+    // Determine the target return type: prefer caller-provided, otherwise use the
+    // type of the last node
+    let internal_ret_type: InternalType = match target_return_type {
+        Some(t) => t.clone(),
+        None => {
+            let ret_type = fn_builder
+                .get_type(available_nodes.last().unwrap())
+                .unwrap();
+            let ret_type_str = ret_type.to_string();
+            let mut parser = ir_parser::Parser::new(&ret_type_str);
+            parser.parse_type().expect("Failed to parse return type")
+        }
+    };
     let ret_node =
         build_return_value_with_type(&mut fn_builder, package, &type_map, &internal_ret_type)
             .unwrap_or_else(|| available_nodes.last().unwrap().clone());
@@ -872,14 +879,19 @@ impl FuzzSample {
     ) -> arbitrary::Result<Self> {
         let mut pkg =
             xlsynth::IrPackage::new("orig").map_err(|_| arbitrary::Error::IncorrectFormat)?;
-        let ret_bits: u64 = generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg)
-            .ok()
-            .and_then(|f| {
-                f.get_type()
-                    .ok()
-                    .map(|t| t.return_type().get_flat_bit_count() as u64)
-            })
-            .unwrap_or(orig.input_bits as u64);
+        let (_ret_bits, orig_internal_ret_type): (u64, Option<InternalType>) =
+            generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg, None)
+                .ok()
+                .and_then(|f| {
+                    f.get_type().ok().map(|t| {
+                        let ret_ty = t.return_type();
+                        let ret_ty_str = ret_ty.to_string();
+                        let mut parser = ir_parser::Parser::new(&ret_ty_str);
+                        let internal = parser.parse_type().ok();
+                        (ret_ty.get_flat_bit_count() as u64, internal)
+                    })
+                })
+                .unwrap_or((orig.input_bits as u64, None));
 
         let mut sample = FuzzSample::arbitrary(u)?;
         sample.input_bits = orig.input_bits;
@@ -900,29 +912,12 @@ impl FuzzSample {
 
         let mut pkg_new =
             xlsynth::IrPackage::new("new").map_err(|_| arbitrary::Error::IncorrectFormat)?;
-        let new_ret_bits: u64 = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg_new)
-            .ok()
-            .and_then(|f| {
-                f.get_type()
-                    .ok()
-                    .map(|t| t.return_type().get_flat_bit_count() as u64)
-            })
-            .unwrap_or(ret_bits);
-
-        if new_ret_bits < ret_bits {
-            let idx = sample.ops.len() as u8;
-            sample.ops.push(FuzzOp::ZeroExt {
-                operand: FuzzOperand { index: idx },
-                new_bit_count: ret_bits,
-            });
-        } else if new_ret_bits > ret_bits {
-            let idx = sample.ops.len() as u8;
-            sample.ops.push(FuzzOp::BitSlice {
-                operand: FuzzOperand { index: idx },
-                start: 0,
-                width: ret_bits,
-            });
-        }
+        let _ = generate_ir_fn(
+            sample.input_bits,
+            sample.ops.clone(),
+            &mut pkg_new,
+            orig_internal_ret_type.as_ref(),
+        );
 
         Ok(sample)
     }

@@ -20,7 +20,7 @@ fuzz_target!(|sample: FuzzSample| {
     // 1) Generate XLS IR via C++ bindings into a package
     let mut pkg = xlsynth::IrPackage::new("fuzz_pkg")
         .expect("IrPackage::new should not fail; treat as infra error");
-    if let Err(_) = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg) {
+    if let Err(_) = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg, None) {
         // The generator can deliberately produce edge-case or temporarily unsupported
         // constructs; those are not failures of this roundtrip target. Skip to let
         // the generator evolve without turning such cases into crashes here.

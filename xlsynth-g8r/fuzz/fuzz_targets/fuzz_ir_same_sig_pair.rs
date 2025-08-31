@@ -23,7 +23,12 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     let mut pkg1 = IrPackage::new("first")
         .expect("IrPackage::new should not fail; treat as infra error");
-    let func1 = match generate_ir_fn(pair.first.input_bits, pair.first.ops.clone(), &mut pkg1) {
+    let func1 = match generate_ir_fn(
+        pair.first.input_bits,
+        pair.first.ops.clone(),
+        &mut pkg1,
+        None,
+    ) {
         Ok(f) => f,
         Err(_) => {
             // The generator can produce constructs not yet supported; skip such cases.
@@ -33,7 +38,12 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     let mut pkg2 = IrPackage::new("second")
         .expect("IrPackage::new should not fail; treat as infra error");
-    let func2 = match generate_ir_fn(pair.second.input_bits, pair.second.ops.clone(), &mut pkg2) {
+    let func2 = match generate_ir_fn(
+        pair.second.input_bits,
+        pair.second.ops.clone(),
+        &mut pkg2,
+        None,
+    ) {
         Ok(f) => f,
         Err(_) => {
             // The generator can produce constructs not yet supported; skip such cases.
