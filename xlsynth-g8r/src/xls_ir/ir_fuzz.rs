@@ -313,7 +313,10 @@ pub fn build_return_value_with_type(
                 let refs: Vec<&BValue> = acc.iter().map(|n| *n).collect();
                 return Some(fn_builder.concat(&refs, None));
             }
-            None
+            // As a last resort, synthesize a literal of the requested width.
+            let zeros: xlsynth::IrValue =
+                xlsynth::IrValue::make_ubits(*width as usize, 0u64).unwrap();
+            Some(fn_builder.literal(&zeros, None))
         }
         _ => None,
     }
@@ -881,11 +884,11 @@ impl FuzzSample {
     pub fn gen_with_same_signature<'a>(
         orig: &FuzzSample,
         u: &mut arbitrary::Unstructured<'a>,
+        pkg_for_orig: &mut xlsynth::IrPackage,
+        _pkg_for_tmp: &mut xlsynth::IrPackage,
     ) -> arbitrary::Result<Self> {
-        let mut pkg =
-            xlsynth::IrPackage::new("orig").map_err(|_| arbitrary::Error::IncorrectFormat)?;
         let (_ret_bits, orig_internal_ret_type): (u64, Option<InternalType>) =
-            generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg, None)
+            generate_ir_fn(orig.input_bits, orig.ops.clone(), pkg_for_orig, None)
                 .ok()
                 .and_then(|f| {
                     f.get_type().ok().map(|t| {
@@ -915,14 +918,18 @@ impl FuzzSample {
             }
         }
 
-        let mut pkg_new =
-            xlsynth::IrPackage::new("new").map_err(|_| arbitrary::Error::IncorrectFormat)?;
-        let _ = generate_ir_fn(
-            sample.input_bits,
-            sample.ops.clone(),
-            &mut pkg_new,
-            orig_internal_ret_type.as_ref(),
-        );
+        // Try to coerce the final op's width to match the original bit width, when
+        // applicable.
+        if let Some(InternalType::Bits(want_width)) = &orig_internal_ret_type {
+            // Guarantee the last node has the desired width without needing to build.
+            // Append a literal of the requested width, which becomes the function's result
+            // type.
+            let lit_bits = (*want_width as u8).clamp(1, 255);
+            sample.ops.push(FuzzOp::Literal {
+                bits: lit_bits,
+                value: 0,
+            });
+        }
 
         Ok(sample)
     }
@@ -937,7 +944,14 @@ pub struct FuzzSampleSameTypedPair {
 impl<'a> arbitrary::Arbitrary<'a> for FuzzSampleSameTypedPair {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let first = FuzzSample::arbitrary(u)?;
-        let second = FuzzSample::gen_with_same_signature(&first, u)?;
+        // Dependency-inject packages for internal type probing to avoid creating them
+        // inside.
+        let mut pkg_for_orig = xlsynth::IrPackage::new("pair_gen_orig")
+            .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let mut pkg_for_tmp = xlsynth::IrPackage::new("pair_gen_tmp")
+            .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let second =
+            FuzzSample::gen_with_same_signature(&first, u, &mut pkg_for_orig, &mut pkg_for_tmp)?;
         Ok(FuzzSampleSameTypedPair { first, second })
     }
 }
