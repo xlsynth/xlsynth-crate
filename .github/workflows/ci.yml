@@ -26,41 +26,6 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v2
 
-      - name: Resolve XLS release tag
-        id: resolve-xls-tag
-        run: |
-          TAG=$(python3 get_required_xls_release_tag.py)
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Cache xlsynth tools (fuzz smoke)
-        uses: actions/cache@v3
-        with:
-          path: /tmp/xlsynth_tools_smoke
-          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag.outputs.tag }}-rocky8
-
-      - name: Resolve XLS release tag
-        id: resolve-xls-tag
-        run: |
-          TAG=$(python3 get_required_xls_release_tag.py)
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Cache xlsynth tools (valgrind job)
-        uses: actions/cache@v3
-        with:
-          path: xlsynth_tools
-          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag.outputs.tag }}-ubuntu2004
-
-      - name: Resolve XLS release tag
-        id: resolve-xls-tag
-        run: |
-          TAG=$(python3 get_required_xls_release_tag.py)
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Cache xlsynth tools (macos)
-        uses: actions/cache@v3
-        with:
-          path: xlsynth_tools
-          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag.outputs.tag }}-arm64
 
       - name: Install protobuf compiler
         run: |
@@ -160,7 +125,7 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Resolve XLS release tag
-        id: resolve-xls-tag
+        id: resolve-xls-tag-matrix
         run: |
           TAG=$(python3 get_required_xls_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
@@ -169,14 +134,14 @@ jobs:
         uses: actions/cache@v3
         with:
           path: xlsynth_tools
-          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag.outputs.tag }}-ubuntu2004
+          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag-matrix.outputs.tag }}-ubuntu2004
 
       - name: Download xlsynth binaries
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           pip3 install -r requirements.txt
-          TAG='${{ steps.resolve-xls-tag.outputs.tag }}'
+          TAG='${{ steps.resolve-xls-tag-matrix.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools --tag ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
@@ -277,7 +242,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Resolve XLS release tag
-        id: resolve-xls-tag
+        id: resolve-xls-tag-2004
         run: |
           TAG=$(python3 get_required_xls_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
@@ -286,7 +251,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: xlsynth_tools
-          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag.outputs.tag }}-ubuntu2004
+          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag-2004.outputs.tag }}-ubuntu2004
 
       - name: Install dependencies for Python scripts and downloads
         run: |
@@ -335,7 +300,7 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          TAG='${{ steps.resolve-xls-tag.outputs.tag }}'
+          TAG='${{ steps.resolve-xls-tag-2004.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools --tag ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
@@ -433,6 +398,12 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v2
 
+      - name: Resolve XLS release tag
+        id: resolve-xls-tag-macos
+        run: |
+          TAG=$(python3 get_required_xls_release_tag.py)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
       - name: Note Xcode version
         run: xcodebuild -version
 
@@ -442,7 +413,7 @@ jobs:
         run: |
           python3 -V  # Print the python3 version.
           pip3 install --break-system-packages -r requirements.txt
-          TAG='${{ steps.resolve-xls-tag.outputs.tag }}'
+          TAG='${{ steps.resolve-xls-tag-macos.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
           python3 download_release.py -p arm64 -o xlsynth_tools --tag ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
@@ -603,6 +574,12 @@ jobs:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-22.04
     steps:
+      - name: Resolve XLS release tag
+        id: resolve-xls-tag-valgrind
+        run: |
+          TAG=$(python3 get_required_xls_release_tag.py)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
       - name: Set up Rust nightly
         uses: actions-rs/toolchain@v1
         with:
@@ -674,7 +651,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           pip3 install -r requirements.txt
-          TAG='${{ steps.resolve-xls-tag.outputs.tag }}'
+          TAG='${{ steps.resolve-xls-tag-valgrind.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
           python3 download_release.py -p ubuntu2004 -o xlsynth_tools --tag ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
