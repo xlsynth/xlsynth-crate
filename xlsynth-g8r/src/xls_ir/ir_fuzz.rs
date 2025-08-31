@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::xls_ir::ir::Type as InternalType;
+use crate::xls_ir::ir_parser;
 use arbitrary::Arbitrary;
 use std::collections::BTreeMap;
 use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
@@ -192,13 +194,33 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
     }
 }
 
+/// Converts our internal Type (from ir.rs) to xlsynth::IrType using the package
+/// as context.
+pub fn internal_type_to_xlsynth(pkg: &mut xlsynth::IrPackage, ty: &InternalType) -> IrType {
+    match ty {
+        InternalType::Bits(width) => pkg.get_bits_type(*width as u64),
+        InternalType::Tuple(types) => {
+            let elem_types: Vec<IrType> = types
+                .iter()
+                .map(|t| internal_type_to_xlsynth(pkg, t))
+                .collect();
+            pkg.get_tuple_type(&elem_types)
+        }
+        InternalType::Array(arr) => {
+            let elem_type = internal_type_to_xlsynth(pkg, &arr.element_type);
+            pkg.get_array_type(&elem_type, arr.element_count as u64)
+        }
+        InternalType::Token => pkg.get_token_type(),
+    }
+}
+
 /// Given a map from types to available nodes, recursively constructs a value of
 /// the requested type. If a node of the exact type is available, returns it.
 /// Otherwise, attempts to build the type from available components.
 pub fn build_return_value_with_type(
     fn_builder: &mut FnBuilder,
-    type_map: &BTreeMap<IrType, Vec<BValue>>,
-    target_type: &IrType,
+    type_map: &BTreeMap<InternalType, Vec<BValue>>,
+    target_type: &InternalType,
 ) -> Option<BValue> {
     // If we have a node of the exact type, use it.
     if let Some(nodes) = type_map.get(target_type) {
@@ -207,7 +229,7 @@ pub fn build_return_value_with_type(
         }
     }
     match target_type {
-        IrType::Tuple(types) => {
+        InternalType::Tuple(types) => {
             // Recursively build each element of the tuple.
             let mut elems = Vec::with_capacity(types.len());
             for elem_ty in types {
@@ -217,17 +239,22 @@ pub fn build_return_value_with_type(
             let refs: Vec<&BValue> = elems.iter().collect();
             Some(fn_builder.tuple(&refs, None))
         }
-        IrType::Array(elem_ty, len) => {
+        InternalType::Array(array_data) => {
             // Recursively build each element of the array.
-            let mut elems = Vec::with_capacity(*len as usize);
-            for _ in 0..*len {
-                let elem = build_return_value_with_type(fn_builder, type_map, elem_ty)?;
+            let mut elems = Vec::with_capacity(array_data.element_count);
+            for _ in 0..array_data.element_count {
+                let elem =
+                    build_return_value_with_type(fn_builder, type_map, &array_data.element_type)?;
                 elems.push(elem);
             }
             let refs: Vec<&BValue> = elems.iter().collect();
-            Some(fn_builder.array(elem_ty, &refs, None))
+            // Use the correct IrType for the array
+            let pkg = fn_builder.get_package_mut();
+            let ir_elem_type = internal_type_to_xlsynth(pkg, &array_data.element_type);
+            let ir_array_type = pkg.get_array_type(&ir_elem_type, array_data.element_count as u64);
+            Some(fn_builder.array(&ir_array_type, &refs, None))
         }
-        IrType::Bits { width, .. } => {
+        InternalType::Bits(width) => {
             // Try to find a bits node of the right width.
             if let Some(nodes) = type_map.get(target_type) {
                 if let Some(node) = nodes.first() {
@@ -236,23 +263,23 @@ pub fn build_return_value_with_type(
             }
             // Otherwise, try to build from other bits nodes (slice, extend, concat).
             // Find all available bits nodes.
-            let mut bits_nodes: Vec<(usize, &BValue, &IrType)> = Vec::new();
+            let mut bits_nodes: Vec<(usize, &BValue, &InternalType)> = Vec::new();
             for (ty, nodes) in type_map.iter() {
-                if let IrType::Bits { width: w, .. } = ty {
+                if let InternalType::Bits(w) = ty {
                     for node in nodes {
                         bits_nodes.push((*w as usize, node, ty));
                     }
                 }
             }
             // Try to find a node to slice or extend.
-            for (node_width, node, node_ty) in &bits_nodes {
-                if *node_width > *width as usize {
+            for (node_width, node, _node_ty) in &bits_nodes {
+                if *node_width > *width {
                     // Slice down
                     return Some(fn_builder.bit_slice(node, 0, *width as u64, None));
-                } else if *node_width < *width as usize {
+                } else if *node_width < *width {
                     // Zero-extend up
                     return Some(fn_builder.zero_extend(node, *width as u64, None));
-                } else if *node_width == *width as usize {
+                } else if *node_width == *width {
                     return Some((*node).clone());
                 }
             }
@@ -261,15 +288,15 @@ pub fn build_return_value_with_type(
             let mut acc = Vec::new();
             let mut acc_width = 0;
             for (node_width, node, _) in &bits_nodes {
-                if acc_width + *node_width <= *width as usize {
+                if acc_width + *node_width <= *width {
                     acc.push(*node);
                     acc_width += *node_width;
-                    if acc_width == *width as usize {
+                    if acc_width == *width {
                         break;
                     }
                 }
             }
-            if acc_width == *width as usize && !acc.is_empty() {
+            if acc_width == *width && !acc.is_empty() {
                 let refs: Vec<&BValue> = acc.iter().map(|n| *n).collect();
                 return Some(fn_builder.concat(&refs, None));
             }
@@ -293,12 +320,15 @@ pub fn generate_ir_fn(
     // Add a single input parameter
     let input_type: IrType = package.get_bits_type(input_bits as u64);
     let input_node = fn_builder.param("input", &input_type);
+    let input_type_str = input_type.to_string();
+    let mut parser = ir_parser::Parser::new(&input_type_str);
+    let internal_input_type = parser.parse_type().expect("Failed to parse input type");
 
     // Track all available nodes that can be used as operands
     let mut available_nodes: Vec<BValue> = vec![input_node.clone()];
-    let mut type_map: BTreeMap<IrType, Vec<BValue>> = BTreeMap::new();
+    let mut type_map: BTreeMap<InternalType, Vec<BValue>> = BTreeMap::new();
     type_map
-        .entry(input_type.clone())
+        .entry(internal_input_type.clone())
         .or_default()
         .push(input_node.clone());
 
@@ -524,7 +554,11 @@ pub fn generate_ir_fn(
         };
         // Track the node and its type
         if let Some(ty) = fn_builder.get_type(&node) {
-            type_map.entry(ty.clone()).or_default().push(node.clone());
+            let ty_str = ty.to_string();
+            let mut parser = ir_parser::Parser::new(&ty_str);
+            if let Ok(internal_ty) = parser.parse_type() {
+                type_map.entry(internal_ty).or_default().push(node.clone());
+            }
         }
         available_nodes.push(node);
     }
@@ -532,7 +566,10 @@ pub fn generate_ir_fn(
     let ret_type = fn_builder
         .get_type(available_nodes.last().unwrap())
         .unwrap();
-    let ret_node = build_return_value_with_type(&mut fn_builder, &type_map, &ret_type)
+    let ret_type_str = ret_type.to_string();
+    let mut parser = ir_parser::Parser::new(&ret_type_str);
+    let internal_ret_type = parser.parse_type().expect("Failed to parse return type");
+    let ret_node = build_return_value_with_type(&mut fn_builder, &type_map, &internal_ret_type)
         .unwrap_or_else(|| available_nodes.last().unwrap().clone());
     fn_builder.build_with_return_value(&ret_node)
 }
@@ -888,5 +925,116 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSampleSameTypedPair {
         let first = FuzzSample::arbitrary(u)?;
         let second = FuzzSample::gen_with_same_signature(&first, u)?;
         Ok(FuzzSampleSameTypedPair { first, second })
+    }
+}
+
+// -- Tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use xlsynth::IrPackage;
+
+    fn make_bits_node(fn_builder: &mut FnBuilder, width: usize, value: u64) -> BValue {
+        let ir_value = xlsynth::IrValue::make_ubits(width, value).unwrap();
+        fn_builder.literal(&ir_value, None)
+    }
+
+    #[test]
+    fn test_build_bits_exact() {
+        let mut pkg = IrPackage::new("test").unwrap();
+        let mut fn_builder = FnBuilder::new(&mut pkg, "f", true);
+        let node = make_bits_node(&mut fn_builder, 8, 42);
+        let ty_str = "bits[8]";
+        let mut parser = ir_parser::Parser::new(ty_str);
+        let ty = parser.parse_type().unwrap();
+        let mut map = BTreeMap::new();
+        map.entry(ty.clone()).or_insert_with(|| vec![node.clone()]);
+        let out = build_return_value_with_type(&mut fn_builder, &map, &ty);
+        assert!(out == Some(node));
+    }
+
+    #[test]
+    fn test_build_bits_slice_and_extend() {
+        let mut pkg = IrPackage::new("test").unwrap();
+        let mut fn_builder = FnBuilder::new(&mut pkg, "f", true);
+        let node = make_bits_node(&mut fn_builder, 16, 0xFFFF);
+        let ty_str = "bits[8]";
+        let mut parser = ir_parser::Parser::new(ty_str);
+        let ty = parser.parse_type().unwrap();
+        let mut map = BTreeMap::new();
+        let node_ty_str = "bits[16]";
+        let mut parser2 = ir_parser::Parser::new(node_ty_str);
+        let node_ty = parser2.parse_type().unwrap();
+        map.entry(node_ty.clone())
+            .or_insert_with(|| vec![node.clone()]);
+        // Should slice down
+        let out = build_return_value_with_type(&mut fn_builder, &map, &ty);
+        assert!(out.is_some());
+        // Should extend up
+        let node8 = make_bits_node(&mut fn_builder, 8, 0xAA);
+        let ty8_str = "bits[8]";
+        let mut parser3 = ir_parser::Parser::new(ty8_str);
+        let ty8 = parser3.parse_type().unwrap();
+        let mut map2 = BTreeMap::new();
+        map2.entry(ty8.clone())
+            .or_insert_with(|| vec![node8.clone()]);
+        let ty16_str = "bits[16]";
+        let mut parser4 = ir_parser::Parser::new(ty16_str);
+        let ty16 = parser4.parse_type().unwrap();
+        let out2 = build_return_value_with_type(&mut fn_builder, &map2, &ty16);
+        assert!(out2.is_some());
+    }
+
+    #[test]
+    fn test_build_tuple() {
+        let mut pkg = IrPackage::new("test").unwrap();
+        let mut fn_builder = FnBuilder::new(&mut pkg, "f", true);
+        let a = make_bits_node(&mut fn_builder, 3, 1);
+        let b = make_bits_node(&mut fn_builder, 5, 2);
+        let a_ty_str = "bits[3]";
+        let b_ty_str = "bits[5]";
+        let mut parser_a = ir_parser::Parser::new(a_ty_str);
+        let mut parser_b = ir_parser::Parser::new(b_ty_str);
+        let a_ty = parser_a.parse_type().unwrap();
+        let b_ty = parser_b.parse_type().unwrap();
+        let mut map = BTreeMap::new();
+        map.entry(a_ty.clone()).or_insert_with(|| vec![a.clone()]);
+        map.entry(b_ty.clone()).or_insert_with(|| vec![b.clone()]);
+        let tuple_ty_str = "(bits[3], bits[5])";
+        let mut parser_tuple = ir_parser::Parser::new(tuple_ty_str);
+        let tuple_ty = parser_tuple.parse_type().unwrap();
+        let out = build_return_value_with_type(&mut fn_builder, &map, &tuple_ty);
+        assert!(out.is_some());
+    }
+
+    #[test]
+    fn test_build_array() {
+        let mut pkg = IrPackage::new("test").unwrap();
+        let mut fn_builder = FnBuilder::new(&mut pkg, "f", true);
+        let elem = make_bits_node(&mut fn_builder, 4, 7);
+        let elem_ty_str = "bits[4]";
+        let mut parser_elem = ir_parser::Parser::new(elem_ty_str);
+        let elem_ty = parser_elem.parse_type().unwrap();
+        let mut map = BTreeMap::new();
+        map.entry(elem_ty.clone())
+            .or_insert_with(|| vec![elem.clone()]);
+        let arr_ty_str = "bits[4][3]";
+        let mut parser_arr = ir_parser::Parser::new(arr_ty_str);
+        let arr_ty = parser_arr.parse_type().unwrap();
+        let out = build_return_value_with_type(&mut fn_builder, &map, &arr_ty);
+        assert!(out.is_some());
+    }
+
+    #[test]
+    fn test_build_fails_if_not_possible() {
+        let mut pkg = IrPackage::new("test").unwrap();
+        let mut fn_builder = FnBuilder::new(&mut pkg, "f", true);
+        let map = BTreeMap::new();
+        let ty_str = "bits[8]";
+        let mut parser = ir_parser::Parser::new(ty_str);
+        let ty = parser.parse_type().unwrap();
+        let out = build_return_value_with_type(&mut fn_builder, &map, &ty);
+        assert!(out.is_none());
     }
 }

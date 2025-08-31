@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_eval_pure_literal() {
-        let mut env = HashMap::new();
+        let env = HashMap::new();
         let ir_value = IrValue::make_ubits(32, 1).unwrap();
         let n = ir::Node {
             text_id: 0,
