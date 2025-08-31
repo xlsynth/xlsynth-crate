@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arbitrary::Arbitrary;
+use std::collections::BTreeMap;
 use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
 
 #[derive(Debug, Arbitrary, Clone)]
@@ -191,6 +192,93 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
     }
 }
 
+/// Given a map from types to available nodes, recursively constructs a value of
+/// the requested type. If a node of the exact type is available, returns it.
+/// Otherwise, attempts to build the type from available components.
+pub fn build_return_value_with_type(
+    fn_builder: &mut FnBuilder,
+    type_map: &BTreeMap<IrType, Vec<BValue>>,
+    target_type: &IrType,
+) -> Option<BValue> {
+    // If we have a node of the exact type, use it.
+    if let Some(nodes) = type_map.get(target_type) {
+        if let Some(node) = nodes.first() {
+            return Some(node.clone());
+        }
+    }
+    match target_type {
+        IrType::Tuple(types) => {
+            // Recursively build each element of the tuple.
+            let mut elems = Vec::with_capacity(types.len());
+            for elem_ty in types {
+                let elem = build_return_value_with_type(fn_builder, type_map, elem_ty)?;
+                elems.push(elem);
+            }
+            let refs: Vec<&BValue> = elems.iter().collect();
+            Some(fn_builder.tuple(&refs, None))
+        }
+        IrType::Array(elem_ty, len) => {
+            // Recursively build each element of the array.
+            let mut elems = Vec::with_capacity(*len as usize);
+            for _ in 0..*len {
+                let elem = build_return_value_with_type(fn_builder, type_map, elem_ty)?;
+                elems.push(elem);
+            }
+            let refs: Vec<&BValue> = elems.iter().collect();
+            Some(fn_builder.array(elem_ty, &refs, None))
+        }
+        IrType::Bits { width, .. } => {
+            // Try to find a bits node of the right width.
+            if let Some(nodes) = type_map.get(target_type) {
+                if let Some(node) = nodes.first() {
+                    return Some(node.clone());
+                }
+            }
+            // Otherwise, try to build from other bits nodes (slice, extend, concat).
+            // Find all available bits nodes.
+            let mut bits_nodes: Vec<(usize, &BValue, &IrType)> = Vec::new();
+            for (ty, nodes) in type_map.iter() {
+                if let IrType::Bits { width: w, .. } = ty {
+                    for node in nodes {
+                        bits_nodes.push((*w as usize, node, ty));
+                    }
+                }
+            }
+            // Try to find a node to slice or extend.
+            for (node_width, node, node_ty) in &bits_nodes {
+                if *node_width > *width as usize {
+                    // Slice down
+                    return Some(fn_builder.bit_slice(node, 0, *width as u64, None));
+                } else if *node_width < *width as usize {
+                    // Zero-extend up
+                    return Some(fn_builder.zero_extend(node, *width as u64, None));
+                } else if *node_width == *width as usize {
+                    return Some((*node).clone());
+                }
+            }
+            // Try to concat smaller nodes to reach the width
+            bits_nodes.sort_by_key(|(w, _, _)| *w);
+            let mut acc = Vec::new();
+            let mut acc_width = 0;
+            for (node_width, node, _) in &bits_nodes {
+                if acc_width + *node_width <= *width as usize {
+                    acc.push(*node);
+                    acc_width += *node_width;
+                    if acc_width == *width as usize {
+                        break;
+                    }
+                }
+            }
+            if acc_width == *width as usize && !acc.is_empty() {
+                let refs: Vec<&BValue> = acc.iter().map(|n| *n).collect();
+                return Some(fn_builder.concat(&refs, None));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Builds an xlsynth function by enqueueing the operations given by `ops` into
 /// a `FnBuilder` and returning the built result.
 pub fn generate_ir_fn(
@@ -207,22 +295,26 @@ pub fn generate_ir_fn(
     let input_node = fn_builder.param("input", &input_type);
 
     // Track all available nodes that can be used as operands
-    let mut available_nodes: Vec<BValue> = vec![input_node];
+    let mut available_nodes: Vec<BValue> = vec![input_node.clone()];
+    let mut type_map: BTreeMap<IrType, Vec<BValue>> = BTreeMap::new();
+    type_map
+        .entry(input_type.clone())
+        .or_default()
+        .push(input_node.clone());
 
     // Process each operation
     for op in ops {
         fn_builder.last_value()?;
-        match op {
+        let node = match op {
             FuzzOp::Literal { bits, value } => {
                 assert!(bits > 0, "literal op has no bits");
                 let ir_value = xlsynth::IrValue::make_ubits(bits as usize, value)?;
-                let node = fn_builder.literal(&ir_value, None);
-                available_nodes.push(node);
+                fn_builder.literal(&ir_value, None)
             }
             FuzzOp::Unop(unop, idx) => {
                 let idx = (idx as usize) % available_nodes.len();
                 let operand = &available_nodes[idx];
-                let node = match unop {
+                match unop {
                     FuzzUnop::Not => fn_builder.not(operand, None),
                     FuzzUnop::Neg => fn_builder.neg(operand, None),
                     FuzzUnop::OrReduce => fn_builder.or_reduce(operand, None),
@@ -233,7 +325,6 @@ pub fn generate_ir_fn(
                     FuzzUnop::Encode => {
                         let bits_type: IrType = fn_builder.get_type(operand).unwrap();
                         let bit_count: u64 = bits_type.get_flat_bit_count();
-                        // For one bit input, encode gives back a zero-bit result.
                         if bit_count <= 1 {
                             return Err(XlsynthError(
                                 "encode needs more than 1 bit input operand".to_string(),
@@ -241,15 +332,14 @@ pub fn generate_ir_fn(
                         }
                         fn_builder.encode(operand, None)
                     }
-                };
-                available_nodes.push(node);
+                }
             }
             FuzzOp::Binop(binop, idx1, idx2) => {
                 let idx1 = (idx1 as usize) % available_nodes.len();
                 let idx2 = (idx2 as usize) % available_nodes.len();
                 let operand1: &BValue = &available_nodes[idx1];
                 let operand2: &BValue = &available_nodes[idx2];
-                let node = match binop {
+                match binop {
                     FuzzBinop::Add => fn_builder.add(operand1, operand2, None),
                     FuzzBinop::Sub => fn_builder.sub(operand1, operand2, None),
                     FuzzBinop::And => fn_builder.and(operand1, operand2, None),
@@ -257,8 +347,6 @@ pub fn generate_ir_fn(
                     FuzzBinop::Nor => fn_builder.nor(operand1, operand2, None),
                     FuzzBinop::Or => fn_builder.or(operand1, operand2, None),
                     FuzzBinop::Xor => fn_builder.xor(operand1, operand2, None),
-
-                    // comparisons
                     FuzzBinop::Eq => fn_builder.eq(operand1, operand2, None),
                     FuzzBinop::Ne => fn_builder.ne(operand1, operand2, None),
                     FuzzBinop::Ugt => fn_builder.ugt(operand1, operand2, None),
@@ -269,21 +357,15 @@ pub fn generate_ir_fn(
                     FuzzBinop::Sge => fn_builder.sge(operand1, operand2, None),
                     FuzzBinop::Slt => fn_builder.slt(operand1, operand2, None),
                     FuzzBinop::Sle => fn_builder.sle(operand1, operand2, None),
-
-                    // shifts
                     FuzzBinop::Shrl => fn_builder.shrl(operand1, operand2, None),
                     FuzzBinop::Shra => fn_builder.shra(operand1, operand2, None),
                     FuzzBinop::Shll => fn_builder.shll(operand1, operand2, None),
-
-                    // division / modulus
                     FuzzBinop::Udiv => fn_builder.udiv(operand1, operand2, None),
                     FuzzBinop::Sdiv => fn_builder.sdiv(operand1, operand2, None),
                     FuzzBinop::Umod => fn_builder.umod(operand1, operand2, None),
                     FuzzBinop::Smod => fn_builder.smod(operand1, operand2, None),
-
                     FuzzBinop::Concat => fn_builder.concat(&[operand1, operand2], None),
-                };
-                available_nodes.push(node);
+                }
             }
             FuzzOp::ZeroExt {
                 operand,
@@ -294,8 +376,7 @@ pub fn generate_ir_fn(
                 let operand_width =
                     fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u64;
                 let clamped_new_bit_count = std::cmp::max(new_bit_count, operand_width);
-                let node = fn_builder.zero_extend(operand, clamped_new_bit_count as u64, None);
-                available_nodes.push(node);
+                fn_builder.zero_extend(operand, clamped_new_bit_count as u64, None)
             }
             FuzzOp::SignExt {
                 operand,
@@ -306,8 +387,7 @@ pub fn generate_ir_fn(
                 let operand_width =
                     fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u64;
                 let clamped_new_bit_count = std::cmp::max(new_bit_count, operand_width);
-                let node = fn_builder.sign_extend(operand, clamped_new_bit_count as u64, None);
-                available_nodes.push(node);
+                fn_builder.sign_extend(operand, clamped_new_bit_count as u64, None)
             }
             FuzzOp::BitSlice {
                 operand,
@@ -328,13 +408,11 @@ pub fn generate_ir_fn(
                     width
                 );
                 let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
-                let node = fn_builder.bit_slice(operand, start as u64, width as u64, None);
-                available_nodes.push(node);
+                fn_builder.bit_slice(operand, start as u64, width as u64, None)
             }
             FuzzOp::OneHot { arg, lsb_prio } => {
                 let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
-                let node = fn_builder.one_hot(arg, lsb_prio, None);
-                available_nodes.push(node);
+                fn_builder.one_hot(arg, lsb_prio, None)
             }
             FuzzOp::Sel {
                 selector,
@@ -347,8 +425,7 @@ pub fn generate_ir_fn(
                     .map(|idx| &available_nodes[(idx.index as usize) % available_nodes.len()])
                     .collect::<Vec<_>>();
                 let default = &available_nodes[(default.index as usize) % available_nodes.len()];
-                let node = fn_builder.select(selector, cases.as_slice(), default, None);
-                available_nodes.push(node);
+                fn_builder.select(selector, cases.as_slice(), default, None)
             }
             FuzzOp::PrioritySel {
                 selector,
@@ -364,14 +441,12 @@ pub fn generate_ir_fn(
                     })
                     .collect::<Vec<_>>();
                 let default = &available_nodes[(default.index as usize) % available_nodes.len()];
-                let node = fn_builder.priority_select(selector, cases.as_slice(), default, None);
-                available_nodes.push(node);
+                fn_builder.priority_select(selector, cases.as_slice(), default, None)
             }
             FuzzOp::ArrayIndex { array, index } => {
                 let array = &available_nodes[(array.index as usize) % available_nodes.len()];
                 let index = &available_nodes[(index.index as usize) % available_nodes.len()];
-                let node = fn_builder.array_index(array, index, None);
-                available_nodes.push(node);
+                fn_builder.array_index(array, index, None)
             }
             FuzzOp::Array { elements } => {
                 let elements: Vec<BValue> = elements
@@ -389,8 +464,7 @@ pub fn generate_ir_fn(
                 let element_type_ref: &IrType = element_type.as_ref().unwrap();
                 let elements: &[BValue] = elements.as_slice();
                 let elements_refs = elements.iter().map(|e: &BValue| e).collect::<Vec<_>>();
-                let node = fn_builder.array(element_type_ref, &elements_refs, None);
-                available_nodes.push(node);
+                fn_builder.array(element_type_ref, &elements_refs, None)
             }
             FuzzOp::Tuple { elements } => {
                 let tuple_elems: Vec<BValue> = elements
@@ -400,19 +474,16 @@ pub fn generate_ir_fn(
                     })
                     .collect::<Vec<_>>();
                 let refs: Vec<&BValue> = tuple_elems.iter().collect();
-                let node = fn_builder.tuple(&refs, None);
-                available_nodes.push(node);
+                fn_builder.tuple(&refs, None)
             }
             FuzzOp::TupleIndex { tuple, index } => {
                 let tuple_bv = &available_nodes[(tuple.index as usize) % available_nodes.len()];
-                let node = fn_builder.tuple_index(tuple_bv, index as u64, None);
-                available_nodes.push(node);
+                fn_builder.tuple_index(tuple_bv, index as u64, None)
             }
             FuzzOp::Decode { arg, width } => {
                 assert!(width > 0, "decode has width of 0");
                 let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
-                let node = fn_builder.decode(arg, Some(width as u64), None);
-                available_nodes.push(node);
+                fn_builder.decode(arg, Some(width as u64), None)
             }
             FuzzOp::OneHotSel { selector, cases } => {
                 let selector = &available_nodes[(selector.index as usize) % available_nodes.len()];
@@ -422,27 +493,23 @@ pub fn generate_ir_fn(
                         available_nodes[(idx.index as usize) % available_nodes.len()].clone()
                     })
                     .collect::<Vec<_>>();
-                let node = fn_builder.one_hot_select(selector, cases.as_slice(), None);
-                available_nodes.push(node);
+                fn_builder.one_hot_select(selector, cases.as_slice(), None)
             }
             FuzzOp::UMul { lhs, rhs } => {
                 let lhs = &available_nodes[(lhs.index as usize) % available_nodes.len()];
                 let rhs = &available_nodes[(rhs.index as usize) % available_nodes.len()];
-                let node = fn_builder.umul(lhs, rhs, None);
-                available_nodes.push(node);
+                fn_builder.umul(lhs, rhs, None)
             }
             FuzzOp::SMul { lhs, rhs } => {
                 let lhs = &available_nodes[(lhs.index as usize) % available_nodes.len()];
                 let rhs = &available_nodes[(rhs.index as usize) % available_nodes.len()];
-                let node = fn_builder.smul(lhs, rhs, None);
-                available_nodes.push(node);
+                fn_builder.smul(lhs, rhs, None)
             }
             FuzzOp::DynamicBitSlice { arg, start, width } => {
                 assert!(width > 0, "dynamic bit slice has no width");
                 let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
                 let start = &available_nodes[(start.index as usize) % available_nodes.len()];
-                let node = fn_builder.dynamic_bit_slice(arg, start, width as u64, None);
-                available_nodes.push(node);
+                fn_builder.dynamic_bit_slice(arg, start, width as u64, None)
             }
             FuzzOp::BitSliceUpdate {
                 value,
@@ -452,13 +519,22 @@ pub fn generate_ir_fn(
                 let value_bv = &available_nodes[(value.index as usize) % available_nodes.len()];
                 let start_bv = &available_nodes[(start.index as usize) % available_nodes.len()];
                 let update_bv = &available_nodes[(update.index as usize) % available_nodes.len()];
-                let node = fn_builder.bit_slice_update(value_bv, start_bv, update_bv, None);
-                available_nodes.push(node);
+                fn_builder.bit_slice_update(value_bv, start_bv, update_bv, None)
             }
+        };
+        // Track the node and its type
+        if let Some(ty) = fn_builder.get_type(&node) {
+            type_map.entry(ty.clone()).or_default().push(node.clone());
         }
+        available_nodes.push(node);
     }
-    // Set the last node as the return value
-    fn_builder.build_with_return_value(available_nodes.last().unwrap())
+    // Use the type of the last node as the return type (for now)
+    let ret_type = fn_builder
+        .get_type(available_nodes.last().unwrap())
+        .unwrap();
+    let ret_node = build_return_value_with_type(&mut fn_builder, &type_map, &ret_type)
+        .unwrap_or_else(|| available_nodes.last().unwrap().clone());
+    fn_builder.build_with_return_value(&ret_node)
 }
 
 #[derive(Debug, Clone)]

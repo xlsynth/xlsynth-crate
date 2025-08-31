@@ -3,7 +3,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use xlsynth::IrPackage;
+use xlsynth::{IrPackage, IrType};
 use xlsynth_g8r::xls_ir::ir_fuzz::{generate_ir_fn, FuzzSampleSameTypedPair};
 
 fuzz_target!(|pair: FuzzSampleSameTypedPair| {
@@ -50,17 +50,17 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     assert_eq!(t1.param_count(), t2.param_count());
     for i in 0..t1.param_count() {
-        let p1 = t1.param_type(i).expect("param type");
-        let p2 = t2.param_type(i).expect("param type");
+        let p1: IrType = t1.param_type(i).expect("param type");
+        let p2: IrType = t2.param_type(i).expect("param type");
         assert_eq!(
-            p1.get_flat_bit_count(),
-            p2.get_flat_bit_count(),
+            p1.to_string(),
+            p2.to_string(),
             "param {i} width mismatch"
         );
     }
     assert_eq!(
-        t1.return_type().get_flat_bit_count(),
-        t2.return_type().get_flat_bit_count(),
+        t1.return_type().to_string(),
+        t2.return_type().to_string(),
         "return width mismatch"
     );
 });
