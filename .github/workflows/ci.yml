@@ -43,15 +43,6 @@ jobs:
           override: true
           components: clippy
 
-      - name: Enable sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
-
-      - name: Configure sccache for Rust
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
-          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
-
       - name: Enable Rust build cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -165,7 +156,8 @@ jobs:
       - name: Configure sccache for Rust
         run: |
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
 
       - name: Enable Rust build cache
@@ -331,7 +323,8 @@ jobs:
       - name: Configure sccache for Rust
         run: |
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
 
       - name: Enable Rust build cache
@@ -407,7 +400,8 @@ jobs:
       - name: Configure sccache for Rust
         run: |
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
 
       - name: Enable Rust build cache
@@ -539,7 +533,8 @@ jobs:
       - name: Configure sccache for Rust
         run: |
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
 
       - name: Enable Rust build cache
@@ -635,7 +630,8 @@ jobs:
       - name: Configure sccache for Rust
         run: |
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
 
       - name: Enable Rust build cache
@@ -689,7 +685,8 @@ jobs:
       - name: Configure sccache for Rust
         run: |
           echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=on" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
 
       - name: Enable Rust build cache
