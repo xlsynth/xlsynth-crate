@@ -64,7 +64,7 @@ pub enum FuzzBinop {
 
 #[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzOperand {
-    index: u8,
+    index: usize,
 }
 
 #[derive(Debug, Arbitrary, Clone)]
@@ -73,8 +73,8 @@ pub enum FuzzOp {
         bits: u8,
         value: u64,
     },
-    Unop(FuzzUnop, u8),
-    Binop(FuzzBinop, u8, u8),
+    Unop(FuzzUnop, usize),
+    Binop(FuzzBinop, usize, usize),
     ZeroExt {
         operand: FuzzOperand,
         new_bit_count: u64,
@@ -130,7 +130,7 @@ pub enum FuzzOp {
     },
     TupleIndex {
         tuple: FuzzOperand,
-        index: u8,
+        index: usize,
     },
     DynamicBitSlice {
         arg: FuzzOperand,
@@ -359,7 +359,7 @@ pub fn generate_ir_fn(
                 fn_builder.literal(&ir_value, None)
             }
             FuzzOp::Unop(unop, idx) => {
-                let idx = (idx as usize) % available_nodes.len();
+                let idx = idx % available_nodes.len();
                 let operand = &available_nodes[idx];
                 match unop {
                     FuzzUnop::Not => fn_builder.not(operand, None),
@@ -382,8 +382,8 @@ pub fn generate_ir_fn(
                 }
             }
             FuzzOp::Binop(binop, idx1, idx2) => {
-                let idx1 = (idx1 as usize) % available_nodes.len();
-                let idx2 = (idx2 as usize) % available_nodes.len();
+                let idx1 = idx1 % available_nodes.len();
+                let idx2 = idx2 % available_nodes.len();
                 let operand1: &BValue = &available_nodes[idx1];
                 let operand2: &BValue = &available_nodes[idx2];
                 match binop {
@@ -419,7 +419,7 @@ pub fn generate_ir_fn(
                 new_bit_count,
             } => {
                 assert!(new_bit_count > 0, "zero extend has new bit count of 0");
-                let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
+                let operand = &available_nodes[operand.index % available_nodes.len()];
                 let operand_width =
                     fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u64;
                 let clamped_new_bit_count = std::cmp::max(new_bit_count, operand_width);
@@ -430,7 +430,7 @@ pub fn generate_ir_fn(
                 new_bit_count,
             } => {
                 assert!(new_bit_count > 0, "sign extend has new bit count of 0");
-                let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
+                let operand = &available_nodes[operand.index % available_nodes.len()];
                 let operand_width =
                     fn_builder.get_type(operand).unwrap().get_flat_bit_count() as u64;
                 let clamped_new_bit_count = std::cmp::max(new_bit_count, operand_width);
@@ -442,7 +442,7 @@ pub fn generate_ir_fn(
                 width,
             } => {
                 assert!(width > 0, "bit slice has no width");
-                let operand_bv = &available_nodes[(operand.index as usize) % available_nodes.len()];
+                let operand_bv = &available_nodes[operand.index % available_nodes.len()];
                 let operand_width = fn_builder
                     .get_type(operand_bv)
                     .unwrap()
@@ -454,11 +454,11 @@ pub fn generate_ir_fn(
                     start,
                     width
                 );
-                let operand = &available_nodes[(operand.index as usize) % available_nodes.len()];
+                let operand = &available_nodes[operand.index % available_nodes.len()];
                 fn_builder.bit_slice(operand, start as u64, width as u64, None)
             }
             FuzzOp::OneHot { arg, lsb_prio } => {
-                let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
+                let arg = &available_nodes[arg.index % available_nodes.len()];
                 fn_builder.one_hot(arg, lsb_prio, None)
             }
             FuzzOp::Sel {
@@ -466,12 +466,12 @@ pub fn generate_ir_fn(
                 cases,
                 default,
             } => {
-                let selector = &available_nodes[(selector.index as usize) % available_nodes.len()];
+                let selector = &available_nodes[selector.index % available_nodes.len()];
                 let cases = cases
                     .iter()
-                    .map(|idx| &available_nodes[(idx.index as usize) % available_nodes.len()])
+                    .map(|idx| &available_nodes[idx.index % available_nodes.len()])
                     .collect::<Vec<_>>();
-                let default = &available_nodes[(default.index as usize) % available_nodes.len()];
+                let default = &available_nodes[default.index % available_nodes.len()];
                 fn_builder.select(selector, cases.as_slice(), default, None)
             }
             FuzzOp::PrioritySel {
@@ -479,28 +479,23 @@ pub fn generate_ir_fn(
                 cases,
                 default,
             } => {
-                let selector: &BValue =
-                    &available_nodes[(selector.index as usize) % available_nodes.len()];
+                let selector: &BValue = &available_nodes[selector.index % available_nodes.len()];
                 let cases: Vec<BValue> = cases
                     .iter()
-                    .map(|idx| {
-                        available_nodes[(idx.index as usize) % available_nodes.len()].clone()
-                    })
+                    .map(|idx| available_nodes[idx.index % available_nodes.len()].clone())
                     .collect::<Vec<_>>();
-                let default = &available_nodes[(default.index as usize) % available_nodes.len()];
+                let default = &available_nodes[default.index % available_nodes.len()];
                 fn_builder.priority_select(selector, cases.as_slice(), default, None)
             }
             FuzzOp::ArrayIndex { array, index } => {
-                let array = &available_nodes[(array.index as usize) % available_nodes.len()];
-                let index = &available_nodes[(index.index as usize) % available_nodes.len()];
+                let array = &available_nodes[array.index % available_nodes.len()];
+                let index = &available_nodes[index.index % available_nodes.len()];
                 fn_builder.array_index(array, index, None)
             }
             FuzzOp::Array { elements } => {
                 let elements: Vec<BValue> = elements
                     .iter()
-                    .map(|idx| {
-                        available_nodes[(idx.index as usize) % available_nodes.len()].clone()
-                    })
+                    .map(|idx| available_nodes[idx.index % available_nodes.len()].clone())
                     .collect::<Vec<_>>();
                 let element_type: Option<IrType> = fn_builder.get_type(&elements[0]);
                 if element_type.is_none() {
@@ -516,46 +511,42 @@ pub fn generate_ir_fn(
             FuzzOp::Tuple { elements } => {
                 let tuple_elems: Vec<BValue> = elements
                     .iter()
-                    .map(|idx| {
-                        available_nodes[(idx.index as usize) % available_nodes.len()].clone()
-                    })
+                    .map(|idx| available_nodes[idx.index % available_nodes.len()].clone())
                     .collect::<Vec<_>>();
                 let refs: Vec<&BValue> = tuple_elems.iter().collect();
                 fn_builder.tuple(&refs, None)
             }
             FuzzOp::TupleIndex { tuple, index } => {
-                let tuple_bv = &available_nodes[(tuple.index as usize) % available_nodes.len()];
+                let tuple_bv = &available_nodes[tuple.index % available_nodes.len()];
                 fn_builder.tuple_index(tuple_bv, index as u64, None)
             }
             FuzzOp::Decode { arg, width } => {
                 assert!(width > 0, "decode has width of 0");
-                let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
+                let arg = &available_nodes[arg.index % available_nodes.len()];
                 fn_builder.decode(arg, Some(width as u64), None)
             }
             FuzzOp::OneHotSel { selector, cases } => {
-                let selector = &available_nodes[(selector.index as usize) % available_nodes.len()];
+                let selector = &available_nodes[selector.index % available_nodes.len()];
                 let cases: Vec<BValue> = cases
                     .iter()
-                    .map(|idx| {
-                        available_nodes[(idx.index as usize) % available_nodes.len()].clone()
-                    })
+                    .map(|idx| available_nodes[idx.index % available_nodes.len()].clone())
                     .collect::<Vec<_>>();
                 fn_builder.one_hot_select(selector, cases.as_slice(), None)
             }
             FuzzOp::UMul { lhs, rhs } => {
-                let lhs = &available_nodes[(lhs.index as usize) % available_nodes.len()];
-                let rhs = &available_nodes[(rhs.index as usize) % available_nodes.len()];
+                let lhs = &available_nodes[lhs.index % available_nodes.len()];
+                let rhs = &available_nodes[rhs.index % available_nodes.len()];
                 fn_builder.umul(lhs, rhs, None)
             }
             FuzzOp::SMul { lhs, rhs } => {
-                let lhs = &available_nodes[(lhs.index as usize) % available_nodes.len()];
-                let rhs = &available_nodes[(rhs.index as usize) % available_nodes.len()];
+                let lhs = &available_nodes[lhs.index % available_nodes.len()];
+                let rhs = &available_nodes[rhs.index % available_nodes.len()];
                 fn_builder.smul(lhs, rhs, None)
             }
             FuzzOp::DynamicBitSlice { arg, start, width } => {
                 assert!(width > 0, "dynamic bit slice has no width");
-                let arg = &available_nodes[(arg.index as usize) % available_nodes.len()];
-                let start = &available_nodes[(start.index as usize) % available_nodes.len()];
+                let arg = &available_nodes[arg.index % available_nodes.len()];
+                let start = &available_nodes[start.index % available_nodes.len()];
                 fn_builder.dynamic_bit_slice(arg, start, width as u64, None)
             }
             FuzzOp::BitSliceUpdate {
@@ -563,9 +554,9 @@ pub fn generate_ir_fn(
                 start,
                 update,
             } => {
-                let value_bv = &available_nodes[(value.index as usize) % available_nodes.len()];
-                let start_bv = &available_nodes[(start.index as usize) % available_nodes.len()];
-                let update_bv = &available_nodes[(update.index as usize) % available_nodes.len()];
+                let value_bv = &available_nodes[value.index % available_nodes.len()];
+                let start_bv = &available_nodes[start.index % available_nodes.len()];
+                let update_bv = &available_nodes[update.index % available_nodes.len()];
                 fn_builder.bit_slice_update(value_bv, start_bv, update_bv, None)
             }
         };
@@ -643,20 +634,20 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::Unop => {
                     // NOT op: sample an index from [0, available_nodes)
-                    let idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let unop = u.arbitrary::<FuzzUnop>()?;
                     ops.push(FuzzOp::Unop(unop, idx));
                 }
                 FuzzOpFlat::Binop => {
                     // Binary op: sample two valid indices.
-                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
+                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let binop = u.arbitrary::<FuzzBinop>()?;
                     ops.push(FuzzOp::Binop(binop, idx1, idx2));
                 }
                 FuzzOpFlat::ZeroExt => {
                     // ZeroExt op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let new_bit_count = u.int_in_range(1..=8)? as u64;
                     ops.push(FuzzOp::ZeroExt {
                         operand: FuzzOperand { index },
@@ -665,7 +656,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::SignExt => {
                     // SignExt op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let new_bit_count = u.int_in_range(1..=8)? as u64;
                     ops.push(FuzzOp::SignExt {
                         operand: FuzzOperand { index },
@@ -677,7 +668,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     // 0) whose width is `input_bits`. This guarantees the slice
                     // is legal without having to track the widths of all
                     // intermediate IR nodes.
-                    let index: u8 = 0; // primary input
+                    let index: usize = 0; // primary input
 
                     // Choose a valid start such that 0 <= start < input_bits
                     let start = u.int_in_range(0..=((input_bits as u64) - 1))? as u64;
@@ -694,7 +685,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::OneHot => {
                     // OneHot op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let lsb_prio = u.int_in_range(0..=1)? == 1;
                     ops.push(FuzzOp::OneHot {
                         arg: FuzzOperand { index },
@@ -703,12 +694,12 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::PrioritySel => {
                     // PrioritySel op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let num_cases = u.int_in_range(1..=8)?;
                     let mut cases: Vec<FuzzOperand> = Vec::with_capacity(num_cases as usize);
                     for _ in 0..num_cases {
                         cases.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as u8,
+                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
                         });
                     }
                     let last_case: FuzzOperand = cases.last().unwrap().clone();
@@ -720,12 +711,12 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::OneHotSel => {
                     // OneHotSel op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let num_cases = u.int_in_range(1..=8)?;
                     let mut cases: Vec<FuzzOperand> = Vec::with_capacity(num_cases as usize);
                     for _ in 0..num_cases {
                         cases.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as u8,
+                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
                         });
                     }
                     ops.push(FuzzOp::OneHotSel {
@@ -735,7 +726,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::Decode => {
                     // Decode op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let width = u.int_in_range(1..=8)? as u64;
                     ops.push(FuzzOp::Decode {
                         arg: FuzzOperand { index },
@@ -744,7 +735,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::ArrayIndex => {
                     // ArrayIndex op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     ops.push(FuzzOp::ArrayIndex {
                         array: FuzzOperand { index },
                         index: FuzzOperand { index },
@@ -756,7 +747,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     let mut elements: Vec<FuzzOperand> = Vec::with_capacity(num_elements as usize);
                     for _ in 0..num_elements {
                         elements.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as u8,
+                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
                         });
                     }
                     ops.push(FuzzOp::Array { elements });
@@ -766,7 +757,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                     let mut elements: Vec<FuzzOperand> = Vec::with_capacity(num_elements as usize);
                     for _ in 0..num_elements {
                         elements.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as u8,
+                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
                         });
                     }
                     ops.push(FuzzOp::Tuple { elements });
@@ -787,15 +778,13 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                             u.int_in_range(0..=(tuple_candidates.len() as u64 - 1))? as usize;
                         let (tuple_idx, tuple_len) = tuple_candidates[which];
                         // Now pick an element index that is definitely in-bounds.
-                        let index = if tuple_len == 1 {
-                            0u8
+                        let index: usize = if tuple_len == 1 {
+                            0usize
                         } else {
-                            u.int_in_range(0..=((tuple_len - 1) as u64))? as u8
+                            u.int_in_range(0..=((tuple_len - 1) as u64))? as usize
                         };
                         ops.push(FuzzOp::TupleIndex {
-                            tuple: FuzzOperand {
-                                index: tuple_idx as u8,
-                            },
+                            tuple: FuzzOperand { index: tuple_idx },
                             index,
                         });
                     } else {
@@ -812,8 +801,8 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::UMul => {
                     // UMul op: sample two valid indices.
-                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
+                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     ops.push(FuzzOp::UMul {
                         lhs: FuzzOperand { index: idx1 },
                         rhs: FuzzOperand { index: idx2 },
@@ -821,8 +810,8 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::SMul => {
                     // SMul op: sample two valid indices.
-                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
+                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     ops.push(FuzzOp::SMul {
                         lhs: FuzzOperand { index: idx1 },
                         rhs: FuzzOperand { index: idx2 },
@@ -830,15 +819,15 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::Sel => {
                     // Sel op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let num_cases = u.int_in_range(1..=8)?;
                     let mut cases: Vec<FuzzOperand> = Vec::with_capacity(num_cases as usize);
                     for _ in 0..num_cases {
                         cases.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as u8,
+                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
                         });
                     }
-                    let default = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let default = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     ops.push(FuzzOp::Sel {
                         selector: FuzzOperand { index },
                         cases,
@@ -847,8 +836,8 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::DynamicBitSlice => {
                     // DynamicBitSlice op: sample an index from [0, available_nodes)
-                    let arg = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let start = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let arg = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
+                    let start = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     let width = u.int_in_range(1..=8)? as u64;
                     ops.push(FuzzOp::DynamicBitSlice {
                         arg: FuzzOperand { index: arg },
@@ -858,9 +847,9 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
                 }
                 FuzzOpFlat::BitSliceUpdate => {
                     // BitSliceUpdate op: sample three valid indices.
-                    let value_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let start_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
-                    let update_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as u8;
+                    let value_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
+                    let start_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
+                    let update_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
                     ops.push(FuzzOp::BitSliceUpdate {
                         value: FuzzOperand { index: value_idx },
                         start: FuzzOperand { index: start_idx },
@@ -929,7 +918,7 @@ impl FuzzSample {
                         value: 0,
                     });
                     FuzzOperand {
-                        index: sample.ops.len() as u8,
+                        index: sample.ops.len(),
                     }
                 }
                 InternalType::Tuple(types) => {
@@ -941,7 +930,7 @@ impl FuzzSample {
                         elements: elems.clone(),
                     });
                     FuzzOperand {
-                        index: sample.ops.len() as u8,
+                        index: sample.ops.len(),
                     }
                 }
                 InternalType::Array(arr) => {
@@ -953,7 +942,7 @@ impl FuzzSample {
                         elements: elems.clone(),
                     });
                     FuzzOperand {
-                        index: sample.ops.len() as u8,
+                        index: sample.ops.len(),
                     }
                 }
                 InternalType::Token => {
@@ -961,7 +950,7 @@ impl FuzzSample {
                     // progress.
                     sample.ops.push(FuzzOp::Literal { bits: 1, value: 0 });
                     FuzzOperand {
-                        index: sample.ops.len() as u8,
+                        index: sample.ops.len(),
                     }
                 }
             }
