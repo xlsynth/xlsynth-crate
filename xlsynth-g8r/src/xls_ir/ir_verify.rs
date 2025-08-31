@@ -168,7 +168,7 @@ pub fn verify_fn_types_agree_with_deduction(f: &Fn) -> Result<(), String> {
             op_types.push(f.get_node(*nr).ty.clone());
         }
         // Ask the deducer what the result type should be for this payload.
-        match deduce_result_type(&node.payload, &op_types)? {
+        match deduce_result_type(&node.payload, &op_types).map_err(|e| e.to_string())? {
             Some(deduced) => {
                 if deduced != node.ty {
                     return Err(format!(
@@ -186,4 +186,24 @@ pub fn verify_fn_types_agree_with_deduction(f: &Fn) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xls_ir::ir_parser::Parser;
+
+    #[test]
+    fn type_mismatch_on_add_is_flagged() {
+        let ir = r#"
+fn foo(x: bits[8] id=1) -> bits[16] {
+  add.2: bits[16] = add(x, x, id=2)
+  ret id.3: bits[16] = identity(add.2, id=3)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let f = parser.parse_fn().expect("parse fn");
+        // add node is declared bits[16] but deduction expects bits[8]; should error.
+        assert!(verify_fn_types_agree_with_deduction(&f).is_err());
+    }
 }
