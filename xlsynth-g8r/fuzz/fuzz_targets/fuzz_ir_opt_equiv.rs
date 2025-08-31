@@ -67,7 +67,7 @@ fuzz_target!(|sample: FuzzSample| {
 
     // Build an XLS IR package from the fuzz sample
     let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").unwrap();
-    if let Err(e) = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg) {
+    if let Err(e) = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg, None) {
         log::info!("IR generation failed: {}", e);
         return;
     }

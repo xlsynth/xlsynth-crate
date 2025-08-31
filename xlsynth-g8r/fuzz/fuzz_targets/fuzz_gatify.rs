@@ -20,7 +20,7 @@ fuzz_target!(|sample: FuzzSample| {
 
     // Generate IR function from fuzz input
     let mut package = xlsynth::IrPackage::new("fuzz_test").unwrap();
-    if let Err(e) = generate_ir_fn(sample.input_bits, sample.ops, &mut package) {
+    if let Err(e) = generate_ir_fn(sample.input_bits, sample.ops, &mut package, None) {
         log::info!("Error generating IR function: {}", e);
         return;
     }

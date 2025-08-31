@@ -18,6 +18,12 @@ pub struct BValue {
     ptr: Arc<RwLock<BValuePtr>>,
 }
 
+impl std::cmp::PartialEq for BValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr.read().unwrap().ptr == other.ptr.read().unwrap().ptr
+    }
+}
+
 pub struct FnBuilder {
     fn_builder: Arc<RwLock<IrFnBuilderPtr>>,
     package: Arc<RwLock<IrPackagePtr>>,

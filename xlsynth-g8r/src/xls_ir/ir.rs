@@ -29,13 +29,13 @@ impl ParamId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct ArrayTypeData {
     pub element_type: Box<Type>,
     pub element_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum Type {
     Token,
     Bits(usize),
