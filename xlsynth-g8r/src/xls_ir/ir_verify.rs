@@ -5,7 +5,9 @@
 
 use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn, NodePayload};
+use crate::xls_ir::ir::{Fn, NodePayload, Type};
+use crate::xls_ir::ir_deduce::deduce_result_type;
+use crate::xls_ir::ir_utils::operands;
 
 /// Verifies that all node text IDs within a function are unique.
 pub fn verify_fn_unique_node_ids(f: &Fn) -> Result<(), String> {
@@ -149,6 +151,37 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
             }
             NodePayload::Cover { predicate, .. } => {
                 check(*predicate, &format!("node {} cover.predicate", i))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verifies that for all nodes we can deduce, the node's `ty` matches the
+/// type anticipated by the deduction routine.
+pub fn verify_fn_types_agree_with_deduction(f: &Fn) -> Result<(), String> {
+    for (i, node) in f.nodes.iter().enumerate() {
+        // Gather operand types in operand order.
+        let op_refs = operands(&node.payload);
+        let mut op_types: Vec<Type> = Vec::with_capacity(op_refs.len());
+        for nr in op_refs.iter() {
+            op_types.push(f.get_node(*nr).ty.clone());
+        }
+        // Ask the deducer what the result type should be for this payload.
+        match deduce_result_type(&node.payload, &op_types)? {
+            Some(deduced) => {
+                if deduced != node.ty {
+                    return Err(format!(
+                        "type mismatch for node {} ({}): deduced {} vs actual {}",
+                        i,
+                        node.payload.get_operator(),
+                        deduced,
+                        node.ty
+                    ));
+                }
+            }
+            None => {
+                // Deduction not implemented for this payload; skip.
             }
         }
     }

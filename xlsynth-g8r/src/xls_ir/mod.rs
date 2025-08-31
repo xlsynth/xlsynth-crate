@@ -5,6 +5,7 @@
 
 pub mod edit_distance;
 pub mod ir;
+pub mod ir_deduce;
 pub mod ir_eval;
 pub mod ir_node_env;
 pub mod ir_parser;
