@@ -566,6 +566,11 @@ pub fn generate_ir_fn(
                 fn_builder.bit_slice_update(value_bv, start_bv, update_bv, None)
             }
         };
+        // If the builder entered an error state when adding this node, bail out
+        // immediately before attempting to query its type or record it.
+        if let Err(e) = fn_builder.last_value() {
+            return Err(e);
+        }
         // Track the node and its type
         if let Some(ty) = fn_builder.get_type(&node) {
             let ty_str = ty.to_string();
