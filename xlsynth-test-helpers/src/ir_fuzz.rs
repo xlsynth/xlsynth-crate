@@ -744,55 +744,65 @@ impl FuzzSample {
     ) -> arbitrary::Result<Self> {
         let mut pkg =
             xlsynth::IrPackage::new("orig").map_err(|_| arbitrary::Error::IncorrectFormat)?;
-        let ret_bits = generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg)
+        let ret_bits_usize: usize = generate_ir_fn(orig.input_bits, orig.ops.clone(), &mut pkg)
             .ok()
             .and_then(|f| {
                 f.get_type()
                     .ok()
-                    .map(|t| t.return_type().get_flat_bit_count() as u8)
+                    .map(|t| t.return_type().get_flat_bit_count() as usize)
             })
-            .unwrap_or(orig.input_bits);
+            .unwrap_or(orig.input_bits as usize);
 
         let mut sample = FuzzSample::arbitrary(u)?;
         sample.input_bits = orig.input_bits;
 
         for op in &mut sample.ops {
-            if let FuzzOp::BitSlice { start, width, .. } = op {
-                if *start >= sample.input_bits {
-                    *start = 0;
-                }
-                let max_width = sample.input_bits - *start;
-                if max_width == 0 {
-                    *width = 1;
-                } else if *width > max_width {
-                    *width = max_width;
+            if let FuzzOp::BitSlice { operand, start, width } = op {
+                // Only clamp bit-slices that explicitly target the primary input (operand 0).
+                // Randomly generated BitSlice ops in this fuzzer always slice the primary input.
+                // BitSlices we append in gen_with_same_signature may target non-input nodes and
+                // should not be clamped against input width.
+                if operand.index == 0 {
+                    if *start >= sample.input_bits {
+                        *start = 0;
+                    }
+                    let max_width = sample.input_bits - *start;
+                    if max_width == 0 {
+                        *width = 1;
+                    } else if *width > max_width {
+                        *width = max_width;
+                    }
                 }
             }
         }
 
         let mut pkg_new =
             xlsynth::IrPackage::new("new").map_err(|_| arbitrary::Error::IncorrectFormat)?;
-        let new_ret_bits = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg_new)
+        let new_ret_bits_usize: usize = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg_new)
             .ok()
             .and_then(|f| {
                 f.get_type()
                     .ok()
-                    .map(|t| t.return_type().get_flat_bit_count() as u8)
+                    .map(|t| t.return_type().get_flat_bit_count() as usize)
             })
-            .unwrap_or(ret_bits);
+            .unwrap_or(ret_bits_usize);
 
-        if new_ret_bits < ret_bits {
+        if new_ret_bits_usize < ret_bits_usize {
             let idx = sample.ops.len() as u8;
+            let ret_bits_u8 = std::convert::TryInto::<u8>::try_into(ret_bits_usize)
+                .map_err(|_| arbitrary::Error::IncorrectFormat)?;
             sample.ops.push(FuzzOp::ZeroExt {
                 operand: FuzzOperand { index: idx },
-                new_bit_count: ret_bits,
+                new_bit_count: ret_bits_u8,
             });
-        } else if new_ret_bits > ret_bits {
+        } else if new_ret_bits_usize > ret_bits_usize {
             let idx = sample.ops.len() as u8;
+            let ret_bits_u8 = std::convert::TryInto::<u8>::try_into(ret_bits_usize)
+                .map_err(|_| arbitrary::Error::IncorrectFormat)?;
             sample.ops.push(FuzzOp::BitSlice {
                 operand: FuzzOperand { index: idx },
                 start: 0,
-                width: ret_bits,
+                width: ret_bits_u8,
             });
         }
 
