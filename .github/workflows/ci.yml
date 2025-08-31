@@ -21,6 +21,8 @@ jobs:
   # -----------------------------------------------------------
   lint-check-ubuntu:
     runs-on: ubuntu-latest
+    env:
+      OS_KEY: ${{ env.ImageOS }}
 
     steps:
       - name: Check out code
@@ -47,6 +49,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          key: ${{ env.OS_KEY }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@v0.0.6
@@ -102,6 +105,8 @@ jobs:
   build-and-test-ubuntu:
     needs: [lint-check-ubuntu] # Ensure lint checks pass first
     runs-on: ${{ matrix.os }}
+    env:
+      OS_KEY: ${{ env.ImageOS }}
     strategy:
       matrix:
         os: [ubuntu-24.04, ubuntu-22.04]
@@ -174,6 +179,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          key: ${{ env.OS_KEY }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Download and set up Boolector
         run: |
@@ -219,6 +225,8 @@ jobs:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     container: ubuntu:20.04
+    env:
+      OS_KEY: ubuntu-20.04
 
     steps:
       - name: Check out code
@@ -341,6 +349,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          key: ${{ env.OS_KEY }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Show rustfmt and cargo versions
         run: |
@@ -361,6 +370,8 @@ jobs:
   build-and-test-macos:
     needs: [lint-check-ubuntu]
     runs-on: macos-latest
+    env:
+      OS_KEY: ${{ env.ImageOS }}
 
     steps:
       - name: Check out code
@@ -418,6 +429,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          key: ${{ env.OS_KEY }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Z3 binary
         run: |
@@ -452,6 +464,8 @@ jobs:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     container: rockylinux:8
+    env:
+      OS_KEY: rocky8
 
     steps:
       - name: Check out code
@@ -528,6 +542,8 @@ jobs:
     name: Valgrind Tests on Ubuntu Latest
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-22.04
+    env:
+      OS_KEY: ${{ env.ImageOS }}
     steps:
       - name: Set up Rust nightly
         uses: actions-rs/toolchain@v1
@@ -551,6 +567,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          key: ${{ env.OS_KEY }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check out code
         uses: actions/checkout@v2
@@ -622,6 +639,8 @@ jobs:
   build-and-test-predownloaded:
     runs-on: ubuntu-latest
     name: Build and Test with Pre-Downloaded Artifacts
+    env:
+      OS_KEY: ${{ env.ImageOS }}
     steps:
       - name: Check out code
         uses: actions/checkout@v2
@@ -648,6 +667,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          key: ${{ env.OS_KEY }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Pre-download artifacts using download_release.py
         env:
@@ -673,6 +693,8 @@ jobs:
   fuzz-gatify-smoke:
     name: Fuzz Gatify Smoke Test
     runs-on: ubuntu-latest
+    env:
+      OS_KEY: ${{ env.ImageOS }}
     steps:
       - name: Check out code
         uses: actions/checkout@v2
@@ -703,6 +725,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          key: ${{ env.OS_KEY }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install protobuf compiler
         run: |
