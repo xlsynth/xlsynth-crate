@@ -1055,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_fails_if_not_possible() {
+    fn test_build_succeeds_via_literal_synthesis_when_no_candidates() {
         let mut pkg = IrPackage::new("test").unwrap();
         let mut fn_builder = FnBuilder::new(&mut pkg, "f", true);
         let map = BTreeMap::new();
@@ -1063,6 +1063,10 @@ mod tests {
         let mut parser = ir_parser::Parser::new(ty_str);
         let ty = parser.parse_type().unwrap();
         let out = build_return_value_with_type(&mut fn_builder, &mut pkg, &map, &ty);
-        assert!(out.is_none());
+        assert!(out.is_some());
+        // Ensure the synthesized value has the requested type.
+        let out_bv = out.unwrap();
+        let got_ty = fn_builder.get_type(&out_bv).unwrap();
+        assert_eq!(got_ty.to_string(), "bits[8]");
     }
 }
