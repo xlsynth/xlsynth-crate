@@ -84,6 +84,15 @@ Primarily tests:
 - `FuzzSample::gen_with_same_signature` produces paired samples with matching function signatures
 - IR validation succeeds for both generated functions
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_rebase_equiv.rs
+
+Generates two random XLS IR functions with the same input signature (orig and desired). Rebuilds desired on top of orig using `rebase_onto`, then proves semantic equivalence between `desired` and the rebased result using the external toolchain equivalence checker. Skips degenerate samples and generator-unsupported constructs.
+
+Primarily tests:
+
+- `rebase_onto` preserves semantics and IDs stability constraints across random graphs
+- Integration of `rebase_onto` with parser/pretty printer and toolchain equivalence
+
 ______________________________________________________________________
 
 Notes:

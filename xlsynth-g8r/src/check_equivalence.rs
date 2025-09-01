@@ -38,7 +38,8 @@ pub fn check_equivalence_with_top(
     );
 
     let mut command = std::process::Command::new(check_ir_equivalence_main_path);
-    command.arg("--alsologtostderr");
+    // Optional: a flag like "--alsologtostderr" is useful while debugging to mirror
+    // logs to stderr, but not required for functionality.
     command.arg(orig_path.to_str().unwrap());
     command.arg(gate_path.to_str().unwrap());
     if let Some(top) = top_fn_name {
@@ -166,7 +167,7 @@ fn run_external_ir_tool(orig_pkg: &str, gate_pkg: &str) -> IrCheckResult {
     }
 
     let output = std::process::Command::new(exe)
-        .arg("--alsologtostderr")
+        // Optional debug flag can mirror logs to stderr; not required for functionality.
         .arg(orig_path)
         .arg(gate_path)
         .output();
@@ -239,9 +240,9 @@ mod tests {
     #[test]
     fn test_validate_same_signature_simple_one_bit() {
         let simple_xor_ir = "package simple_xor
-top fn my_xor(a: bits[1], b: bits[1]) -> bits[1] {
-    ret xor.3: bits[1] = xor(a, b, id=3)
-}
+ top fn my_xor(a: bits[1], b: bits[1]) -> bits[1] {
+     ret xor.3: bits[1] = xor(a, b, id=3)
+ }
 ";
         let mut parser = ir_parser::Parser::new(simple_xor_ir);
         let ir_package = parser.parse_and_validate_package().unwrap();

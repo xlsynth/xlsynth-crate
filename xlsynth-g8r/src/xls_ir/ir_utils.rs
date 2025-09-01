@@ -471,6 +471,7 @@ mod tests {
         assert_eq!(order.last().unwrap().index, f.nodes.len() - 1);
     }
 }
+
 #[cfg(test)]
 mod remap_tests {
     use super::*;
