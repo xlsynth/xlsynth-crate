@@ -732,11 +732,8 @@ jobs:
           echo "Using DSLX_STDLIB_PATH=${DSLX_STDLIB_PATH}"
           cargo test -p xlsynth --verbose
 
-  # -----------------------------------------------------------
-  # 7) Fuzz smoke test for fuzz_gatify on Ubuntu Latest
-  # -----------------------------------------------------------
-  fuzz-gatify-smoke:
-    name: Fuzz Gatify Smoke Test
+  fuzz-smoke:
+    name: Fuzz Smoke Test
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
@@ -797,7 +794,6 @@ jobs:
         run: |
           sudo apt-get install -y z3
 
-
       - name: Download xlsynth tools for fuzzing
         run: |
           pip3 install -r requirements.txt
@@ -807,15 +803,18 @@ jobs:
           sudo mv /tmp/xlsynth_tools_smoke/libxls-rocky8.so /usr/lib/libxls-rocky8.so
           sudo ldconfig
 
+      - name: Install cargo-fuzz
+        run: |
+          cargo install cargo-fuzz
+
       - name: Build and run fuzz_ir_opt_equiv for 10 seconds
         env:
           XLSYNTH_TOOLS: /tmp/xlsynth_tools_smoke
           XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
-          cargo install cargo-fuzz
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-bitwuzla-built,with-boolector-system -- -max_total_time=10
+          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
 
       - name: Build and run fuzz_gatify for 10 seconds
         env:
@@ -823,9 +822,8 @@ jobs:
           XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
-          cargo install cargo-fuzz
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gatify -- -max_total_time=10
+          cargo fuzz run fuzz_gatify --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
 
       - name: Build and run fuzz_gate_fn_roundtrip for 10 seconds
         env:
@@ -833,9 +831,8 @@ jobs:
           XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
-          cargo install cargo-fuzz
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gate_fn_roundtrip -- -max_total_time=10
+          cargo fuzz run fuzz_gate_fn_roundtrip --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
 
       - name: Build and run fuzz_gate_transform_equiv for 10 seconds
         env:
@@ -843,6 +840,5 @@ jobs:
           XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
-          cargo install cargo-fuzz
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gate_transform_equiv -- -max_total_time=10
+          cargo fuzz run fuzz_gate_transform_equiv --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
