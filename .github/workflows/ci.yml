@@ -164,9 +164,12 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
-      - name: Install Icarus Verilog
+      - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          sudo apt-get install -y iverilog
+          curl -L -o /usr/local/bin/iverilog "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
+          curl -L -o /usr/local/bin/vvp "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
+          iverilog -V
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -319,27 +322,11 @@ jobs:
           mv protoc-*.zip /tmp/
           protoc --version
 
-      - name: Install Icarus Verilog
+      - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          export DEBIAN_FRONTEND=noninteractive
-          # First, remove any existing iverilog.
-          sudo apt-get remove -y iverilog
-          echo "--- Verifying removal ---"
-          iverilog -V || echo "iverilog not found, as expected."
-          # Now, install build dependencies.
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git autoconf bison flex gperf libreadline-dev zlib1g-dev build-essential
-          # And build from source.
-          git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
-          cd /tmp/iverilog
-          git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
-          sh autoconf.sh
-          ./configure --prefix=/usr
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
-          cd ..
-          echo "--- Verifying installation ---"
+          curl -L -o /usr/local/bin/iverilog "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
+          curl -L -o /usr/local/bin/vvp "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
           which iverilog
           iverilog -V
 
@@ -619,18 +606,11 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
-      - name: Install Icarus Verilog
+      - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git autoconf bison flex gperf libreadline-dev zlib1g-dev build-essential
-          git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
-          cd /tmp/iverilog
-          git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
-          sh autoconf.sh
-          ./configure --prefix=/usr
-          make -j$(nproc)
-          sudo make install
-          cd ..
+          curl -L -o /usr/local/bin/iverilog "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
+          curl -L -o /usr/local/bin/vvp "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
           iverilog -V
 
       - name: Install libc++ from llvm-18
