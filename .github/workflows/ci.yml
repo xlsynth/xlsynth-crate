@@ -565,6 +565,9 @@ jobs:
       - name: Test crate
         run: |
           source $HOME/.cargo/env
+          export PATH=/usr/local/bin:/usr/bin:$PATH
+          which iverilog || true
+          iverilog -V || true
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --workspace
