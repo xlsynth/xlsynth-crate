@@ -751,11 +751,6 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl pkg-config libssl-dev build-essential meson
-
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@v0.0.6
 
@@ -774,7 +769,6 @@ jobs:
 
       - name: Install protobuf compiler
         run: |
-          sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
       - name: Download and set up Boolector
@@ -805,6 +799,15 @@ jobs:
       - name: Install cargo-fuzz
         run: |
           cargo install cargo-fuzz
+
+      - name: Cargo fuzz build
+        env:
+          XLSYNTH_TOOLS: /tmp/xlsynth_tools_smoke
+          XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
+          DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
+        run: |
+          cd xlsynth-g8r/fuzz
+          cargo fuzz build --features with-z3-binary-test,with-boolector-system
 
       - name: Build and run fuzz_ir_opt_equiv for 10 seconds
         env:
@@ -841,3 +844,12 @@ jobs:
         run: |
           cd xlsynth-g8r/fuzz
           cargo fuzz run fuzz_gate_transform_equiv --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
+
+      - name: Build and run fuzz_ir_rebase_equiv for 10 seconds
+        env:
+          XLSYNTH_TOOLS: /tmp/xlsynth_tools_smoke
+          XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
+          DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
+        run: |
+          cd xlsynth-g8r/fuzz
+          cargo fuzz run fuzz_ir_rebase_equiv --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
