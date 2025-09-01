@@ -198,7 +198,6 @@ pub fn get_topological_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     topo_from_nodes(nodes)
 }
 
-
 pub fn remap_payload_with<FMap>(payload: &NodePayload, mut map: FMap) -> NodePayload
 where
     FMap: FnMut(NodeRef) -> NodeRef,

@@ -5,9 +5,9 @@ use libfuzzer_sys::fuzz_target;
 
 use xlsynth_g8r::xls_ir::{ir, ir_parser};
 use xlsynth_g8r::xls_ir::simple_rebase::rebase_onto;
-use xlsynth_g8r::xls_ir::ir_validate::{validate_fn, ValidationError};
+use xlsynth_g8r::xls_ir::ir_validate::validate_fn;
 use xlsynth_g8r::equiv::prove_equiv_via_toolchain::{self, EquivResult};
-use xlsynth_test_helpers::ir_fuzz::{generate_ir_fn, FuzzSampleSameTypedPair};
+use xlsynth_g8r::xls_ir::ir_fuzz::{generate_ir_fn, FuzzSampleSameTypedPair};
 
 fn max_text_id(f: &ir::Fn) -> usize {
     f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0)
@@ -35,14 +35,14 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     // 1) Build orig IR from the first sample
     let mut pkg_orig = xlsynth::IrPackage::new("fuzz_pkg_orig").unwrap();
-    if let Err(_) = generate_ir_fn(pair.first.input_bits, pair.first.ops.clone(), &mut pkg_orig) {
+    if let Err(_) = generate_ir_fn(pair.first.input_bits, pair.first.ops.clone(), &mut pkg_orig, None) {
         // Generator can produce temporarily unsupported constructs; not a sample failure.
         return;
     }
 
     // 2) Build desired IR from the second sample
     let mut pkg_desired = xlsynth::IrPackage::new("fuzz_pkg_desired").unwrap();
-    if let Err(_) = generate_ir_fn(pair.second.input_bits, pair.second.ops.clone(), &mut pkg_desired) {
+    if let Err(_) = generate_ir_fn(pair.second.input_bits, pair.second.ops.clone(), &mut pkg_desired, None) {
         // Generator can produce temporarily unsupported constructs; not a sample failure.
         return;
     }
