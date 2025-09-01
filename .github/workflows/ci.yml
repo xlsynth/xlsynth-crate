@@ -175,6 +175,7 @@ jobs:
           sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
           sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
           sudo tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
+          rm -rf artifacts
           iverilog -V
 
       - name: Set up Rust
@@ -272,7 +273,7 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev
+          apt-get install -y --no-install-recommends python3 python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev zlib1g-dev
           pip3 install -r requirements.txt
 
       - name: Set up Python + pre-commit
@@ -339,6 +340,7 @@ jobs:
           sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
           sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
           sudo tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
+          rm -rf artifacts
           which iverilog
           iverilog -V
 
@@ -527,21 +529,17 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
-      - name: Build & install Icarus Verilog from source
+      - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          dnf groupinstall -y "Development Tools"
-          # gperf lives in the Powertools (a.k.a. CodeReady Builder) repo - make sure it is enabled
-          dnf install -y dnf-plugins-core
-          dnf config-manager --set-enabled powertools
-          dnf install -y git autoconf bison flex gperf readline-devel zlib-devel which
-          git clone https://github.com/steveicarus/iverilog.git /tmp/iverilog
-          cd /tmp/iverilog
-          git checkout ea26587b5ef485f2ca82a3e4364e58ec3307240f
-          sh autoconf.sh
-          ./configure --prefix=/usr
-          make -j$(nproc)
-          make install
-          cd ..
+          mkdir -p artifacts
+          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
+          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          install -m 0755 artifacts/iverilog-rocky8 /usr/bin/iverilog
+          install -m 0755 artifacts/vvp-rocky8 /usr/bin/vvp
+          mkdir -p /usr/local/lib
+          tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
+          rm -rf artifacts
 
       - name: Set up dependencies
         run: |
