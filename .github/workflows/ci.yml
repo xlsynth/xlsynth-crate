@@ -802,7 +802,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz build --features with-z3-binary-test,with-boolector-system
+          cargo fuzz build --features with-z3-binary-test,with-boolector-system,with-z3-system
 
       - name: Build and run fuzz_ir_opt_equiv for 10 seconds
         env:
@@ -811,7 +811,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
+          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
 
       - name: Build and run fuzz_gatify for 10 seconds
         env:
@@ -820,7 +820,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gatify --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
+          cargo fuzz run fuzz_gatify --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
 
       - name: Build and run fuzz_gate_fn_roundtrip for 10 seconds
         env:
@@ -829,7 +829,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gate_fn_roundtrip --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
+          cargo fuzz run fuzz_gate_fn_roundtrip --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
 
       - name: Build and run fuzz_gate_transform_equiv for 10 seconds
         env:
@@ -838,7 +838,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gate_transform_equiv --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
+          cargo fuzz run fuzz_gate_transform_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
 
       - name: Build and run fuzz_ir_rebase_equiv for 10 seconds
         env:
@@ -847,7 +847,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_rebase_equiv --features with-z3-binary-test,with-boolector-system -- -max_total_time=10
+          cargo fuzz run fuzz_ir_rebase_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
 
   # -----------------------------------------------------------
   # X) Benches compile-only job
@@ -859,6 +859,17 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+
+      - name: Install libc++ from llvm-18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg curl cmake
+          cd /tmp/
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          sudo apt-get install -y libz3-dev
 
       - name: Install protobuf compiler
         run: |
