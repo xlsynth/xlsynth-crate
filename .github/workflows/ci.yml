@@ -166,9 +166,16 @@ jobs:
 
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          curl -L -o /usr/local/bin/iverilog "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
-          curl -L -o /usr/local/bin/vvp "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          set -euo pipefail
+          mkdir -p artifacts
+          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
+          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          sudo mkdir -p /usr/local/bin /usr/local/lib
+          sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
+          sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
           sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
+          sudo tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
           iverilog -V
 
       - name: Set up Rust
@@ -324,9 +331,16 @@ jobs:
 
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          curl -L -o /usr/local/bin/iverilog "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
-          curl -L -o /usr/local/bin/vvp "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          set -euo pipefail
+          mkdir -p artifacts
+          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
+          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          sudo mkdir -p /usr/local/bin /usr/local/lib
+          sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
+          sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
           sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
+          sudo tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
           which iverilog
           iverilog -V
 
@@ -608,9 +622,16 @@ jobs:
 
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          curl -L -o /usr/local/bin/iverilog "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
-          curl -L -o /usr/local/bin/vvp "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          set -euo pipefail
+          mkdir -p artifacts
+          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
+          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          sudo mkdir -p /usr/local/bin /usr/local/lib
+          sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
+          sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
           sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
+          sudo tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
           iverilog -V
 
       - name: Install libc++ from llvm-18
