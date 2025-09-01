@@ -577,6 +577,14 @@ jobs:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-22.04
     steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Resolve XLS release tag
+        id: resolve-xls-tag-valgrind
+        run: |
+          TAG=$(python3 get_required_xls_release_tag.py)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
       - name: Set up Rust nightly
         uses: actions-rs/toolchain@v1
         with:
@@ -600,9 +608,6 @@ jobs:
         with:
           cache-on-failure: true
           key: ubuntu-22.04-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Check out code
-        uses: actions/checkout@v2
 
       - name: Install protobuf compiler
         run: |
@@ -648,7 +653,9 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           pip3 install -r requirements.txt
-          python3 download_release.py -p ubuntu2004 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          TAG='${{ steps.resolve-xls-tag-valgrind.outputs.tag }}'
+          echo "Resolved XLS release tag: ${TAG}"
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Download Slang
         run: |
@@ -674,6 +681,12 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v2
+
+      - name: Resolve XLS release tag
+        id: resolve-xls-tag-predownload
+        run: |
+          TAG=$(python3 get_required_xls_release_tag.py)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -705,7 +718,9 @@ jobs:
         run: |
           # Note we download rocky8 version just because they have the fewest/oldest system
           # requirements.
-          python3 download_release.py -p rocky8 -o pre_download -d --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          TAG='${{ steps.resolve-xls-tag-predownload.outputs.tag }}'
+          echo "Resolved XLS release tag: ${TAG}"
+          python3 download_release.py -p rocky8 -o pre_download -d -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Run cargo tests using pre-downloaded artifacts
         env:
@@ -726,6 +741,12 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v2
+
+      - name: Resolve XLS release tag
+        id: resolve-xls-tag-smoke
+        run: |
+          TAG=$(python3 get_required_xls_release_tag.py)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
