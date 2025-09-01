@@ -166,7 +166,6 @@ jobs:
 
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          set -euo pipefail
           mkdir -p artifacts
           curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
           curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
@@ -331,7 +330,6 @@ jobs:
 
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          set -euo pipefail
           mkdir -p artifacts
           curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
           curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
@@ -622,7 +620,6 @@ jobs:
 
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
-          set -euo pipefail
           mkdir -p artifacts
           curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
           curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
