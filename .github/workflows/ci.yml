@@ -428,9 +428,12 @@ jobs:
 
       - name: Download Bitwuzla shared library (macOS arm64)
         run: |
+          sudo mkdir -p /usr/local/lib
           curl -L --retry 5 --retry-delay 2 --retry-connrefused \
-            -o /usr/local/lib/libbitwuzla.dylib \
+            -o libbitwuzla-osx-arm64.dylib \
             https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32/libbitwuzla-osx-arm64.dylib
+          sudo install -m 0644 libbitwuzla-osx-arm64.dylib /usr/local/lib/libbitwuzla.dylib
+          echo "DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib:$DYLD_FALLBACK_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Install protobuf compiler
         run: |
