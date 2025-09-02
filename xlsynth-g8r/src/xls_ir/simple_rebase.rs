@@ -447,11 +447,11 @@ mod tests {
 
     #[test]
     fn name_collision_new_node_uniquified() {
+        let _ = env_logger::builder().is_test(true).try_init();
         // existing has a named node 'foo'
         let existing = parse_fn(
             r#"fn c(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
-  foo: bits[8] = add(x, y, id=3)
-  ret foo
+  ret foo: bits[8] = add(x, y, id=3)
 }"#,
         );
         // desired reuses the add node (with a different name) and adds a NEW node also
@@ -460,8 +460,7 @@ mod tests {
         let desired = parse_fn(
             r#"fn c(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
   t: bits[8] = add(x, y, id=3)
-  foo: bits[8] = umul(t, y, id=4)
-  ret foo
+  ret foo: bits[8] = umul(t, y, id=4)
 }"#,
         );
         let mut next_id = 7000usize;

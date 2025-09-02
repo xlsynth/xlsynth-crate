@@ -257,59 +257,14 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     let mut text_diff_chars: usize = 0;
     let mut rtl_diff_chars: usize = 0;
     if compute_text_diff {
-        // Compute text-level Levenshtein distance between IR text(old) and IR
-        // text(patched(old)).
-        println!(
-            "  Computing text diff char count (Myers, inserts+deletes) for IR text old → patched(old)..."
-        );
-        text_diff_chars = myers_insdel_distance_bytes(
-            old_ir_text_emitted.as_bytes(),
-            patched_ir_text_emitted.as_bytes(),
-        );
-        println!(
-            "  Text diff char count (old → patched(old)): {}",
-            text_diff_chars
-        );
-
-        // Emit RTL (Verilog) for old and patched IR, and compute RTL text diff.
-        let old_pkg_x = xlsynth::IrPackage::parse_ir(
+        let (ir_chars, rtl_chars) = compute_package_text_diffs(
             &old_ir_text_emitted,
-            old_path.file_name().and_then(|s| s.to_str()),
-        )
-        .expect("parse old IR for RTL codegen");
-        let patched_pkg_x = xlsynth::IrPackage::parse_ir(&patched_ir_text_emitted, None)
-            .expect("parse patched IR for RTL codegen");
-        let mut old_pkg_x = old_pkg_x;
-        let mut patched_pkg_x = patched_pkg_x;
-        let _ = old_pkg_x.set_top_by_name(&new_fn.name);
-        let _ = patched_pkg_x.set_top_by_name(&new_fn.name);
-        let delay_model = "unit";
-        let sched_proto = format!("delay_model: \"{}\"\npipeline_stages: 1", delay_model);
-        let codegen_proto = format!(
-            "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nuse_system_verilog: true\nmodule_name: \"{}\"\ncodegen_version: 1",
-            new_fn.name
+            &patched_ir_text_emitted,
+            &new_fn.name,
+            &out_dir,
         );
-        let old_sv = xlsynth::schedule_and_codegen(&old_pkg_x, &sched_proto, &codegen_proto)
-            .and_then(|res| res.get_verilog_text())
-            .expect("schedule/codegen old IR");
-        let patched_sv =
-            xlsynth::schedule_and_codegen(&patched_pkg_x, &sched_proto, &codegen_proto)
-                .and_then(|res| res.get_verilog_text())
-                .expect("schedule/codegen patched IR");
-        let old_sv_path = out_dir.join("rtl_old.sv");
-        let patched_sv_path = out_dir.join("rtl_patched_old.sv");
-        std::fs::write(&old_sv_path, old_sv.as_bytes()).expect("write rtl_old.sv");
-        std::fs::write(&patched_sv_path, patched_sv.as_bytes()).expect("write rtl_patched_old.sv");
-        println!("  RTL (old) written to: {}", old_sv_path.display());
-        println!(
-            "  RTL (patched(old)) written to: {}",
-            patched_sv_path.display()
-        );
-        rtl_diff_chars = myers_insdel_distance_bytes(old_sv.as_bytes(), patched_sv.as_bytes());
-        println!(
-            "  RTL text diff char count (old → patched(old)): {}",
-            rtl_diff_chars
-        );
+        text_diff_chars = ir_chars;
+        rtl_diff_chars = rtl_chars;
     }
 
     // Serialize report with both IR and RTL text edit distances now known.
@@ -560,16 +515,7 @@ fn handle_ir_localized_eco_blocks_in_packages(
         .map(|s| s == "true")
         .unwrap_or(false);
     let text_diff_chars: usize = if compute_text_diff {
-        println!(
-            "  Computing text diff {} bytes vs {} bytes...",
-            old_block_text.as_bytes().len(),
-            patched_block_text.as_bytes().len()
-        );
-        let a = old_block_text.as_bytes();
-        let b = patched_block_text.as_bytes();
-        let d = myers_insdel_distance_bytes(a, b);
-        println!("  Text diff char count (old → patched(old)): {}", d);
-        d
+        compute_block_text_diff(&old_block_text, &patched_block_text)
     } else {
         0
     };
@@ -653,6 +599,74 @@ fn myers_insdel_distance_bytes(a: &[u8], b: &[u8]) -> usize {
         }
     }
     max
+}
+
+fn compute_block_text_diff(old_block_text: &str, patched_block_text: &str) -> usize {
+    println!(
+        "  Computing text diff {} bytes vs {} bytes...",
+        old_block_text.as_bytes().len(),
+        patched_block_text.as_bytes().len()
+    );
+    let a = old_block_text.as_bytes();
+    let b = patched_block_text.as_bytes();
+    let d = myers_insdel_distance_bytes(a, b);
+    println!("  Text diff char count (old → patched(old)): {}", d);
+    d
+}
+
+fn compute_package_text_diffs(
+    old_ir_text_emitted: &str,
+    patched_ir_text_emitted: &str,
+    new_fn_name: &str,
+    out_dir: &std::path::Path,
+) -> (usize, usize) {
+    println!(
+        "  Computing text diff char count (Myers, inserts+deletes) for IR text old → patched(old)..."
+    );
+    let text_diff_chars = myers_insdel_distance_bytes(
+        old_ir_text_emitted.as_bytes(),
+        patched_ir_text_emitted.as_bytes(),
+    );
+    println!(
+        "  Text diff char count (old → patched(old)): {}",
+        text_diff_chars
+    );
+
+    let old_pkg_x = xlsynth::IrPackage::parse_ir(old_ir_text_emitted, None)
+        .expect("parse old IR for RTL codegen");
+    let patched_pkg_x = xlsynth::IrPackage::parse_ir(patched_ir_text_emitted, None)
+        .expect("parse patched IR for RTL codegen");
+    let mut old_pkg_x = old_pkg_x;
+    let mut patched_pkg_x = patched_pkg_x;
+    let _ = old_pkg_x.set_top_by_name(new_fn_name);
+    let _ = patched_pkg_x.set_top_by_name(new_fn_name);
+    let delay_model = "unit";
+    let sched_proto = format!("delay_model: \"{}\"\npipeline_stages: 1", delay_model);
+    let codegen_proto = format!(
+        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nuse_system_verilog: true\nmodule_name: \"{}\"\ncodegen_version: 1",
+        new_fn_name
+    );
+    let old_sv = xlsynth::schedule_and_codegen(&old_pkg_x, &sched_proto, &codegen_proto)
+        .and_then(|res| res.get_verilog_text())
+        .expect("schedule/codegen old IR");
+    let patched_sv = xlsynth::schedule_and_codegen(&patched_pkg_x, &sched_proto, &codegen_proto)
+        .and_then(|res| res.get_verilog_text())
+        .expect("schedule/codegen patched IR");
+    let old_sv_path = out_dir.join("rtl_old.sv");
+    let patched_sv_path = out_dir.join("rtl_patched_old.sv");
+    std::fs::write(&old_sv_path, old_sv.as_bytes()).expect("write rtl_old.sv");
+    std::fs::write(&patched_sv_path, patched_sv.as_bytes()).expect("write rtl_patched_old.sv");
+    println!("  RTL (old) written to: {}", old_sv_path.display());
+    println!(
+        "  RTL (patched(old)) written to: {}",
+        patched_sv_path.display()
+    );
+    let rtl_diff_chars = myers_insdel_distance_bytes(old_sv.as_bytes(), patched_sv.as_bytes());
+    println!(
+        "  RTL text diff char count (old → patched(old)): {}",
+        rtl_diff_chars
+    );
+    (text_diff_chars, rtl_diff_chars)
 }
 
 fn type_zero_value_text(ty: &Type) -> String {
@@ -1066,10 +1080,3 @@ fn reshape_args_to_params(
     }
     Ok(out)
 }
-
-// (Unused) Left here for reference if we reinstate edit-based summaries in the
-// future. fn extract_op_from_signature(s: &str) -> String {
-//     if let Some(idx) = s.find('(') { return s[..idx].to_string(); }
-//     if let Some(idx) = s.find(':') { return s[..idx].to_string(); }
-//     s.to_string()
-// }

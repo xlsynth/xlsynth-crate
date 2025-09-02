@@ -65,7 +65,10 @@ mod tests {
 }"#,
         );
         let result = compute_localized_eco(&f, &g);
-        assert_eq!(result.to_string(), g.to_string().replace("fn id", "fn id"));
+        let expected = r#"fn id(a: bits[8] id=1) -> bits[8] {
+  ret identity.2: bits[8] = identity(a, id=2)
+}"#;
+        assert_eq!(result.to_string(), expected);
         // Ensure no additional nodes were introduced.
         assert_eq!(result.nodes.len(), f.nodes.len());
     }
@@ -86,7 +89,12 @@ mod tests {
         let result = compute_localized_eco(&old, &new);
         // Expect one extra node over old.
         assert_eq!(result.nodes.len(), old.nodes.len() + 1);
-        // Result should print like `new` modulo deterministic node ids and name.
+        // Full IR textual expectation.
+        let expected = r#"fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  add.3: bits[8] = add(a, b, id=3)
+  ret umul.4: bits[8] = umul(add.3, b, id=4)
+}"#;
+        assert_eq!(result.to_string(), expected);
         assert_eq!(result.get_type(), new.get_type());
     }
 }
