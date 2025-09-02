@@ -167,9 +167,11 @@ jobs:
       - name: Download Bitwuzla shared library (rocky8)
         run: |
           curl -L --retry 5 --retry-delay 2 --retry-connrefused \
-            -o /usr/lib/libbitwuzla.so \
+            -o libbitwuzla-rocky8.so \
             https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32/libbitwuzla-rocky8.so
+          sudo install -m 0644 libbitwuzla-rocky8.so /usr/lib/libbitwuzla.so
           sudo ldconfig || true
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
@@ -223,6 +225,8 @@ jobs:
       - name: Install Z3 binary
         run: |
           sudo apt-get install -y z3
+          echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Test crate
         env:
