@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use super::ir::{self, Fn, NodePayload, Package, PackageMember, Type};
+use super::ir::{Fn, NaryOp, NodePayload, Package, PackageMember, Type};
 use super::ir_utils::operands;
 
 /// Errors that can arise during validation of XLS IR structures.
@@ -46,6 +46,9 @@ pub enum ValidationError {
     /// The function refers to another function that does not exist in the
     /// package.
     UnknownCallee { func: String, callee: String },
+    /// Bitwise n-ary ops (and/or/xor/nand/nor) must have identical bits-typed
+    /// operands.
+    NaryBitwiseOperandTypeMismatch { func: String, node_index: usize },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -113,6 +116,13 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "function '{}' references undefined callee '{}'",
                     func, callee
+                )
+            }
+            ValidationError::NaryBitwiseOperandTypeMismatch { func, node_index } => {
+                write!(
+                    f,
+                    "function '{}' node {} has mismatched operand types for bitwise n-ary op",
+                    func, node_index
                 )
             }
         }
@@ -231,6 +241,38 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
             }
             _ => {}
         }
+
+        // Enforce that bitwise n-ary ops have identically typed bit operands.
+        if let NodePayload::Nary(op, elems) = &node.payload {
+            match op {
+                NaryOp::And | NaryOp::Or | NaryOp::Xor | NaryOp::Nand | NaryOp::Nor => {
+                    let first_ty = f.get_node(elems[0]).ty.clone();
+                    log::trace!(
+                        "validating nary op: {:?} first_ty: {:?}",
+                        node.payload,
+                        first_ty
+                    );
+                    // Require bits type and identical types across all operands.
+                    for nr in elems.iter().skip(1) {
+                        let operand_ty = &f.get_node(*nr).ty;
+                        log::trace!(
+                            "=> validating nary op: {:?} operand_ty: {:?}",
+                            node.payload,
+                            operand_ty
+                        );
+                        if operand_ty != &first_ty {
+                            return Err(ValidationError::NaryBitwiseOperandTypeMismatch {
+                                func: f.name.clone(),
+                                node_index: i,
+                            });
+                        }
+                    }
+                }
+                NaryOp::Concat => {
+                    // Does not require identical types across all operands.
+                }
+            }
+        }
     }
 
     let ret_node_ref = f
@@ -258,6 +300,7 @@ fn package_has_fn(p: &Package, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xls_ir::ir;
     use crate::xls_ir::ir_parser::Parser;
 
     #[test]

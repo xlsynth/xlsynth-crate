@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::fuzz_utils::arbitrary_irbits;
 use crate::xls_ir::ir::Type as InternalType;
 use crate::xls_ir::ir_parser;
 use arbitrary::Arbitrary;
+use rand::Rng;
 use std::collections::BTreeMap;
 use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
 
@@ -216,6 +218,35 @@ pub fn internal_type_to_xlsynth(pkg: &mut xlsynth::IrPackage, ty: &InternalType)
             pkg.get_array_type(&elem_type, count_i64)
         }
         InternalType::Token => pkg.get_token_type(),
+    }
+}
+
+/// Produces an arbitrary `IrValue` for the given internal IR type using the
+/// provided RNG.
+pub fn arbitrary_ir_value_for_internal_type<R: Rng>(
+    rng: &mut R,
+    ty: &InternalType,
+) -> xlsynth::IrValue {
+    match ty {
+        InternalType::Bits(width) => {
+            let bits = arbitrary_irbits(rng, *width);
+            xlsynth::IrValue::from_bits(&bits)
+        }
+        InternalType::Tuple(elem_types) => {
+            let elems: Vec<xlsynth::IrValue> = elem_types
+                .iter()
+                .map(|t| arbitrary_ir_value_for_internal_type(rng, t))
+                .collect();
+            xlsynth::IrValue::make_tuple(&elems)
+        }
+        InternalType::Array(arr) => {
+            let mut elems: Vec<xlsynth::IrValue> = Vec::with_capacity(arr.element_count);
+            for _ in 0..arr.element_count {
+                elems.push(arbitrary_ir_value_for_internal_type(rng, &arr.element_type));
+            }
+            xlsynth::IrValue::make_array(&elems).expect("array elements should be same-typed")
+        }
+        InternalType::Token => xlsynth::IrValue::make_token(),
     }
 }
 
@@ -960,6 +991,28 @@ impl FuzzSample {
         }
 
         Ok(sample)
+    }
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzSampleWithArgs {
+    pub sample: FuzzSample,
+    /// Random seeds used to derive argument values for the function parameters.
+    pub arg_seeds: Vec<u64>,
+}
+
+impl FuzzSampleWithArgs {
+    /// Generates `IrValue` arguments for the parameters of the given internal
+    /// IR function.
+    pub fn gen_args_for_fn(&self, f: &crate::xls_ir::ir::Fn) -> Vec<xlsynth::IrValue> {
+        use rand_pcg::Pcg64Mcg;
+        let mut out: Vec<xlsynth::IrValue> = Vec::with_capacity(f.params.len());
+        for (i, p) in f.params.iter().enumerate() {
+            let seed = self.arg_seeds.get(i).copied().unwrap_or(0);
+            let mut rng = Pcg64Mcg::new(seed as u128);
+            out.push(arbitrary_ir_value_for_internal_type(&mut rng, &p.ty));
+        }
+        out
     }
 }
 

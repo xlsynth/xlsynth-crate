@@ -43,6 +43,20 @@ Primarily tests:
 
 Builds a random `GateFn`, emits AIGER, reloads AIGER into a new `GateFn`, and checks structural equivalence.
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_eval_interp_equiv.rs
+
+Differentially compares our Rust IR function interpreter (`eval_fn`) with the xlsynth C++ interpreter on the same randomly generated function and arguments.
+
+- Generates a random XLS IR function (via C++ builder), pretty-prints, and reparses to the Rust internal IR.
+- Samples argument values that match the function parameter types using an `Arbitrary`-driven seed.
+- Evaluates with both engines and asserts the results are equal.
+
+Early-return rationale:
+
+- Skips inputs that contain IR operations not yet supported by `eval_pure`/`eval_fn` (e.g., reverse, concat, extends, etc.). These are tracked and will be enabled as support lands.
+- Skips degenerate generator inputs (e.g., empty op lists, zero-width inputs) to avoid biasing toward trivial cases.
+- If the external interpreter or parser rejects a sample due to unrelated infrastructure issues, the target returns early rather than classify as a sample failure.
+
 Primarily tests:
 
 - AIGER emitter/loader roundtrip
