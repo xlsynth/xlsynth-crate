@@ -379,6 +379,7 @@ Computes a localized ECO diff (old → new) between two IR functions and emits a
 - Sanity checks:
   - `--sanity-samples <N>` – if > 0, run N randomized interpreter samples (in addition to all-zeros and all-ones) to sanity-check that patched(old) ≡ new.
   - `--sanity-seed <SEED>` – seed for randomized interpreter samples.
+  - `--compute-text-diff=<BOOL>` – compute IR/RTL text diffs (expensive). Defaults to `false`.
 
 Example:
 

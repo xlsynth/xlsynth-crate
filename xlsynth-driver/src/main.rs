@@ -867,6 +867,15 @@ fn main() {
                         .help("Directory to write outputs (JSON, patched .ir). If omitted, a temp directory is created and printed."),
                 )
                 .arg(
+                    Arg::new("compute_text_diff")
+                        .long("compute-text-diff")
+                        .value_name("BOOL")
+                        .help("Compute IR/RTL text diffs (expensive)")
+                        .value_parser(["true", "false"]).num_args(1)
+                        .default_value("false")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("sanity_samples")
                         .long("sanity-samples")
                         .value_name("N")

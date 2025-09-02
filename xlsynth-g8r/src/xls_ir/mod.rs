@@ -14,6 +14,7 @@ pub mod ir_utils;
 pub mod ir_validate;
 pub mod ir_verify;
 pub mod localized_eco;
+pub mod localized_eco2;
 pub mod node_hashing;
 pub mod simple_rebase;
 pub mod structural_similarity;

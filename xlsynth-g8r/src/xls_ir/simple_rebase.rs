@@ -5,6 +5,7 @@
 //! existing function wherever structurally equivalent subgraphs are found.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::xls_ir::ir::{Fn as IrFn, Node, NodeRef, Type};
 use crate::xls_ir::ir_utils::{get_topological, get_topological_nodes, remap_payload_with};
@@ -49,6 +50,32 @@ pub fn rebase_onto(
 
     // Start result function with a clone of `existing`'s parameters and nodes.
     let mut result_nodes: Vec<Node> = existing.nodes.clone();
+    // Track used names in the result to avoid duplicate-name collisions.
+    let mut used_names: HashSet<String> = HashSet::new();
+    for n in result_nodes.iter() {
+        if let Some(name) = &n.name {
+            used_names.insert(name.clone());
+        }
+    }
+    // For deterministic uniquification, track the next numeric suffix per base
+    // name.
+    let mut next_suffix_for: HashMap<String, usize> = HashMap::new();
+    let mut make_unique_name = |base: &str| -> String {
+        if !used_names.contains(base) {
+            used_names.insert(base.to_string());
+            return base.to_string();
+        }
+        let mut suffix = *next_suffix_for.get(base).unwrap_or(&1);
+        loop {
+            let candidate = format!("{}__{}", base, suffix);
+            if !used_names.contains(&candidate) {
+                used_names.insert(candidate.clone());
+                next_suffix_for.insert(base.to_string(), suffix + 1);
+                return candidate;
+            }
+            suffix += 1;
+        }
+    };
     let result_params = existing.params.clone();
     let result_ret_ty: Type = desired.ret_ty.clone();
 
@@ -98,9 +125,15 @@ pub fn rebase_onto(
             }
         };
         let new_payload = remap_payload_with(&d_node.payload, mapper);
+        // Ensure any new node name does not collide with names already present in the
+        // result.
+        let new_name: Option<String> = match &d_node.name {
+            Some(s) => Some(make_unique_name(s)),
+            None => None,
+        };
         let new_node = Node {
             text_id: gen_new_id(),
-            name: d_node.name.clone(),
+            name: new_name,
             ty: d_node.ty.clone(),
             payload: new_payload,
             pos: d_node.pos.clone(),
@@ -410,6 +443,68 @@ mod tests {
 
         // Semantic equivalence: desired == result
         check_desired_equivalence(&desired, &result);
+    }
+
+    #[test]
+    fn name_collision_new_node_uniquified() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        // existing has a named node 'foo'
+        let existing = parse_fn(
+            r#"fn c(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret foo: bits[8] = add(x, y, id=3)
+}"#,
+        );
+        // desired reuses the add node (with a different name) and adds a NEW node also
+        // named 'foo'. This would collide with existing's 'foo' unless we
+        // uniquify new-node names on rebase.
+        let desired = parse_fn(
+            r#"fn c(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  t: bits[8] = add(x, y, id=3)
+  ret foo: bits[8] = umul(t, y, id=4)
+}"#,
+        );
+        let mut next_id = 7000usize;
+        let result = rebase_onto(&desired, &existing, "c_rebased", || {
+            let id = next_id;
+            next_id += 1;
+            id
+        });
+
+        let expected = r#"fn c_rebased(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  foo: bits[8] = add(x, y, id=3)
+  ret foo__1: bits[8] = umul(foo, y, id=7000)
+}"#;
+        assert_eq!(result.to_string(), expected);
+
+        // Verify parse/validate of the pretty-printed result succeeds (no duplicate
+        // names).
+        let pkg_text = format!("package test\n\n top {}\n", result.to_string());
+        let mut p = Parser::new(&pkg_text);
+        let parsed_pkg = p.parse_and_validate_package();
+        assert!(
+            parsed_pkg.is_ok(),
+            "rebased function should be parseable without duplicate-name errors"
+        );
+
+        // Ensure there are no duplicate names among nodes in the result.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for n in result.nodes.iter() {
+            if let Some(name) = &n.name {
+                assert!(
+                    seen.insert(name.clone()),
+                    "duplicate node name found in result: {}",
+                    name
+                );
+            }
+        }
+        // And the added node does not keep the conflicting base name 'foo' if it was
+        // already used. There should be at most one exact 'foo' in the result.
+        let foo_count = result
+            .nodes
+            .iter()
+            .filter(|n| n.name.as_deref() == Some("foo"))
+            .count();
+        assert!(foo_count <= 1);
     }
 
     #[test]
