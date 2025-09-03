@@ -336,6 +336,7 @@ Computes a structural similarity summary between two IR functions by hashing nod
 - Output:
   - Always prints the return-node depth for each side, then one line per discrepant depth with the total discrepancy count, followed by concise opcode summaries on separate lines for LHS and RHS.
   - With `--show_discrepancies=true`, also prints detailed signature lines for items present only on one side.
+  - With `--diff_output_dir=<DIR>`, also writes two standalone IR packages to `<DIR>/lhs.ir` and `<DIR>/rhs.ir` that expose a common entry-point wrapper function forwarding to each side's minimized "diff" subgraph. If a toolchain is configured, the command will attempt to prove `LHS == LHS_common` and `RHS == RHS_common` and report the results.
 
 Example:
 
@@ -358,9 +359,19 @@ depth 13: 5
 
 Verbose details:
 
-```shell
+````shell
 xlsynth-driver ir-structural-similarity lhs.opt.ir rhs.opt.ir --show_discrepancies=true
-```
+
+Writing commonized diff entry packages and proving wrappers (requires toolchain configured):
+
+```shell
+xlsynth-driver ir-structural-similarity lhs.opt.ir rhs.opt.ir \
+  --lhs_ir_top=__instruction_dispatch__dispatch \
+  --rhs_ir_top=__instruction_dispatch__dispatch \
+  --diff_output_dir=diff_out
+````
+
+````
 
 Notes:
 
@@ -387,7 +398,7 @@ Example:
 xlsynth-driver ir-localized-eco old.opt.ir new.opt.ir \
   --old_ir_top=main --new_ir_top=main \
   --output_dir=eco_out --sanity-samples=10 --sanity-seed=0
-```
+````
 
 ### `ir2gates`: IR to GateFn statistics
 

@@ -824,6 +824,11 @@ fn main() {
                         .long("rhs_ir_top")
                         .help("The top-level entry point for the right-hand side IR"),
                 )
+                .arg(
+                    Arg::new("diff_output_dir")
+                        .long("diff_output_dir")
+                        .help("If set, writes commonized diff entry packages to this directory as lhs.ir and rhs.ir and attempts equivalence proofs against the originals (requires toolchain configured)"),
+                )
                 .add_bool_arg(
                     "show_discrepancies",
                     "Show per-depth discrepancy signatures in verbose form",

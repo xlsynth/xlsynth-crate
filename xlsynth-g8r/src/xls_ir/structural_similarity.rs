@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::xls_ir::ir::{FileTable, Package, PackageMember};
 use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type};
 use crate::xls_ir::ir_utils::{get_topological, operands, remap_payload_with};
 use crate::xls_ir::node_hashing::{
@@ -1109,7 +1110,9 @@ pub fn extract_dual_difference_subgraphs(lhs: &Fn, rhs: &Fn) -> (Fn, Fn) {
         }
     }
 
-    let mut common_keys: Vec<ConsumerKey> = lhs_keys.intersection(&rhs_keys).copied().collect();
+    // Use the union of boundary keys across LHS/RHS. Wrappers on each side will
+    // only consume tuple elements actually referenced by their common region.
+    let mut common_keys: Vec<ConsumerKey> = lhs_keys.union(&rhs_keys).copied().collect();
     // Stable order: by local_hash bytes, then bwd_hash bytes, then operand index
     common_keys.sort_by(|a, b| {
         let ord1 = a.local_hash.as_bytes().cmp(b.local_hash.as_bytes());
@@ -1201,6 +1204,677 @@ fn unify_param_sets(a: &mut Fn, b: &mut Fn) {
 
     remap(a);
     remap(b);
+}
+
+/// Builds two standalone packages that expose a common wrapper function name
+/// which forwards to the provided LHS/RHS subgraph functions, respectively.
+///
+/// The wrapper function name is taken from `lhs_sub.name` (and asserted equal
+/// to `rhs_sub.name`), so callers can use the same entry point on both sides.
+/// The callee subgraph functions are cloned and renamed to side-specific
+/// implementation names to avoid a name collision with the wrapper.
+pub fn build_common_wrapper_packages(lhs_sub: &Fn, rhs_sub: &Fn) -> (Package, Package) {
+    assert_eq!(
+        lhs_sub.name, rhs_sub.name,
+        "Expected identical subgraph function names after unification"
+    );
+    // Wrapper name shared across both packages.
+    let wrapper_name = lhs_sub.name.clone();
+
+    // Build one side.
+    let build_side = |sub: &Fn, impl_suffix: &str, pkg_suffix: &str| -> Package {
+        // Clone and rename the subgraph function to a side-specific impl name.
+        // Note: do not include the wrapper name in the impl symbol to avoid
+        // accidental renaming by naive top-name text replacement in downstream tools.
+        let mut impl_fn = sub.clone();
+        let impl_name = format!("__common_diff_impl{}", impl_suffix);
+        impl_fn.name = impl_name.clone();
+
+        // Build wrapper function that forwards params to the impl via Invoke.
+        let mut wrapper_nodes: Vec<Node> = Vec::new();
+        // Create GetParam nodes in the same order and with matching ParamIds.
+        for p in impl_fn.params.iter() {
+            wrapper_nodes.push(Node {
+                text_id: wrapper_nodes.len() + 1,
+                name: Some(p.name.clone()),
+                ty: p.ty.clone(),
+                payload: NodePayload::GetParam(p.id),
+                pos: None,
+            });
+        }
+        // Build the invoke to the impl function.
+        let invoke_operands: Vec<NodeRef> = (0..wrapper_nodes.len())
+            .map(|i| NodeRef { index: i })
+            .collect();
+        let invoke_node = Node {
+            text_id: wrapper_nodes.len() + 1,
+            name: None,
+            ty: impl_fn.ret_ty.clone(),
+            payload: NodePayload::Invoke {
+                to_apply: impl_name.clone(),
+                operands: invoke_operands,
+            },
+            pos: None,
+        };
+        let invoke_index = wrapper_nodes.len();
+        wrapper_nodes.push(invoke_node);
+
+        let wrapper_fn = Fn {
+            name: wrapper_name.clone(),
+            params: impl_fn.params.clone(),
+            ret_ty: impl_fn.ret_ty.clone(),
+            nodes: wrapper_nodes,
+            ret_node_ref: Some(NodeRef {
+                index: invoke_index,
+            }),
+        };
+
+        // Assemble a package with impl + wrapper; set wrapper as top.
+        let pkg = Package {
+            name: format!("{}_pkg{}", wrapper_name, pkg_suffix),
+            file_table: FileTable::new(),
+            members: vec![
+                PackageMember::Function(impl_fn),
+                PackageMember::Function(wrapper_fn),
+            ],
+            top_name: Some(wrapper_name.clone()),
+        };
+        // Ensure deterministic order: impl before wrapper (already ensured).
+        // Return package.
+        pkg
+    };
+
+    let lhs_pkg = build_side(lhs_sub, "__lhs_impl", "_lhs");
+    let rhs_pkg = build_side(rhs_sub, "__rhs_impl", "_rhs");
+    (lhs_pkg, rhs_pkg)
+}
+
+/// Ensures the inner invoke node exists in `new_nodes` and records its index.
+///
+/// The invoke targets `impl_name` and uses `external_sources` (mapped via
+/// `inc_to_new`) as its operands. The node type is the tuple of
+/// `key_output_types` (single element types collapse to the element type; empty
+/// becomes nil).
+fn ensure_inner_invoke_node(
+    new_nodes: &mut Vec<Node>,
+    inner_invoke_index: &mut Option<usize>,
+    external_sources: &[usize],
+    inc_to_new: &std::collections::HashMap<usize, usize>,
+    impl_name: &str,
+    key_output_types: &[Type],
+) {
+    if inner_invoke_index.is_some() {
+        return;
+    }
+
+    // Map external source indices to node refs in the new function.
+    let invoke_operands: Vec<NodeRef> = external_sources
+        .iter()
+        .copied()
+        .map(|src_idx| {
+            let ni = *inc_to_new
+                .get(&src_idx)
+                .expect("external source must have been created in common region");
+            NodeRef { index: ni }
+        })
+        .collect();
+
+    // Determine the return type of the inner invoke.
+    let ret_ty: Type = match key_output_types.len() {
+        0 => Type::nil(),
+        1 => key_output_types[0].clone(),
+        _ => Type::Tuple(
+            key_output_types
+                .iter()
+                .cloned()
+                .map(|t| Box::new(t))
+                .collect(),
+        ),
+    };
+
+    let invoke_node = Node {
+        text_id: new_nodes.len() + 1,
+        name: None,
+        ty: ret_ty,
+        payload: NodePayload::Invoke {
+            to_apply: impl_name.to_string(),
+            operands: invoke_operands,
+        },
+        pos: None,
+    };
+    let idx = new_nodes.len();
+    new_nodes.push(invoke_node);
+    *inner_invoke_index = Some(idx);
+}
+
+/// Builds packages where the top function is the original function with common
+/// graph preserved and the differing region replaced by an inner invoke to a
+/// side-specific implementation function constructed from the unmatched region.
+///
+/// The top wrapper on each side retains the original function name/signature.
+/// The inner implementation function is named by `impl_name` and is added to
+/// the package members alongside the top wrapper.
+fn build_commonized_wrapper_fn_with_inner(
+    orig: &Fn,
+    unmatched_mask: &[bool],
+    common_keys: &[ConsumerKey],
+    impl_name: &str,
+) -> Fn {
+    // Include common nodes (outside the unmatched region).
+    let n = orig.nodes.len();
+    let mut include_common: Vec<bool> = vec![false; n];
+    for i in 0..n {
+        include_common[i] = if i < unmatched_mask.len() {
+            !unmatched_mask[i]
+        } else {
+            true
+        };
+    }
+
+    // External sources needed by the inner unmatched region (to feed impl).
+    let mut external_sources: Vec<usize> = Vec::new();
+    for (i, inc) in unmatched_mask.iter().enumerate() {
+        if !*inc {
+            continue;
+        }
+        let deps = operands(&orig.nodes[i].payload);
+        for d in deps {
+            if d.index < include_common.len() && include_common[d.index] {
+                if !external_sources.contains(&d.index) {
+                    external_sources.push(d.index);
+                }
+            }
+        }
+    }
+    external_sources.sort_unstable();
+
+    // Map boundary edges to tuple indices of the inner impl output.
+    let users = collect_users_with_operand_indices(orig);
+    let (bwd_entries, _bd) = collect_backward_structural_entries(orig);
+    let mut key_to_tuple_index: HashMap<ConsumerKey, usize> = HashMap::new();
+    // Fallback map: (local_hash_bytes, operand_index) -> tuple index, only if
+    // unique.
+    let mut fallback_by_local_and_operand: HashMap<(Vec<u8>, usize), usize> = HashMap::new();
+    let mut fallback_multiplicity: HashMap<(Vec<u8>, usize), usize> = HashMap::new();
+    for (idx, key) in common_keys.iter().enumerate() {
+        key_to_tuple_index.insert(*key, idx);
+        let k = (key.local_hash.as_bytes().to_vec(), key.operand_index);
+        let c = fallback_multiplicity.entry(k.clone()).or_insert(0);
+        *c += 1;
+        if *c == 1 {
+            fallback_by_local_and_operand.insert(k, idx);
+        }
+    }
+    // Retain only unique entries in fallback map.
+    fallback_by_local_and_operand
+        .retain(|k, _| fallback_multiplicity.get(k).copied().unwrap_or(0) == 1);
+
+    // Determine output types for each tuple element of the inner impl (by key).
+    let mut key_output_types: Vec<Type> = Vec::with_capacity(common_keys.len());
+    for key in common_keys.iter() {
+        let mut found_ty: Option<Type> = None;
+        'outer: for (src_idx, inc_unmatched) in unmatched_mask.iter().copied().enumerate() {
+            if src_idx >= orig.nodes.len() || !inc_unmatched {
+                continue;
+            }
+            for (user_ref, op_index) in users[src_idx].iter().copied() {
+                if op_index != key.operand_index {
+                    continue;
+                }
+                if user_ref.index < include_common.len() && include_common[user_ref.index] {
+                    let local_h = compute_node_local_structural_hash(orig, user_ref);
+                    let bwd_h = bwd_entries[user_ref.index].hash;
+                    if local_h == key.local_hash && bwd_h == key.bwd_hash {
+                        found_ty = Some(orig.nodes[src_idx].ty.clone());
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        key_output_types.push(found_ty.unwrap_or_else(Type::nil));
+    }
+
+    // Build the common wrapper function nodes.
+    let order = get_topological(orig);
+    let mut new_nodes: Vec<Node> = Vec::new();
+    let mut inc_to_new: HashMap<usize, usize> = HashMap::new();
+    // Cache for tuple-index extraction nodes from the inner invoke result.
+    let mut tuple_index_node_for_output: HashMap<usize, usize> = HashMap::new();
+    // Create inner invoke lazily once all external sources are constructed.
+    let mut inner_invoke_index: Option<usize> = None;
+
+    for node_ref in order {
+        let i = node_ref.index;
+        if !include_common[i] {
+            continue;
+        }
+        let old_node = &orig.nodes[i];
+        // Mapper that rewires deps from unmatched region to tuple indexes from inner
+        // invoke.
+        let mut mapper = |r: NodeRef, operand_index: usize| -> NodeRef {
+            if include_common[r.index] {
+                let ni = *inc_to_new
+                    .get(&r.index)
+                    .expect("included dep must be created before consumer");
+                NodeRef { index: ni }
+            } else {
+                // This edge crosses from unmatched -> common; replace with tuple index from
+                // inner invoke. Ensure inner invoke exists (requires all
+                // external sources constructed). Find tuple element index via
+                // consumer key.
+                let local_h = compute_node_local_structural_hash(orig, NodeRef { index: i });
+                let bwd_h = bwd_entries[i].hash;
+                let key = ConsumerKey {
+                    local_hash: local_h,
+                    bwd_hash: bwd_h,
+                    operand_index,
+                };
+                let tuple_i = if let Some(ti) = key_to_tuple_index.get(&key).copied() {
+                    ti
+                } else {
+                    let lk = (key.local_hash.as_bytes().to_vec(), key.operand_index);
+                    *fallback_by_local_and_operand.get(&lk).unwrap_or_else(|| {
+                        let lh_bytes = key.local_hash.as_bytes();
+                        let lh_hex: String = lh_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                        panic!(
+                            "boundary edge must be present in common_keys: local_hash={} operand_index={} consumer_sig={}",
+                            lh_hex,
+                            key.operand_index,
+                            orig.get_node(NodeRef { index: i }).to_signature_string(orig)
+                        )
+                    })
+                };
+                if inner_invoke_index.is_none() {
+                    ensure_inner_invoke_node(
+                        &mut new_nodes,
+                        &mut inner_invoke_index,
+                        &external_sources,
+                        &inc_to_new,
+                        impl_name,
+                        &key_output_types,
+                    );
+                }
+                let inv_idx = inner_invoke_index.expect("inner invoke index set");
+                // Create or reuse a TupleIndex node extracting this element.
+                let ti_node_idx = if let Some(&idx) = tuple_index_node_for_output.get(&tuple_i) {
+                    idx
+                } else {
+                    let ti_node = Node {
+                        text_id: new_nodes.len() + 1,
+                        name: None,
+                        ty: key_output_types[tuple_i].clone(),
+                        payload: NodePayload::TupleIndex {
+                            tuple: NodeRef { index: inv_idx },
+                            index: tuple_i,
+                        },
+                        pos: None,
+                    };
+                    let idx = new_nodes.len();
+                    new_nodes.push(ti_node);
+                    tuple_index_node_for_output.insert(tuple_i, idx);
+                    idx
+                };
+                NodeRef { index: ti_node_idx }
+            }
+        };
+        // Remap payload with operand index-aware mapping.
+        let new_payload = {
+            match &old_node.payload {
+                NodePayload::Nil
+                | NodePayload::GetParam(_)
+                | NodePayload::Literal(_)
+                | NodePayload::Decode { .. }
+                | NodePayload::Encode { .. } => old_node.payload.clone(),
+                NodePayload::Tuple(elems) => NodePayload::Tuple(
+                    elems
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, k))
+                        .collect(),
+                ),
+                NodePayload::Array(elems) => NodePayload::Array(
+                    elems
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, k))
+                        .collect(),
+                ),
+                NodePayload::AfterAll(elems) => NodePayload::AfterAll(
+                    elems
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, k))
+                        .collect(),
+                ),
+                NodePayload::Nary(op, elems) => NodePayload::Nary(
+                    op.clone(),
+                    elems
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, k))
+                        .collect(),
+                ),
+                NodePayload::TupleIndex { tuple, index } => NodePayload::TupleIndex {
+                    tuple: mapper(*tuple, 0),
+                    index: *index,
+                },
+                NodePayload::Unop(op, a) => NodePayload::Unop(op.clone(), mapper(*a, 0)),
+                NodePayload::Binop(op, a, b) => {
+                    NodePayload::Binop(op.clone(), mapper(*a, 0), mapper(*b, 1))
+                }
+                NodePayload::SignExt { arg, new_bit_count } => NodePayload::SignExt {
+                    arg: mapper(*arg, 0),
+                    new_bit_count: *new_bit_count,
+                },
+                NodePayload::ZeroExt { arg, new_bit_count } => NodePayload::ZeroExt {
+                    arg: mapper(*arg, 0),
+                    new_bit_count: *new_bit_count,
+                },
+                NodePayload::ArrayUpdate {
+                    array,
+                    value,
+                    indices,
+                    assumed_in_bounds,
+                } => NodePayload::ArrayUpdate {
+                    array: mapper(*array, 0),
+                    value: mapper(*value, 1),
+                    indices: indices
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, 2 + k))
+                        .collect(),
+                    assumed_in_bounds: *assumed_in_bounds,
+                },
+                NodePayload::ArrayIndex {
+                    array,
+                    indices,
+                    assumed_in_bounds,
+                } => NodePayload::ArrayIndex {
+                    array: mapper(*array, 0),
+                    indices: indices
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, 1 + k))
+                        .collect(),
+                    assumed_in_bounds: *assumed_in_bounds,
+                },
+                NodePayload::DynamicBitSlice { arg, start, width } => {
+                    NodePayload::DynamicBitSlice {
+                        arg: mapper(*arg, 0),
+                        start: mapper(*start, 1),
+                        width: *width,
+                    }
+                }
+                NodePayload::BitSlice { arg, start, width } => NodePayload::BitSlice {
+                    arg: mapper(*arg, 0),
+                    start: *start,
+                    width: *width,
+                },
+                NodePayload::BitSliceUpdate {
+                    arg,
+                    start,
+                    update_value,
+                } => NodePayload::BitSliceUpdate {
+                    arg: mapper(*arg, 0),
+                    start: mapper(*start, 1),
+                    update_value: mapper(*update_value, 2),
+                },
+                NodePayload::Assert {
+                    token,
+                    activate,
+                    message,
+                    label,
+                } => NodePayload::Assert {
+                    token: mapper(*token, 0),
+                    activate: mapper(*activate, 1),
+                    message: message.clone(),
+                    label: label.clone(),
+                },
+                NodePayload::Trace {
+                    token,
+                    activated,
+                    format,
+                    operands,
+                } => NodePayload::Trace {
+                    token: mapper(*token, 0),
+                    activated: mapper(*activated, 1),
+                    format: format.clone(),
+                    operands: operands
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, 2 + k))
+                        .collect(),
+                },
+                NodePayload::Invoke { to_apply, operands } => NodePayload::Invoke {
+                    to_apply: to_apply.clone(),
+                    operands: operands
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, k))
+                        .collect(),
+                },
+                NodePayload::PrioritySel {
+                    selector,
+                    cases,
+                    default,
+                } => NodePayload::PrioritySel {
+                    selector: mapper(*selector, 0),
+                    cases: cases
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, 1 + k))
+                        .collect(),
+                    default: default.map(|r| mapper(r, 1 + cases.len())),
+                },
+                NodePayload::Sel {
+                    selector,
+                    cases,
+                    default,
+                } => NodePayload::Sel {
+                    selector: mapper(*selector, 0),
+                    cases: cases
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, 1 + k))
+                        .collect(),
+                    default: default.map(|r| mapper(r, 1 + cases.len())),
+                },
+                NodePayload::OneHotSel { selector, cases } => NodePayload::OneHotSel {
+                    selector: mapper(*selector, 0),
+                    cases: cases
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, 1 + k))
+                        .collect(),
+                },
+                NodePayload::OneHot { arg, lsb_prio } => NodePayload::OneHot {
+                    arg: mapper(*arg, 0),
+                    lsb_prio: *lsb_prio,
+                },
+                NodePayload::CountedFor {
+                    init,
+                    trip_count,
+                    stride,
+                    body,
+                    invariant_args,
+                } => NodePayload::CountedFor {
+                    init: mapper(*init, 0),
+                    trip_count: *trip_count,
+                    stride: *stride,
+                    body: body.clone(),
+                    invariant_args: invariant_args
+                        .iter()
+                        .enumerate()
+                        .map(|(k, r)| mapper(*r, 3 + k))
+                        .collect(),
+                },
+                NodePayload::Cover { predicate, label } => NodePayload::Cover {
+                    predicate: mapper(*predicate, 0),
+                    label: label.clone(),
+                },
+            }
+        };
+        let new_node = Node {
+            text_id: new_nodes.len() + 1,
+            name: old_node.name.clone(),
+            ty: old_node.ty.clone(),
+            payload: new_payload,
+            pos: old_node.pos.clone(),
+        };
+        let new_idx = new_nodes.len();
+        new_nodes.push(new_node);
+        inc_to_new.insert(i, new_idx);
+    }
+
+    // Ensure inner invoke exists if not created but required at return mapping.
+    let mut ret_node_ref: Option<NodeRef> = None;
+    if let Some(ret_ref) = orig.ret_node_ref {
+        if include_common[ret_ref.index] {
+            let ni = *inc_to_new
+                .get(&ret_ref.index)
+                .expect("ret node must be created if included");
+            ret_node_ref = Some(NodeRef { index: ni });
+        } else {
+            // Return comes from unmatched; return the inner invoke (single element or tuple
+            // as-is).
+            if inner_invoke_index.is_none() {
+                ensure_inner_invoke_node(
+                    &mut new_nodes,
+                    &mut inner_invoke_index,
+                    &external_sources,
+                    &inc_to_new,
+                    impl_name,
+                    &key_output_types,
+                );
+            }
+            ret_node_ref = inner_invoke_index.map(|i| NodeRef { index: i });
+        }
+    }
+
+    Fn {
+        name: orig.name.clone(),
+        params: orig.params.clone(),
+        ret_ty: orig.ret_ty.clone(),
+        nodes: new_nodes,
+        ret_node_ref,
+    }
+}
+
+/// Builds lhs/rhs packages with commonized top functions and side-specific
+/// impls.
+pub fn build_common_packages_from_lhs_rhs(lhs: &Fn, rhs: &Fn) -> (Package, Package) {
+    assert_eq!(
+        lhs.get_type(),
+        rhs.get_type(),
+        "Function signatures must match"
+    );
+
+    let (lhs_mask, rhs_mask) = compute_dual_unmatched_masks(lhs, rhs);
+
+    // Recompute side-specific consumer keys listing boundary edges from unmatched
+    // -> common.
+    let users_lhs = collect_users_with_operand_indices(lhs);
+    let users_rhs = collect_users_with_operand_indices(rhs);
+    let (lhs_bwd_entries, _ld) = collect_backward_structural_entries(lhs);
+    let (rhs_bwd_entries, _rd) = collect_backward_structural_entries(rhs);
+
+    let mut lhs_keys_vec: Vec<ConsumerKey> = Vec::new();
+    for (i, inc) in lhs_mask.iter().enumerate() {
+        if !*inc {
+            continue;
+        }
+        for (user_ref, op_index) in users_lhs[i].iter().copied() {
+            if lhs_mask[user_ref.index] {
+                continue;
+            }
+            let local_h = compute_node_local_structural_hash(lhs, user_ref);
+            let bwd_h = lhs_bwd_entries[user_ref.index].hash;
+            lhs_keys_vec.push(ConsumerKey {
+                local_hash: local_h,
+                bwd_hash: bwd_h,
+                operand_index: op_index,
+            });
+        }
+    }
+    let mut rhs_keys_vec: Vec<ConsumerKey> = Vec::new();
+    for (i, inc) in rhs_mask.iter().enumerate() {
+        if !*inc {
+            continue;
+        }
+        for (user_ref, op_index) in users_rhs[i].iter().copied() {
+            if rhs_mask[user_ref.index] {
+                continue;
+            }
+            let local_h = compute_node_local_structural_hash(rhs, user_ref);
+            let bwd_h = rhs_bwd_entries[user_ref.index].hash;
+            rhs_keys_vec.push(ConsumerKey {
+                local_hash: local_h,
+                bwd_hash: bwd_h,
+                operand_index: op_index,
+            });
+        }
+    }
+    lhs_keys_vec.sort_by(|a, b| {
+        let ord1 = a.local_hash.as_bytes().cmp(b.local_hash.as_bytes());
+        if ord1 != std::cmp::Ordering::Equal {
+            return ord1;
+        }
+        let ord2 = a.bwd_hash.as_bytes().cmp(b.bwd_hash.as_bytes());
+        if ord2 != std::cmp::Ordering::Equal {
+            return ord2;
+        }
+        a.operand_index.cmp(&b.operand_index)
+    });
+    rhs_keys_vec.sort_by(|a, b| {
+        let ord1 = a.local_hash.as_bytes().cmp(b.local_hash.as_bytes());
+        if ord1 != std::cmp::Ordering::Equal {
+            return ord1;
+        }
+        let ord2 = a.bwd_hash.as_bytes().cmp(b.bwd_hash.as_bytes());
+        if ord2 != std::cmp::Ordering::Equal {
+            return ord2;
+        }
+        a.operand_index.cmp(&b.operand_index)
+    });
+
+    // Build impl subgraphs (unmatched regions) with ordered outputs by
+    // side-specific keys.
+    let mut lhs_impl = build_subgraph_fn_from_unmatched(lhs, &lhs_mask, Some(&lhs_keys_vec));
+    let mut rhs_impl = build_subgraph_fn_from_unmatched(rhs, &rhs_mask, Some(&rhs_keys_vec));
+
+    // Names for impls.
+    let lhs_impl_name = "__common_diff_impl__lhs".to_string();
+    let rhs_impl_name = "__common_diff_impl__rhs".to_string();
+    lhs_impl.name = lhs_impl_name.clone();
+    rhs_impl.name = rhs_impl_name.clone();
+
+    // Build commonized wrappers as tops (using side-specific keys ordering).
+    let lhs_wrapper =
+        build_commonized_wrapper_fn_with_inner(lhs, &lhs_mask, &lhs_keys_vec, &lhs_impl_name);
+    let rhs_wrapper =
+        build_commonized_wrapper_fn_with_inner(rhs, &rhs_mask, &rhs_keys_vec, &rhs_impl_name);
+
+    // Assemble packages with impl + wrapper top.
+    let lhs_pkg = Package {
+        name: format!("{}_pkg_lhs", lhs_wrapper.name),
+        file_table: FileTable::new(),
+        members: vec![
+            PackageMember::Function(lhs_impl),
+            PackageMember::Function(lhs_wrapper.clone()),
+        ],
+        top_name: Some(lhs_wrapper.name.clone()),
+    };
+    let rhs_pkg = Package {
+        name: format!("{}_pkg_rhs", rhs_wrapper.name),
+        file_table: FileTable::new(),
+        members: vec![
+            PackageMember::Function(rhs_impl),
+            PackageMember::Function(rhs_wrapper.clone()),
+        ],
+        top_name: Some(rhs_wrapper.name.clone()),
+    };
+
+    (lhs_pkg, rhs_pkg)
 }
 
 #[cfg(test)]
