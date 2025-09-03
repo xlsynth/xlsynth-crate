@@ -719,16 +719,18 @@ impl NodePayload {
                     .join(", "),
                 id
             ),
-            NodePayload::Invoke { to_apply, operands } => format!(
-                "invoke({}, {}, id={})",
-                to_apply,
-                operands
+            NodePayload::Invoke { to_apply, operands } => {
+                let operands_str = operands
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", "),
-                id
-            ),
+                    .join(", ");
+                if operands.is_empty() {
+                    format!("invoke(to_apply={}, id={})", to_apply, id)
+                } else {
+                    format!("invoke({}, to_apply={}, id={})", operands_str, to_apply, id)
+                }
+            }
             NodePayload::PrioritySel {
                 selector,
                 cases,
@@ -1401,6 +1403,25 @@ mod tests {
         let ir_text = "fn f() -> bits[32][2][3][1] {
   ret literal.1: bits[32][2][3][1] = literal(value=[[[0, 1], [2, 3], [4, 5]]], id=1)
 }";
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+        assert_eq!(ir_fn.to_string(), ir_text);
+    }
+    #[test]
+    fn test_invoke_round_trip() {
+        let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
+  ret r: bits[8] = invoke(x, to_apply=g, id=2)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+        assert_eq!(ir_fn.to_string(), ir_text);
+    }
+
+    #[test]
+    fn test_invoke_no_operands_round_trip() {
+        let ir_text = r#"fn f() -> bits[8] {
+  ret r: bits[8] = invoke(to_apply=g, id=1)
+}"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let ir_fn = parser.parse_fn().unwrap();
         assert_eq!(ir_fn.to_string(), ir_text);
