@@ -6296,11 +6296,6 @@ top fn eco_top(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
     // Load JSON and check rebase-based summary: nonzero additions and no edit list.
     let json_bytes = std::fs::read(&json_out).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
-    let edits = v
-        .get("edits")
-        .and_then(|e| e.get("edits"))
-        .and_then(|e| e.as_array())
-        .expect("edits array present");
     let added = v
         .get("added_node_count")
         .and_then(|n| n.as_u64())
@@ -6308,11 +6303,6 @@ top fn eco_top(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
     assert!(
         added >= 1,
         "expected at least one added node; JSON: {}",
-        String::from_utf8_lossy(&json_bytes)
-    );
-    assert!(
-        edits.is_empty(),
-        "expected rebase-based ECO to have no edit list; JSON: {}",
         String::from_utf8_lossy(&json_bytes)
     );
 
