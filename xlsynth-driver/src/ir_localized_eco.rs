@@ -25,7 +25,6 @@ struct AddedOpsSummaryItem {
 struct LocalizedEcoReport {
     added_node_count: usize,
     added_ops: Vec<AddedOpsSummaryItem>,
-    edits: xlsynth_g8r::xls_ir::localized_eco::LocalizedEcoDiff,
     edit_distance_old_to_patched: u64,
     text_edit_distance_old_to_patched: usize,
     rtl_text_edit_distance_old_to_patched: usize,
@@ -174,7 +173,6 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     let report = LocalizedEcoReport {
         added_node_count: added_count,
         added_ops,
-        edits: xlsynth_g8r::xls_ir::localized_eco::LocalizedEcoDiff::default(),
         edit_distance_old_to_patched: 0,
         text_edit_distance_old_to_patched: 0, // placeholder; set below when we have texts
         rtl_text_edit_distance_old_to_patched: 0,
@@ -530,7 +528,6 @@ fn handle_ir_localized_eco_blocks_in_packages(
     let report = LocalizedEcoReport {
         added_node_count: added_count,
         added_ops,
-        edits: xlsynth_g8r::xls_ir::localized_eco::LocalizedEcoDiff::default(),
         edit_distance_old_to_patched: 0,
         text_edit_distance_old_to_patched: text_diff_chars,
         rtl_text_edit_distance_old_to_patched: 0,
