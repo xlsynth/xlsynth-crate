@@ -1123,9 +1123,84 @@ pub fn extract_dual_difference_subgraphs(lhs: &Fn, rhs: &Fn) -> (Fn, Fn) {
         a.operand_index.cmp(&b.operand_index)
     });
 
-    let lhs_sub = build_subgraph_fn_from_unmatched(lhs, &lhs_mask, Some(&common_keys));
-    let rhs_sub = build_subgraph_fn_from_unmatched(rhs, &rhs_mask, Some(&common_keys));
+    let mut lhs_sub = build_subgraph_fn_from_unmatched(lhs, &lhs_mask, Some(&common_keys));
+    let mut rhs_sub = build_subgraph_fn_from_unmatched(rhs, &rhs_mask, Some(&common_keys));
+
+    // Ensure both LHS/RHS subgraphs expose the union of parameter sets in a
+    // deterministic order with matching ParamIds, so callers can treat them as
+    // interchangeable.
+    unify_param_sets(&mut lhs_sub, &mut rhs_sub);
+
     (lhs_sub, rhs_sub)
+}
+
+/// Updates `a` and `b` in-place so they share the union of parameter sets
+/// (by name), with identical order and ParamIds, enabling interchangeable use.
+fn unify_param_sets(a: &mut Fn, b: &mut Fn) {
+    // Build union of parameter names with their types. Prefer asserting that
+    // any common-name parameters have identical types to avoid ambiguity.
+    let mut name_to_type: std::collections::BTreeMap<String, Type> =
+        std::collections::BTreeMap::new();
+
+    for p in a.params.iter() {
+        name_to_type.insert(p.name.clone(), p.ty.clone());
+    }
+    for p in b.params.iter() {
+        match name_to_type.get(&p.name) {
+            Some(t) => {
+                assert_eq!(
+                    t, &p.ty,
+                    "Mismatched types for parameter '{}' between subgraphs: {:?} vs {:?}",
+                    p.name, t, p.ty
+                );
+            }
+            None => {
+                name_to_type.insert(p.name.clone(), p.ty.clone());
+            }
+        }
+    }
+
+    // Construct canonical union param list with stable ParamIds 1..=N.
+    let mut union_params: Vec<Param> = Vec::with_capacity(name_to_type.len());
+    let mut name_to_new_id: HashMap<String, ParamId> = HashMap::new();
+    let mut next_id: usize = 1;
+    for (name, ty) in name_to_type.into_iter() {
+        let id = ParamId::new(next_id);
+        next_id += 1;
+        union_params.push(Param {
+            name: name.clone(),
+            ty: ty.clone(),
+            id,
+        });
+        name_to_new_id.insert(name, id);
+    }
+
+    // Helper: remap one function's params and GetParam nodes to the union set.
+    let remap = |f: &mut Fn| {
+        // Build mapping from old ParamId -> new ParamId using names.
+        let mut old_id_to_new: HashMap<ParamId, ParamId> = HashMap::new();
+        for p in f.params.iter() {
+            let new_id = *name_to_new_id
+                .get(&p.name)
+                .expect("union must contain all existing params by name");
+            old_id_to_new.insert(p.id, new_id);
+        }
+
+        // Update all GetParam nodes to refer to the new ParamIds.
+        for n in f.nodes.iter_mut() {
+            if let NodePayload::GetParam(pid) = n.payload {
+                if let Some(&new_id) = old_id_to_new.get(&pid) {
+                    n.payload = NodePayload::GetParam(new_id);
+                }
+            }
+        }
+
+        // Replace the param list with the canonical union list.
+        f.params = union_params.clone();
+    };
+
+    remap(a);
+    remap(b);
 }
 
 #[cfg(test)]
