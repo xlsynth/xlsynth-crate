@@ -705,4 +705,70 @@ fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
         // Inner should have two params (corresponding to t and u)
         assert_eq!(res.inner.params.len(), 2);
     }
+
+    #[test]
+    fn outline_region_with_two_boundary_outputs_tuple_return() {
+        let ir = r#"fn h(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  t1: bits[8] = add(a, b, id=3)
+  t2: bits[8] = sub(a, b, id=4)
+  ret xor.5: bits[8] = xor(t1, t2, id=5)
+}"#;
+        let (mut pkg, f) = parse_single_fn(ir);
+        let before_pkg = pkg.to_string();
+        // Select the two producers t1(add) and t2(sub) to outline together.
+        let mut to_sel: HashSet<NodeRef> = HashSet::new();
+        for (i, n) in f.nodes.iter().enumerate() {
+            match n.payload {
+                NodePayload::Binop(_, _, _) => {
+                    // add/sub
+                    if i == 1 || i == 2 || i == 3 || i == 4 { /* keep lint calm */ }
+                    to_sel.insert(NodeRef { index: i });
+                }
+                _ => {}
+            }
+        }
+        // Ensure we only captured the add/sub (ids 3 and 4). Filter to exclude xor.
+        to_sel.retain(|nr| match f.nodes[nr.index].payload {
+            NodePayload::Binop(crate::xls_ir::ir::Binop::Add, _, _)
+            | NodePayload::Binop(crate::xls_ir::ir::Binop::Sub, _, _) => true,
+            _ => false,
+        });
+
+        let _res = outline(&f, &to_sel, "h_out", "h_inner", &mut pkg);
+        let after_pkg = pkg.to_string();
+        println!("BEFORE:\n{}\n\nAFTER:\n{}", before_pkg, after_pkg);
+
+        let expected_before = r#"package test
+
+fn h(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  t1: bits[8] = add(a, b, id=3)
+  t2: bits[8] = sub(a, b, id=4)
+  ret xor.5: bits[8] = xor(t1, t2, id=5)
+}
+"#;
+        assert_eq!(before_pkg, expected_before);
+
+        let expected_after = r#"package test
+
+fn h(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  t1: bits[8] = add(a, b, id=3)
+  t2: bits[8] = sub(a, b, id=4)
+  ret xor.5: bits[8] = xor(t1, t2, id=5)
+}
+
+fn h_out(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  invoke.6: (bits[8], bits[8]) = invoke(a, b, to_apply=h_inner, id=6)
+  tuple_index.7: bits[8] = tuple_index(invoke.6, index=0, id=7)
+  tuple_index.8: bits[8] = tuple_index(invoke.6, index=1, id=8)
+  ret xor.5: bits[8] = xor(tuple_index.7, tuple_index.8, id=5)
+}
+
+fn h_inner(a: bits[8] id=1, b: bits[8] id=2) -> (bits[8], bits[8]) {
+  t1: bits[8] = add(a, b, id=3)
+  t2: bits[8] = sub(a, b, id=4)
+  ret tuple.8: (bits[8], bits[8]) = tuple(t1, t2, id=8)
+}
+"#;
+        assert_eq!(after_pkg, expected_after);
+    }
 }
