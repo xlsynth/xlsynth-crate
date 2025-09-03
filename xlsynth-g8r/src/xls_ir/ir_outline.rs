@@ -417,6 +417,7 @@ pub fn outline(
 
     // Create the invoke node in outer
     let mut next_outer_text_id: usize = next_text_id(&outer_nodes);
+    let invoke_operands_for_node = invoke_operands.clone();
     let invoke_node_index = {
         let ret_ty = inner_fn.ret_ty.clone();
         let new_node = Node {
@@ -425,7 +426,7 @@ pub fn outline(
             ty: ret_ty,
             payload: NodePayload::Invoke {
                 to_apply: new_inner_name.to_string(),
-                operands: invoke_operands,
+                operands: invoke_operands_for_node,
             },
             pos: None,
         };
@@ -467,10 +468,30 @@ pub fn outline(
         }
     }
 
+    // Compute a protected operand producer cone for the invoke's operands to avoid
+    // creating cycles: skip rewriting inside this cone.
+    let mut protected: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut stack: Vec<usize> = Vec::new();
+    // The operands vector we built earlier refers to indices in `outer` (and thus
+    // the cloned `outer_nodes`). Walk reverse-transitively via operands.
+    for op in invoke_operands.iter() {
+        if protected.insert(op.index) {
+            stack.push(op.index);
+        }
+    }
+    while let Some(idx) = stack.pop() {
+        for d in operands(&outer_nodes[idx].payload).into_iter() {
+            if protected.insert(d.index) {
+                stack.push(d.index);
+            }
+        }
+    }
+
     // Rewrite all nodes outside the outlined set to refer to replacements where
-    // needed.
+    // needed, but do not rewrite inside the protected cone or the invoke node
+    // itself.
     for (i, node) in outer_nodes.iter_mut().enumerate() {
-        if to_outline_set.contains(&i) {
+        if to_outline_set.contains(&i) || i == invoke_node_index || protected.contains(&i) {
             continue;
         }
         let mapper = |r: NodeRef| -> NodeRef {

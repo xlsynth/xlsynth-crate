@@ -107,6 +107,21 @@ Primarily tests:
 - `rebase_onto` preserves semantics and IDs stability constraints across random graphs
 - Integration of `rebase_onto` with parser/pretty printer and toolchain equivalence
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_outline_equiv.rs
+
+Generates a random XLS IR function via the C++ builder, reparses into the Rust IR, then selects a random connected subgraph (via BFS from a seed) to outline into a new inner function. Rewrites the outer function to invoke the inner and proves semantic equivalence between the original function and the outlined outer using available SMT backends.
+
+Early-return rationale:
+
+- Skips degenerate generator inputs (e.g., empty op lists, zero-width inputs) as they are uninformative for outlining.
+- Skips selections that produce no boundary outputs (e.g., fully internal islands that are not used externally), since outlining such regions would be vacuous.
+- If the C++ package string fails to parse in Rust (unexpected), the target panics to flag a systemic issue rather than silently skip.
+
+Primarily tests:
+
+- Outlining transformation preserves semantics for random connected regions
+- Stability of parser/pretty-printer across transformation boundaries
+
 ______________________________________________________________________
 
 Notes:
