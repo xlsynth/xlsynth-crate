@@ -164,6 +164,15 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused \
+            -o libbitwuzla-rocky8.so \
+            https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32/libbitwuzla-rocky8.so
+          sudo install -m 0644 libbitwuzla-rocky8.so /usr/lib/libbitwuzla.so
+          sudo ldconfig || true
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
           mkdir -p artifacts
@@ -216,6 +225,8 @@ jobs:
       - name: Install Z3 binary
         run: |
           sudo apt-get install -y z3
+          echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Test crate
         env:
@@ -231,7 +242,7 @@ jobs:
             ls -l /usr/lib | grep boolector || true
             exit 1
           fi
-          cargo test --features with-boolector-system,with-z3-system,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
 
 
   # -----------------------------------------------------------
@@ -352,6 +363,16 @@ jobs:
           # Install libc++ itself
           apt-get install -y --no-install-recommends libc++-18-dev libc++abi-18-dev
 
+      - name: Download Bitwuzla shared library (ubuntu20.04)
+        run: |
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused \
+            -o libbitwuzla-rocky8.so \
+            https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32/libbitwuzla-rocky8.so
+          install -m 0644 libbitwuzla-rocky8.so /usr/lib/libbitwuzla.so
+          ldconfig || true
+          echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -382,12 +403,12 @@ jobs:
           cargo --version
 
       - name: Build crate
-        run: cargo build --features with-z3-system --workspace -vv
+        run: cargo build --features with-z3-system,with-bitwuzla-system --workspace -vv
 
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-z3-system --workspace
+          cargo test --features with-z3-system,with-bitwuzla-system --workspace
 
   # -----------------------------------------------------------
   # 4) macOS job
@@ -418,6 +439,15 @@ jobs:
           TAG='${{ steps.resolve-xls-tag-macos.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
           python3 download_release.py -p arm64 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+
+      - name: Download Bitwuzla shared library (macOS arm64)
+        run: |
+          sudo mkdir -p /usr/local/lib
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused \
+            -o libbitwuzla-osx-arm64.dylib \
+            https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32/libbitwuzla-osx-arm64.dylib
+          sudo install -m 0644 libbitwuzla-osx-arm64.dylib /usr/local/lib/libbitwuzla.dylib
+          echo "DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib:$DYLD_FALLBACK_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Install protobuf compiler
         run: |
@@ -486,7 +516,7 @@ jobs:
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-built,with-z3-system,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-built,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
@@ -545,6 +575,12 @@ jobs:
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env
 
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          dnf install -y curl
+          curl -L -o /usr/lib/libbitwuzla.so "https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32/libbitwuzla-rocky8.so"
+          ldconfig
+
       - name: Download Slang
         run: |
           curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
@@ -555,7 +591,7 @@ jobs:
       - name: Build crate
         run: |
           source $HOME/.cargo/env
-          cargo build --workspace -vv
+          cargo build --features with-bitwuzla-system --workspace -vv
 
       - name: Test crate
         run: |
@@ -565,7 +601,7 @@ jobs:
           iverilog -V || true
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --workspace
+          cargo test --features with-bitwuzla-system --workspace
 
   valgrind-tests:
     name: Valgrind Tests (Ubuntu)
@@ -802,7 +838,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz build --features with-z3-binary-test,with-boolector-system,with-z3-system
+          cargo fuzz build --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system
 
       - name: Build and run fuzz_ir_opt_equiv for 10 seconds
         env:
@@ -811,7 +847,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_gatify for 10 seconds
         env:
@@ -820,7 +856,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gatify --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_gatify --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_gate_fn_roundtrip for 10 seconds
         env:
@@ -829,7 +865,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gate_fn_roundtrip --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_gate_fn_roundtrip --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_gate_transform_equiv for 10 seconds
         env:
@@ -838,7 +874,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gate_transform_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_gate_transform_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_ir_rebase_equiv for 10 seconds
         env:
@@ -847,7 +883,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_rebase_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_ir_rebase_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_ir_eval_interp_equiv for 10 seconds
         env:
@@ -917,4 +953,4 @@ jobs:
           sudo apt-get install -y z3
 
       - name: Ensure benches compile
-        run: cargo bench --features with-z3-system --workspace --no-run
+        run: cargo bench --features with-z3-system,with-bitwuzla-system --workspace --no-run
