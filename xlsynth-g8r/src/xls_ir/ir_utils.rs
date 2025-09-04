@@ -12,6 +12,11 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
         GetParam(_) => vec![],
         Tuple(elems) => elems.clone(),
         Array(elems) => elems.clone(),
+        ArraySlice {
+            array,
+            start,
+            width: _,
+        } => vec![*array, *start],
         TupleIndex { tuple, index: _ } => vec![*tuple],
         Binop(_, a, b) => vec![*a, *b],
         Unop(_, a) => vec![*a],
@@ -241,6 +246,15 @@ where
             array: map(*array),
             indices: indices.iter().map(|r| map(*r)).collect(),
             assumed_in_bounds: *assumed_in_bounds,
+        },
+        NodePayload::ArraySlice {
+            array,
+            start,
+            width,
+        } => NodePayload::ArraySlice {
+            array: map(*array),
+            start: map(*start),
+            width: *width,
         },
         NodePayload::DynamicBitSlice { arg, start, width } => NodePayload::DynamicBitSlice {
             arg: map(*arg),
