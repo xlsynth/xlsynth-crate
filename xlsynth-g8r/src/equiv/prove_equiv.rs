@@ -1189,6 +1189,7 @@ pub enum EquivResult {
         lhs_output: FnOutput,
         rhs_output: FnOutput,
     },
+    Error(String),
 }
 
 /// Semantics for handling `assert` statements when checking functional
@@ -1439,25 +1440,27 @@ impl<S: Solver> UfRegistry<S> {
     }
 }
 
+pub struct EquivSide<'a> {
+    pub ir_fn: &'a IrFn<'a>,
+    pub domains: Option<ParamDomains>,
+    pub uf_map: HashMap<String, String>,
+}
+
 /// Prove equivalence like `prove_ir_fn_equiv` but constraining parameters that
 /// are enums to lie within their defined value sets.
-pub fn prove_ir_fn_equiv_with_domains<'a, S: Solver>(
+pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &IrFn<'a>,
-    rhs: &IrFn<'a>,
+    lhs: &EquivSide<'a>,
+    rhs: &EquivSide<'a>,
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
-    lhs_domains: Option<&ParamDomains>,
-    rhs_domains: Option<&ParamDomains>,
-    lhs_uf_map: &HashMap<String, String>,
-    rhs_uf_map: &HashMap<String, String>,
     uf_signatures: &HashMap<String, UfSignature>,
 ) -> EquivResult {
     let mut solver = S::new(solver_config).unwrap();
-    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs, Some("lhs"));
-    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs, Some("rhs"));
+    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.ir_fn, Some("lhs"));
+    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.ir_fn, Some("rhs"));
 
-    let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: Option<&ParamDomains>| {
+    let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: &Option<ParamDomains>| {
         if let Some(dom) = domains {
             for p in inputs.params().iter() {
                 if let Some(allowed) = dom.get(&p.name) {
@@ -1480,14 +1483,14 @@ pub fn prove_ir_fn_equiv_with_domains<'a, S: Solver>(
         }
     };
 
-    assert_domains(&fn_inputs_lhs, lhs_domains);
-    assert_domains(&fn_inputs_rhs, rhs_domains);
+    assert_domains(&fn_inputs_lhs, &lhs.domains);
+    assert_domains(&fn_inputs_rhs, &rhs.domains);
 
     let uf_registry = UfRegistry::from_uf_signatures(&mut solver, uf_signatures);
 
     let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
-    let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs_uf_map, &uf_registry);
-    let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs_uf_map, &uf_registry);
+    let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &uf_registry);
+    let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs.uf_map, &uf_registry);
     check_aligned_fn_equiv_internal(&mut solver, &smt_lhs, &smt_rhs, assertion_semantics)
 }
 
@@ -1498,16 +1501,20 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
-    prove_ir_fn_equiv_with_domains::<S>(
+    prove_ir_fn_equiv_full::<S>(
         solver_config,
-        lhs,
-        rhs,
+        &EquivSide {
+            ir_fn: lhs,
+            domains: None,
+            uf_map: HashMap::new(),
+        },
+        &EquivSide {
+            ir_fn: rhs,
+            domains: None,
+            uf_map: HashMap::new(),
+        },
         assertion_semantics,
         allow_flatten,
-        None,
-        None,
-        &HashMap::new(),
-        &HashMap::new(),
         &HashMap::new(),
     )
 }
@@ -1704,7 +1711,7 @@ pub mod test_utils {
             prove_equiv::{
                 AssertionSemantics, EquivResult, FnInputs, IrFn, ParamDomains, align_fn_inputs,
                 get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
-                prove_ir_fn_equiv_with_domains,
+                prove_ir_fn_equiv_full,
             },
             solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
         },
@@ -1819,24 +1826,28 @@ pub mod test_utils {
             },
         );
 
-        let res_uf = super::prove_ir_fn_equiv_with_domains::<S>(
+        let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: call_g,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: call_g,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: lhs_uf_map,
             },
-            &super::IrFn {
-                fn_ref: call_h,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: call_h,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
             false,
-            None,
-            None,
-            &lhs_uf_map,
-            &rhs_uf_map,
             &uf_sigs,
         );
         assert!(matches!(res_uf, super::EquivResult::Proved));
@@ -1893,24 +1904,28 @@ pub mod test_utils {
             },
         );
 
-        let res = super::prove_ir_fn_equiv_with_domains::<S>(
+        let res = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: top_g,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: top_g,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: lhs_uf_map,
             },
-            &super::IrFn {
-                fn_ref: top_h,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: top_h,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
             false,
-            None,
-            None,
-            &lhs_uf_map,
-            &rhs_uf_map,
             &uf_sigs,
         );
         assert!(matches!(res, super::EquivResult::Proved));
@@ -1978,24 +1993,28 @@ pub mod test_utils {
             },
         );
 
-        let res_uf = super::prove_ir_fn_equiv_with_domains::<S>(
+        let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: call_g,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: call_g,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: lhs_uf_map,
             },
-            &super::IrFn {
-                fn_ref: call_h,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: call_h,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
             false,
-            None,
-            None,
-            &lhs_uf_map,
-            &rhs_uf_map,
             &uf_sigs,
         );
         assert!(matches!(res_uf, super::EquivResult::Proved));
@@ -3572,7 +3591,7 @@ pub mod test_utils {
         }
     }
 
-    // New: shared test that exercises prove_ir_fn_equiv_with_domains.
+    // New: shared test that exercises prove_ir_fn_equiv_full.
     pub fn test_param_domains_equiv<S: Solver>(solver_config: &S::Config) {
         let lhs_ir = r#"
             fn f(x: bits[2]) -> bits[2] {
@@ -3611,16 +3630,20 @@ pub mod test_utils {
             ],
         );
 
-        let res2 = prove_ir_fn_equiv_with_domains::<S>(
+        let res2 = prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &lhs_ir_fn,
-            &rhs_ir_fn,
+            &super::EquivSide {
+                ir_fn: &lhs_ir_fn,
+                domains: Some(doms.clone()),
+                uf_map: HashMap::new(),
+            },
+            &super::EquivSide {
+                ir_fn: &rhs_ir_fn,
+                domains: Some(doms),
+                uf_map: HashMap::new(),
+            },
             AssertionSemantics::Same,
             false,
-            Some(&doms),
-            Some(&doms),
-            &HashMap::new(),
-            &HashMap::new(),
             &HashMap::new(),
         );
         assert!(matches!(res2, super::EquivResult::Proved));

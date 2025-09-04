@@ -12,7 +12,7 @@ use std::{
 use easy_smt::{Context, ContextBuilder, SExpr};
 
 use crate::{
-    equiv::solver_interface::{BitVec, Solver, Uf},
+    equiv::solver_interface::{BitVec, Solver, SolverConfig, Uf},
     ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
     xls_ir::ir,
 };
@@ -114,6 +114,10 @@ pub struct EasySmtSolver {
     term_cache: HashMap<String, SExpr>,
     reverse_cache: HashMap<SExpr, String>,
     fresh_counter: u64,
+}
+
+impl SolverConfig for EasySmtConfig {
+    type Solver = EasySmtSolver;
 }
 
 impl EasySmtSolver {

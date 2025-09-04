@@ -220,10 +220,7 @@ mod tests {
             desired, result,
         );
         assert!(
-            matches!(
-                res,
-                crate::equiv::prove_equiv_via_toolchain::EquivResult::Proved
-            ),
+            matches!(res, crate::equiv::prove_equiv::EquivResult::Proved),
             "Toolchain IR equivalence failed: {:?}",
             res
         );
