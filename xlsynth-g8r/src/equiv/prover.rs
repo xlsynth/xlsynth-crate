@@ -274,3 +274,31 @@ pub fn auto_selected_prover() -> Box<dyn Prover> {
     #[cfg(all(not(feature = "has-bitwuzla"), not(feature = "has-boolector")))]
     Box::new(ExternalProver::Toolchain)
 }
+
+pub fn prove_ir_fn_equiv(lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
+    auto_selected_prover().prove_ir_fn_equiv(lhs, rhs)
+}
+
+pub fn prove_ir_fn_equiv_full(
+    lhs: &EquivSide<'_>,
+    rhs: &EquivSide<'_>,
+    assertion_semantics: AssertionSemantics,
+    allow_flatten: bool,
+    uf_signatures: &HashMap<String, UfSignature>,
+) -> EquivResult {
+    auto_selected_prover().prove_ir_fn_equiv_full(
+        lhs,
+        rhs,
+        assertion_semantics,
+        allow_flatten,
+        uf_signatures,
+    )
+}
+
+pub fn prove_ir_pkg_text_equiv(
+    lhs_pkg_text: &str,
+    rhs_pkg_text: &str,
+    top: Option<&str>,
+) -> EquivResult {
+    auto_selected_prover().prove_ir_pkg_text_equiv(lhs_pkg_text, rhs_pkg_text, top)
+}
