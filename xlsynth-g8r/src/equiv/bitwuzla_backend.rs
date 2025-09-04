@@ -49,7 +49,7 @@ use bitwuzla_sys::{
 };
 
 use crate::{
-    equiv::solver_interface::{BitVec, Response, Solver, Uf},
+    equiv::solver_interface::{BitVec, Response, Solver, SolverConfig, Uf},
     ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
     xls_ir::ir,
 };
@@ -663,6 +663,10 @@ impl Bitwuzla {
 #[derive(Clone)]
 pub struct BitwuzlaTerm {
     raw: bitwuzla_sys::BitwuzlaTerm,
+}
+
+impl SolverConfig for BitwuzlaOptions {
+    type Solver = Bitwuzla;
 }
 
 impl Solver for Bitwuzla {

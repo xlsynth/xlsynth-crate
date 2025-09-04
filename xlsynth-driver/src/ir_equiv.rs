@@ -13,8 +13,8 @@ use xlsynth_g8r::equiv::solver_interface::Solver;
 use std::collections::HashMap;
 use xlsynth::IrValue;
 use xlsynth_g8r::equiv::prove_equiv::{
-    prove_ir_fn_equiv_output_bits_parallel, prove_ir_fn_equiv_split_input_bit,
-    prove_ir_fn_equiv_with_domains, AssertionSemantics, EquivResult, IrFn,
+    prove_ir_fn_equiv_full, prove_ir_fn_equiv_output_bits_parallel,
+    prove_ir_fn_equiv_split_input_bit, AssertionSemantics, EquivResult, EquivSide, IrFn,
 };
 use xlsynth_g8r::xls_ir::ir_parser;
 
@@ -164,16 +164,20 @@ fn run_equiv_check_native<S: Solver>(
 
     let start_time = std::time::Instant::now();
     let result = match inputs.strategy {
-        ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv_with_domains::<S>(
+        ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &lhs_ir_fn,
-            &rhs_ir_fn,
+            &EquivSide {
+                ir_fn: &lhs_ir_fn,
+                domains: inputs.lhs_param_domains.clone(),
+                uf_map: inputs.lhs_uf_map.clone(),
+            },
+            &EquivSide {
+                ir_fn: &rhs_ir_fn,
+                domains: inputs.rhs_param_domains.clone(),
+                uf_map: inputs.rhs_uf_map.clone(),
+            },
             inputs.assertion_semantics,
             inputs.flatten_aggregates,
-            inputs.lhs_param_domains.as_ref(),
-            inputs.rhs_param_domains.as_ref(),
-            &inputs.lhs_uf_map,
-            &inputs.rhs_uf_map,
             &uf_sigs,
         ),
         ParallelismStrategy::OutputBits => prove_ir_fn_equiv_output_bits_parallel::<S>(
@@ -216,6 +220,10 @@ fn run_equiv_check_native<S: Solver>(
                 success: false,
                 counterexample: Some(cex_str),
             }
+        }
+        EquivResult::Error(msg) => {
+            eprintln!("error: {}", msg);
+            std::process::exit(2);
         }
     }
 }

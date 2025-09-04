@@ -792,6 +792,7 @@ pub fn outline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::equiv::prove_equiv::EquivResult;
     use crate::equiv::prove_equiv_via_toolchain;
     use crate::xls_ir::ir::{NodePayload, PackageMember};
     use crate::xls_ir::ir_parser::Parser;
@@ -839,7 +840,7 @@ mod tests {
             &lhs_pkg, &rhs_pkg, None, tool_dir,
         );
         assert!(
-            matches!(res, prove_equiv_via_toolchain::EquivResult::Proved),
+            matches!(res, EquivResult::Proved),
             "Outlining equivalence failed: {:?}",
             res
         );

@@ -24,7 +24,7 @@ use boolector_sys::{
 };
 
 use crate::{
-    equiv::solver_interface::{BitVec, Response, Solver, Uf},
+    equiv::solver_interface::{BitVec, Response, Solver, SolverConfig, Uf},
     ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
     xls_ir::ir,
 };
@@ -195,6 +195,10 @@ impl BoolectorConfig {
         self.options.insert(option, value);
         self
     }
+}
+
+impl SolverConfig for BoolectorConfig {
+    type Solver = Boolector;
 }
 
 impl Solver for Boolector {

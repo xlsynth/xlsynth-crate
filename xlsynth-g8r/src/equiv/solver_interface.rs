@@ -34,9 +34,13 @@ where
     acc
 }
 
+pub trait SolverConfig: Send + Sync {
+    type Solver: Solver<Config = Self>;
+}
+
 pub trait Solver: Sized {
     type Term: Clone;
-    type Config: Send + Sync;
+    type Config: SolverConfig<Solver = Self>;
     fn new(config: &Self::Config) -> io::Result<Self>;
     fn declare(&mut self, name: &str, width: usize) -> io::Result<BitVec<Self::Term>>;
     fn declare_uf(
