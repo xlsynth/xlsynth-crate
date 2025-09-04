@@ -241,24 +241,19 @@ pub fn outline(
 
     // Now create GetParam nodes for each external non-param input, in the same
     // order they were appended to inner_params after the ParamIds.
-    let start_nonparam_param_pos = inner_params
-        .iter()
-        .map(|p| p.id.get_wrapped_id())
-        .max()
-        .unwrap_or(0)
-        - (ext_nonparam_inputs.len());
-    // We need a map from (relative position among nonparam inputs) -> ParamId
-    // Compute the ParamIds assigned to nonparam inputs in order.
+    // Compute the ParamIds (and names) assigned to nonparam inputs in order.
     let mut nonparam_param_ids: Vec<ParamId> = Vec::new();
+    let mut nonparam_param_names: Vec<String> = Vec::new();
     let base = inner_params.len() - ext_nonparam_inputs.len();
     for i in 0..ext_nonparam_inputs.len() {
         nonparam_param_ids.push(inner_params[base + i].id);
+        nonparam_param_names.push(inner_params[base + i].name.clone());
     }
     for (i, ext_idx) in ext_nonparam_inputs.iter().enumerate() {
         let src_node = &outer.nodes[*ext_idx];
         inner_nodes.push(Node {
             text_id: next_inner_text_id,
-            name: src_node.name.clone(),
+            name: Some(nonparam_param_names[i].clone()),
             ty: src_node.ty.clone(),
             payload: NodePayload::GetParam(nonparam_param_ids[i]),
             pos: src_node.pos.clone(),
@@ -744,6 +739,67 @@ fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
         assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
     }
 
+    #[test]
+    fn outline_external_nonparam_inputs_unnamed_sources() {
+        // External inputs to the outlined region are unnamed nodes (e.g., add.3,
+        // not.4). This exercises GetParam synthesis and naming for non-param
+        // external inputs.
+        let ir = r#"fn g2(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  add.3: bits[8] = add(a, b, id=3)
+  not.4: bits[8] = not(a, id=4)
+  ret umul.5: bits[8] = umul(add.3, not.4, id=5)
+}"#;
+        let (mut pkg, f) = parse_single_fn(ir);
+
+        // Outline only the mul node (unnamed sources feeding it are external
+        // non-params)
+        let mut to_sel: HashSet<NodeRef> = HashSet::new();
+        for (i, n) in f.nodes.iter().enumerate() {
+            if let NodePayload::Binop(op, _, _) = n.payload {
+                if crate::xls_ir::ir::binop_to_operator(op) == "umul" {
+                    to_sel.insert(NodeRef { index: i });
+                }
+            }
+        }
+        // Expect exact package strings for determinism; inner params must be named
+        let expected_before = r#"package test
+
+fn g2(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  add.3: bits[8] = add(a, b, id=3)
+  not.4: bits[8] = not(a, id=4)
+  ret umul.5: bits[8] = umul(add.3, not.4, id=5)
+}
+"#;
+        let before_pkg = pkg.to_string();
+        assert_eq!(before_pkg, expected_before);
+
+        let res = outline(&f, &to_sel, "g2_out", "g2_inner", &mut pkg);
+
+        let expected_after = r#"package test
+
+fn g2(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  add.3: bits[8] = add(a, b, id=3)
+  not.4: bits[8] = not(a, id=4)
+  ret umul.5: bits[8] = umul(add.3, not.4, id=5)
+}
+
+fn g2_out(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  add.3: bits[8] = add(a, b, id=3)
+  not.4: bits[8] = not(a, id=4)
+  ret invoke.6: bits[8] = invoke(add.3, not.4, to_apply=g2_inner, id=6)
+}
+
+fn g2_inner(arg_0: bits[8] id=1, arg_1: bits[8] id=2) -> bits[8] {
+  ret umul.5: bits[8] = umul(arg_0, arg_1, id=5)
+}
+"#;
+        // pkg now includes original f, new outer, and new inner
+        let after_pkg = pkg.to_string();
+        assert_eq!(after_pkg, expected_after);
+
+        // Equivalence: original vs outlined outer (skips if invoke is present)
+        assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
+    }
     #[test]
     fn outline_region_with_two_boundary_outputs_tuple_return() {
         let ir = r#"fn h(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {

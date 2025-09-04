@@ -515,7 +515,9 @@ impl NodePayload {
         let get_name = |node_ref: NodeRef| -> String {
             let node = f.get_node(node_ref);
             match node.payload {
-                NodePayload::GetParam(_) => node.name.clone().unwrap(),
+                NodePayload::GetParam(_) => {
+                    node.name.clone().expect("GetParam node should have a name")
+                }
                 _ => {
                     if let Some(ref name) = node.name {
                         name.clone()

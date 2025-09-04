@@ -3,9 +3,12 @@
 //! Computes structural similarity statistics between two XLS IR functions.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type};
-use crate::xls_ir::ir_utils::{get_topological, operands, remap_payload_with};
+use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
+use crate::xls_ir::ir::{Package, PackageMember};
+use crate::xls_ir::ir_outline::outline;
+use crate::xls_ir::ir_utils::{get_topological, operands};
 use crate::xls_ir::node_hashing::{
     compute_node_local_structural_hash, compute_node_structural_hash,
 };
@@ -768,364 +771,52 @@ fn compute_dual_unmatched_masks(lhs: &Fn, rhs: &Fn) -> (Vec<bool>, Vec<bool>) {
     (lhs_unmatched_mask, rhs_unmatched_mask)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct ConsumerKey {
-    local_hash: blake3::Hash,
-    bwd_hash: blake3::Hash,
-    operand_index: usize,
-}
-
-fn build_subgraph_fn_from_unmatched(
-    orig: &Fn,
-    unmatched_mask: &[bool],
-    consumer_keys: Option<&[ConsumerKey]>,
-) -> Fn {
-    let n = orig.nodes.len();
-    let mut include: Vec<bool> = vec![false; n];
-    for i in 0..n {
-        include[i] = if i < unmatched_mask.len() {
-            unmatched_mask[i]
-        } else {
-            false
-        };
-    }
-
-    // Determine external dependencies to become parameters.
-    let mut external_sources: Vec<usize> = Vec::new();
-    for (i, node) in orig.nodes.iter().enumerate() {
-        if !include[i] {
-            continue;
-        }
-        let deps = operands(&node.payload);
-        for d in deps {
-            if !include[d.index] && !external_sources.contains(&d.index) {
-                external_sources.push(d.index);
-            }
-        }
-    }
-    external_sources.sort_unstable();
-
-    // Create parameters and corresponding GetParam nodes.
-    let mut params: Vec<Param> = Vec::new();
-    let mut new_nodes: Vec<Node> = Vec::new();
-    let mut next_param_id: usize = 1;
-    let mut name_used: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut ext_to_new_node: HashMap<usize, usize> = HashMap::new();
-
-    for src_idx in external_sources.iter().copied() {
-        let src_node = &orig.nodes[src_idx];
-        let mut pname = src_node
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("x{}", src_node.text_id));
-        if name_used.contains(&pname) {
-            let mut k = 1usize;
-            while name_used.contains(&format!("{}__{}", pname, k)) {
-                k += 1;
-            }
-            pname = format!("{}__{}", pname, k);
-        }
-        name_used.insert(pname.clone());
-
-        let pid = ParamId::new(next_param_id);
-        next_param_id += 1;
-        params.push(Param {
-            name: pname.clone(),
-            ty: src_node.ty.clone(),
-            id: pid,
-        });
-        let get_param_node = Node {
-            text_id: new_nodes.len() + 1,
-            name: Some(pname.clone()),
-            ty: src_node.ty.clone(),
-            payload: NodePayload::GetParam(pid),
-            pos: src_node.pos.clone(),
-        };
-        let new_idx = new_nodes.len();
-        new_nodes.push(get_param_node);
-        ext_to_new_node.insert(src_idx, new_idx);
-    }
-
-    // Map from original included node index -> new node index
-    let mut inc_to_new: HashMap<usize, usize> = HashMap::new();
-    let order = get_topological(orig);
-    for node_ref in order {
-        let i = node_ref.index;
-        if !include[i] {
-            continue;
-        }
-        let old_node = &orig.nodes[i];
-        let mapper = |r: NodeRef| -> NodeRef {
-            if include[r.index] {
-                let ni = *inc_to_new
-                    .get(&r.index)
-                    .expect("dep included must have been added");
-                NodeRef { index: ni }
-            } else {
-                let ni = *ext_to_new_node
-                    .get(&r.index)
-                    .expect("external dep must be in param map");
-                NodeRef { index: ni }
-            }
-        };
-        let new_payload = remap_payload_with(&old_node.payload, mapper);
-        let new_node = Node {
-            text_id: new_nodes.len() + 1,
-            name: old_node.name.clone(),
-            ty: old_node.ty.clone(),
-            payload: new_payload,
-            pos: old_node.pos.clone(),
-        };
-        let new_idx = new_nodes.len();
-        new_nodes.push(new_node);
-        inc_to_new.insert(i, new_idx);
-    }
-
-    // Determine sinks in the included subgraph (used if no consumer_keys provided)
-    let mut used_count: HashMap<usize, usize> = HashMap::new();
-    for (i, node) in orig.nodes.iter().enumerate() {
-        if !include[i] {
-            continue;
-        }
-        for dep in operands(&node.payload) {
-            if include[dep.index] {
-                *used_count.entry(dep.index).or_insert(0) += 1;
-            }
-        }
-    }
-    let mut sink_new_refs: Vec<NodeRef> = Vec::new();
-    for (i, inc) in include.iter().enumerate() {
-        if *inc && used_count.get(&i).copied().unwrap_or(0) == 0 {
-            let new_i = *inc_to_new.get(&i).expect("included node must be mapped");
-            sink_new_refs.push(NodeRef { index: new_i });
-        }
-    }
-
-    // Build the function return.
-    let mut ret_ty: Type = Type::nil();
-    let mut ret_node_ref: Option<NodeRef> = None;
-    if let Some(keys) = consumer_keys {
-        // Build outputs following the provided consumer keys. For each key, we
-        // find a matching consumer in the original function that consumes some
-        // source value and map that source into the new function, creating a
-        // parameter if it is external.
-        // Build a quick index: for each included node, enumerate users outside.
-        let users = collect_users_with_operand_indices(orig);
-        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(orig);
-        let mut out_refs: Vec<NodeRef> = Vec::new();
-        for key in keys.iter() {
-            // Locate any consumer edge that matches this key.
-            let mut found_src: Option<NodeRef> = None;
-            'outer: for (src_idx, inc) in include.iter().enumerate() {
-                if !*inc {
-                    continue;
-                }
-                for (user_ref, op_index) in users[src_idx].iter().copied() {
-                    if include[user_ref.index] {
-                        continue;
-                    }
-                    if op_index != key.operand_index {
-                        continue;
-                    }
-                    let local_h = compute_node_local_structural_hash(orig, user_ref);
-                    let bwd_h = bwd_entries[user_ref.index].hash;
-                    if local_h == key.local_hash && bwd_h == key.bwd_hash {
-                        // The source feeding this operand is src_idx.
-                        found_src = Some(NodeRef { index: src_idx });
-                        break 'outer;
-                    }
-                }
-            }
-            if let Some(src) = found_src {
-                // Map src into new function space; if external, add a param.
-                let mapped = if include[src.index] {
-                    let ni = *inc_to_new
-                        .get(&src.index)
-                        .expect("included node must be mapped");
-                    NodeRef { index: ni }
-                } else if let Some(&ni) = ext_to_new_node.get(&src.index) {
-                    NodeRef { index: ni }
-                } else {
-                    // Create a new param for this external source
-                    let src_node = &orig.nodes[src.index];
-                    let mut pname = src_node
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| format!("x{}", src_node.text_id));
-                    if name_used.contains(&pname) {
-                        let mut k = 1usize;
-                        while name_used.contains(&format!("{}__{}", pname, k)) {
-                            k += 1;
-                        }
-                        pname = format!("{}__{}", pname, k);
-                    }
-                    name_used.insert(pname.clone());
-                    let pid = ParamId::new(next_param_id);
-                    next_param_id += 1;
-                    params.push(Param {
-                        name: pname.clone(),
-                        ty: src_node.ty.clone(),
-                        id: pid,
-                    });
-                    let get_param_node = Node {
-                        text_id: new_nodes.len() + 1,
-                        name: Some(pname.clone()),
-                        ty: src_node.ty.clone(),
-                        payload: NodePayload::GetParam(pid),
-                        pos: src_node.pos.clone(),
-                    };
-                    let new_idx = new_nodes.len();
-                    new_nodes.push(get_param_node);
-                    ext_to_new_node.insert(src.index, new_idx);
-                    NodeRef { index: new_idx }
-                };
-                out_refs.push(mapped);
-            } else {
-                // If no match found on this side, pass through a unit literal as placeholder.
-                // However, to maintain return arity, use a nil tuple element by skipping; we
-                // choose to map to a zero-width tuple which is invalid; instead, fallback to
-                // using a GetParam created above by adding a new param with nil type. Since
-                // Type::Tuple(vec![]) is valid, but we have no literal Nil node; use an empty
-                // tuple node.
-                let nil_ty = Type::nil();
-                let nil_node = Node {
-                    text_id: new_nodes.len() + 1,
-                    name: None,
-                    ty: nil_ty.clone(),
-                    payload: NodePayload::Tuple(vec![]),
-                    pos: None,
-                };
-                let idx = new_nodes.len();
-                new_nodes.push(nil_node);
-                out_refs.push(NodeRef { index: idx });
-            }
-        }
-        if out_refs.len() == 1 {
-            let nref = out_refs[0];
-            ret_ty = new_nodes[nref.index].ty.clone();
-            ret_node_ref = Some(nref);
-        } else {
-            let elem_tys: Vec<Box<Type>> = out_refs
-                .iter()
-                .map(|r| Box::new(new_nodes[r.index].ty.clone()))
-                .collect();
-            let tuple_ty = Type::Tuple(elem_tys);
-            let tuple_node = Node {
-                text_id: new_nodes.len() + 1,
-                name: None,
-                ty: tuple_ty.clone(),
-                payload: NodePayload::Tuple(out_refs.clone()),
-                pos: None,
-            };
-            let tuple_idx = new_nodes.len();
-            new_nodes.push(tuple_node);
-            ret_ty = tuple_ty;
-            ret_node_ref = Some(NodeRef { index: tuple_idx });
-        }
-    } else if sink_new_refs.len() == 1 {
-        let nref = sink_new_refs[0];
-        ret_ty = new_nodes[nref.index].ty.clone();
-        ret_node_ref = Some(nref);
-    } else if sink_new_refs.len() >= 2 {
-        let elem_tys: Vec<Box<Type>> = sink_new_refs
-            .iter()
-            .map(|r| Box::new(new_nodes[r.index].ty.clone()))
-            .collect();
-        let tuple_ty = Type::Tuple(elem_tys);
-        let tuple_node = Node {
-            text_id: new_nodes.len() + 1,
-            name: None,
-            ty: tuple_ty.clone(),
-            payload: NodePayload::Tuple(sink_new_refs.clone()),
-            pos: None,
-        };
-        let tuple_idx = new_nodes.len();
-        new_nodes.push(tuple_node);
-        ret_ty = tuple_ty;
-        ret_node_ref = Some(NodeRef { index: tuple_idx });
-    }
-
-    Fn {
-        name: format!("{}_diff", orig.name),
-        params,
-        ret_ty,
-        nodes: new_nodes,
-        ret_node_ref,
-    }
-}
-
-/// Extracts LHS/RHS subgraphs of unmatched nodes after dual (fwd OR bwd)
-/// matching. External dependencies are turned into parameters with
-/// corresponding GetParam nodes.
+/// Extracts inner functions for the matched "interior" (nodes that are
+/// equivalent by forward OR backward structural equivalence) using the
+/// outlining transformation. Returns the inner functions from each side.
 pub fn extract_dual_difference_subgraphs(lhs: &Fn, rhs: &Fn) -> (Fn, Fn) {
     assert_eq!(
         lhs.get_type(),
         rhs.get_type(),
         "Function signatures must match for structural comparison",
     );
-    let (lhs_mask, rhs_mask) = compute_dual_unmatched_masks(lhs, rhs);
+    let (lhs_unmatched_mask, rhs_unmatched_mask) = compute_dual_unmatched_masks(lhs, rhs);
 
-    // Compute common consumer keys across LHS and RHS from boundary edges.
-    let users_lhs = collect_users_with_operand_indices(lhs);
-    let users_rhs = collect_users_with_operand_indices(rhs);
-    let (lhs_bwd_entries, _ld) = collect_backward_structural_entries(lhs);
-    let (rhs_bwd_entries, _rd) = collect_backward_structural_entries(rhs);
-
-    let mut lhs_keys: std::collections::HashSet<ConsumerKey> = std::collections::HashSet::new();
-    for (i, inc) in lhs_mask.iter().enumerate() {
-        if !*inc {
-            continue;
+    // Select the unmatched nodes as the interior difference to outline.
+    let mut lhs_interior: HashSet<NodeRef> = HashSet::new();
+    for i in 0..lhs.nodes.len() {
+        if i < lhs_unmatched_mask.len() && lhs_unmatched_mask[i] {
+            lhs_interior.insert(NodeRef { index: i });
         }
-        for (user_ref, op_index) in users_lhs[i].iter().copied() {
-            if lhs_mask[user_ref.index] {
-                continue;
-            }
-            let local_h = compute_node_local_structural_hash(lhs, user_ref);
-            let bwd_h = lhs_bwd_entries[user_ref.index].hash;
-            lhs_keys.insert(ConsumerKey {
-                local_hash: local_h,
-                bwd_hash: bwd_h,
-                operand_index: op_index,
-            });
+    }
+    let mut rhs_interior: HashSet<NodeRef> = HashSet::new();
+    for i in 0..rhs.nodes.len() {
+        if i < rhs_unmatched_mask.len() && rhs_unmatched_mask[i] {
+            rhs_interior.insert(NodeRef { index: i });
         }
     }
 
-    let mut rhs_keys: std::collections::HashSet<ConsumerKey> = std::collections::HashSet::new();
-    for (i, inc) in rhs_mask.iter().enumerate() {
-        if !*inc {
-            continue;
-        }
-        for (user_ref, op_index) in users_rhs[i].iter().copied() {
-            if rhs_mask[user_ref.index] {
-                continue;
-            }
-            let local_h = compute_node_local_structural_hash(rhs, user_ref);
-            let bwd_h = rhs_bwd_entries[user_ref.index].hash;
-            rhs_keys.insert(ConsumerKey {
-                local_hash: local_h,
-                bwd_hash: bwd_h,
-                operand_index: op_index,
-            });
-        }
-    }
+    // Outline the interior on each side and return the resulting inner function.
+    let mut lhs_pkg = Package {
+        name: "outline_lhs".to_string(),
+        file_table: crate::xls_ir::ir::FileTable::new(),
+        members: vec![PackageMember::Function(lhs.clone())],
+        top_name: None,
+    };
+    let mut rhs_pkg = Package {
+        name: "outline_rhs".to_string(),
+        file_table: crate::xls_ir::ir::FileTable::new(),
+        members: vec![PackageMember::Function(rhs.clone())],
+        top_name: None,
+    };
 
-    let mut common_keys: Vec<ConsumerKey> = lhs_keys.intersection(&rhs_keys).copied().collect();
-    // Stable order: by local_hash bytes, then bwd_hash bytes, then operand index
-    common_keys.sort_by(|a, b| {
-        let ord1 = a.local_hash.as_bytes().cmp(b.local_hash.as_bytes());
-        if ord1 != std::cmp::Ordering::Equal {
-            return ord1;
-        }
-        let ord2 = a.bwd_hash.as_bytes().cmp(b.bwd_hash.as_bytes());
-        if ord2 != std::cmp::Ordering::Equal {
-            return ord2;
-        }
-        a.operand_index.cmp(&b.operand_index)
-    });
+    let lhs_names = (format!("{}_out", lhs.name), format!("{}_inner", lhs.name));
+    let rhs_names = (format!("{}_out", rhs.name), format!("{}_inner", rhs.name));
 
-    let lhs_sub = build_subgraph_fn_from_unmatched(lhs, &lhs_mask, Some(&common_keys));
-    let rhs_sub = build_subgraph_fn_from_unmatched(rhs, &rhs_mask, Some(&common_keys));
-    (lhs_sub, rhs_sub)
+    let lhs_res = outline(lhs, &lhs_interior, &lhs_names.0, &lhs_names.1, &mut lhs_pkg);
+    let rhs_res = outline(rhs, &rhs_interior, &rhs_names.0, &rhs_names.1, &mut rhs_pkg);
+
+    (lhs_res.inner, rhs_res.inner)
 }
 
 #[cfg(test)]
