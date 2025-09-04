@@ -15,7 +15,7 @@ use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
 
 use xlsynth_g8r::xls_ir::ir::{Fn as IrFn, NodePayload, NodeRef, PackageMember};
 use xlsynth_g8r::xls_ir::ir_fuzz::{FuzzSample, generate_ir_fn};
-use xlsynth_g8r::xls_ir::ir_outline::outline;
+use xlsynth_g8r::xls_ir::ir_outline::{compute_default_ordering, outline_with_ordering, OutlineOrdering};
 use xlsynth_g8r::xls_ir::ir_parser::Parser;
 use xlsynth_g8r::xls_ir::ir_utils::operands;
 
@@ -69,6 +69,45 @@ fn stable_hash_u64(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+#[derive(Clone, Debug)]
+enum ParamOrderMode {
+    Default,
+    NonDefault,
+}
+
+#[derive(Clone, Debug)]
+enum ReturnOrderMode {
+    Default,
+    NonDefault,
+}
+
+fn xorshift64(mut x: u64) -> u64 {
+    // Stateless xorshift step for deterministic pseudo-random numbers.
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
+fn shuffle_indices_deterministic(indices: &mut [usize], mut seed: u64) {
+    if indices.len() <= 1 { return; }
+    for i in (1..indices.len()).rev() {
+        seed = xorshift64(seed);
+        let j = (seed as usize) % (i + 1);
+        indices.swap(i, j);
+    }
+}
+
+fn permute_vec_deterministic<T: Clone>(v: &mut Vec<T>, seed: u64) {
+    if v.len() <= 1 { return; }
+    let mut idx: Vec<usize> = (0..v.len()).collect();
+    shuffle_indices_deterministic(&mut idx, seed);
+    let old = v.clone();
+    for (k, &i) in idx.iter().enumerate() {
+        v[k] = old[i].clone();
+    }
 }
 
 fuzz_target!(|sample: FuzzSample| {
@@ -130,7 +169,23 @@ fuzz_target!(|sample: FuzzSample| {
 
     // Perform outlining on a mutable clone of the package using the original function
     let work_fn = work_pkg.get_top().unwrap().clone();
-    let res = outline(&work_fn, &to_outline, "outlined_outer", "outlined_inner", &mut work_pkg);
+    // Choose parameter and return ordering modes from hash bits for reproducibility
+    let param_mode = if (h & 1) == 0 { ParamOrderMode::Default } else { ParamOrderMode::NonDefault };
+    let ret_mode = if (h & 2) == 0 { ReturnOrderMode::Default } else { ReturnOrderMode::NonDefault };
+
+    // Build ordering and optionally permute deterministically
+    let mut ordering: OutlineOrdering = compute_default_ordering(&work_fn, &to_outline);
+    if let ParamOrderMode::NonDefault = param_mode { permute_vec_deterministic(&mut ordering.params, h.rotate_right(17)); }
+    if let ReturnOrderMode::NonDefault = ret_mode { permute_vec_deterministic(&mut ordering.returns, h.rotate_left(9)); }
+
+    let res = outline_with_ordering(
+        &work_fn,
+        &to_outline,
+        "outlined_outer",
+        "outlined_inner",
+        &ordering,
+        &mut work_pkg,
+    );
 
     log::info!("work_pkg_text:\n{}", work_pkg.to_string());
 

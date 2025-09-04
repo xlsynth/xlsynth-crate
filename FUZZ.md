@@ -109,7 +109,12 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_outline_equiv.rs
 
-Generates a random XLS IR function via the C++ builder, reparses into the Rust IR, then selects a random connected subgraph (via BFS from a seed) to outline into a new inner function. Rewrites the outer function to invoke the inner and proves semantic equivalence between the original function and the outlined outer using available SMT backends.
+Generates a random XLS IR function via the C++ builder, reparses into the Rust IR, then selects a random connected subgraph (via BFS from a seed) to outline into a new inner function. Rewrites the outer function to invoke the inner and proves semantic equivalence between the original function and the outlined outer using available SMT backends. The target also explores parameter/return ordering:
+
+- Param ordering mode: Default or deterministically shuffled non-default.
+- Return ordering mode: Default or deterministically shuffled non-default.
+
+Non-default orderings are constructed by permuting the default `OutlineOrdering` while preserving validity (same coverage, no duplicates). The PRNG is seeded from a stable hash of the package text, ensuring reproducible behavior for a given sample.
 
 Early-return rationale:
 
