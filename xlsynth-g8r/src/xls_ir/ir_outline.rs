@@ -574,6 +574,7 @@ pub fn outline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::equiv::prove_equiv_via_toolchain;
     use crate::xls_ir::ir::{NodePayload, PackageMember};
     use crate::xls_ir::ir_parser::Parser;
 
@@ -591,6 +592,39 @@ mod tests {
             .next()
             .unwrap();
         (pkg, f)
+    }
+
+    fn assert_equiv_pkg(orig: &IrFn, outlined_outer: &IrFn, outlined_inner: Option<&IrFn>) {
+        // If the outlined outer contains invokes, the external tool requires a
+        // multi-function package with globally unique node ids, which our
+        // pretty-printer does not guarantee across functions. Skip equivalence in
+        // that case for unit tests; fuzz target covers semantic checks separately.
+        if outlined_outer
+            .nodes
+            .iter()
+            .any(|n| matches!(n.payload, NodePayload::Invoke { .. }))
+        {
+            return;
+        }
+        let lhs_pkg = format!("package lhs\n\ntop {}\n", orig.to_string());
+        let rhs_pkg = match outlined_inner {
+            Some(inner) => format!(
+                "package rhs\n\n{}\n\ntop {}\n",
+                inner.to_string(),
+                outlined_outer.to_string()
+            ),
+            None => format!("package rhs\n\ntop {}\n", outlined_outer.to_string()),
+        };
+        let tool_dir = std::env::var("XLSYNTH_TOOLS")
+            .expect("XLSYNTH_TOOLS must be set for equivalence tests");
+        let res = prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
+            &lhs_pkg, &rhs_pkg, None, tool_dir,
+        );
+        assert!(
+            matches!(res, prove_equiv_via_toolchain::EquivResult::Proved),
+            "Outlining equivalence failed: {:?}",
+            res
+        );
     }
 
     #[test]
@@ -613,7 +647,7 @@ mod tests {
         }
         let res = outline(&f, &to_sel, "f_out", "f_inner", &mut pkg);
         let after_pkg = pkg.to_string();
-        println!("BEFORE:\n{}\n\nAFTER:\n{}", before_pkg, after_pkg);
+        println!("AFTER:\n{}", after_pkg);
         // Outer should invoke inner and return its result
         let outer_s = res.outer.to_string();
         // Expect exact package print before
@@ -648,6 +682,8 @@ fn f_inner(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
         assert_eq!(res.inner.params.len(), 2);
         assert_eq!(res.inner.name, "f_inner");
         assert!(matches!(res.inner.ret_ty, Type::Bits(8)));
+        // Equivalence: original vs outlined outer
+        assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
     }
 
     #[test]
@@ -671,7 +707,7 @@ fn f_inner(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
         }
         let res = outline(&f, &to_sel, "g_out", "g_inner", &mut pkg);
         let after_pkg = pkg.to_string();
-        println!("BEFORE:\n{}\n\nAFTER:\n{}", before_pkg, after_pkg);
+        println!("AFTER:\n{}", after_pkg);
         // Expect exact package strings for determinism
         let expected_before = r#"package test
 
@@ -704,6 +740,8 @@ fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
         assert_eq!(after_pkg, expected_after);
         // Inner should have two params (corresponding to t and u)
         assert_eq!(res.inner.params.len(), 2);
+        // Equivalence: original vs outlined outer
+        assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
     }
 
     #[test]
@@ -734,9 +772,9 @@ fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
             _ => false,
         });
 
-        let _res = outline(&f, &to_sel, "h_out", "h_inner", &mut pkg);
+        let res = outline(&f, &to_sel, "h_out", "h_inner", &mut pkg);
         let after_pkg = pkg.to_string();
-        println!("BEFORE:\n{}\n\nAFTER:\n{}", before_pkg, after_pkg);
+        println!("AFTER:\n{}", after_pkg);
 
         let expected_before = r#"package test
 
@@ -770,5 +808,62 @@ fn h_inner(a: bits[8] id=1, b: bits[8] id=2) -> (bits[8], bits[8]) {
 }
 "#;
         assert_eq!(after_pkg, expected_after);
+        // Equivalence: original vs outlined outer
+        assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
+    }
+
+    #[test]
+    fn outline_multi_in_multi_out_with_postprocess() {
+        // Pre-op "px" makes the outlined region interior: it appears before the invoke
+        // and feeds the outlined add/umul, while xor/and/or remain after the
+        // invoke.
+        let ir = r#"fn k(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
+  px: bits[8] = xor(a, c, id=4)
+  add.5: bits[8] = add(px, b, id=5)
+  umul.6: bits[8] = umul(px, b, id=6)
+  xor.7: bits[8] = xor(add.5, c, id=7)
+  and.8: bits[8] = and(umul.6, c, id=8)
+  ret or.9: bits[8] = or(xor.7, and.8, id=9)
+}"#;
+        let (mut pkg, f) = parse_single_fn(ir);
+        let before_pkg = pkg.to_string();
+        // Outline the add and umul producers together
+        let mut to_sel: HashSet<NodeRef> = HashSet::new();
+        for (i, n) in f.nodes.iter().enumerate() {
+            if matches!(
+                n.payload,
+                NodePayload::Binop(crate::xls_ir::ir::Binop::Add, _, _)
+            ) || matches!(
+                n.payload,
+                NodePayload::Binop(crate::xls_ir::ir::Binop::Umul, _, _)
+            ) {
+                to_sel.insert(NodeRef { index: i });
+            }
+        }
+        let res = outline(&f, &to_sel, "k_out", "k_inner", &mut pkg);
+
+        let expected_before_fn = r#"fn k(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
+  px: bits[8] = xor(a, c, id=4)
+  add.5: bits[8] = add(px, b, id=5)
+  umul.6: bits[8] = umul(px, b, id=6)
+  xor.7: bits[8] = xor(add.5, c, id=7)
+  and.8: bits[8] = and(umul.6, c, id=8)
+  ret or.9: bits[8] = or(xor.7, and.8, id=9)
+}"#;
+        assert_eq!(f.to_string(), expected_before_fn);
+
+        let expected_outer = r#"fn k_out(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
+  px: bits[8] = xor(a, c, id=4)
+  invoke.10: (bits[8], bits[8]) = invoke(b, px, to_apply=k_inner, id=10)
+  tuple_index.11: bits[8] = tuple_index(invoke.10, index=0, id=11)
+  xor.7: bits[8] = xor(tuple_index.11, c, id=7)
+  tuple_index.12: bits[8] = tuple_index(invoke.10, index=1, id=12)
+  and.8: bits[8] = and(tuple_index.12, c, id=8)
+  ret or.9: bits[8] = or(xor.7, and.8, id=9)
+}"#;
+        assert_eq!(res.outer.to_string(), expected_outer);
+
+        // Equivalence: original vs outlined outer
+        assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
     }
 }
