@@ -779,6 +779,16 @@ pub fn ir_to_smt<'a, S: Solver>(
                 };
                 let e_bits = elem_ty.bit_count() as i32;
 
+                // Clamp start to the last valid element index to model XLS OOB semantics.
+                // This ensures that for any start >= elem_cnt - 1 the slice replicates the
+                // last element, matching the piecewise definition (and avoids relying on
+                // oversized padding when the start width allows larger values).
+                let start_width = start_bv.bitvec.get_width();
+                let last_idx_const =
+                    solver.numerical(start_width, (elem_cnt.saturating_sub(1)) as u64);
+                let start_le_last = solver.ule(&start_bv.bitvec, &last_idx_const);
+                let clamped_start = solver.ite(&start_le_last, &start_bv.bitvec, &last_idx_const);
+
                 // 1) Build a padding prefix of (width-1) copies of the last element.
                 let last_idx = (elem_cnt as i32) - 1;
                 let last_high = (last_idx + 1) * e_bits - 1;
@@ -795,11 +805,10 @@ pub fn ir_to_smt<'a, S: Solver>(
                 let extended = solver.concat(&pad, &base_array.bitvec);
 
                 // 3) Compute start_scaled = start * e_bits.
-                let start_width = start_bv.bitvec.get_width();
                 let e_bits_u = e_bits as u128;
                 let extra = min_bits_u128(e_bits_u.saturating_sub(1));
                 let start_scaled_w = start_width + extra;
-                let start_ext = solver.extend_to(&start_bv.bitvec, start_scaled_w, false);
+                let start_ext = solver.extend_to(&clamped_start, start_scaled_w, false);
                 let e_const = solver.numerical(start_scaled_w, e_bits_u as u64);
                 let start_scaled =
                     solver.xls_arbitrary_width_umul(&start_ext, &e_const, start_scaled_w);

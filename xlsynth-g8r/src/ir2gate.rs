@@ -160,6 +160,16 @@ fn gatify_array_slice(
     let e_bits = array_ty.element_type.bit_count();
     let n_elems = array_ty.element_count;
 
+    // Clamp start to the last valid index to ensure OOB semantics replicate the
+    // last element, even when the start index is larger than
+    // (n_elems - 1 + width - 1).
+    let start_w = start_bits.get_bit_count();
+    let last_idx_bits = gb.add_literal(
+        &xlsynth::IrBits::make_ubits(start_w, (n_elems.saturating_sub(1)) as u64).unwrap(),
+    );
+    let start_le_last = gatify_ule_via_bit_tests(gb, text_id, start_bits, &last_idx_bits);
+    let clamped_start_bits = gb.add_mux2_vec(&start_le_last, start_bits, &last_idx_bits);
+
     // 1) Build a padding prefix of (width-1) copies of the last element to emulate
     // XLS out-of-bounds semantics (select last element when OOB).
     let last_elem = array_bits.get_lsb_slice((n_elems - 1) * e_bits, e_bits);
@@ -173,9 +183,8 @@ fn gatify_array_slice(
     // 2) Concatenate pad || array_bits to form the extended sequence.
     let extended = AigBitVector::concat(pad, array_bits.clone());
 
-    // 3) Compute start_scaled = start * e_bits, with sufficient width to hold the
-    //    product.
-    let start_w = start_bits.get_bit_count();
+    // 3) Compute start_scaled = clamped_start * e_bits, with sufficient width to
+    //    hold the product.
     let mut tmp = if e_bits > 0 { e_bits - 1 } else { 0 };
     let mut extra = 0usize;
     while tmp > 0 {
@@ -187,9 +196,9 @@ fn gatify_array_slice(
         gb.add_literal(&xlsynth::IrBits::make_ubits(start_scaled_w, e_bits as u64).unwrap());
     let start_ext = if start_scaled_w > start_w {
         let zeros = AigBitVector::zeros(start_scaled_w - start_w);
-        AigBitVector::concat(zeros, start_bits.clone())
+        AigBitVector::concat(zeros, clamped_start_bits.clone())
     } else {
-        start_bits.clone()
+        clamped_start_bits.clone()
     };
     let e_ext = if start_scaled_w > start_w {
         let zeros = AigBitVector::zeros(start_scaled_w - start_w);
