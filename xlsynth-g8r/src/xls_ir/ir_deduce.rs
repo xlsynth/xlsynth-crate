@@ -261,6 +261,25 @@ pub fn deduce_result_type(
             Ok(Some(cur))
         }
 
+        NodePayload::ArraySlice {
+            array: _,
+            start: _,
+            width,
+        } => {
+            let array_ty = operand_types
+                .get(0)
+                .ok_or(DeduceError::MissingOperand("array_slice.array"))?;
+            match array_ty {
+                Type::Array(ArrayTypeData { element_type, .. }) => {
+                    Ok(Some(Type::Array(ArrayTypeData {
+                        element_type: element_type.clone(),
+                        element_count: *width,
+                    })))
+                }
+                _ => Err(DeduceError::ExpectedArray("array_slice")),
+            }
+        }
+
         NodePayload::DynamicBitSlice { width, .. } | NodePayload::BitSlice { width, .. } => {
             Ok(Some(Type::Bits(*width)))
         }

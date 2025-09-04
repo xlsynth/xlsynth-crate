@@ -44,6 +44,7 @@ fn payload_tag(payload: &NodePayload) -> &'static str {
         NodePayload::GetParam(_) => "get_param",
         NodePayload::Tuple(_) => "tuple",
         NodePayload::Array(_) => "array",
+        NodePayload::ArraySlice { .. } => "array_slice",
         NodePayload::TupleIndex { .. } => "tuple_index",
         NodePayload::Binop(_, _, _) => "binop",
         NodePayload::Unop(_, _) => "unop",
@@ -114,6 +115,7 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             indices: _,
             assumed_in_bounds,
         } => update_hash_bool(hasher, *assumed_in_bounds),
+        NodePayload::ArraySlice { width, .. } => update_hash_u64(hasher, *width as u64),
         NodePayload::DynamicBitSlice { width, .. } => update_hash_u64(hasher, *width as u64),
         NodePayload::BitSlice { start, width, .. } => {
             update_hash_u64(hasher, *start as u64);

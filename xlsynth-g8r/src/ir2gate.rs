@@ -149,6 +149,68 @@ fn gatify_array_index(
     result
 }
 
+fn gatify_array_slice(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    start_bits: &AigBitVector,
+    width: usize,
+    text_id: usize,
+) -> AigBitVector {
+    let e_bits = array_ty.element_type.bit_count();
+    let n_elems = array_ty.element_count;
+
+    // 1) Build a padding prefix of (width-1) copies of the last element to emulate
+    // XLS out-of-bounds semantics (select last element when OOB).
+    let last_elem = array_bits.get_lsb_slice((n_elems - 1) * e_bits, e_bits);
+    let mut pad = AigBitVector::zeros(0);
+    if width > 0 {
+        for _ in 0..(width - 1) {
+            pad = AigBitVector::concat(last_elem.clone(), pad);
+        }
+    }
+
+    // 2) Concatenate pad || array_bits to form the extended sequence.
+    let extended = AigBitVector::concat(pad, array_bits.clone());
+
+    // 3) Compute start_scaled = start * e_bits, with sufficient width to hold the
+    //    product.
+    let start_w = start_bits.get_bit_count();
+    let mut tmp = if e_bits > 0 { e_bits - 1 } else { 0 };
+    let mut extra = 0usize;
+    while tmp > 0 {
+        extra += 1;
+        tmp >>= 1;
+    }
+    let start_scaled_w = start_w + extra;
+    let e_const =
+        gb.add_literal(&xlsynth::IrBits::make_ubits(start_scaled_w, e_bits as u64).unwrap());
+    let start_ext = if start_scaled_w > start_w {
+        let zeros = AigBitVector::zeros(start_scaled_w - start_w);
+        AigBitVector::concat(zeros, start_bits.clone())
+    } else {
+        start_bits.clone()
+    };
+    let e_ext = if start_scaled_w > start_w {
+        let zeros = AigBitVector::zeros(start_scaled_w - start_w);
+        AigBitVector::concat(zeros, e_const)
+    } else {
+        e_const
+    };
+    let start_scaled = gatify_umul(&start_ext, &e_ext, start_scaled_w, gb);
+
+    // 4) Shift right by start_scaled and take low (width * e_bits) bits.
+    let shifted = gatify_barrel_shifter(
+        &extended,
+        &start_scaled,
+        Direction::Right,
+        &format!("array_slice_shift_{}", text_id),
+        gb,
+    );
+    let out_width_bits = width * e_bits;
+    shifted.get_lsb_slice(0, out_width_bits)
+}
+
 fn gatify_array_update(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
@@ -1177,6 +1239,27 @@ fn gatify_internal(
                 }
 
                 env.add(node_ref, GateOrVec::BitVector(array_bits));
+            }
+            ir::NodePayload::ArraySlice {
+                array,
+                start,
+                width,
+            } => {
+                let array_ty = match f.get_node_ty(*array) {
+                    ir::Type::Array(array_ty_data) => array_ty_data,
+                    other => panic!("Expected array type for array_slice, got {:?}", other),
+                };
+                let array_bits = env.get_bit_vector(*array).unwrap();
+                let start_bits = env.get_bit_vector(*start).unwrap();
+                let result = gatify_array_slice(
+                    g8_builder,
+                    array_ty,
+                    &array_bits,
+                    &start_bits,
+                    *width,
+                    node.text_id,
+                );
+                env.add(node_ref, GateOrVec::BitVector(result));
             }
             ir::NodePayload::ArrayUpdate {
                 array,

@@ -136,6 +136,24 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 .collect();
             IrValue::make_array(&values).unwrap()
         }
+        ir::NodePayload::ArraySlice {
+            array,
+            start,
+            width,
+        } => {
+            let arr = env.get(&array).unwrap().clone();
+            let start_u = env.get(&start).unwrap().to_u64().unwrap() as usize;
+            let len = arr.get_element_count().unwrap();
+            assert!(len > 0, "ArraySlice: empty array not supported");
+            let mut out_elems: Vec<IrValue> = Vec::with_capacity(width);
+            for j in 0..width {
+                let idx = start_u.saturating_add(j);
+                let clamped = if idx >= len { len - 1 } else { idx };
+                let v = arr.get_element(clamped).unwrap();
+                out_elems.push(v);
+            }
+            IrValue::make_array(&out_elems).unwrap()
+        }
         ir::NodePayload::ArrayIndex {
             array,
             ref indices,

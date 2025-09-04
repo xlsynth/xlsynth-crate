@@ -694,6 +694,28 @@ impl Parser {
                 let members = self.parse_variadic_op(&node_env, &mut maybe_id, "array")?;
                 (ir::NodePayload::Array(members), maybe_id.unwrap())
             }
+            "array_slice" => {
+                let array = self.parse_node_ref(&node_env, "array_slice array")?;
+                self.drop_or_error(",")?;
+                let start = self.parse_node_ref(&node_env, "array_slice start")?;
+                self.drop_or_error(",")?;
+                let width = self.parse_usize_attribute("width")?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for array_slice; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::ArraySlice { array, start, width },
+                    maybe_id.unwrap(),
+                )
+            }
             "array_update" => {
                 let array = self.parse_node_ref(&node_env, "array_update array")?;
                 self.drop_or_error(",")?;

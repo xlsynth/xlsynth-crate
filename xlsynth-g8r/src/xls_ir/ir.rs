@@ -321,6 +321,15 @@ pub enum NodePayload {
     GetParam(ParamId),
     Tuple(Vec<NodeRef>),
     Array(Vec<NodeRef>),
+    /// array_slice(array, start, width=<width>) -> Array
+    /// Returns a slice of the input array consisting of `width` consecutive
+    /// elements starting at `start`. If any selected index is out-of-bounds,
+    /// the last element of the array is used for that position (XLS semantics).
+    ArraySlice {
+        array: NodeRef,
+        start: NodeRef,
+        width: usize,
+    },
     TupleIndex {
         tuple: NodeRef,
         index: usize,
@@ -432,6 +441,7 @@ impl NodePayload {
             NodePayload::GetParam(_) => "get_param",
             NodePayload::Tuple(_) => "tuple",
             NodePayload::Array(_) => "array",
+            NodePayload::ArraySlice { .. } => "array_slice",
             NodePayload::TupleIndex { .. } => "tuple_index",
             NodePayload::Binop(op, _, _) => binop_to_operator(*op),
             NodePayload::Unop(op, _) => unop_to_operator(*op),
@@ -546,6 +556,19 @@ impl NodePayload {
                     .join(", "),
                 id
             ),
+            NodePayload::ArraySlice {
+                array,
+                start,
+                width,
+            } => {
+                format!(
+                    "array_slice({}, {}, width={}, id={})",
+                    get_name(*array),
+                    get_name(*start),
+                    width,
+                    id
+                )
+            }
             NodePayload::TupleIndex { tuple, index } => {
                 format!(
                     "tuple_index({}, index={}, id={})",
@@ -902,6 +925,7 @@ impl Node {
                 width,
                 arg: _,
             } => format!(", start={}, width={}", start, width),
+            NodePayload::ArraySlice { width, .. } => format!(", width={}", width),
             NodePayload::SignExt { new_bit_count, .. }
             | NodePayload::ZeroExt { new_bit_count, .. } => {
                 format!(", new_bit_count={}", new_bit_count)
@@ -993,6 +1017,7 @@ impl Fn {
                 use crate::xls_ir::ir::NodePayload::*;
                 match &n.payload {
                     Tuple(nodes) | Array(nodes) => nodes.contains(&node_ref),
+                    ArraySlice { array, start, .. } => array == &node_ref || start == &node_ref,
                     TupleIndex { tuple, .. } => tuple == &node_ref,
                     Binop(_, a, b) => a == &node_ref || b == &node_ref,
                     Unop(_, a) => a == &node_ref,

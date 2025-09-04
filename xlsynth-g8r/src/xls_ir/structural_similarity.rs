@@ -73,6 +73,12 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry>, Vec<usize>) 
                 child_hashes.push(hashes[tuple.index]);
                 child_depths.push(depths[tuple.index]);
             }
+            NodePayload::ArraySlice { array, start, .. } => {
+                child_hashes.push(hashes[array.index]);
+                child_depths.push(depths[array.index]);
+                child_hashes.push(hashes[start.index]);
+                child_depths.push(depths[start.index]);
+            }
             NodePayload::Binop(_, a, b) => {
                 child_hashes.push(hashes[a.index]);
                 child_depths.push(depths[a.index]);
