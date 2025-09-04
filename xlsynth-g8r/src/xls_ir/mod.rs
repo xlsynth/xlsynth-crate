@@ -9,6 +9,7 @@ pub mod ir_deduce;
 pub mod ir_eval;
 pub mod ir_fuzz;
 pub mod ir_node_env;
+pub mod ir_outline;
 pub mod ir_parser;
 pub mod ir_utils;
 pub mod ir_validate;
