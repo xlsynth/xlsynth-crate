@@ -23,7 +23,9 @@ rustup toolchain install nightly --profile minimal
 rustup component add clippy rustfmt --toolchain nightly
 rustup override set nightly
 
+echo "==> Installing cargo extensions"
 cargo install cargo-nextest
+cargo install cargo-fuzz
 
 echo "==> Installing LLVM 18 libc++/libc++abi (matches CI)"
 curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
