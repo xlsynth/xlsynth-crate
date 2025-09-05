@@ -96,3 +96,12 @@ For changes related to boolector, you should test with
 ```bash
 cargo test --features with-boolector-built --workspace
 ```
+
+## Offline environments (web IDEs, sandboxed runners)
+
+When building or running tools in an offline environment (e.g., Codex Web, remote sandboxes, `CARGO_NET_OFFLINE=1`):
+
+- Ensure pre-fetched XLS artifacts are available via environment variables:
+  - `XLS_DSO_PATH`: directory/path to the XLS dynamic library used for linking and rpath.
+  - `DSLX_STDLIB_PATH`: path to the DSLX stdlib directory (ending in `.../xls/dslx/stdlib/`).
+- Our `xlsynth-sys/build.rs` will error early under `CARGO_NET_OFFLINE=1` if downloads would be required and these variables are not provided.
