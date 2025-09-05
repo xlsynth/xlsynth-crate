@@ -819,8 +819,11 @@ pub fn compute_dual_difference_regions(lhs: &Fn, rhs: &Fn) -> (HashSet<NodeRef>,
 ///   the return if it lies inside the region), a pair of: (producer textual id,
 ///   sorted list of textual ids of outside users), ordered by ascending node
 ///   index to be stable.
-fn compute_region_boundary_nodes(f: &Fn, region: &HashSet<NodeRef>) -> Vec<NodeRef> {
-    let users_map = compute_users(f);
+fn compute_region_boundary_nodes(
+    f: &Fn,
+    region: &HashSet<NodeRef>,
+    users_map: &HashMap<NodeRef, HashSet<NodeRef>>,
+) -> Vec<NodeRef> {
     let mut boundary: Vec<NodeRef> = Vec::new();
     for nr in region.iter() {
         let users = users_map
@@ -843,7 +846,7 @@ fn compute_region_boundary_nodes(f: &Fn, region: &HashSet<NodeRef>) -> Vec<NodeR
 // Helper: compute outbound boundary users summary for a region.
 fn summarize_region_outbound(f: &Fn, region: &HashSet<NodeRef>) -> Vec<(String, Vec<String>)> {
     let users_map = compute_users(f);
-    let boundary = compute_region_boundary_nodes(f, region);
+    let boundary = compute_region_boundary_nodes(f, region, &users_map);
     let mut per_return: Vec<(String, Vec<String>)> = Vec::new();
     for nr in boundary.into_iter() {
         let producer_txt = node_textual_id(f, nr);
@@ -863,18 +866,14 @@ fn summarize_region_outbound(f: &Fn, region: &HashSet<NodeRef>) -> Vec<(String, 
 
 // Helper: build inbound textual-id -> type map for a region.
 fn compute_inbound_text_to_type_map(f: &Fn, region: &HashSet<NodeRef>) -> BTreeMap<String, Type> {
-    let mut inbound_set: HashSet<NodeRef> = HashSet::new();
+    let mut m: BTreeMap<String, Type> = BTreeMap::new();
     for nr in region.iter() {
         let node = f.get_node(*nr);
         for dep in operands(&node.payload).into_iter() {
             if !region.contains(&dep) {
-                inbound_set.insert(dep);
+                m.insert(node_textual_id(f, dep), f.get_node(dep).ty.clone());
             }
         }
-    }
-    let mut m: BTreeMap<String, Type> = BTreeMap::new();
-    for r in inbound_set.into_iter() {
-        m.insert(node_textual_id(f, r), f.get_node(r).ty.clone());
     }
     m
 }
@@ -1007,7 +1006,8 @@ fn build_inner_with_fixed_params(
     }
 
     // Determine boundary outputs inside the region (stable by index)
-    let boundary = compute_region_boundary_nodes(f, region);
+    let users_map = compute_users(f);
+    let boundary = compute_region_boundary_nodes(f, region, &users_map);
 
     // Map boundary outputs to inner refs
     let mut ret_refs: Vec<NodeRef> = Vec::new();
