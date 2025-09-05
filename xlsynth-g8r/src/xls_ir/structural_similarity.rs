@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn, NodePayload, NodeRef};
+use crate::xls_ir::ir::{Fn, NodePayload, NodeRef, node_textual_id};
 use crate::xls_ir::ir::{Package, PackageMember};
 use crate::xls_ir::ir_outline::outline;
-use crate::xls_ir::ir_utils::{get_topological, operands};
+use crate::xls_ir::ir_utils::{compute_users, get_topological, operands};
 use crate::xls_ir::node_hashing::{
     compute_node_local_structural_hash, compute_node_structural_hash,
 };
@@ -817,6 +817,108 @@ pub fn extract_dual_difference_subgraphs(lhs: &Fn, rhs: &Fn) -> (Fn, Fn) {
     let rhs_res = outline(rhs, &rhs_interior, &rhs_names.0, &rhs_names.1, &mut rhs_pkg);
 
     (lhs_res.inner, rhs_res.inner)
+}
+
+/// Computes the node sets that constitute the dual-difference regions on LHS
+/// and RHS.
+///
+/// These are the nodes that remained unmatched when comparing using forward OR
+/// backward structural hashes (same criterion used by
+/// `extract_dual_difference_subgraphs`).
+pub fn compute_dual_difference_regions(lhs: &Fn, rhs: &Fn) -> (HashSet<NodeRef>, HashSet<NodeRef>) {
+    assert_eq!(
+        lhs.get_type(),
+        rhs.get_type(),
+        "Function signatures must match for structural comparison",
+    );
+    let (lhs_unmatched_mask, rhs_unmatched_mask) = compute_dual_unmatched_masks(lhs, rhs);
+
+    let mut lhs_interior: HashSet<NodeRef> = HashSet::new();
+    for i in 0..lhs.nodes.len() {
+        if i < lhs_unmatched_mask.len() && lhs_unmatched_mask[i] {
+            lhs_interior.insert(NodeRef { index: i });
+        }
+    }
+    let mut rhs_interior: HashSet<NodeRef> = HashSet::new();
+    for i in 0..rhs.nodes.len() {
+        if i < rhs_unmatched_mask.len() && rhs_unmatched_mask[i] {
+            rhs_interior.insert(NodeRef { index: i });
+        }
+    }
+    (lhs_interior, rhs_interior)
+}
+
+/// Summarizes the inbound operands and outbound users for a given region of
+/// nodes.
+///
+/// Returns:
+/// - A sorted list of unique textual ids for inbound operands (producers
+///   outside `region` that feed any node inside `region`).
+/// - For each boundary output (nodes in `region` used outside the region, or
+///   the return if it lies inside the region), a pair of: (producer textual id,
+///   sorted list of textual ids of outside users), ordered by ascending node
+///   index to be stable.
+pub fn summarize_region_io(
+    f: &Fn,
+    region: &HashSet<NodeRef>,
+) -> (Vec<String>, Vec<(String, Vec<String>)>) {
+    // Fast membership by NodeRef
+    let region_set: HashSet<NodeRef> = region.iter().copied().collect();
+
+    // Inbound: collect unique producers outside region used by nodes in region.
+    let mut inbound_set: HashSet<NodeRef> = HashSet::new();
+    for nr in region_set.iter() {
+        let node = f.get_node(*nr);
+        for dep in operands(&node.payload).into_iter() {
+            if !region_set.contains(&dep) {
+                inbound_set.insert(dep);
+            }
+        }
+    }
+    let mut inbound_texts: Vec<String> = inbound_set
+        .into_iter()
+        .map(|r| node_textual_id(f, r))
+        .collect();
+    inbound_texts.sort();
+    inbound_texts.dedup();
+
+    // Outbound: boundary outputs are region nodes that have users outside the
+    // region and also include the return node if it lies in the region.
+    let users_map = compute_users(f);
+    let mut boundary: Vec<NodeRef> = Vec::new();
+    for nr in region_set.iter() {
+        let users = users_map
+            .get(nr)
+            .map(|s| s.iter().copied().collect::<Vec<NodeRef>>())
+            .unwrap_or_default();
+        let has_outside = users.iter().any(|u| !region_set.contains(u));
+        if has_outside {
+            boundary.push(*nr);
+        }
+    }
+    if let Some(ret_nr) = f.ret_node_ref {
+        if region_set.contains(&ret_nr) && !boundary.contains(&ret_nr) {
+            boundary.push(ret_nr);
+        }
+    }
+    boundary.sort_by_key(|nr| nr.index);
+
+    let mut per_return: Vec<(String, Vec<String>)> = Vec::new();
+    for nr in boundary.into_iter() {
+        let producer_txt = node_textual_id(f, nr);
+        let mut outside_users: Vec<String> = users_map
+            .get(&nr)
+            .map(|s| s.iter().copied().filter(|u| !region_set.contains(u)))
+            .into_iter()
+            .flatten()
+            .map(|u| node_textual_id(f, u))
+            .collect();
+        outside_users.sort();
+        outside_users.dedup();
+        per_return.push((producer_txt, outside_users));
+    }
+
+    (inbound_texts, per_return)
 }
 
 #[cfg(test)]

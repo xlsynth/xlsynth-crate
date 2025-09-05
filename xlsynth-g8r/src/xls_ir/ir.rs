@@ -839,6 +839,22 @@ impl NodePayload {
     }
 }
 
+/// Returns a human-oriented textual identifier for a node reference.
+///
+/// - For `get_param` nodes, returns the parameter's name.
+/// - For other nodes, returns the node's `name` if present, otherwise
+///   `"<operator>.<text_id>"`.
+pub fn node_textual_id(f: &Fn, nr: NodeRef) -> String {
+    let node = f.get_node(nr);
+    match node.payload {
+        NodePayload::GetParam(_) => node.name.clone().expect("GetParam node should have a name"),
+        _ => match &node.name {
+            Some(n) => n.clone(),
+            None => format!("{}.{}", node.payload.get_operator(), node.text_id),
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     /// All nodes have known ids.
