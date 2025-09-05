@@ -3,6 +3,13 @@
 
 set -euo pipefail
 
+echo "==> Installing system prerequisites"
+sudo apt-get update -y
+sudo apt-get install -y wget curl unzip gnupg cmake build-essential python3-pip pkg-config valgrind iverilog
+
+echo "==> Installing Python deps for scripts"
+apt-get install -y python3-requests pre-commit
+
 if dpkg -s rustc >/dev/null 2>&1 || dpkg -s cargo >/dev/null 2>&1; then
 sudo apt-get remove -y rustc cargo || true
 fi
@@ -16,9 +23,7 @@ rustup toolchain install nightly --profile minimal
 rustup component add clippy rustfmt --toolchain nightly
 rustup override set nightly
 
-echo "==> Installing system prerequisites"
-sudo apt-get update -y
-sudo apt-get install -y wget curl unzip gnupg cmake build-essential python3-pip pkg-config valgrind iverilog
+cargo install cargo-nextest
 
 echo "==> Installing LLVM 18 libc++/libc++abi (matches CI)"
 curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
@@ -33,11 +38,6 @@ unzip -q ${PROTOC_ZIP} -d /tmp/protoc
 sudo mv /tmp/protoc/bin/protoc /usr/local/bin/
 rm -rf /tmp/protoc "${PROTOC_ZIP}"
 protoc --version
-
-echo "==> Installing Python deps for scripts"
-pip3 install --upgrade pip
-pip3 install -r requirements.txt
-pip3 install pre-commit
 
 echo "==> Downloading Slang binary"
 curl -L -o /usr/local/bin/slang https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8

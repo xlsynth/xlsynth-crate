@@ -17,27 +17,24 @@ ldconfig
 echo "==> Setting up environment variables"
 export XLSYNTH_TOOLS="$PWD/xlsynth_tools"
 export DSLX_STDLIB_PATH="$XLSYNTH_TOOLS/xls/dslx/stdlib"
-export SLANG_PATH="$PWD/slang"
+export SLANG_PATH="/usr/local/bin/slang"
 export PATH="$PATH:$PWD"
 export XLS_DSO_PATH=$(ls /usr/lib/libxls*.so)
 
 [ -f "$XLS_DSO_PATH" ] && echo "DSO found OK"
 
-# Idempotently persist environment variables for later interactive use
-ensure_line_in_bashrc() {
-line="$1"
-grep -qxF "$line" ~/.bashrc || echo "$line" >> ~/.bashrc
-}
-
-ensure_line_in_bashrc "export XLSYNTH_TOOLS=\"$XLSYNTH_TOOLS\""
-ensure_line_in_bashrc "export DSLX_STDLIB_PATH=\"$DSLX_STDLIB_PATH\""
-ensure_line_in_bashrc "export SLANG_PATH=\"$SLANG_PATH\""
-ensure_line_in_bashrc "export XLS_DSO_PATH=\"$XLS_DSO_PATH\""
-ensure_line_in_bashrc "export PATH=\"$PATH:$PWD\""
+# Persist a machine-readable env file for non-interactive shells and Docker RUN layers
+mkdir -p /etc/xlsynth
+printf 'XLSYNTH_TOOLS=%q\n' "$XLSYNTH_TOOLS" > /etc/xlsynth/env
+printf 'DSLX_STDLIB_PATH=%q\n' "$DSLX_STDLIB_PATH" >> /etc/xlsynth/env
+printf 'SLANG_PATH=%q\n' "$SLANG_PATH" >> /etc/xlsynth/env
+printf 'XLS_DSO_PATH=%q\n' "$XLS_DSO_PATH" >> /etc/xlsynth/env
+printf 'PATH=%q\n' "$PATH" >> /etc/xlsynth/env
 
 pre-commit install
-# skip rustfmt for the moment as it's having an issue
-SKIP=rustfmt pre-commit run --all-files
+
+echo "==> Running pre-commit"
+pre-commit run --all-files
 
 echo "==> Prefetching all Cargo dependencies"
 cargo fetch --quiet
@@ -50,9 +47,6 @@ cargo build --workspace --all-targets --features=with-boolector-system --jobs $(
 
 echo "==> Going offline (network locked)"
 export CARGO_NET_OFFLINE=true
-ensure_line_in_bashrc 'export CARGO_NET_OFFLINE=true'
-
-echo "==> Showing bashrc"
-cat ~/.bashrc
+printf 'CARGO_NET_OFFLINE=%q\n' "$CARGO_NET_OFFLINE" >> /etc/xlsynth/env
 
 echo "✅ Maintenance complete — you can now run 'cargo test --workspace'"
