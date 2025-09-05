@@ -2,13 +2,16 @@
 
 //! Computes structural similarity statistics between two XLS IR functions.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn, NodePayload, NodeRef, node_textual_id};
-use crate::xls_ir::ir::{Package, PackageMember};
-use crate::xls_ir::ir_outline::outline;
-use crate::xls_ir::ir_utils::{compute_users, get_topological, operands};
+use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type, node_textual_id};
+use crate::xls_ir::ir_utils::{
+    compute_users, get_topological, is_valid_identifier_name, operands, remap_payload_with,
+    sanitize_text_id_to_identifier_name,
+};
 use crate::xls_ir::node_hashing::{
     compute_node_local_structural_hash, compute_node_structural_hash,
 };
@@ -777,54 +780,6 @@ fn compute_dual_unmatched_masks(lhs: &Fn, rhs: &Fn) -> (Vec<bool>, Vec<bool>) {
     (lhs_unmatched_mask, rhs_unmatched_mask)
 }
 
-/// Extracts inner functions for the matched "interior" (nodes that are
-/// equivalent by forward OR backward structural equivalence) using the
-/// outlining transformation. Returns the inner functions from each side.
-pub fn extract_dual_difference_subgraphs(lhs: &Fn, rhs: &Fn) -> (Fn, Fn) {
-    assert_eq!(
-        lhs.get_type(),
-        rhs.get_type(),
-        "Function signatures must match for structural comparison",
-    );
-    let (lhs_unmatched_mask, rhs_unmatched_mask) = compute_dual_unmatched_masks(lhs, rhs);
-
-    // Select the unmatched nodes as the interior difference to outline.
-    let mut lhs_interior: HashSet<NodeRef> = HashSet::new();
-    for i in 0..lhs.nodes.len() {
-        if i < lhs_unmatched_mask.len() && lhs_unmatched_mask[i] {
-            lhs_interior.insert(NodeRef { index: i });
-        }
-    }
-    let mut rhs_interior: HashSet<NodeRef> = HashSet::new();
-    for i in 0..rhs.nodes.len() {
-        if i < rhs_unmatched_mask.len() && rhs_unmatched_mask[i] {
-            rhs_interior.insert(NodeRef { index: i });
-        }
-    }
-
-    // Outline the interior on each side and return the resulting inner function.
-    let mut lhs_pkg = Package {
-        name: "outline_lhs".to_string(),
-        file_table: crate::xls_ir::ir::FileTable::new(),
-        members: vec![PackageMember::Function(lhs.clone())],
-        top_name: None,
-    };
-    let mut rhs_pkg = Package {
-        name: "outline_rhs".to_string(),
-        file_table: crate::xls_ir::ir::FileTable::new(),
-        members: vec![PackageMember::Function(rhs.clone())],
-        top_name: None,
-    };
-
-    let lhs_names = (format!("{}_out", lhs.name), format!("{}_inner", lhs.name));
-    let rhs_names = (format!("{}_out", rhs.name), format!("{}_inner", rhs.name));
-
-    let lhs_res = outline(lhs, &lhs_interior, &lhs_names.0, &lhs_names.1, &mut lhs_pkg);
-    let rhs_res = outline(rhs, &rhs_interior, &rhs_names.0, &rhs_names.1, &mut rhs_pkg);
-
-    (lhs_res.inner, rhs_res.inner)
-}
-
 /// Computes the node sets that constitute the dual-difference regions on LHS
 /// and RHS.
 ///
@@ -864,57 +819,40 @@ pub fn compute_dual_difference_regions(lhs: &Fn, rhs: &Fn) -> (HashSet<NodeRef>,
 ///   the return if it lies inside the region), a pair of: (producer textual id,
 ///   sorted list of textual ids of outside users), ordered by ascending node
 ///   index to be stable.
-pub fn summarize_region_io(
+fn compute_region_boundary_nodes(
     f: &Fn,
     region: &HashSet<NodeRef>,
-) -> (Vec<String>, Vec<(String, Vec<String>)>) {
-    // Fast membership by NodeRef
-    let region_set: HashSet<NodeRef> = region.iter().copied().collect();
-
-    // Inbound: collect unique producers outside region used by nodes in region.
-    let mut inbound_set: HashSet<NodeRef> = HashSet::new();
-    for nr in region_set.iter() {
-        let node = f.get_node(*nr);
-        for dep in operands(&node.payload).into_iter() {
-            if !region_set.contains(&dep) {
-                inbound_set.insert(dep);
-            }
-        }
-    }
-    let mut inbound_texts: Vec<String> = inbound_set
-        .into_iter()
-        .map(|r| node_textual_id(f, r))
-        .collect();
-    inbound_texts.sort();
-    inbound_texts.dedup();
-
-    // Outbound: boundary outputs are region nodes that have users outside the
-    // region and also include the return node if it lies in the region.
-    let users_map = compute_users(f);
+    users_map: &HashMap<NodeRef, HashSet<NodeRef>>,
+) -> Vec<NodeRef> {
     let mut boundary: Vec<NodeRef> = Vec::new();
-    for nr in region_set.iter() {
+    for nr in region.iter() {
         let users = users_map
             .get(nr)
             .map(|s| s.iter().copied().collect::<Vec<NodeRef>>())
             .unwrap_or_default();
-        let has_outside = users.iter().any(|u| !region_set.contains(u));
-        if has_outside {
+        if users.iter().any(|u| !region.contains(u)) {
             boundary.push(*nr);
         }
     }
     if let Some(ret_nr) = f.ret_node_ref {
-        if region_set.contains(&ret_nr) && !boundary.contains(&ret_nr) {
+        if region.contains(&ret_nr) && !boundary.contains(&ret_nr) {
             boundary.push(ret_nr);
         }
     }
     boundary.sort_by_key(|nr| nr.index);
+    boundary
+}
 
+// Helper: compute outbound boundary users summary for a region.
+fn summarize_region_outbound(f: &Fn, region: &HashSet<NodeRef>) -> Vec<(String, Vec<String>)> {
+    let users_map = compute_users(f);
+    let boundary = compute_region_boundary_nodes(f, region, &users_map);
     let mut per_return: Vec<(String, Vec<String>)> = Vec::new();
     for nr in boundary.into_iter() {
         let producer_txt = node_textual_id(f, nr);
         let mut outside_users: Vec<String> = users_map
             .get(&nr)
-            .map(|s| s.iter().copied().filter(|u| !region_set.contains(u)))
+            .map(|s| s.iter().copied().filter(|u| !region.contains(u)))
             .into_iter()
             .flatten()
             .map(|u| node_textual_id(f, u))
@@ -923,8 +861,249 @@ pub fn summarize_region_io(
         outside_users.dedup();
         per_return.push((producer_txt, outside_users));
     }
+    per_return
+}
 
-    (inbound_texts, per_return)
+// Helper: build inbound textual-id -> type map for a region.
+fn compute_inbound_text_to_type_map(f: &Fn, region: &HashSet<NodeRef>) -> BTreeMap<String, Type> {
+    let mut m: BTreeMap<String, Type> = BTreeMap::new();
+    for nr in region.iter() {
+        let node = f.get_node(*nr);
+        for dep in operands(&node.payload).into_iter() {
+            if !region.contains(&dep) {
+                m.insert(node_textual_id(f, dep), f.get_node(dep).ty.clone());
+            }
+        }
+    }
+    m
+}
+
+// Helper: compute union inbound textual ids (sorted) and corresponding types.
+fn compute_union_params(
+    lhs_inbound_map: &BTreeMap<String, Type>,
+    rhs_inbound_map: &BTreeMap<String, Type>,
+) -> Vec<(String, Type)> {
+    // Union textual ids, deterministic order by string.
+    let mut union_texts: BTreeSet<String> = lhs_inbound_map.keys().cloned().collect();
+    for k in rhs_inbound_map.keys() {
+        union_texts.insert(k.clone());
+    }
+
+    // Build type map for union, asserting matching types when present on both
+    // sides.
+    let mut union_pairs: Vec<(String, Type)> = Vec::with_capacity(union_texts.len());
+    for t in union_texts.into_iter() {
+        let ty = match (lhs_inbound_map.get(&t), rhs_inbound_map.get(&t)) {
+            (Some(lt), Some(rt)) => {
+                assert_eq!(lt, rt, "Inbound textual id '{}' has mismatched types", t);
+                lt.clone()
+            }
+            (Some(lt), None) => lt.clone(),
+            (None, Some(rt)) => rt.clone(),
+            (None, None) => unreachable!(),
+        };
+        union_pairs.push((t, ty));
+    }
+    union_pairs
+}
+
+// Helper: clone a region into a new inner function with fixed params from union
+// lists.
+fn build_inner_with_fixed_params(
+    f: &Fn,
+    region: &HashSet<NodeRef>,
+    fname: &str,
+    union_params: &[(String, Type)],
+) -> Fn {
+    // Create inner params in the union order
+    let mut inner_params: Vec<Param> = Vec::new();
+    let mut text_to_inner_param_ref: HashMap<String, NodeRef> = HashMap::new();
+    let mut next_param_pos: usize = 1;
+    let mut inner_nodes: Vec<Node> = Vec::new();
+    let mut next_text_id: usize = {
+        let mut max_id = 0usize;
+        for n in f.nodes.iter() {
+            if n.text_id > max_id {
+                max_id = n.text_id;
+            }
+        }
+        max_id.saturating_add(1)
+    };
+
+    let mut used_names: HashSet<String> = HashSet::new();
+    for (raw_name, ty) in union_params.iter() {
+        let pid = ParamId::new(next_param_pos);
+        next_param_pos += 1;
+        let mut name = if is_valid_identifier_name(raw_name) {
+            raw_name.clone()
+        } else {
+            sanitize_text_id_to_identifier_name(raw_name)
+        };
+        // Ensure uniqueness deterministically
+        if used_names.contains(&name) {
+            let mut k: usize = 1;
+            loop {
+                let cand = format!("{}__{}", name, k);
+                if !used_names.contains(&cand) {
+                    name = cand;
+                    break;
+                }
+                k += 1;
+            }
+        }
+        used_names.insert(name.clone());
+        inner_params.push(Param {
+            name: name.clone(),
+            ty: ty.clone(),
+            id: pid,
+        });
+        // Synthesize a GetParam node for this param
+        inner_nodes.push(Node {
+            text_id: next_text_id,
+            name: Some(name.clone()),
+            ty: ty.clone(),
+            payload: NodePayload::GetParam(pid),
+            pos: None,
+        });
+        let param_ref = NodeRef {
+            index: inner_nodes.len() - 1,
+        };
+        text_to_inner_param_ref.insert(raw_name.clone(), param_ref);
+        next_text_id += 1;
+    }
+
+    // Topologically clone region nodes mapping external operands to inner params
+    let topo = get_topological(f);
+    let mut old_to_new: HashMap<usize, NodeRef> = HashMap::new();
+    for nr in topo.into_iter() {
+        if !region.contains(&nr) {
+            continue;
+        }
+        let old = f.get_node(nr);
+        let mapper = |r: NodeRef| -> NodeRef {
+            if region.contains(&r) {
+                *old_to_new.get(&r.index).expect("mapped internal ref")
+            } else {
+                let text = node_textual_id(f, r);
+                *text_to_inner_param_ref
+                    .get(&text)
+                    .expect("missing fixed param for external operand")
+            }
+        };
+        let new_payload = remap_payload_with(&old.payload, mapper);
+        let new_node = Node {
+            text_id: old.text_id,
+            name: old.name.clone(),
+            ty: old.ty.clone(),
+            payload: new_payload,
+            pos: old.pos.clone(),
+        };
+        inner_nodes.push(new_node);
+        let new_ref = NodeRef {
+            index: inner_nodes.len() - 1,
+        };
+        old_to_new.insert(nr.index, new_ref);
+    }
+
+    // Determine boundary outputs inside the region (stable by index)
+    let users_map = compute_users(f);
+    let boundary = compute_region_boundary_nodes(f, region, &users_map);
+
+    // Map boundary outputs to inner refs
+    let mut ret_refs: Vec<NodeRef> = Vec::new();
+    let mut ret_tys: Vec<Type> = Vec::new();
+    for nr in boundary.into_iter() {
+        let ir = *old_to_new
+            .get(&nr.index)
+            .expect("inner ref for outlined output");
+        ret_tys.push(inner_nodes[ir.index].ty.clone());
+        ret_refs.push(ir);
+    }
+    let (ret_ref_opt, ret_ty) = if ret_refs.len() == 1 {
+        (Some(ret_refs[0]), ret_tys.remove(0))
+    } else {
+        let tuple_ty = Type::Tuple(ret_tys.into_iter().map(|t| Box::new(t)).collect());
+        let tuple_node = Node {
+            text_id: next_text_id,
+            name: None,
+            ty: tuple_ty.clone(),
+            payload: NodePayload::Tuple(ret_refs.clone()),
+            pos: None,
+        };
+        inner_nodes.push(tuple_node);
+        let rref = Some(NodeRef {
+            index: inner_nodes.len() - 1,
+        });
+        (rref, tuple_ty)
+    };
+
+    Fn {
+        name: fname.to_string(),
+        params: inner_params,
+        ret_ty,
+        nodes: inner_nodes,
+        ret_node_ref: ret_ref_opt,
+    }
+}
+pub struct DualDifferenceExtraction {
+    pub lhs_inner: Fn,
+    pub rhs_inner: Fn,
+    pub lhs_region: HashSet<NodeRef>,
+    pub rhs_region: HashSet<NodeRef>,
+    pub union_params: Vec<(String, Type)>,
+    pub lhs_inbound_texts: Vec<String>,
+    pub rhs_inbound_texts: Vec<String>,
+    pub lhs_outbound: Vec<(String, Vec<String>)>,
+    pub rhs_outbound: Vec<(String, Vec<String>)>,
+}
+
+pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
+    lhs: &Fn,
+    rhs: &Fn,
+) -> DualDifferenceExtraction {
+    assert_eq!(
+        lhs.get_type(),
+        rhs.get_type(),
+        "Function signatures must match for structural comparison",
+    );
+
+    let (lhs_interior, rhs_interior) = compute_dual_difference_regions(lhs, rhs);
+
+    let lhs_inbound_map = compute_inbound_text_to_type_map(lhs, &lhs_interior);
+    let rhs_inbound_map = compute_inbound_text_to_type_map(rhs, &rhs_interior);
+
+    let union_params = compute_union_params(&lhs_inbound_map, &rhs_inbound_map);
+
+    let lhs_inner = build_inner_with_fixed_params(
+        lhs,
+        &lhs_interior,
+        &format!("{}_inner", lhs.name),
+        &union_params,
+    );
+    let rhs_inner = build_inner_with_fixed_params(
+        rhs,
+        &rhs_interior,
+        &format!("{}_inner", rhs.name),
+        &union_params,
+    );
+
+    let lhs_inbound_texts: Vec<String> = lhs_inbound_map.keys().cloned().collect();
+    let rhs_inbound_texts: Vec<String> = rhs_inbound_map.keys().cloned().collect();
+
+    let lhs_outbound = summarize_region_outbound(lhs, &lhs_interior);
+    let rhs_outbound = summarize_region_outbound(rhs, &rhs_interior);
+
+    DualDifferenceExtraction {
+        lhs_inner,
+        rhs_inner,
+        lhs_region: lhs_interior,
+        rhs_region: rhs_interior,
+        union_params,
+        lhs_inbound_texts,
+        rhs_inbound_texts,
+        lhs_outbound,
+        rhs_outbound,
+    }
 }
 
 #[cfg(test)]
