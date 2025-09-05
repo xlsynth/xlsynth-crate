@@ -248,7 +248,6 @@ jobs:
 
       - name: Configure APT mirrors and retries (focal)
         run: |
-          set -euo pipefail
           cp /etc/apt/sources.list /etc/apt/sources.list.bak || true
           # Add fallback mirrors including old-releases and kernel.org
           cat >/etc/apt/sources.list.d/focal-fallbacks.list <<'EOF'
