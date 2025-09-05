@@ -386,6 +386,32 @@ where
     }
 }
 
+/// Returns true if `s` is a valid IR identifier `([_A-Za-z][_A-Za-z0-9]*)`;
+/// i.e. can be used as a node name or parameter name.
+pub fn is_valid_identifier_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    };
+    for c in chars {
+        if !(c == '_' || c.is_ascii_alphanumeric()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Sanitizes arbitrary text to a valid identifier name deterministically.
+pub fn sanitize_text_id_to_identifier_name(s: &str) -> String {
+    assert!(
+        s.chars()
+            .all(|c| c == '_' || c == '.' || c.is_ascii_alphanumeric())
+    );
+    // Replace dots with underscores.
+    s.replace('.', "_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

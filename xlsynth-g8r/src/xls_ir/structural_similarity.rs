@@ -3,11 +3,15 @@
 //! Computes structural similarity statistics between two XLS IR functions.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type, node_textual_id};
-use crate::xls_ir::ir_utils::{compute_users, get_topological, operands, remap_payload_with};
+use crate::xls_ir::ir_utils::{
+    compute_users, get_topological, is_valid_identifier_name, operands, remap_payload_with,
+    sanitize_text_id_to_identifier_name,
+};
 use crate::xls_ir::node_hashing::{
     compute_node_local_structural_hash, compute_node_structural_hash,
 };
@@ -815,33 +819,37 @@ pub fn compute_dual_difference_regions(lhs: &Fn, rhs: &Fn) -> (HashSet<NodeRef>,
 ///   the return if it lies inside the region), a pair of: (producer textual id,
 ///   sorted list of textual ids of outside users), ordered by ascending node
 ///   index to be stable.
-// Helper: compute outbound boundary users summary for a region.
-fn summarize_region_outbound(f: &Fn, region: &HashSet<NodeRef>) -> Vec<(String, Vec<String>)> {
-    let region_set: HashSet<NodeRef> = region.iter().copied().collect();
+fn compute_region_boundary_nodes(f: &Fn, region: &HashSet<NodeRef>) -> Vec<NodeRef> {
     let users_map = compute_users(f);
     let mut boundary: Vec<NodeRef> = Vec::new();
-    for nr in region_set.iter() {
+    for nr in region.iter() {
         let users = users_map
             .get(nr)
             .map(|s| s.iter().copied().collect::<Vec<NodeRef>>())
             .unwrap_or_default();
-        if users.iter().any(|u| !region_set.contains(u)) {
+        if users.iter().any(|u| !region.contains(u)) {
             boundary.push(*nr);
         }
     }
     if let Some(ret_nr) = f.ret_node_ref {
-        if region_set.contains(&ret_nr) && !boundary.contains(&ret_nr) {
+        if region.contains(&ret_nr) && !boundary.contains(&ret_nr) {
             boundary.push(ret_nr);
         }
     }
     boundary.sort_by_key(|nr| nr.index);
+    boundary
+}
 
+// Helper: compute outbound boundary users summary for a region.
+fn summarize_region_outbound(f: &Fn, region: &HashSet<NodeRef>) -> Vec<(String, Vec<String>)> {
+    let users_map = compute_users(f);
+    let boundary = compute_region_boundary_nodes(f, region);
     let mut per_return: Vec<(String, Vec<String>)> = Vec::new();
     for nr in boundary.into_iter() {
         let producer_txt = node_textual_id(f, nr);
         let mut outside_users: Vec<String> = users_map
             .get(&nr)
-            .map(|s| s.iter().copied().filter(|u| !region_set.contains(u)))
+            .map(|s| s.iter().copied().filter(|u| !region.contains(u)))
             .into_iter()
             .flatten()
             .map(|u| node_textual_id(f, u))
@@ -854,7 +862,7 @@ fn summarize_region_outbound(f: &Fn, region: &HashSet<NodeRef>) -> Vec<(String, 
 }
 
 // Helper: build inbound textual-id -> type map for a region.
-fn build_inbound_text_to_type_map(f: &Fn, region: &HashSet<NodeRef>) -> BTreeMap<String, Type> {
+fn compute_inbound_text_to_type_map(f: &Fn, region: &HashSet<NodeRef>) -> BTreeMap<String, Type> {
     let mut inbound_set: HashSet<NodeRef> = HashSet::new();
     for nr in region.iter() {
         let node = f.get_node(*nr);
@@ -872,18 +880,15 @@ fn build_inbound_text_to_type_map(f: &Fn, region: &HashSet<NodeRef>) -> BTreeMap
 }
 
 // Helper: compute union inbound textual ids (sorted) and corresponding types.
-fn compute_union_texts_and_types(
+fn compute_union_params(
     lhs_inbound_map: &BTreeMap<String, Type>,
     rhs_inbound_map: &BTreeMap<String, Type>,
 ) -> Vec<(String, Type)> {
     // Union textual ids, deterministic order by string.
-    let mut union_texts: Vec<String> = lhs_inbound_map.keys().cloned().collect();
+    let mut union_texts: BTreeSet<String> = lhs_inbound_map.keys().cloned().collect();
     for k in rhs_inbound_map.keys() {
-        if !union_texts.iter().any(|s| s == k) {
-            union_texts.push(k.clone());
-        }
+        union_texts.insert(k.clone());
     }
-    union_texts.sort();
 
     // Build type map for union, asserting matching types when present on both
     // sides.
@@ -901,39 +906,6 @@ fn compute_union_texts_and_types(
         union_pairs.push((t, ty));
     }
     union_pairs
-}
-
-// Helper: return true if `s` is a valid identifier ([_A-Za-z][_A-Za-z0-9]*).
-fn is_valid_identifier_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
-        _ => return false,
-    };
-    for c in chars {
-        if !(c == '_' || c.is_ascii_alphanumeric()) {
-            return false;
-        }
-    }
-    true
-}
-
-// Helper: sanitize arbitrary text to a valid identifier, deterministically.
-fn sanitize_to_identifier_name(s: &str) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| {
-            if c == '_' || c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if out.is_empty() || !(out.as_bytes()[0].is_ascii_alphabetic() || out.as_bytes()[0] == b'_') {
-        out = format!("p_{}", out);
-    }
-    out
 }
 
 // Helper: clone a region into a new inner function with fixed params from union
@@ -966,7 +938,7 @@ fn build_inner_with_fixed_params(
         let mut name = if is_valid_identifier_name(raw_name) {
             raw_name.clone()
         } else {
-            sanitize_to_identifier_name(raw_name)
+            sanitize_text_id_to_identifier_name(raw_name)
         };
         // Ensure uniqueness deterministically
         if used_names.contains(&name) {
@@ -1003,15 +975,14 @@ fn build_inner_with_fixed_params(
 
     // Topologically clone region nodes mapping external operands to inner params
     let topo = get_topological(f);
-    let region_set: HashSet<NodeRef> = region.iter().copied().collect();
     let mut old_to_new: HashMap<usize, NodeRef> = HashMap::new();
     for nr in topo.into_iter() {
-        if !region_set.contains(&nr) {
+        if !region.contains(&nr) {
             continue;
         }
         let old = f.get_node(nr);
         let mapper = |r: NodeRef| -> NodeRef {
-            if region_set.contains(&r) {
+            if region.contains(&r) {
                 *old_to_new.get(&r.index).expect("mapped internal ref")
             } else {
                 let text = node_textual_id(f, r);
@@ -1036,23 +1007,7 @@ fn build_inner_with_fixed_params(
     }
 
     // Determine boundary outputs inside the region (stable by index)
-    let users_map = compute_users(f);
-    let mut boundary: Vec<NodeRef> = Vec::new();
-    for nr in region_set.iter() {
-        let users = users_map
-            .get(nr)
-            .map(|s| s.iter().copied().collect::<Vec<NodeRef>>())
-            .unwrap_or_default();
-        if users.iter().any(|u| !region_set.contains(u)) {
-            boundary.push(*nr);
-        }
-    }
-    if let Some(ret_nr) = f.ret_node_ref {
-        if region_set.contains(&ret_nr) && !boundary.contains(&ret_nr) {
-            boundary.push(ret_nr);
-        }
-    }
-    boundary.sort_by_key(|nr| nr.index);
+    let boundary = compute_region_boundary_nodes(f, region);
 
     // Map boundary outputs to inner refs
     let mut ret_refs: Vec<NodeRef> = Vec::new();
@@ -1114,10 +1069,10 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
 
     let (lhs_interior, rhs_interior) = compute_dual_difference_regions(lhs, rhs);
 
-    let lhs_inbound_map = build_inbound_text_to_type_map(lhs, &lhs_interior);
-    let rhs_inbound_map = build_inbound_text_to_type_map(rhs, &rhs_interior);
+    let lhs_inbound_map = compute_inbound_text_to_type_map(lhs, &lhs_interior);
+    let rhs_inbound_map = compute_inbound_text_to_type_map(rhs, &rhs_interior);
 
-    let union_params = compute_union_texts_and_types(&lhs_inbound_map, &rhs_inbound_map);
+    let union_params = compute_union_params(&lhs_inbound_map, &rhs_inbound_map);
 
     let lhs_inner = build_inner_with_fixed_params(
         lhs,
