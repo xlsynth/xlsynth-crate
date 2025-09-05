@@ -1495,7 +1495,7 @@ mod tests {
             NodePayload::GetParam(pid) if pid.get_wrapped_id() == 7
         ));
 
-        assert_eq!(format!("{}\n", ir_fn.to_string()), ir_text);
+        assert_eq!(ir_fn.to_string(), ir_text);
     }
 
     #[test]
