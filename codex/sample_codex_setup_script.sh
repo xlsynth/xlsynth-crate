@@ -16,6 +16,8 @@ rustup toolchain install nightly --profile minimal
 rustup component add clippy rustfmt --toolchain nightly
 rustup override set nightly
 
+cargo install cargo-nextest
+
 echo "==> Installing system prerequisites"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip gnupg cmake build-essential python3-pip pkg-config valgrind iverilog
