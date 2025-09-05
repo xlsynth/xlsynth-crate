@@ -7,7 +7,8 @@ set -euo pipefail
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
 echo "==> Installing xlsynth DSO"
-python3 download_release.py -p ubuntu2004 -o xlsynth_tools -d
+# Note: we use system python for this as we installed the python3-requests package earlier
+/usr/bin/python3 download_release.py -p ubuntu2004 -o xlsynth_tools -d
 ls xlsynth_tools/*.so
 mv -iv xlsynth_tools/*.so /usr/lib/
 
