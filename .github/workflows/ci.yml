@@ -251,14 +251,14 @@ jobs:
           cp /etc/apt/sources.list /etc/apt/sources.list.bak || true
           # Add fallback mirrors including old-releases and kernel.org
           cat >/etc/apt/sources.list.d/focal-fallbacks.list <<'EOF'
-          deb http://old-releases.ubuntu.com/ubuntu focal main restricted universe multiverse
-          deb http://old-releases.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
-          deb http://old-releases.ubuntu.com/ubuntu focal-backports main restricted universe multiverse
-          deb http://old-releases.ubuntu.com/ubuntu focal-security main restricted universe multiverse
           deb http://mirrors.edge.kernel.org/ubuntu/ focal main restricted universe multiverse
           deb http://mirrors.edge.kernel.org/ubuntu/ focal-updates main restricted universe multiverse
           deb http://mirrors.edge.kernel.org/ubuntu/ focal-backports main restricted universe multiverse
           deb http://mirrors.edge.kernel.org/ubuntu/ focal-security main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu/ focal main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu/ focal-updates main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu/ focal-backports main restricted universe multiverse
+          deb http://azure.archive.ubuntu.com/ubuntu/ focal-security main restricted universe multiverse
           EOF
           # Configure APT to retry and avoid cached failures
           echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
