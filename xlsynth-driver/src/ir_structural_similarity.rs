@@ -90,29 +90,22 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
         }
     }
 
-    // Also emit minimized subgraphs capturing only the unmatched parts (dual
+    // Also emit minimized subgraphs and metadata for the unmatched parts (dual
     // matching).
-    let (lhs_sub, rhs_sub) =
-        xlsynth_g8r::xls_ir::structural_similarity::extract_dual_difference_subgraphs(
-            lhs_fn, rhs_fn,
-        );
-    // Compute and display inbound/outbound summaries for the original regions.
-    let (lhs_region, rhs_region) =
-        xlsynth_g8r::xls_ir::structural_similarity::compute_dual_difference_regions(lhs_fn, rhs_fn);
-    let (lhs_inbound, lhs_outbound) =
-        xlsynth_g8r::xls_ir::structural_similarity::summarize_region_io(lhs_fn, &lhs_region);
-    let (rhs_inbound, rhs_outbound) =
-        xlsynth_g8r::xls_ir::structural_similarity::summarize_region_io(rhs_fn, &rhs_region);
+    let meta = xlsynth_g8r::xls_ir::structural_similarity::
+        extract_dual_difference_subgraphs_with_shared_params_and_metadata(lhs_fn, rhs_fn);
+    let lhs_sub = meta.lhs_inner;
+    let rhs_sub = meta.rhs_inner;
     println!(
         "\nLHS diff subgraph:\n{}",
         xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&lhs_sub, &lhs_pkg.file_table)
     );
     println!(
         "LHS inbound textual ids (unique): [{}]",
-        lhs_inbound.join(", ")
+        meta.lhs_inbound_texts.join(", ")
     );
     println!("LHS outbound users per return element:");
-    for (prod, users) in lhs_outbound.iter() {
+    for (prod, users) in meta.lhs_outbound.iter() {
         println!("  {} -> [{}]", prod, users.join(", "));
     }
     println!(
@@ -121,10 +114,10 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     );
     println!(
         "RHS inbound textual ids (unique): [{}]",
-        rhs_inbound.join(", ")
+        meta.rhs_inbound_texts.join(", ")
     );
     println!("RHS outbound users per return element:");
-    for (prod, users) in rhs_outbound.iter() {
+    for (prod, users) in meta.rhs_outbound.iter() {
         println!("  {} -> [{}]", prod, users.join(", "));
     }
 }
