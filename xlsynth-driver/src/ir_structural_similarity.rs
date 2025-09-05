@@ -96,12 +96,35 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
         xlsynth_g8r::xls_ir::structural_similarity::extract_dual_difference_subgraphs(
             lhs_fn, rhs_fn,
         );
+    // Compute and display inbound/outbound summaries for the original regions.
+    let (lhs_region, rhs_region) =
+        xlsynth_g8r::xls_ir::structural_similarity::compute_dual_difference_regions(lhs_fn, rhs_fn);
+    let (lhs_inbound, lhs_outbound) =
+        xlsynth_g8r::xls_ir::structural_similarity::summarize_region_io(lhs_fn, &lhs_region);
+    let (rhs_inbound, rhs_outbound) =
+        xlsynth_g8r::xls_ir::structural_similarity::summarize_region_io(rhs_fn, &rhs_region);
     println!(
         "\nLHS diff subgraph:\n{}",
         xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&lhs_sub, &lhs_pkg.file_table)
     );
     println!(
+        "LHS inbound textual ids (unique): [{}]",
+        lhs_inbound.join(", ")
+    );
+    println!("LHS outbound users per return element:");
+    for (prod, users) in lhs_outbound.iter() {
+        println!("  {} -> [{}]", prod, users.join(", "));
+    }
+    println!(
         "\nRHS diff subgraph:\n{}",
         xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&rhs_sub, &rhs_pkg.file_table)
     );
+    println!(
+        "RHS inbound textual ids (unique): [{}]",
+        rhs_inbound.join(", ")
+    );
+    println!("RHS outbound users per return element:");
+    for (prod, users) in rhs_outbound.iter() {
+        println!("  {} -> [{}]", prod, users.join(", "));
+    }
 }
