@@ -1428,8 +1428,72 @@ impl std::fmt::Display for Package {
 mod tests {
     use super::*;
     use crate::xls_ir::ir_parser;
+    use crate::xls_ir::ir_utils::operands;
 
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn params_are_dense_node_refs() {
+        let ir_text = r#"fn add(x: bits[8] id=10, y: bits[8] id=20) -> bits[8] {
+  ret add.42: bits[8] = add(x, y, id=42)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+
+        assert_eq!(ir_fn.params.len(), 2);
+        assert_eq!(ir_fn.nodes.len(), 4);
+
+        assert!(matches!(
+            ir_fn.get_node(NodeRef { index: 0 }).payload,
+            NodePayload::Nil
+        ));
+
+        for (ordinal, param) in ir_fn.params.iter().enumerate() {
+            let node_ref = NodeRef { index: ordinal + 1 };
+            let node = ir_fn.get_node(node_ref);
+            assert_eq!(node.name.as_deref(), Some(param.name.as_str()));
+            assert_eq!(node.ty, param.ty);
+            assert_eq!(node.payload, NodePayload::GetParam(param.id));
+            assert!(operands(&node.payload).is_empty(), "GetParam nodes are leaves");
+        }
+
+        let add_node_ref = NodeRef {
+            index: ir_fn.nodes.len() - 1,
+        };
+        match ir_fn.get_node(add_node_ref).payload {
+            NodePayload::Binop(_, lhs, rhs) => {
+                assert_eq!(lhs, NodeRef { index: 1 });
+                assert_eq!(rhs, NodeRef { index: 2 });
+            }
+            ref payload => panic!("expected binop payload, got {:?}", payload),
+        }
+    }
+
+    #[test]
+    fn returning_parameter_uses_explicit_get_param_node() {
+        let ir_text = r#"fn passthrough(x: bits[16] id=7) -> bits[16] {
+  ret x: bits[16] = param(name=x, id=7)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+
+        assert_eq!(ir_fn.nodes.len(), 3);
+        assert_eq!(ir_fn.ret_node_ref, Some(NodeRef { index: 2 }));
+
+        let auto_param_node = ir_fn.get_node(NodeRef { index: 1 });
+        assert!(matches!(
+            auto_param_node.payload,
+            NodePayload::GetParam(pid) if pid.get_wrapped_id() == 7
+        ));
+
+        let ret_node = ir_fn.get_node(ir_fn.ret_node_ref.unwrap());
+        assert!(matches!(
+            ret_node.payload,
+            NodePayload::GetParam(pid) if pid.get_wrapped_id() == 7
+        ));
+
+        assert_eq!(format!("{}\n", ir_fn.to_string()), ir_text);
+    }
 
     #[test]
     fn test_round_trip_and_gate_ir() {
