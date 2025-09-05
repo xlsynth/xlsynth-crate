@@ -1454,7 +1454,10 @@ mod tests {
             assert_eq!(node.name.as_deref(), Some(param.name.as_str()));
             assert_eq!(node.ty, param.ty);
             assert_eq!(node.payload, NodePayload::GetParam(param.id));
-            assert!(operands(&node.payload).is_empty(), "GetParam nodes are leaves");
+            assert!(
+                operands(&node.payload).is_empty(),
+                "GetParam nodes are leaves"
+            );
         }
 
         let add_node_ref = NodeRef {
