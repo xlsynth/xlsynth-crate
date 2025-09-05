@@ -3,7 +3,9 @@
 
 set -euo pipefail
 
-sudo apt remove rustc cargo -y
+if dpkg -s rustc >/dev/null 2>&1 || dpkg -s cargo >/dev/null 2>&1; then
+sudo apt-get remove -y rustc cargo || true
+fi
 sudo apt update && sudo apt upgrade -y
 sudo apt install curl build-essential gcc make -y
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
