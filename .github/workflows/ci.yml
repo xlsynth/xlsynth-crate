@@ -143,7 +143,7 @@ jobs:
           pip3 install -r requirements.txt
           TAG='${{ steps.resolve-xls-tag-matrix.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG}
 
       - name: Download Slang
         run: |

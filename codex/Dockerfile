@@ -30,8 +30,9 @@ RUN bash codex/sample_codex_setup_script.sh
 # Prepare artifacts and caches while the network is available.
 RUN bash codex/sample_codex_maintenance_script.sh
 
-# Note: We assume the mounted working directory will already be a git repo at runtime.
-# Tests and pre-commit are executed at runtime with the network disabled.
+# Provide persistent env for later steps by sourcing the env file the script wrote.
+ENV CARGO_NET_OFFLINE=true
 
-RUN cargo nextest run --workspace
-RUN pre-commit run --all-files
+# Run tests and pre-commit offline; hooks and deps were fetched during maintenance.
+RUN --network=none bash -lc 'set -a; . /etc/xlsynth/env; set +a; cargo nextest run --workspace'
+RUN --network=none bash -lc 'set -a; . /etc/xlsynth/env; set +a; pre-commit run --all-files'

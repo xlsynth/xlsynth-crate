@@ -60,20 +60,32 @@ fn all_dso_xls_symbols_are_bound_in_sys() {
         return;
     }
 
-    let dso_dir: &str = xlsynth_sys::XLS_DSO_PATH;
-    let candidates: Vec<PathBuf> = list_dso_files_in_dir(dso_dir);
-    assert!(
-        !candidates.is_empty(),
-        "No libxls shared objects found in XLS_DSO_PATH directory: {}",
-        dso_dir
-    );
-
-    // Prefer a deterministic selection: pick the lexicographically max path.
-    let mut sorted_candidates = candidates.clone();
-    sorted_candidates.sort();
-    let dso_path: &PathBuf = sorted_candidates
-        .last()
-        .expect("expected at least one candidate shared object");
+    // XLS_DSO_PATH may be a directory (common in CI where build.rs downloads
+    // artifacts) or a file path (when environment provides a concrete DSO).
+    // Handle both cases.
+    let input_path = PathBuf::from(xlsynth_sys::XLS_DSO_PATH);
+    let chosen: PathBuf = if input_path.is_dir() {
+        let dso_dir: &str = xlsynth_sys::XLS_DSO_PATH;
+        let mut candidates: Vec<PathBuf> = list_dso_files_in_dir(dso_dir);
+        assert!(
+            !candidates.is_empty(),
+            "No libxls shared objects found in XLS_DSO_PATH directory: {}",
+            dso_dir
+        );
+        candidates.sort();
+        candidates
+            .last()
+            .expect("expected at least one candidate shared object")
+            .to_path_buf()
+    } else if input_path.is_file() {
+        input_path
+    } else {
+        panic!(
+            "XLS_DSO_PATH should be a directory or a shared object file; got: {}",
+            input_path.display()
+        );
+    };
+    let dso_path: &PathBuf = &chosen;
 
     // Use nm to enumerate exported symbols. We rely on nm being available in CI.
     let output = Command::new("nm")
