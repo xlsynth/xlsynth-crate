@@ -246,11 +246,31 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
+      - name: Configure APT mirrors and retries (focal)
+        run: |
+          set -euo pipefail
+          cp /etc/apt/sources.list /etc/apt/sources.list.bak || true
+          # Add fallback mirrors including old-releases and kernel.org
+          cat >/etc/apt/sources.list.d/focal-fallbacks.list <<'EOF'
+          deb http://old-releases.ubuntu.com/ubuntu focal main restricted universe multiverse
+          deb http://old-releases.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
+          deb http://old-releases.ubuntu.com/ubuntu focal-backports main restricted universe multiverse
+          deb http://old-releases.ubuntu.com/ubuntu focal-security main restricted universe multiverse
+          deb http://mirrors.edge.kernel.org/ubuntu/ focal main restricted universe multiverse
+          deb http://mirrors.edge.kernel.org/ubuntu/ focal-updates main restricted universe multiverse
+          deb http://mirrors.edge.kernel.org/ubuntu/ focal-backports main restricted universe multiverse
+          deb http://mirrors.edge.kernel.org/ubuntu/ focal-security main restricted universe multiverse
+          EOF
+          # Configure APT to retry and avoid cached failures
+          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
+          echo 'Acquire::http::No-Cache "true";' > /etc/apt/apt.conf.d/80-no-cache
+          apt-get -o Acquire::Retries=5 update
+
       - name: Install Python for resolve
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip
+          apt-get -o Acquire::Retries=5 update
+          apt-get install -y --no-install-recommends python3-minimal python3-pip ca-certificates
 
       - name: Resolve XLS release tag
         id: resolve-xls-tag-2004
@@ -267,8 +287,8 @@ jobs:
       - name: Install dependencies for Python scripts and downloads
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev zlib1g-dev
+          apt-get -o Acquire::Retries=5 update
+          apt-get install -y --no-install-recommends python3-minimal python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev zlib1g-dev ca-certificates
           pip3 install -r requirements.txt
 
       - name: Set up Python + pre-commit
@@ -342,9 +362,9 @@ jobs:
       - name: Install libc++ from llvm-18
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
+          apt-get -o Acquire::Retries=5 update
           # Install prerequisites for llvm.sh and libc++ installation
-          apt-get install -y --no-install-recommends curl wget gnupg lsb-release software-properties-common
+          apt-get install -y --no-install-recommends curl wget gnupg lsb-release software-properties-common ca-certificates
           cd /tmp/
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
