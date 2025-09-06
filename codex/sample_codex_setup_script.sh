@@ -48,4 +48,9 @@ chmod +x /usr/local/bin/slang
 echo "==> Installing boolector DSO"
 wget -O /usr/lib/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
 
-echo "✅ Base setup complete — run 'bash sample_codex_maintenance_script.sh' per job"
+# Note: originally I thought that the maintenance script was always run by codex web after setup,
+# but it seems as though the maintenance script /only/ runs when the setup has been cached.
+echo "✅ Base setup complete — running maintenance script..."
+./codex/sample_codex_maintenance_script.sh
+
+echo "✅ Maintenance script complete"
