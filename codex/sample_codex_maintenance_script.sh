@@ -24,13 +24,20 @@ export XLS_DSO_PATH=$(ls /usr/lib/libxls*.so)
 
 [ -f "$XLS_DSO_PATH" ] && echo "DSO found OK"
 
-# Persist a machine-readable env file for non-interactive shells and Docker RUN layers
-mkdir -p /etc/xlsynth
-printf 'XLSYNTH_TOOLS=%q\n' "$XLSYNTH_TOOLS" > /etc/xlsynth/env
-printf 'DSLX_STDLIB_PATH=%q\n' "$DSLX_STDLIB_PATH" >> /etc/xlsynth/env
-printf 'SLANG_PATH=%q\n' "$SLANG_PATH" >> /etc/xlsynth/env
-printf 'XLS_DSO_PATH=%q\n' "$XLS_DSO_PATH" >> /etc/xlsynth/env
-printf 'PATH=%q\n' "$PATH" >> /etc/xlsynth/env
+# Note: codex docs say we should append to bashrc for commands
+# to pick up our env vars
+# https://developers.openai.com/codex/cloud/environments#manual-setup
+echo "==> Persisting environment variables to ~/.bashrc"
+BASHRC="$HOME/.bashrc"
+touch "$BASHRC"
+
+append_if_missing() { grep -qxF "$1" "$BASHRC" || echo "$1" >> "$BASHRC"; }
+
+append_if_missing "export XLSYNTH_TOOLS=$(printf '%q' "$XLSYNTH_TOOLS")"
+append_if_missing "export DSLX_STDLIB_PATH=$(printf '%q' "$DSLX_STDLIB_PATH")"
+append_if_missing "export SLANG_PATH=$(printf '%q' "$SLANG_PATH")"
+append_if_missing "export XLS_DSO_PATH=$(printf '%q' "$XLS_DSO_PATH")"
+append_if_missing "export PATH=\$PATH:$(printf '%q' "$PWD")"
 
 pre-commit install
 
@@ -48,6 +55,6 @@ cargo build --workspace --all-targets --features=with-boolector-system --jobs $(
 
 echo "==> Going offline (network locked)"
 export CARGO_NET_OFFLINE=true
-printf 'CARGO_NET_OFFLINE=%q\n' "$CARGO_NET_OFFLINE" >> /etc/xlsynth/env
+append_if_missing "export CARGO_NET_OFFLINE=true"
 
 echo "✅ Maintenance complete — you can now run 'cargo test --workspace'"
