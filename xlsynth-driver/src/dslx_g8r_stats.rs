@@ -2,6 +2,7 @@
 
 use clap::ArgMatches;
 
+use crate::common::resolve_type_inference_v2;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 use crate::tools::{run_ir_converter_main, run_opt_main};
 use tempfile::NamedTempFile;
@@ -28,14 +29,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
         .as_ref()
         .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
 
-    let type_inference_v2 = matches
-        .get_one::<String>("type_inference_v2")
-        .map(|s| s == "true")
-        .or_else(|| {
-            config
-                .as_ref()
-                .and_then(|c| c.dslx.as_ref()?.type_inference_v2)
-        });
+    let type_inference_v2 = resolve_type_inference_v2(matches, config);
 
     if type_inference_v2 == Some(true) && tool_path.is_none() {
         eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");

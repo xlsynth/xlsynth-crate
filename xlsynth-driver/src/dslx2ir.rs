@@ -4,6 +4,7 @@ use clap::ArgMatches;
 use xlsynth::{DslxConvertOptions, IrPackage};
 
 use crate::{
+    common::{parse_bool_flag_or, resolve_type_inference_v2},
     toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig},
     tools::{run_ir_converter_main, run_opt_main},
 };
@@ -116,20 +117,13 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         .as_ref()
         .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
 
-    let opt = match matches.get_one::<String>("opt").map(|s| s.as_str()) {
-        Some("true") => true,
-        Some("false") => false,
-        _ => false,
-    };
+    let opt = parse_bool_flag_or(matches, "opt", false);
 
-    let convert_tests = match matches
-        .get_one::<String>("convert_tests")
-        .map(|s| s.as_str())
-    {
-        Some("true") => true,
-        Some("false") => false,
-        _ => crate::flag_defaults::IR_CONVERTER_CONVERT_TESTS,
-    };
+    let convert_tests = parse_bool_flag_or(
+        matches,
+        "convert_tests",
+        crate::flag_defaults::IR_CONVERTER_CONVERT_TESTS,
+    );
 
     if convert_tests && top.is_some() {
         crate::report_cli_error::report_cli_error_and_exit(
@@ -142,16 +136,7 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         );
     }
 
-    let type_inference_v2 = match matches
-        .get_one::<String>("type_inference_v2")
-        .map(|s| s.as_str())
-    {
-        Some("true") => Some(true),
-        Some("false") => Some(false),
-        _ => config
-            .as_ref()
-            .and_then(|c| c.dslx.as_ref()?.type_inference_v2),
-    };
+    let type_inference_v2 = resolve_type_inference_v2(matches, config);
 
     dslx2ir(
         input_path,
