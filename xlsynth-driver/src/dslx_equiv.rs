@@ -209,34 +209,12 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
 
     let output_json = matches.get_one::<String>("output_json");
 
-    // Enable enum-domain constraints only when supported by the selected solver.
-    #[allow(unreachable_patterns)]
-    let support_domain_constraints = match solver_choice {
-        #[cfg(feature = "has-boolector")]
-        Some(SolverChoice::BoolectorLegacy) => false,
-        Some(SolverChoice::Toolchain) => false,
-        Some(_) => true,
-        None => false,
-    };
-
-    if let Some(assume_enum_in_bound) = matches.get_one::<String>("assume-enum-in-bound") {
-        if assume_enum_in_bound == "true" && !support_domain_constraints {
-            eprintln!(
-                "Error: --assume-enum-in-bound=true is not supported with the given solver {:?}",
-                solver_choice
-            );
-            std::process::exit(1);
-        }
-    }
+    let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
     let assume_enum_in_bound = matches
         .get_one::<String>("assume-enum-in-bound")
         .map(|s| s == "true")
         .unwrap_or(true);
-
-    let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
-
-    let want_enum_domains = assume_enum_in_bound && support_domain_constraints;
 
     let lhs_module_name = lhs_path
         .file_stem()
@@ -269,7 +247,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         disable_warnings,
         tool_path,
         type_inference_v2,
-        want_enum_domains,
+        assume_enum_in_bound,
         !use_unoptimized_ir,
     );
     let OptimizedIrText {
@@ -285,14 +263,9 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         disable_warnings,
         tool_path,
         type_inference_v2,
-        want_enum_domains,
+        assume_enum_in_bound,
         !use_unoptimized_ir,
     );
-    let (lhs_param_domains, rhs_param_domains) = if want_enum_domains {
-        (lhs_domains, rhs_domains)
-    } else {
-        (None, None)
-    };
 
     let inputs = EquivInputs {
         lhs_ir_text: &lhs_ir_text,
@@ -308,8 +281,8 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         subcommand: SUBCOMMAND,
         lhs_origin: lhs_file,
         rhs_origin: rhs_file,
-        lhs_param_domains,
-        rhs_param_domains,
+        lhs_param_domains: lhs_domains,
+        rhs_param_domains: rhs_domains,
         lhs_uf_map: lhs_uf_map,
         rhs_uf_map: rhs_uf_map,
     };

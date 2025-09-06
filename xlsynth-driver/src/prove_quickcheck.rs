@@ -283,7 +283,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             results
         }
         #[cfg(feature = "has-boolector")]
-        SolverChoice::Boolector | SolverChoice::BoolectorLegacy => {
+        SolverChoice::Boolector => {
             use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
             let cfg = BoolectorConfig::new();
             run_for_solver::<Boolector>(

@@ -1249,6 +1249,7 @@ pub enum EquivResult {
         lhs_output: FnOutput,
         rhs_output: FnOutput,
     },
+    ToolchainDisproved(String),
     Error(String),
 }
 

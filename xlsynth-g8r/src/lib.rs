@@ -27,7 +27,6 @@ pub mod get_summary_stats;
 pub mod graph_logical_effort;
 pub mod ir2gate;
 pub mod ir2gate_utils;
-pub mod ir_equiv_boolector;
 pub mod ir_value_utils;
 pub mod liberty;
 pub mod match_and_rewrite;
