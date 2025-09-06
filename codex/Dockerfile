@@ -19,5 +19,6 @@ RUN bash codex/sample_codex_maintenance_script.sh
 ENV CARGO_NET_OFFLINE=true
 
 # Run tests and pre-commit offline; hooks and deps were fetched during maintenance.
-RUN --network=none bash -lc 'set -a; . /etc/xlsynth/env; set +a; cargo nextest run --workspace'
-RUN --network=none bash -lc 'set -a; . /etc/xlsynth/env; set +a; pre-commit run --all-files'
+# We need to use `bash -lc` to get the bashrc to be sourced which has our env vars.
+RUN --network=none bash -lc 'cargo nextest run --workspace'
+RUN --network=none bash -lc 'pre-commit run --all-files'
