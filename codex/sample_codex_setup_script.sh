@@ -51,6 +51,6 @@ wget -O /usr/lib/libboolector.so https://github.com/xlsynth/boolector-build/rele
 # Note: originally I thought that the maintenance script was always run by codex web after setup,
 # but it seems as though the maintenance script /only/ runs when the setup has been cached.
 echo "✅ Base setup complete — running maintenance script..."
-./sample_codex_maintenance_script.sh
+./codex/sample_codex_maintenance_script.sh
 
 echo "✅ Maintenance script complete"
