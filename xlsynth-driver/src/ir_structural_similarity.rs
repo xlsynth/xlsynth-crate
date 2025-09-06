@@ -4,6 +4,20 @@ use clap::ArgMatches;
 
 use crate::toolchain_config::ToolchainConfig;
 
+fn find_node_signature_by_textual_id(
+    f: &xlsynth_g8r::xls_ir::ir::Fn,
+    text: &str,
+) -> Option<String> {
+    for (i, _n) in f.nodes.iter().enumerate() {
+        let nr = xlsynth_g8r::xls_ir::ir::NodeRef { index: i };
+        let t = xlsynth_g8r::xls_ir::ir::node_textual_id(f, nr);
+        if t == text {
+            return Some(f.get_node(nr).to_signature_string(f));
+        }
+    }
+    None
+}
+
 pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();
     let lhs_path = std::path::Path::new(lhs);
@@ -96,6 +110,15 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
         extract_dual_difference_subgraphs_with_shared_params_and_metadata(lhs_fn, rhs_fn);
     let lhs_sub = meta.lhs_inner;
     let rhs_sub = meta.rhs_inner;
+    // Unified return mapping before printing subgraphs.
+    println!("\nUnified return type: {}", lhs_sub.ret_ty);
+    println!("Unified return slots (index -> consumer[operand_index] : signature):");
+    for (i, (cons, op)) in meta.slot_order.iter().enumerate() {
+        let sig = find_node_signature_by_textual_id(lhs_fn, cons)
+            .or_else(|| find_node_signature_by_textual_id(rhs_fn, cons))
+            .unwrap_or_else(|| "<unknown signature>".to_string());
+        println!("  {} -> {}[{}]  {}", i, cons, op, sig);
+    }
     println!(
         "\nLHS diff subgraph:\n{}",
         xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&lhs_sub, &lhs_pkg.file_table)
