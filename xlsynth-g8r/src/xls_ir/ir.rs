@@ -321,6 +321,15 @@ pub enum NodePayload {
     GetParam(ParamId),
     Tuple(Vec<NodeRef>),
     Array(Vec<NodeRef>),
+    /// array_slice(array, start, width=<width>) -> Array
+    /// Returns a slice of the input array consisting of `width` consecutive
+    /// elements starting at `start`. If any selected index is out-of-bounds,
+    /// the last element of the array is used for that position (XLS semantics).
+    ArraySlice {
+        array: NodeRef,
+        start: NodeRef,
+        width: usize,
+    },
     TupleIndex {
         tuple: NodeRef,
         index: usize,
@@ -432,6 +441,7 @@ impl NodePayload {
             NodePayload::GetParam(_) => "get_param",
             NodePayload::Tuple(_) => "tuple",
             NodePayload::Array(_) => "array",
+            NodePayload::ArraySlice { .. } => "array_slice",
             NodePayload::TupleIndex { .. } => "tuple_index",
             NodePayload::Binop(op, _, _) => binop_to_operator(*op),
             NodePayload::Unop(op, _) => unop_to_operator(*op),
@@ -515,7 +525,9 @@ impl NodePayload {
         let get_name = |node_ref: NodeRef| -> String {
             let node = f.get_node(node_ref);
             match node.payload {
-                NodePayload::GetParam(_) => node.name.clone().unwrap(),
+                NodePayload::GetParam(_) => {
+                    node.name.clone().expect("GetParam node should have a name")
+                }
                 _ => {
                     if let Some(ref name) = node.name {
                         name.clone()
@@ -544,6 +556,19 @@ impl NodePayload {
                     .join(", "),
                 id
             ),
+            NodePayload::ArraySlice {
+                array,
+                start,
+                width,
+            } => {
+                format!(
+                    "array_slice({}, {}, width={}, id={})",
+                    get_name(*array),
+                    get_name(*start),
+                    width,
+                    id
+                )
+            }
             NodePayload::TupleIndex { tuple, index } => {
                 format!(
                     "tuple_index({}, index={}, id={})",
@@ -719,16 +744,18 @@ impl NodePayload {
                     .join(", "),
                 id
             ),
-            NodePayload::Invoke { to_apply, operands } => format!(
-                "invoke({}, {}, id={})",
-                to_apply,
-                operands
+            NodePayload::Invoke { to_apply, operands } => {
+                let operands_str = operands
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", "),
-                id
-            ),
+                    .join(", ");
+                if operands.is_empty() {
+                    format!("invoke(to_apply={}, id={})", to_apply, id)
+                } else {
+                    format!("invoke({}, to_apply={}, id={})", operands_str, to_apply, id)
+                }
+            }
             NodePayload::PrioritySel {
                 selector,
                 cases,
@@ -835,6 +862,22 @@ impl NodePayload {
     }
 }
 
+/// Returns a human-oriented textual identifier for a node reference.
+///
+/// - For `get_param` nodes, returns the parameter's name.
+/// - For other nodes, returns the node's `name` if present, otherwise
+///   `"<operator>.<text_id>"`.
+pub fn node_textual_id(f: &Fn, nr: NodeRef) -> String {
+    let node = f.get_node(nr);
+    match node.payload {
+        NodePayload::GetParam(_) => node.name.clone().expect("GetParam node should have a name"),
+        _ => match &node.name {
+            Some(n) => n.clone(),
+            None => format!("{}.{}", node.payload.get_operator(), node.text_id),
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     /// All nodes have known ids.
@@ -898,6 +941,7 @@ impl Node {
                 width,
                 arg: _,
             } => format!(", start={}, width={}", start, width),
+            NodePayload::ArraySlice { width, .. } => format!(", width={}", width),
             NodePayload::SignExt { new_bit_count, .. }
             | NodePayload::ZeroExt { new_bit_count, .. } => {
                 format!(", new_bit_count={}", new_bit_count)
@@ -989,6 +1033,7 @@ impl Fn {
                 use crate::xls_ir::ir::NodePayload::*;
                 match &n.payload {
                     Tuple(nodes) | Array(nodes) => nodes.contains(&node_ref),
+                    ArraySlice { array, start, .. } => array == &node_ref || start == &node_ref,
                     TupleIndex { tuple, .. } => tuple == &node_ref,
                     Binop(_, a, b) => a == &node_ref || b == &node_ref,
                     Unop(_, a) => a == &node_ref,
@@ -1383,8 +1428,75 @@ impl std::fmt::Display for Package {
 mod tests {
     use super::*;
     use crate::xls_ir::ir_parser;
+    use crate::xls_ir::ir_utils::operands;
 
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn params_are_dense_node_refs() {
+        let ir_text = r#"fn add(x: bits[8] id=10, y: bits[8] id=20) -> bits[8] {
+  ret add.42: bits[8] = add(x, y, id=42)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+
+        assert_eq!(ir_fn.params.len(), 2);
+        assert_eq!(ir_fn.nodes.len(), 4);
+
+        assert!(matches!(
+            ir_fn.get_node(NodeRef { index: 0 }).payload,
+            NodePayload::Nil
+        ));
+
+        for (ordinal, param) in ir_fn.params.iter().enumerate() {
+            let node_ref = NodeRef { index: ordinal + 1 };
+            let node = ir_fn.get_node(node_ref);
+            assert_eq!(node.name.as_deref(), Some(param.name.as_str()));
+            assert_eq!(node.ty, param.ty);
+            assert_eq!(node.payload, NodePayload::GetParam(param.id));
+            assert!(
+                operands(&node.payload).is_empty(),
+                "GetParam nodes are leaves"
+            );
+        }
+
+        let add_node_ref = NodeRef {
+            index: ir_fn.nodes.len() - 1,
+        };
+        match ir_fn.get_node(add_node_ref).payload {
+            NodePayload::Binop(_, lhs, rhs) => {
+                assert_eq!(lhs, NodeRef { index: 1 });
+                assert_eq!(rhs, NodeRef { index: 2 });
+            }
+            ref payload => panic!("expected binop payload, got {:?}", payload),
+        }
+    }
+
+    #[test]
+    fn returning_parameter_uses_explicit_get_param_node() {
+        let ir_text = r#"fn passthrough(x: bits[16] id=7) -> bits[16] {
+  ret x: bits[16] = param(name=x, id=7)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+
+        assert_eq!(ir_fn.nodes.len(), 3);
+        assert_eq!(ir_fn.ret_node_ref, Some(NodeRef { index: 2 }));
+
+        let auto_param_node = ir_fn.get_node(NodeRef { index: 1 });
+        assert!(matches!(
+            auto_param_node.payload,
+            NodePayload::GetParam(pid) if pid.get_wrapped_id() == 7
+        ));
+
+        let ret_node = ir_fn.get_node(ir_fn.ret_node_ref.unwrap());
+        assert!(matches!(
+            ret_node.payload,
+            NodePayload::GetParam(pid) if pid.get_wrapped_id() == 7
+        ));
+
+        assert_eq!(ir_fn.to_string(), ir_text);
+    }
 
     #[test]
     fn test_round_trip_and_gate_ir() {
@@ -1401,6 +1513,25 @@ mod tests {
         let ir_text = "fn f() -> bits[32][2][3][1] {
   ret literal.1: bits[32][2][3][1] = literal(value=[[[0, 1], [2, 3], [4, 5]]], id=1)
 }";
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+        assert_eq!(ir_fn.to_string(), ir_text);
+    }
+    #[test]
+    fn test_invoke_round_trip() {
+        let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
+  ret r: bits[8] = invoke(x, to_apply=g, id=2)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+        assert_eq!(ir_fn.to_string(), ir_text);
+    }
+
+    #[test]
+    fn test_invoke_no_operands_round_trip() {
+        let ir_text = r#"fn f() -> bits[8] {
+  ret r: bits[8] = invoke(to_apply=g, id=1)
+}"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let ir_fn = parser.parse_fn().unwrap();
         assert_eq!(ir_fn.to_string(), ir_text);

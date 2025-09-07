@@ -43,6 +43,20 @@ Primarily tests:
 
 Builds a random `GateFn`, emits AIGER, reloads AIGER into a new `GateFn`, and checks structural equivalence.
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_eval_interp_equiv.rs
+
+Differentially compares our Rust IR function interpreter (`eval_fn`) with the xlsynth C++ interpreter on the same randomly generated function and arguments.
+
+- Generates a random XLS IR function (via C++ builder), pretty-prints, and reparses to the Rust internal IR.
+- Samples argument values that match the function parameter types using an `Arbitrary`-driven seed.
+- Evaluates with both engines and asserts the results are equal.
+
+Early-return rationale:
+
+- Skips inputs that contain IR operations not yet supported by `eval_pure`/`eval_fn` (e.g., reverse, concat, extends, etc.). These are tracked and will be enabled as support lands.
+- Skips degenerate generator inputs (e.g., empty op lists, zero-width inputs) to avoid biasing toward trivial cases.
+- If the external interpreter or parser rejects a sample due to unrelated infrastructure issues, the target returns early rather than classify as a sample failure.
+
 Primarily tests:
 
 - AIGER emitter/loader roundtrip
@@ -92,6 +106,26 @@ Primarily tests:
 
 - `rebase_onto` preserves semantics and IDs stability constraints across random graphs
 - Integration of `rebase_onto` with parser/pretty printer and toolchain equivalence
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_outline_equiv.rs
+
+Generates a random XLS IR function via the C++ builder, reparses into the Rust IR, then selects a random connected subgraph (via BFS from a seed) to outline into a new inner function. Rewrites the outer function to invoke the inner and proves semantic equivalence between the original function and the outlined outer using available SMT backends. The target also explores parameter/return ordering:
+
+- Param ordering mode: Default or deterministically shuffled non-default.
+- Return ordering mode: Default or deterministically shuffled non-default.
+
+Non-default orderings are constructed by permuting the default `OutlineOrdering` while preserving validity (same coverage, no duplicates). The PRNG is seeded from a stable hash of the package text, ensuring reproducible behavior for a given sample.
+
+Early-return rationale:
+
+- Skips degenerate generator inputs (e.g., empty op lists, zero-width inputs) as they are uninformative for outlining.
+- Skips selections that produce no boundary outputs (e.g., fully internal islands that are not used externally), since outlining such regions would be vacuous.
+- If the C++ package string fails to parse in Rust (unexpected), the target panics to flag a systemic issue rather than silently skip.
+
+Primarily tests:
+
+- Outlining transformation preserves semantics for random connected regions
+- Stability of parser/pretty-printer across transformation boundaries
 
 ______________________________________________________________________
 

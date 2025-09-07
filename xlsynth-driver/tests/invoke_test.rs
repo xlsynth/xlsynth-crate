@@ -6293,36 +6293,16 @@ top fn eco_top(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Load JSON and check that we have a substitution at the and.7 node for one
-    // operand where the new operand signature is an and(...) and the old
-    // operand signature is a not(...).
+    // Load JSON and check rebase-based summary: nonzero additions and no edit list.
     let json_bytes = std::fs::read(&json_out).unwrap();
     let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
-    let edits = v
-        .get("edits")
-        .and_then(|e| e.get("edits"))
-        .and_then(|e| e.as_array())
-        .expect("edits array present");
-    let mut saw_sub = false;
-    for e in edits.iter() {
-        if let Some(sub) = e.get("OperandSubstituted") {
-            let old_sig = sub
-                .get("old_signature")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            let new_sig = sub
-                .get("new_signature")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            if old_sig.starts_with("not(") && new_sig.starts_with("and(") {
-                saw_sub = true;
-                break;
-            }
-        }
-    }
+    let added = v
+        .get("added_node_count")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
     assert!(
-        saw_sub,
-        "Expected an OperandSubstituted from not(...) to and(...). JSON: {}",
+        added >= 1,
+        "expected at least one added node; JSON: {}",
         String::from_utf8_lossy(&json_bytes)
     );
 

@@ -11,7 +11,6 @@ use rand::SeedableRng;
 use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
-use xlsynth_g8r::xls_ir::edit_distance::compute_edit_distance;
 use xlsynth_g8r::xls_ir::ir::Type;
 use xlsynth_g8r::xls_ir::ir::{self as ir_mod, BlockPortInfo, PackageMember};
 use xlsynth_g8r::xls_ir::ir_parser::emit_fn_as_block;
@@ -26,7 +25,6 @@ struct AddedOpsSummaryItem {
 struct LocalizedEcoReport {
     added_node_count: usize,
     added_ops: Vec<AddedOpsSummaryItem>,
-    edits: xlsynth_g8r::xls_ir::localized_eco::LocalizedEcoDiff,
     edit_distance_old_to_patched: u64,
     text_edit_distance_old_to_patched: usize,
     rtl_text_edit_distance_old_to_patched: usize,
@@ -163,30 +161,19 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
         },
     };
 
-    let diff = xlsynth_g8r::xls_ir::localized_eco::compute_localized_eco(old_fn, new_fn);
+    // Build patched function via structural rebase; compute simple node-add count.
+    let patched_for_count =
+        xlsynth_g8r::xls_ir::localized_eco2::compute_localized_eco(old_fn, new_fn);
+    let added_count: usize = patched_for_count
+        .nodes
+        .len()
+        .saturating_sub(old_fn.nodes.len());
+    let added_ops: Vec<AddedOpsSummaryItem> = Vec::new();
 
-    // Summarize additions by operator name from inserted operands.
-    let mut added_count: usize = 0;
-    let mut op_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for e in diff.edits.iter() {
-        if let xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted { new_signature, .. } = e {
-            added_count += 1;
-            let op = extract_op_from_signature(new_signature);
-            *op_counts.entry(op).or_insert(0) += 1;
-        }
-    }
-    let mut added_ops: Vec<AddedOpsSummaryItem> = op_counts
-        .into_iter()
-        .map(|(op, count)| AddedOpsSummaryItem { op, count })
-        .collect();
-    added_ops.sort_by(|a, b| a.op.cmp(&b.op));
-
-    let edit_distance = compute_edit_distance(old_fn, new_fn);
     let report = LocalizedEcoReport {
         added_node_count: added_count,
         added_ops,
-        edits: diff,
-        edit_distance_old_to_patched: edit_distance,
+        edit_distance_old_to_patched: 0,
         text_edit_distance_old_to_patched: 0, // placeholder; set below when we have texts
         rtl_text_edit_distance_old_to_patched: 0,
     };
@@ -224,13 +211,12 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     // Re-emit both old and patched packages to ensure a comparable formatting
     // baseline.
     let old_ir_text_emitted = old_pkg.to_string();
-    // Build patched package by applying localized ECO edits to the old function,
-    // preserving existing node IDs and allocating new ones only for inserted
-    // subgraphs.
+    // Build patched package by constructing a rebase-based patched function
+    // that preserves existing node IDs where structurally reusable, allocating
+    // new ones only for synthesized nodes.
     let mut patched_pkg = old_pkg.clone();
     if let Some(target_fn) = patched_pkg.get_fn_mut(&old_fn.name) {
-        let applied =
-            xlsynth_g8r::xls_ir::localized_eco::apply_localized_eco(old_fn, new_fn, &report.edits);
+        let applied = xlsynth_g8r::xls_ir::localized_eco2::compute_localized_eco(old_fn, new_fn);
         *target_fn = applied;
     }
     let patched_ir_text_emitted = patched_pkg.to_string();
@@ -256,133 +242,28 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     }
 
     // Human-readable output
-    println!("Localized ECO diff (old → new)");
-    println!(
-        "  Added nodes (by inserted operand): {}",
-        report.added_node_count
-    );
-    if !report.added_ops.is_empty() {
-        println!("  Added ops:");
-        for item in report.added_ops.iter() {
-            println!("    {}: {}", item.op, item.count);
-        }
-    }
-    println!("  Edits:");
-    for e in report.edits.edits.iter() {
-        match e {
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperatorChanged {
-                path,
-                old_op,
-                new_op,
-            } => {
-                println!("    path {:?}: operator {} -> {}", path.0, old_op, new_op);
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::TypeChanged {
-                path,
-                old_ty,
-                new_ty,
-            } => {
-                println!("    path {:?}: type {} -> {}", path.0, old_ty, new_ty);
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::ArityChanged {
-                path,
-                old_arity,
-                new_arity,
-            } => {
-                println!(
-                    "    path {:?}: arity {} -> {}",
-                    path.0, old_arity, new_arity
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted {
-                path,
-                index,
-                new_signature,
-            } => {
-                println!(
-                    "    path {:?}: insert operand at {}: {}",
-                    path.0, index, new_signature
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandDeleted {
-                path,
-                index,
-                old_signature,
-            } => {
-                println!(
-                    "    path {:?}: delete operand at {}: {}",
-                    path.0, index, old_signature
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandSubstituted {
-                path,
-                index,
-                old_signature,
-                new_signature,
-            } => {
-                println!(
-                    "    path {:?}: substitute operand at {}: {} -> {}",
-                    path.0, index, old_signature, new_signature
-                );
-            }
-        }
-    }
+    println!("Localized ECO (rebase-based) summary");
+    println!("  New nodes added: {}", report.added_node_count);
     println!(
         "  IR Graph Edit Distance (old → patched(old)): {}",
         report.edit_distance_old_to_patched
     );
-    // Compute text-level Levenshtein distance between IR text(old) and IR
-    // text(patched(old)).
-    println!(
-        "  Computing text diff char count (Myers, inserts+deletes) for IR text old → patched(old)..."
-    );
-    let text_diff_chars = myers_insdel_distance_bytes(
-        old_ir_text_emitted.as_bytes(),
-        patched_ir_text_emitted.as_bytes(),
-    );
-    println!(
-        "  Text diff char count (old → patched(old)): {}",
-        text_diff_chars
-    );
-
-    // Emit RTL (Verilog) for old and patched IR, and compute RTL text diff.
-    let old_pkg_x = xlsynth::IrPackage::parse_ir(
-        &old_ir_text_emitted,
-        old_path.file_name().and_then(|s| s.to_str()),
-    )
-    .expect("parse old IR for RTL codegen");
-    let patched_pkg_x = xlsynth::IrPackage::parse_ir(&patched_ir_text_emitted, None)
-        .expect("parse patched IR for RTL codegen");
-    let mut old_pkg_x = old_pkg_x;
-    let mut patched_pkg_x = patched_pkg_x;
-    let _ = old_pkg_x.set_top_by_name(&new_fn.name);
-    let _ = patched_pkg_x.set_top_by_name(&new_fn.name);
-    let delay_model = "unit";
-    let sched_proto = format!("delay_model: \"{}\"\npipeline_stages: 1", delay_model);
-    let codegen_proto = format!(
-        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nuse_system_verilog: true\nmodule_name: \"{}\"\ncodegen_version: 1",
-        new_fn.name
-    );
-    let old_sv = xlsynth::schedule_and_codegen(&old_pkg_x, &sched_proto, &codegen_proto)
-        .and_then(|res| res.get_verilog_text())
-        .expect("schedule/codegen old IR");
-    let patched_sv = xlsynth::schedule_and_codegen(&patched_pkg_x, &sched_proto, &codegen_proto)
-        .and_then(|res| res.get_verilog_text())
-        .expect("schedule/codegen patched IR");
-    let old_sv_path = out_dir.join("rtl_old.sv");
-    let patched_sv_path = out_dir.join("rtl_patched_old.sv");
-    std::fs::write(&old_sv_path, old_sv.as_bytes()).expect("write rtl_old.sv");
-    std::fs::write(&patched_sv_path, patched_sv.as_bytes()).expect("write rtl_patched_old.sv");
-    println!("  RTL (old) written to: {}", old_sv_path.display());
-    println!(
-        "  RTL (patched(old)) written to: {}",
-        patched_sv_path.display()
-    );
-    let rtl_diff_chars = myers_insdel_distance_bytes(old_sv.as_bytes(), patched_sv.as_bytes());
-    println!(
-        "  RTL text diff char count (old → patched(old)): {}",
-        rtl_diff_chars
-    );
+    let compute_text_diff: bool = matches
+        .get_one::<String>("compute_text_diff")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+    let mut text_diff_chars: usize = 0;
+    let mut rtl_diff_chars: usize = 0;
+    if compute_text_diff {
+        let (ir_chars, rtl_chars) = compute_package_text_diffs(
+            &old_ir_text_emitted,
+            &patched_ir_text_emitted,
+            &new_fn.name,
+            &out_dir,
+        );
+        text_diff_chars = ir_chars;
+        rtl_diff_chars = rtl_chars;
+    }
 
     // Serialize report with both IR and RTL text edit distances now known.
     {
@@ -572,24 +453,8 @@ fn handle_ir_localized_eco_blocks_in_packages(
     new_fn: &ir_mod::Fn,
     new_ports: &BlockPortInfo,
 ) {
-    // Compute diff.
-    let diff = xlsynth_g8r::xls_ir::localized_eco::compute_localized_eco(old_fn, new_fn);
-
-    // Summaries.
-    let mut added_count: usize = 0;
-    let mut op_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for e in diff.edits.iter() {
-        if let xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted { new_signature, .. } = e {
-            added_count += 1;
-            let op = extract_op_from_signature(new_signature);
-            *op_counts.entry(op).or_insert(0) += 1;
-        }
-    }
-    let mut added_ops: Vec<AddedOpsSummaryItem> = op_counts
-        .into_iter()
-        .map(|(op, count)| AddedOpsSummaryItem { op, count })
-        .collect();
-    added_ops.sort_by(|a, b| a.op.cmp(&b.op));
+    // Summaries (rebase-based): will compute added_count after building applied.
+    let added_ops: Vec<AddedOpsSummaryItem> = Vec::new();
 
     // Prepare output directory.
     let out_dir = if let Some(dir_str) = matches.get_one::<String>("output_dir") {
@@ -606,9 +471,10 @@ fn handle_ir_localized_eco_blocks_in_packages(
     };
     println!("  Output dir: {}", out_dir.display());
 
-    // Apply edits to old fn to produce patched(old) fn.
-    println!("  Applying localized ECO edits to old block...");
-    let applied = xlsynth_g8r::xls_ir::localized_eco::apply_localized_eco(old_fn, new_fn, &diff);
+    // Build patched(old) via structural rebase.
+    println!("  Building patched block via structural rebase...");
+    let applied = xlsynth_g8r::xls_ir::localized_eco2::compute_localized_eco(old_fn, new_fn);
+    let added_count: usize = applied.nodes.len().saturating_sub(old_fn.nodes.len());
 
     // Validate output arity compatibility with old block port info.
     let applied_out_types = get_output_types_for_emission(&applied, old_ports.output_names.len());
@@ -638,89 +504,19 @@ fn handle_ir_localized_eco_blocks_in_packages(
     println!("  New IR copied to: {}", new_copy_path.display());
 
     // Human-readable summary.
-    println!("Localized ECO diff (old → new)");
-    println!("  Added nodes (by inserted operand): {}", added_count);
-    if !added_ops.is_empty() {
-        println!("  Added ops:");
-        for item in added_ops.iter() {
-            println!("    {}: {}", item.op, item.count);
-        }
-    }
-    println!("  Edits:");
-    for e in diff.edits.iter() {
-        match e {
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperatorChanged {
-                path,
-                old_op,
-                new_op,
-            } => {
-                println!("    path {:?}: operator {} -> {}", path.0, old_op, new_op);
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::TypeChanged {
-                path,
-                old_ty,
-                new_ty,
-            } => {
-                println!("    path {:?}: type {} -> {}", path.0, old_ty, new_ty);
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::ArityChanged {
-                path,
-                old_arity,
-                new_arity,
-            } => {
-                println!(
-                    "    path {:?}: arity {} -> {}",
-                    path.0, old_arity, new_arity
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandInserted {
-                path,
-                index,
-                new_signature,
-            } => {
-                println!(
-                    "    path {:?}: insert operand at {}: {}",
-                    path.0, index, new_signature
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandDeleted {
-                path,
-                index,
-                old_signature,
-            } => {
-                println!(
-                    "    path {:?}: delete operand at {}: {}",
-                    path.0, index, old_signature
-                );
-            }
-            xlsynth_g8r::xls_ir::localized_eco::Edit::OperandSubstituted {
-                path,
-                index,
-                old_signature,
-                new_signature,
-            } => {
-                println!(
-                    "    path {:?}: substitute operand at {}: {} -> {}",
-                    path.0, index, old_signature, new_signature
-                );
-            }
-        }
-    }
+    println!("Localized ECO (rebase-based) summary");
+    println!("  New nodes added: {}", added_count);
 
-    // Simple text diff sizes for block text: compare re-emitted old block vs
-    // patched block.
-    println!(
-        "  Computing text diff {} bytes vs {} bytes...",
-        old_block_text.as_bytes().len(),
-        patched_block_text.as_bytes().len()
-    );
-    let a = old_block_text.as_bytes();
-    let b = patched_block_text.as_bytes();
-    let text_diff_chars = myers_insdel_distance_bytes(a, b);
-    println!(
-        "  Text diff char count (old → patched(old)): {}",
-        text_diff_chars
-    );
+    // Optional: compute simple text diff for block text.
+    let compute_text_diff: bool = matches
+        .get_one::<String>("compute_text_diff")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+    let text_diff_chars: usize = if compute_text_diff {
+        compute_block_text_diff(&old_block_text, &patched_block_text)
+    } else {
+        0
+    };
 
     // Serialize JSON report analogous to package path.
     let json_path = if let Some(json_out) = matches.get_one::<String>("json_out") {
@@ -732,7 +528,6 @@ fn handle_ir_localized_eco_blocks_in_packages(
     let report = LocalizedEcoReport {
         added_node_count: added_count,
         added_ops,
-        edits: diff,
         edit_distance_old_to_patched: 0,
         text_edit_distance_old_to_patched: text_diff_chars,
         rtl_text_edit_distance_old_to_patched: 0,
@@ -801,6 +596,74 @@ fn myers_insdel_distance_bytes(a: &[u8], b: &[u8]) -> usize {
         }
     }
     max
+}
+
+fn compute_block_text_diff(old_block_text: &str, patched_block_text: &str) -> usize {
+    println!(
+        "  Computing text diff {} bytes vs {} bytes...",
+        old_block_text.as_bytes().len(),
+        patched_block_text.as_bytes().len()
+    );
+    let a = old_block_text.as_bytes();
+    let b = patched_block_text.as_bytes();
+    let d = myers_insdel_distance_bytes(a, b);
+    println!("  Text diff char count (old → patched(old)): {}", d);
+    d
+}
+
+fn compute_package_text_diffs(
+    old_ir_text_emitted: &str,
+    patched_ir_text_emitted: &str,
+    new_fn_name: &str,
+    out_dir: &std::path::Path,
+) -> (usize, usize) {
+    println!(
+        "  Computing text diff char count (Myers, inserts+deletes) for IR text old → patched(old)..."
+    );
+    let text_diff_chars = myers_insdel_distance_bytes(
+        old_ir_text_emitted.as_bytes(),
+        patched_ir_text_emitted.as_bytes(),
+    );
+    println!(
+        "  Text diff char count (old → patched(old)): {}",
+        text_diff_chars
+    );
+
+    let old_pkg_x = xlsynth::IrPackage::parse_ir(old_ir_text_emitted, None)
+        .expect("parse old IR for RTL codegen");
+    let patched_pkg_x = xlsynth::IrPackage::parse_ir(patched_ir_text_emitted, None)
+        .expect("parse patched IR for RTL codegen");
+    let mut old_pkg_x = old_pkg_x;
+    let mut patched_pkg_x = patched_pkg_x;
+    let _ = old_pkg_x.set_top_by_name(new_fn_name);
+    let _ = patched_pkg_x.set_top_by_name(new_fn_name);
+    let delay_model = "unit";
+    let sched_proto = format!("delay_model: \"{}\"\npipeline_stages: 1", delay_model);
+    let codegen_proto = format!(
+        "register_merge_strategy: STRATEGY_IDENTITY_ONLY\ngenerator: GENERATOR_KIND_PIPELINE\nuse_system_verilog: true\nmodule_name: \"{}\"\ncodegen_version: 1",
+        new_fn_name
+    );
+    let old_sv = xlsynth::schedule_and_codegen(&old_pkg_x, &sched_proto, &codegen_proto)
+        .and_then(|res| res.get_verilog_text())
+        .expect("schedule/codegen old IR");
+    let patched_sv = xlsynth::schedule_and_codegen(&patched_pkg_x, &sched_proto, &codegen_proto)
+        .and_then(|res| res.get_verilog_text())
+        .expect("schedule/codegen patched IR");
+    let old_sv_path = out_dir.join("rtl_old.sv");
+    let patched_sv_path = out_dir.join("rtl_patched_old.sv");
+    std::fs::write(&old_sv_path, old_sv.as_bytes()).expect("write rtl_old.sv");
+    std::fs::write(&patched_sv_path, patched_sv.as_bytes()).expect("write rtl_patched_old.sv");
+    println!("  RTL (old) written to: {}", old_sv_path.display());
+    println!(
+        "  RTL (patched(old)) written to: {}",
+        patched_sv_path.display()
+    );
+    let rtl_diff_chars = myers_insdel_distance_bytes(old_sv.as_bytes(), patched_sv.as_bytes());
+    println!(
+        "  RTL text diff char count (old → patched(old)): {}",
+        rtl_diff_chars
+    );
+    (text_diff_chars, rtl_diff_chars)
 }
 
 fn type_zero_value_text(ty: &Type) -> String {
@@ -1213,16 +1076,4 @@ fn reshape_args_to_params(
         out.push(v);
     }
     Ok(out)
-}
-
-fn extract_op_from_signature(s: &str) -> String {
-    // Try to extract an operator-like token from node signature, e.g. before '(' or
-    // before first ':'
-    if let Some(idx) = s.find('(') {
-        return s[..idx].to_string();
-    }
-    if let Some(idx) = s.find(':') {
-        return s[..idx].to_string();
-    }
-    s.to_string()
 }

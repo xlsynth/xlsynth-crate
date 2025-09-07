@@ -836,6 +836,59 @@ pub fn ir_fn_to_boolector(
                 }
                 result
             }
+            NodePayload::ArraySlice {
+                array,
+                start,
+                width,
+            } => {
+                let array_bv = env.get(array).expect("Array BV must be present");
+                let start_bv = env.get(start).expect("Start BV must be present");
+                let array_ty = f.get_node_ty(*array);
+                let (elem_ty, elem_cnt) = match array_ty {
+                    crate::xls_ir::ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                    _ => panic!("ArraySlice: expected array type"),
+                };
+                let elem_width = elem_ty.bit_count() as u32;
+                let start_width = start_bv.get_width();
+
+                // Pre-slice elements
+                let btor_ctx = array_bv.get_btor();
+                let mut elems: Vec<BV<Rc<Btor>>> = Vec::with_capacity(elem_cnt);
+                for i in 0..elem_cnt {
+                    let high = ((i + 1) * elem_width as usize - 1) as u32;
+                    let low = (i * elem_width as usize) as u32;
+                    elems.push(array_bv.slice(high, low));
+                }
+
+                // Helper: number of selectable elements given index width
+                let two_pow = if start_width >= 63 {
+                    u64::MAX
+                } else {
+                    1u64 << start_width
+                };
+                let max_sel = std::cmp::min(elem_cnt as u64, two_pow) as usize;
+
+                // Build result by selecting width consecutive elements
+                let mut acc: Option<BV<Rc<Btor>>> = None;
+                for j in 0..*width {
+                    let off = BV::from_u64(btor_ctx.clone(), j as u64, start_width);
+                    let idx_j = start_bv.add(&off);
+
+                    // Select element with clamp-to-last semantics
+                    let mut selected = elems[max_sel - 1].clone();
+                    for i in (0..max_sel - 1).rev() {
+                        let i_bv = BV::from_u64(btor_ctx.clone(), i as u64, start_width);
+                        let cond = idx_j._eq(&i_bv);
+                        selected = cond.cond_bv(&elems[i], &selected);
+                    }
+
+                    acc = Some(match acc {
+                        None => selected,
+                        Some(prev) => selected.concat(&prev),
+                    });
+                }
+                acc.expect("ArraySlice result must exist")
+            }
             NodePayload::BitSliceUpdate {
                 arg,
                 start,

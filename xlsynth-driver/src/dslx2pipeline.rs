@@ -5,8 +5,9 @@ use std::process;
 use clap::ArgMatches;
 
 use crate::common::{
-    extract_codegen_flags, extract_pipeline_spec, pipeline_codegen_flags_proto,
-    scheduling_options_proto, CodegenFlags, PipelineSpec, DEFAULT_WARNINGS_AS_ERRORS,
+    extract_codegen_flags, extract_pipeline_spec, parse_bool_flag, pipeline_codegen_flags_proto,
+    resolve_type_inference_v2, scheduling_options_proto, CodegenFlags, PipelineSpec,
+    DEFAULT_WARNINGS_AS_ERRORS,
 };
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_pipeline, run_ir_converter_main, run_opt_main};
@@ -185,7 +186,7 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
     let top = matches.get_one::<String>("dslx_top").unwrap();
     let pipeline_spec = extract_pipeline_spec(matches);
     let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
-    let keep_temps = matches.get_one::<String>("keep_temps").map(|s| s == "true");
+    let keep_temps = parse_bool_flag(matches, "keep_temps");
     let codegen_flags = extract_codegen_flags(matches, config.as_ref());
 
     // New optional output paths for capturing IR artifacts
@@ -196,17 +197,7 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
         .get_one::<String>("output_opt_ir")
         .map(|s| std::path::PathBuf::from(s));
 
-    // extract type_inference_v2 flag
-    let type_inference_v2 = match matches
-        .get_one::<String>("type_inference_v2")
-        .map(|s| s.as_str())
-    {
-        Some("true") => Some(true),
-        Some("false") => Some(false),
-        _ => config
-            .as_ref()
-            .and_then(|c| c.dslx.as_ref()?.type_inference_v2),
-    };
+    let type_inference_v2 = resolve_type_inference_v2(matches, config);
 
     dslx2pipeline(
         input_path,

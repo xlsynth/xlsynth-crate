@@ -507,6 +507,52 @@ fn main() {
         std::fs::create_dir_all(&out_dir).unwrap();
     }
 
+    // If we're about to fetch artifacts but OFFLINE is set, fail early with a
+    // clear message. We only panic when the artifacts are not already present
+    // in OUT_DIR and no override env is provided.
+    let offline = std::env::var("CARGO_NET_OFFLINE").is_ok();
+    if offline {
+        let stdlib_dir =
+            PathBuf::from(&out_dir).join(format!("dslx_stdlib_{RELEASE_LIB_VERSION_TAG}"));
+        let have_stdlib = stdlib_dir.exists();
+        let dso_filename = get_dso_info().get_dso_filename();
+        let dso_path = PathBuf::from(&out_dir).join(dso_filename);
+        let have_dso = dso_path.exists();
+        let xls_dso_path = std::env::var("XLS_DSO_PATH").ok();
+        let dslx_stdlib_path = std::env::var("DSLX_STDLIB_PATH").ok();
+        let dev_workspace = std::env::var("DEV_XLS_DSO_WORKSPACE").ok();
+        let has_overrides = xls_dso_path.is_some() && dslx_stdlib_path.is_some();
+        let use_workspace = dev_workspace.is_some();
+        if !(has_overrides || use_workspace || (have_stdlib && have_dso)) {
+            let diag = format!(
+                concat!(
+                    "CARGO_NET_OFFLINE is set but build requires downloading XLS artifacts for {}.\n",
+                    "Specify one of the following to build offline:\n",
+                    "  - XLS_DSO_PATH and DSLX_STDLIB_PATH (pre-fetched artifacts)\n",
+                    "  - DEV_XLS_DSO_WORKSPACE (path to XLS workspace providing the DSO)\n",
+                    "  - Or unset CARGO_NET_OFFLINE to allow downloads.\n\n",
+                    "Diagnostics:\n",
+                    "  OUT_DIR: {}\n",
+                    "  Expected stdlib dir exists: {} ({})\n",
+                    "  Expected DSO file exists: {} ({})\n",
+                    "  XLS_DSO_PATH: {}\n",
+                    "  DSLX_STDLIB_PATH: {}\n",
+                    "  DEV_XLS_DSO_WORKSPACE: {}\n"
+                ),
+                RELEASE_LIB_VERSION_TAG,
+                out_dir,
+                have_stdlib,
+                stdlib_dir.display(),
+                have_dso,
+                dso_path.display(),
+                xls_dso_path.as_deref().unwrap_or("<unset>"),
+                dslx_stdlib_path.as_deref().unwrap_or("<unset>"),
+                dev_workspace.as_deref().unwrap_or("<unset>")
+            );
+            panic!("{}", diag);
+        }
+    }
+
     let stdlib_path: PathBuf = download_stdlib_if_dne(&url_base, &out_dir);
     let stdlib_path_full = format!("{}/xls/dslx/stdlib/", stdlib_path.display());
     println!("cargo:rustc-env=DSLX_STDLIB_PATH={stdlib_path_full}");

@@ -12,6 +12,7 @@ pub mod vast;
 pub mod xlsynth_error;
 
 use std::ffi::CString;
+use std::os::raw::c_char;
 
 use ir_package::ScheduleAndCodegenResult;
 pub use ir_value::{IrBits, IrSBits, IrUBits};
@@ -52,6 +53,43 @@ pub struct DslxToIrTextResult {
     pub warnings: Vec<String>,
 }
 
+struct CStringPtrArray {
+    _storage: Vec<CString>,
+    pointers: Vec<*const c_char>,
+}
+
+impl CStringPtrArray {
+    fn from_strings(strings: &[String]) -> Self {
+        let c_strings = strings
+            .iter()
+            .map(|s| CString::new(s.as_str()).unwrap())
+            .collect::<Vec<_>>();
+        let pointers = c_strings.iter().map(|cstr| cstr.as_ptr()).collect();
+        Self {
+            _storage: c_strings,
+            pointers,
+        }
+    }
+
+    fn from_optional(strings: Option<&[String]>) -> Option<Self> {
+        strings.map(Self::from_strings)
+    }
+
+    fn parts(&self) -> (*const *const c_char, usize) {
+        if self.pointers.is_empty() {
+            (std::ptr::null(), 0)
+        } else {
+            (self.pointers.as_ptr(), self.pointers.len())
+        }
+    }
+}
+
+fn optional_ptr_parts(array: Option<&CStringPtrArray>) -> (*const *const c_char, usize) {
+    array
+        .map(|list| list.parts())
+        .unwrap_or((std::ptr::null(), 0))
+}
+
 /// Converts a DSLX module's source text into an IR package. Returns the IR
 /// text.
 ///
@@ -85,39 +123,19 @@ pub fn convert_dslx_to_ir_text(
     let c_module_name = CString::new(module_name).unwrap();
     let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
 
+    let enable_warnings = CStringPtrArray::from_optional(options.enable_warnings);
+    let disable_warnings = CStringPtrArray::from_optional(options.disable_warnings);
+
     unsafe {
         let additional_search_paths_ptrs: Vec<*const std::os::raw::c_char> = search_paths_cstrs
             .iter()
             .map(|cstr| cstr.as_ptr())
             .collect();
 
-        let enable_warnings_cstrs = options.enable_warnings.as_ref().map(|warnings| {
-            warnings
-                .iter()
-                .map(|w| CString::new(w.as_str()).unwrap())
-                .collect::<Vec<_>>()
-        });
-        let enable_warnings_cstrs_ptrs = enable_warnings_cstrs
-            .as_ref()
-            .map(|cstrs| cstrs.iter().map(|cstr| cstr.as_ptr()).collect::<Vec<_>>());
-        let disable_warnings_cstrs = options.disable_warnings.as_ref().map(|warnings| {
-            warnings
-                .iter()
-                .map(|w| CString::new(w.as_str()).unwrap())
-                .collect::<Vec<_>>()
-        });
-        let disable_warnings_cstrs_ptrs = disable_warnings_cstrs
-            .as_ref()
-            .map(|cstrs| cstrs.iter().map(|cstr| cstr.as_ptr()).collect::<Vec<_>>());
-
-        let enable_warnings_ptr = enable_warnings_cstrs_ptrs
-            .as_ref()
-            .map(|ptrs| ptrs.as_ptr())
-            .unwrap_or(std::ptr::null());
-        let disable_warnings_ptr = disable_warnings_cstrs_ptrs
-            .as_ref()
-            .map(|ptrs| ptrs.as_ptr())
-            .unwrap_or(std::ptr::null());
+        let (enable_warnings_ptr, enable_warnings_len) =
+            optional_ptr_parts(enable_warnings.as_ref());
+        let (disable_warnings_ptr, disable_warnings_len) =
+            optional_ptr_parts(disable_warnings.as_ref());
 
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -134,9 +152,9 @@ pub fn convert_dslx_to_ir_text(
             additional_search_paths_ptrs.as_ptr(),
             additional_search_paths_ptrs.len(),
             enable_warnings_ptr,
-            enable_warnings_cstrs_ptrs.unwrap_or_default().len(),
+            enable_warnings_len,
             disable_warnings_ptr,
-            disable_warnings_cstrs_ptrs.unwrap_or_default().len(),
+            disable_warnings_len,
             false,
             &mut warnings_out,
             &mut warnings_out_count,

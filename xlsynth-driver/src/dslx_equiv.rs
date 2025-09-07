@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::common::{get_function_enum_param_domains, parse_uf_spec};
+use crate::common::{get_function_enum_param_domains, parse_uf_spec, resolve_type_inference_v2};
 use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
 use crate::solver_choice::SolverChoice;
@@ -173,14 +173,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         .as_ref()
         .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
 
-    let type_inference_v2 = matches
-        .get_one::<String>("type_inference_v2")
-        .map(|s| s == "true")
-        .or_else(|| {
-            config
-                .as_ref()
-                .and_then(|c| c.dslx.as_ref()?.type_inference_v2)
-        });
+    let type_inference_v2 = resolve_type_inference_v2(matches, config);
 
     let assertion_semantics = matches
         .get_one::<String>("assertion_semantics")

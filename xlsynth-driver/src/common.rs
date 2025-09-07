@@ -16,6 +16,34 @@ pub enum PipelineSpec {
     ClockPeriodPs(u64),
 }
 
+/// Parses a boolean command-line flag where clap has already constrained the
+/// possible values to the strings "true" or "false".
+pub fn parse_bool_flag(matches: &ArgMatches, flag_name: &str) -> Option<bool> {
+    matches
+        .get_one::<String>(flag_name)
+        .map(|value| value == "true")
+}
+
+/// Parses a boolean flag, falling back to the provided default when it is not
+/// present on the command line.
+pub fn parse_bool_flag_or(matches: &ArgMatches, flag_name: &str, default_value: bool) -> bool {
+    parse_bool_flag(matches, flag_name).unwrap_or(default_value)
+}
+
+/// Determines the effective value of the experimental `type_inference_v2`
+/// option. The command-line flag takes precedence, and we fall back to the
+/// toolchain configuration when the flag is absent.
+pub fn resolve_type_inference_v2(
+    matches: &ArgMatches,
+    config: &Option<crate::toolchain_config::ToolchainConfig>,
+) -> Option<bool> {
+    parse_bool_flag(matches, "type_inference_v2").or_else(|| {
+        config
+            .as_ref()
+            .and_then(|c| c.dslx.as_ref()?.type_inference_v2)
+    })
+}
+
 pub fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
     if let Some(pipeline_stages) = matches.get_one::<String>("pipeline_stages") {
         PipelineSpec::Stages(pipeline_stages.parse().unwrap())

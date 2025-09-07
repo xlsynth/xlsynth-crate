@@ -2,10 +2,16 @@
 
 //! Computes structural similarity statistics between two XLS IR functions.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type};
-use crate::xls_ir::ir_utils::{get_topological, operands};
+use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type, node_textual_id};
+use crate::xls_ir::ir_utils::{
+    compute_users, get_topological, is_valid_identifier_name, operands, remap_payload_with,
+    sanitize_text_id_to_identifier_name,
+};
 use crate::xls_ir::node_hashing::{
     compute_node_local_structural_hash, compute_node_structural_hash,
 };
@@ -69,6 +75,12 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry>, Vec<usize>) 
             | NodePayload::BitSlice { arg: tuple, .. } => {
                 child_hashes.push(hashes[tuple.index]);
                 child_depths.push(depths[tuple.index]);
+            }
+            NodePayload::ArraySlice { array, start, .. } => {
+                child_hashes.push(hashes[array.index]);
+                child_depths.push(depths[array.index]);
+                child_hashes.push(hashes[start.index]);
+                child_depths.push(depths[start.index]);
             }
             NodePayload::Binop(_, a, b) => {
                 child_hashes.push(hashes[a.index]);
@@ -707,152 +719,6 @@ pub fn compute_structural_discrepancies_dual(
     (result, lhs_ret_depth, rhs_ret_depth)
 }
 
-fn remap_payload_with<FMap>(payload: &NodePayload, mut map: FMap) -> NodePayload
-where
-    FMap: FnMut(NodeRef) -> NodeRef,
-{
-    match payload {
-        NodePayload::Nil => NodePayload::Nil,
-        NodePayload::GetParam(p) => NodePayload::GetParam(*p),
-        NodePayload::Tuple(elems) => NodePayload::Tuple(elems.iter().map(|r| map(*r)).collect()),
-        NodePayload::Array(elems) => NodePayload::Array(elems.iter().map(|r| map(*r)).collect()),
-        NodePayload::TupleIndex { tuple, index } => NodePayload::TupleIndex {
-            tuple: map(*tuple),
-            index: *index,
-        },
-        NodePayload::Binop(op, a, b) => NodePayload::Binop(*op, map(*a), map(*b)),
-        NodePayload::Unop(op, a) => NodePayload::Unop(*op, map(*a)),
-        NodePayload::Literal(v) => NodePayload::Literal(v.clone()),
-        NodePayload::SignExt { arg, new_bit_count } => NodePayload::SignExt {
-            arg: map(*arg),
-            new_bit_count: *new_bit_count,
-        },
-        NodePayload::ZeroExt { arg, new_bit_count } => NodePayload::ZeroExt {
-            arg: map(*arg),
-            new_bit_count: *new_bit_count,
-        },
-        NodePayload::ArrayUpdate {
-            array,
-            value,
-            indices,
-            assumed_in_bounds,
-        } => NodePayload::ArrayUpdate {
-            array: map(*array),
-            value: map(*value),
-            indices: indices.iter().map(|r| map(*r)).collect(),
-            assumed_in_bounds: *assumed_in_bounds,
-        },
-        NodePayload::ArrayIndex {
-            array,
-            indices,
-            assumed_in_bounds,
-        } => NodePayload::ArrayIndex {
-            array: map(*array),
-            indices: indices.iter().map(|r| map(*r)).collect(),
-            assumed_in_bounds: *assumed_in_bounds,
-        },
-        NodePayload::DynamicBitSlice { arg, start, width } => NodePayload::DynamicBitSlice {
-            arg: map(*arg),
-            start: map(*start),
-            width: *width,
-        },
-        NodePayload::BitSlice { arg, start, width } => NodePayload::BitSlice {
-            arg: map(*arg),
-            start: *start,
-            width: *width,
-        },
-        NodePayload::BitSliceUpdate {
-            arg,
-            start,
-            update_value,
-        } => NodePayload::BitSliceUpdate {
-            arg: map(*arg),
-            start: map(*start),
-            update_value: map(*update_value),
-        },
-        NodePayload::Assert {
-            token,
-            activate,
-            message,
-            label,
-        } => NodePayload::Assert {
-            token: map(*token),
-            activate: map(*activate),
-            message: message.clone(),
-            label: label.clone(),
-        },
-        NodePayload::Trace {
-            token,
-            activated,
-            format,
-            operands,
-        } => NodePayload::Trace {
-            token: map(*token),
-            activated: map(*activated),
-            format: format.clone(),
-            operands: operands.iter().map(|r| map(*r)).collect(),
-        },
-        NodePayload::AfterAll(elems) => {
-            NodePayload::AfterAll(elems.iter().map(|r| map(*r)).collect())
-        }
-        NodePayload::Nary(op, elems) => {
-            NodePayload::Nary(*op, elems.iter().map(|r| map(*r)).collect())
-        }
-        NodePayload::Invoke { to_apply, operands } => NodePayload::Invoke {
-            to_apply: to_apply.clone(),
-            operands: operands.iter().map(|r| map(*r)).collect(),
-        },
-        NodePayload::PrioritySel {
-            selector,
-            cases,
-            default,
-        } => NodePayload::PrioritySel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
-            default: default.map(|d| map(d)),
-        },
-        NodePayload::OneHotSel { selector, cases } => NodePayload::OneHotSel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
-        },
-        NodePayload::OneHot { arg, lsb_prio } => NodePayload::OneHot {
-            arg: map(*arg),
-            lsb_prio: *lsb_prio,
-        },
-        NodePayload::Sel {
-            selector,
-            cases,
-            default,
-        } => NodePayload::Sel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
-            default: default.map(|d| map(d)),
-        },
-        NodePayload::Cover { predicate, label } => NodePayload::Cover {
-            predicate: map(*predicate),
-            label: label.clone(),
-        },
-        NodePayload::Decode { arg, width } => NodePayload::Decode {
-            arg: map(*arg),
-            width: *width,
-        },
-        NodePayload::Encode { arg } => NodePayload::Encode { arg: map(*arg) },
-        NodePayload::CountedFor {
-            init,
-            trip_count,
-            stride,
-            body,
-            invariant_args,
-        } => NodePayload::CountedFor {
-            init: map(*init),
-            trip_count: *trip_count,
-            stride: *stride,
-            body: body.clone(),
-            invariant_args: invariant_args.iter().map(|r| map(*r)).collect(),
-        },
-    }
-}
-
 fn compute_dual_unmatched_masks(lhs: &Fn, rhs: &Fn) -> (Vec<bool>, Vec<bool>) {
     let (lhs_fwd_entries, _lhs_fwd_depths) = collect_structural_entries(lhs);
     let (rhs_fwd_entries, _rhs_fwd_depths) = collect_structural_entries(rhs);
@@ -914,364 +780,543 @@ fn compute_dual_unmatched_masks(lhs: &Fn, rhs: &Fn) -> (Vec<bool>, Vec<bool>) {
     (lhs_unmatched_mask, rhs_unmatched_mask)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct ConsumerKey {
-    local_hash: blake3::Hash,
-    bwd_hash: blake3::Hash,
-    operand_index: usize,
-}
-
-fn build_subgraph_fn_from_unmatched(
-    orig: &Fn,
-    unmatched_mask: &[bool],
-    consumer_keys: Option<&[ConsumerKey]>,
-) -> Fn {
-    let n = orig.nodes.len();
-    let mut include: Vec<bool> = vec![false; n];
-    for i in 0..n {
-        include[i] = if i < unmatched_mask.len() {
-            unmatched_mask[i]
-        } else {
-            false
-        };
-    }
-
-    // Determine external dependencies to become parameters.
-    let mut external_sources: Vec<usize> = Vec::new();
-    for (i, node) in orig.nodes.iter().enumerate() {
-        if !include[i] {
-            continue;
-        }
-        let deps = operands(&node.payload);
-        for d in deps {
-            if !include[d.index] && !external_sources.contains(&d.index) {
-                external_sources.push(d.index);
-            }
-        }
-    }
-    external_sources.sort_unstable();
-
-    // Create parameters and corresponding GetParam nodes.
-    let mut params: Vec<Param> = Vec::new();
-    let mut new_nodes: Vec<Node> = Vec::new();
-    let mut next_param_id: usize = 1;
-    let mut name_used: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut ext_to_new_node: HashMap<usize, usize> = HashMap::new();
-
-    for src_idx in external_sources.iter().copied() {
-        let src_node = &orig.nodes[src_idx];
-        let mut pname = src_node
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("x{}", src_node.text_id));
-        if name_used.contains(&pname) {
-            let mut k = 1usize;
-            while name_used.contains(&format!("{}__{}", pname, k)) {
-                k += 1;
-            }
-            pname = format!("{}__{}", pname, k);
-        }
-        name_used.insert(pname.clone());
-
-        let pid = ParamId::new(next_param_id);
-        next_param_id += 1;
-        params.push(Param {
-            name: pname.clone(),
-            ty: src_node.ty.clone(),
-            id: pid,
-        });
-        let get_param_node = Node {
-            text_id: new_nodes.len() + 1,
-            name: Some(pname.clone()),
-            ty: src_node.ty.clone(),
-            payload: NodePayload::GetParam(pid),
-            pos: src_node.pos.clone(),
-        };
-        let new_idx = new_nodes.len();
-        new_nodes.push(get_param_node);
-        ext_to_new_node.insert(src_idx, new_idx);
-    }
-
-    // Map from original included node index -> new node index
-    let mut inc_to_new: HashMap<usize, usize> = HashMap::new();
-    let order = get_topological(orig);
-    for node_ref in order {
-        let i = node_ref.index;
-        if !include[i] {
-            continue;
-        }
-        let old_node = &orig.nodes[i];
-        let mapper = |r: NodeRef| -> NodeRef {
-            if include[r.index] {
-                let ni = *inc_to_new
-                    .get(&r.index)
-                    .expect("dep included must have been added");
-                NodeRef { index: ni }
-            } else {
-                let ni = *ext_to_new_node
-                    .get(&r.index)
-                    .expect("external dep must be in param map");
-                NodeRef { index: ni }
-            }
-        };
-        let new_payload = remap_payload_with(&old_node.payload, mapper);
-        let new_node = Node {
-            text_id: new_nodes.len() + 1,
-            name: old_node.name.clone(),
-            ty: old_node.ty.clone(),
-            payload: new_payload,
-            pos: old_node.pos.clone(),
-        };
-        let new_idx = new_nodes.len();
-        new_nodes.push(new_node);
-        inc_to_new.insert(i, new_idx);
-    }
-
-    // Determine sinks in the included subgraph (used if no consumer_keys provided)
-    let mut used_count: HashMap<usize, usize> = HashMap::new();
-    for (i, node) in orig.nodes.iter().enumerate() {
-        if !include[i] {
-            continue;
-        }
-        for dep in operands(&node.payload) {
-            if include[dep.index] {
-                *used_count.entry(dep.index).or_insert(0) += 1;
-            }
-        }
-    }
-    let mut sink_new_refs: Vec<NodeRef> = Vec::new();
-    for (i, inc) in include.iter().enumerate() {
-        if *inc && used_count.get(&i).copied().unwrap_or(0) == 0 {
-            let new_i = *inc_to_new.get(&i).expect("included node must be mapped");
-            sink_new_refs.push(NodeRef { index: new_i });
-        }
-    }
-
-    // Build the function return.
-    let mut ret_ty: Type = Type::nil();
-    let mut ret_node_ref: Option<NodeRef> = None;
-    if let Some(keys) = consumer_keys {
-        // Build outputs following the provided consumer keys. For each key, we
-        // find a matching consumer in the original function that consumes some
-        // source value and map that source into the new function, creating a
-        // parameter if it is external.
-        // Build a quick index: for each included node, enumerate users outside.
-        let users = collect_users_with_operand_indices(orig);
-        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(orig);
-        let mut out_refs: Vec<NodeRef> = Vec::new();
-        for key in keys.iter() {
-            // Locate any consumer edge that matches this key.
-            let mut found_src: Option<NodeRef> = None;
-            'outer: for (src_idx, inc) in include.iter().enumerate() {
-                if !*inc {
-                    continue;
-                }
-                for (user_ref, op_index) in users[src_idx].iter().copied() {
-                    if include[user_ref.index] {
-                        continue;
-                    }
-                    if op_index != key.operand_index {
-                        continue;
-                    }
-                    let local_h = compute_node_local_structural_hash(orig, user_ref);
-                    let bwd_h = bwd_entries[user_ref.index].hash;
-                    if local_h == key.local_hash && bwd_h == key.bwd_hash {
-                        // The source feeding this operand is src_idx.
-                        found_src = Some(NodeRef { index: src_idx });
-                        break 'outer;
-                    }
-                }
-            }
-            if let Some(src) = found_src {
-                // Map src into new function space; if external, add a param.
-                let mapped = if include[src.index] {
-                    let ni = *inc_to_new
-                        .get(&src.index)
-                        .expect("included node must be mapped");
-                    NodeRef { index: ni }
-                } else if let Some(&ni) = ext_to_new_node.get(&src.index) {
-                    NodeRef { index: ni }
-                } else {
-                    // Create a new param for this external source
-                    let src_node = &orig.nodes[src.index];
-                    let mut pname = src_node
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| format!("x{}", src_node.text_id));
-                    if name_used.contains(&pname) {
-                        let mut k = 1usize;
-                        while name_used.contains(&format!("{}__{}", pname, k)) {
-                            k += 1;
-                        }
-                        pname = format!("{}__{}", pname, k);
-                    }
-                    name_used.insert(pname.clone());
-                    let pid = ParamId::new(next_param_id);
-                    next_param_id += 1;
-                    params.push(Param {
-                        name: pname.clone(),
-                        ty: src_node.ty.clone(),
-                        id: pid,
-                    });
-                    let get_param_node = Node {
-                        text_id: new_nodes.len() + 1,
-                        name: Some(pname.clone()),
-                        ty: src_node.ty.clone(),
-                        payload: NodePayload::GetParam(pid),
-                        pos: src_node.pos.clone(),
-                    };
-                    let new_idx = new_nodes.len();
-                    new_nodes.push(get_param_node);
-                    ext_to_new_node.insert(src.index, new_idx);
-                    NodeRef { index: new_idx }
-                };
-                out_refs.push(mapped);
-            } else {
-                // If no match found on this side, pass through a unit literal as placeholder.
-                // However, to maintain return arity, use a nil tuple element by skipping; we
-                // choose to map to a zero-width tuple which is invalid; instead, fallback to
-                // using a GetParam created above by adding a new param with nil type. Since
-                // Type::Tuple(vec![]) is valid, but we have no literal Nil node; use an empty
-                // tuple node.
-                let nil_ty = Type::nil();
-                let nil_node = Node {
-                    text_id: new_nodes.len() + 1,
-                    name: None,
-                    ty: nil_ty.clone(),
-                    payload: NodePayload::Tuple(vec![]),
-                    pos: None,
-                };
-                let idx = new_nodes.len();
-                new_nodes.push(nil_node);
-                out_refs.push(NodeRef { index: idx });
-            }
-        }
-        if out_refs.len() == 1 {
-            let nref = out_refs[0];
-            ret_ty = new_nodes[nref.index].ty.clone();
-            ret_node_ref = Some(nref);
-        } else {
-            let elem_tys: Vec<Box<Type>> = out_refs
-                .iter()
-                .map(|r| Box::new(new_nodes[r.index].ty.clone()))
-                .collect();
-            let tuple_ty = Type::Tuple(elem_tys);
-            let tuple_node = Node {
-                text_id: new_nodes.len() + 1,
-                name: None,
-                ty: tuple_ty.clone(),
-                payload: NodePayload::Tuple(out_refs.clone()),
-                pos: None,
-            };
-            let tuple_idx = new_nodes.len();
-            new_nodes.push(tuple_node);
-            ret_ty = tuple_ty;
-            ret_node_ref = Some(NodeRef { index: tuple_idx });
-        }
-    } else if sink_new_refs.len() == 1 {
-        let nref = sink_new_refs[0];
-        ret_ty = new_nodes[nref.index].ty.clone();
-        ret_node_ref = Some(nref);
-    } else if sink_new_refs.len() >= 2 {
-        let elem_tys: Vec<Box<Type>> = sink_new_refs
-            .iter()
-            .map(|r| Box::new(new_nodes[r.index].ty.clone()))
-            .collect();
-        let tuple_ty = Type::Tuple(elem_tys);
-        let tuple_node = Node {
-            text_id: new_nodes.len() + 1,
-            name: None,
-            ty: tuple_ty.clone(),
-            payload: NodePayload::Tuple(sink_new_refs.clone()),
-            pos: None,
-        };
-        let tuple_idx = new_nodes.len();
-        new_nodes.push(tuple_node);
-        ret_ty = tuple_ty;
-        ret_node_ref = Some(NodeRef { index: tuple_idx });
-    }
-
-    Fn {
-        name: format!("{}_diff", orig.name),
-        params,
-        ret_ty,
-        nodes: new_nodes,
-        ret_node_ref,
-    }
-}
-
-/// Extracts LHS/RHS subgraphs of unmatched nodes after dual (fwd OR bwd)
-/// matching. External dependencies are turned into parameters with
-/// corresponding GetParam nodes.
-pub fn extract_dual_difference_subgraphs(lhs: &Fn, rhs: &Fn) -> (Fn, Fn) {
+/// Computes the node sets that constitute the dual-difference regions on LHS
+/// and RHS.
+///
+/// These are the nodes that remained unmatched when comparing using forward OR
+/// backward structural hashes (same criterion used by
+/// `extract_dual_difference_subgraphs`).
+pub fn compute_dual_difference_regions(lhs: &Fn, rhs: &Fn) -> (HashSet<NodeRef>, HashSet<NodeRef>) {
     assert_eq!(
         lhs.get_type(),
         rhs.get_type(),
         "Function signatures must match for structural comparison",
     );
-    let (lhs_mask, rhs_mask) = compute_dual_unmatched_masks(lhs, rhs);
+    let (lhs_unmatched_mask, rhs_unmatched_mask) = compute_dual_unmatched_masks(lhs, rhs);
 
-    // Compute common consumer keys across LHS and RHS from boundary edges.
-    let users_lhs = collect_users_with_operand_indices(lhs);
-    let users_rhs = collect_users_with_operand_indices(rhs);
-    let (lhs_bwd_entries, _ld) = collect_backward_structural_entries(lhs);
-    let (rhs_bwd_entries, _rd) = collect_backward_structural_entries(rhs);
-
-    let mut lhs_keys: std::collections::HashSet<ConsumerKey> = std::collections::HashSet::new();
-    for (i, inc) in lhs_mask.iter().enumerate() {
-        if !*inc {
-            continue;
+    let mut lhs_interior: HashSet<NodeRef> = HashSet::new();
+    for i in 0..lhs.nodes.len() {
+        if i < lhs_unmatched_mask.len() && lhs_unmatched_mask[i] {
+            lhs_interior.insert(NodeRef { index: i });
         }
-        for (user_ref, op_index) in users_lhs[i].iter().copied() {
-            if lhs_mask[user_ref.index] {
-                continue;
+    }
+    let mut rhs_interior: HashSet<NodeRef> = HashSet::new();
+    for i in 0..rhs.nodes.len() {
+        if i < rhs_unmatched_mask.len() && rhs_unmatched_mask[i] {
+            rhs_interior.insert(NodeRef { index: i });
+        }
+    }
+    (lhs_interior, rhs_interior)
+}
+
+/// Summarizes the inbound operands and outbound users for a given region of
+/// nodes.
+///
+/// Returns:
+/// - A sorted list of unique textual ids for inbound operands (producers
+///   outside `region` that feed any node inside `region`).
+/// - For each boundary output (nodes in `region` used outside the region, or
+///   the return if it lies inside the region), a pair of: (producer textual id,
+///   sorted list of textual ids of outside users), ordered by ascending node
+///   index to be stable.
+fn compute_region_boundary_nodes(
+    f: &Fn,
+    region: &HashSet<NodeRef>,
+    users_map: &HashMap<NodeRef, HashSet<NodeRef>>,
+) -> Vec<NodeRef> {
+    let mut boundary: Vec<NodeRef> = Vec::new();
+    for nr in region.iter() {
+        let users = users_map
+            .get(nr)
+            .map(|s| s.iter().copied().collect::<Vec<NodeRef>>())
+            .unwrap_or_default();
+        if users.iter().any(|u| !region.contains(u)) {
+            boundary.push(*nr);
+        }
+    }
+    if let Some(ret_nr) = f.ret_node_ref {
+        if region.contains(&ret_nr) && !boundary.contains(&ret_nr) {
+            boundary.push(ret_nr);
+        }
+    }
+    boundary.sort_by_key(|nr| nr.index);
+    boundary
+}
+
+// Helper: compute outbound boundary users summary for a region.
+fn summarize_region_outbound(f: &Fn, region: &HashSet<NodeRef>) -> Vec<(String, Vec<String>)> {
+    let users_map = compute_users(f);
+    let boundary = compute_region_boundary_nodes(f, region, &users_map);
+    let mut per_return: Vec<(String, Vec<String>)> = Vec::new();
+    for nr in boundary.into_iter() {
+        let producer_txt = node_textual_id(f, nr);
+        let mut outside_users: Vec<String> = users_map
+            .get(&nr)
+            .map(|s| s.iter().copied().filter(|u| !region.contains(u)))
+            .into_iter()
+            .flatten()
+            .map(|u| node_textual_id(f, u))
+            .collect();
+        outside_users.sort();
+        outside_users.dedup();
+        per_return.push((producer_txt, outside_users));
+    }
+    per_return
+}
+
+// Helper: collect outbound edges (consumer with operand index) for boundary
+// producers.
+fn collect_outbound_edges_with_operand_indices(
+    f: &Fn,
+    region: &std::collections::HashSet<NodeRef>,
+) -> BTreeMap<(String, usize), (NodeRef /* producer */, NodeRef /* consumer */)> {
+    let users_map = compute_users(f);
+    let boundary = compute_region_boundary_nodes(f, region, &users_map);
+    let mut edges: BTreeMap<(String, usize), (NodeRef, NodeRef)> = BTreeMap::new();
+    for prod in boundary.into_iter() {
+        if let Some(users) = users_map.get(&prod) {
+            for user in users.iter().copied().filter(|u| !region.contains(u)) {
+                let user_node = f.get_node(user);
+                let deps = operands(&user_node.payload);
+                for (op_index, dep) in deps.into_iter().enumerate() {
+                    if dep.index == prod.index {
+                        let key = (node_textual_id(f, user), op_index);
+                        edges.insert(key, (prod, user));
+                    }
+                }
             }
-            let local_h = compute_node_local_structural_hash(lhs, user_ref);
-            let bwd_h = lhs_bwd_entries[user_ref.index].hash;
-            lhs_keys.insert(ConsumerKey {
-                local_hash: local_h,
-                bwd_hash: bwd_h,
-                operand_index: op_index,
-            });
+        }
+    }
+    edges
+}
+
+// Helper: build textual-id -> NodeRef index for a function.
+fn build_textual_id_index(f: &Fn) -> HashMap<String, NodeRef> {
+    let mut m: HashMap<String, NodeRef> = HashMap::new();
+    for (i, _n) in f.nodes.iter().enumerate() {
+        let nr = NodeRef { index: i };
+        let t = node_textual_id(f, nr);
+        m.insert(t, nr);
+    }
+    m
+}
+
+fn make_slot_param_name(consumer_text: &str, op_index: usize) -> String {
+    format!("__slot__{}__op{}", consumer_text, op_index)
+}
+
+// Helper: build inbound textual-id -> type map for a region.
+fn compute_inbound_text_to_type_map(f: &Fn, region: &HashSet<NodeRef>) -> BTreeMap<String, Type> {
+    let mut m: BTreeMap<String, Type> = BTreeMap::new();
+    for nr in region.iter() {
+        let node = f.get_node(*nr);
+        for dep in operands(&node.payload).into_iter() {
+            if !region.contains(&dep) {
+                m.insert(node_textual_id(f, dep), f.get_node(dep).ty.clone());
+            }
+        }
+    }
+    m
+}
+
+// Helper: compute union inbound textual ids (sorted) and corresponding types.
+fn compute_union_params(
+    lhs_inbound_map: &BTreeMap<String, Type>,
+    rhs_inbound_map: &BTreeMap<String, Type>,
+) -> Vec<(String, Type)> {
+    // Union textual ids, deterministic order by string.
+    let mut union_texts: BTreeSet<String> = lhs_inbound_map.keys().cloned().collect();
+    for k in rhs_inbound_map.keys() {
+        union_texts.insert(k.clone());
+    }
+
+    // Build type map for union, asserting matching types when present on both
+    // sides.
+    let mut union_pairs: Vec<(String, Type)> = Vec::with_capacity(union_texts.len());
+    for t in union_texts.into_iter() {
+        let ty = match (lhs_inbound_map.get(&t), rhs_inbound_map.get(&t)) {
+            (Some(lt), Some(rt)) => {
+                assert_eq!(lt, rt, "Inbound textual id '{}' has mismatched types", t);
+                lt.clone()
+            }
+            (Some(lt), None) => lt.clone(),
+            (None, Some(rt)) => rt.clone(),
+            (None, None) => unreachable!(),
+        };
+        union_pairs.push((t, ty));
+    }
+    union_pairs
+}
+
+// Helper: clone a region into a new inner function with fixed params from union
+// lists.
+
+// Variant: builds an inner function that returns a tuple matching the union of
+// consumer-operand slots across LHS/RHS, using passthrough params when this
+// side does not produce a given slot.
+fn build_inner_with_union_user_slots(
+    f: &Fn,
+    region: &HashSet<NodeRef>,
+    fname: &str,
+    // Base union params (inbound to region).
+    union_params: &[(String, Type)],
+    // Extra passthrough params (deduped union across sides).
+    extra_passthrough_params: &[(String, Type)],
+    // Deterministic slot order: (consumer textual id, operand index)
+    slot_order: &[(String, usize)],
+    // For this side only, outbound mapping from slot key -> boundary producer NodeRef.
+    side_edges: &BTreeMap<(String, usize), (NodeRef, NodeRef)>,
+) -> Fn {
+    // 1) Create inner params: union of union_params + extra_passthrough_params,
+    //    dedup’d by name, in deterministic order.
+    let mut inner_params: Vec<Param> = Vec::new();
+    let mut text_to_inner_param_ref: HashMap<String, NodeRef> = HashMap::new();
+    let mut next_param_pos: usize = 1;
+    let mut inner_nodes: Vec<Node> = Vec::new();
+    let mut next_text_id: usize = {
+        let mut max_id = 0usize;
+        for n in f.nodes.iter() {
+            if n.text_id > max_id {
+                max_id = n.text_id;
+            }
+        }
+        max_id.saturating_add(1)
+    };
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut merged_params: Vec<(String, Type)> = Vec::new();
+    for (t, ty) in union_params.iter() {
+        if seen.insert(t.clone()) {
+            merged_params.push((t.clone(), ty.clone()));
+        }
+    }
+    for (t, ty) in extra_passthrough_params.iter() {
+        if seen.insert(t.clone()) {
+            merged_params.push((t.clone(), ty.clone()));
         }
     }
 
-    let mut rhs_keys: std::collections::HashSet<ConsumerKey> = std::collections::HashSet::new();
-    for (i, inc) in rhs_mask.iter().enumerate() {
-        if !*inc {
+    let mut used_names: HashSet<String> = HashSet::new();
+    for (raw_name, ty) in merged_params.iter() {
+        let pid = ParamId::new(next_param_pos);
+        next_param_pos += 1;
+        let mut name = if is_valid_identifier_name(raw_name) {
+            raw_name.clone()
+        } else {
+            sanitize_text_id_to_identifier_name(raw_name)
+        };
+        if used_names.contains(&name) {
+            let mut k: usize = 1;
+            loop {
+                let cand = format!("{}__{}", name, k);
+                if !used_names.contains(&cand) {
+                    name = cand;
+                    break;
+                }
+                k += 1;
+            }
+        }
+        used_names.insert(name.clone());
+        inner_params.push(Param {
+            name: name.clone(),
+            ty: ty.clone(),
+            id: pid,
+        });
+        // Synthesize a GetParam node for this param
+        inner_nodes.push(Node {
+            text_id: next_text_id,
+            name: Some(name.clone()),
+            ty: ty.clone(),
+            payload: NodePayload::GetParam(pid),
+            pos: None,
+        });
+        let param_ref = NodeRef {
+            index: inner_nodes.len() - 1,
+        };
+        text_to_inner_param_ref.insert(raw_name.clone(), param_ref);
+        next_text_id += 1;
+    }
+
+    // 2) Topologically clone region nodes mapping external operands to inner params
+    let topo = get_topological(f);
+    let mut old_to_new: HashMap<usize, NodeRef> = HashMap::new();
+    for nr in topo.into_iter() {
+        if !region.contains(&nr) {
             continue;
         }
-        for (user_ref, op_index) in users_rhs[i].iter().copied() {
-            if rhs_mask[user_ref.index] {
-                continue;
+        let old = f.get_node(nr);
+        let mapper = |r: NodeRef| -> NodeRef {
+            if region.contains(&r) {
+                *old_to_new.get(&r.index).expect("mapped internal ref")
+            } else {
+                let text = node_textual_id(f, r);
+                *text_to_inner_param_ref
+                    .get(&text)
+                    .expect("missing fixed/extra param for external operand")
             }
-            let local_h = compute_node_local_structural_hash(rhs, user_ref);
-            let bwd_h = rhs_bwd_entries[user_ref.index].hash;
-            rhs_keys.insert(ConsumerKey {
-                local_hash: local_h,
-                bwd_hash: bwd_h,
-                operand_index: op_index,
-            });
+        };
+        let new_payload = remap_payload_with(&old.payload, mapper);
+        let new_node = Node {
+            text_id: old.text_id,
+            name: old.name.clone(),
+            ty: old.ty.clone(),
+            payload: new_payload,
+            pos: old.pos.clone(),
+        };
+        inner_nodes.push(new_node);
+        let new_ref = NodeRef {
+            index: inner_nodes.len() - 1,
+        };
+        old_to_new.insert(nr.index, new_ref);
+    }
+
+    // 3) Assemble return tuple in slot order
+    let mut ret_elems: Vec<NodeRef> = Vec::with_capacity(slot_order.len());
+    let mut ret_tys: Vec<Type> = Vec::with_capacity(slot_order.len());
+    for (consumer_text, op_index) in slot_order.iter() {
+        if let Some((prod, _user)) = side_edges.get(&(consumer_text.clone(), *op_index)) {
+            let inner_ref = *old_to_new
+                .get(&prod.index)
+                .expect("inner ref for boundary producer");
+            ret_tys.push(inner_nodes[inner_ref.index].ty.clone());
+            ret_elems.push(inner_ref);
+        } else {
+            // Passthrough: use the original consumer operand value as a param.
+            let mut consumer_ref_opt: Option<NodeRef> = None;
+            for (i, _n) in f.nodes.iter().enumerate() {
+                if node_textual_id(f, NodeRef { index: i }) == *consumer_text {
+                    consumer_ref_opt = Some(NodeRef { index: i });
+                    break;
+                }
+            }
+            if let Some(consumer_ref) = consumer_ref_opt {
+                let deps = operands(&f.get_node(consumer_ref).payload);
+                if *op_index < deps.len() {
+                    let dep = deps[*op_index];
+                    let dep_text = node_textual_id(f, dep);
+                    let param_ref = *text_to_inner_param_ref
+                        .get(&dep_text)
+                        .expect("extra passthrough param must be present");
+                    ret_tys.push(inner_nodes[param_ref.index].ty.clone());
+                    ret_elems.push(param_ref);
+                } else {
+                    let synth = make_slot_param_name(consumer_text, *op_index);
+                    let param_ref = *text_to_inner_param_ref
+                        .get(&synth)
+                        .expect("synthetic passthrough param must be present");
+                    ret_tys.push(inner_nodes[param_ref.index].ty.clone());
+                    ret_elems.push(param_ref);
+                }
+            } else {
+                // Consumer absent; use synthetic param
+                let synth = make_slot_param_name(consumer_text, *op_index);
+                let param_ref = *text_to_inner_param_ref
+                    .get(&synth)
+                    .expect("synthetic passthrough param must be present");
+                ret_tys.push(inner_nodes[param_ref.index].ty.clone());
+                ret_elems.push(param_ref);
+            }
         }
     }
 
-    let mut common_keys: Vec<ConsumerKey> = lhs_keys.intersection(&rhs_keys).copied().collect();
-    // Stable order: by local_hash bytes, then bwd_hash bytes, then operand index
-    common_keys.sort_by(|a, b| {
-        let ord1 = a.local_hash.as_bytes().cmp(b.local_hash.as_bytes());
-        if ord1 != std::cmp::Ordering::Equal {
-            return ord1;
+    let (ret_ref_opt, ret_ty) = if ret_elems.len() == 1 {
+        (Some(ret_elems[0]), ret_tys.remove(0))
+    } else {
+        let tuple_ty = Type::Tuple(ret_tys.into_iter().map(|t| Box::new(t)).collect());
+        let tuple_node = Node {
+            text_id: next_text_id,
+            name: None,
+            ty: tuple_ty.clone(),
+            payload: NodePayload::Tuple(ret_elems.clone()),
+            pos: None,
+        };
+        inner_nodes.push(tuple_node);
+        let rref = Some(NodeRef {
+            index: inner_nodes.len() - 1,
+        });
+        (rref, tuple_ty)
+    };
+
+    Fn {
+        name: fname.to_string(),
+        params: inner_params,
+        ret_ty,
+        nodes: inner_nodes,
+        ret_node_ref: ret_ref_opt,
+    }
+}
+pub struct DualDifferenceExtraction {
+    pub lhs_inner: Fn,
+    pub rhs_inner: Fn,
+    pub lhs_region: HashSet<NodeRef>,
+    pub rhs_region: HashSet<NodeRef>,
+    pub union_params: Vec<(String, Type)>,
+    pub lhs_inbound_texts: Vec<String>,
+    pub rhs_inbound_texts: Vec<String>,
+    pub lhs_outbound: Vec<(String, Vec<String>)>,
+    pub rhs_outbound: Vec<(String, Vec<String>)>,
+    pub slot_order: Vec<(String, usize)>,
+}
+
+pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
+    lhs: &Fn,
+    rhs: &Fn,
+) -> DualDifferenceExtraction {
+    assert_eq!(
+        lhs.get_type(),
+        rhs.get_type(),
+        "Function signatures must match for structural comparison",
+    );
+
+    let (lhs_interior, rhs_interior) = compute_dual_difference_regions(lhs, rhs);
+
+    let lhs_inbound_map = compute_inbound_text_to_type_map(lhs, &lhs_interior);
+    let rhs_inbound_map = compute_inbound_text_to_type_map(rhs, &rhs_interior);
+
+    let union_params = compute_union_params(&lhs_inbound_map, &rhs_inbound_map);
+
+    // Compute outbound edges with operand indices on both sides.
+    let lhs_edges = collect_outbound_edges_with_operand_indices(lhs, &lhs_interior);
+    let rhs_edges = collect_outbound_edges_with_operand_indices(rhs, &rhs_interior);
+
+    // Deterministic slot order = union of keys (no intersection filtering).
+    let mut slot_keys: BTreeSet<(String, usize)> = lhs_edges.keys().cloned().collect();
+    for k in rhs_edges.keys() {
+        slot_keys.insert(k.clone());
+    }
+    let lhs_text_index = build_textual_id_index(lhs);
+    let rhs_text_index = build_textual_id_index(rhs);
+    let mut slot_order: Vec<(String, usize)> = slot_keys.into_iter().collect();
+    slot_order.sort_by(|a, b| {
+        let ord = a.0.cmp(&b.0);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
         }
-        let ord2 = a.bwd_hash.as_bytes().cmp(b.bwd_hash.as_bytes());
-        if ord2 != std::cmp::Ordering::Equal {
-            return ord2;
-        }
-        a.operand_index.cmp(&b.operand_index)
+        a.1.cmp(&b.1)
     });
 
-    let lhs_sub = build_subgraph_fn_from_unmatched(lhs, &lhs_mask, Some(&common_keys));
-    let rhs_sub = build_subgraph_fn_from_unmatched(rhs, &rhs_mask, Some(&common_keys));
-    (lhs_sub, rhs_sub)
+    // Build extra passthrough param union across sides for missing slots.
+    let mut extra_passthrough: BTreeMap<String, Type> = BTreeMap::new();
+    // For each slot, determine if each side needs a passthrough, and if so, add the
+    // appropriate param.
+    for (consumer_text, op_index) in slot_order.iter() {
+        // LHS side
+        if !lhs_edges.contains_key(&(consumer_text.clone(), *op_index)) {
+            if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
+                let deps = operands(&lhs.get_node(*lhs_cons).payload);
+                if *op_index < deps.len() {
+                    let dep = deps[*op_index];
+                    let dep_text = node_textual_id(lhs, dep);
+                    if !lhs_inbound_map.contains_key(&dep_text)
+                        && !rhs_inbound_map.contains_key(&dep_text)
+                    {
+                        extra_passthrough
+                            .entry(dep_text)
+                            .or_insert(lhs.get_node(dep).ty.clone());
+                    }
+                } else {
+                    // Operand index out of range on LHS; fall back to synthetic param using RHS
+                    // type if available.
+                    if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
+                        let rhs_deps = operands(&rhs.get_node(*rhs_cons).payload);
+                        if *op_index < rhs_deps.len() {
+                            let rhs_ty = rhs.get_node(rhs_deps[*op_index]).ty.clone();
+                            let synth = make_slot_param_name(consumer_text, *op_index);
+                            extra_passthrough.entry(synth).or_insert(rhs_ty);
+                        }
+                    }
+                }
+            } else {
+                // Consumer absent on LHS; create synthetic param with type derived from RHS
+                // consumer operand if possible.
+                if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
+                    let rhs_deps = operands(&rhs.get_node(*rhs_cons).payload);
+                    if *op_index < rhs_deps.len() {
+                        let rhs_ty = rhs.get_node(rhs_deps[*op_index]).ty.clone();
+                        let synth = make_slot_param_name(consumer_text, *op_index);
+                        extra_passthrough.entry(synth).or_insert(rhs_ty);
+                    }
+                }
+            }
+        }
+        // RHS side
+        if !rhs_edges.contains_key(&(consumer_text.clone(), *op_index)) {
+            if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
+                let deps = operands(&rhs.get_node(*rhs_cons).payload);
+                if *op_index < deps.len() {
+                    let dep = deps[*op_index];
+                    let dep_text = node_textual_id(rhs, dep);
+                    if !lhs_inbound_map.contains_key(&dep_text)
+                        && !rhs_inbound_map.contains_key(&dep_text)
+                    {
+                        extra_passthrough
+                            .entry(dep_text)
+                            .or_insert(rhs.get_node(dep).ty.clone());
+                    }
+                } else {
+                    if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
+                        let lhs_deps = operands(&lhs.get_node(*lhs_cons).payload);
+                        if *op_index < lhs_deps.len() {
+                            let lhs_ty = lhs.get_node(lhs_deps[*op_index]).ty.clone();
+                            let synth = make_slot_param_name(consumer_text, *op_index);
+                            extra_passthrough.entry(synth).or_insert(lhs_ty);
+                        }
+                    }
+                }
+            } else {
+                if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
+                    let lhs_deps = operands(&lhs.get_node(*lhs_cons).payload);
+                    if *op_index < lhs_deps.len() {
+                        let lhs_ty = lhs.get_node(lhs_deps[*op_index]).ty.clone();
+                        let synth = make_slot_param_name(consumer_text, *op_index);
+                        extra_passthrough.entry(synth).or_insert(lhs_ty);
+                    }
+                }
+            }
+        }
+    }
+
+    let extra_passthrough_params: Vec<(String, Type)> = extra_passthrough.into_iter().collect();
+    // Order by name via BTreeMap; keep as-is.
+
+    // Build each inner with fixed + passthrough params and the unified slot tuple.
+    let lhs_inner = build_inner_with_union_user_slots(
+        lhs,
+        &lhs_interior,
+        &format!("{}_inner", lhs.name),
+        &union_params,
+        &extra_passthrough_params,
+        &slot_order,
+        &lhs_edges,
+    );
+    let rhs_inner = build_inner_with_union_user_slots(
+        rhs,
+        &rhs_interior,
+        &format!("{}_inner", rhs.name),
+        &union_params,
+        &extra_passthrough_params,
+        &slot_order,
+        &rhs_edges,
+    );
+
+    let lhs_inbound_texts: Vec<String> = lhs_inbound_map.keys().cloned().collect();
+    let rhs_inbound_texts: Vec<String> = rhs_inbound_map.keys().cloned().collect();
+
+    let lhs_outbound = summarize_region_outbound(lhs, &lhs_interior);
+    let rhs_outbound = summarize_region_outbound(rhs, &rhs_interior);
+
+    DualDifferenceExtraction {
+        lhs_inner,
+        rhs_inner,
+        lhs_region: lhs_interior,
+        rhs_region: rhs_interior,
+        union_params,
+        lhs_inbound_texts,
+        rhs_inbound_texts,
+        lhs_outbound,
+        rhs_outbound,
+        slot_order,
+    }
 }
 
 #[cfg(test)]

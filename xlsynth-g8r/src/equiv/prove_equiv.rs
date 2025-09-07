@@ -761,6 +761,68 @@ pub fn ir_to_smt<'a, S: Solver>(
 
                 array_index_recursive(solver, base_array, &index_bvs)
             }
+            NodePayload::ArraySlice {
+                array,
+                start,
+                width,
+            } => {
+                // Shift-based implementation with padding by last element.
+                // Flattened array layout is chunked by element width with index 0 at LSB.
+                let base_array = env.get(array).expect("Array BV must be present");
+                let start_bv = env.get(start).expect("Start BV must be present");
+                let (elem_ty, elem_cnt) = match base_array.ir_type {
+                    ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                    _ => panic!(
+                        "ArraySlice: expected array type, found {:?}",
+                        base_array.ir_type
+                    ),
+                };
+                let e_bits = elem_ty.bit_count() as i32;
+
+                // Clamp start to the last valid element index to model XLS OOB semantics.
+                // This ensures that for any start >= elem_cnt - 1 the slice replicates the
+                // last element, matching the piecewise definition (and avoids relying on
+                // oversized padding when the start width allows larger values).
+                let start_width = start_bv.bitvec.get_width();
+                let last_idx_const =
+                    solver.numerical(start_width, (elem_cnt.saturating_sub(1)) as u64);
+                let start_le_last = solver.ule(&start_bv.bitvec, &last_idx_const);
+                let clamped_start = solver.ite(&start_le_last, &start_bv.bitvec, &last_idx_const);
+
+                // 1) Build a padding prefix of (width-1) copies of the last element.
+                let last_idx = (elem_cnt as i32) - 1;
+                let last_high = (last_idx + 1) * e_bits - 1;
+                let last_low = last_idx * e_bits;
+                let last_elem = solver.extract(&base_array.bitvec, last_high, last_low);
+                let mut pad = BitVec::ZeroWidth;
+                if *width > 0 {
+                    for _ in 0..(*width - 1) {
+                        pad = solver.concat(&last_elem, &pad);
+                    }
+                }
+
+                // 2) Concatenate pad || base_array to form the extended sequence.
+                let extended = solver.concat(&pad, &base_array.bitvec);
+
+                // 3) Compute start_scaled = start * e_bits.
+                let e_bits_u = e_bits as u128;
+                let extra = min_bits_u128(e_bits_u.saturating_sub(1));
+                let start_scaled_w = start_width + extra;
+                let start_ext = solver.extend_to(&clamped_start, start_scaled_w, false);
+                let e_const = solver.numerical(start_scaled_w, e_bits_u as u64);
+                let start_scaled =
+                    solver.xls_arbitrary_width_umul(&start_ext, &e_const, start_scaled_w);
+
+                // 4) Shift right by start_scaled and slice low (width * e_bits) bits.
+                let shifted = solver.xls_shrl(&extended, &start_scaled);
+                let out_width_bits = (*width as usize) * (e_bits as usize);
+                let result_bv = solver.slice(&shifted, 0, out_width_bits);
+
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: result_bv,
+                }
+            }
             NodePayload::DynamicBitSlice { arg, start, width } => {
                 let arg_bv = env.get(arg).expect("DynamicBitSlice arg must be present");
                 let start_bv = env
@@ -1189,6 +1251,7 @@ pub enum EquivResult {
         lhs_output: FnOutput,
         rhs_output: FnOutput,
     },
+    Error(String),
 }
 
 /// Semantics for handling `assert` statements when checking functional
@@ -1439,25 +1502,27 @@ impl<S: Solver> UfRegistry<S> {
     }
 }
 
+pub struct EquivSide<'a> {
+    pub ir_fn: &'a IrFn<'a>,
+    pub domains: Option<ParamDomains>,
+    pub uf_map: HashMap<String, String>,
+}
+
 /// Prove equivalence like `prove_ir_fn_equiv` but constraining parameters that
 /// are enums to lie within their defined value sets.
-pub fn prove_ir_fn_equiv_with_domains<'a, S: Solver>(
+pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &IrFn<'a>,
-    rhs: &IrFn<'a>,
+    lhs: &EquivSide<'a>,
+    rhs: &EquivSide<'a>,
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
-    lhs_domains: Option<&ParamDomains>,
-    rhs_domains: Option<&ParamDomains>,
-    lhs_uf_map: &HashMap<String, String>,
-    rhs_uf_map: &HashMap<String, String>,
     uf_signatures: &HashMap<String, UfSignature>,
 ) -> EquivResult {
     let mut solver = S::new(solver_config).unwrap();
-    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs, Some("lhs"));
-    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs, Some("rhs"));
+    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.ir_fn, Some("lhs"));
+    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.ir_fn, Some("rhs"));
 
-    let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: Option<&ParamDomains>| {
+    let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: &Option<ParamDomains>| {
         if let Some(dom) = domains {
             for p in inputs.params().iter() {
                 if let Some(allowed) = dom.get(&p.name) {
@@ -1480,14 +1545,14 @@ pub fn prove_ir_fn_equiv_with_domains<'a, S: Solver>(
         }
     };
 
-    assert_domains(&fn_inputs_lhs, lhs_domains);
-    assert_domains(&fn_inputs_rhs, rhs_domains);
+    assert_domains(&fn_inputs_lhs, &lhs.domains);
+    assert_domains(&fn_inputs_rhs, &rhs.domains);
 
     let uf_registry = UfRegistry::from_uf_signatures(&mut solver, uf_signatures);
 
     let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
-    let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs_uf_map, &uf_registry);
-    let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs_uf_map, &uf_registry);
+    let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &uf_registry);
+    let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs.uf_map, &uf_registry);
     check_aligned_fn_equiv_internal(&mut solver, &smt_lhs, &smt_rhs, assertion_semantics)
 }
 
@@ -1498,16 +1563,20 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
 ) -> EquivResult {
-    prove_ir_fn_equiv_with_domains::<S>(
+    prove_ir_fn_equiv_full::<S>(
         solver_config,
-        lhs,
-        rhs,
+        &EquivSide {
+            ir_fn: lhs,
+            domains: None,
+            uf_map: HashMap::new(),
+        },
+        &EquivSide {
+            ir_fn: rhs,
+            domains: None,
+            uf_map: HashMap::new(),
+        },
         assertion_semantics,
         allow_flatten,
-        None,
-        None,
-        &HashMap::new(),
-        &HashMap::new(),
         &HashMap::new(),
     )
 }
@@ -1704,7 +1773,7 @@ pub mod test_utils {
             prove_equiv::{
                 AssertionSemantics, EquivResult, FnInputs, IrFn, ParamDomains, align_fn_inputs,
                 get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
-                prove_ir_fn_equiv_with_domains,
+                prove_ir_fn_equiv_full,
             },
             solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
         },
@@ -1819,24 +1888,28 @@ pub mod test_utils {
             },
         );
 
-        let res_uf = super::prove_ir_fn_equiv_with_domains::<S>(
+        let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: call_g,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: call_g,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: lhs_uf_map,
             },
-            &super::IrFn {
-                fn_ref: call_h,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: call_h,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
             false,
-            None,
-            None,
-            &lhs_uf_map,
-            &rhs_uf_map,
             &uf_sigs,
         );
         assert!(matches!(res_uf, super::EquivResult::Proved));
@@ -1893,24 +1966,28 @@ pub mod test_utils {
             },
         );
 
-        let res = super::prove_ir_fn_equiv_with_domains::<S>(
+        let res = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: top_g,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: top_g,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: lhs_uf_map,
             },
-            &super::IrFn {
-                fn_ref: top_h,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: top_h,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
             false,
-            None,
-            None,
-            &lhs_uf_map,
-            &rhs_uf_map,
             &uf_sigs,
         );
         assert!(matches!(res, super::EquivResult::Proved));
@@ -1978,24 +2055,28 @@ pub mod test_utils {
             },
         );
 
-        let res_uf = super::prove_ir_fn_equiv_with_domains::<S>(
+        let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: call_g,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: call_g,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: lhs_uf_map,
             },
-            &super::IrFn {
-                fn_ref: call_h,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
+            &super::EquivSide {
+                ir_fn: &super::IrFn {
+                    fn_ref: call_h,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
             false,
-            None,
-            None,
-            &lhs_uf_map,
-            &rhs_uf_map,
             &uf_sigs,
         );
         assert!(matches!(res_uf, super::EquivResult::Proved));
@@ -2449,6 +2530,53 @@ pub mod test_utils {
                 ret literal.1: bits[8][2][3] = literal(value=[[0x12, 0x34], [0x56, 0x78], [0x9a, 0xbc]], id=1)
             }"#,
             |solver: &mut S, _: &FnInputs<S::Term>| solver.from_raw_str(48, "#xbc9a78563412"),
+        );
+    }
+
+    /// array_slice(input, start, width=3) on bits[8][4]
+    pub fn test_ir_array_slice_basic<S: Solver>(solver_config: &S::Config) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[8][4] id=1, start: bits[3] id=2) -> bits[8][3] {
+                ret s: bits[8][3] = array_slice(input, start, width=3, id=3)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                // Piecewise expected for width=3 on N=4:
+                // (1) in-bounds start<=1, (2) cross-bound start==2, (3) OOB start>=3.
+                let input_bv = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let start_bv = inputs.inputs.get("start").unwrap().bitvec.clone();
+                let width = start_bv.get_width();
+
+                // Precompute element slices A0..A3 (LSB chunk is index 0)
+                let a0 = solver.extract(&input_bv, 7, 0);
+                let a1 = solver.extract(&input_bv, 15, 8);
+                let a2 = solver.extract(&input_bv, 23, 16);
+                let a3 = solver.extract(&input_bv, 31, 24);
+
+                // In-bounds result for start in {0,1}
+                let s1 = solver.numerical(width, 1);
+                let is1 = solver.eq(&start_bv, &s1);
+                let r0 = solver.concat(&a2, &a1);
+                let r0 = solver.concat(&r0, &a0); // [A0,A1,A2]
+                let r1 = solver.concat(&a3, &a2);
+                let r1 = solver.concat(&r1, &a1); // [A1,A2,A3]
+                let r_in = solver.ite(&is1, &r1, &r0);
+
+                // Cross-bound for start==2 → [A2,A3,A3]
+                let s2 = solver.numerical(width, 2);
+                let eq2 = solver.eq(&start_bv, &s2);
+                let r_cross = solver.concat(&a3, &a3);
+                let r_cross = solver.concat(&r_cross, &a2);
+
+                // Totally OOB start>=3 → [A3,A3,A3]
+                let rr = solver.concat(&a3, &a3);
+                let rr = solver.concat(&rr, &a3);
+
+                // Conditions
+                let le1 = solver.ule(&start_bv, &s1);
+                let tmp = solver.ite(&eq2, &r_cross, &rr);
+                solver.ite(&le1, &r_in, &tmp)
+            },
         );
     }
 
@@ -3572,7 +3700,7 @@ pub mod test_utils {
         }
     }
 
-    // New: shared test that exercises prove_ir_fn_equiv_with_domains.
+    // New: shared test that exercises prove_ir_fn_equiv_full.
     pub fn test_param_domains_equiv<S: Solver>(solver_config: &S::Config) {
         let lhs_ir = r#"
             fn f(x: bits[2]) -> bits[2] {
@@ -3611,16 +3739,20 @@ pub mod test_utils {
             ],
         );
 
-        let res2 = prove_ir_fn_equiv_with_domains::<S>(
+        let res2 = prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &lhs_ir_fn,
-            &rhs_ir_fn,
+            &super::EquivSide {
+                ir_fn: &lhs_ir_fn,
+                domains: Some(doms.clone()),
+                uf_map: HashMap::new(),
+            },
+            &super::EquivSide {
+                ir_fn: &rhs_ir_fn,
+                domains: Some(doms),
+                uf_map: HashMap::new(),
+            },
             AssertionSemantics::Same,
             false,
-            Some(&doms),
-            Some(&doms),
-            &HashMap::new(),
-            &HashMap::new(),
             &HashMap::new(),
         );
         assert!(matches!(res2, super::EquivResult::Proved));
@@ -3688,6 +3820,10 @@ macro_rules! test_with_solver {
             #[test]
             fn test_ir_array() {
                 test_utils::test_ir_array::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_ir_array_slice_basic() {
+                test_utils::test_ir_array_slice_basic::<$solver_type>($solver_config);
             }
             #[test]
             fn test_ir_value_tuple() {

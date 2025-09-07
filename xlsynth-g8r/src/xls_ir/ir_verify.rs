@@ -54,6 +54,10 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
             | NodePayload::BitSlice { arg: tuple, .. } => {
                 check(*tuple, &format!("node {} single", i))?;
             }
+            NodePayload::ArraySlice { array, start, .. } => {
+                check(*array, &format!("node {} array_slice.array", i))?;
+                check(*start, &format!("node {} array_slice.start", i))?;
+            }
             NodePayload::Binop(_, a, b) => {
                 check(*a, &format!("node {} binop.lhs", i))?;
                 check(*b, &format!("node {} binop.rhs", i))?;

@@ -20,6 +20,24 @@ pub struct IrBits {
 }
 
 impl IrBits {
+    fn from_raw(ptr: *mut CIrBits) -> Self {
+        Self { ptr }
+    }
+
+    fn apply_binary_op(
+        &self,
+        rhs: &IrBits,
+        op: unsafe extern "C" fn(*const CIrBits, *const CIrBits) -> *mut CIrBits,
+    ) -> Self {
+        let result = unsafe { op(self.ptr, rhs.ptr) };
+        Self::from_raw(result)
+    }
+
+    fn apply_unary_op(&self, op: unsafe extern "C" fn(*const CIrBits) -> *mut CIrBits) -> Self {
+        let result = unsafe { op(self.ptr) };
+        Self::from_raw(result)
+    }
+
     pub fn make_ubits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
         xls_bits_make_ubits(bit_count, value)
     }
@@ -86,33 +104,27 @@ impl IrBits {
     }
 
     pub fn add(&self, rhs: &IrBits) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_add(self.ptr, rhs.ptr) };
-        IrBits { ptr: result }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_add)
     }
 
     pub fn sub(&self, rhs: &IrBits) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_sub(self.ptr, rhs.ptr) };
-        IrBits { ptr: result }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_sub)
     }
 
     pub fn umul(&self, rhs: &IrBits) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_umul(self.ptr, rhs.ptr) };
-        IrBits { ptr: result }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_umul)
     }
 
     pub fn smul(&self, rhs: &IrBits) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_smul(self.ptr, rhs.ptr) };
-        IrBits { ptr: result }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_smul)
     }
 
     pub fn negate(&self) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_negate(self.ptr) };
-        IrBits { ptr: result }
+        self.apply_unary_op(xlsynth_sys::xls_bits_negate)
     }
 
     pub fn abs(&self) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_abs(self.ptr) };
-        IrBits { ptr: result }
+        self.apply_unary_op(xlsynth_sys::xls_bits_abs)
     }
 
     pub fn msb(&self) -> bool {
@@ -141,23 +153,19 @@ impl IrBits {
     }
 
     pub fn not(&self) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_not(self.ptr) };
-        IrBits { ptr: result }
+        self.apply_unary_op(xlsynth_sys::xls_bits_not)
     }
 
     pub fn and(&self, rhs: &IrBits) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_and(self.ptr, rhs.ptr) };
-        IrBits { ptr: result }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_and)
     }
 
     pub fn or(&self, rhs: &IrBits) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_or(self.ptr, rhs.ptr) };
-        IrBits { ptr: result }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_or)
     }
 
     pub fn xor(&self, rhs: &IrBits) -> IrBits {
-        let result = unsafe { xlsynth_sys::xls_bits_xor(self.ptr, rhs.ptr) };
-        IrBits { ptr: result }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_xor)
     }
 }
 
@@ -237,8 +245,7 @@ impl std::ops::BitAnd for IrBits {
     type Output = Self;
 
     fn bitand(self, rhs: Self) -> Self::Output {
-        let result = unsafe { xlsynth_sys::xls_bits_and(self.ptr, rhs.ptr) };
-        Self { ptr: result }
+        IrBits::and(&self, &rhs)
     }
 }
 

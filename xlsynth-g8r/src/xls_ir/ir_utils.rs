@@ -3,6 +3,7 @@
 //! Utility functions for working with / on XLS IR.
 
 use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef};
+use std::collections::{HashMap, HashSet};
 
 /// Returns the list of operands for the provided node.
 pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
@@ -12,6 +13,11 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
         GetParam(_) => vec![],
         Tuple(elems) => elems.clone(),
         Array(elems) => elems.clone(),
+        ArraySlice {
+            array,
+            start,
+            width: _,
+        } => vec![*array, *start],
         TupleIndex { tuple, index: _ } => vec![*tuple],
         Binop(_, a, b) => vec![*a, *b],
         Unop(_, a) => vec![*a],
@@ -198,6 +204,33 @@ pub fn get_topological_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     topo_from_nodes(nodes)
 }
 
+/// Computes the immediate users of each node in the function.
+///
+/// Returns a mapping from each `NodeRef` to the set of `NodeRef`s that
+/// directly use it as an operand. Nodes with no users will map to an empty set.
+pub fn compute_users(f: &Fn) -> HashMap<NodeRef, HashSet<NodeRef>> {
+    let n = f.nodes.len();
+    let mut users: HashMap<NodeRef, HashSet<NodeRef>> = HashMap::with_capacity(n);
+
+    // Initialize all keys so even unreachable / sink nodes appear with empty sets.
+    for i in 0..n {
+        users.insert(NodeRef { index: i }, HashSet::new());
+    }
+
+    // For each node, add it as a user of each of its operands.
+    for (i, node) in f.nodes.iter().enumerate() {
+        let this_ref = NodeRef { index: i };
+        for dep in operands(&node.payload) {
+            users
+                .get_mut(&dep)
+                .expect("operand NodeRef must exist in users map")
+                .insert(this_ref);
+        }
+    }
+
+    users
+}
+
 pub fn remap_payload_with<FMap>(payload: &NodePayload, mut map: FMap) -> NodePayload
 where
     FMap: FnMut(NodeRef) -> NodeRef,
@@ -241,6 +274,15 @@ where
             array: map(*array),
             indices: indices.iter().map(|r| map(*r)).collect(),
             assumed_in_bounds: *assumed_in_bounds,
+        },
+        NodePayload::ArraySlice {
+            array,
+            start,
+            width,
+        } => NodePayload::ArraySlice {
+            array: map(*array),
+            start: map(*start),
+            width: *width,
         },
         NodePayload::DynamicBitSlice { arg, start, width } => NodePayload::DynamicBitSlice {
             arg: map(*arg),
@@ -342,6 +384,32 @@ where
             invariant_args: invariant_args.iter().map(|r| map(*r)).collect(),
         },
     }
+}
+
+/// Returns true if `s` is a valid IR identifier `([_A-Za-z][_A-Za-z0-9]*)`;
+/// i.e. can be used as a node name or parameter name.
+pub fn is_valid_identifier_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    };
+    for c in chars {
+        if !(c == '_' || c.is_ascii_alphanumeric()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Sanitizes arbitrary text to a valid identifier name deterministically.
+pub fn sanitize_text_id_to_identifier_name(s: &str) -> String {
+    assert!(
+        s.chars()
+            .all(|c| c == '_' || c == '.' || c.is_ascii_alphanumeric())
+    );
+    // Replace dots with underscores.
+    s.replace('.', "_")
 }
 
 #[cfg(test)]
@@ -615,5 +683,122 @@ mod remap_tests {
             }
             _ => panic!("expected AfterAll"),
         }
+    }
+}
+
+#[cfg(test)]
+mod users_tests {
+    use super::*;
+    use crate::xls_ir::ir::{NaryOp, PackageMember};
+    use crate::xls_ir::ir_parser::Parser;
+
+    fn parse_fn(ir: &str) -> Fn {
+        let pkg_text = format!("package test\n\n{}\n", ir);
+        let mut p = Parser::new(&pkg_text);
+        let pkg = p.parse_and_validate_package().unwrap();
+        pkg.members
+            .iter()
+            .filter_map(|m| match m {
+                PackageMember::Function(f) => Some(f.clone()),
+                _ => None,
+            })
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn users_linear_chain() {
+        let f = parse_fn(
+            r#"fn f() -> bits[1] {
+  lit.1: bits[1] = literal(value=1, id=1)
+  ret identity.2: bits[1] = identity(lit.1, id=2)
+}"#,
+        );
+        let users = compute_users(&f);
+        assert_eq!(users.len(), f.nodes.len());
+
+        // Find literal and its sole user (the identity node) by payload relationships.
+        let mut lit_ref: Option<NodeRef> = None;
+        let mut idn_ref: Option<NodeRef> = None;
+        for (i, node) in f.nodes.iter().enumerate() {
+            match &node.payload {
+                NodePayload::Literal(_) => lit_ref = Some(NodeRef { index: i }),
+                NodePayload::Unop(_, arg) => {
+                    // Identity will be the Unop consuming the literal.
+                    if let Some(lr) = lit_ref {
+                        if *arg == lr {
+                            idn_ref = Some(NodeRef { index: i });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let lit = lit_ref.expect("expected a literal node");
+        let idn = idn_ref.expect("expected an identity node using the literal");
+        assert!(users.get(&lit).unwrap().contains(&idn));
+        assert!(users.get(&idn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn users_fanout_and_unreachable() {
+        let f = parse_fn(
+            r#"fn f() -> bits[1] {
+  u.1: bits[1] = literal(value=0, id=1)
+  a.2: bits[1] = literal(value=1, id=2)
+  b.3: bits[1] = literal(value=0, id=3)
+  and.4: bits[1] = and(a.2, b.3, id=4)
+  ret identity.5: bits[1] = identity(and.4, id=5)
+}"#,
+        );
+        let users = compute_users(&f);
+        assert_eq!(users.len(), f.nodes.len());
+
+        // Locate the key nodes via payload structure, not assumed indices.
+        let mut u_ref: Option<NodeRef> = None;
+        let mut a_ref: Option<NodeRef> = None;
+        let mut b_ref: Option<NodeRef> = None;
+        let mut and_ref: Option<NodeRef> = None;
+        let mut ret_ref: Option<NodeRef> = None;
+
+        // First, find the 'and' node and its two literal operands.
+        for (i, node) in f.nodes.iter().enumerate() {
+            if let NodePayload::Nary(NaryOp::And, elems) = &node.payload {
+                assert_eq!(elems.len(), 2);
+                and_ref = Some(NodeRef { index: i });
+                a_ref = Some(elems[0]);
+                b_ref = Some(elems[1]);
+            }
+        }
+        let and = and_ref.expect("expected and node");
+        let a = a_ref.expect("expected lhs operand");
+        let b = b_ref.expect("expected rhs operand");
+
+        // Find unreachable literal as the literal that is not an operand of 'and'.
+        for (i, node) in f.nodes.iter().enumerate() {
+            if let NodePayload::Literal(_) = &node.payload {
+                let nr = NodeRef { index: i };
+                if nr != a && nr != b {
+                    u_ref = Some(nr);
+                }
+            }
+        }
+        let u = u_ref.expect("expected unreachable literal");
+
+        // Find the ret identity node that consumes the 'and'.
+        for (i, node) in f.nodes.iter().enumerate() {
+            if let NodePayload::Unop(_, arg) = &node.payload {
+                if *arg == and {
+                    ret_ref = Some(NodeRef { index: i });
+                }
+            }
+        }
+        let ret = ret_ref.expect("expected ret identity using and");
+
+        assert!(users.get(&u).unwrap().is_empty());
+        assert!(users.get(&a).unwrap().contains(&and));
+        assert!(users.get(&b).unwrap().contains(&and));
+        assert!(users.get(&and).unwrap().contains(&ret));
+        assert!(users.get(&ret).unwrap().is_empty());
     }
 }

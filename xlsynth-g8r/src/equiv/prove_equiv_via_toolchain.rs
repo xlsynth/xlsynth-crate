@@ -2,13 +2,7 @@
 
 //! IR equivalence via external toolchain `check_ir_equivalence_main`.
 
-use crate::xls_ir::ir::Fn;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EquivResult {
-    Proved,
-    OtherProcessError(String),
-}
+use crate::{equiv::prove_equiv::EquivResult, xls_ir::ir::Fn};
 
 /// Prove equivalence by invoking an external toolchain binary.
 /// The `tool_dir` must contain `check_ir_equivalence_main`.
@@ -23,14 +17,14 @@ pub fn prove_ir_pkg_equiv_with_tool_exe<P: AsRef<std::path::Path>>(
 ) -> EquivResult {
     let exe = tool_exe.as_ref();
     if !exe.exists() {
-        return EquivResult::OtherProcessError(format!("tool not found: {}", exe.display()));
+        return EquivResult::Error(format!("tool not found: {}", exe.display()));
     }
     let lhs_tmp = tempfile::NamedTempFile::new().unwrap();
     let rhs_tmp = tempfile::NamedTempFile::new().unwrap();
     if std::fs::write(lhs_tmp.path(), lhs_pkg_text).is_err()
         || std::fs::write(rhs_tmp.path(), rhs_pkg_text).is_err()
     {
-        return EquivResult::OtherProcessError("failed to write temp files".to_string());
+        return EquivResult::Error("failed to write temp files".to_string());
     }
     let mut cmd = std::process::Command::new(exe);
     // Note: flag like "--alsologtostderr" can be added for extra logs when
@@ -53,9 +47,9 @@ pub fn prove_ir_pkg_equiv_with_tool_exe<P: AsRef<std::path::Path>>(
                 msg.push_str(": ");
                 msg.push_str(&snippet);
             }
-            EquivResult::OtherProcessError(msg)
+            EquivResult::Error(msg)
         }
-        Err(e) => EquivResult::OtherProcessError(format!("spawn failed: {}", e)),
+        Err(e) => EquivResult::Error(format!("spawn failed: {}", e)),
     }
 }
 
@@ -67,7 +61,7 @@ pub fn prove_ir_pkg_equiv_with_tool_dir<P: AsRef<std::path::Path>>(
 ) -> EquivResult {
     let exe = tool_dir.as_ref().join("check_ir_equivalence_main");
     if !exe.exists() {
-        return EquivResult::OtherProcessError(format!(
+        return EquivResult::Error(format!(
             "check_ir_equivalence_main not found in {}",
             tool_dir.as_ref().display()
         ));
@@ -82,7 +76,7 @@ pub fn prove_ir_fn_equiv_with_tool_dir<P: AsRef<std::path::Path>>(
 ) -> EquivResult {
     let exe = tool_dir.as_ref().join("check_ir_equivalence_main");
     if !exe.exists() {
-        return EquivResult::OtherProcessError(format!(
+        return EquivResult::Error(format!(
             "check_ir_equivalence_main not found in {}",
             tool_dir.as_ref().display()
         ));
@@ -96,7 +90,7 @@ pub fn prove_ir_fn_equiv_with_tool_dir<P: AsRef<std::path::Path>>(
 pub fn prove_ir_fn_equiv_via_toolchain(lhs: &Fn, rhs: &Fn) -> EquivResult {
     match std::env::var("XLSYNTH_TOOLS") {
         Ok(dir) => prove_ir_fn_equiv_with_tool_dir(lhs, rhs, dir),
-        Err(_) => EquivResult::OtherProcessError(
+        Err(_) => EquivResult::Error(
             "XLSYNTH_TOOLS is not set; cannot run toolchain equivalence".to_string(),
         ),
     }

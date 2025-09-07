@@ -97,6 +97,10 @@ fn main_has_bitwuzla(args: Args) {
             println!("  output LHS: {:?}", lhs_output);
             println!("  output RHS: {:?}", rhs_output);
         }
+        EquivResult::Error(msg) => {
+            eprintln!("error: {}", msg);
+            std::process::exit(2);
+        }
     }
 
     // Now run the external `check_ir_equivalence_main` tool via the helper in
