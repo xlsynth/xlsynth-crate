@@ -978,5 +978,16 @@ jobs:
         run: |
           sudo apt-get install -y z3
 
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+          done
+          sudo ldconfig || true
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Ensure benches compile
         run: cargo bench --features with-z3-system,with-bitwuzla-system --workspace --no-run
