@@ -997,10 +997,33 @@ fn build_inner_with_union_user_slots(
     }
 
     let mut used_names: HashSet<String> = HashSet::new();
+    // Build helpers to name params using forward structural hashes where possible.
+    let text_index = build_textual_id_index(f);
+    let (fwd_entries, _fwd_depths) = collect_structural_entries(f);
+    let mut text_to_fwd_hex: BTreeMap<String, String> = BTreeMap::new();
+    for (i, _n) in f.nodes.iter().enumerate() {
+        let t = node_textual_id(f, NodeRef { index: i });
+        let bytes = fwd_entries[i].hash.as_bytes();
+        let mut s = String::with_capacity(16);
+        for b in bytes.iter().take(8) {
+            s.push_str(&format!("{:02x}", b));
+        }
+        text_to_fwd_hex.insert(t, s);
+    }
     for (raw_name, ty) in merged_params.iter() {
         let pid = ParamId::new(next_param_pos);
         next_param_pos += 1;
-        let mut name = if is_valid_identifier_name(raw_name) {
+        // Prefer a forward-hash-based name when we can resolve this textual id on this
+        // side.
+        let mut name = if text_index.contains_key(raw_name) {
+            format!(
+                "__fwd__{}",
+                text_to_fwd_hex
+                    .get(raw_name)
+                    .expect("fwd hex for text")
+                    .clone()
+            )
+        } else if is_valid_identifier_name(raw_name) {
             raw_name.clone()
         } else {
             sanitize_text_id_to_identifier_name(raw_name)
@@ -1024,7 +1047,8 @@ fn build_inner_with_union_user_slots(
         });
         // Synthesize a GetParam node for this param
         inner_nodes.push(Node {
-            text_id: next_text_id,
+            // For GetParam nodes, the text id must equal the declared Param id.
+            text_id: pid.get_wrapped_id(),
             name: Some(name.clone()),
             ty: ty.clone(),
             payload: NodePayload::GetParam(pid),
@@ -1034,7 +1058,7 @@ fn build_inner_with_union_user_slots(
             index: inner_nodes.len() - 1,
         };
         text_to_inner_param_ref.insert(raw_name.clone(), param_ref);
-        next_text_id += 1;
+        // Do not advance next_text_id here; params reserve their own ids.
     }
 
     // 2) Topologically clone region nodes mapping external operands to inner params
@@ -1309,7 +1333,8 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
     let lhs_outbound = summarize_region_outbound(lhs, &lhs_interior);
     let rhs_outbound = summarize_region_outbound(rhs, &rhs_interior);
 
-    // Build reverse-CSE (backward) hash based slot order and per-side consumer maps.
+    // Build reverse-CSE (backward) hash based slot order and per-side consumer
+    // maps.
     let (lhs_bwd_entries, _lhs_bwd_depths) = collect_backward_structural_entries(lhs);
     let (rhs_bwd_entries, _rhs_bwd_depths) = collect_backward_structural_entries(rhs);
     let mut lhs_bwd_hex_by_index: HashMap<usize, String> = HashMap::new();

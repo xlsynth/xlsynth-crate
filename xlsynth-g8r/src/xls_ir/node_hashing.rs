@@ -214,8 +214,8 @@ pub(crate) fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> b
     hasher.finalize()
 }
 
-/// Returns a short hexadecimal prefix of the local structural hash for `node_ref` in `f`.
-/// This avoids exposing the hash type to downstream crates.
+/// Returns a short hexadecimal prefix of the local structural hash for
+/// `node_ref` in `f`. This avoids exposing the hash type to downstream crates.
 pub fn local_structural_hash_hex_prefix(f: &Fn, node_ref: NodeRef, nbytes: usize) -> String {
     let h = compute_node_local_structural_hash(f, node_ref);
     let bytes = h.as_bytes();
