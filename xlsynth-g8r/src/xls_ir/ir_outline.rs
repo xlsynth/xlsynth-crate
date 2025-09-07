@@ -413,10 +413,22 @@ pub fn build_outer_with_existing_callee(
     // Start from a clone of the outer's nodes.
     let mut outer_nodes = outer.nodes.clone();
 
-    // Build invoke operands in the exact order of inner params. Some
-    // OutlineParamSpecs may have unresolved NodeRefs (index == usize::MAX); we
-    // synthesize zero-literals for them.
+    // Build invoke operands in the exact order of inner params.
+    // Fresh id allocator to avoid collisions with any existing text ids.
+    let mut used_ids: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for n in outer_nodes.iter() {
+        used_ids.insert(n.text_id);
+    }
     let mut next_outer_text_id: usize = next_text_id(&outer_nodes);
+    let mut fresh_id = |used: &mut std::collections::HashSet<usize>, next_id: &mut usize| -> usize {
+        while used.contains(next_id) {
+            *next_id = next_id.saturating_add(1);
+        }
+        let id = *next_id;
+        used.insert(id);
+        *next_id = next_id.saturating_add(1);
+        id
+    };
     let mut invoke_operands: Vec<NodeRef> = Vec::with_capacity(ordering.params.len());
     for (pidx, ps) in ordering.params.iter().enumerate() {
         assert!(
@@ -435,7 +447,7 @@ pub fn build_outer_with_existing_callee(
     let invoke_node_index = {
         let invoke_operands_for_node = invoke_operands.clone();
         let new_node = Node {
-            text_id: next_outer_text_id,
+            text_id: fresh_id(&mut used_ids, &mut next_outer_text_id),
             name: None,
             ty: ret_ty,
             payload: NodePayload::Invoke {
@@ -445,7 +457,6 @@ pub fn build_outer_with_existing_callee(
             pos: None,
         };
         outer_nodes.push(new_node);
-        next_outer_text_id += 1;
         outer_nodes.len() - 1
     };
     let invoke_ref = NodeRef {
@@ -478,7 +489,7 @@ pub fn build_outer_with_existing_callee(
             let ty = outer.nodes[r.node.index].ty.clone();
             let name = r.rename.clone();
             let tidx = Node {
-                text_id: next_outer_text_id,
+                text_id: fresh_id(&mut used_ids, &mut next_outer_text_id),
                 name,
                 ty,
                 payload: NodePayload::TupleIndex {
@@ -492,7 +503,6 @@ pub fn build_outer_with_existing_callee(
                 index: outer_nodes.len() - 1,
             };
             return_value_refs.push(new_ref);
-            next_outer_text_id += 1;
         }
     }
 

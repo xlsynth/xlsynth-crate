@@ -1616,7 +1616,13 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         if let Some(nr) = lhs_text_index.get(cons_text) {
             if nr.index == cons.index {
                 if let Some(hex) = lhs_bwd_hex_by_index.get(&nr.index) {
-                    slot_keys_bwd.insert((hex.clone(), *op_index));
+                    let key = (hex.clone(), *op_index);
+                    assert!(
+                        !slot_keys_bwd.contains(&key),
+                        "duplicate backward-hash slot on LHS: {:?}",
+                        key
+                    );
+                    slot_keys_bwd.insert(key);
                     lhs_consumer_bwd_map.entry(hex.clone()).or_insert(*nr);
                 }
             }
@@ -1626,7 +1632,13 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         if let Some(nr) = rhs_text_index.get(cons_text) {
             if nr.index == cons.index {
                 if let Some(hex) = rhs_bwd_hex_by_index.get(&nr.index) {
-                    slot_keys_bwd.insert((hex.clone(), *op_index));
+                    let key = (hex.clone(), *op_index);
+                    assert!(
+                        !slot_keys_bwd.contains(&key),
+                        "duplicate backward-hash slot on RHS: {:?}",
+                        key
+                    );
+                    slot_keys_bwd.insert(key);
                     rhs_consumer_bwd_map.entry(hex.clone()).or_insert(*nr);
                 }
             }
