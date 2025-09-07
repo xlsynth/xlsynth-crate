@@ -966,6 +966,9 @@ fn build_inner_with_union_user_slots(
     slot_order: &[(String, usize)],
     // For this side only, outbound mapping from slot key -> boundary producer NodeRef.
     side_edges: &BTreeMap<(String, usize), (NodeRef, NodeRef)>,
+    // Mapping from unified slot -> forward-hash param name, for cases where this
+    // side needs a passthrough.
+    slot_key_to_param_name: &BTreeMap<(String, usize), String>,
 ) -> Fn {
     // 1) Create inner params: union of union_params + extra_passthrough_params,
     //    dedup’d by name, in deterministic order.
@@ -1056,7 +1059,25 @@ fn build_inner_with_union_user_slots(
         let param_ref = NodeRef {
             index: inner_nodes.len() - 1,
         };
-        text_to_inner_param_ref.insert(raw_name.clone(), param_ref);
+        // Provide lookup aliases by textual id for all external operands that
+        // should route to this param. If the param name encodes a forward-hash
+        // ("__fwd__<hex>"), map all nodes in this function whose forward-hash
+        // matches <hex> to this param. This ensures
+        // `node_textual_id(f, dep)` lookups resolve.
+        // Always map the chosen param name itself to this param.
+        text_to_inner_param_ref.insert(name.clone(), param_ref);
+        if let Some(hex) = name.strip_prefix("__fwd__") {
+            assert!(
+                !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()),
+                "forward-hash param name malformed: {}",
+                name
+            );
+            for (text, h) in text_to_fwd_hex.iter() {
+                if h == hex {
+                    text_to_inner_param_ref.insert(text.clone(), param_ref);
+                }
+            }
+        }
         // Do not advance next_text_id here; params reserve their own ids.
     }
 
@@ -1135,11 +1156,13 @@ fn build_inner_with_union_user_slots(
                     ret_elems.push(param_ref);
                 }
             } else {
-                // Consumer absent; use synthetic param
-                let synth = make_slot_param_name(consumer_text, *op_index);
+                // Consumer absent on this side; use the unified forward-hash param name.
+                let pname = slot_key_to_param_name
+                    .get(&(consumer_text.clone(), *op_index))
+                    .expect("missing slot->param mapping for passthrough");
                 let param_ref = *text_to_inner_param_ref
-                    .get(&synth)
-                    .expect("synthetic passthrough param must be present");
+                    .get(pname)
+                    .expect("forward-hash passthrough param must be present");
                 ret_tys.push(inner_nodes[param_ref.index].ty.clone());
                 ret_elems.push(param_ref);
             }
@@ -1226,8 +1249,69 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         a.1.cmp(&b.1)
     });
 
-    // Build extra passthrough param union across sides for missing slots.
+    // Build forward structural hash maps (textual id -> forward hex) for both sides.
+    let (lhs_fwd_entries, _lhs_fwd_depths) = collect_structural_entries(lhs);
+    let mut lhs_text_to_fwd_hex: BTreeMap<String, String> = BTreeMap::new();
+    for (i, _n) in lhs.nodes.iter().enumerate() {
+        let t = node_textual_id(lhs, NodeRef { index: i });
+        let bytes = lhs_fwd_entries[i].hash.as_bytes();
+        let mut s = String::with_capacity(16);
+        for b in bytes.iter().take(8) {
+            s.push_str(&format!("{:02x}", b));
+        }
+        lhs_text_to_fwd_hex.insert(t, s);
+    }
+    let (rhs_fwd_entries, _rhs_fwd_depths) = collect_structural_entries(rhs);
+    let mut rhs_text_to_fwd_hex: BTreeMap<String, String> = BTreeMap::new();
+    for (i, _n) in rhs.nodes.iter().enumerate() {
+        let t = node_textual_id(rhs, NodeRef { index: i });
+        let bytes = rhs_fwd_entries[i].hash.as_bytes();
+        let mut s = String::with_capacity(16);
+        for b in bytes.iter().take(8) {
+            s.push_str(&format!("{:02x}", b));
+        }
+        rhs_text_to_fwd_hex.insert(t, s);
+    }
+    let to_fwd_name = |text: &str| -> String {
+        if let Some(hex) = lhs_text_to_fwd_hex.get(text) {
+            return format!("__fwd__{}", hex);
+        }
+        if let Some(hex) = rhs_text_to_fwd_hex.get(text) {
+            return format!("__fwd__{}", hex);
+        }
+        panic!("forward-hex not found for textual id '{}' on either side", text);
+    };
+
+    // Helper: find nearest external producer for a given operand (walk towards inbound/common).
+    let nearest_external = |f: &Fn, region: &HashSet<NodeRef>, inbound: &BTreeMap<String, Type>, mut nr: NodeRef| -> NodeRef {
+        loop {
+            if !region.contains(&nr) {
+                return nr;
+            }
+            let node = f.get_node(nr);
+            let deps = operands(&node.payload);
+            assert!(!deps.is_empty(), "internal node with no operands in differing region: {}", node_textual_id(f, nr));
+            // Prefer an operand that is already inbound (textual id present) or external.
+            let mut chosen: Option<NodeRef> = None;
+            for d in deps.iter() {
+                if !region.contains(d) {
+                    chosen = Some(*d);
+                    break;
+                }
+                let t = node_textual_id(f, *d);
+                if inbound.contains_key(&t) {
+                    chosen = Some(*d);
+                    break;
+                }
+            }
+            nr = chosen.unwrap_or(deps[0]);
+        }
+    };
+
+    // Build extra passthrough param union across sides for missing slots using forward-hash names.
+    // Also record a deterministic mapping from unified slot -> chosen forward param name.
     let mut extra_passthrough: BTreeMap<String, Type> = BTreeMap::new();
+    let mut slot_key_to_param_name: BTreeMap<(String, usize), String> = BTreeMap::new();
     // For each slot, determine if each side needs a passthrough, and if so, add the
     // appropriate param.
     for (consumer_text, op_index) in slot_order.iter() {
@@ -1236,13 +1320,25 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
             if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
                 let deps = operands(&lhs.get_node(*lhs_cons).payload);
                 if *op_index < deps.len() {
-                    let dep = deps[*op_index];
+                    let dep0 = deps[*op_index];
+                    let dep = nearest_external(lhs, &lhs_interior, &lhs_inbound_map, dep0);
                     let dep_text = node_textual_id(lhs, dep);
                     if !lhs_inbound_map.contains_key(&dep_text)
                         && !rhs_inbound_map.contains_key(&dep_text)
                     {
+                        let fwd_name = to_fwd_name(&dep_text);
+                        slot_key_to_param_name
+                            .entry((consumer_text.clone(), *op_index))
+                            .or_insert(fwd_name.clone());
+                        log::info!(
+                            "passthrough slot {}[{}] uses external '{}' -> {}",
+                            consumer_text,
+                            op_index,
+                            dep_text,
+                            fwd_name
+                        );
                         extra_passthrough
-                            .entry(dep_text)
+                            .entry(fwd_name)
                             .or_insert(lhs.get_node(dep).ty.clone());
                     }
                 } else {
@@ -1251,9 +1347,22 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
                     if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
                         let rhs_deps = operands(&rhs.get_node(*rhs_cons).payload);
                         if *op_index < rhs_deps.len() {
-                            let rhs_ty = rhs.get_node(rhs_deps[*op_index]).ty.clone();
-                            let synth = make_slot_param_name(consumer_text, *op_index);
-                            extra_passthrough.entry(synth).or_insert(rhs_ty);
+                            let rhs_dep0 = rhs_deps[*op_index];
+                            let rhs_dep = nearest_external(rhs, &rhs_interior, &rhs_inbound_map, rhs_dep0);
+                            let rhs_dep_text = node_textual_id(rhs, rhs_dep);
+                            let rhs_ty = rhs.get_node(rhs_dep).ty.clone();
+                            let fwd_name = to_fwd_name(&rhs_dep_text);
+                            slot_key_to_param_name
+                                .entry((consumer_text.clone(), *op_index))
+                                .or_insert(fwd_name.clone());
+                            log::info!(
+                                "passthrough slot {}[{}] (LHS oob) uses RHS external '{}' -> {}",
+                                consumer_text,
+                                op_index,
+                                rhs_dep_text,
+                                fwd_name
+                            );
+                            extra_passthrough.entry(fwd_name).or_insert(rhs_ty);
                         }
                     }
                 }
@@ -1263,9 +1372,22 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
                 if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
                     let rhs_deps = operands(&rhs.get_node(*rhs_cons).payload);
                     if *op_index < rhs_deps.len() {
-                        let rhs_ty = rhs.get_node(rhs_deps[*op_index]).ty.clone();
-                        let synth = make_slot_param_name(consumer_text, *op_index);
-                        extra_passthrough.entry(synth).or_insert(rhs_ty);
+                        let rhs_dep0 = rhs_deps[*op_index];
+                        let rhs_dep = nearest_external(rhs, &rhs_interior, &rhs_inbound_map, rhs_dep0);
+                        let rhs_dep_text = node_textual_id(rhs, rhs_dep);
+                        let rhs_ty = rhs.get_node(rhs_dep).ty.clone();
+                        let fwd_name = to_fwd_name(&rhs_dep_text);
+                        slot_key_to_param_name
+                            .entry((consumer_text.clone(), *op_index))
+                            .or_insert(fwd_name.clone());
+                        log::info!(
+                            "passthrough slot {}[{}] (LHS missing consumer) uses RHS external '{}' -> {}",
+                            consumer_text,
+                            op_index,
+                            rhs_dep_text,
+                            fwd_name
+                        );
+                        extra_passthrough.entry(fwd_name).or_insert(rhs_ty);
                     }
                 }
             }
@@ -1275,22 +1397,47 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
             if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
                 let deps = operands(&rhs.get_node(*rhs_cons).payload);
                 if *op_index < deps.len() {
-                    let dep = deps[*op_index];
+                    let dep0 = deps[*op_index];
+                    let dep = nearest_external(rhs, &rhs_interior, &rhs_inbound_map, dep0);
                     let dep_text = node_textual_id(rhs, dep);
                     if !lhs_inbound_map.contains_key(&dep_text)
                         && !rhs_inbound_map.contains_key(&dep_text)
                     {
+                        let fwd_name = to_fwd_name(&dep_text);
+                        slot_key_to_param_name
+                            .entry((consumer_text.clone(), *op_index))
+                            .or_insert(fwd_name.clone());
+                        log::info!(
+                            "passthrough slot {}[{}] uses external '{}' -> {}",
+                            consumer_text,
+                            op_index,
+                            dep_text,
+                            fwd_name
+                        );
                         extra_passthrough
-                            .entry(dep_text)
+                            .entry(fwd_name)
                             .or_insert(rhs.get_node(dep).ty.clone());
                     }
                 } else {
                     if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
                         let lhs_deps = operands(&lhs.get_node(*lhs_cons).payload);
                         if *op_index < lhs_deps.len() {
-                            let lhs_ty = lhs.get_node(lhs_deps[*op_index]).ty.clone();
-                            let synth = make_slot_param_name(consumer_text, *op_index);
-                            extra_passthrough.entry(synth).or_insert(lhs_ty);
+                            let lhs_dep0 = lhs_deps[*op_index];
+                            let lhs_dep = nearest_external(lhs, &lhs_interior, &lhs_inbound_map, lhs_dep0);
+                            let lhs_dep_text = node_textual_id(lhs, lhs_dep);
+                            let lhs_ty = lhs.get_node(lhs_dep).ty.clone();
+                            let fwd_name = to_fwd_name(&lhs_dep_text);
+                            slot_key_to_param_name
+                                .entry((consumer_text.clone(), *op_index))
+                                .or_insert(fwd_name.clone());
+                            log::info!(
+                                "passthrough slot {}[{}] (RHS oob) uses LHS external '{}' -> {}",
+                                consumer_text,
+                                op_index,
+                                lhs_dep_text,
+                                fwd_name
+                            );
+                            extra_passthrough.entry(fwd_name).or_insert(lhs_ty);
                         }
                     }
                 }
@@ -1298,9 +1445,22 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
                 if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
                     let lhs_deps = operands(&lhs.get_node(*lhs_cons).payload);
                     if *op_index < lhs_deps.len() {
-                        let lhs_ty = lhs.get_node(lhs_deps[*op_index]).ty.clone();
-                        let synth = make_slot_param_name(consumer_text, *op_index);
-                        extra_passthrough.entry(synth).or_insert(lhs_ty);
+                        let lhs_dep0 = lhs_deps[*op_index];
+                        let lhs_dep = nearest_external(lhs, &lhs_interior, &lhs_inbound_map, lhs_dep0);
+                        let lhs_dep_text = node_textual_id(lhs, lhs_dep);
+                        let lhs_ty = lhs.get_node(lhs_dep).ty.clone();
+                        let fwd_name = to_fwd_name(&lhs_dep_text);
+                        slot_key_to_param_name
+                            .entry((consumer_text.clone(), *op_index))
+                            .or_insert(fwd_name.clone());
+                        log::info!(
+                            "passthrough slot {}[{}] (RHS missing consumer) uses LHS external '{}' -> {}",
+                            consumer_text,
+                            op_index,
+                            lhs_dep_text,
+                            fwd_name
+                        );
+                        extra_passthrough.entry(fwd_name).or_insert(lhs_ty);
                     }
                 }
             }
@@ -1308,6 +1468,75 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
     }
 
     let extra_passthrough_params: Vec<(String, Type)> = extra_passthrough.into_iter().collect();
+
+    // Map union inbound textual ids to forward-hash-based names for robust resolution on both sides.
+    let mut union_params_fwd: Vec<(String, Type)> = Vec::with_capacity(union_params.len());
+    for (t, ty) in union_params.iter() {
+        let name = to_fwd_name(t);
+        union_params_fwd.push((name, ty.clone()));
+    }
+
+    // Ensure every slot-mapped forward-hash param will be present in the inner param list.
+    // If missing from both union and extra sets, derive its type from either side by hex.
+    let mut present_param_names: BTreeSet<String> = BTreeSet::new();
+    for (n, _ty) in union_params_fwd.iter() {
+        present_param_names.insert(n.clone());
+    }
+    for (n, _ty) in extra_passthrough_params.iter() {
+        present_param_names.insert(n.clone());
+    }
+    let mut ensured_extra: Vec<(String, Type)> = Vec::new();
+    for (_slot, pname) in slot_key_to_param_name.iter() {
+        if !present_param_names.contains(pname) {
+            // Derive type by resolving forward-hex on either side.
+            let hex = pname
+                .strip_prefix("__fwd__")
+                .expect("slot param must be forward-hash named");
+            let mut ty_opt: Option<Type> = None;
+            // Search LHS by forward hex
+            for (text, h) in lhs_text_to_fwd_hex.iter() {
+                if h == hex {
+                    // Find node by textual id on LHS
+                    let mut found: Option<Type> = None;
+                    for (i, _n) in lhs.nodes.iter().enumerate() {
+                        if node_textual_id(lhs, NodeRef { index: i }) == *text {
+                            found = Some(lhs.get_node(NodeRef { index: i }).ty.clone());
+                            break;
+                        }
+                    }
+                    if let Some(t) = found {
+                        ty_opt = Some(t);
+                        break;
+                    }
+                }
+            }
+            // Search RHS if needed
+            if ty_opt.is_none() {
+                for (text, h) in rhs_text_to_fwd_hex.iter() {
+                    if h == hex {
+                        let mut found: Option<Type> = None;
+                        for (i, _n) in rhs.nodes.iter().enumerate() {
+                            if node_textual_id(rhs, NodeRef { index: i }) == *text {
+                                found = Some(rhs.get_node(NodeRef { index: i }).ty.clone());
+                                break;
+                            }
+                        }
+                        if let Some(t) = found {
+                            ty_opt = Some(t);
+                            break;
+                        }
+                    }
+                }
+            }
+            let ty = ty_opt.expect("type must be derivable from either side for forward-hash param");
+            log::info!(
+                "ensuring forward-hash param '{}' with type '{}' is present",
+                pname,
+                ty
+            );
+            ensured_extra.push((pname.clone(), ty));
+        }
+    }
     // Order by name via BTreeMap; keep as-is.
 
     // Build each inner with fixed + passthrough params and the unified slot tuple.
@@ -1315,20 +1544,38 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         lhs,
         &lhs_interior,
         &format!("{}_inner", lhs.name),
-        &union_params,
-        &extra_passthrough_params,
+        &union_params_fwd,
+        &{
+            let mut v = extra_passthrough_params.clone();
+            v.extend(ensured_extra.clone());
+            v
+        },
         &slot_order,
         &lhs_edges,
+        &slot_key_to_param_name,
     );
     let rhs_inner = build_inner_with_union_user_slots(
         rhs,
         &rhs_interior,
         &format!("{}_inner", rhs.name),
-        &union_params,
-        &extra_passthrough_params,
+        &union_params_fwd,
+        &{
+            let mut v = extra_passthrough_params.clone();
+            v.extend(ensured_extra);
+            v
+        },
         &slot_order,
         &rhs_edges,
+        &slot_key_to_param_name,
     );
+
+    // Invariant: all param names should be forward-hash based (no '__slot__' names remain).
+    for p in lhs_inner.params.iter() {
+        assert!(p.name.starts_with("__fwd__"), "lhs param not fwd-hash named: {}", p.name);
+    }
+    for p in rhs_inner.params.iter() {
+        assert!(p.name.starts_with("__fwd__"), "rhs param not fwd-hash named: {}", p.name);
+    }
 
     let lhs_inbound_texts: Vec<String> = lhs_inbound_map.keys().cloned().collect();
     let rhs_inbound_texts: Vec<String> = rhs_inbound_map.keys().cloned().collect();

@@ -398,35 +398,13 @@ pub fn build_outer_with_existing_callee(
     let mut next_outer_text_id: usize = next_text_id(&outer_nodes);
     let mut invoke_operands: Vec<NodeRef> = Vec::with_capacity(ordering.params.len());
     for (pidx, ps) in ordering.params.iter().enumerate() {
-        if ps.node.index != usize::MAX {
-            invoke_operands.push(ps.node);
-        } else {
-            // Synthesize a zero literal for the expected type by looking at the inner param
-            // name and matching it to the ordering position.
-            // We cannot see types from `ordering` directly; infer from the referenced node
-            // name if present, otherwise conservatively use a 1-bit zero
-            // (asserts type later if used). Prefer robust approach: require the
-            // referenced base textual id to exist for non-synthetic names; only
-            // synthetic names may reach here.
-            let name = ps.rename.clone().unwrap_or_else(|| format!("arg_{}", pidx));
-            // Default to bits[1] zero; this value must be unused on this side by
-            // construction.
-            let lit_ty = crate::xls_ir::ir::Type::Bits(1);
-            let lit_val = xlsynth::IrValue::make_ubits(1, 0u64).unwrap();
-            let new_node = Node {
-                text_id: next_outer_text_id,
-                name: Some(name),
-                ty: lit_ty,
-                payload: NodePayload::Literal(lit_val),
-                pos: None,
-            };
-            outer_nodes.push(new_node);
-            let nr = NodeRef {
-                index: outer_nodes.len() - 1,
-            };
-            invoke_operands.push(nr);
-            next_outer_text_id += 1;
-        }
+        assert!(
+            ps.node.index != usize::MAX,
+            "Outer builder must not synthesize zero-literal param; unresolved param at index {} (rename={:?}). Ordering should provide concrete NodeRef or such a case should be handled upstream.",
+            pidx,
+            ps.rename
+        );
+        invoke_operands.push(ps.node);
     }
 
     // Determine the invoke return type from returns. Single return: pass-through
