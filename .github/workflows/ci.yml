@@ -169,8 +169,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
-            sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "/usr/lib/lib${lib}.so" "${BASE_URL}/${src}"
           done
           sudo ldconfig || true
           echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
@@ -370,8 +369,7 @@ jobs:
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
-            install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "/usr/lib/lib${lib}.so" "${BASE_URL}/${src}"
           done
           ldconfig || true
           echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
@@ -583,8 +581,8 @@ jobs:
           dnf install -y curl
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
-            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "/usr/lib/lib${lib}.so" "${BASE_URL}/lib${lib}-rocky8.so"
-            install -m 0644 "/usr/lib/lib${lib}.so" "/usr/lib/lib${lib}.so"
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "/usr/lib/lib${lib}.so" "${BASE_URL}/${src}"
           done
           ldconfig
 
@@ -820,6 +818,16 @@ jobs:
         run: |
           ls -l /usr/lib/libboolector.so
           ldconfig -p | grep boolector
+
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "/usr/lib/lib${lib}.so" "${BASE_URL}/${src}"
+          done
+          sudo ldconfig || true
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Install Z3 binary
         run: |
