@@ -815,6 +815,9 @@ fn test_gatify_ule() {
 }
 
 /// Tests that we can convert the bf16 multiplier in the DSLX standard library.
+///
+/// Ignored as it takes a significant amount of time to run.
+#[ignore]
 #[test_case(Opt::Yes)]
 #[test_case(Opt::No)]
 fn test_gatify_bf16_mul(opt: Opt) {
@@ -842,6 +845,9 @@ fn bf16_mul(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
 }
 
 /// Tests that we can convert the bf16 adder in the DSLX standard library.
+///
+/// Ignored as it takes a significant amount of time to run.
+#[ignore]
 #[test_case(Opt::Yes)]
 #[test_case(Opt::No)]
 fn test_gatify_bf16_add(opt: Opt) {

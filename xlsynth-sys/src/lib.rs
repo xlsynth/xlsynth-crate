@@ -194,6 +194,11 @@ pub struct CDslxInterpValue {
 }
 
 #[repr(C)]
+pub struct CDslxParametricEnv {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CDslxEnumMember {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -280,6 +285,9 @@ pub struct CIrFunctionBuilder {
 
 pub type XlsFormatPreference = i32;
 pub type XlsValueKind = i32;
+
+// Calling convention used for DSLX mangling APIs.
+pub type XlsCallingConvention = i32;
 
 pub type VastFileType = i32;
 
@@ -432,6 +440,15 @@ extern "C" {
     pub fn xls_bits_get_bit_count(bits: *const CIrBits) -> i64;
     pub fn xls_bits_get_bit(bits: *const CIrBits, index: i64) -> bool;
     pub fn xls_bits_eq(bits: *const CIrBits, other: *const CIrBits) -> bool;
+    pub fn xls_bits_ne(a: *const CIrBits, b: *const CIrBits) -> bool;
+    pub fn xls_bits_ult(a: *const CIrBits, b: *const CIrBits) -> bool;
+    pub fn xls_bits_ule(a: *const CIrBits, b: *const CIrBits) -> bool;
+    pub fn xls_bits_ugt(a: *const CIrBits, b: *const CIrBits) -> bool;
+    pub fn xls_bits_uge(a: *const CIrBits, b: *const CIrBits) -> bool;
+    pub fn xls_bits_slt(a: *const CIrBits, b: *const CIrBits) -> bool;
+    pub fn xls_bits_sle(a: *const CIrBits, b: *const CIrBits) -> bool;
+    pub fn xls_bits_sgt(a: *const CIrBits, b: *const CIrBits) -> bool;
+    pub fn xls_bits_sge(a: *const CIrBits, b: *const CIrBits) -> bool;
     pub fn xls_bits_to_debug_string(bits: *const CIrBits) -> *mut std::os::raw::c_char;
     pub fn xls_bits_make_bits_from_bytes(
         bit_count: libc::size_t,
@@ -439,6 +456,17 @@ extern "C" {
         byte_count: libc::size_t,
         error_out: *mut *mut std::os::raw::c_char,
         bits_out: *mut *mut CIrBits,
+    ) -> bool;
+    pub fn xls_mangle_dslx_name_full(
+        module_name: *const std::os::raw::c_char,
+        function_name: *const std::os::raw::c_char,
+        convention: XlsCallingConvention,
+        free_keys: *const *const std::os::raw::c_char,
+        free_keys_count: libc::size_t,
+        param_env: *const CDslxParametricEnv,
+        scope: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        mangled_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
     pub fn xls_bits_add(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_sub(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
@@ -611,6 +639,11 @@ extern "C" {
     pub fn xls_package_set_top_by_name(
         p: *mut CIrPackage,
         name: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    pub fn xls_verify_package(
+        p: *mut CIrPackage,
         error_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
 
@@ -821,6 +854,9 @@ extern "C" {
         additional_search_paths_count: libc::size_t,
     ) -> *mut CDslxImportData;
     pub fn xls_dslx_import_data_free(data: *mut CDslxImportData);
+
+    pub fn xls_dslx_parametric_env_create() -> *mut CDslxParametricEnv;
+    pub fn xls_dslx_parametric_env_free(env: *mut CDslxParametricEnv);
 
     pub fn xls_dslx_parse_and_typecheck(
         text: *const std::os::raw::c_char,
@@ -1056,6 +1092,12 @@ extern "C" {
         value: *mut CDslxInterpValue,
     ) -> *mut std::os::raw::c_char;
 
+    pub fn xls_dslx_interp_value_from_string(
+        text: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxInterpValue,
+    ) -> bool;
+
     pub fn xls_dslx_interp_value_convert_to_ir(
         value: *mut CDslxInterpValue,
         error_out: *mut *mut std::os::raw::c_char,
@@ -1067,6 +1109,21 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+
+    pub fn xls_dslx_interp_value_make_ubits(bit_count: i64, value: u64) -> *mut CDslxInterpValue;
+    pub fn xls_dslx_interp_value_make_sbits(bit_count: i64, value: i64) -> *mut CDslxInterpValue;
+    pub fn xls_dslx_interp_value_make_array(
+        elements: *const *const CDslxInterpValue,
+        element_count: libc::size_t,
+    ) -> *mut CDslxInterpValue;
+    pub fn xls_dslx_interp_value_make_tuple(
+        elements: *const *const CDslxInterpValue,
+        element_count: libc::size_t,
+    ) -> *mut CDslxInterpValue;
+    pub fn xls_dslx_interp_value_make_enum(
+        enum_name: *const std::os::raw::c_char,
+        member_name: *const std::os::raw::c_char,
+    ) -> *mut CDslxInterpValue;
 
     // Stringification for DSLX AST nodes
     pub fn xls_dslx_function_to_string(function: *const CDslxFunction)

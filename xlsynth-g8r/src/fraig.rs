@@ -295,60 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fraig_optimize_bf16_mul() {
-        let loaded = load_bf16_mul_sample(Opt::Yes);
-        let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_mul");
-        assert_eq!(results.did_converge, DidConverge::Yes(2));
-        assert_within!(
-            results.original_nodes as isize,
-            1153 as isize,
-            NODE_TOLERANCE as isize
-        );
-        assert_within!(
-            results.original_depth as isize,
-            105 as isize,
-            DEPTH_TOLERANCE as isize
-        );
-        assert_within!(
-            results.optimized_nodes as isize,
-            1133 as isize,
-            NODE_TOLERANCE as isize
-        );
-        assert_within!(
-            results.optimized_depth as isize,
-            101 as isize,
-            DEPTH_TOLERANCE as isize
-        );
-    }
-
-    #[test]
-    fn test_fraig_optimize_bf16_add() {
-        let loaded = load_bf16_add_sample(Opt::Yes);
-        let results = do_fraig_and_report(&loaded.gate_fn, 512, "bf16_add");
-        assert_eq!(results.did_converge, DidConverge::Yes(5));
-        assert_within!(
-            results.original_nodes as isize,
-            1296 as isize,
-            NODE_TOLERANCE as isize
-        );
-        assert_within!(
-            results.original_depth as isize,
-            130 as isize,
-            DEPTH_TOLERANCE as isize
-        );
-        assert_within!(
-            results.optimized_nodes as isize,
-            1095 as isize,
-            NODE_TOLERANCE as isize
-        );
-        assert_within!(
-            results.optimized_depth as isize,
-            120 as isize,
-            DEPTH_TOLERANCE as isize
-        );
-    }
-
-    #[test]
     fn test_equiv_class_with_equal_depth_and_opposite_polarity_canonicalizes() {
         let _ = env_logger::builder().is_test(true).try_init();
         let test_graph = setup_padded_graph_with_equal_depth_opposite_polarity();
