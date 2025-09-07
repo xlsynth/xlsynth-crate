@@ -26,6 +26,7 @@ pub struct OutlineResult {
 pub struct OutlineOrdering {
     pub params: Vec<OutlineParamSpec>,
     pub returns: Vec<OutlineReturnSpec>,
+    pub inner_ret_ty: Type,
 }
 
 #[derive(Debug, Clone)]
@@ -259,7 +260,17 @@ pub fn build_outline_ordering_from_unified_spec_for_side(
         });
     }
 
-    OutlineOrdering { params, returns }
+    // Compute inner return type based on returns (order matters)
+    let inner_ret_ty = if returns.len() == 1 {
+        base.nodes[returns[0].node.index].ty.clone()
+    } else {
+        let mut elem_tys: Vec<Type> = Vec::with_capacity(returns.len());
+        for r in returns.iter() {
+            elem_tys.push(base.nodes[r.node.index].ty.clone());
+        }
+        Type::Tuple(elem_tys.into_iter().map(|t| Box::new(t)).collect())
+    };
+    OutlineOrdering { params, returns, inner_ret_ty }
 }
 
 /// Hash-based variant: builds an OutlineOrdering from a unified inner callee
@@ -365,7 +376,17 @@ pub fn build_outline_ordering_from_unified_hash_spec_for_side(
         });
     }
 
-    OutlineOrdering { params, returns }
+    // Compute inner return type based on returns (order matters)
+    let inner_ret_ty = if returns.len() == 1 {
+        base.nodes[returns[0].node.index].ty.clone()
+    } else {
+        let mut elem_tys: Vec<Type> = Vec::with_capacity(returns.len());
+        for r in returns.iter() {
+            elem_tys.push(base.nodes[r.node.index].ty.clone());
+        }
+        Type::Tuple(elem_tys.into_iter().map(|t| Box::new(t)).collect())
+    };
+    OutlineOrdering { params, returns, inner_ret_ty }
 }
 
 /// Builds only the outer/common function that invokes an existing callee (with
@@ -407,17 +428,8 @@ pub fn build_outer_with_existing_callee(
         invoke_operands.push(ps.node);
     }
 
-    // Determine the invoke return type from returns. Single return: pass-through
-    // type; multiple: tuple of return element types in order.
-    let ret_ty = if ordering.returns.len() == 1 {
-        outer.nodes[ordering.returns[0].node.index].ty.clone()
-    } else {
-        let mut elem_tys: Vec<Type> = Vec::with_capacity(ordering.returns.len());
-        for r in ordering.returns.iter() {
-            elem_tys.push(outer.nodes[r.node.index].ty.clone());
-        }
-        Type::Tuple(elem_tys.into_iter().map(|t| Box::new(t)).collect())
-    };
+    // Use the inner callee's unified return type directly.
+    let ret_ty = ordering.inner_ret_ty.clone();
 
     // Create the invoke node in outer
     let invoke_node_index = {
@@ -441,7 +453,23 @@ pub fn build_outer_with_existing_callee(
     };
 
     // Materialize return projections in the specified order
-    let multi_return = ordering.returns.len() > 1;
+    // If the callee returns a tuple, materialize tuple_index projections for the
+    // requested returns; otherwise use the invoke directly.
+    let multi_return = true; // Always project via tuple_index to get per-slot values deterministically.
+    // If tuple, ensure the arity matches the number of requested returns; if not tuple, expect exactly one request.
+    if let Type::Tuple(ref elems) = ordering.inner_ret_ty {
+        debug_assert!(
+            elems.len() == ordering.returns.len(),
+            "tuple arity ({}) must equal number of requested returns ({})",
+            elems.len(),
+            ordering.returns.len()
+        );
+    } else {
+        debug_assert!(
+            ordering.returns.len() == 1,
+            "non-tuple inner return but multiple returns requested"
+        );
+    }
     let mut return_value_refs: Vec<NodeRef> = Vec::with_capacity(ordering.returns.len());
     if !multi_return {
         return_value_refs.push(invoke_ref);
@@ -708,7 +736,16 @@ pub fn compute_default_ordering(outer: &IrFn, to_outline: &HashSet<NodeRef>) -> 
         .collect();
     returns.sort_by_key(|r| r.node.index);
 
-    OutlineOrdering { params, returns }
+    let inner_ret_ty = if returns.len() == 1 {
+        outer.nodes[returns[0].node.index].ty.clone()
+    } else {
+        let mut elem_tys: Vec<Type> = Vec::with_capacity(returns.len());
+        for r in returns.iter() {
+            elem_tys.push(outer.nodes[r.node.index].ty.clone());
+        }
+        Type::Tuple(elem_tys.into_iter().map(|t| Box::new(t)).collect())
+    };
+    OutlineOrdering { params, returns, inner_ret_ty }
 }
 
 pub fn outline_with_ordering(
