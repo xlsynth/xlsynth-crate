@@ -444,11 +444,16 @@ jobs:
       - name: Download Bitwuzla shared library (macOS arm64)
         run: |
           sudo mkdir -p /usr/local/lib
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused \
-            -o libbitwuzla-osx-arm64.dylib \
-            https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32/libbitwuzla-osx-arm64.dylib
-          sudo install -m 0644 libbitwuzla-osx-arm64.dylib /usr/local/lib/libbitwuzla.dylib
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-osx-arm64.dylib"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            sudo install -m 0644 "${src}" "/usr/local/lib/lib${lib}.dylib"
+            sudo install_name_tool -id "@rpath/lib${lib}.dylib" "/usr/local/lib/lib${lib}.dylib"
+          done
           echo "DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib:$DYLD_FALLBACK_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/local/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LDFLAGS=-L/usr/local/lib $LDFLAGS" >> $GITHUB_ENV
 
       - name: Install protobuf compiler
         run: |
@@ -515,6 +520,8 @@ jobs:
           pre-commit run --all-files
 
       - name: Test crate
+        env:
+          DYLD_LIBRARY_PATH: /usr/local/lib
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --features with-boolector-built,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
