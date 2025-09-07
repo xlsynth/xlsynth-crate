@@ -213,3 +213,16 @@ pub(crate) fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> b
     hash_payload_attributes(f, &node.payload, &mut hasher);
     hasher.finalize()
 }
+
+/// Returns a short hexadecimal prefix of the local structural hash for `node_ref` in `f`.
+/// This avoids exposing the hash type to downstream crates.
+pub fn local_structural_hash_hex_prefix(f: &Fn, node_ref: NodeRef, nbytes: usize) -> String {
+    let h = compute_node_local_structural_hash(f, node_ref);
+    let bytes = h.as_bytes();
+    let take = core::cmp::min(nbytes, bytes.len());
+    let mut s = String::with_capacity(take * 2);
+    for b in bytes.iter().take(take) {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}

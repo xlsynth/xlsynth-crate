@@ -143,4 +143,110 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     for (prod, users) in meta.rhs_outbound.iter() {
         println!("  {} -> [{}]", prod, users.join(", "));
     }
+
+    // Print a cross-side alignment for each unified return slot, grouped by consumer reverse-CSE (backward)
+    // structural hash and operand index. This is cut-invariant and deduplicates textual-id differences.
+    println!("\nUnified return slots (grouped by consumer backward structural hash):");
+    use std::collections::{BTreeMap, HashMap};
+    // Build quick textual-id -> NodeRef lookup for each side.
+    let mut lhs_text_to_ref: HashMap<String, xlsynth_g8r::xls_ir::ir::NodeRef> = HashMap::new();
+    for (i, _n) in lhs_fn.nodes.iter().enumerate() {
+        let nr = xlsynth_g8r::xls_ir::ir::NodeRef { index: i };
+        let t = xlsynth_g8r::xls_ir::ir::node_textual_id(lhs_fn, nr);
+        lhs_text_to_ref.insert(t, nr);
+    }
+    let mut rhs_text_to_ref: HashMap<String, xlsynth_g8r::xls_ir::ir::NodeRef> = HashMap::new();
+    for (i, _n) in rhs_fn.nodes.iter().enumerate() {
+        let nr = xlsynth_g8r::xls_ir::ir::NodeRef { index: i };
+        let t = xlsynth_g8r::xls_ir::ir::node_textual_id(rhs_fn, nr);
+        rhs_text_to_ref.insert(t, nr);
+    }
+    // Build backward-hash arrays per side (index-aligned with nodes)
+    let (lhs_bwd_entries, _lhs_bwd_depths) = xlsynth_g8r::xls_ir::structural_similarity::collect_backward_structural_entries(lhs_fn);
+    let (rhs_bwd_entries, _rhs_bwd_depths) = xlsynth_g8r::xls_ir::structural_similarity::collect_backward_structural_entries(rhs_fn);
+    let lhs_bwd_hex_by_index: std::collections::HashMap<usize, String> = lhs_bwd_entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let bytes = e.hash.as_bytes();
+            let mut s = String::with_capacity(16);
+            for b in bytes.iter().take(8) { s.push_str(&format!("{:02x}", b)); }
+            (i, s)
+        })
+        .collect();
+    let rhs_bwd_hex_by_index: std::collections::HashMap<usize, String> = rhs_bwd_entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let bytes = e.hash.as_bytes();
+            let mut s = String::with_capacity(16);
+            for b in bytes.iter().take(8) { s.push_str(&format!("{:02x}", b)); }
+            (i, s)
+        })
+        .collect();
+
+    #[derive(Default)]
+    struct Row {
+        lhs_text: Option<String>,
+        rhs_text: Option<String>,
+        sig: Option<String>,
+    }
+    let mut rows: BTreeMap<(String, usize), Row> = BTreeMap::new();
+    for (cons_text, op) in meta.slot_order.iter() {
+        if let Some(&nr) = lhs_text_to_ref.get(cons_text) {
+            let hh = lhs_bwd_hex_by_index.get(&nr.index).cloned().unwrap_or_else(|| "-".to_string());
+            let key = (hh, *op);
+            let e = rows.entry(key).or_default();
+            e.lhs_text = Some(cons_text.clone());
+            if e.sig.is_none() {
+                e.sig = find_node_signature_by_textual_id(lhs_fn, cons_text);
+            }
+        }
+        if let Some(&nr) = rhs_text_to_ref.get(cons_text) {
+            let hh = rhs_bwd_hex_by_index.get(&nr.index).cloned().unwrap_or_else(|| "-".to_string());
+            let key = (hh, *op);
+            let e = rows.entry(key).or_default();
+            e.rhs_text = Some(cons_text.clone());
+            if e.sig.is_none() {
+                e.sig = find_node_signature_by_textual_id(rhs_fn, cons_text);
+            }
+        }
+    }
+    for (i, ((hash_hex, op), row)) in rows.into_iter().enumerate() {
+        let lhs = row
+            .lhs_text
+            .map(|t| t)
+            .unwrap_or_else(|| "-".to_string());
+        let rhs = row
+            .rhs_text
+            .map(|t| t)
+            .unwrap_or_else(|| "-".to_string());
+        let sig = row.sig.unwrap_or_else(|| "<unknown signature>".to_string());
+        println!(
+            "  {} -> op={} hash={} lhs_cons={} rhs_cons={}  {}",
+            i, op, hash_hex, lhs, rhs, sig
+        );
+    }
+
+    // Build a common outer graph for LHS that invokes the unified-signature LHS callee.
+    {
+        let ordering = xlsynth_g8r::xls_ir::ir_outline::build_outline_ordering_from_unified_hash_spec_for_side(
+            lhs_fn,
+            &meta.lhs_region,
+            &lhs_sub,
+            &meta.slot_order_bwd,
+            &meta.lhs_consumer_bwd_map,
+        );
+        let lhs_commoned = xlsynth_g8r::xls_ir::ir_outline::build_outer_with_existing_callee(
+            lhs_fn,
+            &meta.lhs_region,
+            &format!("{}_common", lhs_fn.name),
+            &lhs_sub.name,
+            &ordering,
+        );
+        println!(
+            "\nLHS commoned outer:\n{}",
+            xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&lhs_commoned, &lhs_pkg.file_table)
+        );
+    }
 }

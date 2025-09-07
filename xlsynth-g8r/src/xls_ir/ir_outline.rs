@@ -80,6 +80,365 @@ fn is_used_by_any(users: &[Node], target: NodeRef) -> bool {
     false
 }
 
+/// Helper: build textual-id -> NodeRef index for a function.
+fn build_textual_id_index(f: &IrFn) -> HashMap<String, NodeRef> {
+    let mut m: HashMap<String, NodeRef> = HashMap::new();
+    for (i, _n) in f.nodes.iter().enumerate() {
+        let nr = NodeRef { index: i };
+        let t = crate::xls_ir::ir::node_textual_id(f, nr);
+        m.insert(t, nr);
+    }
+    m
+}
+
+/// Parses a synthetic slot param name produced by structural unification.
+/// Format: "__slot__<consumer_text>__op<operand_index>"
+fn parse_slot_param_name(name: &str) -> Option<(String, usize)> {
+    if !name.starts_with("__slot__") {
+        return None;
+    }
+    // Find the last occurrence of "__op" and parse the operand index.
+    if let Some(pos) = name.rfind("__op") {
+        let (cons_part, op_part) = name.split_at(pos);
+        // op_part starts with "__op"
+        let idx_str = &op_part[4..];
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            // consumer_text is the part after the "__slot__" prefix up to "__opN"
+            let consumer_text = cons_part["__slot__".len()..].to_string();
+            return Some((consumer_text, idx));
+        }
+    }
+    None
+}
+
+/// Builds an OutlineOrdering from a unified inner callee and unified slot order, for one side.
+///
+/// - Params are taken directly from `inner.params` order. Each param name is resolved to a
+///   NodeRef in `base` either by textual-id match, or by interpreting a synthetic slot name
+///   to find the corresponding consumer operand on this side. If a param cannot be resolved
+///   (e.g. synthetic for a consumer absent on this side), a zero literal of the appropriate
+///   type will be synthesized during outer construction.
+/// - Returns are ordered by `slot_order` and map to the producer at the specified consumer
+///   operand position in `base`. Producers may be inside or outside `region`.
+pub fn build_outline_ordering_from_unified_spec_for_side(
+    base: &IrFn,
+    _region: &HashSet<NodeRef>,
+    inner: &IrFn,
+    slot_order: &[(String, usize)],
+) -> OutlineOrdering {
+    let text_index = build_textual_id_index(base);
+
+    // Build params: resolve each inner param name to a NodeRef in base when possible.
+    let mut params: Vec<OutlineParamSpec> = Vec::with_capacity(inner.params.len());
+    for p in inner.params.iter() {
+        // Try direct textual id match first.
+        if let Some(nr) = text_index.get(&p.name) {
+            params.push(OutlineParamSpec {
+                node: *nr,
+                rename: Some(p.name.clone()),
+            });
+            continue;
+        }
+        // Try synthetic slot mapping.
+        if let Some((consumer_text, op_index)) = parse_slot_param_name(&p.name) {
+            if let Some(cons_nr) = text_index.get(&consumer_text) {
+                let deps = operands(&base.get_node(*cons_nr).payload);
+                if op_index < deps.len() {
+                    params.push(OutlineParamSpec {
+                        node: deps[op_index],
+                        rename: Some(p.name.clone()),
+                    });
+                    continue;
+                }
+            }
+        }
+        // Could not resolve; insert a placeholder that will be synthesized during invoke build.
+        // Use a Nil target here; it will be patched when constructing the outer invoke.
+        // We carry the intent via `rename` and index position.
+        params.push(OutlineParamSpec {
+            node: NodeRef { index: usize::MAX },
+            rename: Some(p.name.clone()),
+        });
+    }
+
+    // Build returns: for each (consumer_text, op_index), find the producer that feeds that
+    // operand position in `base`.
+    let mut returns: Vec<OutlineReturnSpec> = Vec::with_capacity(slot_order.len());
+    for (consumer_text, op_index) in slot_order.iter() {
+        let cons_nr = text_index
+            .get(consumer_text)
+            .unwrap_or_else(|| panic!("consumer '{}' not found in base function", consumer_text));
+        let deps = operands(&base.get_node(*cons_nr).payload);
+        assert!(
+            *op_index < deps.len(),
+            "operand index {} out of range for consumer '{}'",
+            op_index,
+            consumer_text
+        );
+        let prod = deps[*op_index];
+        returns.push(OutlineReturnSpec {
+            node: prod,
+            rename: None,
+        });
+    }
+
+    OutlineOrdering { params, returns }
+}
+
+/// Hash-based variant: builds an OutlineOrdering from a unified inner callee and a slot order
+/// keyed by reverse-CSE (backward) consumer hash hex prefix with operand indices. Consumers are
+/// resolved via `consumer_hash_to_node` on this side, and producers are taken from the corresponding
+/// operand position in the base function.
+pub fn build_outline_ordering_from_unified_hash_spec_for_side(
+    base: &IrFn,
+    _region: &HashSet<NodeRef>,
+    inner: &IrFn,
+    slot_order_bwd: &[(String, usize)],
+    consumer_hash_to_node: &std::collections::BTreeMap<String, NodeRef>,
+) -> OutlineOrdering {
+    // Params: reuse the same logic as the textual-id path (names are from inner).
+    let text_index = build_textual_id_index(base);
+
+    let mut params: Vec<OutlineParamSpec> = Vec::with_capacity(inner.params.len());
+    for p in inner.params.iter() {
+        if let Some(nr) = text_index.get(&p.name) {
+            params.push(OutlineParamSpec { node: *nr, rename: Some(p.name.clone()) });
+            continue;
+        }
+        if let Some((consumer_text, op_index)) = parse_slot_param_name(&p.name) {
+            if let Some(nr) = text_index.get(&consumer_text) {
+                let deps = operands(&base.get_node(*nr).payload);
+                if op_index < deps.len() {
+                    params.push(OutlineParamSpec { node: deps[op_index], rename: Some(p.name.clone()) });
+                    continue;
+                }
+            }
+        }
+        params.push(OutlineParamSpec { node: NodeRef { index: usize::MAX }, rename: Some(p.name.clone()) });
+    }
+
+    // Returns: resolve consumer by backward hash on this side, then take producer as deps[idx].
+    // Build a fallback map for this side from all nodes, in case the provided map is missing entries
+    // (e.g., due to asymmetric union construction).
+    let (entries_bwd, _depths) = crate::xls_ir::structural_similarity::collect_backward_structural_entries(base);
+    let mut fallback_consumer_map: std::collections::BTreeMap<String, NodeRef> = std::collections::BTreeMap::new();
+    for (i, e) in entries_bwd.iter().enumerate() {
+        let bytes = e.hash.as_bytes();
+        let mut s = String::with_capacity(16);
+        for b in bytes.iter().take(8) { s.push_str(&format!("{:02x}", b)); }
+        fallback_consumer_map.entry(s).or_insert(NodeRef { index: i });
+    }
+    let mut returns: Vec<OutlineReturnSpec> = Vec::with_capacity(slot_order_bwd.len());
+    for (hash_hex, op_index) in slot_order_bwd.iter() {
+        let cons_nr = consumer_hash_to_node
+            .get(hash_hex)
+            .copied()
+            .or_else(|| fallback_consumer_map.get(hash_hex).copied())
+            .unwrap_or_else(|| panic!("consumer hash '{}' not found on this side", hash_hex));
+        let deps = operands(&base.get_node(cons_nr).payload);
+        assert!(
+            *op_index < deps.len(),
+            "operand index {} out of range for consumer hash {}",
+            op_index,
+            hash_hex
+        );
+        returns.push(OutlineReturnSpec { node: deps[*op_index], rename: None });
+    }
+
+    OutlineOrdering { params, returns }
+}
+
+/// Builds only the outer/common function that invokes an existing callee (with unified signature)
+/// to replace `to_outline` in `outer`. Does not construct/insert the inner; `callee_name` must
+/// refer to an existing function. The new function is returned; it is not registered into a package.
+pub fn build_outer_with_existing_callee(
+    outer: &IrFn,
+    to_outline: &HashSet<NodeRef>,
+    new_outer_name: &str,
+    callee_name: &str,
+    ordering: &OutlineOrdering,
+) -> IrFn {
+    // Basic sanity on indices
+    for nr in to_outline.iter() {
+        assert!(nr.index < outer.nodes.len(), "NodeRef out of bounds: {:?}", nr);
+    }
+    let to_outline_set: HashSet<usize> = to_outline.iter().map(|r| r.index).collect();
+
+    // Start from a clone of the outer's nodes.
+    let mut outer_nodes = outer.nodes.clone();
+
+    // Build invoke operands in the exact order of inner params. Some OutlineParamSpecs may
+    // have unresolved NodeRefs (index == usize::MAX); we synthesize zero-literals for them.
+    let mut next_outer_text_id: usize = next_text_id(&outer_nodes);
+    let mut invoke_operands: Vec<NodeRef> = Vec::with_capacity(ordering.params.len());
+    for (pidx, ps) in ordering.params.iter().enumerate() {
+        if ps.node.index != usize::MAX {
+            invoke_operands.push(ps.node);
+        } else {
+            // Synthesize a zero literal for the expected type by looking at the inner param name
+            // and matching it to the ordering position.
+            // We cannot see types from `ordering` directly; infer from the referenced node name
+            // if present, otherwise conservatively use a 1-bit zero (asserts type later if used).
+            // Prefer robust approach: require the referenced base textual id to exist for non-synthetic
+            // names; only synthetic names may reach here.
+            let name = ps.rename.clone().unwrap_or_else(|| format!("arg_{}", pidx));
+            // Default to bits[1] zero; this value must be unused on this side by construction.
+            let lit_ty = crate::xls_ir::ir::Type::Bits(1);
+            let lit_val = xlsynth::IrValue::make_ubits(1, 0u64).unwrap();
+            let new_node = Node {
+                text_id: next_outer_text_id,
+                name: Some(name),
+                ty: lit_ty,
+                payload: NodePayload::Literal(lit_val),
+                pos: None,
+            };
+            outer_nodes.push(new_node);
+            let nr = NodeRef {
+                index: outer_nodes.len() - 1,
+            };
+            invoke_operands.push(nr);
+            next_outer_text_id += 1;
+        }
+    }
+
+    // Determine the invoke return type from returns. Single return: pass-through type; multiple:
+    // tuple of return element types in order.
+    let ret_ty = if ordering.returns.len() == 1 {
+        outer.nodes[ordering.returns[0].node.index].ty.clone()
+    } else {
+        let mut elem_tys: Vec<Type> = Vec::with_capacity(ordering.returns.len());
+        for r in ordering.returns.iter() {
+            elem_tys.push(outer.nodes[r.node.index].ty.clone());
+        }
+        Type::Tuple(elem_tys.into_iter().map(|t| Box::new(t)).collect())
+    };
+
+    // Create the invoke node in outer
+    let invoke_node_index = {
+        let invoke_operands_for_node = invoke_operands.clone();
+        let new_node = Node {
+            text_id: next_outer_text_id,
+            name: None,
+            ty: ret_ty,
+            payload: NodePayload::Invoke {
+                to_apply: callee_name.to_string(),
+                operands: invoke_operands_for_node,
+            },
+            pos: None,
+        };
+        outer_nodes.push(new_node);
+        next_outer_text_id += 1;
+        outer_nodes.len() - 1
+    };
+    let invoke_ref = NodeRef { index: invoke_node_index };
+
+    // Materialize return projections in the specified order
+    let multi_return = ordering.returns.len() > 1;
+    let mut return_value_refs: Vec<NodeRef> = Vec::with_capacity(ordering.returns.len());
+    if !multi_return {
+        return_value_refs.push(invoke_ref);
+    } else {
+        for (i, r) in ordering.returns.iter().enumerate() {
+            let ty = outer.nodes[r.node.index].ty.clone();
+            let name = r.rename.clone();
+            let tidx = Node {
+                text_id: next_outer_text_id,
+                name,
+                ty,
+                payload: NodePayload::TupleIndex {
+                    tuple: invoke_ref,
+                    index: i,
+                },
+                pos: None,
+            };
+            outer_nodes.push(tidx);
+            let new_ref = NodeRef {
+                index: outer_nodes.len() - 1,
+            };
+            return_value_refs.push(new_ref);
+            next_outer_text_id += 1;
+        }
+    }
+
+    // Build replacement map for outlined outputs and passthroughs
+    let mut replacement_map: HashMap<usize, NodeRef> = HashMap::new();
+    for (i, r) in ordering.returns.iter().enumerate() {
+        let rep = if multi_return { return_value_refs[i] } else { invoke_ref };
+        replacement_map.insert(r.node.index, rep);
+    }
+
+    // Compute a protected operand producer cone for the invoke's operands to avoid
+    // creating cycles: skip rewriting inside this cone.
+    let mut protected: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut stack: Vec<usize> = Vec::new();
+    for op in invoke_operands.iter() {
+        if protected.insert(op.index) {
+            stack.push(op.index);
+        }
+    }
+    while let Some(idx) = stack.pop() {
+        for d in operands(&outer_nodes[idx].payload).into_iter() {
+            if protected.insert(d.index) {
+                stack.push(d.index);
+            }
+        }
+    }
+
+    // Rewrite all nodes outside the outlined set to refer to replacements where needed,
+    // but do not rewrite inside the protected cone or the invoke node itself.
+    for (i, node) in outer_nodes.iter_mut().enumerate() {
+        if to_outline_set.contains(&i) || i == invoke_node_index || protected.contains(&i) {
+            continue;
+        }
+        let mapper = |r: NodeRef| -> NodeRef {
+            if let Some(&nr) = replacement_map.get(&r.index) { nr } else { r }
+        };
+        let new_payload = remap_payload_with(&node.payload, mapper);
+        node.payload = new_payload;
+    }
+
+    // Clobber outlined nodes' payloads with Nil (except GetParam nodes, which may be used)
+    for &idx in to_outline_set.iter() {
+        if !matches!(outer_nodes[idx].payload, NodePayload::GetParam(_)) {
+            outer_nodes[idx].payload = NodePayload::Nil;
+        }
+    }
+
+    // Update outer return if it pointed to an outlined node
+    let mut outer_ret_ref = outer.ret_node_ref.map(|nr| {
+        if let Some(&rep) = replacement_map.get(&nr.index) { rep } else { nr }
+    });
+
+    // Topologically reorder outer nodes and remap operands accordingly
+    let order_outer = get_topological_nodes(&outer_nodes);
+    let mut old_to_new_outer: Vec<usize> = vec![0; outer_nodes.len()];
+    for (new_idx, nr) in order_outer.iter().enumerate() {
+        old_to_new_outer[nr.index] = new_idx;
+    }
+    let mut remapped_outer_nodes: Vec<Node> = Vec::with_capacity(outer_nodes.len());
+    for nr in order_outer.iter() {
+        let old = &outer_nodes[nr.index];
+        let mapper = |r: NodeRef| -> NodeRef { NodeRef { index: old_to_new_outer[r.index] } };
+        let new_payload = remap_payload_with(&old.payload, mapper);
+        remapped_outer_nodes.push(Node {
+            text_id: old.text_id,
+            name: old.name.clone(),
+            ty: old.ty.clone(),
+            payload: new_payload,
+            pos: old.pos.clone(),
+        });
+    }
+    outer_ret_ref = outer_ret_ref.map(|nr| NodeRef { index: old_to_new_outer[nr.index] });
+
+    IrFn {
+        name: new_outer_name.to_string(),
+        params: outer.params.clone(),
+        ret_ty: outer.ret_ty.clone(),
+        nodes: remapped_outer_nodes,
+        ret_node_ref: outer_ret_ref,
+    }
+}
+
 /// Outline `to_outline` from `outer` into a new inner function. Returns the
 /// rewritten outer and the new inner; also registers both into `package`.
 ///

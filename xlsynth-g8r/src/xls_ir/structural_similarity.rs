@@ -1156,6 +1156,10 @@ pub struct DualDifferenceExtraction {
     pub lhs_outbound: Vec<(String, Vec<String>)>,
     pub rhs_outbound: Vec<(String, Vec<String>)>,
     pub slot_order: Vec<(String, usize)>,
+    // Cut-invariant consumer mapping by reverse-CSE (backward) hash hex prefix
+    pub slot_order_bwd: Vec<(String, usize)>,
+    pub lhs_consumer_bwd_map: BTreeMap<String, NodeRef>,
+    pub rhs_consumer_bwd_map: BTreeMap<String, NodeRef>,
 }
 
 pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
@@ -1305,6 +1309,56 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
     let lhs_outbound = summarize_region_outbound(lhs, &lhs_interior);
     let rhs_outbound = summarize_region_outbound(rhs, &rhs_interior);
 
+    // Build reverse-CSE (backward) hash based slot order and per-side consumer maps.
+    let (lhs_bwd_entries, _lhs_bwd_depths) = collect_backward_structural_entries(lhs);
+    let (rhs_bwd_entries, _rhs_bwd_depths) = collect_backward_structural_entries(rhs);
+    let mut lhs_bwd_hex_by_index: HashMap<usize, String> = HashMap::new();
+    for (i, e) in lhs_bwd_entries.iter().enumerate() {
+        let bytes = e.hash.as_bytes();
+        let mut s = String::with_capacity(16);
+        for b in bytes.iter().take(8) {
+            s.push_str(&format!("{:02x}", b));
+        }
+        lhs_bwd_hex_by_index.insert(i, s);
+    }
+    let mut rhs_bwd_hex_by_index: HashMap<usize, String> = HashMap::new();
+    for (i, e) in rhs_bwd_entries.iter().enumerate() {
+        let bytes = e.hash.as_bytes();
+        let mut s = String::with_capacity(16);
+        for b in bytes.iter().take(8) {
+            s.push_str(&format!("{:02x}", b));
+        }
+        rhs_bwd_hex_by_index.insert(i, s);
+    }
+
+    let mut lhs_consumer_bwd_map: BTreeMap<String, NodeRef> = BTreeMap::new();
+    let mut rhs_consumer_bwd_map: BTreeMap<String, NodeRef> = BTreeMap::new();
+    let mut slot_keys_bwd: BTreeSet<(String, usize)> = BTreeSet::new();
+    // Index textual id -> NodeRef to resolve consumer indices
+    let lhs_text_index = build_textual_id_index(lhs);
+    let rhs_text_index = build_textual_id_index(rhs);
+    for ((cons_text, op_index), (_prod, cons)) in lhs_edges.iter() {
+        if let Some(nr) = lhs_text_index.get(cons_text) {
+            if nr.index == cons.index {
+                if let Some(hex) = lhs_bwd_hex_by_index.get(&nr.index) {
+                    slot_keys_bwd.insert((hex.clone(), *op_index));
+                    lhs_consumer_bwd_map.entry(hex.clone()).or_insert(*nr);
+                }
+            }
+        }
+    }
+    for ((cons_text, op_index), (_prod, cons)) in rhs_edges.iter() {
+        if let Some(nr) = rhs_text_index.get(cons_text) {
+            if nr.index == cons.index {
+                if let Some(hex) = rhs_bwd_hex_by_index.get(&nr.index) {
+                    slot_keys_bwd.insert((hex.clone(), *op_index));
+                    rhs_consumer_bwd_map.entry(hex.clone()).or_insert(*nr);
+                }
+            }
+        }
+    }
+    let slot_order_bwd: Vec<(String, usize)> = slot_keys_bwd.into_iter().collect();
+
     DualDifferenceExtraction {
         lhs_inner,
         rhs_inner,
@@ -1316,6 +1370,9 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         lhs_outbound,
         rhs_outbound,
         slot_order,
+        slot_order_bwd,
+        lhs_consumer_bwd_map,
+        rhs_consumer_bwd_map,
     }
 }
 
