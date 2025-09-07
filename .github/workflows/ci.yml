@@ -606,7 +606,7 @@ jobs:
       - name: Build crate
         run: |
           source $HOME/.cargo/env
-          cargo build --features with-bitwuzla-system --workspace # -vv
+          cargo build --features with-bitwuzla-system --workspace -vv
 
       - name: Test crate
         run: |
