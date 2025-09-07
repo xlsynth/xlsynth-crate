@@ -15,9 +15,10 @@ use std::collections::HashMap;
 use xlsynth::IrValue;
 use xlsynth_g8r::equiv::prove_equiv::{
     prove_ir_fn_equiv_full, prove_ir_fn_equiv_output_bits_parallel,
-    prove_ir_fn_equiv_split_input_bit, AssertionSemantics, EquivResult, EquivSide, IrFn,
+    prove_ir_fn_equiv_split_input_bit,
 };
 use xlsynth_g8r::equiv::prover::{ExternalProver, Prover};
+use xlsynth_g8r::equiv::types::{AssertionSemantics, EquivResult, EquivSide, IrFn};
 use xlsynth_pir::ir_parser;
 
 use crate::parallelism::ParallelismStrategy;

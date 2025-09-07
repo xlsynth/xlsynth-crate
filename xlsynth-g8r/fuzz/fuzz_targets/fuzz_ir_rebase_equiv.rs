@@ -3,7 +3,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_g8r::equiv::prove_equiv::EquivResult;
+use xlsynth_g8r::equiv::types::EquivResult;
 use xlsynth_g8r::equiv::prove_equiv_via_toolchain::{self};
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_pir::ir_validate::validate_fn;

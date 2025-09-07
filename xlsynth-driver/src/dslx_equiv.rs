@@ -7,7 +7,7 @@ use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 use crate::tools::{run_ir_converter_main, run_opt_main};
 use xlsynth::{mangle_dslx_name, DslxConvertOptions, IrPackage};
-use xlsynth_g8r::equiv::prove_equiv::{AssertionSemantics, ParamDomains};
+use xlsynth_g8r::equiv::types::{AssertionSemantics, ParamDomains};
 
 const SUBCOMMAND: &str = "dslx-equiv";
 

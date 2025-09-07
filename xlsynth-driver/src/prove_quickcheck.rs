@@ -17,11 +17,11 @@ use serde::Serialize;
 use xlsynth::{
     mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
 };
-use xlsynth_g8r::equiv::prove_equiv::{IrFn, UfSignature};
-use xlsynth_g8r::equiv::prove_quickcheck::{
-    prove_ir_fn_always_true_with_ufs, BoolPropertyResult, QuickCheckAssertionSemantics,
-};
+use xlsynth_g8r::equiv::prove_quickcheck::prove_ir_fn_always_true_with_ufs;
 use xlsynth_g8r::equiv::solver_interface::Solver;
+use xlsynth_g8r::equiv::types::{
+    BoolPropertyResult, IrFn, QuickCheckAssertionSemantics, UfSignature,
+};
 use xlsynth_pir::{ir, ir_parser};
 
 #[derive(Debug, Clone, Serialize)]

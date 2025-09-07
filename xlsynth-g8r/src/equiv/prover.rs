@@ -3,8 +3,8 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::equiv::{
-    prove_equiv::{AssertionSemantics, EquivResult, EquivSide, IrFn, UfSignature},
     solver_interface::SolverConfig,
+    types::{AssertionSemantics, EquivResult, EquivSide, IrFn, UfSignature},
 };
 use xlsynth_pir::{ir, ir_parser};
 

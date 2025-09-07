@@ -13,7 +13,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
+use xlsynth_g8r::equiv::types::AssertionSemantics;
 use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, PackageMember};
 use xlsynth_pir::ir_parser::{self, emit_fn_as_block};

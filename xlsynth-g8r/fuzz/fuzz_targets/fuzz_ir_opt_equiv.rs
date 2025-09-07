@@ -9,8 +9,9 @@ use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
 use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
+use xlsynth_g8r::equiv::types::{AssertionSemantics, EquivResult, IrFn};
 use xlsynth_g8r::equiv::prove_equiv::{
-    AssertionSemantics, EquivResult, IrFn, prove_ir_fn_equiv,
+    prove_ir_fn_equiv,
     prove_ir_fn_equiv_output_bits_parallel,
 };
 use xlsynth_pir::ir_parser;

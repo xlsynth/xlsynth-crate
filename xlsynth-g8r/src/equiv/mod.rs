@@ -8,3 +8,5 @@ pub mod prove_equiv_via_toolchain;
 pub mod prove_quickcheck;
 pub mod prover;
 pub mod solver_interface;
+pub mod translate;
+pub mod types;

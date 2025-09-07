@@ -222,7 +222,7 @@ mod tests {
                 &result.to_string(),
             );
         assert!(
-            matches!(res, xlsynth_g8r::equiv::prove_equiv::EquivResult::Proved),
+            matches!(res, xlsynth_g8r::equiv::types::EquivResult::Proved),
             "Toolchain IR equivalence failed: {:?}",
             res
         );
