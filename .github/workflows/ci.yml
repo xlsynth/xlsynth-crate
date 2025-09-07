@@ -452,6 +452,7 @@ jobs:
             curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/local/lib/lib${lib}.dylib"
             sudo install_name_tool -id "@rpath/lib${lib}.dylib" "/usr/local/lib/lib${lib}.dylib"
+            sudo rm -f "${src}"
           done
           echo "DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib:$DYLD_FALLBACK_LIBRARY_PATH" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/usr/local/lib:$LIBRARY_PATH" >> $GITHUB_ENV
