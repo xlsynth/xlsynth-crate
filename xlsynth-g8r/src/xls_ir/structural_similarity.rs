@@ -971,17 +971,16 @@ fn build_inner_with_union_user_slots(
     //    dedup’d by name, in deterministic order.
     let mut inner_params: Vec<Param> = Vec::new();
     let mut text_to_inner_param_ref: HashMap<String, NodeRef> = HashMap::new();
-    let mut next_param_pos: usize = 1;
     let mut inner_nodes: Vec<Node> = Vec::new();
-    let mut next_text_id: usize = {
-        let mut max_id = 0usize;
-        for n in f.nodes.iter() {
-            if n.text_id > max_id {
-                max_id = n.text_id;
-            }
-        }
-        max_id.saturating_add(1)
-    };
+    // Choose parameter ids from a range strictly above any existing node text_id
+    // in the source function to avoid collisions after extraction/combination.
+    let max_existing_text_id: usize = f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0);
+    // Use a high base to avoid collisions with any ids that may be allocated in
+    // an enclosing/common function when these inners are packaged together.
+    let id_base: usize = max_existing_text_id.saturating_add(1_000_000);
+    let mut next_param_pos: usize = id_base;
+    // next_text_id will be defined after parameter emission to avoid collisions
+    // with parameter GetParam node ids.
 
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut merged_params: Vec<(String, Type)> = Vec::new();
@@ -1060,6 +1059,10 @@ fn build_inner_with_union_user_slots(
         text_to_inner_param_ref.insert(raw_name.clone(), param_ref);
         // Do not advance next_text_id here; params reserve their own ids.
     }
+
+    // After declaring all params, set the next node text id to the first id
+    // after the parameter id range to avoid collisions with GetParam nodes.
+    let next_text_id: usize = next_param_pos;
 
     // 2) Topologically clone region nodes mapping external operands to inner params
     let topo = get_topological(f);

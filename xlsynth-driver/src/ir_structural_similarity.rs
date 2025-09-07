@@ -386,5 +386,35 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, config: &Option<Too
                 eprintln!("LHS commoned outer equivalence: error: {}", msg);
             }
         }
+
+        // Prove: original RHS == commoned RHS outer. Include the inner callee in
+        // the LHS package in case the outer contains an invoke.
+        let rhs_orig_pkg_text = format!(
+            "package rhs\n\n{}\n",
+            format!("top {}\n", rhs_fn.to_string())
+        );
+        let rhs_common_pkg_text = format!(
+            "package rhs_common\n\n{}\n\n{}\n",
+            rhs_sub.to_string(),
+            format!("top {}\n", rhs_commoned.to_string())
+        );
+        let res_rhs =
+            xlsynth_g8r::equiv::prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
+                &rhs_orig_pkg_text,
+                &rhs_common_pkg_text,
+                None,
+                &tool_dir,
+            );
+        match res_rhs {
+            EquivResult::Proved => {
+                println!("RHS commoned outer equivalence: success (proof closed)");
+            }
+            EquivResult::Disproved { .. } => {
+                eprintln!("RHS commoned outer equivalence: FAILED");
+            }
+            EquivResult::Error(msg) => {
+                eprintln!("RHS commoned outer equivalence: error: {}", msg);
+            }
+        }
     }
 }
