@@ -509,6 +509,11 @@ pub(crate) fn xls_package_set_top_by_name(
     Ok(())
 }
 
+pub(crate) fn xls_verify_package(package: *mut CIrPackage) -> Result<(), XlsynthError> {
+    xls_ffi_call_noreturn!(xlsynth_sys::xls_verify_package, package)?;
+    Ok(())
+}
+
 pub(crate) fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: u64) -> IrType {
     let type_raw = unsafe { xlsynth_sys::xls_package_get_bits_type(package, bit_count as i64) };
     IrType { ptr: type_raw }
