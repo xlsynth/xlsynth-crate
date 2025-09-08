@@ -12,7 +12,9 @@ use crate::ir_utils::{
     compute_users, get_topological, is_valid_identifier_name, operands, remap_payload_with,
     sanitize_text_id_to_identifier_name,
 };
-use crate::node_hashing::{compute_node_local_structural_hash, compute_node_structural_hash};
+use crate::node_hashing::{
+    BwdHash, FwdHash, compute_node_backward_structural_hash, compute_node_structural_hash,
+};
 
 /// Returns true if two IR functions are structurally equivalent (forward and
 /// backward user-context) and have identical signatures.
@@ -34,24 +36,24 @@ fn compute_node_depth(f: &Fn, node_ref: NodeRef, child_depths: &[usize]) -> usiz
     }
 }
 
-pub struct StructuralEntry {
-    pub hash: blake3::Hash,
+pub struct StructuralEntry<H> {
+    pub hash: H,
     pub depth: usize,
     pub id: usize,
     pub signature: String,
 }
 
 /// Helper: walk a function and collect structural entries for each node.
-pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry>, Vec<usize>) {
+pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec<usize>) {
     let order = get_topological(f);
     let n = f.nodes.len();
-    let mut hashes: Vec<blake3::Hash> = vec![blake3::Hash::from([0u8; 32]); n];
+    let mut hashes: Vec<FwdHash> = vec![FwdHash(blake3::Hash::from([0u8; 32])); n];
     let mut depths: Vec<usize> = vec![0; n];
 
     for node_ref in order {
         // Gather child info in the same order as operands appear.
         let node = f.get_node(node_ref);
-        let mut child_hashes: Vec<blake3::Hash> = Vec::new();
+        let mut child_hashes: Vec<FwdHash> = Vec::new();
         let mut child_depths: Vec<usize> = Vec::new();
         match &node.payload {
             NodePayload::Nil => {}
@@ -214,7 +216,7 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry>, Vec<usize>) 
         depths[node_ref.index] = d;
     }
 
-    let mut entries: Vec<StructuralEntry> = Vec::with_capacity(n);
+    let mut entries: Vec<StructuralEntry<FwdHash>> = Vec::with_capacity(n);
     for (i, node) in f.nodes.iter().enumerate() {
         let h = hashes[i];
         let d = depths[i];
@@ -249,44 +251,27 @@ fn collect_users_with_operand_indices(f: &Fn) -> Vec<Vec<(NodeRef, usize)>> {
 ///
 /// A node's backward hash is computed from its local structural hash combined
 /// with a sorted vector of (user_backward_hash, user_operand_index) pairs.
-pub fn collect_backward_structural_entries(f: &Fn) -> (Vec<StructuralEntry>, Vec<usize>) {
+pub fn collect_backward_structural_entries(f: &Fn) -> (Vec<StructuralEntry<BwdHash>>, Vec<usize>) {
     let order = get_topological(f);
     let n = f.nodes.len();
     let users = collect_users_with_operand_indices(f);
 
-    let mut bwd_hashes: Vec<blake3::Hash> = vec![blake3::Hash::from([0u8; 32]); n];
+    let mut bwd_hashes: Vec<BwdHash> = vec![BwdHash(blake3::Hash::from([0u8; 32])); n];
     let mut depths: Vec<usize> = vec![0; n];
 
     // Iterate in reverse topological order so users are processed before their
     // operands.
     for node_ref in order.into_iter().rev() {
         // Gather user info for this node.
-        let mut user_pairs: Vec<(blake3::Hash, usize)> = Vec::new();
+        let mut user_pairs: Vec<(BwdHash, usize)> = Vec::new();
         let mut user_depths: Vec<usize> = Vec::new();
         for (user_ref, operand_index) in users[node_ref.index].iter().copied() {
             user_pairs.push((bwd_hashes[user_ref.index], operand_index));
             user_depths.push(depths[user_ref.index]);
         }
-
-        // Sort by (hash bytes, operand index) for a stable characterization.
-        user_pairs.sort_by(|a, b| {
-            let ord = a.0.as_bytes().cmp(b.0.as_bytes());
-            if ord != std::cmp::Ordering::Equal {
-                return ord;
-            }
-            a.1.cmp(&b.1)
-        });
-
-        // Combine local hash with user context.
-        let mut hasher = blake3::Hasher::new();
-        let local = compute_node_local_structural_hash(f, node_ref);
-        hasher.update(local.as_bytes());
-        hasher.update(&u64::try_from(user_pairs.len()).unwrap_or(0).to_le_bytes());
-        for (uh, idx) in user_pairs.into_iter() {
-            hasher.update(uh.as_bytes());
-            hasher.update(&u64::try_from(idx).unwrap_or(0).to_le_bytes());
-        }
-        bwd_hashes[node_ref.index] = hasher.finalize();
+        // Combine local hash with user context via hashing helper.
+        bwd_hashes[node_ref.index] =
+            compute_node_backward_structural_hash(f, node_ref, &user_pairs);
 
         // Backward depth: sinks (no users) are depth 0; else 1 + max(user depths).
         depths[node_ref.index] = match user_depths.iter().copied().max() {
@@ -295,7 +280,7 @@ pub fn collect_backward_structural_entries(f: &Fn) -> (Vec<StructuralEntry>, Vec
         };
     }
 
-    let mut entries: Vec<StructuralEntry> = Vec::with_capacity(n);
+    let mut entries: Vec<StructuralEntry<BwdHash>> = Vec::with_capacity(n);
     for (i, node) in f.nodes.iter().enumerate() {
         let h = bwd_hashes[i];
         let d = depths[i];
@@ -326,8 +311,8 @@ pub fn discrepancies_by_depth(lhs: &Fn, rhs: &Fn) -> HashMap<usize, usize> {
     let (rhs_entries, _rhs_depths) = collect_structural_entries(rhs);
 
     // Build depth -> hash -> count maps.
-    let mut lhs_map: HashMap<usize, HashMap<blake3::Hash, usize>> = HashMap::new();
-    let mut rhs_map: HashMap<usize, HashMap<blake3::Hash, usize>> = HashMap::new();
+    let mut lhs_map: HashMap<usize, HashMap<FwdHash, usize>> = HashMap::new();
+    let mut rhs_map: HashMap<usize, HashMap<FwdHash, usize>> = HashMap::new();
 
     for e in lhs_entries.into_iter() {
         *lhs_map
@@ -358,7 +343,7 @@ pub fn discrepancies_by_depth(lhs: &Fn, rhs: &Fn) -> HashMap<usize, usize> {
         let l = lhs_map.get(&d).cloned().unwrap_or_default();
         let r = rhs_map.get(&d).cloned().unwrap_or_default();
 
-        let mut hashes: Vec<blake3::Hash> = l.keys().copied().collect();
+        let mut hashes: Vec<FwdHash> = l.keys().copied().collect();
         for h in r.keys() {
             if !hashes.contains(h) {
                 hashes.push(*h);
@@ -391,8 +376,8 @@ pub fn discrepancies_by_depth_bwd(lhs: &Fn, rhs: &Fn) -> HashMap<usize, usize> {
     let (lhs_entries, _lhs_depths) = collect_backward_structural_entries(lhs);
     let (rhs_entries, _rhs_depths) = collect_backward_structural_entries(rhs);
 
-    let mut lhs_map: HashMap<usize, HashMap<blake3::Hash, usize>> = HashMap::new();
-    let mut rhs_map: HashMap<usize, HashMap<blake3::Hash, usize>> = HashMap::new();
+    let mut lhs_map: HashMap<usize, HashMap<BwdHash, usize>> = HashMap::new();
+    let mut rhs_map: HashMap<usize, HashMap<BwdHash, usize>> = HashMap::new();
 
     for e in lhs_entries.into_iter() {
         *lhs_map
@@ -422,7 +407,7 @@ pub fn discrepancies_by_depth_bwd(lhs: &Fn, rhs: &Fn) -> HashMap<usize, usize> {
         let l = lhs_map.get(&d).cloned().unwrap_or_default();
         let r = rhs_map.get(&d).cloned().unwrap_or_default();
 
-        let mut hashes: Vec<blake3::Hash> = l.keys().copied().collect();
+        let mut hashes: Vec<BwdHash> = l.keys().copied().collect();
         for h in r.keys() {
             if !hashes.contains(h) {
                 hashes.push(*h);
@@ -474,8 +459,8 @@ pub fn compute_structural_discrepancies(
     };
 
     // Build depth -> hash -> signature -> count maps.
-    let mut lhs_map: HashMap<usize, HashMap<blake3::Hash, HashMap<String, usize>>> = HashMap::new();
-    let mut rhs_map: HashMap<usize, HashMap<blake3::Hash, HashMap<String, usize>>> = HashMap::new();
+    let mut lhs_map: HashMap<usize, HashMap<FwdHash, HashMap<String, usize>>> = HashMap::new();
+    let mut rhs_map: HashMap<usize, HashMap<FwdHash, HashMap<String, usize>>> = HashMap::new();
     for e in lhs_entries {
         *lhs_map
             .entry(e.depth)
@@ -512,7 +497,7 @@ pub fn compute_structural_discrepancies(
         let r = rhs_map.get(&d);
 
         // Union of hashes at this depth
-        let mut hashes: Vec<blake3::Hash> = Vec::new();
+        let mut hashes: Vec<FwdHash> = Vec::new();
         if let Some(m) = l {
             hashes.extend(m.keys().copied());
         }
@@ -592,8 +577,8 @@ pub fn compute_structural_discrepancies_dual(
     };
 
     // Build maps from fwd/bwd hash -> rhs indices (unmatched pool).
-    let mut rhs_fwd_map: HashMap<blake3::Hash, Vec<usize>> = HashMap::new();
-    let mut rhs_bwd_map: HashMap<blake3::Hash, Vec<usize>> = HashMap::new();
+    let mut rhs_fwd_map: HashMap<FwdHash, Vec<usize>> = HashMap::new();
+    let mut rhs_bwd_map: HashMap<BwdHash, Vec<usize>> = HashMap::new();
     let rhs_len = rhs_fwd_entries.len();
     for i in 0..rhs_len {
         rhs_fwd_map
@@ -724,8 +709,8 @@ fn compute_dual_unmatched_masks(lhs: &Fn, rhs: &Fn) -> (Vec<bool>, Vec<bool>) {
     let (rhs_bwd_entries, _rhs_bwd_depths) = collect_backward_structural_entries(rhs);
 
     let rhs_len = rhs_fwd_entries.len();
-    let mut rhs_fwd_map: HashMap<blake3::Hash, Vec<usize>> = HashMap::new();
-    let mut rhs_bwd_map: HashMap<blake3::Hash, Vec<usize>> = HashMap::new();
+    let mut rhs_fwd_map: HashMap<FwdHash, Vec<usize>> = HashMap::new();
+    let mut rhs_bwd_map: HashMap<BwdHash, Vec<usize>> = HashMap::new();
     for j in 0..rhs_len {
         rhs_fwd_map
             .entry(rhs_fwd_entries[j].hash)

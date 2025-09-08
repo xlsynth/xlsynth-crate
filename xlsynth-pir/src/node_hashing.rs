@@ -4,6 +4,24 @@
 
 use crate::ir::{self, Fn, NodePayload, NodeRef, ParamId, Type};
 
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
+pub struct FwdHash(pub blake3::Hash);
+
+impl FwdHash {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
+pub struct BwdHash(pub blake3::Hash);
+
+impl BwdHash {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
+
 fn update_hash_str(hasher: &mut blake3::Hasher, s: &str) {
     hasher.update(s.as_bytes());
 }
@@ -187,8 +205,8 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
 pub(crate) fn compute_node_structural_hash(
     f: &Fn,
     node_ref: NodeRef,
-    child_hashes: &[blake3::Hash],
-) -> blake3::Hash {
+    child_hashes: &[FwdHash],
+) -> FwdHash {
     let node = f.get_node(node_ref);
     let mut hasher = blake3::Hasher::new();
     update_hash_str(&mut hasher, payload_tag(&node.payload));
@@ -197,15 +215,44 @@ pub(crate) fn compute_node_structural_hash(
     for ch in child_hashes.iter() {
         hasher.update(ch.as_bytes());
     }
-    hasher.finalize()
+    FwdHash(hasher.finalize())
 }
 
-pub(crate) fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> blake3::Hash {
+pub(crate) fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> FwdHash {
     // Hash operator tag + type + payload attributes only; ignore children.
     let node = f.get_node(node_ref);
     let mut hasher = blake3::Hasher::new();
     update_hash_str(&mut hasher, payload_tag(&node.payload));
     update_hash_type(&mut hasher, &node.ty);
     hash_payload_attributes(f, &node.payload, &mut hasher);
-    hasher.finalize()
+    FwdHash(hasher.finalize())
+}
+
+/// Computes a node's backward structural hash by combining its local
+/// structural hash with its users' backward hashes and the operand indices
+/// at which this node appears. The user pairs are sorted by (hash bytes,
+/// operand index) to produce a stable characterization.
+pub(crate) fn compute_node_backward_structural_hash(
+    f: &Fn,
+    node_ref: NodeRef,
+    user_pairs: &[(BwdHash, usize)],
+) -> BwdHash {
+    let mut pairs: Vec<(BwdHash, usize)> = user_pairs.to_vec();
+    pairs.sort_by(|a, b| {
+        let ord = a.0.as_bytes().cmp(b.0.as_bytes());
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+        a.1.cmp(&b.1)
+    });
+
+    let mut hasher = blake3::Hasher::new();
+    let local = compute_node_local_structural_hash(f, node_ref);
+    hasher.update(local.as_bytes());
+    hasher.update(&(u64::try_from(pairs.len()).unwrap_or(0)).to_le_bytes());
+    for (uh, idx) in pairs.into_iter() {
+        hasher.update(uh.as_bytes());
+        hasher.update(&(u64::try_from(idx).unwrap_or(0)).to_le_bytes());
+    }
+    BwdHash(hasher.finalize())
 }
