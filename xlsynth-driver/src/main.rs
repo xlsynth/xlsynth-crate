@@ -824,6 +824,12 @@ fn main() {
                         .long("rhs_ir_top")
                         .help("The top-level entry point for the right-hand side IR"),
                 )
+                .arg(
+                    Arg::new("output_dir")
+                        .long("output-dir")
+                        .value_name("DIR")
+                        .help("Directory to write outputs (original IR copies). If omitted, a temp directory is created and printed."),
+                )
                 .add_bool_arg(
                     "show_discrepancies",
                     "Show per-depth discrepancy signatures in verbose form",
