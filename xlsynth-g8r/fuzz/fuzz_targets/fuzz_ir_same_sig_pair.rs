@@ -4,7 +4,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use xlsynth::{IrPackage, IrType};
-use xlsynth_g8r::xls_ir::ir_fuzz::{generate_ir_fn, FuzzSampleSameTypedPair};
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSampleSameTypedPair};
 
 fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     // Skip degenerate samples early.

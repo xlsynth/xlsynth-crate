@@ -5,10 +5,10 @@ use libfuzzer_sys::fuzz_target;
 
 use xlsynth_g8r::equiv::prove_equiv::EquivResult;
 use xlsynth_g8r::equiv::prove_equiv_via_toolchain::{self};
-use xlsynth_g8r::xls_ir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
-use xlsynth_g8r::xls_ir::ir_validate::validate_fn;
-use xlsynth_g8r::xls_ir::simple_rebase::rebase_onto;
-use xlsynth_g8r::xls_ir::{ir, ir_parser};
+use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
+use xlsynth_pir::ir_validate::validate_fn;
+use xlsynth_pir::simple_rebase::rebase_onto;
+use xlsynth_pir::{ir, ir_parser};
 
 fn max_text_id(f: &ir::Fn) -> usize {
     f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0)

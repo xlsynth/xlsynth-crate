@@ -2,9 +2,9 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_g8r::xls_ir::{ir, ir_parser};
-use xlsynth_g8r::xls_ir::structural_similarity::structurally_equivalent_ir;
-use xlsynth_g8r::xls_ir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::{ir, ir_parser};
+use xlsynth_pir::structural_similarity::structurally_equivalent_ir;
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
 
 fuzz_target!(|sample: FuzzSample| {
     // Skip degenerate samples early.

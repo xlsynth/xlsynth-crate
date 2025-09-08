@@ -38,6 +38,21 @@ impl IrBits {
         Self::from_raw(result)
     }
 
+    /// Converts a `&[bool]` slice into an IR `Bits` value.
+    ///
+    /// ```
+    /// use xlsynth::ir_value::IrFormatPreference;
+    /// use xlsynth::IrBits;
+    ///
+    /// let bools = vec![true, false, true, false]; // LSB is bools[0]
+    /// let ir_bits: IrBits = IrBits::from_lsb_is_0(&bools);
+    /// assert_eq!(ir_bits.to_string_fmt(IrFormatPreference::Binary, false), "0b101");
+    /// assert_eq!(ir_bits.get_bit_count(), 4);
+    /// assert_eq!(ir_bits.get_bit(0).unwrap(), true); // LSB
+    /// assert_eq!(ir_bits.get_bit(1).unwrap(), false);
+    /// assert_eq!(ir_bits.get_bit(2).unwrap(), true);
+    /// assert_eq!(ir_bits.get_bit(3).unwrap(), false); // MSB
+    /// ```
     pub fn from_lsb_is_0(bits: &[bool]) -> Self {
         if bits.is_empty() {
             return IrBits::make_ubits(0, 0).unwrap();
