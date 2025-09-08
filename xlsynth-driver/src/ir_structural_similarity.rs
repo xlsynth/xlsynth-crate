@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use blake3;
+use std::io::Write;
 use clap::ArgMatches;
 use comfy_table::{presets::ASCII_MARKDOWN, ContentArrangement, Table};
 use xlsynth_pir::{
@@ -8,9 +9,11 @@ use xlsynth_pir::{
     structural_similarity::{
         build_common_wrapper_lhs, collect_backward_structural_entries, collect_structural_entries,
         compute_structural_discrepancies_dual,
+        compute_dual_difference_regions,
         extract_dual_difference_subgraphs_with_shared_params_and_metadata,
     },
 };
+use xlsynth_pir::ir_utils::get_topological;
 
 use crate::toolchain_config::ToolchainConfig;
 
@@ -76,71 +79,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     let _ = std::fs::create_dir_all(&outdir_path);
     println!("Diff artifacts directory: {}", outdir_path.display());
 
-    // Print node tables early (before discrepancy analysis).
-    let mut early_node_tables_text = String::new();
-    {
-        // LHS
-        let (fwd_entries, _fwd_depths) = collect_structural_entries(lhs_fn);
-        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(lhs_fn);
-        let mut indices: Vec<usize> = (0..lhs_fn.nodes.len()).collect();
-        indices.sort_by(|&a, &b| {
-            let ta = ir::node_textual_id(lhs_fn, ir::NodeRef { index: a });
-            let tb = ir::node_textual_id(lhs_fn, ir::NodeRef { index: b });
-            ta.cmp(&tb)
-        });
-        println!("\nLHS graph");
-        let mut table = Table::new();
-        table
-            .load_preset(ASCII_MARKDOWN)
-            .set_content_arrangement(ContentArrangement::Disabled)
-            .set_header(vec!["node_name", "hash", "rhash", "is_diff"]);
-        // No region info yet; mark empty.
-        for i in indices.into_iter() {
-            let nref = ir::NodeRef { index: i };
-            let name = ir::node_textual_id(lhs_fn, nref);
-            if name == "reserved_zero_node" {
-                continue;
-            }
-            let fh = fwd_entries[i].hash.to_hex().to_string();
-            let rh = bwd_entries[i].hash.to_hex().to_string();
-            table.add_row(vec![name, fh, rh, "".to_string()]);
-        }
-        println!("{}", table);
-        early_node_tables_text.push_str("LHS graph\n");
-        early_node_tables_text.push_str(&format!("{}\n\n", table));
-    }
-    {
-        // RHS
-        let (fwd_entries, _fwd_depths) = collect_structural_entries(rhs_fn);
-        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(rhs_fn);
-        let mut indices: Vec<usize> = (0..rhs_fn.nodes.len()).collect();
-        indices.sort_by(|&a, &b| {
-            let ta = ir::node_textual_id(rhs_fn, ir::NodeRef { index: a });
-            let tb = ir::node_textual_id(rhs_fn, ir::NodeRef { index: b });
-            ta.cmp(&tb)
-        });
-        println!("\nRHS graph");
-        let mut table = Table::new();
-        table
-            .load_preset(ASCII_MARKDOWN)
-            .set_content_arrangement(ContentArrangement::Disabled)
-            .set_header(vec!["node_name", "hash", "rhash", "is_diff"]);
-        for i in indices.into_iter() {
-            let nref = ir::NodeRef { index: i };
-            let name = ir::node_textual_id(rhs_fn, nref);
-            if name == "reserved_zero_node" {
-                continue;
-            }
-            let fh = fwd_entries[i].hash.to_hex().to_string();
-            let rh = bwd_entries[i].hash.to_hex().to_string();
-            table.add_row(vec![name, fh, rh, "".to_string()]);
-        }
-        println!("{}", table);
-        early_node_tables_text.push_str("RHS graph\n");
-        early_node_tables_text.push_str(&format!("{}\n", table));
-    }
-    // Also write the early tables to artifacts.
-    let _ = std::fs::write(outdir_path.join("node_tables.txt"), &early_node_tables_text);
+    // (Skip printing node tables until after we compute diff regions)
 
     let (recs, lhs_ret_depth, rhs_ret_depth) =
         compute_structural_discrepancies_dual(lhs_fn, rhs_fn);
@@ -206,6 +145,81 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
         }
     }
 
+    // Compute diff regions (without outlining) and print detailed node tables now.
+    let (lhs_region, rhs_region) = compute_dual_difference_regions(lhs_fn, rhs_fn);
+    {
+        // LHS detailed table with marks
+        let (fwd_entries, _fwd_depths) = collect_structural_entries(lhs_fn);
+        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(lhs_fn);
+        let topo = get_topological(lhs_fn);
+        let ret_idx = lhs_fn.ret_node_ref.map(|r| r.index);
+        println!("\nLHS graph (with diff marks)");
+        let mut table = Table::new();
+        table
+            .load_preset(ASCII_MARKDOWN)
+            .set_content_arrangement(ContentArrangement::Disabled)
+            .set_header(vec!["node_name", "hash", "rhash", "is_diff"]);
+        for nref in topo.into_iter() {
+            let i = nref.index;
+            let mut name = ir::node_textual_id(lhs_fn, nref);
+            if name == "reserved_zero_node" {
+                continue;
+            }
+            if ret_idx == Some(i) {
+                name = format!("▶ {}", name);
+            }
+            let fh = fwd_entries[i].hash.to_hex().to_string();
+            let rh = bwd_entries[i].hash.to_hex().to_string();
+            let mark = if lhs_region.contains(&nref) { "✓" } else { "" };
+            table.add_row(vec![name, fh, rh, mark.to_string()]);
+        }
+        println!("{}", table);
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(outdir_path.join("node_tables.txt"))
+        {
+            let _ = writeln!(f, "\nLHS graph (with diff marks)\n{}", table);
+        }
+    }
+    {
+        // RHS detailed table with marks
+        let (fwd_entries, _fwd_depths) = collect_structural_entries(rhs_fn);
+        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(rhs_fn);
+        let topo = get_topological(rhs_fn);
+        let ret_idx = rhs_fn.ret_node_ref.map(|r| r.index);
+        println!("\nRHS graph (with diff marks)");
+        let mut table = Table::new();
+        table
+            .load_preset(ASCII_MARKDOWN)
+            .set_content_arrangement(ContentArrangement::Disabled)
+            .set_header(vec!["node_name", "hash", "rhash", "is_diff"]);
+        for nref in topo.into_iter() {
+            let i = nref.index;
+            let mut name = ir::node_textual_id(rhs_fn, nref);
+            if name == "reserved_zero_node" {
+                continue;
+            }
+            if ret_idx == Some(i) {
+                name = format!("▶ {}", name);
+            }
+            let fh = fwd_entries[i].hash.to_hex().to_string();
+            let rh = bwd_entries[i].hash.to_hex().to_string();
+            let mark = if rhs_region.contains(&nref) { "✓" } else { "" };
+            table.add_row(vec![name, fh, rh, mark.to_string()]);
+        }
+        println!("{}", table);
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(outdir_path.join("node_tables.txt"))
+        {
+            let _ = writeln!(f, "\nRHS graph (with diff marks)\n{}", table);
+        }
+    }
+
     // Also emit minimized subgraphs and metadata for the unmatched parts (dual
     // matching).
     let meta = extract_dual_difference_subgraphs_with_shared_params_and_metadata(lhs_fn, rhs_fn);
@@ -243,6 +257,87 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     println!("RHS outbound users per return element:");
     for (prod, users) in meta.rhs_outbound.iter() {
         println!("  {} -> [{}]", prod, users.join(", "));
+    }
+
+    // Print detailed node tables after computing diff regions; mark return nodes and diff nodes.
+    let mut later_node_tables_text = String::new();
+    // LHS detailed table
+    {
+        let (fwd_entries, _fwd_depths) = collect_structural_entries(lhs_fn);
+        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(lhs_fn);
+        let mut indices: Vec<usize> = (0..lhs_fn.nodes.len()).collect();
+        indices.sort_by(|&a, &b| {
+            let ta = ir::node_textual_id(lhs_fn, ir::NodeRef { index: a });
+            let tb = ir::node_textual_id(lhs_fn, ir::NodeRef { index: b });
+            ta.cmp(&tb)
+        });
+        let ret_idx = lhs_fn.ret_node_ref.map(|r| r.index);
+        println!("\nLHS graph (with diff marks)");
+        let mut table = Table::new();
+        table
+            .load_preset(ASCII_MARKDOWN)
+            .set_content_arrangement(ContentArrangement::Disabled)
+            .set_header(vec!["node_name", "hash", "rhash", "is_diff"]);
+        for i in indices.into_iter() {
+            let nref = ir::NodeRef { index: i };
+            let mut name = ir::node_textual_id(lhs_fn, nref);
+            if name == "reserved_zero_node" {
+                continue;
+            }
+            if ret_idx == Some(i) {
+                name = format!("▶ {}", name);
+            }
+            let fh = fwd_entries[i].hash.to_hex().to_string();
+            let rh = bwd_entries[i].hash.to_hex().to_string();
+            let mark = if meta.lhs_region.contains(&nref) { "✓" } else { "" };
+            table.add_row(vec![name, fh, rh, mark.to_string()]);
+        }
+        println!("{}", table);
+        later_node_tables_text.push_str("LHS graph (with diff marks)\n");
+        later_node_tables_text.push_str(&format!("{}\n\n", table));
+    }
+    // RHS detailed table
+    {
+        let (fwd_entries, _fwd_depths) = collect_structural_entries(rhs_fn);
+        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(rhs_fn);
+        let mut indices: Vec<usize> = (0..rhs_fn.nodes.len()).collect();
+        indices.sort_by(|&a, &b| {
+            let ta = ir::node_textual_id(rhs_fn, ir::NodeRef { index: a });
+            let tb = ir::node_textual_id(rhs_fn, ir::NodeRef { index: b });
+            ta.cmp(&tb)
+        });
+        let ret_idx = rhs_fn.ret_node_ref.map(|r| r.index);
+        println!("\nRHS graph (with diff marks)");
+        let mut table = Table::new();
+        table
+            .load_preset(ASCII_MARKDOWN)
+            .set_content_arrangement(ContentArrangement::Disabled)
+            .set_header(vec!["node_name", "hash", "rhash", "is_diff"]);
+        for i in indices.into_iter() {
+            let nref = ir::NodeRef { index: i };
+            let mut name = ir::node_textual_id(rhs_fn, nref);
+            if name == "reserved_zero_node" {
+                continue;
+            }
+            if ret_idx == Some(i) {
+                name = format!("▶ {}", name);
+            }
+            let fh = fwd_entries[i].hash.to_hex().to_string();
+            let rh = bwd_entries[i].hash.to_hex().to_string();
+            let mark = if meta.rhs_region.contains(&nref) { "✓" } else { "" };
+            table.add_row(vec![name, fh, rh, mark.to_string()]);
+        }
+        println!("{}", table);
+        later_node_tables_text.push_str("RHS graph (with diff marks)\n");
+        later_node_tables_text.push_str(&format!("{}\n", table));
+    }
+    // Append detailed tables to artifacts file.
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(outdir_path.join("node_tables.txt"))
+    {
+        let _ = f.write_all(later_node_tables_text.as_bytes());
     }
 
     // (node tables already printed & written earlier)
