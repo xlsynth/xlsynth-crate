@@ -4,25 +4,19 @@
 //! `#[quickcheck]` function in a DSLX file (or a selected one) always
 //! returns `true` for every possible input using an SMT solver.
 
-use std::collections::HashMap;
+// use std::collections::HashMap;
 
 use crate::common::{infer_uf_signature, parse_uf_spec};
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 
 use crate::solver_choice::SolverChoice;
-use crate::tools::run_prove_quickcheck_main;
 use regex::Regex;
 use serde::Serialize;
-use xlsynth::{
-    mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
-};
-use xlsynth_g8r::equiv::prove_quickcheck::prove_ir_fn_always_true_with_ufs;
-use xlsynth_g8r::equiv::solver_interface::Solver;
-use xlsynth_g8r::equiv::types::{
-    BoolPropertyResult, IrFn, QuickCheckAssertionSemantics, UfSignature,
-};
-use xlsynth_pir::{ir, ir_parser};
+use xlsynth::DslxConvertOptions;
+use xlsynth_g8r::equiv::prover::Prover;
+use xlsynth_g8r::equiv::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
+use xlsynth_pir::ir_parser;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckTestOutcome {
@@ -133,26 +127,10 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             }
         };
 
-    // Solver selection.
+    // Solver selection (optional). If omitted, use auto-selected prover.
     let solver_choice_opt: Option<SolverChoice> = matches
         .get_one::<String>("solver")
         .map(|s| s.parse().unwrap());
-
-    let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
-
-    // If user did not specify --solver we default to toolchain (external prover) if
-    // available.
-    let solver_choice = solver_choice_opt.unwrap_or_else(|| {
-        if tool_path.is_some() {
-            SolverChoice::Toolchain
-        } else {
-            report_cli_error_and_exit(
-                "No solver specified and no toolchain available",
-                Some("prove-quickcheck"),
-                vec![],
-            );
-        }
-    });
 
     // Assertion semantics.
     let assertion_semantics = matches
@@ -164,77 +142,36 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
     // UF semantics: functions mapped to the same <uf_name> are treated as the
     // same uninterpreted symbol (assumed equivalent) and assertions inside them
     // are ignored during proving.
-    let use_unoptimized_ir = !uf_map.is_empty();
     let pkg = ir_parser::Parser::new(&ir_text_result)
         .parse_package()
         .unwrap();
 
     let uf_sigs = infer_uf_signature(&pkg, &uf_map);
 
-    // Helper that runs proof for a given solver type and collects outcomes.
-    fn run_for_solver<S: Solver>(
-        config: &S::Config,
-        quickchecks: &[(String, bool)],
-        module_name: &str,
+    // Helper: run proofs for a given prover over all quickchecks, using the
+    // trait's DSLX-based entry point which handles implicit-token mangling.
+    fn run_for_prover(
+        prover: &dyn Prover,
+        entry_file: &std::path::Path,
+        qc_names: &[String],
         semantics: QuickCheckAssertionSemantics,
-        uf_map: &HashMap<String, String>,
-        uf_sigs: &HashMap<String, UfSignature>,
-        unoptimized_pkg: &ir::Package,
-        ir_text: &str,
-        use_unoptimized_ir: bool,
+        uf_map: &std::collections::HashMap<String, String>,
+        uf_sigs: &std::collections::HashMap<String, xlsynth_g8r::equiv::types::UfSignature>,
     ) -> Vec<QuickCheckTestOutcome> {
-        let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(quickchecks.len());
-        for (qc_name, has_itok) in quickchecks {
-            let cc = if *has_itok {
-                DslxCallingConvention::ImplicitToken
-            } else {
-                DslxCallingConvention::Typical
-            };
-            let mangled =
-                mangle_dslx_name_with_calling_convention(module_name, qc_name, cc).unwrap();
+        let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(qc_names.len());
+        for qc_name in qc_names {
+            let start_time = std::time::Instant::now();
+            let res = prover
+                .prove_dslx_quickcheck_with_ufs(entry_file, qc_name, semantics, uf_map, uf_sigs);
 
-            let run = |pkg: &ir::Package| {
-                let ir_fn_ref = pkg.get_fn(&mangled).unwrap();
-
-                let ir_fn = IrFn {
-                    fn_ref: ir_fn_ref,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: *has_itok,
-                };
-                let start_time = std::time::Instant::now();
-
-                let res = prove_ir_fn_always_true_with_ufs::<S>(
-                    config,
-                    &ir_fn,
-                    semantics.clone(),
-                    &uf_map,
-                    &uf_sigs,
-                );
-                let micros = start_time.elapsed().as_micros();
-                (res, micros)
-            };
-
-            let (res, micros) = if use_unoptimized_ir {
-                run(unoptimized_pkg)
-            } else {
-                let base_pkg = xlsynth::IrPackage::parse_ir(&ir_text, None).unwrap();
-                let optimized_pkg = xlsynth::optimize_ir(&base_pkg, &mangled).unwrap();
-                let optimized_text = optimized_pkg.to_string();
-                let g8_pkg = ir_parser::Parser::new(&optimized_text)
-                    .parse_package()
-                    .unwrap();
-                run(&g8_pkg)
-            };
-
+            let micros = start_time.elapsed().as_micros();
             match res {
-                BoolPropertyResult::Proved => {
-                    results.push(QuickCheckTestOutcome {
-                        name: qc_name.clone(),
-                        time_micros: micros,
-                        success: true,
-                        counterexample: None,
-                    });
-                }
+                BoolPropertyResult::Proved => results.push(QuickCheckTestOutcome {
+                    name: qc_name.clone(),
+                    time_micros: micros,
+                    success: true,
+                    counterexample: None,
+                }),
                 BoolPropertyResult::Disproved { inputs, output } => {
                     let cex_str = format!("inputs: {:?}, output: {:?}", inputs, output);
                     results.push(QuickCheckTestOutcome {
@@ -244,95 +181,90 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                         counterexample: Some(cex_str),
                     });
                 }
+                BoolPropertyResult::ToolchainDisproved(msg) => {
+                    results.push(QuickCheckTestOutcome {
+                        name: qc_name.clone(),
+                        time_micros: micros,
+                        success: false,
+                        counterexample: Some(msg),
+                    })
+                }
             }
         }
         results
     }
 
-    let results: Vec<QuickCheckTestOutcome> = match solver_choice {
-        SolverChoice::Toolchain => {
-            let tool_path = tool_path.expect("tool_path required for Toolchain solver");
-            let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(quickchecks.len());
-            for (qc_name, _) in &quickchecks {
-                let start = std::time::Instant::now();
-                match run_prove_quickcheck_main(input_path, Some(qc_name), tool_path) {
-                    Ok(_stdout) => {
-                        let micros = start.elapsed().as_micros();
-                        results.push(QuickCheckTestOutcome {
-                            name: qc_name.clone(),
-                            time_micros: micros,
-                            success: true,
-                            counterexample: None,
-                        });
-                    }
-                    Err(output) => {
-                        let micros = start.elapsed().as_micros();
-                        let mut msg = String::from_utf8_lossy(&output.stdout).to_string();
-                        if msg.trim().is_empty() {
-                            msg = String::from_utf8_lossy(&output.stderr).to_string();
-                        }
-                        results.push(QuickCheckTestOutcome {
-                            name: qc_name.clone(),
-                            time_micros: micros,
-                            success: false,
-                            counterexample: Some(msg.trim().to_string()),
-                        });
-                    }
-                }
-            }
-            results
-        }
-        #[cfg(feature = "has-boolector")]
-        SolverChoice::Boolector => {
-            use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
-            let cfg = BoolectorConfig::new();
-            run_for_solver::<Boolector>(
-                &cfg,
-                &quickchecks,
-                module_name,
+    // (unused now; external quickchecks go via Prover::prove_dslx_quickcheck)
+
+    let qc_names: Vec<String> = quickchecks.iter().map(|(n, _)| n.clone()).collect();
+
+    let results: Vec<QuickCheckTestOutcome> = match solver_choice_opt {
+        None => {
+            let prover = xlsynth_g8r::equiv::prover::auto_selected_prover();
+            run_for_prover(
+                &*prover,
+                input_path,
+                &qc_names,
                 *assertion_semantics,
                 &uf_map,
                 &uf_sigs,
-                &pkg,
-                &ir_text_result,
-                use_unoptimized_ir,
+            )
+        }
+        Some(SolverChoice::Toolchain) => {
+            let prover = xlsynth_g8r::equiv::prover::ExternalProver::Toolchain;
+            run_for_prover(
+                &prover,
+                input_path,
+                &qc_names,
+                *assertion_semantics,
+                &uf_map,
+                &uf_sigs,
+            )
+        }
+        #[cfg(feature = "has-boolector")]
+        Some(SolverChoice::Boolector) => {
+            use xlsynth_g8r::equiv::boolector_backend::BoolectorConfig;
+            let prover = BoolectorConfig::new();
+            run_for_prover(
+                &prover,
+                input_path,
+                &qc_names,
+                *assertion_semantics,
+                &uf_map,
+                &uf_sigs,
             )
         }
         #[cfg(feature = "has-bitwuzla")]
-        SolverChoice::Bitwuzla => {
-            use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
-            let opts = BitwuzlaOptions::new();
-            run_for_solver::<Bitwuzla>(
-                &opts,
-                &quickchecks,
-                module_name,
+        Some(SolverChoice::Bitwuzla) => {
+            use xlsynth_g8r::equiv::bitwuzla_backend::BitwuzlaOptions;
+            let prover = BitwuzlaOptions::new();
+            run_for_prover(
+                &prover,
+                input_path,
+                &qc_names,
                 *assertion_semantics,
                 &uf_map,
                 &uf_sigs,
-                &pkg,
-                &ir_text_result,
-                use_unoptimized_ir,
             )
         }
         #[cfg(feature = "has-easy-smt")]
-        SolverChoice::Z3Binary | SolverChoice::BitwuzlaBinary | SolverChoice::BoolectorBinary => {
-            use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
-            let cfg = match solver_choice {
+        Some(SolverChoice::Z3Binary)
+        | Some(SolverChoice::BitwuzlaBinary)
+        | Some(SolverChoice::BoolectorBinary) => {
+            use xlsynth_g8r::equiv::easy_smt_backend::EasySmtConfig;
+            let prover = match solver_choice_opt.unwrap() {
                 SolverChoice::Z3Binary => EasySmtConfig::z3(),
                 SolverChoice::BitwuzlaBinary => EasySmtConfig::bitwuzla(),
                 SolverChoice::BoolectorBinary => EasySmtConfig::boolector(),
                 _ => unreachable!(),
             };
-            run_for_solver::<EasySmtSolver>(
-                &cfg,
-                &quickchecks,
-                module_name,
+            run_for_prover(
+                &prover,
+                input_path,
+                &qc_names,
                 *assertion_semantics,
                 &uf_map,
                 &uf_sigs,
-                &pkg,
-                &ir_text_result,
-                use_unoptimized_ir,
             )
         }
     };

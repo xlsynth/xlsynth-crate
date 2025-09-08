@@ -326,4 +326,10 @@ pub enum BoolPropertyResult {
         /// counter-example.
         output: FnOutput,
     },
+    /// External toolchain reported failure without a structured counterexample.
+    ///
+    /// This is used by the `ExternalProver` implementation where the
+    /// external tools (e.g. `check_ir_equivalence_main`) do not provide a
+    /// machine-readable counterexample for QuickCheck-style properties.
+    ToolchainDisproved(String),
 }
