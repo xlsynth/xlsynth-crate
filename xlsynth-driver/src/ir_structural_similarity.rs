@@ -26,6 +26,46 @@ fn find_node_signature_by_textual_id(f: &ir::Fn, text: &str) -> Option<String> {
     None
 }
 
+// Emit a node_table.txt summarizing each side's nodes with fwd/bwd hashes and
+// diff flags.
+fn hash_to_hex(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+fn ir_fn_to_table(f: &ir::Fn, diff_region: &std::collections::HashSet<ir::NodeRef>) -> String {
+    let (fwd_entries, _fwd_depths) = collect_structural_entries(f);
+    let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(f);
+    let order = get_topological(f);
+    let ret_idx_opt = f.ret_node_ref.map(|nr| nr.index);
+
+    let mut table = Table::new();
+    table.load_preset(ASCII_MARKDOWN);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec!["node_name", "fwd_hash", "bwd_hash", "Δ"]);
+
+    for nr in order.into_iter() {
+        let name = ir::node_textual_id(f, nr);
+        if name == "reserved_zero_node" {
+            continue;
+        }
+        let is_ret = ret_idx_opt == Some(nr.index);
+        let sigil = if is_ret { "*" } else { "" };
+        let fwd_hex = hash_to_hex(fwd_entries[nr.index].hash.as_bytes());
+        let bwd_hex = hash_to_hex(bwd_entries[nr.index].hash.as_bytes());
+        let is_diff = if diff_region.contains(&nr) { "✓" } else { "" };
+        table.add_row(vec![
+            format!("{}{}", sigil, name),
+            fwd_hex,
+            bwd_hex,
+            is_diff.to_string(),
+        ]);
+    }
+    table.to_string()
+}
+
 pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();
     let lhs_path = std::path::Path::new(lhs);
@@ -169,46 +209,6 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     println!("RHS outbound users per return element:");
     for (prod, users) in meta.rhs_outbound.iter() {
         println!("  {} -> [{}]", prod, users.join(", "));
-    }
-
-    // Emit a node_table.txt summarizing each side's nodes with fwd/bwd hashes and
-    // diff flags.
-    fn hash_to_hex(bytes: &[u8; 32]) -> String {
-        let mut s = String::with_capacity(64);
-        for b in bytes.iter() {
-            s.push_str(&format!("{:02x}", b));
-        }
-        s
-    }
-    fn ir_fn_to_table(f: &ir::Fn, diff_region: &std::collections::HashSet<ir::NodeRef>) -> String {
-        let (fwd_entries, _fwd_depths) = collect_structural_entries(f);
-        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(f);
-        let order = get_topological(f);
-        let ret_idx_opt = f.ret_node_ref.map(|nr| nr.index);
-
-        let mut table = Table::new();
-        table.load_preset(ASCII_MARKDOWN);
-        table.set_content_arrangement(ContentArrangement::Dynamic);
-        table.set_header(vec!["node_name", "fwd_hash", "bwd_hash", "is_diff"]);
-
-        for nr in order.into_iter() {
-            let name = ir::node_textual_id(f, nr);
-            if name == "reserved_zero_node" {
-                continue;
-            }
-            let is_ret = ret_idx_opt == Some(nr.index);
-            let sigil = if is_ret { "*" } else { "" };
-            let fwd_hex = hash_to_hex(fwd_entries[nr.index].hash.as_bytes());
-            let bwd_hex = hash_to_hex(bwd_entries[nr.index].hash.as_bytes());
-            let is_diff = if diff_region.contains(&nr) { "✓" } else { "" };
-            table.add_row(vec![
-                format!("{}{}", sigil, name),
-                fwd_hex,
-                bwd_hex,
-                is_diff.to_string(),
-            ]);
-        }
-        table.to_string()
     }
 
     let lhs_table = ir_fn_to_table(lhs_fn, &meta.lhs_region);
