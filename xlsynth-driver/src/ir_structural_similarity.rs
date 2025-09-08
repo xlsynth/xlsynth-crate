@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use blake3;
 use clap::ArgMatches;
 use comfy_table::{presets::ASCII_MARKDOWN, ContentArrangement, Table};
-use blake3;
 use xlsynth_pir::{
     ir, ir_parser,
     structural_similarity::{
-        collect_backward_structural_entries, collect_structural_entries,
+        build_common_wrapper_lhs, collect_backward_structural_entries, collect_structural_entries,
         compute_structural_discrepancies_dual,
         extract_dual_difference_subgraphs_with_shared_params_and_metadata,
     },
@@ -33,8 +33,28 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     let lhs_ir_top = matches.get_one::<String>("lhs_ir_top");
     let rhs_ir_top = matches.get_one::<String>("rhs_ir_top");
 
-    let lhs_pkg = ir_parser::parse_path_to_package(lhs_path).unwrap();
-    let rhs_pkg = ir_parser::parse_path_to_package(rhs_path).unwrap();
+    let lhs_pkg = match ir_parser::parse_and_validate_path_to_package(lhs_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "LHS IR failed to parse/validate ({}): {}",
+                lhs_path.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+    };
+    let rhs_pkg = match ir_parser::parse_and_validate_path_to_package(rhs_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "RHS IR failed to parse/validate ({}): {}",
+                rhs_path.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+    };
 
     let lhs_fn = match lhs_ir_top {
         Some(top) => lhs_pkg.get_fn(top).unwrap(),
@@ -123,8 +143,8 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     // Also emit minimized subgraphs and metadata for the unmatched parts (dual
     // matching).
     let meta = extract_dual_difference_subgraphs_with_shared_params_and_metadata(lhs_fn, rhs_fn);
-    let lhs_sub = meta.lhs_inner;
-    let rhs_sub = meta.rhs_inner;
+    let lhs_sub = meta.lhs_inner.clone();
+    let rhs_sub = meta.rhs_inner.clone();
     // Unified return mapping before printing subgraphs.
     println!("\nUnified return type: {}", lhs_sub.ret_ty);
     println!("Unified return slots (index -> consumer[operand_index] : signature):");
@@ -243,4 +263,60 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     // Write node tables to artifacts directory.
     let node_tables_path = outdir_path.join("node_tables.txt");
     let _ = std::fs::write(&node_tables_path, node_tables_text);
+
+    // Build common wrappers for LHS and RHS.
+    let lhs_common = build_common_wrapper_lhs(lhs_fn, &meta);
+    // Note: We currently only build LHS common; extend to RHS similarly if needed
+    // elsewhere.
+    let rhs_common = xlsynth_pir::structural_similarity::build_common_wrapper_rhs(rhs_fn, &meta);
+
+    // Emit full IR packages for lhs_diff.ir and rhs_diff.ir with inner before
+    // common wrapper.
+    let mut lhs_pkg_out = ir::Package {
+        name: format!("{}_diff", lhs_pkg.name),
+        file_table: lhs_pkg.file_table.clone(),
+        members: vec![
+            ir::PackageMember::Function(lhs_sub.clone()),
+            ir::PackageMember::Function(lhs_common.clone()),
+        ],
+        top_name: Some(lhs_common.name.clone()),
+    };
+    let mut rhs_pkg_out = ir::Package {
+        name: format!("{}_diff", rhs_pkg.name),
+        file_table: rhs_pkg.file_table.clone(),
+        members: vec![
+            ir::PackageMember::Function(rhs_sub.clone()),
+            ir::PackageMember::Function(rhs_common.clone()),
+        ],
+        top_name: Some(rhs_common.name.clone()),
+    };
+    let lhs_pkg_text = lhs_pkg_out.to_string();
+    let rhs_pkg_text = rhs_pkg_out.to_string();
+    let lhs_path = outdir_path.join("lhs_diff.ir");
+    let rhs_path = outdir_path.join("rhs_diff.ir");
+    let _ = std::fs::write(&lhs_path, lhs_pkg_text.clone());
+    let _ = std::fs::write(&rhs_path, rhs_pkg_text.clone());
+
+    // Also emit the original packages for reference.
+    let _ = std::fs::write(outdir_path.join("lhs_orig.ir"), lhs_pkg.to_string());
+    let _ = std::fs::write(outdir_path.join("rhs_orig.ir"), rhs_pkg.to_string());
+
+    // Verify generated packages parse and validate; print detailed errors.
+    let lhs_result = {
+        let mut p = ir_parser::Parser::new(&lhs_pkg_text);
+        p.parse_and_validate_package()
+    };
+    let rhs_result = {
+        let mut p = ir_parser::Parser::new(&rhs_pkg_text);
+        p.parse_and_validate_package()
+    };
+    println!("\nGenerated IR verification:");
+    match lhs_result {
+        Ok(_) => println!("  LHS package: ok ({})", lhs_path.display()),
+        Err(e) => println!("  LHS package: FAILED ({})\n    {}", lhs_path.display(), e),
+    }
+    match rhs_result {
+        Ok(_) => println!("  RHS package: ok ({})", rhs_path.display()),
+        Err(e) => println!("  RHS package: FAILED ({})\n    {}", rhs_path.display(), e),
+    }
 }

@@ -13,6 +13,23 @@ use crate::ir_utils::{
     sanitize_text_id_to_identifier_name,
 };
 use crate::node_hashing::{compute_node_local_structural_hash, compute_node_structural_hash};
+use xlsynth::IrValue;
+
+fn zero_ir_value_for_type(ty: &Type) -> IrValue {
+    match ty {
+        Type::Token => IrValue::make_tuple(&[]),
+        Type::Bits(width) => IrValue::make_ubits(*width, 0).unwrap(),
+        Type::Tuple(types) => {
+            let elems: Vec<IrValue> = types.iter().map(|t| zero_ir_value_for_type(t)).collect();
+            IrValue::make_tuple(&elems)
+        }
+        Type::Array(arr) => {
+            let elem = zero_ir_value_for_type(&arr.element_type);
+            let elems: Vec<IrValue> = (0..arr.element_count).map(|_| elem.clone()).collect();
+            IrValue::make_array(&elems).unwrap()
+        }
+    }
+}
 
 /// Returns true if two IR functions are structurally equivalent (forward and
 /// backward user-context) and have identical signatures.
@@ -1286,11 +1303,14 @@ pub struct DualDifferenceExtraction {
     pub lhs_region: HashSet<NodeRef>,
     pub rhs_region: HashSet<NodeRef>,
     pub union_params: Vec<(String, Type)>,
+    pub extra_passthrough_params: Vec<(String, Type)>,
     pub lhs_inbound_texts: Vec<String>,
     pub rhs_inbound_texts: Vec<String>,
     pub lhs_outbound: Vec<(String, Vec<String>)>,
     pub rhs_outbound: Vec<(String, Vec<String>)>,
     pub slot_order: Vec<(String, usize)>,
+    pub lhs_inbound_assignment: HashMap<usize, String>,
+    pub rhs_inbound_assignment: HashMap<usize, String>,
 }
 
 pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
@@ -1451,12 +1471,348 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         lhs_region: lhs_interior,
         rhs_region: rhs_interior,
         union_params,
+        extra_passthrough_params: extra_passthrough_params.clone(),
         lhs_inbound_texts,
         rhs_inbound_texts,
         lhs_outbound,
         rhs_outbound,
         slot_order,
+        lhs_inbound_assignment: lhs_inbound_hash.assignment,
+        rhs_inbound_assignment: rhs_inbound_hash.assignment,
     }
+}
+
+fn parse_slot_param_name(name: &str) -> Option<(String, usize)> {
+    if !name.starts_with("__slot__") {
+        return None;
+    }
+    // Format: __slot__{consumer_text}__op{index}
+    let rest = &name[8..];
+    if let Some(pos) = rest.rfind("__op") {
+        let consumer = &rest[..pos];
+        let idx_str = &rest[pos + 4..];
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            return Some((consumer.to_string(), idx));
+        }
+    }
+    None
+}
+
+fn build_merged_params_order(
+    union_params: &[(String, Type)],
+    extra_passthrough_params: &[(String, Type)],
+) -> Vec<(String, Type)> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut merged: Vec<(String, Type)> = Vec::new();
+    for (t, ty) in union_params.iter() {
+        if seen.insert(t.clone()) {
+            merged.push((t.clone(), ty.clone()));
+        }
+    }
+    for (t, ty) in extra_passthrough_params.iter() {
+        if seen.insert(t.clone()) {
+            merged.push((t.clone(), ty.clone()));
+        }
+    }
+    merged
+}
+
+fn build_name_to_inbound_producer_map(
+    inbound_assignment: &HashMap<usize, String>,
+) -> HashMap<String, NodeRef> {
+    let mut m: HashMap<String, NodeRef> = HashMap::new();
+    for (idx, name) in inbound_assignment.iter() {
+        m.insert(name.clone(), NodeRef { index: *idx });
+    }
+    m
+}
+
+fn build_slot_to_index_map(slot_order: &[(String, usize)]) -> BTreeMap<(String, usize), usize> {
+    let mut m: BTreeMap<(String, usize), usize> = BTreeMap::new();
+    for (i, (t, k)) in slot_order.iter().enumerate() {
+        m.insert((t.clone(), *k), i);
+    }
+    m
+}
+
+fn build_prod_to_slot_index_map(
+    side_edges: &BTreeMap<(String, usize), (NodeRef, NodeRef)>,
+    slot_to_index: &BTreeMap<(String, usize), usize>,
+) -> HashMap<usize, usize> {
+    let mut m: HashMap<usize, usize> = HashMap::new();
+    for (key, (prod, _cons)) in side_edges.iter() {
+        if let Some(sidx) = slot_to_index.get(key) {
+            m.entry(prod.index)
+                .and_modify(|v| {
+                    if *sidx < *v {
+                        *v = *sidx
+                    }
+                })
+                .or_insert(*sidx);
+        }
+    }
+    m
+}
+
+pub fn build_common_wrapper_for_side(
+    f: &Fn,
+    region: &HashSet<NodeRef>,
+    inner_name: &str,
+    union_params: &[(String, Type)],
+    extra_passthrough_params: &[(String, Type)],
+    inbound_assignment: &HashMap<usize, String>,
+    slot_order: &[(String, usize)],
+    side_edges: &BTreeMap<(String, usize), (NodeRef, NodeRef)>,
+    inner_ret_ty: &Type,
+) -> Fn {
+    // New function basics: same name/signature as original.
+    let mut new_params: Vec<Param> = Vec::new();
+    let mut new_nodes: Vec<Node> = Vec::new();
+    let mut old_to_new: HashMap<usize, NodeRef> = HashMap::new();
+
+    // Start text_id after max existing.
+    let mut next_text_id: usize = {
+        let mut max_id = 0usize;
+        for n in f.nodes.iter() {
+            if n.text_id > max_id {
+                max_id = n.text_id;
+            }
+        }
+        max_id.saturating_add(1)
+    };
+
+    // Clone params and synthesize GetParam nodes.
+    let mut next_param_pos: usize = 1;
+    for p in f.params.iter() {
+        let pid = ParamId::new(next_param_pos);
+        next_param_pos += 1;
+        new_params.push(Param {
+            name: p.name.clone(),
+            ty: p.ty.clone(),
+            id: pid,
+        });
+        new_nodes.push(Node {
+            text_id: next_text_id,
+            name: Some(p.name.clone()),
+            ty: p.ty.clone(),
+            payload: NodePayload::GetParam(pid),
+            pos: None,
+        });
+        old_to_new.insert(
+            f.nodes
+                .iter()
+                .position(|n| n.name.as_ref() == Some(&p.name))
+                .expect("original GetParam node present"),
+            NodeRef {
+                index: new_nodes.len() - 1,
+            },
+        );
+        next_text_id += 1;
+    }
+
+    let order = get_topological(f);
+
+    // Pass 1: clone outside-of-region nodes that do not depend on region.
+    for nr in order.iter().copied() {
+        if region.contains(&nr) {
+            continue;
+        }
+        let node = f.get_node(nr);
+        let deps = operands(&node.payload);
+        if deps.iter().any(|d| region.contains(d)) {
+            continue;
+        }
+        let mapper = |r: NodeRef| -> NodeRef {
+            *old_to_new
+                .get(&r.index)
+                .expect("dependency should have been cloned")
+        };
+        let new_payload = remap_payload_with(&node.payload, mapper);
+        new_nodes.push(Node {
+            text_id: node.text_id,
+            name: node.name.clone(),
+            ty: node.ty.clone(),
+            payload: new_payload,
+            pos: node.pos.clone(),
+        });
+        old_to_new.insert(
+            nr.index,
+            NodeRef {
+                index: new_nodes.len() - 1,
+            },
+        );
+    }
+
+    // Build invoke operands in original space, then map via old_to_new.
+    let merged = build_merged_params_order(union_params, extra_passthrough_params);
+    let name_to_prod = build_name_to_inbound_producer_map(inbound_assignment);
+    let text_index = build_textual_id_index(f);
+    let slot_to_index = build_slot_to_index_map(slot_order);
+    let resolve_original = |name: &str| -> Option<NodeRef> {
+        if let Some(prod) = name_to_prod.get(name) {
+            return Some(*prod);
+        }
+        if let Some((cons_text, op_index)) = parse_slot_param_name(name) {
+            if let Some(cons_ref) = text_index.get(&cons_text) {
+                let deps = operands(&f.get_node(*cons_ref).payload);
+                if op_index < deps.len() {
+                    return Some(deps[op_index]);
+                }
+            }
+            return None;
+        }
+        // Fall back to textual id mapping.
+        text_index.get(name).copied()
+    };
+    let mut invoke_operands_new: Vec<NodeRef> = Vec::new();
+    for (n, ty) in merged.iter() {
+        let mapped_opt = resolve_original(n).and_then(|orig| old_to_new.get(&orig.index).copied());
+        let mapped = match mapped_opt {
+            Some(mr) => mr,
+            None => {
+                // Synthesize a zero literal of the required type.
+                let lit_node = Node {
+                    text_id: next_text_id,
+                    name: None,
+                    ty: ty.clone(),
+                    payload: NodePayload::Literal(zero_ir_value_for_type(ty)),
+                    pos: None,
+                };
+                new_nodes.push(lit_node);
+                let r = NodeRef {
+                    index: new_nodes.len() - 1,
+                };
+                next_text_id += 1;
+                r
+            }
+        };
+        invoke_operands_new.push(mapped);
+    }
+
+    // Create invoke node.
+    let invoke_node = Node {
+        text_id: next_text_id,
+        name: None,
+        ty: inner_ret_ty.clone(),
+        payload: NodePayload::Invoke {
+            to_apply: inner_name.to_string(),
+            operands: invoke_operands_new,
+        },
+        pos: None,
+    };
+    new_nodes.push(invoke_node);
+    let invoke_ref = NodeRef {
+        index: new_nodes.len() - 1,
+    };
+    next_text_id += 1;
+
+    // Create tuple extractors per slot index (or use invoke directly if single
+    // value).
+    let mut tuple_elems: Vec<NodeRef> = Vec::new();
+    match inner_ret_ty {
+        Type::Tuple(elem_tys) => {
+            for (i, ety) in elem_tys.iter().enumerate() {
+                let ti = Node {
+                    text_id: next_text_id,
+                    name: None,
+                    ty: *ety.clone(),
+                    payload: NodePayload::TupleIndex {
+                        tuple: invoke_ref,
+                        index: i,
+                    },
+                    pos: None,
+                };
+                new_nodes.push(ti);
+                tuple_elems.push(NodeRef {
+                    index: new_nodes.len() - 1,
+                });
+                next_text_id += 1;
+            }
+        }
+        _ => {
+            tuple_elems.push(invoke_ref);
+        }
+    }
+
+    // Build producer->slot index map to choose a representative tuple elem for each
+    // internal producer.
+    let prod_to_slot = build_prod_to_slot_index_map(side_edges, &slot_to_index);
+
+    // Pass 2: clone remaining outside-of-region nodes, mapping region deps to tuple
+    // elems.
+    for nr in order.into_iter() {
+        if region.contains(&nr) {
+            continue;
+        }
+        if old_to_new.contains_key(&nr.index) {
+            continue;
+        }
+        let node = f.get_node(nr);
+        let mapper = |r: NodeRef| -> NodeRef {
+            if region.contains(&r) {
+                let sidx = *prod_to_slot
+                    .get(&r.index)
+                    .expect("slot index for producer in region");
+                return tuple_elems[sidx];
+            }
+            *old_to_new.get(&r.index).expect("mapped earlier dependency")
+        };
+        let new_payload = remap_payload_with(&node.payload, mapper);
+        new_nodes.push(Node {
+            text_id: node.text_id,
+            name: node.name.clone(),
+            ty: node.ty.clone(),
+            payload: new_payload,
+            pos: node.pos.clone(),
+        });
+        old_to_new.insert(
+            nr.index,
+            NodeRef {
+                index: new_nodes.len() - 1,
+            },
+        );
+    }
+
+    // Map return ref.
+    let new_ret = f
+        .ret_node_ref
+        .map(|r| *old_to_new.get(&r.index).expect("mapped return"));
+
+    Fn {
+        name: f.name.clone(),
+        params: new_params,
+        ret_ty: f.ret_ty.clone(),
+        nodes: new_nodes,
+        ret_node_ref: new_ret,
+    }
+}
+
+pub fn build_common_wrapper_lhs(lhs: &Fn, meta: &DualDifferenceExtraction) -> Fn {
+    build_common_wrapper_for_side(
+        lhs,
+        &meta.lhs_region,
+        &meta.lhs_inner.name,
+        &meta.union_params,
+        &meta.extra_passthrough_params,
+        &meta.lhs_inbound_assignment,
+        &meta.slot_order,
+        &collect_outbound_edges_with_operand_indices(lhs, &meta.lhs_region),
+        &meta.lhs_inner.ret_ty,
+    )
+}
+
+pub fn build_common_wrapper_rhs(rhs: &Fn, meta: &DualDifferenceExtraction) -> Fn {
+    build_common_wrapper_for_side(
+        rhs,
+        &meta.rhs_region,
+        &meta.rhs_inner.name,
+        &meta.union_params,
+        &meta.extra_passthrough_params,
+        &meta.rhs_inbound_assignment,
+        &meta.slot_order,
+        &collect_outbound_edges_with_operand_indices(rhs, &meta.rhs_region),
+        &meta.rhs_inner.ret_ty,
+    )
 }
 
 #[cfg(test)]
