@@ -164,6 +164,17 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+          done
+          sudo ldconfig || true
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
           mkdir -p artifacts
@@ -216,6 +227,8 @@ jobs:
       - name: Install Z3 binary
         run: |
           sudo apt-get install -y z3
+          echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Test crate
         env:
@@ -231,8 +244,175 @@ jobs:
             ls -l /usr/lib | grep boolector || true
             exit 1
           fi
-          cargo test --features with-boolector-system,with-z3-system,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
 
+
+  # -----------------------------------------------------------
+  # 3) Ubuntu 20.04 job (no Slang download)
+  # -----------------------------------------------------------
+  build-and-test-ubuntu-2004-no-slang:
+    needs: [lint-check-ubuntu]
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install Python for resolve
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-pip
+
+      - name: Resolve XLS release tag
+        id: resolve-xls-tag-2004
+        run: |
+          TAG=$(python3 get_required_xls_release_tag.py)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Cache xlsynth tools (ubuntu 20.04)
+        uses: actions/cache@v3
+        with:
+          path: xlsynth_tools
+          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag-2004.outputs.tag }}-ubuntu2004
+
+      - name: Install dependencies for Python scripts and downloads
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev zlib1g-dev
+          pip3 install -r requirements.txt
+
+      - name: Set up Python + pre-commit
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          echo "Initializing git repository as a workaround for pre-commit"
+          if [ ! -d ".git" ]; then
+            echo ".git directory not found, initializing..."
+            git init
+          else
+            echo ".git directory found, skipping init."
+          fi
+          python3 -m pip install --upgrade pip
+          pip3 install pre-commit
+          # Configure git for pre-commit install
+          echo "Configuring git safe directory and user..."
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          echo "--- Running Git Diagnostics ---"
+          echo "Current directory:"
+          pwd
+          echo "Listing contents (including .git):"
+          ls -la
+          echo "Git status:"
+          git status
+          echo "Git top level:"
+          git rev-parse --show-toplevel
+          echo "--- End Git Diagnostics ---"
+          pre-commit install
+
+      - name: Run pre-commit checks
+        env:
+          SKIP: no-commit-to-branch
+        run: |
+          # Git config done in setup step
+          pre-commit run --all-files
+
+      - name: Download xlsynth binaries
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          TAG='${{ steps.resolve-xls-tag-2004.outputs.tag }}'
+          echo "Resolved XLS release tag: ${TAG}"
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+
+      - name: Install protobuf compiler
+        run: |
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          unzip protoc-29.1-linux-x86_64.zip -d protoc
+          mv protoc/bin/protoc /usr/local/bin/protoc
+          mv protoc /tmp/
+          mv protoc-*.zip /tmp/
+          protoc --version
+
+      - name: Install Icarus Verilog (prebuilt for rocky8)
+        run: |
+          mkdir -p artifacts
+          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
+          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
+          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          sudo mkdir -p /usr/local/bin /usr/local/lib
+          sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
+          sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
+          sudo chmod +x /usr/local/bin/iverilog /usr/local/bin/vvp
+          sudo tar -xzf artifacts/ivl-rocky8.tar.gz -C /usr/local/lib
+          rm -rf artifacts
+          which iverilog
+          iverilog -V
+
+      - name: Install libc++ from llvm-18
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          # Install prerequisites for llvm.sh and libc++ installation
+          apt-get install -y --no-install-recommends curl wget gnupg lsb-release software-properties-common
+          cd /tmp/
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          ./llvm.sh 18
+          # Install libc++ itself
+          apt-get install -y --no-install-recommends libc++-18-dev libc++abi-18-dev
+
+      - name: Download Bitwuzla shared library (ubuntu20.04)
+        run: |
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+          done
+          ldconfig || true
+          echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          profile: minimal
+          override: true
+          components: clippy
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache for Rust
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=off" >> $GITHUB_ENV
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=5G" >> $GITHUB_ENV
+
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: ubuntu-20.04-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Show rustfmt and cargo versions
+        run: |
+          rustfmt --version
+          cargo --version
+
+      - name: Build crate
+        run: cargo build --features with-z3-system,with-bitwuzla-system --workspace -vv
+
+      - name: Test crate
+        run: |
+          export XLSYNTH_TOOLS=`realpath xlsynth_tools`
+          cargo test --features with-z3-system,with-bitwuzla-system --workspace
   # -----------------------------------------------------------
   # 4) macOS job
   # -----------------------------------------------------------
@@ -262,6 +442,21 @@ jobs:
           TAG='${{ steps.resolve-xls-tag-macos.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
           python3 download_release.py -p arm64 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+
+      - name: Download Bitwuzla shared library (macOS arm64)
+        run: |
+          sudo mkdir -p /usr/local/lib
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-osx-arm64.dylib"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            sudo install -m 0644 "${src}" "/usr/local/lib/lib${lib}.dylib"
+            sudo install_name_tool -id "@rpath/lib${lib}.dylib" "/usr/local/lib/lib${lib}.dylib"
+            sudo rm -f "${src}"
+          done
+          echo "DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib:$DYLD_FALLBACK_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/local/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LDFLAGS=-L/usr/local/lib $LDFLAGS" >> $GITHUB_ENV
 
       - name: Install protobuf compiler
         run: |
@@ -328,15 +523,17 @@ jobs:
           pre-commit run --all-files
 
       - name: Test crate
+        env:
+          DYLD_LIBRARY_PATH: /usr/local/lib
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-built,with-z3-system,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-built,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
   # -----------------------------------------------------------
   build-and-test-rocky8:
-    needs: [lint-check-ubuntu]
+    # needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     container: rockylinux:8
     env:
@@ -389,6 +586,17 @@ jobs:
           echo "source $HOME/.cargo/env" >> $HOME/.bashrc
           source $HOME/.cargo/env
 
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          dnf install -y curl
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+          done
+          ldconfig
+
       - name: Download Slang
         run: |
           curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
@@ -399,7 +607,7 @@ jobs:
       - name: Build crate
         run: |
           source $HOME/.cargo/env
-          cargo build --workspace -vv
+          cargo build --features with-bitwuzla-system --workspace -vv
 
       - name: Test crate
         run: |
@@ -409,7 +617,7 @@ jobs:
           iverilog -V || true
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --workspace
+          cargo test --features with-bitwuzla-system --workspace
 
   valgrind-tests:
     name: Valgrind Tests (Ubuntu)
@@ -622,6 +830,17 @@ jobs:
           ls -l /usr/lib/libboolector.so
           ldconfig -p | grep boolector
 
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+          done
+          sudo ldconfig || true
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Install Z3 binary
         run: |
           sudo apt-get install -y z3
@@ -646,7 +865,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz build --features with-z3-binary-test,with-boolector-system,with-z3-system
+          cargo fuzz build --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system
 
       - name: Build and run fuzz_ir_opt_equiv for 10 seconds
         env:
@@ -655,7 +874,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_ir_opt_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_gatify for 10 seconds
         env:
@@ -664,7 +883,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gatify --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_gatify --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_gate_fn_roundtrip for 10 seconds
         env:
@@ -673,7 +892,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gate_fn_roundtrip --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_gate_fn_roundtrip --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_gate_transform_equiv for 10 seconds
         env:
@@ -682,7 +901,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_gate_transform_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_gate_transform_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_ir_rebase_equiv for 10 seconds
         env:
@@ -691,7 +910,7 @@ jobs:
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
           cd xlsynth-g8r/fuzz
-          cargo fuzz run fuzz_ir_rebase_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system -- -max_total_time=10
+          cargo fuzz run fuzz_ir_rebase_equiv --features with-z3-binary-test,with-boolector-system,with-z3-system,with-bitwuzla-system -- -max_total_time=10
 
       - name: Build and run fuzz_ir_eval_interp_equiv for 10 seconds
         env:
@@ -760,5 +979,16 @@ jobs:
         run: |
           sudo apt-get install -y z3
 
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+          done
+          sudo ldconfig || true
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Ensure benches compile
-        run: cargo bench --features with-z3-system --workspace --no-run
+        run: cargo bench --features with-z3-system,with-bitwuzla-system --workspace --no-run
