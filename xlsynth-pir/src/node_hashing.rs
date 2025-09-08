@@ -2,7 +2,7 @@
 
 //! Helpers for computing structural hashes of XLS IR nodes.
 
-use crate::xls_ir::ir::{Fn, NodePayload, NodeRef, ParamId, Type};
+use crate::ir::{self, Fn, NodePayload, NodeRef, ParamId, Type};
 
 fn update_hash_str(hasher: &mut blake3::Hasher, s: &str) {
     hasher.update(s.as_bytes());
@@ -91,12 +91,8 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             update_hash_u64(hasher, nodes.len() as u64);
         }
         NodePayload::TupleIndex { tuple: _, index } => update_hash_u64(hasher, *index as u64),
-        NodePayload::Binop(op, _, _) => {
-            update_hash_str(hasher, crate::xls_ir::ir::binop_to_operator(*op))
-        }
-        NodePayload::Unop(op, _) => {
-            update_hash_str(hasher, crate::xls_ir::ir::unop_to_operator(*op))
-        }
+        NodePayload::Binop(op, _, _) => update_hash_str(hasher, ir::binop_to_operator(*op)),
+        NodePayload::Unop(op, _) => update_hash_str(hasher, ir::unop_to_operator(*op)),
         NodePayload::Literal(value) => update_hash_str(hasher, &value.to_string()),
         NodePayload::SignExt { new_bit_count, .. } => {
             update_hash_u64(hasher, *new_bit_count as u64)
@@ -140,7 +136,7 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
         } => {}
         NodePayload::AfterAll(nodes) => update_hash_u64(hasher, nodes.len() as u64),
         NodePayload::Nary(op, nodes) => {
-            update_hash_str(hasher, crate::xls_ir::ir::nary_op_to_operator(*op));
+            update_hash_str(hasher, ir::nary_op_to_operator(*op));
             update_hash_u64(hasher, nodes.len() as u64);
         }
         NodePayload::Invoke { to_apply, operands } => {

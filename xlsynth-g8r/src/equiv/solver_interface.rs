@@ -4,7 +4,7 @@ use std::io;
 
 use xlsynth::IrValue;
 
-use crate::xls_ir::ir;
+use xlsynth_pir::ir;
 
 #[derive(Debug, PartialEq)]
 pub enum Response {
@@ -1122,15 +1122,15 @@ macro_rules! test_solver {
                 $solver,
                 8,
                 "#x53",
-                crate::xls_ir::ir::Type::Tuple(vec![
-                    Box::new(crate::xls_ir::ir::Type::Bits(2)),
-                    Box::new(crate::xls_ir::ir::Type::Bits(1)),
-                    Box::new(crate::xls_ir::ir::Type::Bits(5))
+                ir::Type::Tuple(vec![
+                    Box::new(ir::Type::Bits(2)),
+                    Box::new(ir::Type::Bits(1)),
+                    Box::new(ir::Type::Bits(5))
                 ]),
-                xlsynth::IrValue::make_tuple(&[
-                    xlsynth::IrValue::make_ubits(2, 0b11).unwrap(),
-                    xlsynth::IrValue::make_ubits(1, 0b0).unwrap(),
-                    xlsynth::IrValue::make_ubits(5, 0b01010).unwrap(),
+                IrValue::make_tuple(&[
+                    IrValue::make_ubits(2, 0b11).unwrap(),
+                    IrValue::make_ubits(1, 0b0).unwrap(),
+                    IrValue::make_ubits(5, 0b01010).unwrap(),
                 ])
             );
 
@@ -1139,10 +1139,10 @@ macro_rules! test_solver {
                 $solver,
                 8,
                 "#b01010011",
-                crate::xls_ir::ir::Type::Tuple(vec![
-                    Box::new(crate::xls_ir::ir::Type::Bits(2)),
-                    Box::new(crate::xls_ir::ir::Type::Bits(1)),
-                    Box::new(crate::xls_ir::ir::Type::Bits(5))
+                ir::Type::Tuple(vec![
+                    Box::new(ir::Type::Bits(2)),
+                    Box::new(ir::Type::Bits(1)),
+                    Box::new(ir::Type::Bits(5))
                 ]),
                 xlsynth::IrValue::make_tuple(&[
                     xlsynth::IrValue::make_ubits(2, 0b11).unwrap(),
@@ -2279,8 +2279,8 @@ macro_rules! test_solver {
                 solver.pop().unwrap();
             }
 
-            use crate::xls_ir::ir;
             use xlsynth::IrValue;
+            use xlsynth_pir::ir;
 
             /// Tests that we can handle single-bit values converting to/from the solver
             /// as this have a different syntax with Boolector vs. other solvers.

@@ -47,12 +47,13 @@ use bitwuzla_sys::{
     bitwuzla_set_option, bitwuzla_set_option_mode, bitwuzla_term_manager_delete,
     bitwuzla_term_manager_new, bitwuzla_term_to_string, bitwuzla_term_value_get_str,
 };
+use xlsynth::IrBits;
 
 use crate::{
     equiv::solver_interface::{BitVec, Response, Solver, SolverConfig, Uf},
-    ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
-    xls_ir::ir,
+    ir_value_utils::ir_value_from_bits_with_type,
 };
+use xlsynth_pir::ir;
 
 struct RawBitwuzla {
     term_manager: *mut bitwuzla_sys::BitwuzlaTermManager,
@@ -860,7 +861,7 @@ impl Solver for Bitwuzla {
                     .unwrap();
                 let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
                 Ok(ir_value_from_bits_with_type(
-                    &ir_bits_from_lsb_is_0(&bits),
+                    &IrBits::from_lsb_is_0(&bits),
                     ty,
                 ))
             },

@@ -2,13 +2,11 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::{
-    equiv::{
-        prove_equiv::{AssertionSemantics, EquivResult, EquivSide, IrFn, UfSignature},
-        solver_interface::SolverConfig,
-    },
-    xls_ir::{ir, ir_parser::Parser},
+use crate::equiv::{
+    prove_equiv::{AssertionSemantics, EquivResult, EquivSide, IrFn, UfSignature},
+    solver_interface::SolverConfig,
 };
+use xlsynth_pir::{ir, ir_parser};
 
 pub trait Prover {
     fn prove_ir_fn_equiv(self: &Self, lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
@@ -59,10 +57,10 @@ impl<S: SolverConfig> Prover for S {
         rhs_pkg_text: &str,
         top: Option<&str>,
     ) -> EquivResult {
-        let lhs_pkg = Parser::new(lhs_pkg_text)
+        let lhs_pkg = ir_parser::Parser::new(lhs_pkg_text)
             .parse_package()
             .expect("Failed to parse LHS IR package");
-        let rhs_pkg = Parser::new(rhs_pkg_text)
+        let rhs_pkg = ir_parser::Parser::new(rhs_pkg_text)
             .parse_package()
             .expect("Failed to parse RHS IR package");
 

@@ -6,9 +6,9 @@
 use crate::check_equivalence;
 use crate::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-use crate::xls_ir::ir::{self, ParamId, StartAndLimit};
-use crate::xls_ir::ir_utils;
 use std::collections::HashMap;
+use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
+use xlsynth_pir::ir_utils;
 
 use crate::ir2gate_utils::{
     AdderMapping, Direction, gatify_add_brent_kung, gatify_add_kogge_stone,
@@ -2108,8 +2108,9 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String
 
 #[cfg(test)]
 mod tests {
-    use crate::xls_ir::ir;
-    use crate::{ir2gate::GatifyOptions, ir2gate::gatify, xls_ir::ir_parser};
+    use crate::{ir2gate::GatifyOptions, ir2gate::gatify};
+    use xlsynth_pir::ir;
+    use xlsynth_pir::ir_parser;
 
     #[test]
     fn test_gatify_array_literal_flattening() {

@@ -12,7 +12,7 @@ use xlsynth_g8r::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::ir2gate::{GatifyOptions, gatify, gatify_ule_via_bit_tests};
 use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
 use xlsynth_g8r::test_utils::Opt;
-use xlsynth_g8r::xls_ir::ir_parser;
+use xlsynth_pir::ir_parser;
 
 use maplit::btreemap;
 

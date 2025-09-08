@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
-use xlsynth_g8r::xls_ir::ir_parser::{emit_fn_as_block, Parser};
+use xlsynth_pir::{
+    ir,
+    ir_parser::{self, emit_fn_as_block, Parser},
+};
 
 /// Implements the "ir-round-trip" subcommand: parse IR and write it back to
 /// stdout.
@@ -16,10 +19,10 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
     // Grammar-based prefix scanning: package vs block.
     let trimmed = ir_text.trim_start();
     if trimmed.starts_with("package") {
-        match xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(ir_path) {
+        match ir_parser::parse_path_to_package(ir_path) {
             Ok(mut pkg) => {
                 if strip_pos {
-                    pkg.file_table = xlsynth_g8r::xls_ir::ir::FileTable::new();
+                    pkg.file_table = ir::FileTable::new();
                     pkg.for_each_fn_mut(|f| {
                         for n in f.nodes.iter_mut() {
                             n.pos = None;

@@ -2,9 +2,8 @@
 
 use std::collections::HashMap;
 
-use crate::ir_value_utils::ir_bits_from_lsb_is_0;
-use crate::xls_ir::ir;
-use crate::xls_ir::ir_utils::get_topological;
+use crate::ir;
+use crate::ir_utils::get_topological;
 use xlsynth::{IrBits, IrValue};
 
 fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
@@ -113,7 +112,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     for i in 0..w {
                         outs.push(operand_bits.get_bit(w - 1 - i).unwrap());
                     }
-                    let out_bits = ir_bits_from_lsb_is_0(&outs);
+                    let out_bits = IrBits::from_lsb_is_0(&outs);
                     IrValue::from_bits(&out_bits)
                 }
             }
@@ -202,7 +201,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 for _ in old_w..new_w {
                     outs.push(false);
                 }
-                let out_bits = ir_bits_from_lsb_is_0(&outs);
+                let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
             }
         }
@@ -228,7 +227,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 for _ in old_w..new_w {
                     outs.push(msb);
                 }
-                let out_bits = ir_bits_from_lsb_is_0(&outs);
+                let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
             }
         }
@@ -345,7 +344,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             // Final bit is set when arg == 0
             outs.push(prior_clear);
-            let out_bits = ir_bits_from_lsb_is_0(&outs);
+            let out_bits = IrBits::from_lsb_is_0(&outs);
             IrValue::from_bits(&out_bits)
         }
         ir::NodePayload::BitSliceUpdate {
@@ -374,7 +373,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     out.push(arg_bits.get_bit(i).unwrap());
                 }
             }
-            let out_bits = ir_bits_from_lsb_is_0(&out);
+            let out_bits = IrBits::from_lsb_is_0(&out);
             IrValue::from_bits(&out_bits)
         }
         ir::NodePayload::Sel {
@@ -762,7 +761,7 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                         outs.push(arg_bits.get_bit(i).unwrap());
                     }
                 }
-                let out_bits = ir_bits_from_lsb_is_0(&outs);
+                let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
             }
             P::Decode { arg, width: _ } => {
@@ -781,7 +780,7 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                 if arg_u < expected_w {
                     outs[arg_u] = true;
                 }
-                let out_bits = ir_bits_from_lsb_is_0(&outs);
+                let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
             }
             _ => eval_pure(node, &env),
@@ -853,7 +852,7 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir_parser::Parser;
     use maplit::hashmap;
 
     #[test]
@@ -1318,7 +1317,7 @@ fn f(x: bits[1] id=1) -> bits[1] {
         let mut p = Parser::new(ir_text);
         let pkg = p.parse_and_validate_package().expect("parse ok");
         let f = match &pkg.members[0] {
-            crate::xls_ir::ir::PackageMember::Function(f) => f.clone(),
+            ir::PackageMember::Function(f) => f.clone(),
             _ => unreachable!(),
         };
 
@@ -1360,7 +1359,7 @@ fn f(x: bits[3] id=1) -> bits[1] {
         let mut p = Parser::new(ir_text);
         let pkg = p.parse_and_validate_package().expect("parse ok");
         let f = match &pkg.members[0] {
-            crate::xls_ir::ir::PackageMember::Function(f) => f.clone(),
+            ir::PackageMember::Function(f) => f.clone(),
             _ => unreachable!(),
         };
 

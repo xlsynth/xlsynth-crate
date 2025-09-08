@@ -8,7 +8,7 @@
 //! level context (e.g. `invoke`) or richer semantics may return `Ok(None)`
 //! to indicate deduction is not presently implemented.
 
-use crate::xls_ir::ir::{ArrayTypeData, Binop, NaryOp, NodePayload, Type, Unop};
+use crate::ir::{ArrayTypeData, Binop, NaryOp, NodePayload, Type, Unop};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeduceError {

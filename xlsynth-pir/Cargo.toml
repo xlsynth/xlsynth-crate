@@ -1,0 +1,28 @@
+[package]
+name = "xlsynth-pir"
+version = "0.0.182"
+edition = "2024"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "partial XLS IR focused on functions"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth"
+homepage = "https://github.com/xlsynth/xlsynth-crate"
+
+[dependencies]
+xlsynth = { path = "../xlsynth", version = "0.0.182" }
+env_logger = "0.11"
+log = "0.4"
+arbitrary = { version = "1.3", features = ["derive"] }
+blake3 = "1.5"
+rand = "0.8"
+rand_pcg = "0.3.1"
+
+[dev-dependencies]
+maplit = "1.0.2"
+pretty_assertions = "1.4.1"
+xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.0.182" }
+
+[lib]
+name = "xlsynth_pir"
+path = "src/lib.rs"

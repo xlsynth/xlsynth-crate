@@ -5,9 +5,9 @@
 
 use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn, NodePayload, Type};
-use crate::xls_ir::ir_deduce::deduce_result_type;
-use crate::xls_ir::ir_utils::operands;
+use crate::ir::{self, Fn, NodePayload, Type};
+use crate::ir_deduce::deduce_result_type;
+use crate::ir_utils::operands;
 
 /// Verifies that all node text IDs within a function are unique.
 pub fn verify_fn_unique_node_ids(f: &Fn) -> Result<(), String> {
@@ -26,7 +26,7 @@ pub fn verify_fn_unique_node_ids(f: &Fn) -> Result<(), String> {
 /// Verifies that all NodeRef indices referenced by payloads are within bounds.
 pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
     let n = f.nodes.len();
-    let check = |nr: crate::xls_ir::ir::NodeRef, ctx: &str| -> Result<(), String> {
+    let check = |nr: ir::NodeRef, ctx: &str| -> Result<(), String> {
         if nr.index >= n {
             return Err(format!(
                 "operand index {} out of bounds in {}; function '{}' has {} nodes",
@@ -195,7 +195,7 @@ pub fn verify_fn_types_agree_with_deduction(f: &Fn) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir_parser::Parser;
 
     #[test]
     fn type_mismatch_on_add_is_flagged() {

@@ -7,14 +7,12 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type, node_textual_id};
-use crate::xls_ir::ir_utils::{
+use crate::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type, node_textual_id};
+use crate::ir_utils::{
     compute_users, get_topological, is_valid_identifier_name, operands, remap_payload_with,
     sanitize_text_id_to_identifier_name,
 };
-use crate::xls_ir::node_hashing::{
-    compute_node_local_structural_hash, compute_node_structural_hash,
-};
+use crate::node_hashing::{compute_node_local_structural_hash, compute_node_structural_hash};
 
 /// Returns true if two IR functions are structurally equivalent (forward and
 /// backward user-context) and have identical signatures.
@@ -1322,8 +1320,8 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir::PackageMember;
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir::PackageMember;
+    use crate::ir_parser::Parser;
 
     fn parse_fn(ir: &str) -> Fn {
         let pkg_text = format!("package test\n\n{}\n", ir);

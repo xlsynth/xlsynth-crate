@@ -2,11 +2,11 @@
 
 //! Functionality for proposing equivalence classes via concrete simulation.
 
-use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate::{AigNode, AigRef, GateFn};
 use crate::gate_sim::{self, Collect, GateSimResult};
 use bitvec::vec::BitVec;
 use xlsynth::IrBits;
+use xlsynth_pir::fuzz_utils::arbitrary_irbits;
 
 use rand::Rng;
 use std::collections::{HashMap, HashSet};

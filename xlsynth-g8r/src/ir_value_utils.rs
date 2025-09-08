@@ -2,33 +2,7 @@
 
 use bitvec::vec::BitVec;
 use xlsynth::{IrValue, ir_value::IrBits};
-
-/// Converts a `&[bool]` slice into an IR `Bits` value.
-///
-/// ```
-/// use xlsynth::ir_value::IrFormatPreference;
-/// use xlsynth::IrBits;
-/// use xlsynth_g8r::ir_value_utils::ir_bits_from_lsb_is_0;
-///
-/// let bools = vec![true, false, true, false]; // LSB is bools[0]
-/// let ir_bits: IrBits = ir_bits_from_lsb_is_0(&bools);
-/// assert_eq!(ir_bits.to_string_fmt(IrFormatPreference::Binary, false), "0b101");
-/// assert_eq!(ir_bits.get_bit_count(), 4);
-/// assert_eq!(ir_bits.get_bit(0).unwrap(), true); // LSB
-/// assert_eq!(ir_bits.get_bit(1).unwrap(), false);
-/// assert_eq!(ir_bits.get_bit(2).unwrap(), true);
-/// assert_eq!(ir_bits.get_bit(3).unwrap(), false); // MSB
-/// ```
-pub fn ir_bits_from_lsb_is_0(bits: &[bool]) -> IrBits {
-    if bits.is_empty() {
-        return IrBits::make_ubits(0, 0).unwrap();
-    }
-    let mut s: String = format!("bits[{}]:0b", bits.len());
-    for b in bits.iter().rev() {
-        s.push(if *b { '1' } else { '0' });
-    }
-    IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
-}
+use xlsynth_pir::ir;
 
 pub fn ir_bits_from_bitvec_lsb_is_0(bv: &BitVec) -> IrBits {
     if bv.is_empty() {
@@ -52,29 +26,13 @@ pub fn ir_bits_from_bitvec_msb_is_0(bv: &BitVec) -> IrBits {
     IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
 }
 
-/// Turns a boolean slice into an IR `Bits` value under the assumption that
-/// index 0 in the slice is the most significant bit (MSb).
-pub fn ir_bits_from_msb_is_0(bits: &[bool]) -> IrBits {
-    if bits.is_empty() {
-        return IrBits::make_ubits(0, 0).unwrap();
-    }
-    let mut s: String = format!("bits[{}]:0b", bits.len());
-    for b in bits {
-        s.push(if *b { '1' } else { '0' });
-    }
-    IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
-}
-
-pub fn ir_value_from_bits_with_type(
-    bits: &IrBits,
-    ty: &crate::xls_ir::ir::Type,
-) -> xlsynth::IrValue {
+pub fn ir_value_from_bits_with_type(bits: &IrBits, ty: &ir::Type) -> IrValue {
     match ty {
-        crate::xls_ir::ir::Type::Bits(width) => {
+        ir::Type::Bits(width) => {
             assert_eq!(bits.get_bit_count(), *width);
-            xlsynth::IrValue::from_bits(bits)
+            IrValue::from_bits(bits)
         }
-        crate::xls_ir::ir::Type::Array(array_ty) => {
+        ir::Type::Array(array_ty) => {
             let elem_width = array_ty.element_type.bit_count();
             let mut elements = Vec::with_capacity(array_ty.element_count);
             for i in 0..array_ty.element_count {
@@ -84,13 +42,13 @@ pub fn ir_value_from_bits_with_type(
                 for j in start..end {
                     elem_bits_vec.push(bits.get_bit(j).unwrap());
                 }
-                let elem_bits = ir_bits_from_lsb_is_0(&elem_bits_vec);
+                let elem_bits = IrBits::from_lsb_is_0(&elem_bits_vec);
                 let elem_value = ir_value_from_bits_with_type(&elem_bits, &array_ty.element_type);
                 elements.push(elem_value);
             }
-            xlsynth::IrValue::make_array(&elements).unwrap()
+            IrValue::make_array(&elements).unwrap()
         }
-        crate::xls_ir::ir::Type::Tuple(types) => {
+        ir::Type::Tuple(types) => {
             let mut elements = Vec::with_capacity(types.len());
             let mut offset = 0;
             for t in types.iter() {
@@ -99,14 +57,14 @@ pub fn ir_value_from_bits_with_type(
                 for j in offset..offset + t_width {
                     elem_bits_vec.push(bits.get_bit(j).unwrap());
                 }
-                let elem_bits = ir_bits_from_lsb_is_0(&elem_bits_vec);
+                let elem_bits = IrBits::from_lsb_is_0(&elem_bits_vec);
                 let elem_value = ir_value_from_bits_with_type(&elem_bits, t);
                 elements.push(elem_value);
                 offset += t_width;
             }
-            xlsynth::IrValue::make_tuple(&elements)
+            IrValue::make_tuple(&elements)
         }
-        crate::xls_ir::ir::Type::Token => xlsynth::IrValue::make_tuple(&[]), // Tokens are zero bits
+        ir::Type::Token => IrValue::make_tuple(&[]), // Tokens are zero bits
     }
 }
 
@@ -120,7 +78,7 @@ mod tests {
     fn test_ir_bits_from_lsb_is_0() {
         // Small: bits: [true, false, true, false] => 0b0101 (LSB at index 0)
         let bits = [true, false, true, false];
-        let ir = ir_bits_from_lsb_is_0(&bits);
+        let ir = IrBits::from_lsb_is_0(&bits);
         assert_eq!(ir, IrBits::make_ubits(4, 0b0101).unwrap());
 
         // Large: 100 bits, alternating true/false, LSB at index 0
@@ -128,7 +86,7 @@ mod tests {
         for i in 0..100 {
             bits.push(i % 2 == 0);
         }
-        let ir = ir_bits_from_lsb_is_0(&bits);
+        let ir = IrBits::from_lsb_is_0(&bits);
         // Check a few bits
         for i in 0..100 {
             assert_eq!(ir.get_bit(i).unwrap(), i % 2 == 0, "bit {}", i);
@@ -187,7 +145,7 @@ mod tests {
     #[test]
     fn test_ir_bits_from_lsb_is_0_zero_bits() {
         let bits: [bool; 0] = [];
-        let ir = ir_bits_from_lsb_is_0(&bits);
+        let ir = IrBits::from_lsb_is_0(&bits);
         assert_eq!(ir, IrBits::make_ubits(0, 0).unwrap());
         assert_eq!(ir.get_bit_count(), 0);
     }
@@ -211,7 +169,7 @@ mod tests {
     #[test]
     fn test_ir_bits_from_msb_is_0_zero_bits() {
         let bits: [bool; 0] = [];
-        let ir = ir_bits_from_msb_is_0(&bits);
+        let ir = IrBits::from_msb_is_0(&bits);
         assert_eq!(ir, IrBits::make_ubits(0, 0).unwrap());
         assert_eq!(ir.get_bit_count(), 0);
     }

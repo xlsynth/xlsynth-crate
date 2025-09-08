@@ -10,6 +10,7 @@ use crate::equiv::{
 use crate::equiv::prove_equiv::FnOutput;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt};
+use xlsynth_pir::ir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -161,9 +162,7 @@ where
             // Determine if any assertion violated and build FnOutput accordingly
             let mut violation: Option<(String, String)> = None;
             for a in &smt_fn.assertions {
-                let val = solver
-                    .get_value(&a.active, &crate::xls_ir::ir::Type::Bits(1))
-                    .unwrap();
+                let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
                 let bits = val.to_bits().unwrap();
                 if !bits.get_bit(0).unwrap() {
                     violation = Some((a.message.to_string(), a.label.to_string()));
@@ -193,7 +192,7 @@ where
 mod test_utils {
     use super::*;
     use crate::equiv::prove_equiv::IrFn;
-    use crate::xls_ir::ir_parser::Parser;
+    use xlsynth_pir::ir_parser::Parser;
 
     /// Assert that `prove_ir_fn_always_true` returns `Proved`.
     pub fn assert_proved<S: Solver>(

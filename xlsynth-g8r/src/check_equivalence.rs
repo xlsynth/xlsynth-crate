@@ -2,7 +2,8 @@
 
 use std::time::Instant;
 
-use crate::{gate, gate2ir, xls_ir::ir};
+use crate::{gate, gate2ir};
+use xlsynth_pir::ir;
 
 pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), String> {
     check_equivalence_with_top(orig_package, gate_package, None, false)
@@ -232,8 +233,8 @@ mod tests {
     use crate::{
         gate::AigBitVector,
         gate_builder::{GateBuilder, GateBuilderOptions},
-        xls_ir::ir_parser,
     };
+    use xlsynth_pir::ir_parser;
 
     use super::*;
 

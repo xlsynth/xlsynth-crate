@@ -38,6 +38,30 @@ impl IrBits {
         Self::from_raw(result)
     }
 
+    pub fn from_lsb_is_0(bits: &[bool]) -> Self {
+        if bits.is_empty() {
+            return IrBits::make_ubits(0, 0).unwrap();
+        }
+        let mut s: String = format!("bits[{}]:0b", bits.len());
+        for b in bits.iter().rev() {
+            s.push(if *b { '1' } else { '0' });
+        }
+        IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
+    }
+
+    /// Turns a boolean slice into an IR `Bits` value under the assumption that
+    /// index 0 in the slice is the most significant bit (MSb).
+    pub fn from_msb_is_0(bits: &[bool]) -> Self {
+        if bits.is_empty() {
+            return IrBits::make_ubits(0, 0).unwrap();
+        }
+        let mut s: String = format!("bits[{}]:0b", bits.len());
+        for b in bits {
+            s.push(if *b { '1' } else { '0' });
+        }
+        IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
+    }
+
     pub fn make_ubits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
         xls_bits_make_ubits(bit_count, value)
     }

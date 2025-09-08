@@ -7,8 +7,8 @@
 use clap::Parser;
 use std::time::Instant;
 use xlsynth_g8r::check_equivalence::check_equivalence_with_top;
-use xlsynth_g8r::xls_ir::ir::Package;
-use xlsynth_g8r::xls_ir::ir_parser::Parser as IrParser;
+use xlsynth_pir::ir::Package;
+use xlsynth_pir::ir_parser::Parser as IrParser;
 
 /// Checks equivalence of two XLS IR functions by name.
 #[derive(Parser, Debug)]

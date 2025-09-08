@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::fuzz_utils::arbitrary_irbits;
-use crate::xls_ir::ir::Type as InternalType;
-use crate::xls_ir::ir_parser;
+use crate::ir::Type as InternalType;
+use crate::ir_parser;
+use crate::{fuzz_utils::arbitrary_irbits, ir};
 use arbitrary::Arbitrary;
 use rand::Rng;
 use std::collections::BTreeMap;
@@ -1004,7 +1004,7 @@ pub struct FuzzSampleWithArgs {
 impl FuzzSampleWithArgs {
     /// Generates `IrValue` arguments for the parameters of the given internal
     /// IR function.
-    pub fn gen_args_for_fn(&self, f: &crate::xls_ir::ir::Fn) -> Vec<xlsynth::IrValue> {
+    pub fn gen_args_for_fn(&self, f: &ir::Fn) -> Vec<xlsynth::IrValue> {
         use rand_pcg::Pcg64Mcg;
         let mut out: Vec<xlsynth::IrValue> = Vec::with_capacity(f.params.len());
         for (i, p) in f.params.iter().enumerate() {

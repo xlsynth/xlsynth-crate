@@ -6,8 +6,8 @@ use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 
 use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
-use xlsynth_g8r::xls_ir::ir::{self as ir_mod, BlockPortInfo, FileTable, Package, PackageMember};
-use xlsynth_g8r::xls_ir::ir_parser;
+use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, FileTable, Package, PackageMember};
+use xlsynth_pir::ir_parser;
 
 use std::collections::HashMap;
 

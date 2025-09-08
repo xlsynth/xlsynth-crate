@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::xls_ir::ir::{Fn as IrFn, Node, NodeRef, Type};
-use crate::xls_ir::ir_utils::{get_topological, get_topological_nodes, remap_payload_with};
-use crate::xls_ir::structural_similarity::collect_structural_entries;
+use crate::ir::{Fn as IrFn, Node, NodeRef, Type};
+use crate::ir_utils::{get_topological, get_topological_nodes, remap_payload_with};
+use crate::structural_similarity::collect_structural_entries;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DesiredNodeRef(NodeRef);
@@ -198,8 +198,8 @@ pub fn rebase_onto(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir::{Binop, NaryOp, NodePayload, PackageMember};
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir::{Binop, NaryOp, NodePayload, PackageMember};
+    use crate::ir_parser::Parser;
 
     fn parse_fn(ir: &str) -> IrFn {
         let pkg_text = format!("package test\n\n{}\n", ir);
@@ -216,11 +216,13 @@ mod tests {
     }
 
     fn check_desired_equivalence(desired: &IrFn, result: &IrFn) {
-        let res = crate::equiv::prove_equiv_via_toolchain::prove_ir_fn_equiv_via_toolchain(
-            desired, result,
-        );
+        let res =
+            xlsynth_g8r::equiv::prove_equiv_via_toolchain::prove_ir_fn_strings_equiv_via_toolchain(
+                &desired.to_string(),
+                &result.to_string(),
+            );
         assert!(
-            matches!(res, crate::equiv::prove_equiv::EquivResult::Proved),
+            matches!(res, xlsynth_g8r::equiv::prove_equiv::EquivResult::Proved),
             "Toolchain IR equivalence failed: {:?}",
             res
         );
