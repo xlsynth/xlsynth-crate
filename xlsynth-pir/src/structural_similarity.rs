@@ -879,8 +879,8 @@ fn summarize_region_outbound(f: &Fn, region: &HashSet<NodeRef>) -> Vec<(String, 
     per_return
 }
 
-// Helper: collect outbound edges (consumer with operand index) for boundary
-// producers.
+// Helper: collect outbound edges keyed by (consumer backward-hash, operand index)
+// for boundary producers.
 fn collect_outbound_edges_with_operand_indices(
     f: &Fn,
     region: &std::collections::HashSet<NodeRef>,
@@ -888,6 +888,12 @@ fn collect_outbound_edges_with_operand_indices(
     let users_map = compute_users(f);
     let boundary = compute_region_boundary_nodes(f, region, &users_map);
     let mut edges: BTreeMap<(String, usize), (NodeRef, NodeRef)> = BTreeMap::new();
+    // Precompute backward hashes per node for stable consumer identity.
+    let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(f);
+    let mut bwd_hex_by_index: Vec<String> = vec![String::new(); f.nodes.len()];
+    for (i, e) in bwd_entries.into_iter().enumerate() {
+        bwd_hex_by_index[i] = e.hash.to_hex().to_string();
+    }
     for prod in boundary.into_iter() {
         if let Some(users) = users_map.get(&prod) {
             for user in users.iter().copied().filter(|u| !region.contains(u)) {
@@ -895,7 +901,7 @@ fn collect_outbound_edges_with_operand_indices(
                 let deps = operands(&user_node.payload);
                 for (op_index, dep) in deps.into_iter().enumerate() {
                     if dep.index == prod.index {
-                        let key = (node_textual_id(f, user), op_index);
+                        let key = (bwd_hex_by_index[user.index].clone(), op_index);
                         edges.insert(key, (prod, user));
                     }
                 }
@@ -916,8 +922,8 @@ fn build_textual_id_index(f: &Fn) -> HashMap<String, NodeRef> {
     m
 }
 
-fn make_slot_param_name(consumer_text: &str, op_index: usize) -> String {
-    format!("__slot__{}__op{}", consumer_text, op_index)
+fn make_slot_param_name(consumer_bwd_hash: &str, op_index: usize) -> String {
+    format!("__slot__{}__op{}", consumer_bwd_hash, op_index)
 }
 
 // Helper: collect inbound edges (producer outside region to consumer inside)
@@ -1108,6 +1114,8 @@ fn build_inner_with_union_user_slots(
     side_edges: &BTreeMap<(String, usize), (NodeRef, NodeRef)>,
     // For this side only, mapping from inbound external producer index -> assigned param name.
     inbound_assignment: &HashMap<usize, String>,
+    // For this side only, mapping from consumer backward-hash -> NodeRef.
+    consumer_by_bwd: &HashMap<String, NodeRef>,
 ) -> Fn {
     // 1) Create inner params: union of union_params + extra_passthrough_params,
     //    dedup’d by name, in deterministic order.
@@ -1222,8 +1230,8 @@ fn build_inner_with_union_user_slots(
     // 3) Assemble return tuple in slot order
     let mut ret_elems: Vec<NodeRef> = Vec::with_capacity(slot_order.len());
     let mut ret_tys: Vec<Type> = Vec::with_capacity(slot_order.len());
-    for (consumer_text, op_index) in slot_order.iter() {
-        if let Some((prod, _user)) = side_edges.get(&(consumer_text.clone(), *op_index)) {
+    for (consumer_bwd_hash, op_index) in slot_order.iter() {
+        if let Some((prod, _user)) = side_edges.get(&(consumer_bwd_hash.clone(), *op_index)) {
             let inner_ref = *old_to_new
                 .get(&prod.index)
                 .expect("inner ref for boundary producer");
@@ -1231,22 +1239,15 @@ fn build_inner_with_union_user_slots(
             ret_elems.push(inner_ref);
         } else {
             // Passthrough: use the original consumer operand value as a param via hash mapping.
-            let mut consumer_ref_opt: Option<NodeRef> = None;
-            for (i, _n) in f.nodes.iter().enumerate() {
-                if node_textual_id(f, NodeRef { index: i }) == *consumer_text {
-                    consumer_ref_opt = Some(NodeRef { index: i });
-                    break;
-                }
-            }
-            if let Some(consumer_ref) = consumer_ref_opt {
-                let deps = operands(&f.get_node(consumer_ref).payload);
+            if let Some(consumer_ref) = consumer_by_bwd.get(consumer_bwd_hash) {
+                let deps = operands(&f.get_node(*consumer_ref).payload);
                 if *op_index < deps.len() {
                     let dep = deps[*op_index];
                     let pname = inbound_assignment.get(&dep.index).unwrap_or_else(|| {
                         panic!(
-                            "missing inbound param assignment for passthrough; func={}, consumer_text={}, op_index={}, dep_text={}, dep_fwd_hash={}",
+                            "missing inbound param assignment for passthrough; func={}, consumer_bwd_hash={}, op_index={}, dep_text={}, dep_fwd_hash={}",
                             f.name,
-                            consumer_text,
+                            consumer_bwd_hash,
                             op_index,
                             node_textual_id(f, dep),
                             fwd_hash_hex_by_index[dep.index]
@@ -1254,9 +1255,9 @@ fn build_inner_with_union_user_slots(
                     });
                     let param_ref = *text_to_inner_param_ref.get(pname).unwrap_or_else(|| {
                         panic!(
-                            "missing inbound param node for passthrough; func={}, consumer_text={}, op_index={}, pname={}",
+                            "missing inbound param node for passthrough; func={}, consumer_bwd_hash={}, op_index={}, pname={}",
                             f.name,
-                            consumer_text,
+                            consumer_bwd_hash,
                             op_index,
                             pname
                         )
@@ -1265,17 +1266,17 @@ fn build_inner_with_union_user_slots(
                     ret_elems.push(param_ref);
                 } else {
                     panic!(
-                        "slot op index out of range while building passthrough; func={}, consumer_text={}, op_index={}, deps_len={}",
+                        "slot op index out of range while building passthrough; func={}, consumer_bwd_hash={}, op_index={}, deps_len={}",
                         f.name,
-                        consumer_text,
+                        consumer_bwd_hash,
                         op_index,
                         deps.len()
                     );
                 }
             } else {
                 panic!(
-                    "consumer missing while building passthrough; func={}, consumer_text={}",
-                    f.name, consumer_text
+                    "consumer missing while building passthrough; func={}, consumer_bwd_hash={}",
+                    f.name, consumer_bwd_hash
                 );
             }
         }
@@ -1351,11 +1352,20 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
     for k in rhs_edges.keys() {
         slot_keys.insert(k.clone());
     }
-    let lhs_text_index = build_textual_id_index(lhs);
-    let rhs_text_index = build_textual_id_index(rhs);
+    // Build bwd-hash lookup for consumers on each side.
+    let (lhs_bwd_entries, _ld) = collect_backward_structural_entries(lhs);
+    let (rhs_bwd_entries, _rd) = collect_backward_structural_entries(rhs);
+    let mut lhs_consumer_by_bwd: HashMap<String, NodeRef> = HashMap::new();
+    for (i, e) in lhs_bwd_entries.into_iter().enumerate() {
+        lhs_consumer_by_bwd.insert(e.hash.to_hex().to_string(), NodeRef { index: i });
+    }
+    let mut rhs_consumer_by_bwd: HashMap<String, NodeRef> = HashMap::new();
+    for (i, e) in rhs_bwd_entries.into_iter().enumerate() {
+        rhs_consumer_by_bwd.insert(e.hash.to_hex().to_string(), NodeRef { index: i });
+    }
     let mut slot_order: Vec<(String, usize)> = slot_keys.into_iter().collect();
     slot_order.sort_by(|a, b| {
-        let ord = a.0.cmp(&b.0);
+        let ord = a.0.as_bytes().cmp(&b.0.as_bytes());
         if ord != std::cmp::Ordering::Equal {
             return ord;
         }
@@ -1375,6 +1385,7 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         &slot_order,
         &lhs_edges,
         &lhs_inbound_hash.assignment,
+        &lhs_consumer_by_bwd,
     );
     let rhs_inner = build_inner_with_union_user_slots(
         rhs,
@@ -1384,6 +1395,7 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         &slot_order,
         &rhs_edges,
         &rhs_inbound_hash.assignment,
+        &rhs_consumer_by_bwd,
     );
 
     let lhs_inbound_texts: Vec<String> = lhs_inbound_map.keys().cloned().collect();
@@ -1412,7 +1424,7 @@ fn parse_slot_param_name(name: &str) -> Option<(String, usize)> {
     if !name.starts_with("__slot__") {
         return None;
     }
-    // Format: __slot__{consumer_text}__op{index}
+    // Format: __slot__{consumer_bwd_hash}__op{index}
     let rest = &name[8..];
     if let Some(pos) = rest.rfind("__op") {
         let consumer = &rest[..pos];
