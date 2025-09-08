@@ -11,11 +11,10 @@ use std::{
 
 use easy_smt::{Context, ContextBuilder, SExpr};
 
-use crate::{
-    equiv::solver_interface::{BitVec, Solver, SolverConfig, Uf},
-    ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
-    xls_ir::ir,
-};
+use crate::equiv::solver_interface::{BitVec, Solver, SolverConfig, Uf};
+use crate::ir_value_utils::ir_value_from_bits_with_type;
+use xlsynth::IrBits;
+use xlsynth_pir::ir;
 
 #[derive(Debug, Clone)]
 pub struct SolverFn {
@@ -461,7 +460,7 @@ impl Solver for EasySmtSolver {
                 };
                 let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
                 Ok(ir_value_from_bits_with_type(
-                    &ir_bits_from_lsb_is_0(&bits),
+                    &IrBits::from_lsb_is_0(&bits),
                     ty,
                 ))
             }
