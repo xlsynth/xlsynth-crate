@@ -719,6 +719,47 @@ pub(crate) fn xls_mangle_dslx_name(
     Ok(unsafe { c_str_to_rust(mangled_out) })
 }
 
+pub(crate) fn xls_mangle_dslx_name_full(
+    module_name: &str,
+    function_name: &str,
+    convention: crate::DslxCallingConvention,
+    free_keys: &[&str],
+    param_env: Option<&crate::dslx::ParametricEnv>,
+    scope: Option<&str>,
+) -> Result<String, XlsynthError> {
+    let module_c = std::ffi::CString::new(module_name).unwrap();
+    let function_c = std::ffi::CString::new(function_name).unwrap();
+
+    let free_key_cstrs: Vec<std::ffi::CString> = free_keys
+        .iter()
+        .map(|s| std::ffi::CString::new((*s).as_bytes()).unwrap())
+        .collect();
+    let free_key_ptrs: Vec<*const std::os::raw::c_char> =
+        free_key_cstrs.iter().map(|s| s.as_ptr()).collect();
+    let free_keys_ptr = if free_key_ptrs.is_empty() {
+        std::ptr::null()
+    } else {
+        free_key_ptrs.as_ptr()
+    };
+
+    let (_scope_cstr_opt, scope_ptr) = optional_cstring_and_ptr(scope);
+    let cc: xlsynth_sys::XlsCallingConvention = convention.into();
+
+    let mut mangled_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+    xls_ffi_call!(
+        xlsynth_sys::xls_mangle_dslx_name_full,
+        module_c.as_ptr(),
+        function_c.as_ptr(),
+        cc,
+        free_keys_ptr,
+        free_key_ptrs.len(),
+        param_env.map(|e| e.as_ptr()).unwrap_or(std::ptr::null()),
+        scope_ptr;
+        mangled_out
+    )?;
+    Ok(unsafe { c_str_to_rust(mangled_out) })
+}
+
 pub(crate) fn xls_schedule_and_codegen_package(
     _package: &Arc<RwLock<IrPackagePtr>>,
     guard: RwLockWriteGuard<IrPackagePtr>,

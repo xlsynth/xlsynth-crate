@@ -17,7 +17,10 @@ use std::os::raw::c_char;
 use ir_package::ScheduleAndCodegenResult;
 pub use ir_value::{IrBits, IrSBits, IrUBits};
 use lib_support::xls_schedule_and_codegen_package;
-use lib_support::{c_str_to_rust, c_str_to_rust_no_dealloc, xls_mangle_dslx_name, xls_optimize_ir};
+use lib_support::{
+    c_str_to_rust, c_str_to_rust_no_dealloc, xls_mangle_dslx_name, xls_mangle_dslx_name_full,
+    xls_optimize_ir,
+};
 
 pub use ir_builder::BValue;
 pub use ir_builder::FnBuilder;
@@ -249,11 +252,25 @@ pub fn mangle_dslx_name(module: &str, name: &str) -> Result<String, XlsynthError
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Indicates the calling convention used by a DSLX function for mangling.
 pub enum DslxCallingConvention {
-    /// Normal DSLX function (no implicit token parameter in the mangled name).
-    Normal,
+    /// Typical DSLX function (no implicit token parameter in the mangled name).
+    Typical,
     /// DSLX function that has an implicit token parameter; mangled name is
     /// prefixed with `__itok`.
     ImplicitToken,
+    /// DSLX proc-next convention (e.g. used for state machine next functions).
+    ProcNext,
+}
+
+impl From<DslxCallingConvention> for xlsynth_sys::XlsCallingConvention {
+    fn from(value: DslxCallingConvention) -> Self {
+        match value {
+            DslxCallingConvention::Typical => xlsynth_sys::XLS_CALLING_CONVENTION_TYPICAL,
+            DslxCallingConvention::ImplicitToken => {
+                xlsynth_sys::XLS_CALLING_CONVENTION_IMPLICIT_TOKEN
+            }
+            DslxCallingConvention::ProcNext => xlsynth_sys::XLS_CALLING_CONVENTION_PROC_NEXT,
+        }
+    }
 }
 
 /// Mangles a DSLX function name according to the given calling convention.
@@ -264,11 +281,22 @@ pub fn mangle_dslx_name_with_calling_convention(
     name: &str,
     cc: DslxCallingConvention,
 ) -> Result<String, XlsynthError> {
-    let base = mangle_dslx_name(module, name)?;
-    Ok(match cc {
-        DslxCallingConvention::Normal => base,
-        DslxCallingConvention::ImplicitToken => format!("__itok{base}"),
-    })
+    // Delegate to the full-featured mangler-with-env with no
+    // free-keys/parametrics/scope.
+    mangle_dslx_name_full(module, name, cc, &[], None, None)
+}
+
+/// Full-featured DSLX name mangling API variant that accepts a prebuilt
+/// ParametricEnv.
+pub fn mangle_dslx_name_full(
+    module: &str,
+    name: &str,
+    convention: DslxCallingConvention,
+    free_keys: &[&str],
+    env: Option<&dslx::ParametricEnv>,
+    scope: Option<&str>,
+) -> Result<String, XlsynthError> {
+    xls_mangle_dslx_name_full(module, name, convention, free_keys, env, scope)
 }
 
 fn x_path_to_rs_filename(path: &std::path::Path) -> String {
@@ -321,6 +349,100 @@ mod tests {
     use xlsynth_sys::XlsFormatPreference;
 
     use super::*;
+
+    #[test]
+    fn test_mangle_dslx_name_full_basic() {
+        let mangled = mangle_dslx_name_full(
+            "my_mod",
+            "f",
+            DslxCallingConvention::Typical,
+            &[],
+            None,
+            None,
+        )
+        .expect("mangle success");
+        assert_eq!(mangled, "__my_mod__f");
+    }
+
+    #[test]
+    fn test_mangle_dslx_name_full_scope() {
+        let mangled = mangle_dslx_name_full(
+            "my_mod",
+            "f",
+            DslxCallingConvention::Typical,
+            &[],
+            None,
+            Some("Point"),
+        )
+        .expect("mangle success (scoped)");
+        assert_eq!(mangled, "__my_mod__Point__f");
+    }
+
+    #[test]
+    fn test_mangle_dslx_name_full_parametrics() {
+        // Prepare parametric bindings X=42, Y=64.
+        let x_val = dslx::InterpValue::make_ubits(32, 42);
+        let y_val = dslx::InterpValue::make_ubits(32, 64);
+        let free_keys = ["X", "Y"]; // order should not matter for result here
+        let env = dslx::ParametricEnv::new(&[("X", &x_val), ("Y", &y_val)]).expect("env");
+
+        let mangled = mangle_dslx_name_full(
+            "my_mod",
+            "p",
+            DslxCallingConvention::Typical,
+            &free_keys,
+            Some(&env),
+            None,
+        )
+        .expect("mangle with params");
+        assert_eq!(mangled, "__my_mod__p__42_64");
+    }
+
+    #[test]
+    fn test_mangle_dslx_name_full_implicit_token() {
+        let mangled_itok = mangle_dslx_name_full(
+            "my_mod",
+            "f",
+            DslxCallingConvention::ImplicitToken,
+            &[],
+            None,
+            None,
+        )
+        .expect("mangle implicit-token");
+        assert_eq!(mangled_itok, "__itok__my_mod__f");
+    }
+
+    #[test]
+    fn test_mangle_dslx_name_full_proc_next() {
+        let mangled_next = mangle_dslx_name_full(
+            "my_mod",
+            "f",
+            DslxCallingConvention::ProcNext,
+            &[],
+            None,
+            None,
+        )
+        .expect("mangle proc-next");
+        assert_eq!(mangled_next, "__my_mod__f_next");
+    }
+
+    #[test]
+    fn test_mangle_dslx_name_full_composed() {
+        // Combine implicit-token, scope, and parametric env (no special chars).
+        let x_val = dslx::InterpValue::make_ubits(32, 7);
+        let y_val = dslx::InterpValue::make_ubits(32, 9);
+        let env = dslx::ParametricEnv::new(&[("X", &x_val), ("Y", &y_val)]).expect("env");
+        let mangled = mangle_dslx_name_full(
+            "my_mod",
+            "g_step1",
+            DslxCallingConvention::ImplicitToken,
+            &["X", "Y"],
+            Some(&env),
+            Some("Impl"),
+        )
+        .expect("mangle composed");
+        assert_eq!(mangled, "__itok__my_mod__Impl__g_step1__7_9");
+    }
 
     #[test]
     fn test_convert_dslx_to_ir() {
