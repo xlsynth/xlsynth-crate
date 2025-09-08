@@ -903,6 +903,133 @@ fn make_slot_param_name(consumer_text: &str, op_index: usize) -> String {
     format!("__slot__{}__op{}", consumer_text, op_index)
 }
 
+// Helper: collect inbound edges (producer outside region to consumer inside)
+// with operand indices and deterministically ordered by (consumer textual id,
+// operand index).
+fn collect_inbound_edges_with_operand_indices(
+    f: &Fn,
+    region: &HashSet<NodeRef>,
+) -> BTreeMap<(String, usize), (NodeRef /* producer */, NodeRef /* consumer */)> {
+    let mut edges: BTreeMap<(String, usize), (NodeRef, NodeRef)> = BTreeMap::new();
+    for (i, _n) in f.nodes.iter().enumerate() {
+        let cons = NodeRef { index: i };
+        if !region.contains(&cons) {
+            continue;
+        }
+        let deps = operands(&f.get_node(cons).payload);
+        for (op_index, dep) in deps.into_iter().enumerate() {
+            if !region.contains(&dep) {
+                let key = (node_textual_id(f, cons), op_index);
+                edges.insert(key, (dep, cons));
+            }
+        }
+    }
+    edges
+}
+
+fn to_hex_string(h: &blake3::Hash) -> String {
+    h.to_hex().to_string()
+}
+
+fn short_hex(s: &str) -> String {
+    let n = s.len();
+    let take = if n >= 12 { 12 } else { n };
+    s[..take].to_string()
+}
+
+struct InboundHashInfo {
+    // Number of inbound arcs per forward-hash on this side.
+    counts: BTreeMap<String /* full hex */, usize>,
+    // Representative type per hash on this side.
+    types: BTreeMap<String /* full hex */, Type>,
+    // Deterministic assignment of each inbound producer NodeRef to a param name.
+    // Name format: in_h_<short_hex>_<k>
+    assignment: HashMap<usize /* producer index */, String>,
+}
+
+fn build_inbound_hash_info(f: &Fn, region: &HashSet<NodeRef>) -> InboundHashInfo {
+    // Compute forward structural hashes per node index.
+    let (entries, _depths) = collect_structural_entries(f);
+    let mut hash_by_index: Vec<String> = vec![String::new(); f.nodes.len()];
+    for (i, e) in entries.into_iter().enumerate() {
+        hash_by_index[i] = to_hex_string(&e.hash);
+    }
+
+    // Collect inbound arcs in deterministic order.
+    let inbound = collect_inbound_edges_with_operand_indices(f, region);
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut types: BTreeMap<String, Type> = BTreeMap::new();
+    let mut per_hash_cursor: HashMap<String, usize> = HashMap::new();
+    let mut assignment: HashMap<usize, String> = HashMap::new();
+
+    for ((_cons_text, _op_index), (producer, _consumer)) in inbound.into_iter() {
+        let h = hash_by_index[producer.index].clone();
+        let sh = short_hex(&h);
+        let cur = per_hash_cursor.entry(h.clone()).or_insert(0);
+        let name = format!("fwd_{}_{}", sh, *cur);
+        assignment.insert(producer.index, name);
+        *cur += 1;
+        *counts.entry(h.clone()).or_insert(0) += 1;
+        // Record/verify representative type for this hash on this side.
+        let ty = f.get_node(producer).ty.clone();
+        match types.get(&h) {
+            Some(existing) => {
+                assert_eq!(
+                    existing, &ty,
+                    "Inbound hash has inconsistent types on one side"
+                );
+            }
+            None => {
+                types.insert(h, ty);
+            }
+        }
+    }
+
+    InboundHashInfo {
+        counts,
+        types,
+        assignment,
+    }
+}
+
+// Compute union params based on inbound forward-hash multisets across LHS/RHS.
+fn compute_union_params_by_hash(
+    lhs: &InboundHashInfo,
+    rhs: &InboundHashInfo,
+) -> Vec<(String, Type)> {
+    let mut all_hashes: BTreeSet<String> = lhs.counts.keys().cloned().collect();
+    for h in rhs.counts.keys() {
+        all_hashes.insert(h.clone());
+    }
+
+    let mut result: Vec<(String, Type)> = Vec::new();
+    for h in all_hashes.into_iter() {
+        let lc = lhs.counts.get(&h).copied().unwrap_or(0);
+        let rc = rhs.counts.get(&h).copied().unwrap_or(0);
+        let count = if lc > rc { lc } else { rc };
+        if count == 0 {
+            continue;
+        }
+        // Determine type and ensure consistency across sides when present.
+        let lty = lhs.types.get(&h);
+        let rty = rhs.types.get(&h);
+        let ty = match (lty, rty) {
+            (Some(lt), Some(rt)) => {
+                assert_eq!(lt, rt, "Inbound hash has mismatched types across sides");
+                lt.clone()
+            }
+            (Some(lt), None) => lt.clone(),
+            (None, Some(rt)) => rt.clone(),
+            (None, None) => unreachable!(),
+        };
+        let sh = short_hex(&h);
+        for k in 0..count {
+            result.push((format!("fwd_{}_{}", sh, k), ty.clone()));
+        }
+    }
+    result
+}
+
 // Helper: build inbound textual-id -> type map for a region.
 fn compute_inbound_text_to_type_map(f: &Fn, region: &HashSet<NodeRef>) -> BTreeMap<String, Type> {
     let mut m: BTreeMap<String, Type> = BTreeMap::new();
@@ -964,6 +1091,8 @@ fn build_inner_with_union_user_slots(
     slot_order: &[(String, usize)],
     // For this side only, outbound mapping from slot key -> boundary producer NodeRef.
     side_edges: &BTreeMap<(String, usize), (NodeRef, NodeRef)>,
+    // For this side only, mapping from inbound external producer index -> assigned param name.
+    inbound_assignment: &HashMap<usize, String>,
 ) -> Fn {
     // 1) Create inner params: union of union_params + extra_passthrough_params,
     //    dedup’d by name, in deterministic order.
@@ -1047,10 +1176,18 @@ fn build_inner_with_union_user_slots(
             if region.contains(&r) {
                 *old_to_new.get(&r.index).expect("mapped internal ref")
             } else {
-                let text = node_textual_id(f, r);
-                *text_to_inner_param_ref
-                    .get(&text)
-                    .expect("missing fixed/extra param for external operand")
+                // Prefer hash-based inbound assignment when available; otherwise fall back to
+                // textual.
+                if let Some(name) = inbound_assignment.get(&r.index) {
+                    *text_to_inner_param_ref
+                        .get(name)
+                        .expect("missing inbound hash-based param for external operand")
+                } else {
+                    let text = node_textual_id(f, r);
+                    *text_to_inner_param_ref
+                        .get(&text)
+                        .expect("missing fixed/extra param for external operand")
+                }
             }
         };
         let new_payload = remap_payload_with(&old.payload, mapper);
@@ -1171,7 +1308,10 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
     let lhs_inbound_map = compute_inbound_text_to_type_map(lhs, &lhs_interior);
     let rhs_inbound_map = compute_inbound_text_to_type_map(rhs, &rhs_interior);
 
-    let union_params = compute_union_params(&lhs_inbound_map, &rhs_inbound_map);
+    // Hash-based inbound identification and union param construction.
+    let lhs_inbound_hash = build_inbound_hash_info(lhs, &lhs_interior);
+    let rhs_inbound_hash = build_inbound_hash_info(rhs, &rhs_interior);
+    let union_params = compute_union_params_by_hash(&lhs_inbound_hash, &rhs_inbound_hash);
 
     // Compute outbound edges with operand indices on both sides.
     let lhs_edges = collect_outbound_edges_with_operand_indices(lhs, &lhs_interior);
@@ -1286,6 +1426,7 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         &extra_passthrough_params,
         &slot_order,
         &lhs_edges,
+        &lhs_inbound_hash.assignment,
     );
     let rhs_inner = build_inner_with_union_user_slots(
         rhs,
@@ -1295,6 +1436,7 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         &extra_passthrough_params,
         &slot_order,
         &rhs_edges,
+        &rhs_inbound_hash.assignment,
     );
 
     let lhs_inbound_texts: Vec<String> = lhs_inbound_map.keys().cloned().collect();

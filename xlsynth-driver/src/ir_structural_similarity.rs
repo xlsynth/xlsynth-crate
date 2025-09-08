@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use comfy_table::{presets::ASCII_MARKDOWN, ContentArrangement, Table};
 use xlsynth_pir::{
     ir, ir_parser,
     structural_similarity::{
+        collect_backward_structural_entries, collect_structural_entries,
         compute_structural_discrepancies_dual,
         extract_dual_difference_subgraphs_with_shared_params_and_metadata,
     },
@@ -143,5 +145,79 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     println!("RHS outbound users per return element:");
     for (prod, users) in meta.rhs_outbound.iter() {
         println!("  {} -> [{}]", prod, users.join(", "));
+    }
+
+    // Append tables of all nodes with forward/backward hashes and diff-region flag.
+    // LHS graph table
+    {
+        let (fwd_entries, _fwd_depths) = collect_structural_entries(lhs_fn);
+        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(lhs_fn);
+
+        // Build stable ordering by textual id.
+        let mut indices: Vec<usize> = (0..lhs_fn.nodes.len()).collect();
+        indices.sort_by(|&a, &b| {
+            let ta = ir::node_textual_id(lhs_fn, ir::NodeRef { index: a });
+            let tb = ir::node_textual_id(lhs_fn, ir::NodeRef { index: b });
+            ta.cmp(&tb)
+        });
+
+        println!("\nLHS graph");
+        let mut table = Table::new();
+        table
+            .load_preset(ASCII_MARKDOWN)
+            .set_content_arrangement(ContentArrangement::Disabled)
+            .set_header(vec!["node_name", "hash", "rhash", "is_diff"]);
+        for i in indices.into_iter() {
+            let nref = ir::NodeRef { index: i };
+            let name = ir::node_textual_id(lhs_fn, nref);
+            if name == "reserved_zero_node" {
+                continue;
+            }
+            let fh = fwd_entries[i].hash.to_hex().to_string();
+            let rh = bwd_entries[i].hash.to_hex().to_string();
+            let mark = if meta.lhs_region.contains(&nref) {
+                "✓"
+            } else {
+                ""
+            };
+            table.add_row(vec![name, fh, rh, mark.to_string()]);
+        }
+        println!("{}", table);
+    }
+
+    // RHS graph table
+    {
+        let (fwd_entries, _fwd_depths) = collect_structural_entries(rhs_fn);
+        let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(rhs_fn);
+
+        let mut indices: Vec<usize> = (0..rhs_fn.nodes.len()).collect();
+        indices.sort_by(|&a, &b| {
+            let ta = ir::node_textual_id(rhs_fn, ir::NodeRef { index: a });
+            let tb = ir::node_textual_id(rhs_fn, ir::NodeRef { index: b });
+            ta.cmp(&tb)
+        });
+
+        println!("\nRHS graph");
+        let mut table = Table::new();
+        table
+            .load_preset(ASCII_MARKDOWN)
+            .set_content_arrangement(ContentArrangement::Disabled)
+            .set_header(vec!["node_name", "hash", "rhash", "is_diff"]);
+        for i in indices.into_iter() {
+            let nref = ir::NodeRef { index: i };
+            let name = ir::node_textual_id(rhs_fn, nref);
+            if name == "reserved_zero_node" {
+                continue;
+            }
+            let fh = fwd_entries[i].hash.to_hex().to_string();
+            let rh = bwd_entries[i].hash.to_hex().to_string();
+            let mark = if meta.rhs_region.contains(&nref) {
+                "✓"
+            } else {
+                ""
+            };
+            table.add_row(vec![name, fh, rh, mark.to_string()]);
+        }
+        println!("{}", table);
     }
 }
