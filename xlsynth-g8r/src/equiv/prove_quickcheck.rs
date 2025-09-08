@@ -1,57 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::equiv::{
-    prove_equiv::{
-        AssertionViolation, FnInput, IrFn, UfRegistry, UfSignature, get_fn_inputs, ir_to_smt,
-    },
     solver_interface::{BitVec, Response, Solver},
+    translate::{get_fn_inputs, ir_to_smt},
+    types::{
+        AssertionViolation, BoolPropertyResult, FnInput, FnOutput, IrFn,
+        QuickCheckAssertionSemantics, UfRegistry, UfSignature,
+    },
 };
 
-use crate::equiv::prove_equiv::FnOutput;
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt};
+use std::collections::HashMap;
 use xlsynth_pir::ir;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum QuickCheckAssertionSemantics {
-    /// Assertions are just dropped entirely
-    Ignore,
-    /// Prove that assertion conditions can never fire
-    Never,
-    /// Assume that assertion conditions hold to try to help complete the proof
-    Assume,
-}
-
-impl fmt::Display for QuickCheckAssertionSemantics {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            QuickCheckAssertionSemantics::Ignore => "ignore",
-            QuickCheckAssertionSemantics::Never => "never",
-            QuickCheckAssertionSemantics::Assume => "assume",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-/// Result of proving that a boolean-returning function is always `true`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum BoolPropertyResult {
-    /// The solver proved that the function returns `true` for **all** possible
-    /// inputs (w.r.t. the chosen `assertion_semantics`).
-    Proved,
-    /// The solver found a counter-example – a concrete set of inputs for which
-    /// the function does **not** return `true` (or violates the assertion
-    /// semantics).
-    Disproved {
-        /// Concrete input values leading to failure. Kept in the same order as
-        /// the function parameters after potential implicit-token handling.
-        inputs: Vec<FnInput>,
-        /// Concrete (possibly failing) output value observed for the
-        /// counter-example.
-        output: FnOutput,
-    },
-}
 
 /// Prove that a given `IrFn` always returns boolean `true` (`bits[1] == 1`) for
 /// all possible inputs.
@@ -191,7 +150,7 @@ where
 #[cfg(test)]
 mod test_utils {
     use super::*;
-    use crate::equiv::prove_equiv::IrFn;
+    use crate::equiv::types::IrFn;
     use xlsynth_pir::ir_parser::Parser;
 
     /// Assert that `prove_ir_fn_always_true` returns `Proved`.
@@ -401,10 +360,10 @@ mod test_utils {
         let mut uf_map: HashMap<String, String> = HashMap::new();
         uf_map.insert("g".to_string(), "F".to_string());
         uf_map.insert("h".to_string(), "F".to_string());
-        let mut uf_sigs: HashMap<String, crate::equiv::prove_equiv::UfSignature> = HashMap::new();
+        let mut uf_sigs: HashMap<String, crate::equiv::types::UfSignature> = HashMap::new();
         uf_sigs.insert(
             "F".to_string(),
-            crate::equiv::prove_equiv::UfSignature {
+            crate::equiv::types::UfSignature {
                 arg_widths: vec![8],
                 ret_width: 8,
             },

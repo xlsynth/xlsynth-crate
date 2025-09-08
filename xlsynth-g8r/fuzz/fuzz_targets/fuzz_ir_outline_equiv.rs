@@ -5,7 +5,8 @@ use libfuzzer_sys::fuzz_target;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use xlsynth_g8r::equiv::prove_equiv::{AssertionSemantics, EquivResult, IrFn as EqIrFn, prove_ir_fn_equiv};
+use xlsynth_g8r::equiv::types::{AssertionSemantics, EquivResult, IrFn as EqIrFn};
+use xlsynth_g8r::equiv::prove_equiv::prove_ir_fn_equiv;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
 #[cfg(feature = "has-boolector")]
