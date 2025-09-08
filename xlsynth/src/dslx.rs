@@ -784,6 +784,45 @@ pub struct InterpValue {
 }
 
 impl InterpValue {
+    pub fn make_ubits(bit_count: i64, value: u64) -> Self {
+        let raw = unsafe { sys::xls_dslx_interp_value_make_ubits(bit_count, value) };
+        InterpValue {
+            ptr: Rc::new(InterpValuePtr { ptr: raw }),
+        }
+    }
+
+    pub fn make_sbits(bit_count: i64, value: i64) -> Self {
+        let raw = unsafe { sys::xls_dslx_interp_value_make_sbits(bit_count, value) };
+        InterpValue {
+            ptr: Rc::new(InterpValuePtr { ptr: raw }),
+        }
+    }
+
+    pub(crate) fn raw_ptr(&self) -> *const sys::CDslxInterpValue {
+        self.ptr.ptr as *const sys::CDslxInterpValue
+    }
+
+    pub fn from_string(text: &str) -> Result<Self, crate::XlsynthError> {
+        let c_text = std::ffi::CString::new(text).unwrap();
+        let c_stdlib = std::ffi::CString::new(sys::DSLX_STDLIB_PATH).unwrap();
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let mut result_out: *mut sys::CDslxInterpValue = std::ptr::null_mut();
+            let ok = sys::xls_dslx_interp_value_from_string(
+                c_text.as_ptr(),
+                c_stdlib.as_ptr(),
+                &mut error_out,
+                &mut result_out,
+            );
+            if ok {
+                Ok(InterpValue {
+                    ptr: Rc::new(InterpValuePtr { ptr: result_out }),
+                })
+            } else {
+                Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
+            }
+        }
+    }
     pub fn convert_to_ir(&self) -> Result<IrValue, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();
@@ -799,6 +838,227 @@ impl InterpValue {
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
+    }
+
+    pub fn make_enum(
+        def: &EnumDef,
+        is_signed: bool,
+        bits: &crate::IrBits,
+    ) -> Result<Self, crate::XlsynthError> {
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let mut result_out: *mut sys::CDslxInterpValue = std::ptr::null_mut();
+            let ok = sys::xls_dslx_interp_value_make_enum(
+                def.ptr,
+                is_signed,
+                bits.ptr as *const sys::CIrBits,
+                &mut error_out,
+                &mut result_out,
+            );
+            if ok {
+                Ok(InterpValue {
+                    ptr: Rc::new(InterpValuePtr { ptr: result_out }),
+                })
+            } else {
+                Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
+            }
+        }
+    }
+
+    pub fn make_tuple(elements: &[&InterpValue]) -> Result<Self, crate::XlsynthError> {
+        let mut ptrs: Vec<*mut sys::CDslxInterpValue> =
+            elements.iter().map(|v| v.ptr.ptr).collect();
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let mut result_out: *mut sys::CDslxInterpValue = std::ptr::null_mut();
+            let ok = sys::xls_dslx_interp_value_make_tuple(
+                ptrs.len(),
+                if ptrs.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    ptrs.as_mut_ptr()
+                },
+                &mut error_out,
+                &mut result_out,
+            );
+            if ok {
+                Ok(InterpValue {
+                    ptr: Rc::new(InterpValuePtr { ptr: result_out }),
+                })
+            } else {
+                Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
+            }
+        }
+    }
+
+    pub fn make_array(elements: &[&InterpValue]) -> Result<Self, crate::XlsynthError> {
+        let mut ptrs: Vec<*mut sys::CDslxInterpValue> =
+            elements.iter().map(|v| v.ptr.ptr).collect();
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let mut result_out: *mut sys::CDslxInterpValue = std::ptr::null_mut();
+            let ok = sys::xls_dslx_interp_value_make_array(
+                ptrs.len(),
+                if ptrs.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    ptrs.as_mut_ptr()
+                },
+                &mut error_out,
+                &mut result_out,
+            );
+            if ok {
+                Ok(InterpValue {
+                    ptr: Rc::new(InterpValuePtr { ptr: result_out }),
+                })
+            } else {
+                Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
+            }
+        }
+    }
+}
+
+// -- ParametricEnv
+
+pub struct ParametricEnv {
+    ptr: *mut sys::CDslxParametricEnv,
+}
+
+impl Drop for ParametricEnv {
+    fn drop(&mut self) {
+        unsafe { sys::xls_dslx_parametric_env_free(self.ptr) };
+    }
+}
+
+impl ParametricEnv {
+    pub fn new(items: &[(&str, &InterpValue)]) -> Result<Self, crate::XlsynthError> {
+        let id_cstrs: Vec<std::ffi::CString> = items
+            .iter()
+            .map(|(id, _)| std::ffi::CString::new(id.as_bytes()).unwrap())
+            .collect();
+        let mut ffi_items: Vec<sys::XlsDslxParametricEnvItem> = Vec::with_capacity(items.len());
+        for (i, (_id, val)) in items.iter().enumerate() {
+            ffi_items.push(sys::XlsDslxParametricEnvItem {
+                identifier: id_cstrs[i].as_ptr(),
+                value: val.raw_ptr(),
+            });
+        }
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let mut env_out: *mut sys::CDslxParametricEnv = std::ptr::null_mut();
+            let ok = sys::xls_dslx_parametric_env_create(
+                if ffi_items.is_empty() {
+                    std::ptr::null()
+                } else {
+                    ffi_items.as_ptr()
+                },
+                ffi_items.len(),
+                &mut error_out,
+                &mut env_out,
+            );
+            if ok {
+                Ok(ParametricEnv { ptr: env_out })
+            } else {
+                Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
+            }
+        }
+    }
+
+    pub fn empty() -> Result<Self, crate::XlsynthError> {
+        Self::new(&[])
+    }
+
+    pub(crate) fn as_ptr(&self) -> *const sys::CDslxParametricEnv {
+        self.ptr as *const sys::CDslxParametricEnv
+    }
+}
+
+#[cfg(test)]
+mod param_env_and_interp_value_tests {
+    use super::*;
+    use crate::{mangle_dslx_name_with_env, DslxCallingConvention, IrBits, IrValue};
+
+    #[test]
+    fn test_interp_value_make_bits_and_convert() {
+        let iv = InterpValue::make_ubits(32, 42);
+        let ir = iv.convert_to_ir().expect("convert to IR");
+        assert_eq!(ir.to_string(), "bits[32]:42");
+
+        let iv_s = InterpValue::make_sbits(8, -5);
+        let ir_s = iv_s.convert_to_ir().expect("convert to IR");
+        assert_eq!(ir_s.to_string(), "bits[8]:251");
+    }
+
+    #[test]
+    fn test_interp_value_from_string_and_convert() {
+        let iv = InterpValue::from_string("u32:42").expect("parse success");
+        let ir = iv.convert_to_ir().expect("convert to IR");
+        assert_eq!(ir.to_string(), "bits[32]:42");
+    }
+
+    #[test]
+    fn test_interp_value_tuple_and_array_convert() {
+        let a = InterpValue::make_ubits(8, 1);
+        let b = InterpValue::make_ubits(8, 2);
+        let tup = InterpValue::make_tuple(&[&a, &b]).expect("make tuple");
+        let ir_tup = tup.convert_to_ir().expect("tup to IR");
+        assert_eq!(ir_tup.get_element_count().unwrap(), 2);
+        assert_eq!(ir_tup.get_element(0).unwrap().to_string(), "bits[8]:1");
+        assert_eq!(ir_tup.get_element(1).unwrap().to_string(), "bits[8]:2");
+
+        let arr = InterpValue::make_array(&[&a, &b]).expect("make array");
+        let ir_arr = arr.convert_to_ir().expect("arr to IR");
+        assert_eq!(ir_arr.get_element_count().unwrap(), 2);
+        assert_eq!(ir_arr.get_element(0).unwrap().to_string(), "bits[8]:1");
+        assert_eq!(ir_arr.get_element(1).unwrap().to_string(), "bits[8]:2");
+    }
+
+    #[test]
+    fn test_interp_value_make_enum_and_convert() {
+        // Build a small module with an enum and fetch its EnumDef.
+        let dslx = "enum MyE : u8 { A = 0x7 }";
+        let mut import_data = ImportData::default();
+        let tcm = parse_and_typecheck(dslx, "/memfile/e.x", "e", &mut import_data)
+            .expect("typecheck success");
+        let module = tcm.get_module();
+        let enum_def = module.get_type_definition_as_enum_def(0).expect("enum def");
+
+        let bits = IrBits::make_ubits(8, 7).expect("bits");
+        let iv = InterpValue::make_enum(&enum_def, false, &bits).expect("make enum");
+        let ir = iv.convert_to_ir().expect("convert enum to IR");
+        assert_eq!(ir.to_string(), "bits[8]:7");
+    }
+
+    #[test]
+    fn test_parametric_env_new_and_mangle() {
+        let x = InterpValue::make_ubits(32, 42);
+        let y = InterpValue::make_ubits(32, 64);
+        let env = ParametricEnv::new(&[("X", &x), ("Y", &y)]).expect("env");
+        let mangled = mangle_dslx_name_with_env(
+            "my_mod",
+            "p",
+            DslxCallingConvention::Typical,
+            &["X", "Y"],
+            Some(&env),
+            None,
+        )
+        .expect("mangle");
+        assert_eq!(mangled, "__my_mod__p__42_64");
+    }
+
+    #[test]
+    fn test_parametric_env_empty_and_mangle() {
+        let env = ParametricEnv::empty().expect("empty env");
+        let mangled = mangle_dslx_name_with_env(
+            "my_mod",
+            "f",
+            DslxCallingConvention::Typical,
+            &[],
+            Some(&env),
+            Some("Point"),
+        )
+        .expect("mangle");
+        assert_eq!(mangled, "__my_mod__Point__f");
     }
 }
 

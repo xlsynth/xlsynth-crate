@@ -188,7 +188,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             let cc = if *has_itok {
                 DslxCallingConvention::ImplicitToken
             } else {
-                DslxCallingConvention::Normal
+                DslxCallingConvention::Typical
             };
             let mangled =
                 mangle_dslx_name_with_calling_convention(module_name, qc_name, cc).unwrap();
