@@ -243,16 +243,38 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     {
         let mut p = ir_parser::Parser::new(&lhs_diff_pkg);
         match p.parse_and_validate_package() {
-            Ok(_pkg) => println!("  LHS diff package verification: OK"),
-            Err(e) => println!("  LHS diff package verification FAILED: {}", e),
+            Ok(_pkg) => println!("  LHS diff (PIR verify): OK"),
+            Err(e) => println!("  LHS diff (PIR verify) FAILED: {}", e),
         }
     }
     {
         let mut p = ir_parser::Parser::new(&rhs_diff_pkg);
         match p.parse_and_validate_package() {
-            Ok(_pkg) => println!("  RHS diff package verification: OK"),
-            Err(e) => println!("  RHS diff package verification FAILED: {}", e),
+            Ok(_pkg) => println!("  RHS diff (PIR verify): OK"),
+            Err(e) => println!("  RHS diff (PIR verify) FAILED: {}", e),
         }
+    }
+
+    // xlsynth parse + verify
+    match xlsynth::IrPackage::parse_ir(&lhs_diff_pkg, None) {
+        Ok(mut pkg) => {
+            let _ = pkg.set_top_by_name(lhs_fn.name.as_str());
+            match pkg.verify() {
+                Ok(()) => println!("  LHS diff (xlsynth verify): OK"),
+                Err(e) => println!("  LHS diff (xlsynth verify) FAILED: {}", e),
+            }
+        }
+        Err(e) => println!("  LHS diff (xlsynth parse) FAILED: {}", e),
+    }
+    match xlsynth::IrPackage::parse_ir(&rhs_diff_pkg, None) {
+        Ok(mut pkg) => {
+            let _ = pkg.set_top_by_name(lhs_fn.name.as_str());
+            match pkg.verify() {
+                Ok(()) => println!("  RHS diff (xlsynth verify): OK"),
+                Err(e) => println!("  RHS diff (xlsynth verify) FAILED: {}", e),
+            }
+        }
+        Err(e) => println!("  RHS diff (xlsynth parse) FAILED: {}", e),
     }
 
     // Opportunistic equivalence checks using library-level equiv: (lhs_diff ≡ lhs_orig) and (rhs_diff ≡ rhs_orig).

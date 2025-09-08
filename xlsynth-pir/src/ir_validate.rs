@@ -158,6 +158,27 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
         }
     }
 
+    // Enforce package-wide uniqueness of node text ids (including parameter nodes).
+    let mut seen_ids: HashSet<usize> = HashSet::new();
+    for member in &p.members {
+        let f = match member {
+            PackageMember::Function(f) => f,
+            PackageMember::Block { func, .. } => func,
+        };
+        for node in f.nodes.iter() {
+            // Skip synthetic Nil node at index 0 which is never emitted to IR text.
+            if matches!(node.payload, NodePayload::Nil) {
+                continue;
+            }
+            if !seen_ids.insert(node.text_id) {
+                return Err(ValidationError::DuplicateTextId {
+                    func: f.name.clone(),
+                    text_id: node.text_id,
+                });
+            }
+        }
+    }
+
     Ok(())
 }
 
