@@ -6,12 +6,14 @@ use libfuzzer_sys::fuzz_target;
 use rand::prelude::IteratorRandom;
 use rand::Rng;
 use std::collections::HashMap;
+
 use xlsynth_g8r::bulk_replace::{bulk_replace, SubstitutionMap};
 use xlsynth_g8r::dce::dce;
-use xlsynth_g8r::fuzz_utils;
 use xlsynth_g8r::gate::{AigBitVector, AigOperand, AigRef, GateFn};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::gate_sim::{eval, Collect};
+
+use xlsynth_pir::fuzz_utils;
 
 #[derive(Debug, Clone, Arbitrary)]
 enum FuzzGateOp {

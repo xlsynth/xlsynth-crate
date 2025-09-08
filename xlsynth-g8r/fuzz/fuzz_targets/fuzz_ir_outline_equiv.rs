@@ -13,11 +13,11 @@ use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
 
-use xlsynth_g8r::xls_ir::ir::{Fn as IrFn, NodePayload, NodeRef, PackageMember};
-use xlsynth_g8r::xls_ir::ir_fuzz::{FuzzSample, generate_ir_fn};
-use xlsynth_g8r::xls_ir::ir_outline::{compute_default_ordering, outline_with_ordering, OutlineOrdering};
-use xlsynth_g8r::xls_ir::ir_parser::Parser;
-use xlsynth_g8r::xls_ir::ir_utils::operands;
+use xlsynth_pir::ir::{Fn as IrFn, NodePayload, NodeRef, PackageMember};
+use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
+use xlsynth_pir::ir_outline::{compute_default_ordering, outline_with_ordering, OutlineOrdering};
+use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::ir_utils::operands;
 
 fn build_users(f: &IrFn) -> HashMap<usize, Vec<usize>> {
     let mut users: HashMap<usize, Vec<usize>> = HashMap::new();

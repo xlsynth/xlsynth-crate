@@ -22,12 +22,13 @@ use boolector_sys::{
     boolector_uf, boolector_ugt, boolector_ugte, boolector_ult, boolector_ulte,
     boolector_unsigned_int, boolector_urem, boolector_var, boolector_xor, boolector_zero,
 };
+use xlsynth::{IrBits, IrValue};
 
 use crate::{
     equiv::solver_interface::{BitVec, Response, Solver, SolverConfig, Uf},
-    ir_value_utils::{ir_bits_from_lsb_is_0, ir_value_from_bits_with_type},
-    xls_ir::ir,
+    ir_value_utils::ir_value_from_bits_with_type,
 };
+use xlsynth_pir::ir;
 
 // Low-level wrapper for the Boolector solver context.
 struct RawBtor {
@@ -379,13 +380,13 @@ impl Solver for Boolector {
                 boolector_free_bv_assignment(self.raw_btor(), s);
                 let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
                 Ok(ir_value_from_bits_with_type(
-                    &ir_bits_from_lsb_is_0(&bits),
+                    &IrBits::from_lsb_is_0(&bits),
                     ty,
                 ))
             },
             BitVec::ZeroWidth => {
                 if matches!(ty, ir::Type::Token) {
-                    Ok(xlsynth::IrValue::make_token())
+                    Ok(IrValue::make_token())
                 } else {
                     panic!("Cannot get value of zero-width bitvector for type {:?}", ty)
                 }

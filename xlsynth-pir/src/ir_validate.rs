@@ -300,8 +300,8 @@ fn package_has_fn(p: &Package, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir;
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir;
+    use crate::ir_parser::Parser;
 
     #[test]
     fn validate_package_ok() {

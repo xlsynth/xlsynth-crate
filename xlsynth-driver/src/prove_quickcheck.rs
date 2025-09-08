@@ -22,6 +22,7 @@ use xlsynth_g8r::equiv::prove_quickcheck::{
     prove_ir_fn_always_true_with_ufs, BoolPropertyResult, QuickCheckAssertionSemantics,
 };
 use xlsynth_g8r::equiv::solver_interface::Solver;
+use xlsynth_pir::{ir, ir_parser};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckTestOutcome {
@@ -164,7 +165,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
     // same uninterpreted symbol (assumed equivalent) and assertions inside them
     // are ignored during proving.
     let use_unoptimized_ir = !uf_map.is_empty();
-    let pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&ir_text_result)
+    let pkg = ir_parser::Parser::new(&ir_text_result)
         .parse_package()
         .unwrap();
 
@@ -178,7 +179,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         semantics: QuickCheckAssertionSemantics,
         uf_map: &HashMap<String, String>,
         uf_sigs: &HashMap<String, UfSignature>,
-        unoptimized_pkg: &xlsynth_g8r::xls_ir::ir::Package,
+        unoptimized_pkg: &ir::Package,
         ir_text: &str,
         use_unoptimized_ir: bool,
     ) -> Vec<QuickCheckTestOutcome> {
@@ -192,7 +193,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             let mangled =
                 mangle_dslx_name_with_calling_convention(module_name, qc_name, cc).unwrap();
 
-            let run = |pkg: &xlsynth_g8r::xls_ir::ir::Package| {
+            let run = |pkg: &ir::Package| {
                 let ir_fn_ref = pkg.get_fn(&mangled).unwrap();
 
                 let ir_fn = IrFn {
@@ -219,7 +220,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 let base_pkg = xlsynth::IrPackage::parse_ir(&ir_text, None).unwrap();
                 let optimized_pkg = xlsynth::optimize_ir(&base_pkg, &mangled).unwrap();
                 let optimized_text = optimized_pkg.to_string();
-                let g8_pkg = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&optimized_text)
+                let g8_pkg = ir_parser::Parser::new(&optimized_text)
                     .parse_package()
                     .unwrap();
                 run(&g8_pkg)

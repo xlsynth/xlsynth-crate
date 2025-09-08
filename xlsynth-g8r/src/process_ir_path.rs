@@ -14,7 +14,6 @@ use crate::fanout::fanout_histogram;
 use crate::find_structures;
 use crate::fraig;
 use crate::fraig::{DidConverge, FraigIterationStat, IterationBounds};
-use crate::fuzz_utils::arbitrary_irbits;
 use crate::gate;
 use crate::get_summary_stats::get_gate_depth;
 use crate::graph_logical_effort;
@@ -22,8 +21,8 @@ use crate::graph_logical_effort::analyze_graph_logical_effort;
 use crate::ir2gate;
 use crate::logical_effort::compute_logical_effort_min_delay;
 use crate::use_count::get_id_to_use_count;
-use crate::xls_ir::ir;
-use crate::xls_ir::ir_parser;
+use xlsynth_pir::ir;
+use xlsynth_pir::ir_parser;
 
 #[derive(Debug, serde::Serialize)]
 pub struct Ir2GatesSummaryStats {
@@ -215,7 +214,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         for _ in 0..options.toggle_sample_count {
             let mut input_vec = Vec::with_capacity(input_widths.len());
             for &width in &input_widths {
-                let bits = arbitrary_irbits(&mut rng, width);
+                let bits = xlsynth_pir::fuzz_utils::arbitrary_irbits(&mut rng, width);
                 input_vec.push(bits);
             }
             batch_inputs.push(input_vec);

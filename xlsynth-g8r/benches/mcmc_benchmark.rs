@@ -12,6 +12,7 @@ use xlsynth_g8r::mcmc_logic::{
     mcmc_iteration,
 };
 use xlsynth_g8r::transforms::get_all_transforms;
+use xlsynth_pir::fuzz_utils;
 
 fn benchmark_mcmc_iteration(c: &mut Criterion) {
     let start_gfn = match load_start("sample://bf16_add") {
@@ -49,7 +50,7 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     for lane in 0..256 {
                         let mut bit_cursor = 0;
                         for input in &start_gfn.inputs {
-                            let rand_bits = xlsynth_g8r::fuzz_utils::arbitrary_irbits(
+                            let rand_bits = fuzz_utils::arbitrary_irbits(
                                 &mut rng,
                                 input.bit_vector.get_bit_count(),
                             );

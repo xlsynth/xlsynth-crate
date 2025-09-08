@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::xls_ir::ir;
+use crate::ir;
 use std::collections::HashMap;
 
 #[derive(Debug)]

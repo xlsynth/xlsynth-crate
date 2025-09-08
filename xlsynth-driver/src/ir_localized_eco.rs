@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use xlsynth_pir::ir;
+use xlsynth_pir::ir_verify;
+use xlsynth_pir::localized_eco2;
 
 use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
@@ -11,9 +14,9 @@ use rand::SeedableRng;
 use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::equiv::prove_equiv::AssertionSemantics;
-use xlsynth_g8r::xls_ir::ir::Type;
-use xlsynth_g8r::xls_ir::ir::{self as ir_mod, BlockPortInfo, PackageMember};
-use xlsynth_g8r::xls_ir::ir_parser::emit_fn_as_block;
+use xlsynth_pir::ir::Type;
+use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, PackageMember};
+use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
 
 #[derive(serde::Serialize)]
 struct AddedOpsSummaryItem {
@@ -75,7 +78,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
         );
     }
 
-    let old_pkg = match xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(old_path) {
+    let old_pkg = match ir_parser::parse_path_to_package(old_path) {
         Ok(p) => p,
         Err(e) => {
             let path_str = old_path.display().to_string();
@@ -88,7 +91,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
             report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![])
         }
     };
-    let new_pkg = match xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(new_path) {
+    let new_pkg = match ir_parser::parse_path_to_package(new_path) {
         Ok(p) => p,
         Err(e) => {
             let path_str = new_path.display().to_string();
@@ -162,8 +165,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     };
 
     // Build patched function via structural rebase; compute simple node-add count.
-    let patched_for_count =
-        xlsynth_g8r::xls_ir::localized_eco2::compute_localized_eco(old_fn, new_fn);
+    let patched_for_count = localized_eco2::compute_localized_eco(old_fn, new_fn);
     let added_count: usize = patched_for_count
         .nodes
         .len()
@@ -216,7 +218,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     // new ones only for synthesized nodes.
     let mut patched_pkg = old_pkg.clone();
     if let Some(target_fn) = patched_pkg.get_fn_mut(&old_fn.name) {
-        let applied = xlsynth_g8r::xls_ir::localized_eco2::compute_localized_eco(old_fn, new_fn);
+        let applied = localized_eco2::compute_localized_eco(old_fn, new_fn);
         *target_fn = applied;
     }
     let patched_ir_text_emitted = patched_pkg.to_string();
@@ -234,10 +236,10 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
 
     // Run local validations on the 'new' function (mirrors patched IR) to catch
     // common issues like duplicate IDs before invoking the external toolchain.
-    if let Err(e) = xlsynth_g8r::xls_ir::ir_verify::verify_fn_unique_node_ids(new_fn) {
+    if let Err(e) = ir_verify::verify_fn_unique_node_ids(new_fn) {
         println!("  WARNING: verification failed (duplicate IDs): {}", e);
     }
-    if let Err(e) = xlsynth_g8r::xls_ir::ir_verify::verify_fn_operand_indices_in_bounds(new_fn) {
+    if let Err(e) = ir_verify::verify_fn_operand_indices_in_bounds(new_fn) {
         println!("  WARNING: verification failed (operand indices): {}", e);
     }
 
@@ -473,7 +475,7 @@ fn handle_ir_localized_eco_blocks_in_packages(
 
     // Build patched(old) via structural rebase.
     println!("  Building patched block via structural rebase...");
-    let applied = xlsynth_g8r::xls_ir::localized_eco2::compute_localized_eco(old_fn, new_fn);
+    let applied = localized_eco2::compute_localized_eco(old_fn, new_fn);
     let added_count: usize = applied.nodes.len().saturating_sub(old_fn.nodes.len());
 
     // Validate output arity compatibility with old block port info.
@@ -759,15 +761,11 @@ fn type_random_value_text(ty: &Type, rng: &mut rand::rngs::StdRng) -> String {
     }
 }
 
-fn has_token_param(f: &xlsynth_g8r::xls_ir::ir::Fn) -> bool {
+fn has_token_param(f: &ir::Fn) -> bool {
     f.params.iter().any(|p| matches!(p.ty, Type::Token))
 }
 
-fn build_args_text(
-    f: &xlsynth_g8r::xls_ir::ir::Fn,
-    mode: &str,
-    mut rng: Option<&mut rand::rngs::StdRng>,
-) -> String {
+fn build_args_text(f: &ir::Fn, mode: &str, mut rng: Option<&mut rand::rngs::StdRng>) -> String {
     let parts: Vec<String> = f
         .params
         .iter()
@@ -785,7 +783,7 @@ fn build_args_text(
 
 fn sanity_check_interpret(
     new_ir_text: &str,
-    new_fn: &xlsynth_g8r::xls_ir::ir::Fn,
+    new_fn: &ir::Fn,
     patched_ir_path: &std::path::Path,
     random_samples: usize,
     seed: u64,
@@ -882,7 +880,7 @@ fn sanity_check_interpret(
 
 fn try_interpret_cex(
     new_ir_text: &str,
-    new_fn: &xlsynth_g8r::xls_ir::ir::Fn,
+    new_fn: &ir::Fn,
     patched_ir_path: &std::path::Path,
     arg_text: &str,
 ) -> Result<(), String> {
@@ -1065,10 +1063,7 @@ fn consume_value_for_type(
     }
 }
 
-fn reshape_args_to_params(
-    flat: &[IrValue],
-    params: &[xlsynth_g8r::xls_ir::ir::Param],
-) -> Result<Vec<IrValue>, String> {
+fn reshape_args_to_params(flat: &[IrValue], params: &[ir::Param]) -> Result<Vec<IrValue>, String> {
     let mut idx: usize = 0;
     let mut out: Vec<IrValue> = Vec::with_capacity(params.len());
     for p in params.iter() {

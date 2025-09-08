@@ -2,11 +2,11 @@
 
 //! Parser for XLS IR (just functions for the time being).
 
-use crate::xls_ir::ir::{
+use crate::ir::{
     self, ArrayTypeData, BlockPortInfo, FileTable, PackageMember, operator_to_nary_op,
 };
-use crate::xls_ir::ir_node_env::{IrNodeEnv, NameOrId};
-use crate::xls_ir::ir_validate;
+use crate::ir_node_env::{IrNodeEnv, NameOrId};
+use crate::ir_validate;
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
     let file_content = std::fs::read_to_string(path)
@@ -2784,7 +2784,7 @@ top fn main(t: token id=1) -> token {
         let mut parser = Parser::new(input);
         let f = parser.parse_fn().unwrap();
         let ret_node = f.get_node(f.ret_node_ref.unwrap());
-        if let crate::xls_ir::ir::NodePayload::GetParam(pid) = &ret_node.payload {
+        if let ir::NodePayload::GetParam(pid) = &ret_node.payload {
             assert_eq!(pid.get_wrapped_id(), 29);
         } else {
             panic!("Expected GetParam node payload");

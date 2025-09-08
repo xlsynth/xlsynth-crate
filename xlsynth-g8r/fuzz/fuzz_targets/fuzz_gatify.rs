@@ -3,8 +3,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::ir2gate::gatify;
-use xlsynth_g8r::xls_ir::ir_parser;
-use xlsynth_g8r::xls_ir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
 
 fuzz_target!(|sample: FuzzSample| {
     // Check for necessary environment variables first.

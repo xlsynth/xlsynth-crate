@@ -4,6 +4,7 @@
 
 use clap::ArgMatches;
 use rand_xoshiro::rand_core::SeedableRng;
+use xlsynth_pir::ir_parser;
 
 use crate::toolchain_config::ToolchainConfig;
 use std::fs::File;
@@ -11,13 +12,13 @@ use std::io::Write;
 use xlsynth_g8r::count_toggles;
 use xlsynth_g8r::emit_netlist;
 use xlsynth_g8r::fanout::fanout_histogram;
-use xlsynth_g8r::fuzz_utils::arbitrary_irbits;
 use xlsynth_g8r::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::graph_logical_effort::{self, analyze_graph_logical_effort};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::logical_effort::compute_logical_effort_min_delay;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::use_count::get_id_to_use_count;
+use xlsynth_pir::fuzz_utils::arbitrary_irbits;
 
 fn ir2gates(
     input_file: &std::path::Path,
@@ -206,7 +207,7 @@ fn ir_to_gatefn_with_stats(
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&input_file)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", input_file.display(), err));
-    let mut parser = xlsynth_g8r::xls_ir::ir_parser::Parser::new(&file_content);
+    let mut parser = ir_parser::Parser::new(&file_content);
     let ir_package = parser.parse_package().unwrap_or_else(|err| {
         eprintln!("Error encountered parsing XLS IR package: {:?}", err);
         std::process::exit(1);

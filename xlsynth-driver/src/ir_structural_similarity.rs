@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use xlsynth_pir::{
+    ir, ir_parser,
+    structural_similarity::{
+        compute_structural_discrepancies_dual,
+        extract_dual_difference_subgraphs_with_shared_params_and_metadata,
+    },
+};
 
 use crate::toolchain_config::ToolchainConfig;
 
-fn find_node_signature_by_textual_id(
-    f: &xlsynth_g8r::xls_ir::ir::Fn,
-    text: &str,
-) -> Option<String> {
+fn find_node_signature_by_textual_id(f: &ir::Fn, text: &str) -> Option<String> {
     for (i, _n) in f.nodes.iter().enumerate() {
-        let nr = xlsynth_g8r::xls_ir::ir::NodeRef { index: i };
-        let t = xlsynth_g8r::xls_ir::ir::node_textual_id(f, nr);
+        let nr = ir::NodeRef { index: i };
+        let t = ir::node_textual_id(f, nr);
         if t == text {
             return Some(f.get_node(nr).to_signature_string(f));
         }
@@ -26,8 +30,8 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     let lhs_ir_top = matches.get_one::<String>("lhs_ir_top");
     let rhs_ir_top = matches.get_one::<String>("rhs_ir_top");
 
-    let lhs_pkg = xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(lhs_path).unwrap();
-    let rhs_pkg = xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(rhs_path).unwrap();
+    let lhs_pkg = ir_parser::parse_path_to_package(lhs_path).unwrap();
+    let rhs_pkg = ir_parser::parse_path_to_package(rhs_path).unwrap();
 
     let lhs_fn = match lhs_ir_top {
         Some(top) => lhs_pkg.get_fn(top).unwrap(),
@@ -39,9 +43,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     };
 
     let (recs, lhs_ret_depth, rhs_ret_depth) =
-        xlsynth_g8r::xls_ir::structural_similarity::compute_structural_discrepancies_dual(
-            lhs_fn, rhs_fn,
-        );
+        compute_structural_discrepancies_dual(lhs_fn, rhs_fn);
 
     println!("LHS return depth: {}", lhs_ret_depth);
     println!("RHS return depth: {}", rhs_ret_depth);
@@ -106,8 +108,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
 
     // Also emit minimized subgraphs and metadata for the unmatched parts (dual
     // matching).
-    let meta = xlsynth_g8r::xls_ir::structural_similarity::
-        extract_dual_difference_subgraphs_with_shared_params_and_metadata(lhs_fn, rhs_fn);
+    let meta = extract_dual_difference_subgraphs_with_shared_params_and_metadata(lhs_fn, rhs_fn);
     let lhs_sub = meta.lhs_inner;
     let rhs_sub = meta.rhs_inner;
     // Unified return mapping before printing subgraphs.
@@ -121,7 +122,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     }
     println!(
         "\nLHS diff subgraph:\n{}",
-        xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&lhs_sub, &lhs_pkg.file_table)
+        ir::emit_fn_with_human_pos_comments(&lhs_sub, &lhs_pkg.file_table)
     );
     println!(
         "LHS inbound textual ids (unique): [{}]",
@@ -133,7 +134,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     }
     println!(
         "\nRHS diff subgraph:\n{}",
-        xlsynth_g8r::xls_ir::ir::emit_fn_with_human_pos_comments(&rhs_sub, &rhs_pkg.file_table)
+        ir::emit_fn_with_human_pos_comments(&rhs_sub, &rhs_pkg.file_table)
     );
     println!(
         "RHS inbound textual ids (unique): [{}]",

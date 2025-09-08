@@ -7,8 +7,8 @@
 //! the behavior of the new implementation. It does not compute edit sequences;
 //! instead it leverages structural reuse during a rebase operation.
 
-use crate::xls_ir::ir::Fn as IrFn;
-use crate::xls_ir::simple_rebase::rebase_onto;
+use crate::ir::Fn as IrFn;
+use crate::simple_rebase::rebase_onto;
 
 /// Builds a patched version of `old` that behaves like `new`, reusing all
 /// structurally equivalent nodes from `old` and only allocating new node ids
@@ -43,7 +43,7 @@ pub fn compute_localized_eco(old: &IrFn, new: &IrFn) -> IrFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir_parser::Parser;
 
     fn parse_fn(ir_body: &str) -> IrFn {
         let pkg_text = format!("package test\n\n{}\n", ir_body);

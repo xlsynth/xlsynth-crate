@@ -15,6 +15,7 @@ env_logger = "0.11"
 xlsynth = { path = "../../xlsynth", version = "0.0.182" }
 rand = "0.8"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
+xlsynth-pir = { path = "../../xlsynth-pir" }
 xlsynth-g8r = { path = "../../xlsynth-g8r" }
 
 [lib]

@@ -33,7 +33,6 @@ use crate::test_utils::{
 };
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
-use crate::xls_ir::ir_parser;
 use clap::ValueEnum;
 use core::simd::u64x4;
 use serde_json;
@@ -41,6 +40,7 @@ use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
+use xlsynth_pir::ir_parser;
 
 const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
@@ -1065,7 +1065,7 @@ fn generate_simd_inputs(gate_fn: &GateFn, rng: &mut impl rand::Rng) -> Vec<Vec25
         let mut bit_cursor = 0;
         for input in &gate_fn.inputs {
             let rand_val =
-                crate::fuzz_utils::arbitrary_irbits(rng, input.bit_vector.get_bit_count());
+                xlsynth_pir::fuzz_utils::arbitrary_irbits(rng, input.bit_vector.get_bit_count());
             for bit_idx in 0..input.bit_vector.get_bit_count() {
                 if rand_val.get_bit(bit_idx).unwrap() {
                     let limb = lane / 64;

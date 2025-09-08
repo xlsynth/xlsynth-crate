@@ -9,6 +9,7 @@ use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
 use xlsynth_g8r::equiv::solver_interface::Solver;
+use xlsynth_pir::ir;
 
 use std::collections::HashMap;
 use xlsynth::IrValue;
@@ -16,7 +17,7 @@ use xlsynth_g8r::equiv::prove_equiv::{
     prove_ir_fn_equiv_full, prove_ir_fn_equiv_output_bits_parallel,
     prove_ir_fn_equiv_split_input_bit, AssertionSemantics, EquivResult, EquivSide, IrFn,
 };
-use xlsynth_g8r::xls_ir::ir_parser;
+use xlsynth_pir::ir_parser;
 
 use crate::parallelism::ParallelismStrategy;
 
@@ -65,10 +66,7 @@ fn parse_and_prepare_fn(
     subcommand: &str,
     origin: &str,
     side: &str,
-) -> (
-    xlsynth_g8r::xls_ir::ir::Package,
-    xlsynth_g8r::xls_ir::ir::Fn,
-) {
+) -> (ir::Package, ir::Fn) {
     let pkg = match ir_parser::Parser::new(ir_text).parse_package() {
         Ok(pkg) => pkg,
         Err(e) => {

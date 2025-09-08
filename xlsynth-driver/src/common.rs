@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::process;
 use std::process::Command;
 use xlsynth::mangle_dslx_name;
+use xlsynth_pir::ir;
 
 // By default in the driver we treat warnings as errors.
 pub const DEFAULT_WARNINGS_AS_ERRORS: bool = true;
@@ -577,13 +578,12 @@ pub fn merge_uf_signature(
 }
 
 pub fn infer_uf_signature(
-    pkg: &xlsynth_g8r::xls_ir::ir::Package,
+    pkg: &ir::Package,
     uf_map: &HashMap<String, String>,
 ) -> HashMap<String, UfSignature> {
     let mut uf_sigs: std::collections::HashMap<String, UfSignature> =
         std::collections::HashMap::new();
-    let mut add_sig = |pkg: &xlsynth_g8r::xls_ir::ir::Package,
-                       mapping: &HashMap<String, String>| {
+    let mut add_sig = |pkg: &ir::Package, mapping: &HashMap<String, String>| {
         for (fn_name, uf_sym) in mapping {
             if let Some(f) = pkg.get_fn(fn_name) {
                 let arg_widths: Vec<usize> = f.params.iter().map(|p| p.ty.bit_count()).collect();

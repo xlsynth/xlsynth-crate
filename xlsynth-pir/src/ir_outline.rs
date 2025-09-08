@@ -9,12 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::xls_ir::ir::{
+use crate::ir::{
     Fn as IrFn, Node, NodePayload, NodeRef, Package, PackageMember, Param, ParamId, Type,
 };
-use crate::xls_ir::ir_utils::{
-    get_topological, get_topological_nodes, operands, remap_payload_with,
-};
+use crate::ir_utils::{get_topological, get_topological_nodes, operands, remap_payload_with};
 
 #[derive(Debug, Clone)]
 pub struct OutlineResult {
@@ -535,6 +533,8 @@ pub fn outline_with_ordering(
             ret_elem_refs.push(ir);
         }
     }
+
+    #[allow(unused_assignments)]
     let (inner_ret_ref, inner_ret_ty) = if ret_elem_refs.len() == 1 {
         (Some(ret_elem_refs[0]), ret_elem_tys.remove(0))
     } else {
@@ -792,10 +792,10 @@ pub fn outline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::equiv::prove_equiv::EquivResult;
-    use crate::equiv::prove_equiv_via_toolchain;
-    use crate::xls_ir::ir::{NodePayload, PackageMember};
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir::{self, NodePayload, PackageMember};
+    use crate::ir_parser::Parser;
+    use xlsynth_g8r::equiv::prove_equiv::EquivResult;
+    use xlsynth_g8r::equiv::prove_equiv_via_toolchain;
 
     fn parse_single_fn(ir: &str) -> (Package, IrFn) {
         let pkg_text = format!("package test\n\n{}\n", ir);
@@ -865,7 +865,7 @@ mod tests {
                         a_param_idx = Some(i);
                     }
                 }
-                NodePayload::Binop(crate::xls_ir::ir::Binop::Add, _, _) => {
+                NodePayload::Binop(ir::Binop::Add, _, _) => {
                     add_idx = Some(i);
                 }
                 _ => {}
@@ -958,7 +958,7 @@ fn f_inner(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
         let mut to_sel: HashSet<NodeRef> = HashSet::new();
         for (i, n) in f.nodes.iter().enumerate() {
             if let NodePayload::Binop(op, _, _) = n.payload {
-                if crate::xls_ir::ir::binop_to_operator(op) == "umul" {
+                if ir::binop_to_operator(op) == "umul" {
                     to_sel.insert(NodeRef { index: i });
                 }
             }
@@ -1019,7 +1019,7 @@ fn g_inner(t: bits[8] id=1, u: bits[8] id=2) -> bits[8] {
         let mut to_sel: HashSet<NodeRef> = HashSet::new();
         for (i, n) in f.nodes.iter().enumerate() {
             if let NodePayload::Binop(op, _, _) = n.payload {
-                if crate::xls_ir::ir::binop_to_operator(op) == "umul" {
+                if ir::binop_to_operator(op) == "umul" {
                     to_sel.insert(NodeRef { index: i });
                 }
             }
@@ -1086,8 +1086,9 @@ fn g2_inner(arg_0: bits[8] id=1, arg_1: bits[8] id=2) -> bits[8] {
         }
         // Ensure we only captured the add/sub (ids 3 and 4). Filter to exclude xor.
         to_sel.retain(|nr| match f.nodes[nr.index].payload {
-            NodePayload::Binop(crate::xls_ir::ir::Binop::Add, _, _)
-            | NodePayload::Binop(crate::xls_ir::ir::Binop::Sub, _, _) => true,
+            NodePayload::Binop(ir::Binop::Add, _, _) | NodePayload::Binop(ir::Binop::Sub, _, _) => {
+                true
+            }
             _ => false,
         });
 
@@ -1149,13 +1150,9 @@ fn h_inner(a: bits[8] id=1, b: bits[8] id=2) -> (bits[8], bits[8]) {
         // Outline the add and umul producers together
         let mut to_sel: HashSet<NodeRef> = HashSet::new();
         for (i, n) in f.nodes.iter().enumerate() {
-            if matches!(
-                n.payload,
-                NodePayload::Binop(crate::xls_ir::ir::Binop::Add, _, _)
-            ) || matches!(
-                n.payload,
-                NodePayload::Binop(crate::xls_ir::ir::Binop::Umul, _, _)
-            ) {
+            if matches!(n.payload, NodePayload::Binop(ir::Binop::Add, _, _))
+                || matches!(n.payload, NodePayload::Binop(ir::Binop::Umul, _, _))
+            {
                 to_sel.insert(NodeRef { index: i });
             }
         }

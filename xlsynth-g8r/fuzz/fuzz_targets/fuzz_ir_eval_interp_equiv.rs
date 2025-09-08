@@ -3,9 +3,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_g8r::xls_ir::{ir, ir_parser};
-use xlsynth_g8r::xls_ir::ir_eval::{eval_fn, FnEvalResult};
-use xlsynth_g8r::xls_ir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzUnop, FuzzSampleWithArgs, generate_ir_fn};
+use xlsynth_pir::{ir, ir_parser};
+use xlsynth_pir::ir_eval::{eval_fn, FnEvalResult};
+use xlsynth_pir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzUnop, FuzzSampleWithArgs, generate_ir_fn};
 
 fuzz_target!(|with: FuzzSampleWithArgs| {
     // Skip degenerate base cases as in other targets.

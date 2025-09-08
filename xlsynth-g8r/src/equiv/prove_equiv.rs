@@ -9,12 +9,10 @@ use std::sync::{Arc, Mutex};
 use xlsynth::IrValue;
 
 use crate::equiv::solver_interface::Uf;
-use crate::{
-    equiv::solver_interface::{BitVec, Response, Solver},
-    xls_ir::{
-        ir::{self, NaryOp, NodePayload, NodeRef, Unop},
-        ir_utils::get_topological,
-    },
+use crate::equiv::solver_interface::{BitVec, Response, Solver};
+use xlsynth_pir::{
+    ir::{self, NaryOp, NodePayload, NodeRef, Unop},
+    ir_utils::get_topological,
 };
 
 #[inline]
@@ -1589,7 +1587,7 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
 /// Helper: create a variant of `f` that returns only the single output bit at
 /// position `bit`.
 fn make_bit_fn(f: &ir::Fn, bit: usize) -> ir::Fn {
-    use crate::xls_ir::ir::{Node, NodePayload, NodeRef, Type};
+    use ir::{Node, NodePayload, NodeRef, Type};
 
     let mut nf = f.clone();
     let ret_ref = nf.ret_node_ref.expect("Function must have a return node");
@@ -1768,17 +1766,14 @@ pub mod test_utils {
 
     use xlsynth::IrValue;
 
-    use crate::{
-        equiv::{
-            prove_equiv::{
-                AssertionSemantics, EquivResult, FnInputs, IrFn, ParamDomains, align_fn_inputs,
-                get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
-                prove_ir_fn_equiv_full,
-            },
-            solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
+    use crate::equiv::{
+        prove_equiv::{
+            AssertionSemantics, EquivResult, FnInputs, IrFn, ParamDomains, align_fn_inputs,
+            get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv, prove_ir_fn_equiv_full,
         },
-        xls_ir::ir,
+        solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
     };
+    use xlsynth_pir::{ir, ir_parser};
 
     pub fn test_invoke_basic<S: Solver>(solver_config: &S::Config) {
         // Package with a callee that doubles its input and two wrappers:
@@ -1799,7 +1794,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let call_fn = pkg.get_fn("call").expect("call not found");
@@ -1850,7 +1845,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let call_g = pkg.get_fn("call_g").expect("call_g not found");
@@ -1946,7 +1941,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let top_g = pkg.get_fn("top_g").expect("top_g not found");
@@ -2018,7 +2013,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let call_g = pkg.get_fn("call_g").expect("call_g not found");
@@ -2100,7 +2095,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let call_fn = pkg.get_fn("call").expect("call not found");
@@ -2148,7 +2143,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let looped = pkg.get_fn("looped").expect("looped not found");
@@ -2195,7 +2190,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let looped = pkg.get_fn("looped").expect("looped not found");
@@ -2237,7 +2232,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let looped = pkg.get_fn("looped").expect("looped not found");
@@ -2289,7 +2284,7 @@ pub mod test_utils {
             }
         "#;
 
-        let pkg = crate::xls_ir::ir_parser::Parser::new(ir_pkg_text)
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
             .parse_package()
             .expect("Failed to parse IR package");
         let looped = pkg.get_fn("looped").expect("looped not found");
@@ -2319,7 +2314,7 @@ pub mod test_utils {
             }
         "#;
 
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
@@ -2335,7 +2330,7 @@ pub mod test_utils {
             }
         "#;
 
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
@@ -2349,7 +2344,7 @@ pub mod test_utils {
         ir_text: &str,
         expected: impl Fn(&mut S, &FnInputs<S::Term>) -> BitVec<S::Term>,
     ) {
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
@@ -2390,9 +2385,9 @@ pub mod test_utils {
         assertion_semantics: AssertionSemantics,
         expected_proven: bool,
     ) {
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(lhs_text);
+        let mut parser = ir_parser::Parser::new(lhs_text);
         let lhs_ir_fn = parser.parse_fn().unwrap();
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(rhs_text);
+        let mut parser = ir_parser::Parser::new(rhs_text);
         let rhs_ir_fn = parser.parse_fn().unwrap();
         let actual = prove_ir_fn_equiv::<S>(
             solver_config,
@@ -2650,7 +2645,7 @@ pub mod test_utils {
             }}"#,
             lhs_width_str, rhs_width_str, result_width_str, result_width_str, binop_xls_name
         );
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(&ir_text);
+        let mut parser = ir_parser::Parser::new(&ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
@@ -3062,9 +3057,7 @@ pub mod test_utils {
                     start: bits[4] = literal(value=4, id=2)
                     ret r: bits[16] = dynamic_bit_slice(input, start, width=16, id=1)
                 }"#;
-        let f = crate::xls_ir::ir_parser::Parser::new(ir)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
@@ -3259,9 +3252,7 @@ pub mod test_utils {
                     c: bits[4] = literal(value=3, id=4)
                     ret s: bits[4] = sel(idx, cases=[a, b, c], id=5)
                 }"#;
-        let f = crate::xls_ir::ir_parser::Parser::new(ir)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
@@ -3283,9 +3274,7 @@ pub mod test_utils {
                     def: bits[4] = literal(value=5, id=6)
                     ret s: bits[4] = sel(idx, cases=[a,b,c,d], default=def, id=7)
                 }"#;
-        let f = crate::xls_ir::ir_parser::Parser::new(ir)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
         let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
@@ -3454,9 +3443,9 @@ pub mod test_utils {
         let lhs = lt_ir(8, 1);
         let rhs = lt_ir(8, 2);
 
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(&lhs);
+        let mut parser = ir_parser::Parser::new(&lhs);
         let lhs_ir_fn = parser.parse_fn().unwrap();
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(&rhs);
+        let mut parser = ir_parser::Parser::new(&rhs);
         let rhs_ir_fn = parser.parse_fn().unwrap();
 
         let res = super::prove_ir_fn_equiv::<S>(
@@ -3657,9 +3646,9 @@ pub mod test_utils {
                 ret id.1: bits[8] = identity(b, id=1)
             }"#;
         // Parse the IR text into functions.
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(lhs_ir);
+        let mut parser = ir_parser::Parser::new(lhs_ir);
         let lhs_fn_ir = parser.parse_fn().unwrap();
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(rhs_ir);
+        let mut parser = ir_parser::Parser::new(rhs_ir);
         let rhs_fn_ir = parser.parse_fn().unwrap();
 
         // Run equivalence prover – expect a counter-example (Disproved).
@@ -3713,9 +3702,9 @@ pub mod test_utils {
                 ret and.2: bits[2] = and(x, one, id=2)
             }
         "#;
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(lhs_ir);
+        let mut parser = ir_parser::Parser::new(lhs_ir);
         let lhs_fn_ir = parser.parse_fn().unwrap();
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(rhs_ir);
+        let mut parser = ir_parser::Parser::new(rhs_ir);
         let rhs_fn_ir = parser.parse_fn().unwrap();
 
         let lhs_ir_fn = IrFn::new(&lhs_fn_ir, None);

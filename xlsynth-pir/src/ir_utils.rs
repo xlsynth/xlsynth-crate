@@ -2,12 +2,13 @@
 
 //! Utility functions for working with / on XLS IR.
 
-use crate::xls_ir::ir::{Fn, Node, NodePayload, NodeRef};
+use crate::ir::{Fn, Node, NodePayload, NodeRef};
 use std::collections::{HashMap, HashSet};
 
 /// Returns the list of operands for the provided node.
 pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     use NodePayload::*;
+
     match payload {
         Nil => vec![],
         GetParam(_) => vec![],
@@ -415,8 +416,8 @@ pub fn sanitize_text_id_to_identifier_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir::PackageMember;
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir::PackageMember;
+    use crate::ir_parser::Parser;
 
     fn parse_fn(ir: &str) -> Fn {
         let pkg_text = format!("package test\n\n{}\n", ir);
@@ -543,7 +544,7 @@ mod tests {
 #[cfg(test)]
 mod remap_tests {
     use super::*;
-    use crate::xls_ir::ir::{NodePayload, NodeRef};
+    use crate::ir::{NodePayload, NodeRef};
 
     fn add(delta: usize) -> impl FnMut(NodeRef) -> NodeRef {
         move |nr: NodeRef| NodeRef {
@@ -689,8 +690,8 @@ mod remap_tests {
 #[cfg(test)]
 mod users_tests {
     use super::*;
-    use crate::xls_ir::ir::{NaryOp, PackageMember};
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir::{NaryOp, PackageMember};
+    use crate::ir_parser::Parser;
 
     fn parse_fn(ir: &str) -> Fn {
         let pkg_text = format!("package test\n\n{}\n", ir);

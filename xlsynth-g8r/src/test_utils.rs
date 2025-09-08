@@ -4,11 +4,11 @@ use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Outp
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::ir2gate;
 use crate::ir2gate_utils::gatify_add_ripple_carry;
-use crate::xls_ir::ir::Package as CrateIrPackage;
-use crate::xls_ir::ir_parser;
 use half::bf16;
 use std::path::Path;
 use xlsynth::{IrBits, IrFunction, IrPackage, IrValue, mangle_dslx_name};
+use xlsynth_pir::ir::Package as CrateIrPackage;
+use xlsynth_pir::ir_parser;
 
 // BF16 Constants
 pub const BF16_EXPONENT_BITS: usize = 8;

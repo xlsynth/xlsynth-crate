@@ -13,8 +13,8 @@ use xlsynth_g8r::equiv::prove_equiv::{
     AssertionSemantics, EquivResult, IrFn, prove_ir_fn_equiv,
     prove_ir_fn_equiv_output_bits_parallel,
 };
-use xlsynth_g8r::xls_ir::ir_parser;
-use xlsynth_g8r::xls_ir::ir_fuzz::{FuzzSample, generate_ir_fn};
+use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 
 // Insert helper that checks consistency among the external tool, a primary
 // solver result, and an optional per-bit parallel solver result.

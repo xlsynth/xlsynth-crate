@@ -3,8 +3,6 @@
 #![cfg(feature = "has-boolector")]
 
 use crate::ir_value_utils::ir_value_from_bits_with_type;
-use crate::xls_ir::ir::{Fn, NodePayload, NodeRef, Type};
-use crate::xls_ir::ir_utils::get_topological;
 use boolector::option::{BtorOption, ModelGen};
 use boolector::{BV, Btor, SolverResult};
 use log::debug;
@@ -16,6 +14,8 @@ use std::sync::{
 };
 use xlsynth::IrBits;
 use xlsynth::IrValue;
+use xlsynth_pir::ir::{self, Fn, NodePayload, NodeRef, Type};
+use xlsynth_pir::ir_utils::get_topological;
 
 /// Result of converting an XLS IR function to Boolector logic.
 pub struct IrFnBoolectorResult {
@@ -56,7 +56,7 @@ impl Ctx {
     /// across proofs.
     pub fn new(lhs: &Fn, rhs: &Fn) -> Self {
         let btor = new_btor(Incremental::Yes);
-        let collect_param_bit_widths = |params: &[crate::xls_ir::ir::Param]| {
+        let collect_param_bit_widths = |params: &[ir::Param]| {
             params
                 .iter()
                 .map(|p| (p.name.clone(), p.ty.bit_count() as u32))
@@ -179,9 +179,9 @@ pub fn ir_fn_to_boolector(
             NodePayload::Unop(op, arg) => {
                 let arg_bv = env.get(arg).expect("Unop argument must be present");
                 match op {
-                    crate::xls_ir::ir::Unop::Not => arg_bv.not(),
-                    crate::xls_ir::ir::Unop::Neg => arg_bv.neg(),
-                    crate::xls_ir::ir::Unop::OrReduce => {
+                    ir::Unop::Not => arg_bv.not(),
+                    ir::Unop::Neg => arg_bv.neg(),
+                    ir::Unop::OrReduce => {
                         let width = arg_bv.get_width();
                         let mut result = arg_bv.slice(0, 0);
                         for i in 1..width {
@@ -190,7 +190,7 @@ pub fn ir_fn_to_boolector(
                         }
                         result
                     }
-                    crate::xls_ir::ir::Unop::AndReduce => {
+                    ir::Unop::AndReduce => {
                         let width = arg_bv.get_width();
                         let mut result = arg_bv.slice(0, 0);
                         for i in 1..width {
@@ -199,8 +199,8 @@ pub fn ir_fn_to_boolector(
                         }
                         result
                     }
-                    crate::xls_ir::ir::Unop::Identity => arg_bv.clone(),
-                    crate::xls_ir::ir::Unop::Reverse => {
+                    ir::Unop::Identity => arg_bv.clone(),
+                    ir::Unop::Reverse => {
                         let width = arg_bv.get_width();
                         if width == 0 {
                             arg_bv.clone()
@@ -218,7 +218,7 @@ pub fn ir_fn_to_boolector(
                             result
                         }
                     }
-                    crate::xls_ir::ir::Unop::XorReduce => {
+                    ir::Unop::XorReduce => {
                         let width = arg_bv.get_width();
                         let mut result = arg_bv.slice(0, 0);
                         for i in 1..width {
@@ -269,7 +269,7 @@ pub fn ir_fn_to_boolector(
                 result
             }
             NodePayload::Nary(op, elems) => match op {
-                crate::xls_ir::ir::NaryOp::Concat => {
+                ir::NaryOp::Concat => {
                     assert!(elems.len() >= 2, "Concat must have at least two operands");
                     let mut it = elems.iter();
                     let first = env
@@ -281,7 +281,7 @@ pub fn ir_fn_to_boolector(
                         acc.concat(next)
                     })
                 }
-                crate::xls_ir::ir::NaryOp::And => {
+                ir::NaryOp::And => {
                     assert!(elems.len() >= 2, "And must have at least two operands");
                     let mut it = elems.iter();
                     let first = env
@@ -293,7 +293,7 @@ pub fn ir_fn_to_boolector(
                         acc.and(next)
                     })
                 }
-                crate::xls_ir::ir::NaryOp::Xor => {
+                ir::NaryOp::Xor => {
                     assert!(elems.len() >= 2, "Xor must have at least two operands");
                     let mut it = elems.iter();
                     let first = env
@@ -305,7 +305,7 @@ pub fn ir_fn_to_boolector(
                         acc.xor(next)
                     })
                 }
-                crate::xls_ir::ir::NaryOp::Nor => {
+                ir::NaryOp::Nor => {
                     assert!(elems.len() >= 2, "Nor must have at least two operands");
                     let mut it = elems.iter();
                     let first = env
@@ -318,7 +318,7 @@ pub fn ir_fn_to_boolector(
                     });
                     or_result.not()
                 }
-                crate::xls_ir::ir::NaryOp::Or => {
+                ir::NaryOp::Or => {
                     assert!(elems.len() >= 2, "Or must have at least two operands");
                     let mut it = elems.iter();
                     let first = env
@@ -330,7 +330,7 @@ pub fn ir_fn_to_boolector(
                         acc.or(next)
                     })
                 }
-                crate::xls_ir::ir::NaryOp::Nand => {
+                ir::NaryOp::Nand => {
                     assert!(elems.len() >= 2, "Nand must have at least two operands");
                     let mut it = elems.iter();
                     let first = env
@@ -347,7 +347,7 @@ pub fn ir_fn_to_boolector(
             NodePayload::Binop(op, a, b) => {
                 let a_bv = env.get(a).expect("Binop lhs must be present");
                 let b_bv = env.get(b).expect("Binop rhs must be present");
-                use crate::xls_ir::ir::Binop;
+                use ir::Binop;
                 match op {
                     Binop::Add => a_bv.add(b_bv),
                     Binop::Sub => a_bv.sub(b_bv),
@@ -705,7 +705,7 @@ pub fn ir_fn_to_boolector(
                 let index_bv = env.get(&indices[0]).expect("Index BV must be present");
                 let array_ty = f.get_node_ty(*array);
                 let (element_type, element_count) = match array_ty {
-                    crate::xls_ir::ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                    ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
                     _ => panic!("ArrayIndex: expected array type"),
                 };
                 let elem_width = element_type.bit_count() as u32;
@@ -754,7 +754,7 @@ pub fn ir_fn_to_boolector(
                 let index_bv = env.get(&indices[0]).expect("Index BV must be present");
                 let array_ty = f.get_node_ty(*array);
                 let (elem_ty, elem_count) = match array_ty {
-                    crate::xls_ir::ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                    ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
                     _ => panic!("ArrayUpdate: expected array type"),
                 };
                 let elem_width = elem_ty.bit_count() as u32;
@@ -845,7 +845,7 @@ pub fn ir_fn_to_boolector(
                 let start_bv = env.get(start).expect("Start BV must be present");
                 let array_ty = f.get_node_ty(*array);
                 let (elem_ty, elem_cnt) = match array_ty {
-                    crate::xls_ir::ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
+                    ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
                     _ => panic!("ArraySlice: expected array type"),
                 };
                 let elem_width = elem_ty.bit_count() as u32;
@@ -1148,10 +1148,10 @@ pub enum EquivResult {
 }
 
 /// Helper to flatten a BV output (tuple) to a single BV
-fn flatten_bv(bv: &BV<Rc<Btor>>, ty: &crate::xls_ir::ir::Type) -> BV<Rc<Btor>> {
+fn flatten_bv(bv: &BV<Rc<Btor>>, ty: &ir::Type) -> BV<Rc<Btor>> {
     match ty {
-        crate::xls_ir::ir::Type::Bits(_) => bv.clone(),
-        crate::xls_ir::ir::Type::Tuple(members) => {
+        ir::Type::Bits(_) => bv.clone(),
+        ir::Type::Tuple(members) => {
             let mut offset = 0;
             let mut result = None;
             for member in members.iter().rev() {
@@ -1166,7 +1166,7 @@ fn flatten_bv(bv: &BV<Rc<Btor>>, ty: &crate::xls_ir::ir::Type) -> BV<Rc<Btor>> {
             }
             result.expect("Tuple must have at least one member")
         }
-        crate::xls_ir::ir::Type::Array(arr) => {
+        ir::Type::Array(arr) => {
             let mut offset = 0;
             let mut result = None;
             for _ in 0..arr.element_count {
@@ -1186,11 +1186,11 @@ fn flatten_bv(bv: &BV<Rc<Btor>>, ty: &crate::xls_ir::ir::Type) -> BV<Rc<Btor>> {
 }
 
 /// Helper to flatten a type to a single bit width (tuples, arrays, bits)
-pub fn flatten_type(ty: &crate::xls_ir::ir::Type) -> usize {
+pub fn flatten_type(ty: &ir::Type) -> usize {
     match ty {
-        crate::xls_ir::ir::Type::Bits(width) => *width,
-        crate::xls_ir::ir::Type::Tuple(members) => members.iter().map(|t| flatten_type(&**t)).sum(),
-        crate::xls_ir::ir::Type::Array(arr) => flatten_type(&arr.element_type) * arr.element_count,
+        ir::Type::Bits(width) => *width,
+        ir::Type::Tuple(members) => members.iter().map(|t| flatten_type(&**t)).sum(),
+        ir::Type::Array(arr) => flatten_type(&arr.element_type) * arr.element_count,
         _ => unimplemented!("flatten_type for {:?}", ty),
     }
 }
@@ -1211,7 +1211,7 @@ fn bv_solution_to_ir_bits(bv: &BV<Rc<Btor>>) -> IrBits {
             bits.len()
         );
     }
-    crate::ir_value_utils::ir_bits_from_lsb_is_0(&bits)
+    IrBits::from_lsb_is_0(&bits)
 }
 
 /// Helper: convert a Boolector BV model solution to a typed IRValue using the
@@ -1362,13 +1362,9 @@ fn irbits_to_binary_str(bits: &xlsynth::IrBits) -> String {
         .collect()
 }
 
-fn ir_value_to_bv(
-    btor: Rc<Btor>,
-    ir_value: &xlsynth::IrValue,
-    ty: &crate::xls_ir::ir::Type,
-) -> BV<Rc<Btor>> {
+fn ir_value_to_bv(btor: Rc<Btor>, ir_value: &xlsynth::IrValue, ty: &ir::Type) -> BV<Rc<Btor>> {
     match ty {
-        crate::xls_ir::ir::Type::Bits(width) => {
+        ir::Type::Bits(width) => {
             let bits = ir_value.to_bits().expect("Bits literal must be bits");
             if *width <= 64 {
                 let mut value = 0u64;
@@ -1383,7 +1379,7 @@ fn ir_value_to_bv(
                 BV::from_binary_str(btor, &bin_str)
             }
         }
-        crate::xls_ir::ir::Type::Array(array_ty) => {
+        ir::Type::Array(array_ty) => {
             let elements = ir_value
                 .get_elements()
                 .expect("Array literal must have elements");
@@ -1399,7 +1395,7 @@ fn ir_value_to_bv(
             }
             result
         }
-        crate::xls_ir::ir::Type::Tuple(types) => {
+        ir::Type::Tuple(types) => {
             // Keep element-0 as the most-significant slice to match the
             // ordering used by the `tuple` IR node and by
             // `tuple_get_flat_bit_slice_for_index`.
@@ -1423,7 +1419,7 @@ fn ir_value_to_bv(
             }
             result
         }
-        crate::xls_ir::ir::Type::Token => {
+        ir::Type::Token => {
             // Tokens are zero bits
             BV::from_u64(btor, 0, 0)
         }
@@ -1479,7 +1475,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel(
     // Helper to create a variant of `f` that returns just a single bit of the
     // original return value at position `bit`.
     fn make_bit_fn(f: &Fn, bit: usize) -> Fn {
-        use crate::xls_ir::ir::{Node, NodePayload, NodeRef, Type};
+        use ir::{Node, NodePayload, NodeRef, Type};
 
         let mut nf = f.clone();
         let ret = nf.ret_node_ref.expect("ret node");
@@ -1651,10 +1647,10 @@ pub fn prove_ir_fn_equiv_split_input_bit(
 mod tests {
     use super::*;
     use crate::test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample};
-    use crate::xls_ir::ir::{ArrayTypeData, Type};
-    use crate::xls_ir::ir_parser;
     use boolector::Btor;
+    use ir::{ArrayTypeData, Type};
     use std::rc::Rc;
+    use xlsynth_pir::ir_parser;
 
     /// Asserts that the given IR function (as text) is equivalent to itself.
     fn assert_fn_equiv_to_self(ir_text: &str) {
@@ -2099,9 +2095,7 @@ mod tests {
    zero: bits[4] = literal(value=0, id=2)
    ret q: bits[4] = sdiv(dividend, zero, id=3)
  }"#;
-        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
         let btor = std::rc::Rc::new(boolector::Btor::new());
         btor.set_opt(boolector::option::BtorOption::ModelGen(
             boolector::option::ModelGen::All,
@@ -2121,7 +2115,7 @@ mod tests {
         let ir_text = r#"fn sel3(x: bits[2] id=1, a: bits[4] id=2, b: bits[4] id=3, c: bits[4] id=4, d: bits[4] id=5) -> bits[4] {
   ret sel.6: bits[4] = sel(x, cases=[a, b, c], default=d, id=6)
 }"#;
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         // Try all selector values 0, 1, 2, 3
         for sel_val in [0, 1, 2, 3].iter().cloned() {
@@ -2183,7 +2177,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
   ret dynamic_bit_slice.2: bits[2] = dynamic_bit_slice(input, input, width=2, id=2)
 }"#;
 
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
 
         let btor = Rc::new(Btor::new());
@@ -2211,12 +2205,8 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let ir_zero = r#"fn zero_fn(x: bits[3] id=1) -> bits[2] {
   ret zero.2: bits[2] = literal(value=0, id=2)
 }"#;
-        let slice_f = crate::xls_ir::ir_parser::Parser::new(ir_slice)
-            .parse_fn()
-            .unwrap();
-        let zero_f = crate::xls_ir::ir_parser::Parser::new(ir_zero)
-            .parse_fn()
-            .unwrap();
+        let slice_f = ir_parser::Parser::new(ir_slice).parse_fn().unwrap();
+        let zero_f = ir_parser::Parser::new(ir_zero).parse_fn().unwrap();
         let result = prove_ir_fn_equiv(&slice_f, &zero_f, false);
         assert_eq!(result, EquivResult::Proved);
     }
@@ -2234,7 +2224,7 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let ir_text = r#"fn xor4(x: bits[4] id=1) -> bits[1] {
   ret xor_reduce.2: bits[1] = xor_reduce(x, id=2)
 }"#;
-        let mut parser = crate::xls_ir::ir_parser::Parser::new(ir_text);
+        let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let btor = Rc::new(Btor::new());
         btor.set_opt(BtorOption::ModelGen(ModelGen::All));
@@ -2261,12 +2251,8 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
   ret k32: bits[7] = literal(value=32, id=1)
 }"#;
 
-        let f = crate::xls_ir::ir_parser::Parser::new(ir_onehot)
-            .parse_fn()
-            .unwrap();
-        let g = crate::xls_ir::ir_parser::Parser::new(ir_const)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir_onehot).parse_fn().unwrap();
+        let g = ir_parser::Parser::new(ir_const).parse_fn().unwrap();
         let result = prove_ir_fn_equiv(&f, &g, false);
         assert_eq!(
             result,
@@ -2285,12 +2271,8 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
   ret id: bits[2] = identity(x, id=2)
 }"#;
 
-        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
-            .parse_fn()
-            .unwrap();
-        let g = crate::xls_ir::ir_parser::Parser::new(ir_id)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
+        let g = ir_parser::Parser::new(ir_id).parse_fn().unwrap();
         let res = prove_ir_fn_equiv(&f, &g, false);
         assert_eq!(res, EquivResult::Proved);
     }
@@ -2304,12 +2286,8 @@ fn fuzz_test(input: bits[4] id=1) -> bits[1] {
         let ir_static = r#"fn g(x: bits[8] id=1) -> bits[2] {
   ret bs: bits[2] = bit_slice(x, start=1, width=2, id=2)
 }"#;
-        let f = crate::xls_ir::ir_parser::Parser::new(ir_dyn)
-            .parse_fn()
-            .unwrap();
-        let g = crate::xls_ir::ir_parser::Parser::new(ir_static)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir_dyn).parse_fn().unwrap();
+        let g = ir_parser::Parser::new(ir_static).parse_fn().unwrap();
         assert_eq!(prove_ir_fn_equiv(&f, &g, false), EquivResult::Proved);
     }
 
@@ -2417,12 +2395,8 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
         let ir_id = r#"fn id1(x: bits[1] id=1) -> bits[1] {
   ret id.2: bits[1] = identity(x, id=2)
 }"#;
-        let f_shl = crate::xls_ir::ir_parser::Parser::new(ir_shl)
-            .parse_fn()
-            .unwrap();
-        let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
-            .parse_fn()
-            .unwrap();
+        let f_shl = ir_parser::Parser::new(ir_shl).parse_fn().unwrap();
+        let f_id = ir_parser::Parser::new(ir_id).parse_fn().unwrap();
         assert_eq!(prove_ir_fn_equiv(&f_shl, &f_id, false), EquivResult::Proved);
     }
 
@@ -2438,12 +2412,8 @@ fn optimized_shrl_saturation_fn(input: bits[8] id=1) -> bits[1] {
         let ir_id = r#"fn id1(x: bits[1] id=1) -> bits[1] {
   ret id.2: bits[1] = identity(x, id=2)
 }"#;
-        let f_shra = crate::xls_ir::ir_parser::Parser::new(ir_shra)
-            .parse_fn()
-            .unwrap();
-        let f_id = crate::xls_ir::ir_parser::Parser::new(ir_id)
-            .parse_fn()
-            .unwrap();
+        let f_shra = ir_parser::Parser::new(ir_shra).parse_fn().unwrap();
+        let f_id = ir_parser::Parser::new(ir_id).parse_fn().unwrap();
         assert_eq!(
             prove_ir_fn_equiv(&f_shra, &f_id, false),
             EquivResult::Proved
@@ -2483,10 +2453,10 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
 }
 "#;
 
-        let pkg_orig = crate::xls_ir::ir_parser::Parser::new(ir_original)
+        let pkg_orig = ir_parser::Parser::new(ir_original)
             .parse_and_validate_package()
             .unwrap();
-        let pkg_opt = crate::xls_ir::ir_parser::Parser::new(ir_optimized)
+        let pkg_opt = ir_parser::Parser::new(ir_optimized)
             .parse_and_validate_package()
             .unwrap();
 
@@ -2527,10 +2497,10 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret and.15: bits[7] = and(array_index.8, sign_ext.14, id=15)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(orig_ir)
+        let lhs = ir_parser::Parser::new(orig_ir)
             .parse_fn()
             .expect("Failed to parse original IR");
-        let rhs = crate::xls_ir::ir_parser::Parser::new(opt_ir)
+        let rhs = ir_parser::Parser::new(opt_ir)
             .parse_fn()
             .expect("Failed to parse optimized IR");
 
@@ -2550,9 +2520,7 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   zero: bits[8] = literal(value=0, id=2)
   ret r: bits[8] = umod(x, zero, id=3)
 }"#;
-        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
         // Instantiate Boolector directly to evaluate.
         let btor = std::rc::Rc::new(boolector::Btor::new());
         btor.set_opt(boolector::option::BtorOption::ModelGen(
@@ -2575,9 +2543,7 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
         let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
    ret smod.2: bits[8] = smod(x, x, id=2)
  }"#;
-        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
         let btor = std::rc::Rc::new(boolector::Btor::new());
         btor.set_opt(boolector::option::BtorOption::ModelGen(
             boolector::option::ModelGen::All,
@@ -2626,10 +2592,10 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
    ret and.41: bits[7] = and(sub.8, sign_ext.40, id=41)
  }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(orig_ir)
+        let lhs = ir_parser::Parser::new(orig_ir)
             .parse_fn()
             .expect("parse lhs");
-        let rhs = crate::xls_ir::ir_parser::Parser::new(opt_ir)
+        let rhs = ir_parser::Parser::new(opt_ir)
             .parse_fn()
             .expect("parse rhs");
         let result = prove_ir_fn_equiv(&lhs, &rhs, false);
@@ -2660,9 +2626,7 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret r: bits[32] = bit_slice_update(operand, start, upd_val, id=4)
 }"#;
 
-        let f = crate::xls_ir::ir_parser::Parser::new(ir_text)
-            .parse_fn()
-            .unwrap();
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
         // Evaluate through Boolector; ensure no panic and width is 32.
         let btor = std::rc::Rc::new(boolector::Btor::new());
         btor.set_opt(boolector::option::BtorOption::ModelGen(
@@ -2684,12 +2648,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret literal_255: bits[8] = literal(value=255, id=3)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(orig_ir)
-            .parse_fn()
-            .unwrap();
-        let rhs = crate::xls_ir::ir_parser::Parser::new(opt_ir)
-            .parse_fn()
-            .unwrap();
+        let lhs = ir_parser::Parser::new(orig_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(opt_ir).parse_fn().unwrap();
 
         assert_eq!(
             super::prove_ir_fn_equiv(&lhs, &rhs, false),
@@ -2714,12 +2674,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret tup: (bits[8], bits[4]) = tuple(lit0, lit1, id=3)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
-            .parse_fn()
-            .unwrap();
-        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
-            .parse_fn()
-            .unwrap();
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
         let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
         assert_eq!(
@@ -2743,12 +2699,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret lit: bits[8] = literal(value=0x12, id=1)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
-            .parse_fn()
-            .unwrap();
-        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
-            .parse_fn()
-            .unwrap();
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
         let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
         assert_eq!(
@@ -2777,12 +2729,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret lit: bits[4] = literal(value=0xF, id=1)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
-            .parse_fn()
-            .unwrap();
-        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
-            .parse_fn()
-            .unwrap();
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
         let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
         assert!(
@@ -2808,12 +2756,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret expected: bits[4][3] = literal(value=[1, 0xA, 4], id=1)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
-            .parse_fn()
-            .unwrap();
-        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
-            .parse_fn()
-            .unwrap();
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
         let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
         assert!(
@@ -2837,12 +2781,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret arr: bits[4][3] = array(e0, e1, e2, id=4)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
-            .parse_fn()
-            .unwrap();
-        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
-            .parse_fn()
-            .unwrap();
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
         let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
         assert!(
@@ -2864,12 +2804,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret two: bits[4] = literal(value=1, id=1)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
-            .parse_fn()
-            .unwrap();
-        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
-            .parse_fn()
-            .unwrap();
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
         let result = super::prove_ir_fn_equiv(&lhs, &rhs, false);
         assert!(
@@ -2890,12 +2826,8 @@ top fn fuzz_test(input: bits[2] id=1) -> bits[1] {
   ret flat: bits[12] = literal(value=0x321, id=1)
 }"#;
 
-        let lhs = crate::xls_ir::ir_parser::Parser::new(lhs_ir)
-            .parse_fn()
-            .unwrap();
-        let rhs = crate::xls_ir::ir_parser::Parser::new(rhs_ir)
-            .parse_fn()
-            .unwrap();
+        let lhs = ir_parser::Parser::new(lhs_ir).parse_fn().unwrap();
+        let rhs = ir_parser::Parser::new(rhs_ir).parse_fn().unwrap();
 
         let result = super::prove_ir_fn_equiv(&lhs, &rhs, true);
         assert!(

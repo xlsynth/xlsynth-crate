@@ -2,8 +2,8 @@
 
 //! Computes a graph edit distance between two XLS IR functions.
 
-use crate::xls_ir::ir::{Fn, Node, NodePayload};
-use crate::xls_ir::ir::{binop_to_operator, nary_op_to_operator, unop_to_operator};
+use crate::ir::{Fn, Node, NodePayload};
+use crate::ir::{binop_to_operator, nary_op_to_operator, unop_to_operator};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NodeSignature {
@@ -119,8 +119,8 @@ fn extract_operand_name(node: &Node) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir::Package;
-    use crate::xls_ir::ir_parser::Parser;
+    use crate::ir::Package;
+    use crate::ir_parser::Parser;
 
     fn parse_ir_from_string(s: &str) -> Package {
         let mut parser = Parser::new(s);

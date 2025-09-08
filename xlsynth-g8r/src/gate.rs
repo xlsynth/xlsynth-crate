@@ -8,7 +8,7 @@ use bitvec::vec::BitVec;
 use xlsynth::IrBits;
 
 use crate::topo::post_order_operands;
-use crate::xls_ir::ir;
+use xlsynth_pir::ir;
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct AigRef {

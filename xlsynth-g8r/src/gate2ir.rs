@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::iter::zip;
 
 use crate::gate::{self, AigNode, AigOperand};
-use crate::xls_ir::ir::{self, ArrayTypeData};
 use xlsynth;
 use xlsynth::{BValue, FnBuilder, IrType, IrValue, XlsynthError};
+use xlsynth_pir::ir::{self, ArrayTypeData};
 
 fn make_xlsynth_type(param_type: &ir::Type, package: &mut xlsynth::IrPackage) -> IrType {
     match param_type {
@@ -279,7 +279,8 @@ pub fn gate_fn_to_xlsynth_ir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ir2gate::GatifyOptions, ir2gate::gatify, xls_ir::ir_parser};
+    use crate::{ir2gate::GatifyOptions, ir2gate::gatify};
+    use xlsynth_pir::ir_parser;
 
     #[test]
     fn test_gate_fn_to_ir_one_and_gate() {

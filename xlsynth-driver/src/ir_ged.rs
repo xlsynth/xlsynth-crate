@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
-use xlsynth_g8r::xls_ir::edit_distance;
+use xlsynth_pir::edit_distance;
+use xlsynth_pir::ir_parser;
 
 use crate::toolchain_config::ToolchainConfig;
 
@@ -14,8 +15,8 @@ fn ir_ged(
 ) {
     log::info!("ir_ged");
 
-    let lhs_pkg = xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(lhs).unwrap();
-    let rhs_pkg = xlsynth_g8r::xls_ir::ir_parser::parse_path_to_package(rhs).unwrap();
+    let lhs_pkg = ir_parser::parse_path_to_package(lhs).unwrap();
+    let rhs_pkg = ir_parser::parse_path_to_package(rhs).unwrap();
 
     let lhs_fn = match lhs_ir_top {
         Some(top) => lhs_pkg.get_fn(top).unwrap(),

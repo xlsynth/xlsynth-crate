@@ -212,13 +212,8 @@ mod tests {
     #[allow(unused_imports)]
     use crate::assert_within;
     use crate::{
-        check_equivalence,
-        gate_builder::GateBuilder,
-        get_summary_stats::get_summary_stats,
-        test_utils::{
-            DEPTH_TOLERANCE, NODE_TOLERANCE, Opt, load_bf16_add_sample, load_bf16_mul_sample,
-            setup_padded_graph_with_equal_depth_opposite_polarity,
-        },
+        check_equivalence, gate_builder::GateBuilder, get_summary_stats::get_summary_stats,
+        test_utils::setup_padded_graph_with_equal_depth_opposite_polarity,
     };
     use rand::SeedableRng;
     use rand_xoshiro::Xoshiro256PlusPlus;

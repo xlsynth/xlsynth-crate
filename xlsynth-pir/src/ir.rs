@@ -6,7 +6,7 @@ use std::collections::{HashMap, hash_map::OccupiedError};
 
 use xlsynth::{IrValue, ir_value::IrFormatPreference};
 
-use crate::xls_ir::ir_utils::operands;
+use crate::{ir, ir_parser, ir_utils::operands};
 
 /// Strongly-typed wrapper for parameter IDs.
 ///
@@ -1019,7 +1019,7 @@ impl Fn {
         // Find all GetParam nodes for dropped params
         let mut offending = Vec::new();
         for (i, node) in self.nodes.iter().enumerate() {
-            if let crate::xls_ir::ir::NodePayload::GetParam(param_id) = &node.payload {
+            if let ir::NodePayload::GetParam(param_id) = &node.payload {
                 if dropped.contains(param_id) {
                     offending.push((i, *param_id));
                 }
@@ -1028,9 +1028,9 @@ impl Fn {
         // For each offending node, check if it is referenced by any other node
         let mut to_nil = Vec::new();
         for (idx, param_id) in offending {
-            let node_ref = crate::xls_ir::ir::NodeRef { index: idx };
+            let node_ref = ir::NodeRef { index: idx };
             let is_used = self.nodes.iter().any(|n| {
-                use crate::xls_ir::ir::NodePayload::*;
+                use ir::NodePayload::*;
                 match &n.payload {
                     Tuple(nodes) | Array(nodes) => nodes.contains(&node_ref),
                     ArraySlice { array, start, .. } => array == &node_ref || start == &node_ref,
@@ -1107,7 +1107,7 @@ impl Fn {
         }
         // Clobber unused GetParam nodes with Nil
         for idx in to_nil {
-            self.nodes[idx].payload = crate::xls_ir::ir::NodePayload::Nil;
+            self.nodes[idx].payload = ir::NodePayload::Nil;
         }
         Ok(self)
     }
@@ -1409,8 +1409,7 @@ impl std::fmt::Display for Package {
                 }
                 PackageMember::Block { func, port_info } => {
                     // Emit as a block using helper from the parser module.
-                    let block_text =
-                        crate::xls_ir::ir_parser::emit_fn_as_block(func, None, Some(port_info));
+                    let block_text = ir_parser::emit_fn_as_block(func, None, Some(port_info));
                     write!(f, "{}", block_text)?;
                 }
             }
@@ -1427,8 +1426,8 @@ impl std::fmt::Display for Package {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xls_ir::ir_parser;
-    use crate::xls_ir::ir_utils::operands;
+    use crate::ir_parser;
+    use crate::ir_utils::operands;
 
     use pretty_assertions::assert_eq;
 
