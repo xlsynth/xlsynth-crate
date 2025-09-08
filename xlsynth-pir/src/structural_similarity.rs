@@ -1102,8 +1102,6 @@ fn build_inner_with_union_user_slots(
     fname: &str,
     // Base union params (inbound to region).
     union_params: &[(String, Type)],
-    // Extra passthrough params (deduped union across sides).
-    extra_passthrough_params: &[(String, Type)],
     // Deterministic slot order: (consumer textual id, operand index)
     slot_order: &[(String, usize)],
     // For this side only, outbound mapping from slot key -> boundary producer NodeRef.
@@ -1127,21 +1125,8 @@ fn build_inner_with_union_user_slots(
         max_id.saturating_add(1)
     };
 
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut merged_params: Vec<(String, Type)> = Vec::new();
-    for (t, ty) in union_params.iter() {
-        if seen.insert(t.clone()) {
-            merged_params.push((t.clone(), ty.clone()));
-        }
-    }
-    for (t, ty) in extra_passthrough_params.iter() {
-        if seen.insert(t.clone()) {
-            merged_params.push((t.clone(), ty.clone()));
-        }
-    }
-
     let mut used_names: HashSet<String> = HashSet::new();
-    for (raw_name, ty) in merged_params.iter() {
+    for (raw_name, ty) in union_params.iter() {
         let pid = ParamId::new(next_param_pos);
         next_param_pos += 1;
         let mut name = if is_valid_identifier_name(raw_name) {
@@ -1168,7 +1153,7 @@ fn build_inner_with_union_user_slots(
         });
         // Synthesize a GetParam node for this param
         inner_nodes.push(Node {
-            text_id: next_text_id,
+            text_id: pid.get_wrapped_id(),
             name: Some(name.clone()),
             ty: ty.clone(),
             payload: NodePayload::GetParam(pid),
@@ -1178,11 +1163,16 @@ fn build_inner_with_union_user_slots(
             index: inner_nodes.len() - 1,
         };
         text_to_inner_param_ref.insert(raw_name.clone(), param_ref);
-        next_text_id += 1;
     }
 
     // 2) Topologically clone region nodes mapping external operands to inner params
     let topo = get_topological(f);
+    // Precompute forward hashes for error diagnostics.
+    let (entries_for_diag, _depths_for_diag) = collect_structural_entries(f);
+    let mut fwd_hash_hex_by_index: Vec<String> = vec![String::new(); f.nodes.len()];
+    for (i, e) in entries_for_diag.into_iter().enumerate() {
+        fwd_hash_hex_by_index[i] = to_hex_string(&e.hash);
+    }
     let mut old_to_new: HashMap<usize, NodeRef> = HashMap::new();
     for nr in topo.into_iter() {
         if !region.contains(&nr) {
@@ -1193,17 +1183,24 @@ fn build_inner_with_union_user_slots(
             if region.contains(&r) {
                 *old_to_new.get(&r.index).expect("mapped internal ref")
             } else {
-                // Prefer hash-based inbound assignment when available; otherwise fall back to
-                // textual.
-                if let Some(name) = inbound_assignment.get(&r.index) {
-                    *text_to_inner_param_ref
-                        .get(name)
-                        .expect("missing inbound hash-based param for external operand")
-                } else {
-                    let text = node_textual_id(f, r);
-                    *text_to_inner_param_ref
-                        .get(&text)
-                        .expect("missing fixed/extra param for external operand")
+                // External operand must map to an inbound hash param.
+                match inbound_assignment.get(&r.index) {
+                    Some(name) => {
+                        *text_to_inner_param_ref.get(name).unwrap_or_else(|| {
+                            panic!(
+                                "missing inbound param node for external operand; func={}, ext_op_text={}, fwd_hash={}",
+                                f.name,
+                                node_textual_id(f, r),
+                                fwd_hash_hex_by_index[r.index]
+                            )
+                        })
+                    }
+                    None => panic!(
+                        "missing inbound param assignment for external operand; func={}, ext_op_text={}, fwd_hash={}",
+                        f.name,
+                        node_textual_id(f, r),
+                        fwd_hash_hex_by_index[r.index]
+                    ),
                 }
             }
         };
@@ -1233,7 +1230,7 @@ fn build_inner_with_union_user_slots(
             ret_tys.push(inner_nodes[inner_ref.index].ty.clone());
             ret_elems.push(inner_ref);
         } else {
-            // Passthrough: use the original consumer operand value as a param.
+            // Passthrough: use the original consumer operand value as a param via hash mapping.
             let mut consumer_ref_opt: Option<NodeRef> = None;
             for (i, _n) in f.nodes.iter().enumerate() {
                 if node_textual_id(f, NodeRef { index: i }) == *consumer_text {
@@ -1245,28 +1242,41 @@ fn build_inner_with_union_user_slots(
                 let deps = operands(&f.get_node(consumer_ref).payload);
                 if *op_index < deps.len() {
                     let dep = deps[*op_index];
-                    let dep_text = node_textual_id(f, dep);
-                    let param_ref = *text_to_inner_param_ref
-                        .get(&dep_text)
-                        .expect("extra passthrough param must be present");
+                    let pname = inbound_assignment.get(&dep.index).unwrap_or_else(|| {
+                        panic!(
+                            "missing inbound param assignment for passthrough; func={}, consumer_text={}, op_index={}, dep_text={}, dep_fwd_hash={}",
+                            f.name,
+                            consumer_text,
+                            op_index,
+                            node_textual_id(f, dep),
+                            fwd_hash_hex_by_index[dep.index]
+                        )
+                    });
+                    let param_ref = *text_to_inner_param_ref.get(pname).unwrap_or_else(|| {
+                        panic!(
+                            "missing inbound param node for passthrough; func={}, consumer_text={}, op_index={}, pname={}",
+                            f.name,
+                            consumer_text,
+                            op_index,
+                            pname
+                        )
+                    });
                     ret_tys.push(inner_nodes[param_ref.index].ty.clone());
                     ret_elems.push(param_ref);
                 } else {
-                    let synth = make_slot_param_name(consumer_text, *op_index);
-                    let param_ref = *text_to_inner_param_ref
-                        .get(&synth)
-                        .expect("synthetic passthrough param must be present");
-                    ret_tys.push(inner_nodes[param_ref.index].ty.clone());
-                    ret_elems.push(param_ref);
+                    panic!(
+                        "slot op index out of range while building passthrough; func={}, consumer_text={}, op_index={}, deps_len={}",
+                        f.name,
+                        consumer_text,
+                        op_index,
+                        deps.len()
+                    );
                 }
             } else {
-                // Consumer absent; use synthetic param
-                let synth = make_slot_param_name(consumer_text, *op_index);
-                let param_ref = *text_to_inner_param_ref
-                    .get(&synth)
-                    .expect("synthetic passthrough param must be present");
-                ret_tys.push(inner_nodes[param_ref.index].ty.clone());
-                ret_elems.push(param_ref);
+                panic!(
+                    "consumer missing while building passthrough; func={}, consumer_text={}",
+                    f.name, consumer_text
+                );
             }
         }
     }
@@ -1303,7 +1313,6 @@ pub struct DualDifferenceExtraction {
     pub lhs_region: HashSet<NodeRef>,
     pub rhs_region: HashSet<NodeRef>,
     pub union_params: Vec<(String, Type)>,
-    pub extra_passthrough_params: Vec<(String, Type)>,
     pub lhs_inbound_texts: Vec<String>,
     pub rhs_inbound_texts: Vec<String>,
     pub lhs_outbound: Vec<(String, Vec<String>)>,
@@ -1353,89 +1362,9 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         a.1.cmp(&b.1)
     });
 
-    // Build extra passthrough param union across sides for missing slots.
-    let mut extra_passthrough: BTreeMap<String, Type> = BTreeMap::new();
-    // For each slot, determine if each side needs a passthrough, and if so, add the
-    // appropriate param.
-    for (consumer_text, op_index) in slot_order.iter() {
-        // LHS side
-        if !lhs_edges.contains_key(&(consumer_text.clone(), *op_index)) {
-            if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
-                let deps = operands(&lhs.get_node(*lhs_cons).payload);
-                if *op_index < deps.len() {
-                    let dep = deps[*op_index];
-                    let dep_text = node_textual_id(lhs, dep);
-                    if !lhs_inbound_map.contains_key(&dep_text)
-                        && !rhs_inbound_map.contains_key(&dep_text)
-                    {
-                        extra_passthrough
-                            .entry(dep_text)
-                            .or_insert(lhs.get_node(dep).ty.clone());
-                    }
-                } else {
-                    // Operand index out of range on LHS; fall back to synthetic param using RHS
-                    // type if available.
-                    if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
-                        let rhs_deps = operands(&rhs.get_node(*rhs_cons).payload);
-                        if *op_index < rhs_deps.len() {
-                            let rhs_ty = rhs.get_node(rhs_deps[*op_index]).ty.clone();
-                            let synth = make_slot_param_name(consumer_text, *op_index);
-                            extra_passthrough.entry(synth).or_insert(rhs_ty);
-                        }
-                    }
-                }
-            } else {
-                // Consumer absent on LHS; create synthetic param with type derived from RHS
-                // consumer operand if possible.
-                if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
-                    let rhs_deps = operands(&rhs.get_node(*rhs_cons).payload);
-                    if *op_index < rhs_deps.len() {
-                        let rhs_ty = rhs.get_node(rhs_deps[*op_index]).ty.clone();
-                        let synth = make_slot_param_name(consumer_text, *op_index);
-                        extra_passthrough.entry(synth).or_insert(rhs_ty);
-                    }
-                }
-            }
-        }
-        // RHS side
-        if !rhs_edges.contains_key(&(consumer_text.clone(), *op_index)) {
-            if let Some(rhs_cons) = rhs_text_index.get(consumer_text) {
-                let deps = operands(&rhs.get_node(*rhs_cons).payload);
-                if *op_index < deps.len() {
-                    let dep = deps[*op_index];
-                    let dep_text = node_textual_id(rhs, dep);
-                    if !lhs_inbound_map.contains_key(&dep_text)
-                        && !rhs_inbound_map.contains_key(&dep_text)
-                    {
-                        extra_passthrough
-                            .entry(dep_text)
-                            .or_insert(rhs.get_node(dep).ty.clone());
-                    }
-                } else {
-                    if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
-                        let lhs_deps = operands(&lhs.get_node(*lhs_cons).payload);
-                        if *op_index < lhs_deps.len() {
-                            let lhs_ty = lhs.get_node(lhs_deps[*op_index]).ty.clone();
-                            let synth = make_slot_param_name(consumer_text, *op_index);
-                            extra_passthrough.entry(synth).or_insert(lhs_ty);
-                        }
-                    }
-                }
-            } else {
-                if let Some(lhs_cons) = lhs_text_index.get(consumer_text) {
-                    let lhs_deps = operands(&lhs.get_node(*lhs_cons).payload);
-                    if *op_index < lhs_deps.len() {
-                        let lhs_ty = lhs.get_node(lhs_deps[*op_index]).ty.clone();
-                        let synth = make_slot_param_name(consumer_text, *op_index);
-                        extra_passthrough.entry(synth).or_insert(lhs_ty);
-                    }
-                }
-            }
-        }
-    }
-
-    let extra_passthrough_params: Vec<(String, Type)> = extra_passthrough.into_iter().collect();
-    // Order by name via BTreeMap; keep as-is.
+    // Note: Do not construct cross-side passthrough params. All inbound values
+    // must originate from the common region and are represented as forward-hash
+    // params.
 
     // Build each inner with fixed + passthrough params and the unified slot tuple.
     let lhs_inner = build_inner_with_union_user_slots(
@@ -1443,7 +1372,6 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         &lhs_interior,
         &format!("{}_inner", lhs.name),
         &union_params,
-        &extra_passthrough_params,
         &slot_order,
         &lhs_edges,
         &lhs_inbound_hash.assignment,
@@ -1453,7 +1381,6 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         &rhs_interior,
         &format!("{}_inner", rhs.name),
         &union_params,
-        &extra_passthrough_params,
         &slot_order,
         &rhs_edges,
         &rhs_inbound_hash.assignment,
@@ -1471,7 +1398,6 @@ pub fn extract_dual_difference_subgraphs_with_shared_params_and_metadata(
         lhs_region: lhs_interior,
         rhs_region: rhs_interior,
         union_params,
-        extra_passthrough_params: extra_passthrough_params.clone(),
         lhs_inbound_texts,
         rhs_inbound_texts,
         lhs_outbound,
@@ -1559,7 +1485,6 @@ pub fn build_common_wrapper_for_side(
     region: &HashSet<NodeRef>,
     inner_name: &str,
     union_params: &[(String, Type)],
-    extra_passthrough_params: &[(String, Type)],
     inbound_assignment: &HashMap<usize, String>,
     slot_order: &[(String, usize)],
     side_edges: &BTreeMap<(String, usize), (NodeRef, NodeRef)>,
@@ -1592,7 +1517,7 @@ pub fn build_common_wrapper_for_side(
             id: pid,
         });
         new_nodes.push(Node {
-            text_id: next_text_id,
+            text_id: pid.get_wrapped_id(),
             name: Some(p.name.clone()),
             ty: p.ty.clone(),
             payload: NodePayload::GetParam(pid),
@@ -1629,7 +1554,7 @@ pub fn build_common_wrapper_for_side(
         };
         let new_payload = remap_payload_with(&node.payload, mapper);
         new_nodes.push(Node {
-            text_id: node.text_id,
+            text_id: next_text_id,
             name: node.name.clone(),
             ty: node.ty.clone(),
             payload: new_payload,
@@ -1641,10 +1566,11 @@ pub fn build_common_wrapper_for_side(
                 index: new_nodes.len() - 1,
             },
         );
+        next_text_id += 1;
     }
 
     // Build invoke operands in original space, then map via old_to_new.
-    let merged = build_merged_params_order(union_params, extra_passthrough_params);
+    let merged = build_merged_params_order(union_params, &[]);
     let name_to_prod = build_name_to_inbound_producer_map(inbound_assignment);
     let text_index = build_textual_id_index(f);
     let slot_to_index = build_slot_to_index_map(slot_order);
@@ -1665,27 +1591,11 @@ pub fn build_common_wrapper_for_side(
         text_index.get(name).copied()
     };
     let mut invoke_operands_new: Vec<NodeRef> = Vec::new();
-    for (n, ty) in merged.iter() {
-        let mapped_opt = resolve_original(n).and_then(|orig| old_to_new.get(&orig.index).copied());
-        let mapped = match mapped_opt {
-            Some(mr) => mr,
-            None => {
-                // Synthesize a zero literal of the required type.
-                let lit_node = Node {
-                    text_id: next_text_id,
-                    name: None,
-                    ty: ty.clone(),
-                    payload: NodePayload::Literal(zero_ir_value_for_type(ty)),
-                    pos: None,
-                };
-                new_nodes.push(lit_node);
-                let r = NodeRef {
-                    index: new_nodes.len() - 1,
-                };
-                next_text_id += 1;
-                r
-            }
-        };
+    for (n, _ty) in merged.iter() {
+        let orig = resolve_original(n).expect("resolve original producer for invoke operand");
+        let mapped = *old_to_new
+            .get(&orig.index)
+            .expect("invoke operand producer should be cloned in pass 1");
         invoke_operands_new.push(mapped);
     }
 
@@ -1759,7 +1669,7 @@ pub fn build_common_wrapper_for_side(
         };
         let new_payload = remap_payload_with(&node.payload, mapper);
         new_nodes.push(Node {
-            text_id: node.text_id,
+            text_id: next_text_id,
             name: node.name.clone(),
             ty: node.ty.clone(),
             payload: new_payload,
@@ -1771,6 +1681,7 @@ pub fn build_common_wrapper_for_side(
                 index: new_nodes.len() - 1,
             },
         );
+        next_text_id += 1;
     }
 
     // Map return ref.
@@ -1793,7 +1704,6 @@ pub fn build_common_wrapper_lhs(lhs: &Fn, meta: &DualDifferenceExtraction) -> Fn
         &meta.lhs_region,
         &meta.lhs_inner.name,
         &meta.union_params,
-        &meta.extra_passthrough_params,
         &meta.lhs_inbound_assignment,
         &meta.slot_order,
         &collect_outbound_edges_with_operand_indices(lhs, &meta.lhs_region),
@@ -1807,7 +1717,6 @@ pub fn build_common_wrapper_rhs(rhs: &Fn, meta: &DualDifferenceExtraction) -> Fn
         &meta.rhs_region,
         &meta.rhs_inner.name,
         &meta.union_params,
-        &meta.extra_passthrough_params,
         &meta.rhs_inbound_assignment,
         &meta.slot_order,
         &collect_outbound_edges_with_operand_indices(rhs, &meta.rhs_region),
