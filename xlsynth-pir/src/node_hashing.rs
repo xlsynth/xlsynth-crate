@@ -56,40 +56,6 @@ fn update_hash_type(hasher: &mut blake3::Hasher, ty: &Type) {
     }
 }
 
-fn payload_tag(payload: &NodePayload) -> &'static str {
-    match payload {
-        NodePayload::Nil => "nil",
-        NodePayload::GetParam(_) => "get_param",
-        NodePayload::Tuple(_) => "tuple",
-        NodePayload::Array(_) => "array",
-        NodePayload::ArraySlice { .. } => "array_slice",
-        NodePayload::TupleIndex { .. } => "tuple_index",
-        NodePayload::Binop(_, _, _) => "binop",
-        NodePayload::Unop(_, _) => "unop",
-        NodePayload::Literal(_) => "literal",
-        NodePayload::SignExt { .. } => "sign_ext",
-        NodePayload::ZeroExt { .. } => "zero_ext",
-        NodePayload::ArrayUpdate { .. } => "array_update",
-        NodePayload::ArrayIndex { .. } => "array_index",
-        NodePayload::DynamicBitSlice { .. } => "dynamic_bit_slice",
-        NodePayload::BitSlice { .. } => "bit_slice",
-        NodePayload::BitSliceUpdate { .. } => "bit_slice_update",
-        NodePayload::Assert { .. } => "assert",
-        NodePayload::Trace { .. } => "trace",
-        NodePayload::AfterAll(_) => "after_all",
-        NodePayload::Nary(_, _) => "nary",
-        NodePayload::Invoke { .. } => "invoke",
-        NodePayload::PrioritySel { .. } => "priority_sel",
-        NodePayload::OneHotSel { .. } => "one_hot_sel",
-        NodePayload::OneHot { .. } => "one_hot",
-        NodePayload::Sel { .. } => "sel",
-        NodePayload::Cover { .. } => "cover",
-        NodePayload::Decode { .. } => "decode",
-        NodePayload::Encode { .. } => "encode",
-        NodePayload::CountedFor { .. } => "counted_for",
-    }
-}
-
 pub(crate) fn get_param_ordinal(f: &Fn, param_id: ParamId) -> usize {
     f.params
         .iter()
@@ -209,7 +175,7 @@ pub(crate) fn compute_node_structural_hash(
 ) -> FwdHash {
     let node = f.get_node(node_ref);
     let mut hasher = blake3::Hasher::new();
-    update_hash_str(&mut hasher, payload_tag(&node.payload));
+    update_hash_str(&mut hasher, node.payload.get_operator());
     update_hash_type(&mut hasher, &node.ty);
     hash_payload_attributes(f, &node.payload, &mut hasher);
     for ch in child_hashes.iter() {
@@ -222,7 +188,7 @@ pub(crate) fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> F
     // Hash operator tag + type + payload attributes only; ignore children.
     let node = f.get_node(node_ref);
     let mut hasher = blake3::Hasher::new();
-    update_hash_str(&mut hasher, payload_tag(&node.payload));
+    update_hash_str(&mut hasher, node.payload.get_operator());
     update_hash_type(&mut hasher, &node.ty);
     hash_payload_attributes(f, &node.payload, &mut hasher);
     FwdHash(hasher.finalize())
