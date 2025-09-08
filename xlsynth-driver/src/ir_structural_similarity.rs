@@ -2,6 +2,7 @@
 
 use clap::ArgMatches;
 use comfy_table::{presets::ASCII_MARKDOWN, ContentArrangement, Table};
+use blake3;
 use xlsynth_pir::{
     ir, ir_parser,
     structural_similarity::{
@@ -43,6 +44,17 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
         Some(top) => rhs_pkg.get_fn(top).unwrap(),
         None => rhs_pkg.get_top().unwrap(),
     };
+
+    // Prepare deterministic diff artifacts directory keyed by input paths.
+    let lhs_abs = std::fs::canonicalize(lhs_path).unwrap_or(lhs_path.to_path_buf());
+    let rhs_abs = std::fs::canonicalize(rhs_path).unwrap_or(rhs_path.to_path_buf());
+    let key = format!("{}::{}", lhs_abs.display(), rhs_abs.display());
+    let hash_hex = blake3::hash(key.as_bytes()).to_hex().to_string();
+    let dir_name = format!("xlsynth-structural-diff-{}", &hash_hex[..16]);
+    let outdir_path = std::env::temp_dir().join(dir_name);
+    let _ = std::fs::remove_dir_all(&outdir_path);
+    let _ = std::fs::create_dir_all(&outdir_path);
+    println!("Diff artifacts directory: {}", outdir_path.display());
 
     let (recs, lhs_ret_depth, rhs_ret_depth) =
         compute_structural_discrepancies_dual(lhs_fn, rhs_fn);
@@ -148,6 +160,9 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     }
 
     // Append tables of all nodes with forward/backward hashes and diff-region flag.
+    // Accumulate node table text to write to artifacts directory.
+    let mut node_tables_text = String::new();
+
     // LHS graph table
     {
         let (fwd_entries, _fwd_depths) = collect_structural_entries(lhs_fn);
@@ -183,6 +198,8 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
             table.add_row(vec![name, fh, rh, mark.to_string()]);
         }
         println!("{}", table);
+        node_tables_text.push_str("LHS graph\n");
+        node_tables_text.push_str(&format!("{}\n\n", table));
     }
 
     // RHS graph table
@@ -219,5 +236,11 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
             table.add_row(vec![name, fh, rh, mark.to_string()]);
         }
         println!("{}", table);
+        node_tables_text.push_str("RHS graph\n");
+        node_tables_text.push_str(&format!("{}\n", table));
     }
+
+    // Write node tables to artifacts directory.
+    let node_tables_path = outdir_path.join("node_tables.txt");
+    let _ = std::fs::write(&node_tables_path, node_tables_text);
 }
