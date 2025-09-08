@@ -283,12 +283,18 @@ pub fn mangle_dslx_name_with_calling_convention(
 ) -> Result<String, XlsynthError> {
     // Delegate to the full-featured mangler-with-env with no
     // free-keys/parametrics/scope.
-    mangle_dslx_name_full(module, name, cc, &[], None, None)
+    mangle_dslx_name_with_env(module, name, cc, &[], None, None)
 }
 
 /// Full-featured DSLX name mangling API variant that accepts a prebuilt
 /// ParametricEnv.
-pub fn mangle_dslx_name_full(
+///
+/// - free_keys: Parametric identifier names whose bound values should be
+///   encoded into the mangled name. Every key must be present in `env`; pass an
+///   empty slice when the target is non-parametric.
+/// - scope: Optional scope qualifier inserted between the module and function
+///   names (e.g. an impl/struct name like "Point"). Use `None` for no scope.
+pub fn mangle_dslx_name_with_env(
     module: &str,
     name: &str,
     convention: DslxCallingConvention,
@@ -352,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_mangle_dslx_name_full_basic() {
-        let mangled = mangle_dslx_name_full(
+        let mangled = mangle_dslx_name_with_env(
             "my_mod",
             "f",
             DslxCallingConvention::Typical,
@@ -366,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_mangle_dslx_name_full_scope() {
-        let mangled = mangle_dslx_name_full(
+        let mangled = mangle_dslx_name_with_env(
             "my_mod",
             "f",
             DslxCallingConvention::Typical,
@@ -386,7 +392,7 @@ mod tests {
         let free_keys = ["X", "Y"]; // order should not matter for result here
         let env = dslx::ParametricEnv::new(&[("X", &x_val), ("Y", &y_val)]).expect("env");
 
-        let mangled = mangle_dslx_name_full(
+        let mangled = mangle_dslx_name_with_env(
             "my_mod",
             "p",
             DslxCallingConvention::Typical,
@@ -400,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_mangle_dslx_name_full_implicit_token() {
-        let mangled_itok = mangle_dslx_name_full(
+        let mangled_itok = mangle_dslx_name_with_env(
             "my_mod",
             "f",
             DslxCallingConvention::ImplicitToken,
@@ -414,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_mangle_dslx_name_full_proc_next() {
-        let mangled_next = mangle_dslx_name_full(
+        let mangled_next = mangle_dslx_name_with_env(
             "my_mod",
             "f",
             DslxCallingConvention::ProcNext,
@@ -432,7 +438,7 @@ mod tests {
         let x_val = dslx::InterpValue::make_ubits(32, 7);
         let y_val = dslx::InterpValue::make_ubits(32, 9);
         let env = dslx::ParametricEnv::new(&[("X", &x_val), ("Y", &y_val)]).expect("env");
-        let mangled = mangle_dslx_name_full(
+        let mangled = mangle_dslx_name_with_env(
             "my_mod",
             "g_step1",
             DslxCallingConvention::ImplicitToken,

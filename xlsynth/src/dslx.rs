@@ -976,7 +976,7 @@ impl ParametricEnv {
 #[cfg(test)]
 mod param_env_and_interp_value_tests {
     use super::*;
-    use crate::{mangle_dslx_name_full, DslxCallingConvention, IrBits, IrValue};
+    use crate::{mangle_dslx_name_with_env, DslxCallingConvention, IrBits, IrValue};
 
     #[test]
     fn test_interp_value_make_bits_and_convert() {
@@ -1034,7 +1034,7 @@ mod param_env_and_interp_value_tests {
         let x = InterpValue::make_ubits(32, 42);
         let y = InterpValue::make_ubits(32, 64);
         let env = ParametricEnv::new(&[("X", &x), ("Y", &y)]).expect("env");
-        let mangled = mangle_dslx_name_full(
+        let mangled = mangle_dslx_name_with_env(
             "my_mod",
             "p",
             DslxCallingConvention::Typical,
@@ -1049,7 +1049,7 @@ mod param_env_and_interp_value_tests {
     #[test]
     fn test_parametric_env_empty_and_mangle() {
         let env = ParametricEnv::empty().expect("empty env");
-        let mangled = mangle_dslx_name_full(
+        let mangled = mangle_dslx_name_with_env(
             "my_mod",
             "f",
             DslxCallingConvention::Typical,
