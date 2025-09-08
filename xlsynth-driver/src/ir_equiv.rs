@@ -17,6 +17,7 @@ use xlsynth_g8r::equiv::prove_equiv::{
     prove_ir_fn_equiv_full, prove_ir_fn_equiv_output_bits_parallel,
     prove_ir_fn_equiv_split_input_bit, AssertionSemantics, EquivResult, EquivSide, IrFn,
 };
+use xlsynth_g8r::equiv::prover::{ExternalProver, Prover};
 use xlsynth_pir::ir_parser;
 
 use crate::parallelism::ParallelismStrategy;
@@ -100,34 +101,8 @@ fn parse_and_prepare_fn(
     (pkg, fn_owned)
 }
 
-/// Toolchain top name unifier (exposed so DSLX path can reuse identical logic).
-pub fn unify_toolchain_tops<'a>(
-    lhs_ir: &'a str,
-    rhs_ir: &'a str,
-    lhs_top: &str,
-    rhs_top: &str,
-) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>, String) {
-    if lhs_top == rhs_top {
-        return (
-            std::borrow::Cow::Borrowed(lhs_ir),
-            std::borrow::Cow::Borrowed(rhs_ir),
-            lhs_top.to_string(),
-        );
-    }
-    let unified = lhs_top.to_string();
-    let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
-    (
-        std::borrow::Cow::Borrowed(lhs_ir),
-        std::borrow::Cow::Owned(rhs_rewritten),
-        unified,
-    )
-}
-
-/// Internal helper used by the native runner for solvers (non-legacy path)
-fn run_equiv_check_native<S: Solver>(
-    solver_config: &S::Config,
-    inputs: &EquivInputs,
-) -> EquivOutcome {
+/// Internal helper that runs equivalence via a provided Prover (native path)
+fn run_equiv_with_prover(prover: &dyn Prover, inputs: &EquivInputs) -> EquivOutcome {
     let (lhs_pkg, lhs_fn_dropped) = parse_and_prepare_fn(
         inputs.lhs_ir_text,
         inputs.lhs_top,
@@ -156,37 +131,38 @@ fn run_equiv_check_native<S: Solver>(
         fixed_implicit_activation: inputs.rhs_fixed_implicit_activation,
     };
 
-    let lhs_uf_sigs = infer_uf_signature(&lhs_pkg, &inputs.lhs_uf_map);
-    let rhs_uf_sigs = infer_uf_signature(&rhs_pkg, &inputs.rhs_uf_map);
-    let uf_sigs = merge_uf_signature(lhs_uf_sigs, &rhs_uf_sigs);
-
     let start_time = std::time::Instant::now();
     let result = match inputs.strategy {
-        ParallelismStrategy::SingleThreaded => prove_ir_fn_equiv_full::<S>(
-            solver_config,
-            &EquivSide {
+        ParallelismStrategy::SingleThreaded => {
+            let lhs_uf_sigs = infer_uf_signature(&lhs_pkg, &inputs.lhs_uf_map);
+            let rhs_uf_sigs = infer_uf_signature(&rhs_pkg, &inputs.rhs_uf_map);
+            let uf_sigs = merge_uf_signature(lhs_uf_sigs, &rhs_uf_sigs);
+
+            let lhs_side = EquivSide {
                 ir_fn: &lhs_ir_fn,
                 domains: inputs.lhs_param_domains.clone(),
                 uf_map: inputs.lhs_uf_map.clone(),
-            },
-            &EquivSide {
+            };
+            let rhs_side = EquivSide {
                 ir_fn: &rhs_ir_fn,
                 domains: inputs.rhs_param_domains.clone(),
                 uf_map: inputs.rhs_uf_map.clone(),
-            },
-            inputs.assertion_semantics,
-            inputs.flatten_aggregates,
-            &uf_sigs,
-        ),
-        ParallelismStrategy::OutputBits => prove_ir_fn_equiv_output_bits_parallel::<S>(
-            solver_config,
+            };
+            prover.prove_ir_fn_equiv_full(
+                &lhs_side,
+                &rhs_side,
+                inputs.assertion_semantics,
+                inputs.flatten_aggregates,
+                &uf_sigs,
+            )
+        }
+        ParallelismStrategy::OutputBits => prover.prove_ir_fn_equiv_output_bits_parallel(
             &lhs_ir_fn,
             &rhs_ir_fn,
             inputs.assertion_semantics,
             inputs.flatten_aggregates,
         ),
-        ParallelismStrategy::InputBitSplit => prove_ir_fn_equiv_split_input_bit::<S>(
-            solver_config,
+        ParallelismStrategy::InputBitSplit => prover.prove_ir_fn_equiv_split_input_bit(
             &lhs_ir_fn,
             &rhs_ir_fn,
             0,
@@ -220,159 +196,14 @@ fn run_equiv_check_native<S: Solver>(
             }
         }
         EquivResult::Error(msg) => {
-            eprintln!("error: {}", msg);
-            std::process::exit(2);
-        }
-    }
-}
-
-#[cfg(feature = "has-boolector")]
-fn run_boolector_legacy_native(inputs: &EquivInputs) -> EquivOutcome {
-    use xlsynth_g8r::ir_equiv_boolector;
-
-    if inputs.lhs_fixed_implicit_activation || inputs.rhs_fixed_implicit_activation {
-        eprintln!(
-            "[{}] Error: fixed implicit activation flags not supported for boolector-legacy solver",
-            inputs.subcommand
-        );
-        std::process::exit(1);
-    }
-    if inputs.assertion_semantics != AssertionSemantics::Same {
-        eprintln!("[{}] Error: assertion semantics other than 'same' not supported for boolector-legacy solver", inputs.subcommand);
-        std::process::exit(1);
-    }
-
-    let (_lhs_pkg_unused, lhs_fn_dropped) = parse_and_prepare_fn(
-        inputs.lhs_ir_text,
-        inputs.lhs_top,
-        inputs.drop_params,
-        inputs.subcommand,
-        inputs.lhs_origin,
-        "LHS",
-    );
-    let (_rhs_pkg_unused, rhs_fn_dropped) = parse_and_prepare_fn(
-        inputs.rhs_ir_text,
-        inputs.rhs_top,
-        inputs.drop_params,
-        inputs.subcommand,
-        inputs.rhs_origin,
-        "RHS",
-    );
-
-    let start_time = std::time::Instant::now();
-    let result = match inputs.strategy {
-        ParallelismStrategy::SingleThreaded => ir_equiv_boolector::prove_ir_fn_equiv(
-            &lhs_fn_dropped,
-            &rhs_fn_dropped,
-            inputs.flatten_aggregates,
-        ),
-        ParallelismStrategy::OutputBits => {
-            ir_equiv_boolector::prove_ir_fn_equiv_output_bits_parallel(
-                &lhs_fn_dropped,
-                &rhs_fn_dropped,
-                inputs.flatten_aggregates,
-            )
-        }
-        ParallelismStrategy::InputBitSplit => {
-            ir_equiv_boolector::prove_ir_fn_equiv_split_input_bit(
-                &lhs_fn_dropped,
-                &rhs_fn_dropped,
-                0,
-                0,
-                inputs.flatten_aggregates,
-            )
-        }
-    };
-    let micros = start_time.elapsed().as_micros();
-
-    match result {
-        ir_equiv_boolector::EquivResult::Proved => EquivOutcome {
-            time_micros: micros,
-            success: true,
-            counterexample: None,
-        },
-        ir_equiv_boolector::EquivResult::Disproved {
-            inputs: cex,
-            outputs: (lhs_bits, rhs_bits),
-        } => {
-            let cex_str = format!(
-                "inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
-                cex, lhs_bits, rhs_bits
-            );
-            EquivOutcome {
-                time_micros: micros,
-                success: false,
-                counterexample: Some(cex_str),
-            }
-        }
-    }
-}
-
-pub fn run_ir_equiv_native(solver_choice: SolverChoice, inputs: &EquivInputs) -> EquivOutcome {
-    match solver_choice {
-        #[cfg(feature = "has-boolector")]
-        SolverChoice::Boolector => {
-            use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
-            let cfg = BoolectorConfig::new();
-            run_equiv_check_native::<Boolector>(&cfg, inputs)
-        }
-        #[cfg(feature = "has-easy-smt")]
-        SolverChoice::Z3Binary | SolverChoice::BitwuzlaBinary | SolverChoice::BoolectorBinary => {
-            use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
-            let cfg = match solver_choice {
-                SolverChoice::Z3Binary => EasySmtConfig::z3(),
-                SolverChoice::BitwuzlaBinary => EasySmtConfig::bitwuzla(),
-                SolverChoice::BoolectorBinary => EasySmtConfig::boolector(),
-                _ => unreachable!(),
-            };
-            run_equiv_check_native::<EasySmtSolver>(&cfg, inputs)
-        }
-        #[cfg(feature = "has-bitwuzla")]
-        SolverChoice::Bitwuzla => {
-            use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
-            let opts = BitwuzlaOptions::new();
-            run_equiv_check_native::<Bitwuzla>(&opts, inputs)
-        }
-        #[cfg(feature = "has-boolector")]
-        SolverChoice::BoolectorLegacy => run_boolector_legacy_native(inputs),
-        SolverChoice::Toolchain => {
-            eprintln!("Internal error: run_ir_equiv_native called with Toolchain solver");
+            eprintln!("[{}] Error: {}", inputs.subcommand, msg);
             std::process::exit(1);
         }
-    }
-}
-
-pub fn run_toolchain_ir_equiv_text(
-    lhs_ir: &str,
-    rhs_ir: &str,
-    top: &str,
-    tool_path: &str,
-) -> EquivOutcome {
-    let lhs_tmp = tempfile::NamedTempFile::new().unwrap();
-    let rhs_tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(lhs_tmp.path(), lhs_ir).unwrap();
-    std::fs::write(rhs_tmp.path(), rhs_ir).unwrap();
-    let start_time = std::time::Instant::now();
-    let output =
-        run_check_ir_equivalence_main(lhs_tmp.path(), rhs_tmp.path(), Some(top), tool_path);
-    let micros = start_time.elapsed().as_micros();
-    match output {
-        Ok(_stdout) => EquivOutcome {
+        EquivResult::ToolchainDisproved(msg) => EquivOutcome {
             time_micros: micros,
-            success: true,
-            counterexample: None,
+            success: false,
+            counterexample: Some(msg),
         },
-        Err(output) => {
-            let mut msg = String::from_utf8_lossy(&output.stdout).to_string();
-            if msg.trim().is_empty() {
-                msg = String::from_utf8_lossy(&output.stderr).to_string();
-            }
-            EquivOutcome {
-                time_micros: micros,
-                success: false,
-                counterexample: Some(msg.trim().to_string()),
-            }
-        }
     }
 }
 
@@ -390,69 +221,51 @@ pub fn dispatch_ir_equiv(
         solver_choice,
         tool_path
     );
-    if solver_choice.is_none() && tool_path.is_none() {
-        eprintln!(
-            "[{}] Error: no solver specified and no toolchain path configured (need --solver or toolchain config)",
-            inputs.subcommand
-        );
-        std::process::exit(1);
-    }
-    #[allow(unreachable_patterns)]
-    let use_toolchain = match solver_choice {
-        Some(SolverChoice::Toolchain) => true,
-        Some(_) => false,
-        None => tool_path.is_some(),
-    };
-
-    #[allow(unreachable_patterns)]
-    let support_domain_constraints = match solver_choice {
+    // Construct a Prover for the selected native solver via unified interface.
+    match solver_choice {
         #[cfg(feature = "has-boolector")]
-        Some(SolverChoice::BoolectorLegacy) => false,
-        Some(SolverChoice::Toolchain) => false,
-        Some(_) => true,
-        None => false,
-    };
-
-    // Guard: param-domain constraints (e.g., enum in-bound assumptions) are not
-    // supported when using the external toolchain path.
-    if !support_domain_constraints
-        && (inputs.lhs_param_domains.is_some() || inputs.rhs_param_domains.is_some())
-    {
-        eprintln!(
-            "[{}] Error: enum/param domain constraints are not supported with the given solver {:?}",
-            inputs.subcommand, solver_choice
-        );
-        std::process::exit(1);
-    }
-
-    if use_toolchain {
-        let tool_path = tool_path.expect("tool_path required for toolchain path");
-        match (inputs.lhs_top, inputs.rhs_top) {
-            (Some(lt), Some(rt)) => {
-                if lt != rt {
-                    let (lhs_use, rhs_use, unified_top) =
-                        unify_toolchain_tops(inputs.lhs_ir_text, inputs.rhs_ir_text, lt, rt);
-                    run_toolchain_ir_equiv_text(&lhs_use, &rhs_use, &unified_top, tool_path)
-                } else {
-                    run_toolchain_ir_equiv_text(
-                        inputs.lhs_ir_text,
-                        inputs.rhs_ir_text,
-                        lt,
-                        tool_path,
-                    )
-                }
-            }
-            _ => {
-                eprintln!(
-                    "[{}] Error: top function(s) must be specified for toolchain equivalence",
-                    inputs.subcommand
-                );
-                std::process::exit(1);
-            }
+        Some(SolverChoice::Boolector) => {
+            use xlsynth_g8r::equiv::boolector_backend::BoolectorConfig;
+            let prover = BoolectorConfig::new();
+            run_equiv_with_prover(&prover, inputs)
         }
-    } else {
-        let solver_choice = solver_choice.expect("Non-toolchain solver must be specified");
-        run_ir_equiv_native(solver_choice, inputs)
+        #[cfg(feature = "has-easy-smt")]
+        Some(SolverChoice::Z3Binary)
+        | Some(SolverChoice::BitwuzlaBinary)
+        | Some(SolverChoice::BoolectorBinary) => {
+            use xlsynth_g8r::equiv::easy_smt_backend::EasySmtConfig;
+            let cfg = match solver_choice {
+                Some(SolverChoice::Z3Binary) => EasySmtConfig::z3(),
+                Some(SolverChoice::BitwuzlaBinary) => EasySmtConfig::bitwuzla(),
+                Some(SolverChoice::BoolectorBinary) => EasySmtConfig::boolector(),
+                _ => unreachable!(),
+            };
+            run_equiv_with_prover(&cfg, inputs)
+        }
+        #[cfg(feature = "has-bitwuzla")]
+        Some(SolverChoice::Bitwuzla) => {
+            use xlsynth_g8r::equiv::bitwuzla_backend::BitwuzlaOptions;
+            let opts = BitwuzlaOptions::new();
+            run_equiv_with_prover(&opts, inputs)
+        }
+        Some(SolverChoice::Toolchain) => {
+            let prover = match tool_path {
+                Some(p) => {
+                    let pb = std::path::Path::new(p);
+                    if pb.is_dir() {
+                        ExternalProver::ToolDir(pb.to_path_buf())
+                    } else {
+                        ExternalProver::ToolExe(pb.to_path_buf())
+                    }
+                }
+                None => ExternalProver::Toolchain,
+            };
+            run_equiv_with_prover(&prover, inputs)
+        }
+        None => {
+            let prover = xlsynth_g8r::equiv::prover::auto_selected_prover();
+            run_equiv_with_prover(&*prover, inputs)
+        }
     }
 }
 
@@ -465,11 +278,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     let mut lhs_top = matches.get_one::<String>("lhs_ir_top").map(|s| s.as_str());
     let mut rhs_top = matches.get_one::<String>("rhs_ir_top").map(|s| s.as_str());
 
-    let top = if let Some(top) = matches.get_one::<String>("ir_top") {
-        Some(top.as_str())
-    } else {
-        None
-    };
+    let top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
 
     if top.is_some() && (lhs_top.is_some() || rhs_top.is_some()) {
         eprintln!("Error: --ir_top and --lhs_ir_top/--rhs_ir_top cannot be used together");

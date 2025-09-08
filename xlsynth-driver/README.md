@@ -27,7 +27,7 @@ Proves two IR functions to be equivalent or provides a counterexample to their e
 Key flags:
 
 - `--top <NAME>` or per-side `--lhs_ir_top <NAME>` / `--rhs_ir_top <NAME>` to select entry points.
-- `--solver <toolchain|bitwuzla|boolector|boolector-legacy|z3-binary|bitwuzla-binary|boolector-binary>`
+- `--solver <toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
 - `--flatten_aggregates=<BOOL>`
 - `--drop_params <CSV>`
 - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -42,7 +42,7 @@ Proves two IR blocks to be equivalent by selecting block members from package-fo
 Key flags:
 
 - `--lhs_top <NAME>` / `--rhs_top <NAME>` or shared `--top <NAME>` to select block entry points (by block name in each package). If omitted, the package `top` block is used when present; otherwise the first block member is selected.
-- `--solver <toolchain|bitwuzla|boolector|boolector-legacy|z3-binary|bitwuzla-binary|boolector-binary>`
+- `--solver <toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
 - `--flatten_aggregates=<BOOL>`
 - `--drop_params <CSV>`
 - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -454,7 +454,7 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
 - Entry-point selection: either `--dslx_top <NAME>` or both `--lhs_dslx_top <NAME>` and `--rhs_dslx_top <NAME>`.
 - Search paths: `--dslx_path <P1;P2;...>` and `--dslx_stdlib_path <PATH>`.
 - Behavior flags:
-  - `--solver <toolchain|bitwuzla|boolector|boolector-legacy|z3-binary|bitwuzla-binary|boolector-binary>`
+  - `--solver <toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
   - `--flatten_aggregates=<BOOL>`
   - `--drop_params <CSV>`
   - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -632,7 +632,7 @@ Schema details
   - Required: `lhs_ir_file` (path), `rhs_ir_file` (path)
   - Entry-point selection: either `top` (string) or both `lhs_ir_top` and `rhs_ir_top` (strings)
   - Optional:
-    - `solver`: one of `toolchain`, `bitwuzla`, `boolector`, `boolector-legacy`, `z3-binary`, `bitwuzla-binary`, `boolector-binary` (availability gated by build features)
+    - `solver`: one of `toolchain`, `bitwuzla`, `boolector`, `z3-binary`, `bitwuzla-binary`, `boolector-binary` (availability gated by build features)
     - `flatten_aggregates`: bool
     - `drop_params`: array of strings (joined with commas for the CLI)
     - `parallelism_strategy`: one of `single-threaded`, `output-bits`, `input-bit-split`

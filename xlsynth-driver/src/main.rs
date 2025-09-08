@@ -624,8 +624,6 @@ fn main() {
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector-legacy",
                             "toolchain",
                         ])
                         .default_value("toolchain")
@@ -721,8 +719,6 @@ fn main() {
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector-legacy",
                             "toolchain",
                         ])
                         .default_value("toolchain")
@@ -1199,8 +1195,6 @@ fn main() {
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector-legacy",
                             "toolchain",
                         ])
                         .action(clap::ArgAction::Set),

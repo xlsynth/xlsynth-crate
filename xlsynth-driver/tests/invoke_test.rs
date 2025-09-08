@@ -1246,7 +1246,7 @@ fn my_main(x: bits[32]) -> bits[32] {
     assert!(!output.status.success());
     assert!(stdout.is_empty());
     assert!(
-        stderr.contains("[ir-equiv] failure: Verified NOT equivalent; results differ for input"),
+        stderr.contains("Verified NOT equivalent; results differ for input"),
         "stderr: {:?}",
         stderr
     );
@@ -1362,7 +1362,7 @@ block sub_block(a: bits[32], b: bits[32], out: bits[32]) {
         stderr
     );
     assert!(
-        stderr.contains("[ir-equiv-blocks] failure"),
+        stderr.contains("Verified NOT equivalent"),
         "stdout: {}\nstderr: {}",
         stdout,
         stderr
@@ -1907,18 +1907,18 @@ fn test_irequiv_subcommand_solver_invoke_equivalent(solver: &str) {
     let lhs_ir = r#"package p_invoke
 
 fn g(x: bits[8]) -> bits[8] {
-  ret add.1: bits[8] = add(x, x, id=1)
+  ret add.2: bits[8] = add(x, x, id=2)
 }
 
-fn my_main(x: bits[8]) -> bits[8] {
-  ret invoke.2: bits[8] = invoke(x, to_apply=g, id=2)
+fn my_main(x: bits[8] id=3) -> bits[8] {
+  ret invoke.4: bits[8] = invoke(x, to_apply=g, id=4)
 }
 "#;
 
     let rhs_ir = r#"package p_inline
 
 fn my_main(x: bits[8]) -> bits[8] {
-  ret add.1: bits[8] = add(x, x, id=1)
+  ret add.2: bits[8] = add(x, x, id=2)
 }
 "#;
 
@@ -1949,8 +1949,8 @@ fn my_main(x: bits[8]) -> bits[8] {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    log::info!("stdout: {}", stdout);
-    log::info!("stderr: {}", stderr);
+    println!("stdout: {}", stdout);
+    println!("stderr: {}", stderr);
     assert!(
         output.status.success(),
         "Invoke ir-equiv with solver {} should succeed; stderr: {}",
@@ -2238,7 +2238,6 @@ macro_rules! test_irequiv_subcommand_solver {
 }
 
 test_irequiv_subcommand_solver!(boolector, "has-boolector", "boolector", true);
-test_irequiv_subcommand_solver!(boolector_legacy, "has-boolector", "boolector-legacy", false);
 test_irequiv_subcommand_solver!(bitwuzla, "has-bitwuzla", "bitwuzla", true);
 test_irequiv_subcommand_solver!(
     boolector_binary,
@@ -3724,7 +3723,6 @@ fn test_prove_quickcheck_solver_param(solver: &str, should_succeed: bool) {
 // success cases are tested.
 #[test_case("toolchain"; "multi_qc_toolchain")]
 #[cfg_attr(feature="has-boolector", test_case("boolector"; "multi_qc_boolector"))]
-#[cfg_attr(feature="has-boolector", test_case("boolector-legacy"; "multi_qc_boolector_legacy"))]
 #[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla"; "multi_qc_bitwuzla"))]
 #[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary"; "multi_qc_z3_binary"))]
 #[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary"; "multi_qc_bitwuzla_binary"))]
@@ -4207,7 +4205,9 @@ fn test_dslx_equiv_solver_param(solver: &str, should_succeed: bool) {
             stderr
         );
         assert!(
-            stderr.contains("failure") || stdout.contains("failure"),
+            stderr.contains("failure")
+                || stdout.contains("failure")
+                || stderr.contains("Verified NOT equivalent"),
             "expected failure marker. stdout: {} stderr: {}",
             stdout,
             stderr
@@ -4294,7 +4294,9 @@ fn test_dslx_equiv_solver_param_different_tops(solver: &str, should_succeed: boo
             stderr
         );
         assert!(
-            stderr.contains("failure") || stdout.contains("failure"),
+            stderr.contains("failure")
+                || stdout.contains("failure")
+                || stderr.contains("Verified NOT equivalent"),
             "expected failure marker. stdout: {} stderr: {}",
             stdout,
             stderr
@@ -4756,7 +4758,6 @@ fn run_dslx_equiv_enum_in_bound_for_solver(solver: &str, expect_supported: bool)
 }
 
 #[cfg_attr(feature="has-boolector", test_case::test_case("boolector", true; "enum_in_bound_boolector"))]
-#[cfg_attr(feature="has-boolector", test_case::test_case("boolector-legacy", false; "enum_in_bound_boolector_legacy_unsupported"))]
 #[cfg_attr(feature="has-bitwuzla", test_case::test_case("bitwuzla", true; "enum_in_bound_bitwuzla"))]
 #[cfg_attr(feature="with-z3-binary-test", test_case::test_case("z3-binary", true; "enum_in_bound_z3_binary"))]
 #[cfg_attr(feature="with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary", true; "enum_in_bound_bitwuzla_binary"))]

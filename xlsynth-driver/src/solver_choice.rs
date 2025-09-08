@@ -24,8 +24,6 @@ pub enum SolverChoice {
 
     #[cfg(feature = "has-boolector")]
     Boolector,
-    #[cfg(feature = "has-boolector")]
-    BoolectorLegacy,
 
     /// Use the external XLS tool-chain binaries (whatever is configured via
     /// `xlsynth-toolchain.toml`).  Currently only used by the `ir-equiv`
@@ -46,8 +44,6 @@ impl fmt::Display for SolverChoice {
             SolverChoice::Bitwuzla => "bitwuzla",
             #[cfg(feature = "has-boolector")]
             SolverChoice::Boolector => "boolector",
-            #[cfg(feature = "has-boolector")]
-            SolverChoice::BoolectorLegacy => "boolector-legacy",
             SolverChoice::Toolchain => "toolchain",
         };
         write!(f, "{}", s)
@@ -70,8 +66,6 @@ impl std::str::FromStr for SolverChoice {
 
             #[cfg(feature = "has-boolector")]
             "boolector" => Ok(Self::Boolector),
-            #[cfg(feature = "has-boolector")]
-            "boolector-legacy" => Ok(Self::BoolectorLegacy),
 
             "toolchain" => Ok(Self::Toolchain),
             _ => Err(format!("invalid solver: {}", s)),

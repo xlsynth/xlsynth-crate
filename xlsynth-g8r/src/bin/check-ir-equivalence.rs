@@ -101,6 +101,10 @@ fn main_has_bitwuzla(args: Args) {
             eprintln!("error: {}", msg);
             std::process::exit(2);
         }
+        _ => {
+            eprintln!("error: unexpected equivalence result");
+            std::process::exit(2);
+        }
     }
 
     // Now run the external `check_ir_equivalence_main` tool via the helper in

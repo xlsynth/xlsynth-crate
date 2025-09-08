@@ -48,6 +48,22 @@ pub trait Prover {
         allow_flatten: bool,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> EquivResult;
+    fn prove_ir_fn_equiv_output_bits_parallel(
+        self: &Self,
+        lhs: &IrFn,
+        rhs: &IrFn,
+        assertion_semantics: AssertionSemantics,
+        allow_flatten: bool,
+    ) -> EquivResult;
+    fn prove_ir_fn_equiv_split_input_bit(
+        self: &Self,
+        lhs: &IrFn,
+        rhs: &IrFn,
+        start_input: usize,
+        start_bit: usize,
+        assertion_semantics: AssertionSemantics,
+        allow_flatten: bool,
+    ) -> EquivResult;
 }
 
 impl<S: SolverConfig> Prover for S {
@@ -123,6 +139,42 @@ impl<S: SolverConfig> Prover for S {
             uf_signatures,
         )
     }
+
+    fn prove_ir_fn_equiv_output_bits_parallel(
+        self: &Self,
+        lhs: &IrFn,
+        rhs: &IrFn,
+        assertion_semantics: AssertionSemantics,
+        allow_flatten: bool,
+    ) -> EquivResult {
+        crate::equiv::prove_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
+            self,
+            lhs,
+            rhs,
+            assertion_semantics,
+            allow_flatten,
+        )
+    }
+
+    fn prove_ir_fn_equiv_split_input_bit(
+        self: &Self,
+        lhs: &IrFn,
+        rhs: &IrFn,
+        start_input: usize,
+        start_bit: usize,
+        assertion_semantics: AssertionSemantics,
+        allow_flatten: bool,
+    ) -> EquivResult {
+        crate::equiv::prove_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
+            self,
+            lhs,
+            rhs,
+            start_input,
+            start_bit,
+            assertion_semantics,
+            allow_flatten,
+        )
+    }
 }
 
 pub enum ExternalProver {
@@ -181,8 +233,12 @@ impl Prover for ExternalProver {
                 "External provers do not support fixed implicit activation".to_string(),
             );
         }
-        if lhs.domains.is_some() || rhs.domains.is_some() {
-            return EquivResult::Error("External provers do not support domains".to_string());
+        if (lhs.domains.is_some() && lhs.domains.as_ref().unwrap().len() != 0)
+            || (rhs.domains.is_some() && rhs.domains.as_ref().unwrap().len() != 0)
+        {
+            println!(
+                "Warning: External provers do not support domains for arguments. Enums will be treated as possibly out of bounds."
+            );
         }
         if lhs.uf_map.len() != 0 || rhs.uf_map.len() != 0 {
             return EquivResult::Error("External provers do not support UFs".to_string());
@@ -200,18 +256,66 @@ impl Prover for ExternalProver {
         }
         let lhs_pkg = match lhs.ir_fn.pkg_ref {
             Some(pkg) => pkg.to_string(),
-            None => format!("package lhs\n\ntop {}\n", lhs.ir_fn.fn_ref.name),
+            None => format!("package lhs\n\ntop {}\n", lhs.ir_fn.fn_ref.to_string()),
         };
         let rhs_pkg = match rhs.ir_fn.pkg_ref {
             Some(pkg) => pkg.to_string(),
-            None => format!("package rhs\n\ntop {}\n", rhs.ir_fn.fn_ref.name),
+            None => format!("package rhs\n\ntop {}\n", rhs.ir_fn.fn_ref.to_string()),
         };
-        if lhs.ir_fn.fn_ref.name != rhs.ir_fn.fn_ref.name {
-            return EquivResult::Error(
-                "External provers do not support different function names".to_string(),
-            );
+        fn unify_toolchain_tops<'a>(
+            lhs_ir: &'a str,
+            rhs_ir: &'a str,
+            lhs_top: &str,
+            rhs_top: &str,
+        ) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>, String) {
+            if lhs_top == rhs_top {
+                return (
+                    std::borrow::Cow::Borrowed(lhs_ir),
+                    std::borrow::Cow::Borrowed(rhs_ir),
+                    lhs_top.to_string(),
+                );
+            }
+            let unified = lhs_top.to_string();
+            let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
+            (
+                std::borrow::Cow::Borrowed(lhs_ir),
+                std::borrow::Cow::Owned(rhs_rewritten),
+                unified,
+            )
         }
-        self.prove_ir_pkg_text_equiv(&lhs_pkg, &rhs_pkg, Some(&lhs.ir_fn.fn_ref.name))
+
+        let (lhs_unified, rhs_unified, unified_top) = unify_toolchain_tops(
+            &lhs_pkg,
+            &rhs_pkg,
+            &lhs.ir_fn.fn_ref.name,
+            &rhs.ir_fn.fn_ref.name,
+        );
+
+        self.prove_ir_pkg_text_equiv(&lhs_unified, &rhs_unified, Some(&unified_top))
+    }
+
+    fn prove_ir_fn_equiv_output_bits_parallel(
+        self: &Self,
+        _lhs: &IrFn,
+        _rhs: &IrFn,
+        _assertion_semantics: AssertionSemantics,
+        _allow_flatten: bool,
+    ) -> EquivResult {
+        EquivResult::Error(
+            "External provers do not support output-bits parallel strategy".to_string(),
+        )
+    }
+
+    fn prove_ir_fn_equiv_split_input_bit(
+        self: &Self,
+        _lhs: &IrFn,
+        _rhs: &IrFn,
+        _start_input: usize,
+        _start_bit: usize,
+        _assertion_semantics: AssertionSemantics,
+        _allow_flatten: bool,
+    ) -> EquivResult {
+        EquivResult::Error("External provers do not support input-bit split strategy".to_string())
     }
 }
 

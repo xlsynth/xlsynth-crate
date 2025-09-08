@@ -41,6 +41,11 @@ pub fn prove_ir_pkg_equiv_with_tool_exe<P: AsRef<std::path::Path>>(
         Ok(output) => {
             // Include stderr snippet to aid debugging, but do not print directly.
             let mut msg = format!("tool exited with status {}", output.status);
+            if !output.stdout.is_empty() {
+                let stdout_str = String::from_utf8_lossy(&output.stdout);
+                msg.push_str(": ");
+                msg.push_str(&stdout_str);
+            }
             if !output.stderr.is_empty() {
                 let stderr_str = String::from_utf8_lossy(&output.stderr);
                 // Truncate to a reasonable length to avoid huge error strings.
@@ -48,7 +53,7 @@ pub fn prove_ir_pkg_equiv_with_tool_exe<P: AsRef<std::path::Path>>(
                 msg.push_str(": ");
                 msg.push_str(&snippet);
             }
-            EquivResult::Error(msg)
+            EquivResult::ToolchainDisproved(msg)
         }
         Err(e) => EquivResult::Error(format!("spawn failed: {}", e)),
     }
