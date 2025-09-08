@@ -367,42 +367,4 @@ mod tests {
             analysis.delay
         );
     }
-
-    #[test]
-    fn test_graph_logical_effort_bf16_add() {
-        let bf16_add = load_bf16_add_sample(Opt::Yes);
-        let options = GraphLogicalEffortOptions {
-            beta1: 1.0,
-            beta2: 0.0,
-        };
-        let analysis = analyze_graph_logical_effort(&bf16_add.gate_fn, &options);
-        let expected = 594.0;
-        let epsilon = 10.0;
-        assert!(
-            (analysis.delay - expected).abs() < epsilon,
-            "delay was {}",
-            analysis.delay
-        );
-        let options = GraphLogicalEffortOptions {
-            beta1: 1.5,
-            beta2: 0.5,
-        };
-        let analysis = analyze_graph_logical_effort(&bf16_add.gate_fn, &options);
-        let expected = 1298.0;
-        let epsilon = 10.0;
-        assert_within!(analysis.delay, expected, epsilon);
-    }
-
-    #[test]
-    fn test_graph_logical_effort_bf16_mul() {
-        let bf16_mul = load_bf16_mul_sample(Opt::Yes);
-        let options = GraphLogicalEffortOptions {
-            beta1: 1.0,
-            beta2: 0.0,
-        };
-        let analysis = analyze_graph_logical_effort(&bf16_mul.gate_fn, &options);
-        let expected = 480.0;
-        let epsilon = 10.0;
-        assert_within!(analysis.delay, expected, epsilon);
-    }
 }

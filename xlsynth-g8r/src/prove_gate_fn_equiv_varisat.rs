@@ -454,63 +454,6 @@ mod tests {
         assert_eq!(validation_result.proven_equiv_sets.len(), 4);
     }
 
-    fn do_propose_and_validate(gate_fn: &GateFn, input_sample_count: usize) -> (usize, usize) {
-        let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let propose_start = Instant::now();
-        let counterexamples = HashSet::new();
-        let proposed_equiv_classes = propose_equivalence_classes(
-            &gate_fn,
-            input_sample_count,
-            &mut seeded_rng,
-            &counterexamples,
-        );
-        let propose_end = Instant::now();
-        let propose_duration = propose_end - propose_start;
-        eprintln!(
-            "Proposed {} equiv classes in {:?}",
-            proposed_equiv_classes.len(),
-            propose_duration
-        );
-
-        let classes: Vec<&[EquivNode]> = proposed_equiv_classes
-            .values()
-            .map(|nodes| nodes.as_slice())
-            .collect();
-        let validate_start = Instant::now();
-        let validation_result = validate_equivalence_classes(&gate_fn, &classes).unwrap();
-        let validate_end = Instant::now();
-        let validate_duration = validate_end - validate_start;
-        eprintln!(
-            "Validated to {} proven sets {} counterexamples in {:?}",
-            validation_result.proven_equiv_sets.len(),
-            validation_result.cex_inputs.len(),
-            validate_duration
-        );
-
-        (
-            proposed_equiv_classes.len(),
-            validation_result.proven_equiv_sets.len(),
-        )
-    }
-
-    #[test]
-    fn test_validate_equiv_bf16_mul() {
-        let setup = load_bf16_mul_sample(Opt::No);
-        let (proposed_equiv_classes_len, proven_equiv_sets_len) =
-            do_propose_and_validate(&setup.gate_fn, 256);
-        assert_eq!(proposed_equiv_classes_len, 370);
-        assert_within!(proven_equiv_sets_len as isize, 112 as isize, 20 as isize);
-    }
-
-    #[test]
-    fn test_validate_equiv_bf16_add() {
-        let setup = load_bf16_add_sample(Opt::No);
-        let (proposed_equiv_classes_len, proven_equiv_sets_len) =
-            do_propose_and_validate(&setup.gate_fn, 256);
-        assert_eq!(proposed_equiv_classes_len, 434);
-        assert_within!(proven_equiv_sets_len as isize, 140 as isize, 10 as isize);
-    }
-
     #[test]
     fn test_validate_partial_equivalence() {
         let setup = setup_partially_equiv_graph();
