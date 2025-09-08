@@ -3,13 +3,17 @@
 use clap::ArgMatches;
 use xlsynth_pir::{
     ir, ir_parser,
+    ir_utils::get_topological,
     structural_similarity::{
+        collect_backward_structural_entries, collect_structural_entries,
         compute_structural_discrepancies_dual,
         extract_dual_difference_subgraphs_with_shared_params_and_metadata,
     },
 };
 
 use crate::toolchain_config::ToolchainConfig;
+use comfy_table::presets::ASCII_MARKDOWN;
+use comfy_table::{ContentArrangement, Table};
 
 fn find_node_signature_by_textual_id(f: &ir::Fn, text: &str) -> Option<String> {
     for (i, _n) in f.nodes.iter().enumerate() {
@@ -22,6 +26,46 @@ fn find_node_signature_by_textual_id(f: &ir::Fn, text: &str) -> Option<String> {
     None
 }
 
+// Emit a node_table.txt summarizing each side's nodes with fwd/bwd hashes and
+// diff flags.
+fn hash_to_hex(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+fn ir_fn_to_table(f: &ir::Fn, diff_region: &std::collections::HashSet<ir::NodeRef>) -> String {
+    let (fwd_entries, _fwd_depths) = collect_structural_entries(f);
+    let (bwd_entries, _bwd_depths) = collect_backward_structural_entries(f);
+    let order = get_topological(f);
+    let ret_idx_opt = f.ret_node_ref.map(|nr| nr.index);
+
+    let mut table = Table::new();
+    table.load_preset(ASCII_MARKDOWN);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec!["node_name", "fwd_hash", "bwd_hash", "Δ"]);
+
+    for nr in order.into_iter() {
+        let name = ir::node_textual_id(f, nr);
+        if name == "reserved_zero_node" {
+            continue;
+        }
+        let is_ret = ret_idx_opt == Some(nr.index);
+        let sigil = if is_ret { "*" } else { "" };
+        let fwd_hex = hash_to_hex(fwd_entries[nr.index].hash.as_bytes());
+        let bwd_hex = hash_to_hex(bwd_entries[nr.index].hash.as_bytes());
+        let is_diff = if diff_region.contains(&nr) { "✓" } else { "" };
+        table.add_row(vec![
+            format!("{}{}", sigil, name),
+            fwd_hex,
+            bwd_hex,
+            is_diff.to_string(),
+        ]);
+    }
+    table.to_string()
+}
+
 pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();
     let lhs_path = std::path::Path::new(lhs);
@@ -29,6 +73,28 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     let rhs_path = std::path::Path::new(rhs);
     let lhs_ir_top = matches.get_one::<String>("lhs_ir_top");
     let rhs_ir_top = matches.get_one::<String>("rhs_ir_top");
+
+    // Prepare output directory: user-provided or a kept temp directory.
+    let out_dir = if let Some(dir_str) = matches.get_one::<String>("output_dir") {
+        let p = std::path::PathBuf::from(dir_str);
+        if !p.exists() {
+            std::fs::create_dir_all(&p).unwrap();
+        }
+        p
+    } else {
+        let td = tempfile::tempdir().unwrap();
+        let p = td.path().to_path_buf();
+        std::mem::forget(td); // persist directory
+        p
+    };
+    println!("  Output dir: {}", out_dir.display());
+    // Copy original IR files for convenience/debugging.
+    let lhs_copy_path = out_dir.join("lhs_orig.ir");
+    let rhs_copy_path = out_dir.join("rhs_orig.ir");
+    let _ = std::fs::copy(&lhs_path, &lhs_copy_path).expect("copy lhs IR");
+    let _ = std::fs::copy(&rhs_path, &rhs_copy_path).expect("copy rhs IR");
+    println!("  LHS IR copied to: {}", lhs_copy_path.display());
+    println!("  RHS IR copied to: {}", rhs_copy_path.display());
 
     let lhs_pkg = ir_parser::parse_path_to_package(lhs_path).unwrap();
     let rhs_pkg = ir_parser::parse_path_to_package(rhs_path).unwrap();
@@ -144,4 +210,15 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     for (prod, users) in meta.rhs_outbound.iter() {
         println!("  {} -> [{}]", prod, users.join(", "));
     }
+
+    let lhs_table = ir_fn_to_table(lhs_fn, &meta.lhs_region);
+    let rhs_table = ir_fn_to_table(rhs_fn, &meta.rhs_region);
+    let mut table_text = String::new();
+    table_text.push_str("LHS nodes:\n");
+    table_text.push_str(&lhs_table);
+    table_text.push_str("\n\nRHS nodes:\n");
+    table_text.push_str(&rhs_table);
+    let table_path = out_dir.join("node_table.txt");
+    std::fs::write(&table_path, table_text.as_bytes()).unwrap();
+    println!("  Node table written to: {}", table_path.display());
 }

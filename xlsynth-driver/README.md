@@ -336,6 +336,9 @@ Computes a structural similarity summary between two IR functions by hashing nod
 - Output:
   - Always prints the return-node depth for each side, then one line per discrepant depth with the total discrepancy count, followed by concise opcode summaries on separate lines for LHS and RHS.
   - With `--show_discrepancies=true`, also prints detailed signature lines for items present only on one side.
+  - Copies the original inputs to an output directory for convenience:
+    - `lhs_orig.ir` and `rhs_orig.ir`.
+    - Control the directory with `--output-dir=<DIR>`. If omitted, a temporary directory is created and its path is printed.
 
 Example:
 
