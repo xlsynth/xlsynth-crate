@@ -14,6 +14,7 @@ use xlsynth_pir::{
 use crate::toolchain_config::ToolchainConfig;
 use comfy_table::presets::ASCII_MARKDOWN;
 use comfy_table::{ContentArrangement, Table};
+use xlsynth_g8r::check_equivalence;
 
 fn find_node_signature_by_textual_id(f: &ir::Fn, text: &str) -> Option<String> {
     for (i, _n) in f.nodes.iter().enumerate() {
@@ -64,6 +65,18 @@ fn ir_fn_to_table(f: &ir::Fn, diff_region: &std::collections::HashSet<ir::NodeRe
         ]);
     }
     table.to_string()
+}
+
+fn print_equiv_result(label: &str, lhs_pkg_text: &str, rhs_pkg_text: &str, top_name: &str) {
+    match check_equivalence::check_equivalence_with_top(
+        lhs_pkg_text,
+        rhs_pkg_text,
+        Some(top_name),
+        false,
+    ) {
+        Ok(()) => println!("  Equiv ({}): OK", label),
+        Err(e) => println!("  Equiv ({}): FAILED: {}", label, e),
+    }
 }
 
 pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
@@ -209,6 +222,61 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     println!("RHS outbound users per return element:");
     for (prod, users) in meta.rhs_outbound.iter() {
         println!("  {} -> [{}]", prod, users.join(", "));
+    }
+
+    // Write diff packages: common outer (from LHS) + side-specific inner.
+    let outer_text = ir::emit_fn_with_human_pos_comments(lhs_fn, &lhs_pkg.file_table);
+    let lhs_inner_text = ir::emit_fn_with_human_pos_comments(&lhs_sub, &lhs_pkg.file_table);
+    let rhs_inner_text = ir::emit_fn_with_human_pos_comments(&rhs_sub, &rhs_pkg.file_table);
+
+    let lhs_diff_pkg = format!("package lhs_diff\n\n{}\n\n{}\n", outer_text, lhs_inner_text);
+    let rhs_diff_pkg = format!("package rhs_diff\n\n{}\n\n{}\n", outer_text, rhs_inner_text);
+
+    let lhs_diff_path = out_dir.join("lhs_diff.ir");
+    let rhs_diff_path = out_dir.join("rhs_diff.ir");
+    std::fs::write(&lhs_diff_path, lhs_diff_pkg.as_bytes()).unwrap();
+    std::fs::write(&rhs_diff_path, rhs_diff_pkg.as_bytes()).unwrap();
+    println!("  LHS diff IR written to: {}", lhs_diff_path.display());
+    println!("  RHS diff IR written to: {}", rhs_diff_path.display());
+
+    // Parse and verify the emitted diff packages; print results without panicking.
+    {
+        let mut p = ir_parser::Parser::new(&lhs_diff_pkg);
+        match p.parse_and_validate_package() {
+            Ok(_pkg) => println!("  LHS diff package verification: OK"),
+            Err(e) => println!("  LHS diff package verification FAILED: {}", e),
+        }
+    }
+    {
+        let mut p = ir_parser::Parser::new(&rhs_diff_pkg);
+        match p.parse_and_validate_package() {
+            Ok(_pkg) => println!("  RHS diff package verification: OK"),
+            Err(e) => println!("  RHS diff package verification FAILED: {}", e),
+        }
+    }
+
+    // Opportunistic equivalence checks using library-level equiv: (lhs_diff ≡ lhs_orig) and (rhs_diff ≡ rhs_orig).
+    match std::fs::read_to_string(&lhs_copy_path) {
+        Ok(lhs_orig_text) => {
+            print_equiv_result(
+                "lhs_diff ≡ lhs_orig",
+                &lhs_diff_pkg,
+                &lhs_orig_text,
+                lhs_fn.name.as_str(),
+            );
+        }
+        Err(e) => println!("  Equiv (lhs_diff ≡ lhs_orig): skipped (read error: {})", e),
+    }
+    match std::fs::read_to_string(&rhs_copy_path) {
+        Ok(rhs_orig_text) => {
+            print_equiv_result(
+                "rhs_diff ≡ rhs_orig",
+                &rhs_diff_pkg,
+                &rhs_orig_text,
+                lhs_fn.name.as_str(),
+            );
+        }
+        Err(e) => println!("  Equiv (rhs_diff ≡ rhs_orig): skipped (read error: {})", e),
     }
 
     let lhs_table = ir_fn_to_table(lhs_fn, &meta.lhs_region);
