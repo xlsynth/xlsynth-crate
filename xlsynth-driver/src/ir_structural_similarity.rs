@@ -277,7 +277,8 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
         Err(e) => println!("  RHS diff (xlsynth parse) FAILED: {}", e),
     }
 
-    // Opportunistic equivalence checks using library-level equiv: (lhs_diff ≡ lhs_orig) and (rhs_diff ≡ rhs_orig).
+    // Opportunistic equivalence checks using library-level equiv: (lhs_diff ≡
+    // lhs_orig) and (rhs_diff ≡ rhs_orig).
     match std::fs::read_to_string(&lhs_copy_path) {
         Ok(lhs_orig_text) => {
             print_equiv_result(
