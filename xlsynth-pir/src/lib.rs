@@ -7,10 +7,12 @@
 
 pub mod edit_distance;
 pub mod fuzz_utils;
+pub mod graph_edit;
 pub mod ir;
 pub mod ir_deduce;
 pub mod ir_eval;
 pub mod ir_fuzz;
+pub mod ir_isomorphism;
 pub mod ir_node_env;
 pub mod ir_outline;
 pub mod ir_parser;
