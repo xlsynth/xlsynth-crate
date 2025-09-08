@@ -110,6 +110,10 @@ impl IrPackage {
         Ok(ir_package)
     }
 
+    pub fn verify(&self) -> Result<(), XlsynthError> {
+        self.with_write(|guard| lib_support::xls_verify_package(guard.mut_c_ptr()))
+    }
+
     pub fn set_top_by_name(&mut self, name: &str) -> Result<(), XlsynthError> {
         self.with_write(|guard| lib_support::xls_package_set_top_by_name(guard.mut_c_ptr(), name))
     }
@@ -338,5 +342,38 @@ mod tests {
         let u64 = package.get_bits_type(64);
         let tuple = package.get_tuple_type(&[u32, u64]);
         assert_eq!(tuple.to_string(), "(bits[32], bits[64])");
+    }
+
+    #[test]
+    fn test_ir_package_verify_succeeds() {
+        let ir = "package test\nfn f() -> bits[32] {\n  ret literal.1: bits[32] = literal(value=42)\n}\n";
+        let package = IrPackage::parse_ir(ir, None).expect("parse success");
+        package.verify().expect("verify success");
+    }
+
+    #[test]
+    fn test_ir_package_verify_fails_when_builder_skips_checks() {
+        let mut package = IrPackage::new("test_package").unwrap();
+        let u32 = package.get_bits_type(32);
+
+        // Construct a function with mismatched operand types using a builder that does
+        // not verify nodes as they are added. The package verifier should catch
+        // this mismatch.
+        let mut builder = FnBuilder::new(&mut package, "bad", false);
+        let x = builder.param("x", &u32);
+        let wide_literal = IrValue::parse_typed("bits[64]:1").unwrap();
+        let literal = builder.literal(&wide_literal, None);
+        let sum = builder.add(&x, &literal, None);
+
+        builder
+            .build_with_return_value(&sum)
+            .expect("builder should succeed without verification");
+
+        let error = package.verify().expect_err("verify should fail");
+        assert!(
+            error.to_string().contains("type") || error.to_string().contains("Type"),
+            "unexpected error: {}",
+            error
+        );
     }
 }
