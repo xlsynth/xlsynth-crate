@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use xlsynth::IrValue;
 
-use crate::equiv::solver_interface::{BitVec, Response, Solver};
-use crate::equiv::translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv};
-use crate::equiv::types::{
+use crate::solver_interface::{BitVec, Response, Solver};
+use crate::translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv};
+use crate::types::{
     Assertion, AssertionSemantics, AssertionViolation, EquivResult, EquivSide, FnInput, FnInputs,
     FnOutput, IrFn, IrTypedBitVec, ParamDomains, SmtFn, UfRegistry, UfSignature,
 };
@@ -536,7 +536,7 @@ pub mod test_utils {
 
     use xlsynth::IrValue;
 
-    use crate::equiv::{
+    use crate::{
         prove_equiv::{
             AssertionSemantics, EquivResult, FnInputs, IrFn, ParamDomains, align_fn_inputs,
             get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv, prove_ir_fn_equiv_full,
@@ -1138,7 +1138,7 @@ pub mod test_utils {
         let bv = ir_value_to_bv(&mut solver, &ir_value, &ir_type);
         assert_eq!(bv.ir_type, ir_type);
         let expected_value = expected(&mut solver);
-        crate::equiv::solver_interface::test_utils::assert_solver_eq(
+        crate::solver_interface::test_utils::assert_solver_eq(
             &mut solver,
             &bv.bitvec,
             &expected_value,
@@ -1257,7 +1257,7 @@ pub mod test_utils {
     }
 
     pub fn test_ir_value_array<S: Solver>(solver_config: &S::Config) {
-        crate::equiv::prove_equiv::test_utils::assert_ir_value_to_bv_eq::<S>(
+        crate::prove_equiv::test_utils::assert_ir_value_to_bv_eq::<S>(
             solver_config,
             &IrValue::make_array(&[
                 IrValue::make_array(&[
@@ -1431,7 +1431,7 @@ pub mod test_utils {
         let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
         let y = fn_inputs.inputs.get("y").unwrap().bitvec.clone();
         let expected = binop(&mut solver, &x, &y);
-        crate::equiv::solver_interface::test_utils::assert_solver_eq(
+        crate::solver_interface::test_utils::assert_solver_eq(
             &mut solver,
             &smt_fn.output.bitvec,
             &expected,
@@ -1468,7 +1468,7 @@ pub mod test_utils {
     }
 
     pub fn test_ir_tuple_index_literal<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             &(r#"fn f() -> bits[8] {
@@ -1480,7 +1480,7 @@ pub mod test_utils {
     }
 
     pub fn test_ir_tuple_reverse<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(a: (bits[8], bits[4])) -> (bits[4], bits[8]) {
@@ -1544,7 +1544,7 @@ pub mod test_utils {
         index: &str,
         expected_low: i32,
     ) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             &(r#"fn f(input: bits[8][4] id=1) -> bits[8] {
@@ -1562,7 +1562,7 @@ pub mod test_utils {
     }
 
     pub fn test_ir_array_index_multi_level<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[8][4][2] id=1) -> bits[8] {
@@ -1577,7 +1577,7 @@ pub mod test_utils {
     }
 
     pub fn test_ir_array_index_deep_multi_level<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[8][4][2] id=1) -> bits[8] {
@@ -1593,7 +1593,7 @@ pub mod test_utils {
     }
 
     pub fn test_array_update_inbound_value<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[4][4] id=1, val: bits[4] id=2) -> bits[4][4] {
@@ -1612,7 +1612,7 @@ pub mod test_utils {
     }
 
     pub fn test_array_update_nested<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[8][4][4] id=1, val: bits[8][4] id=2) -> bits[8][4][4] {
@@ -1631,7 +1631,7 @@ pub mod test_utils {
     }
 
     pub fn test_array_update_deep_nested<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[8][2][2] id=1, val: bits[8] id=2) -> bits[8][2][2] {
@@ -1655,7 +1655,7 @@ pub mod test_utils {
         extend_width: usize,
         signed: bool,
     ) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             &(format!(
@@ -1680,7 +1680,7 @@ pub mod test_utils {
         start: usize,
         width: usize,
     ) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             &(format!(
@@ -1724,7 +1724,7 @@ pub mod test_utils {
     }
 
     pub fn test_bit_slice_update_zero<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
@@ -1742,7 +1742,7 @@ pub mod test_utils {
     }
 
     pub fn test_bit_slice_update_middle<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
@@ -1762,7 +1762,7 @@ pub mod test_utils {
     }
 
     pub fn test_bit_slice_update_end<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
@@ -1780,7 +1780,7 @@ pub mod test_utils {
     }
 
     pub fn test_bit_slice_update_beyond_end<S: Solver>(solver_config: &S::Config) {
-        use crate::equiv::prove_equiv::test_utils::assert_smt_fn_eq;
+        use crate::prove_equiv::test_utils::assert_smt_fn_eq;
         assert_smt_fn_eq::<S>(
             solver_config,
             r#"fn f(input: bits[8], slice: bits[10]) -> bits[8] {
@@ -2528,7 +2528,7 @@ macro_rules! test_with_solver {
         #[cfg(test)]
         mod $mod_ident {
             use super::*;
-            use crate::equiv::prove_equiv::test_utils;
+            use crate::prove_equiv::test_utils;
 
             #[test]
             fn test_align_zero_width_fn_inputs() {
@@ -3159,30 +3159,30 @@ macro_rules! test_with_solver {
 #[cfg(feature = "with-bitwuzla-binary-test")]
 test_with_solver!(
     bitwuzla_tests,
-    crate::equiv::easy_smt_backend::EasySmtSolver,
-    &crate::equiv::easy_smt_backend::EasySmtConfig::bitwuzla()
+    crate::easy_smt_backend::EasySmtSolver,
+    &crate::easy_smt_backend::EasySmtConfig::bitwuzla()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-boolector-binary-test")]
 test_with_solver!(
     boolector_tests,
-    crate::equiv::easy_smt_backend::EasySmtSolver,
-    &crate::equiv::easy_smt_backend::EasySmtConfig::boolector()
+    crate::easy_smt_backend::EasySmtSolver,
+    &crate::easy_smt_backend::EasySmtConfig::boolector()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-z3-binary-test")]
 test_with_solver!(
     z3_tests,
-    crate::equiv::easy_smt_backend::EasySmtSolver,
-    &crate::equiv::easy_smt_backend::EasySmtConfig::z3()
+    crate::easy_smt_backend::EasySmtSolver,
+    &crate::easy_smt_backend::EasySmtConfig::z3()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-bitwuzla-built")]
 test_with_solver!(
     bitwuzla_built_tests,
-    crate::equiv::bitwuzla_backend::Bitwuzla,
-    &crate::equiv::bitwuzla_backend::BitwuzlaOptions::new()
+    crate::bitwuzla_backend::Bitwuzla,
+    &crate::bitwuzla_backend::BitwuzlaOptions::new()
 );

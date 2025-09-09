@@ -2,8 +2,8 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::equiv::solver_interface::SolverConfig;
-use crate::equiv::types::{
+use crate::solver_interface::SolverConfig;
+use crate::types::{
     AssertionSemantics, BoolPropertyResult, EquivResult, EquivSide, IrFn,
     QuickCheckAssertionSemantics, UfSignature,
 };
@@ -161,7 +161,7 @@ impl<S: SolverConfig> Prover for S {
             uf_map: HashMap::new(),
         };
 
-        crate::equiv::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
+        crate::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
             self,
             &lhs,
             &rhs,
@@ -179,7 +179,7 @@ impl<S: SolverConfig> Prover for S {
         allow_flatten: bool,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> EquivResult {
-        crate::equiv::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
+        crate::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
             self,
             lhs,
             rhs,
@@ -196,7 +196,7 @@ impl<S: SolverConfig> Prover for S {
         assertion_semantics: AssertionSemantics,
         allow_flatten: bool,
     ) -> EquivResult {
-        crate::equiv::prove_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
+        crate::prove_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
             self,
             lhs,
             rhs,
@@ -214,7 +214,7 @@ impl<S: SolverConfig> Prover for S {
         assertion_semantics: AssertionSemantics,
         allow_flatten: bool,
     ) -> EquivResult {
-        crate::equiv::prove_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
+        crate::prove_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
             self,
             lhs,
             rhs,
@@ -232,7 +232,7 @@ impl<S: SolverConfig> Prover for S {
         uf_map: &HashMap<String, String>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult {
-        crate::equiv::prove_quickcheck::prove_ir_fn_always_true_with_ufs::<S::Solver>(
+        crate::prove_quickcheck::prove_ir_fn_always_true_with_ufs::<S::Solver>(
             self,
             ir_fn,
             assertion_semantics,
@@ -301,7 +301,7 @@ impl<S: SolverConfig> Prover for S {
             fixed_implicit_activation,
         };
 
-        crate::equiv::prove_quickcheck::prove_ir_fn_always_true_with_ufs::<S::Solver>(
+        crate::prove_quickcheck::prove_ir_fn_always_true_with_ufs::<S::Solver>(
             self,
             &ir_fn,
             assertion_semantics,
@@ -326,7 +326,7 @@ impl Prover for ExternalProver {
     ) -> EquivResult {
         match self {
             ExternalProver::ToolExe(path) => {
-                crate::equiv::prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_exe(
+                crate::prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_exe(
                     lhs_pkg_text,
                     rhs_pkg_text,
                     top,
@@ -334,7 +334,7 @@ impl Prover for ExternalProver {
                 )
             }
             ExternalProver::ToolDir(path) => {
-                crate::equiv::prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
+                crate::prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
                     lhs_pkg_text,
                     rhs_pkg_text,
                     top,
@@ -480,21 +480,21 @@ impl Prover for ExternalProver {
         }
         match self {
             ExternalProver::ToolExe(path) => {
-                crate::equiv::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_exe(
+                crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_exe(
                     entry_file,
                     quickcheck_name,
                     path,
                 )
             }
             ExternalProver::ToolDir(path) => {
-                crate::equiv::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_dir(
+                crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_dir(
                     entry_file,
                     quickcheck_name,
                     path,
                 )
             }
             ExternalProver::Toolchain => {
-                crate::equiv::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_via_toolchain(
+                crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_via_toolchain(
                     entry_file,
                     quickcheck_name,
                 )
@@ -506,12 +506,12 @@ impl Prover for ExternalProver {
 pub fn auto_selected_prover() -> Box<dyn Prover> {
     #[cfg(feature = "has-bitwuzla")]
     {
-        use crate::equiv::bitwuzla_backend::BitwuzlaOptions;
+        use crate::bitwuzla_backend::BitwuzlaOptions;
         return Box::new(BitwuzlaOptions::new());
     }
     #[cfg(all(feature = "has-boolector", not(feature = "has-bitwuzla")))]
     {
-        use crate::equiv::boolector_backend::BoolectorConfig;
+        use crate::boolector_backend::BoolectorConfig;
         return Box::new(BoolectorConfig::new());
     }
     #[cfg(all(
@@ -520,8 +520,8 @@ pub fn auto_selected_prover() -> Box<dyn Prover> {
         not(feature = "has-boolector")
     ))]
     {
-        use crate::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
-        use crate::equiv::solver_interface::{Response, Solver};
+        use crate::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
+        use crate::solver_interface::{Response, Solver};
 
         fn is_usable(config: &EasySmtConfig) -> bool {
             match EasySmtSolver::new(config) {

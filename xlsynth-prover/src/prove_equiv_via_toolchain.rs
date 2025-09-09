@@ -2,7 +2,7 @@
 
 //! IR equivalence via external toolchain `check_ir_equivalence_main`.
 
-use crate::equiv::types::EquivResult;
+use crate::types::EquivResult;
 use xlsynth_pir::ir::Fn;
 
 /// Prove equivalence by invoking an external toolchain binary.

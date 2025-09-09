@@ -24,11 +24,8 @@ use boolector_sys::{
 };
 use xlsynth::{IrBits, IrValue};
 
-use crate::{
-    equiv::solver_interface::{BitVec, Response, Solver, SolverConfig, Uf},
-    ir_value_utils::ir_value_from_bits_with_type,
-};
-use xlsynth_pir::ir;
+use crate::solver_interface::{BitVec, Response, Solver, SolverConfig, Uf};
+use xlsynth_pir::{ir, ir_value_utils::ir_value_from_bits_with_type};
 
 // Low-level wrapper for the Boolector solver context.
 struct RawBtor {
