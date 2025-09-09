@@ -3,9 +3,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_pir::{ir, ir_parser};
 use xlsynth_pir::ir_eval::{eval_fn, FnEvalResult};
-use xlsynth_pir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzUnop, FuzzSampleWithArgs, generate_ir_fn};
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzBinop, FuzzOp, FuzzSampleWithArgs, FuzzUnop};
+use xlsynth_pir::{ir, ir_parser};
 
 fuzz_target!(|with: FuzzSampleWithArgs| {
     // Skip degenerate base cases as in other targets.
@@ -16,8 +16,8 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
 
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // 1) Generate an XLS IR function via C++ bindings.
-    //    Filter out comparison binops we don't currently support in the pure evaluator.
+    // 1) Generate an XLS IR function via C++ bindings. Filter out comparison binops
+    //    we don't currently support in the pure evaluator.
     let filtered_ops: Vec<FuzzOp> = with
         .sample
         .ops
@@ -65,9 +65,13 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
 
     log::info!("pkg_text:\n{}", pkg_text);
 
-    let parsed_pkg = ir_parser::Parser::new(&pkg_text).parse_and_validate_package()
+    let parsed_pkg = ir_parser::Parser::new(&pkg_text)
+        .parse_and_validate_package()
         .expect("parse_and_validate_package should not fail");
-    let parsed_top = match parsed_pkg.get_top() { Some(f) => f.clone(), None => return };
+    let parsed_top = match parsed_pkg.get_top() {
+        Some(f) => f.clone(),
+        None => return,
+    };
 
     // Guard: skip samples that contain one_hot_sel with non-bits-typed cases.
     for nr in parsed_top.node_refs() {
@@ -85,7 +89,8 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
     // 3) Build arguments consistent with the function's parameter types.
     let args: Vec<xlsynth::IrValue> = with.gen_args_for_fn(&parsed_top);
 
-    // 4) Evaluate via our interpreter. If our interpreter panics (paranoia asserts), skip.
+    // 4) Evaluate via our interpreter. If our interpreter panics (paranoia
+    //    asserts), skip.
     let ours = match std::panic::catch_unwind(|| eval_fn(&parsed_top, &args)) {
         Ok(FnEvalResult::Success(s)) => s.value,
         Ok(FnEvalResult::Failure(_)) => {
@@ -99,11 +104,15 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
     let theirs = match ir_fn.interpret(&args) {
         Ok(v) => v,
         Err(_) => {
-            // If the external interpreter rejects, skip; other targets cover interpreter stability.
+            // If the external interpreter rejects, skip; other targets cover interpreter
+            // stability.
             return;
         }
     };
 
     // 6) Compare results.
-    assert_eq!(ours, theirs, "eval_fn result disagrees with xlsynth interpreter");
+    assert_eq!(
+        ours, theirs,
+        "eval_fn result disagrees with xlsynth interpreter"
+    );
 });
