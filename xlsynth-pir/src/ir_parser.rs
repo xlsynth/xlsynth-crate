@@ -466,13 +466,16 @@ impl Parser {
         Ok(params)
     }
 
-    fn pop_node_name_or_error(&mut self, ctx: &str) -> Result<NameOrId, ParseError> {
+    fn pop_node_name_or_error(
+        &mut self,
+        ctx: &str,
+    ) -> Result<(NameOrId, Option<String>), ParseError> {
         let name: String = self.pop_identifier_or_error(ctx)?;
         if self.try_drop(".") {
             let id = self.pop_number_usize_or_error(ctx)?;
-            Ok(NameOrId::Id(id))
+            Ok((NameOrId::Id(id), Some(name)))
         } else {
-            Ok(NameOrId::Name(name))
+            Ok((NameOrId::Name(name), None))
         }
     }
 
@@ -481,7 +484,14 @@ impl Parser {
         node_env: &IrNodeEnv,
         ctx: &str,
     ) -> Result<ir::NodeRef, ParseError> {
-        let name_or_id = self.pop_node_name_or_error(ctx)?;
+        let (name_or_id, dotted_prefix_opt) = self.pop_node_name_or_error(ctx)?;
+        // Try resolve by full dotted name first if provided; else fall back to id/name.
+        if let (NameOrId::Id(id), Some(prefix)) = (&name_or_id, dotted_prefix_opt) {
+            let dotted = format!("{}.{}", prefix, id);
+            if let Some(node_ref) = node_env.name_id_to_ref(&NameOrId::Name(dotted)) {
+                return Ok(*node_ref);
+            }
+        }
         let maybe_node_ref = node_env.name_id_to_ref(&name_or_id);
         match maybe_node_ref {
             Some(node_ref) => Ok(*node_ref),
@@ -673,7 +683,7 @@ impl Parser {
 
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
         log::debug!("parse_node");
-        let name_or_id = self.pop_node_name_or_error("node name")?;
+        let (name_or_id, dotted_prefix_opt) = self.pop_node_name_or_error("node name")?;
         let mut maybe_id = match name_or_id {
             NameOrId::Id(id) => Some(id),
             NameOrId::Name(_) => None,
@@ -1351,6 +1361,26 @@ impl Parser {
             None
         };
 
+        // Enforce dotted LHS consistency: '<prefix>.<digits>' must match operator and
+        // id.
+        if let Some(lhs_prefix) = dotted_prefix_opt.as_ref() {
+            let expected_op = operator.as_str();
+            if lhs_prefix != expected_op {
+                return Err(ParseError::new(format!(
+                    "node name dotted prefix '{}' does not match operator '{}'",
+                    lhs_prefix, expected_op
+                )));
+            }
+            if let NameOrId::Id(lhs_id) = name_or_id {
+                if lhs_id != id {
+                    return Err(ParseError::new(format!(
+                        "node name id suffix {} does not match id attribute {}",
+                        lhs_id, id
+                    )));
+                }
+            }
+        }
+
         Ok(ir::Node {
             text_id: id,
             name: match name_or_id {
@@ -1575,7 +1605,7 @@ impl Parser {
             // parsing which will error with a helpful message.
             let parse_port_line = || -> Result<Option<()>, ParseError> {
                 // name or id.
-                let name_or_id = self.pop_node_name_or_error("node name")?;
+                let (name_or_id, _dot) = self.pop_node_name_or_error("node name")?;
                 self.drop_or_error(":")?;
                 let node_ty = self.parse_type()?;
                 self.drop_or_error("=")?;

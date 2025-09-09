@@ -61,6 +61,22 @@ pub enum ValidationError {
     /// A GetParam node exists in the node list that does not correspond to any
     /// declared parameter in the function signature.
     ExtraParamNode { func: String, text_id: usize },
+    /// A node name looks like a default textual id (e.g. op.id) but the
+    /// operator prefix does not match the node's actual operator.
+    NodeNameOpMismatch {
+        func: String,
+        node_index: usize,
+        name: String,
+        expected_op: String,
+    },
+    /// A node name looks like a default textual id (e.g. op.id) but the numeric
+    /// suffix does not match the node's text id.
+    NodeNameIdSuffixMismatch {
+        func: String,
+        node_index: usize,
+        name: String,
+        expected_id: usize,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -162,6 +178,30 @@ impl std::fmt::Display for ValidationError {
                     func, text_id
                 )
             }
+            ValidationError::NodeNameOpMismatch {
+                func,
+                node_index,
+                name,
+                expected_op,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} name '{}' operator prefix does not match op '{}'",
+                    func, node_index, name, expected_op
+                )
+            }
+            ValidationError::NodeNameIdSuffixMismatch {
+                func,
+                node_index,
+                name,
+                expected_id,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} name '{}' id suffix does not match text id {}",
+                    func, node_index, name, expected_id
+                )
+            }
         }
     }
 }
@@ -240,6 +280,37 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
         param_name_to_id.insert(name, p.id.get_wrapped_id());
     }
     for (i, node) in f.nodes.iter().enumerate() {
+        // Enforce: if a node has a name that looks like a default textual id
+        // pattern '<prefix>.<digits>', then '<prefix>' must match the operator
+        // and the numeric suffix must match the node's text id. This aligns with
+        // external xlsynth verifier expectations and prevents misleading names.
+        if let Some(ref name) = node.name {
+            if let Some(dot_pos) = name.rfind('.') {
+                let (prefix, suffix) = name.split_at(dot_pos);
+                let suffix_digits = &suffix[1..]; // skip '.'
+                if !suffix_digits.is_empty() && suffix_digits.chars().all(|c| c.is_ascii_digit()) {
+                    let op_str = node.payload.get_operator();
+                    if prefix != op_str {
+                        return Err(ValidationError::NodeNameOpMismatch {
+                            func: f.name.clone(),
+                            node_index: i,
+                            name: name.clone(),
+                            expected_op: op_str.to_string(),
+                        });
+                    }
+                    if let Ok(parsed_id) = suffix_digits.parse::<usize>() {
+                        if parsed_id != node.text_id {
+                            return Err(ValidationError::NodeNameIdSuffixMismatch {
+                                func: f.name.clone(),
+                                node_index: i,
+                                name: name.clone(),
+                                expected_id: node.text_id,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         match &node.payload {
             NodePayload::GetParam(pid) => {
                 let declared = node
@@ -504,6 +575,65 @@ mod tests {
         assert!(matches!(
             validate_fn(f, &pkg),
             Err(ValidationError::DuplicateTextId { .. })
+        ));
+    }
+
+    #[test]
+    fn name_operator_prefix_mismatch_fails() {
+        let ir = r#"
+        package test
+
+        fn foo() -> bits[8] {
+          ret one.2: bits[8] = literal(value=1, id=2)
+        }
+        "#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        let f = pkg.get_top().unwrap();
+        assert!(matches!(
+            validate_fn(f, &pkg),
+            Err(ValidationError::NodeNameOpMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn manual_construct_one_dot_id_literal_fails() {
+        // Build a function programmatically containing a node named "one.2"
+        // with operator literal(id=2). This should fail with NodeNameOpMismatch.
+        let mut pkg = ir::Package {
+            name: "test".to_string(),
+            file_table: ir::FileTable::new(),
+            members: Vec::new(),
+            top_name: Some("f".to_string()),
+        };
+        let lit_node = ir::Node {
+            text_id: 2,
+            name: Some("one.2".to_string()),
+            ty: ir::Type::Bits(8),
+            payload: ir::NodePayload::Literal(xlsynth::IrValue::make_ubits(8, 1).unwrap()),
+            pos: None,
+        };
+        let f = ir::Fn {
+            name: "f".to_string(),
+            params: Vec::new(),
+            ret_ty: ir::Type::Bits(8),
+            nodes: vec![
+                ir::Node {
+                    text_id: 0,
+                    name: Some("reserved_zero_node".to_string()),
+                    ty: ir::Type::nil(),
+                    payload: ir::NodePayload::Nil,
+                    pos: None,
+                },
+                lit_node,
+            ],
+            ret_node_ref: Some(ir::NodeRef { index: 1 }),
+        };
+        pkg.members.push(ir::PackageMember::Function(f.clone()));
+        let fref = pkg.get_top().unwrap();
+        assert!(matches!(
+            super::validate_fn(fref, &pkg),
+            Err(ValidationError::NodeNameOpMismatch { .. })
         ));
     }
 
