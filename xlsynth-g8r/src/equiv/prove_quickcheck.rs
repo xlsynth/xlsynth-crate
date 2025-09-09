@@ -373,18 +373,18 @@ mod test_utils {
         let ir_pkg_text = r#"
             package p_qc_uf
 
-            fn g(x: bits[8]) -> bits[8] {
-              ret add.1: bits[8] = add(x, x, id=1)
+            fn g(x: bits[8] id=1) -> bits[8] {
+              ret add.1: bits[8] = add(x, x, id=2)
             }
 
-            fn h(x: bits[8]) -> bits[8] {
-              ret sub.2: bits[8] = sub(x, x, id=2)
+            fn h(x: bits[8] id=2) -> bits[8] {
+              ret sub.2: bits[8] = sub(x, x, id=3)
             }
 
-            fn f(x: bits[8]) -> bits[1] {
-              a: bits[8] = invoke(x, to_apply=g, id=3)
-              b: bits[8] = invoke(x, to_apply=h, id=4)
-              ret eq.5: bits[1] = eq(a, b, id=5)
+            fn f(x: bits[8] id=4) -> bits[1] {
+              a: bits[8] = invoke(x, to_apply=g, id=5)
+              b: bits[8] = invoke(x, to_apply=h, id=6)
+              ret eq.5: bits[1] = eq(a, b, id=7)
             }
         "#;
 
