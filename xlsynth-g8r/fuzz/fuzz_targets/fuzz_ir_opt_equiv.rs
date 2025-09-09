@@ -4,13 +4,13 @@
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
+use xlsynth_prover::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
 #[cfg(feature = "has-boolector")]
-use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
+use xlsynth_prover::boolector_backend::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
-use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
-use xlsynth_g8r::equiv::types::{AssertionSemantics, EquivResult, IrFn};
-use xlsynth_g8r::equiv::prove_equiv::{
+use xlsynth_prover::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
+use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn};
+use xlsynth_prover::prove_equiv::{
     prove_ir_fn_equiv,
     prove_ir_fn_equiv_output_bits_parallel,
 };
