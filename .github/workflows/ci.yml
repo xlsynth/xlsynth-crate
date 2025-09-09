@@ -244,7 +244,7 @@ jobs:
             ls -l /usr/lib | grep boolector || true
             exit 1
           fi
-          cargo test --features with-boolector-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
 
 
   # -----------------------------------------------------------
@@ -407,12 +407,12 @@ jobs:
           cargo --version
 
       - name: Build crate
-        run: cargo build --features with-bitwuzla-system --workspace -vv
+        run: cargo build --features with-z3-system,with-bitwuzla-system --workspace -vv
 
       - name: Test crate
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-bitwuzla-system --workspace
+          cargo test --features with-z3-system,with-bitwuzla-system --workspace
   # -----------------------------------------------------------
   # 4) macOS job
   # -----------------------------------------------------------
@@ -535,7 +535,7 @@ jobs:
           DYLD_LIBRARY_PATH: /usr/local/lib
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-built,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
@@ -747,7 +747,7 @@ jobs:
           echo "$(pwd)" >> $GITHUB_PATH
 
       - name: Build crate
-        run: cargo build --features with-bitwuzla-system,with-boolector-system,with-z3-binary-test --workspace -vv
+        run: cargo build --features with-z3-system,with-bitwuzla-system,with-boolector-system,with-z3-binary-test --workspace -vv
 
       - name: Run Valgrind Tests
         run: |
@@ -1027,4 +1027,4 @@ jobs:
           echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Ensure benches compile
-        run: cargo bench --features with-bitwuzla-system --workspace --no-run
+        run: cargo bench --features with-z3-system,with-bitwuzla-system --workspace --no-run
