@@ -466,7 +466,7 @@ impl Parser {
         Ok(params)
     }
 
-    fn pop_node_name_or_error(
+    fn pop_node_name_or_error_with_dotted(
         &mut self,
         ctx: &str,
     ) -> Result<(NameOrId, Option<String>), ParseError> {
@@ -479,19 +479,17 @@ impl Parser {
         }
     }
 
+    fn pop_node_name_or_error(&mut self, ctx: &str) -> Result<NameOrId, ParseError> {
+        let (name_or_id, _dot) = self.pop_node_name_or_error_with_dotted(ctx)?;
+        Ok(name_or_id)
+    }
+
     fn parse_node_ref(
         &mut self,
         node_env: &IrNodeEnv,
         ctx: &str,
     ) -> Result<ir::NodeRef, ParseError> {
-        let (name_or_id, dotted_prefix_opt) = self.pop_node_name_or_error(ctx)?;
-        // Try resolve by full dotted name first if provided; else fall back to id/name.
-        if let (NameOrId::Id(id), Some(prefix)) = (&name_or_id, dotted_prefix_opt) {
-            let dotted = format!("{}.{}", prefix, id);
-            if let Some(node_ref) = node_env.name_id_to_ref(&NameOrId::Name(dotted)) {
-                return Ok(*node_ref);
-            }
-        }
+        let name_or_id = self.pop_node_name_or_error(ctx)?;
         let maybe_node_ref = node_env.name_id_to_ref(&name_or_id);
         match maybe_node_ref {
             Some(node_ref) => Ok(*node_ref),
@@ -683,7 +681,8 @@ impl Parser {
 
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
         log::debug!("parse_node");
-        let (name_or_id, dotted_prefix_opt) = self.pop_node_name_or_error("node name")?;
+        let (name_or_id, dotted_prefix_opt) =
+            self.pop_node_name_or_error_with_dotted("node name")?;
         let mut maybe_id = match name_or_id {
             NameOrId::Id(id) => Some(id),
             NameOrId::Name(_) => None,
@@ -1605,7 +1604,7 @@ impl Parser {
             // parsing which will error with a helpful message.
             let parse_port_line = || -> Result<Option<()>, ParseError> {
                 // name or id.
-                let (name_or_id, _dot) = self.pop_node_name_or_error("node name")?;
+                let name_or_id = self.pop_node_name_or_error("node name")?;
                 self.drop_or_error(":")?;
                 let node_ty = self.parse_type()?;
                 self.drop_or_error("=")?;
