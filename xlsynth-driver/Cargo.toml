@@ -57,6 +57,8 @@ has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]
 with-boolector-system = ["xlsynth-prover/with-boolector-system", "has-boolector"]
 # Enables boolector support AND builds it from source
 with-boolector-built = ["xlsynth-prover/with-boolector-built", "has-boolector"]
+with-z3-system = ["xlsynth-g8r/with-z3-system"]
+with-z3-built = ["xlsynth-g8r/with-z3-built"]
 with-easy-smt = ["xlsynth-prover/with-easy-smt", "has-easy-smt"]
 with-boolector-binary-test = ["xlsynth-prover/with-easy-smt", "with-easy-smt"]
 with-bitwuzla-binary-test = ["xlsynth-prover/with-easy-smt", "with-easy-smt"]
