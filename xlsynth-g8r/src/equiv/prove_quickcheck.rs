@@ -377,14 +377,14 @@ mod test_utils {
               ret add.1: bits[8] = add(x, x, id=2)
             }
 
-            fn h(x: bits[8] id=2) -> bits[8] {
-              ret sub.2: bits[8] = sub(x, x, id=3)
+            fn h(x: bits[8] id=3) -> bits[8] {
+              ret sub.2: bits[8] = sub(x, x, id=4)
             }
 
-            fn f(x: bits[8] id=4) -> bits[1] {
-              a: bits[8] = invoke(x, to_apply=g, id=5)
-              b: bits[8] = invoke(x, to_apply=h, id=6)
-              ret eq.5: bits[1] = eq(a, b, id=7)
+            fn f(x: bits[8] id=5) -> bits[1] {
+              a: bits[8] = invoke(x, to_apply=g, id=6)
+              b: bits[8] = invoke(x, to_apply=h, id=7)
+              ret eq.5: bits[1] = eq(a, b, id=8)
             }
         "#;
 
