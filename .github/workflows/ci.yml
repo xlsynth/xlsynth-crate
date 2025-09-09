@@ -674,6 +674,34 @@ jobs:
           # Emit the protobuf compiler version number.
           protoc --version
 
+      - name: Download Bitwuzla shared library (rocky8)
+        run: |
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-rocky8.so"
+            curl -L --retry 5 --retry-delay 2 --retry-connrefused -o "${src}" "${BASE_URL}/${src}"
+            sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
+          done
+          sudo ldconfig || true
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Download and set up Boolector
+        run: |
+          mkdir -p boolector_libs
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          sudo cp boolector_libs/libboolector.so /usr/lib/
+          sudo ldconfig
+          echo "Listing /usr/lib for libboolector.so:"
+          ls -l /usr/lib/libboolector.so || echo "libboolector.so not found in /usr/lib!"
+          echo "ldconfig -p | grep boolector:"
+          ldconfig -p | grep boolector || echo "libboolector.so not found in ldconfig!"
+
+      - name: Install Z3 binary
+        run: |
+          sudo apt-get install -y z3
+          echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
           mkdir -p artifacts
@@ -719,7 +747,7 @@ jobs:
           echo "$(pwd)" >> $GITHUB_PATH
 
       - name: Build crate
-        run: cargo build --features --workspace -vv
+        run: cargo build --features with-bitwuzla-system,with-boolector-system,with-z3-binary-test --workspace -vv
 
       - name: Run Valgrind Tests
         run: |
