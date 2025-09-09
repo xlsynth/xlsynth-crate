@@ -110,6 +110,38 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     println!("  LHS IR copied to: {}", lhs_copy_path.display());
     println!("  RHS IR copied to: {}", rhs_copy_path.display());
 
+    // Prefer showing xlsynth parse/verify results first.
+    match std::fs::read_to_string(&lhs_path) {
+        Ok(lhs_text) => match xlsynth::IrPackage::parse_ir(&lhs_text, None) {
+            Ok(mut pkg) => {
+                if let Some(top) = lhs_ir_top {
+                    let _ = pkg.set_top_by_name(top.as_str());
+                }
+                match pkg.verify() {
+                    Ok(()) => println!("  LHS input (xlsynth verify): OK"),
+                    Err(e) => println!("  LHS input (xlsynth verify) FAILED: {}", e),
+                }
+            }
+            Err(e) => println!("  LHS input (xlsynth parse) FAILED: {}", e),
+        },
+        Err(e) => println!("  LHS input (read) FAILED: {}", e),
+    }
+    match std::fs::read_to_string(&rhs_path) {
+        Ok(rhs_text) => match xlsynth::IrPackage::parse_ir(&rhs_text, None) {
+            Ok(mut pkg) => {
+                if let Some(top) = rhs_ir_top {
+                    let _ = pkg.set_top_by_name(top.as_str());
+                }
+                match pkg.verify() {
+                    Ok(()) => println!("  RHS input (xlsynth verify): OK"),
+                    Err(e) => println!("  RHS input (xlsynth verify) FAILED: {}", e),
+                }
+            }
+            Err(e) => println!("  RHS input (xlsynth parse) FAILED: {}", e),
+        },
+        Err(e) => println!("  RHS input (read) FAILED: {}", e),
+    }
+
     let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
         Ok(pkg) => pkg,
         Err(e) => {
@@ -164,7 +196,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
         },
     };
 
-    // Early verification of inputs: PIR verify and xlsynth verify.
+    // Early verification of inputs: PIR verify (after xlsynth reporting above).
     match ir_parser::parse_and_validate_path_to_package(lhs_path) {
         Ok(_pkg) => println!("  LHS input (PIR verify): OK"),
         Err(e) => println!("  LHS input (PIR verify) FAILED: {}", e),
@@ -172,32 +204,6 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     match ir_parser::parse_and_validate_path_to_package(rhs_path) {
         Ok(_pkg) => println!("  RHS input (PIR verify): OK"),
         Err(e) => println!("  RHS input (PIR verify) FAILED: {}", e),
-    }
-    match std::fs::read_to_string(&lhs_path) {
-        Ok(lhs_text) => match xlsynth::IrPackage::parse_ir(&lhs_text, None) {
-            Ok(mut pkg) => {
-                let _ = pkg.set_top_by_name(lhs_fn.name.as_str());
-                match pkg.verify() {
-                    Ok(()) => println!("  LHS input (xlsynth verify): OK"),
-                    Err(e) => println!("  LHS input (xlsynth verify) FAILED: {}", e),
-                }
-            }
-            Err(e) => println!("  LHS input (xlsynth parse) FAILED: {}", e),
-        },
-        Err(e) => println!("  LHS input (read) FAILED: {}", e),
-    }
-    match std::fs::read_to_string(&rhs_path) {
-        Ok(rhs_text) => match xlsynth::IrPackage::parse_ir(&rhs_text, None) {
-            Ok(mut pkg) => {
-                let _ = pkg.set_top_by_name(rhs_fn.name.as_str());
-                match pkg.verify() {
-                    Ok(()) => println!("  RHS input (xlsynth verify): OK"),
-                    Err(e) => println!("  RHS input (xlsynth verify) FAILED: {}", e),
-                }
-            }
-            Err(e) => println!("  RHS input (xlsynth parse) FAILED: {}", e),
-        },
-        Err(e) => println!("  RHS input (read) FAILED: {}", e),
     }
 
     let (recs, lhs_ret_depth, rhs_ret_depth) =
