@@ -16,6 +16,7 @@ pub mod ir_outline;
 pub mod ir_parser;
 pub mod ir_utils;
 pub mod ir_validate;
+pub mod ir_value_utils;
 pub mod ir_verify;
 pub mod localized_eco2;
 pub mod node_hashing;

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::equiv::solver_interface::Uf;
+use crate::solver_interface::Uf;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt};
 use xlsynth::IrValue;
 
-use crate::equiv::solver_interface::{BitVec, Solver};
+use crate::solver_interface::{BitVec, Solver};
 use xlsynth_pir::ir;
 
 #[derive(Clone)]

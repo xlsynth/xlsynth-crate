@@ -473,7 +473,7 @@ pub fn execute_command_with_context(
 // DSLX helpers shared across subcommands
 // -----------------------------------------------------------------------------
 
-use xlsynth_g8r::equiv::types::{ParamDomains, UfSignature};
+use xlsynth_prover::types::{ParamDomains, UfSignature};
 
 pub fn get_enum_domain(
     tcm: &xlsynth::dslx::TypecheckedModule,

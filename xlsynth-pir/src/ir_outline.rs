@@ -794,8 +794,8 @@ mod tests {
     use super::*;
     use crate::ir::{self, NodePayload, PackageMember};
     use crate::ir_parser::Parser;
-    use xlsynth_g8r::equiv::prove_equiv_via_toolchain;
-    use xlsynth_g8r::equiv::types::EquivResult;
+    use xlsynth_prover::prove_equiv_via_toolchain;
+    use xlsynth_prover::types::EquivResult;
 
     fn parse_single_fn(ir: &str) -> (Package, IrFn) {
         let pkg_text = format!("package test\n\n{}\n", ir);
