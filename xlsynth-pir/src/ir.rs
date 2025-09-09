@@ -1479,12 +1479,14 @@ mod tests {
         let mut parser = ir_parser::Parser::new(ir_text);
         let ir_fn = parser.parse_fn().unwrap();
 
-        assert_eq!(ir_fn.nodes.len(), 3);
-        assert_eq!(ir_fn.ret_node_ref, Some(NodeRef { index: 2 }));
+        // With de-duplication of GetParam nodes, only the reserved zero node and
+        // a single GetParam remain; the return refers to that same node.
+        assert_eq!(ir_fn.nodes.len(), 2);
+        assert_eq!(ir_fn.ret_node_ref, Some(NodeRef { index: 1 }));
 
-        let auto_param_node = ir_fn.get_node(NodeRef { index: 1 });
+        let param_node = ir_fn.get_node(NodeRef { index: 1 });
         assert!(matches!(
-            auto_param_node.payload,
+            param_node.payload,
             NodePayload::GetParam(pid) if pid.get_wrapped_id() == 7
         ));
 

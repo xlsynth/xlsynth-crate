@@ -49,6 +49,18 @@ pub enum ValidationError {
     /// Bitwise n-ary ops (and/or/xor/nand/nor) must have identical bits-typed
     /// operands.
     NaryBitwiseOperandTypeMismatch { func: String, node_index: usize },
+    /// Two parameters share the same name within a function.
+    DuplicateParamName { func: String, param_name: String },
+    /// A parameter declared in the function signature has no corresponding
+    /// GetParam node in the node list.
+    MissingParamNode {
+        func: String,
+        param_name: String,
+        expected_id: usize,
+    },
+    /// A GetParam node exists in the node list that does not correspond to any
+    /// declared parameter in the function signature.
+    ExtraParamNode { func: String, text_id: usize },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -125,6 +137,31 @@ impl std::fmt::Display for ValidationError {
                     func, node_index
                 )
             }
+            ValidationError::DuplicateParamName { func, param_name } => {
+                write!(
+                    f,
+                    "function '{}' has duplicate param name '{}'",
+                    func, param_name
+                )
+            }
+            ValidationError::MissingParamNode {
+                func,
+                param_name,
+                expected_id,
+            } => {
+                write!(
+                    f,
+                    "function '{}' missing GetParam node for param '{}' (expected id={})",
+                    func, param_name, expected_id
+                )
+            }
+            ValidationError::ExtraParamNode { func, text_id } => {
+                write!(
+                    f,
+                    "function '{}' has GetParam node with id {} not declared in signature",
+                    func, text_id
+                )
+            }
         }
     }
 }
@@ -186,11 +223,21 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
 pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
     // Track ids used by non-parameter nodes to ensure uniqueness.
     let mut seen_nonparam_ids: HashSet<usize> = HashSet::new();
-    // Map parameter names to their declared ids from the function signature.
+    // Track GetParam node ids to verify 1:1 mapping with signature params.
+    let mut seen_param_ids: HashSet<usize> = HashSet::new();
+    // Map parameter names to their declared ids from the function signature, and
+    // check name uniqueness.
     let mut param_name_to_id: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
     for p in &f.params {
-        param_name_to_id.insert(p.name.as_str(), p.id.get_wrapped_id());
+        let name = p.name.as_str();
+        if param_name_to_id.contains_key(name) {
+            return Err(ValidationError::DuplicateParamName {
+                func: f.name.clone(),
+                param_name: p.name.clone(),
+            });
+        }
+        param_name_to_id.insert(name, p.id.get_wrapped_id());
     }
     for (i, node) in f.nodes.iter().enumerate() {
         match &node.payload {
@@ -202,6 +249,7 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
                     .copied()
                     .unwrap_or(pid.get_wrapped_id());
                 let actual_pid = pid.get_wrapped_id();
+                // First: mismatch between declared and actual -> ParamIdMismatch.
                 if actual_pid != declared || node.text_id != declared {
                     let param_name = node
                         .name
@@ -212,6 +260,20 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
                         param_name,
                         expected: declared,
                         actual: node.text_id,
+                    });
+                }
+                // Ensure this GetParam refers to a declared param id.
+                if !param_name_to_id.values().any(|&v| v == actual_pid) {
+                    return Err(ValidationError::ExtraParamNode {
+                        func: f.name.clone(),
+                        text_id: node.text_id,
+                    });
+                }
+                // Ensure each GetParam id appears exactly once in the node list.
+                if !seen_param_ids.insert(actual_pid) {
+                    return Err(ValidationError::DuplicateTextId {
+                        func: f.name.clone(),
+                        text_id: actual_pid,
                     });
                 }
             }
@@ -293,6 +355,17 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
                     // Does not require identical types across all operands.
                 }
             }
+        }
+    }
+    // Ensure every declared parameter has a corresponding GetParam node.
+    for p in &f.params {
+        let pid = p.id.get_wrapped_id();
+        if !seen_param_ids.contains(&pid) {
+            return Err(ValidationError::MissingParamNode {
+                func: f.name.clone(),
+                param_name: p.name.clone(),
+                expected_id: pid,
+            });
         }
     }
 
@@ -468,6 +541,84 @@ mod tests {
         assert!(matches!(
             validate_fn(f, &pkg),
             Err(ValidationError::UnknownCallee { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_getparam_node_id_fails() {
+        let ir = r#"
+        package test
+
+        fn foo(x: bits[8]) -> bits[8] {
+          ret x: bits[8] = identity(x, id=2)
+        }
+        "#;
+        let mut parser = Parser::new(ir);
+        let mut pkg = parser.parse_package().unwrap();
+        {
+            let f = pkg.get_top_mut().unwrap();
+            // Manually insert a duplicate GetParam node with the same id as 'x'.
+            let pid = f.params[0].id;
+            let dup = ir::Node {
+                text_id: pid.get_wrapped_id(),
+                name: Some(f.params[0].name.clone()),
+                ty: f.params[0].ty.clone(),
+                payload: ir::NodePayload::GetParam(pid),
+                pos: None,
+            };
+            f.nodes.push(dup);
+        }
+        let f_ro = pkg.get_top().unwrap();
+        assert!(matches!(
+            validate_fn(f_ro, &pkg),
+            Err(ValidationError::DuplicateTextId { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_getparam_node_fails() {
+        let ir = r#"
+        package test
+
+        fn foo(x: bits[8]) -> bits[8] {
+          ret x: bits[8] = identity(x, id=2)
+        }
+        "#;
+        let mut parser = Parser::new(ir);
+        let mut pkg = parser.parse_package().unwrap();
+        {
+            let f = pkg.get_top_mut().unwrap();
+            // Remove the GetParam node for 'x'. It should be at index 1.
+            let idx = f
+                .nodes
+                .iter()
+                .position(|n| matches!(n.payload, NodePayload::GetParam(_)))
+                .unwrap();
+            f.nodes.remove(idx);
+        }
+        let f_ro = pkg.get_top().unwrap();
+        let err = validate_fn(f_ro, &pkg).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::MissingParamNode { .. } | ValidationError::OperandUsesUndefined { .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_param_name_fails() {
+        let ir = r#"
+        package test
+
+        fn foo(x: bits[8], x: bits[8]) -> bits[8] {
+          ret x: bits[8] = identity(x, id=2)
+        }
+        "#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        let f = pkg.get_top().unwrap();
+        assert!(matches!(
+            validate_fn(f, &pkg),
+            Err(ValidationError::DuplicateParamName { .. })
         ));
     }
 }
