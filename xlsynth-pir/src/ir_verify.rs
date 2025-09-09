@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::ir::{self, Fn, NodePayload, Type};
+use crate::ir::{self, Fn, NodePayload, Package, PackageMember, Type};
 use crate::ir_deduce::deduce_result_type;
 use crate::ir_utils::operands;
 
@@ -186,6 +186,27 @@ pub fn verify_fn_types_agree_with_deduction(f: &Fn) -> Result<(), String> {
             }
             None => {
                 // Deduction not implemented for this payload; skip.
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verifies that all node text IDs are unique across the entire package
+/// (functions and blocks), matching upstream XLS expectations.
+pub fn verify_package_unique_node_ids(pkg: &Package) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for m in pkg.members.iter() {
+        let f: &Fn = match m {
+            PackageMember::Function(f) => f,
+            PackageMember::Block { func, .. } => func,
+        };
+        for (idx, n) in f.nodes.iter().enumerate() {
+            if !seen.insert(n.text_id) {
+                return Err(format!(
+                    "duplicate node id={} found at node index {} in function '{}'",
+                    n.text_id, idx, f.name
+                ));
             }
         }
     }

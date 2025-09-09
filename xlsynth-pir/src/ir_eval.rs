@@ -1308,10 +1308,10 @@ mod tests {
         let ir_text = r#"package test
 
 fn f(x: bits[1] id=1) -> bits[1] {
-  t.1: token = after_all(id=1)
-  _tr.2: token = trace(t.1, x, format="x={} done", data_operands=[x], id=2)
-  _a.3: token = assert(t.1, x, message="boom", label="L", id=3)
-  ret literal.4: bits[1] = literal(value=1, id=4)
+  t.2: token = after_all(id=2)
+  _tr.3: token = trace(t.2, x, format="x={} done", data_operands=[x], id=3)
+  _a.4: token = assert(t.2, x, message="boom", label="L", id=4)
+  ret literal.5: bits[1] = literal(value=1, id=5)
 }
 "#;
         let mut p = Parser::new(ir_text);

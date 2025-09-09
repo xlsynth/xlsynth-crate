@@ -1414,9 +1414,27 @@ impl Parser {
         while !self.try_drop("}") {
             let is_ret = self.try_drop("ret ");
             let node = self.parse_node(&mut node_env)?;
-            let node_ref = ir::NodeRef { index: nodes.len() };
-            node_env.add(node.name.clone(), node.text_id, node_ref);
-            nodes.push(node);
+            // Special handling: avoid duplicating GetParam nodes if we've already
+            // created one for this param id from the function signature. If a
+            // duplicate param(...) appears (e.g., for a return), just reference
+            // the existing node instead of adding a new one.
+            let mut node_ref = ir::NodeRef { index: nodes.len() };
+            let is_get_param = matches!(node.payload, ir::NodePayload::GetParam(_));
+            if is_get_param {
+                if let Some(existing) = node_env
+                    .name_id_to_ref(&crate::ir_node_env::NameOrId::Id(node.text_id))
+                    .copied()
+                {
+                    // Do not add a duplicate; use the existing node ref.
+                    node_ref = existing;
+                } else {
+                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    nodes.push(node);
+                }
+            } else {
+                node_env.add(node.name.clone(), node.text_id, node_ref);
+                nodes.push(node);
+            }
             if is_ret {
                 ret_node_ref = Some(node_ref);
             }
