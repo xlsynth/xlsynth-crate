@@ -488,8 +488,8 @@ mod tests {
         package test
 
         fn foo(x: bits[1]) -> bits[1] {
-          tmp.2: bits[1] = add(x, x)
-          ret neg.3: bits[1] = neg(tmp.2)
+          tmp: bits[1] = add(x, x, id=2)
+          ret neg: bits[1] = neg(tmp, id=3)
         }
         "#;
         let mut parser = Parser::new(ir);
@@ -564,9 +564,9 @@ mod tests {
         package test
 
         fn foo(x: bits[1]) -> bits[1] {
-          a.2: bits[1] = add(x, x, id=2)
-          b.2: bits[1] = add(a.2, x, id=2)
-          ret b.2: bits[1] = identity(b.2, id=3)
+          a: bits[1] = add(x, x, id=2)
+          b: bits[1] = add(a, x, id=2)
+          ret b: bits[1] = identity(b, id=3)
         }
         "#;
         let mut parser = Parser::new(ir);
@@ -588,12 +588,7 @@ mod tests {
         }
         "#;
         let mut parser = Parser::new(ir);
-        let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
-        assert!(matches!(
-            validate_fn(f, &pkg),
-            Err(ValidationError::NodeNameOpMismatch { .. })
-        ));
+        assert!(parser.parse_package().is_err());
     }
 
     #[test]

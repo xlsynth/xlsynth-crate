@@ -454,8 +454,8 @@ mod tests {
     fn topo_linear_chain() {
         let f = parse_fn(
             r#"fn f() -> bits[1] {
-  lit.1: bits[1] = literal(value=1, id=1)
-  ret identity.2: bits[1] = identity(lit.1, id=2)
+  lit: bits[1] = literal(value=1, id=1)
+  ret identity.2: bits[1] = identity(lit, id=2)
 }"#,
         );
         let order = get_topological(&f);
@@ -467,9 +467,9 @@ mod tests {
     fn topo_with_unreachable_node() {
         let f = parse_fn(
             r#"fn f() -> bits[1] {
-  u.1: bits[1] = literal(value=0, id=1)
-  lit.2: bits[1] = literal(value=1, id=2)
-  ret identity.3: bits[1] = identity(lit.2, id=3)
+  u: bits[1] = literal(value=0, id=1)
+  lit: bits[1] = literal(value=1, id=2)
+  ret identity.3: bits[1] = identity(lit, id=3)
 }"#,
         );
         let order = get_topological(&f);
@@ -482,21 +482,19 @@ mod tests {
         // Build a long identity chain to stress recursion; here we expect non-recursive
         // handling.
         let mut ir = String::from("fn g(x: bits[1] id=1) -> bits[1] {\n");
-        ir.push_str("  n1.2: bits[1] = identity(x, id=2)\n");
+        ir.push_str("  n2: bits[1] = identity(x, id=2)\n");
         let chain_len = 1024;
         for i in 3..(2 + chain_len) {
             let prev = i - 1;
             ir.push_str(&format!(
-                "  n{}.{}: bits[1] = identity(n{}.{}, id={})\n",
-                i, i, prev, prev, i
+                "  n{}: bits[1] = identity(n{}, id={})\n",
+                i, prev, i
             ));
         }
         let last = 1 + chain_len;
         ir.push_str(&format!(
-            "  ret n{}.{}: bits[1] = identity(n{}.{}, id={})\n",
+            "  ret n{}: bits[1] = identity(n{}, id={})\n",
             last + 1,
-            last + 1,
-            last,
             last,
             last + 1
         ));
@@ -513,13 +511,13 @@ mod tests {
         // before all B nodes (no interleaving), then ret.
         let f = parse_fn(
             r#"fn f() -> bits[1] {
-  a1.1: bits[1] = literal(value=1, id=1)
-  a2.2: bits[1] = identity(a1.1, id=2)
-  a3.3: bits[1] = identity(a2.2, id=3)
-  b1.4: bits[1] = literal(value=0, id=4)
-  b2.5: bits[1] = identity(b1.4, id=5)
-  b3.6: bits[1] = identity(b2.5, id=6)
-  ret r.7: bits[1] = identity(a3.3, id=7)
+  a1: bits[1] = literal(value=1, id=1)
+  a2: bits[1] = identity(a1, id=2)
+  a3: bits[1] = identity(a2, id=3)
+  b1: bits[1] = literal(value=0, id=4)
+  b2: bits[1] = identity(b1, id=5)
+  b3: bits[1] = identity(b2, id=6)
+  ret r: bits[1] = identity(a3, id=7)
 }"#,
         );
         let order = get_topological(&f);
@@ -711,7 +709,7 @@ mod users_tests {
     fn users_linear_chain() {
         let f = parse_fn(
             r#"fn f() -> bits[1] {
-  lit.1: bits[1] = literal(value=1, id=1)
+  literal.1: bits[1] = literal(value=1, id=1)
   ret identity.2: bits[1] = identity(lit.1, id=2)
 }"#,
         );
@@ -745,10 +743,10 @@ mod users_tests {
     fn users_fanout_and_unreachable() {
         let f = parse_fn(
             r#"fn f() -> bits[1] {
-  u.1: bits[1] = literal(value=0, id=1)
-  a.2: bits[1] = literal(value=1, id=2)
-  b.3: bits[1] = literal(value=0, id=3)
-  and.4: bits[1] = and(a.2, b.3, id=4)
+  u: bits[1] = literal(value=0, id=1)
+  a: bits[1] = literal(value=1, id=2)
+  b: bits[1] = literal(value=0, id=3)
+  and.4: bits[1] = and(a, b, id=4)
   ret identity.5: bits[1] = identity(and.4, id=5)
 }"#,
         );

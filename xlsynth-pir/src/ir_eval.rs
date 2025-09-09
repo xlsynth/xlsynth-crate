@@ -1308,9 +1308,9 @@ mod tests {
         let ir_text = r#"package test
 
 fn f(x: bits[1] id=1) -> bits[1] {
-  t.2: token = after_all(id=2)
-  _tr.3: token = trace(t.2, x, format="x={} done", data_operands=[x], id=3)
-  _a.4: token = assert(t.2, x, message="boom", label="L", id=4)
+  t: token = after_all(id=2)
+  _tr: token = trace(t, x, format="x={} done", data_operands=[x], id=3)
+  _a: token = assert(t, x, message="boom", label="L", id=4)
   ret literal.5: bits[1] = literal(value=1, id=5)
 }
 "#;

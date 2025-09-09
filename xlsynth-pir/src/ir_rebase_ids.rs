@@ -72,8 +72,8 @@ mod tests {
         parse_function(
             r#"
 fn sample(lhs: bits[8] id=1, rhs: bits[8] id=3) -> bits[8] {
-  sum.30: bits[8] = add(lhs, rhs)
-  ret negated.40: bits[8] = neg(sum.30)
+  sum: bits[8] = add(lhs, rhs, id=30)
+  ret negated: bits[8] = neg(sum, id=40)
 }
 "#,
         )
