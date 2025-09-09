@@ -588,7 +588,11 @@ mod tests {
         }
         "#;
         let mut parser = Parser::new(ir);
-        assert!(parser.parse_package().is_err());
+        let err = parser.parse_package().unwrap_err();
+        assert_eq!(
+            format!("{}", err),
+            "ParseError: node name dotted prefix 'one' does not match operator 'literal'"
+        );
     }
 
     #[test]
