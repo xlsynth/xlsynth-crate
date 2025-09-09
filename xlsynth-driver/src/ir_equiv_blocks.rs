@@ -5,9 +5,9 @@ use crate::parallelism::ParallelismStrategy;
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 
-use xlsynth_g8r::equiv::types::AssertionSemantics;
 use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, FileTable, Package, PackageMember};
 use xlsynth_pir::ir_parser;
+use xlsynth_prover::types::AssertionSemantics;
 
 use std::collections::HashMap;
 

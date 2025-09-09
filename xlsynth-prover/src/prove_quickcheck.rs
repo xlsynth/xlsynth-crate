@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::equiv::{
+use crate::{
     solver_interface::{BitVec, Response, Solver},
     translate::{get_fn_inputs, ir_to_smt},
     types::{
@@ -150,7 +150,7 @@ where
 #[cfg(test)]
 mod test_utils {
     use super::*;
-    use crate::equiv::types::IrFn;
+    use crate::types::IrFn;
     use xlsynth_pir::ir_parser::Parser;
 
     /// Assert that `prove_ir_fn_always_true` returns `Proved`.
@@ -360,10 +360,10 @@ mod test_utils {
         let mut uf_map: HashMap<String, String> = HashMap::new();
         uf_map.insert("g".to_string(), "F".to_string());
         uf_map.insert("h".to_string(), "F".to_string());
-        let mut uf_sigs: HashMap<String, crate::equiv::types::UfSignature> = HashMap::new();
+        let mut uf_sigs: HashMap<String, crate::types::UfSignature> = HashMap::new();
         uf_sigs.insert(
             "F".to_string(),
-            crate::equiv::types::UfSignature {
+            crate::types::UfSignature {
                 arg_widths: vec![8],
                 ret_width: 8,
             },
@@ -386,7 +386,7 @@ macro_rules! quickcheck_test_with_solver {
         #[cfg(test)]
         mod $mod_ident {
             use super::*;
-            use crate::equiv::prove_quickcheck::test_utils;
+            use crate::prove_quickcheck::test_utils;
 
             #[test]
             fn always_true_proved_ignore() {
@@ -529,30 +529,30 @@ macro_rules! quickcheck_test_with_solver {
 #[cfg(feature = "with-bitwuzla-binary-test")]
 quickcheck_test_with_solver!(
     bitwuzla_qc_tests,
-    crate::equiv::easy_smt_backend::EasySmtSolver,
-    &crate::equiv::easy_smt_backend::EasySmtConfig::bitwuzla()
+    crate::easy_smt_backend::EasySmtSolver,
+    &crate::easy_smt_backend::EasySmtConfig::bitwuzla()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-boolector-binary-test")]
 quickcheck_test_with_solver!(
     boolector_qc_tests,
-    crate::equiv::easy_smt_backend::EasySmtSolver,
-    &crate::equiv::easy_smt_backend::EasySmtConfig::boolector()
+    crate::easy_smt_backend::EasySmtSolver,
+    &crate::easy_smt_backend::EasySmtConfig::boolector()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-z3-binary-test")]
 quickcheck_test_with_solver!(
     z3_qc_tests,
-    crate::equiv::easy_smt_backend::EasySmtSolver,
-    &crate::equiv::easy_smt_backend::EasySmtConfig::z3()
+    crate::easy_smt_backend::EasySmtSolver,
+    &crate::easy_smt_backend::EasySmtConfig::z3()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-bitwuzla-built")]
 quickcheck_test_with_solver!(
     bitwuzla_built_qc_tests,
-    crate::equiv::bitwuzla_backend::Bitwuzla,
-    &crate::equiv::bitwuzla_backend::BitwuzlaOptions::new()
+    crate::bitwuzla_backend::Bitwuzla,
+    &crate::bitwuzla_backend::BitwuzlaOptions::new()
 );

@@ -27,8 +27,8 @@ use std::process::Command;
 use crate::parallelism::ParallelismStrategy;
 use crate::solver_choice::SolverChoice;
 use serde::{Deserialize, Serialize};
-use xlsynth_g8r::equiv::types::AssertionSemantics;
-use xlsynth_g8r::equiv::types::QuickCheckAssertionSemantics;
+use xlsynth_prover::types::AssertionSemantics;
+use xlsynth_prover::types::QuickCheckAssertionSemantics;
 
 fn add_flag(cmd: &mut Command, name: &str, value: &str) {
     cmd.arg(format!("--{}", name)).arg(value);

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::ir;
 use bitvec::vec::BitVec;
 use xlsynth::{IrValue, ir_value::IrBits};
-use xlsynth_pir::ir;
 
 pub fn ir_bits_from_bitvec_lsb_is_0(bv: &BitVec) -> IrBits {
     if bv.is_empty() {

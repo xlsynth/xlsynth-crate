@@ -17,6 +17,7 @@ pub mod ir_parser;
 pub mod ir_rebase_ids;
 pub mod ir_utils;
 pub mod ir_validate;
+pub mod ir_value_utils;
 pub mod ir_verify;
 pub mod ir_verify_parity;
 pub mod localized_eco2;

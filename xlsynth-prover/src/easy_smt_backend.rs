@@ -11,10 +11,9 @@ use std::{
 
 use easy_smt::{Context, ContextBuilder, SExpr};
 
-use crate::equiv::solver_interface::{BitVec, Solver, SolverConfig, Uf};
-use crate::ir_value_utils::ir_value_from_bits_with_type;
+use crate::solver_interface::{BitVec, Solver, SolverConfig, Uf};
 use xlsynth::IrBits;
-use xlsynth_pir::ir;
+use xlsynth_pir::{ir, ir_value_utils::ir_value_from_bits_with_type};
 
 #[derive(Debug, Clone)]
 pub struct SolverFn {
