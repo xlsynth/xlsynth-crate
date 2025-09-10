@@ -466,14 +466,22 @@ impl Parser {
         Ok(params)
     }
 
-    fn pop_node_name_or_error(&mut self, ctx: &str) -> Result<NameOrId, ParseError> {
+    fn pop_node_name_or_error_with_dotted(
+        &mut self,
+        ctx: &str,
+    ) -> Result<(NameOrId, Option<String>), ParseError> {
         let name: String = self.pop_identifier_or_error(ctx)?;
         if self.try_drop(".") {
             let id = self.pop_number_usize_or_error(ctx)?;
-            Ok(NameOrId::Id(id))
+            Ok((NameOrId::Id(id), Some(name)))
         } else {
-            Ok(NameOrId::Name(name))
+            Ok((NameOrId::Name(name), None))
         }
+    }
+
+    fn pop_node_name_or_error(&mut self, ctx: &str) -> Result<NameOrId, ParseError> {
+        let (name_or_id, _dot) = self.pop_node_name_or_error_with_dotted(ctx)?;
+        Ok(name_or_id)
     }
 
     fn parse_node_ref(
@@ -673,7 +681,8 @@ impl Parser {
 
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
         log::debug!("parse_node");
-        let name_or_id = self.pop_node_name_or_error("node name")?;
+        let (name_or_id, dotted_prefix_opt) =
+            self.pop_node_name_or_error_with_dotted("node name")?;
         let mut maybe_id = match name_or_id {
             NameOrId::Id(id) => Some(id),
             NameOrId::Name(_) => None,
@@ -1350,6 +1359,26 @@ impl Parser {
         } else {
             None
         };
+
+        // Enforce dotted LHS consistency: '<prefix>.<digits>' must match operator and
+        // id.
+        if let Some(lhs_prefix) = dotted_prefix_opt.as_ref() {
+            let expected_op = operator.as_str();
+            if lhs_prefix != expected_op {
+                return Err(ParseError::new(format!(
+                    "node name dotted prefix '{}' does not match operator '{}'",
+                    lhs_prefix, expected_op
+                )));
+            }
+            if let NameOrId::Id(lhs_id) = name_or_id {
+                if lhs_id != id {
+                    return Err(ParseError::new(format!(
+                        "node name id suffix {} does not match id attribute {}",
+                        lhs_id, id
+                    )));
+                }
+            }
+        }
 
         Ok(ir::Node {
             text_id: id,

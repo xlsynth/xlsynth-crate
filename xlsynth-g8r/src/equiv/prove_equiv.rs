@@ -691,7 +691,7 @@ pub mod test_utils {
             }
 
             fn inner_h(x: bits[4]) -> bits[4] {
-              ret lit7.2: bits[4] = literal(value=7, id=2)
+              ret literal.2: bits[4] = literal(value=7, id=2)
             }
 
             fn mid_g(x: bits[4]) -> bits[4] {
@@ -998,7 +998,7 @@ pub mod test_utils {
             }
 
             fn inline(init: bits[8]) -> bits[8] {
-              ret id.1: bits[8] = identity(init, id=1)
+              ret identity.1: bits[8] = identity(init, id=1)
             }
         "#;
 
@@ -1388,9 +1388,9 @@ pub mod test_utils {
             solver_config,
             &(format!(
                 r#"fn f(x: bits[8]) -> bits[8] {{
-                ret get_param.1: bits[8] = {}(x, id=1)
+                ret {op}.1: bits[8] = {op}(x, id=1)
             }}"#,
-                unop_xls_name
+                op = unop_xls_name
             )),
             |solver: &mut S, inputs: &FnInputs<S::Term>| {
                 unop(solver, &inputs.inputs.get("x").unwrap().bitvec)
@@ -1410,10 +1410,13 @@ pub mod test_utils {
         let rhs_width_str = rhs_width.to_string();
         let result_width_str = result_width.to_string();
         let ir_text = format!(
-            r#"fn f(x: bits[{}], y: bits[{}]) -> bits[{}] {{
-                ret get_param.1: bits[{}] = {}(x, y, id=1)
+            r#"fn f(x: bits[{lw}], y: bits[{rw}]) -> bits[{rw2}] {{
+                ret {op}.1: bits[{rw2}] = {op}(x, y, id=1)
             }}"#,
-            lhs_width_str, rhs_width_str, result_width_str, result_width_str, binop_xls_name
+            lw = lhs_width_str,
+            rw = rhs_width_str,
+            rw2 = result_width_str,
+            op = binop_xls_name
         );
         let mut parser = ir_parser::Parser::new(&ir_text);
         let f = parser.parse_fn().unwrap();
@@ -1498,10 +1501,10 @@ pub mod test_utils {
         assert_ir_fn_equiv::<S>(
             solver_config,
             r#"fn f() -> (bits[8], bits[4]) {
-            ret tuple.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
+            ret literal.1: (bits[8], bits[4]) = literal(value=(0x12, 0x4), id=1)
         }"#,
             r#"fn g() -> bits[12] {
-            ret tuple.1: bits[12] = literal(value=0x124, id=1)
+            ret literal.1: bits[12] = literal(value=0x124, id=1)
         }"#,
             true,
         );
@@ -1657,9 +1660,10 @@ pub mod test_utils {
             solver_config,
             &(format!(
                 r#"fn f(x: bits[8]) -> bits[{}] {{
-                ret get_param.1: bits[{}] = {}(x, new_bit_count={}, id=1)
+                ret {}.1: bits[{}] = {}(x, new_bit_count={}, id=1)
             }}"#,
                 extend_width,
+                if signed { "sign_ext" } else { "zero_ext" },
                 extend_width,
                 if signed { "sign_ext" } else { "zero_ext" },
                 extend_width
@@ -1682,7 +1686,7 @@ pub mod test_utils {
             &(format!(
                 r#"fn f(input: bits[8]) -> bits[{}] {{
                 start: bits[4] = literal(value={}, id=2)
-                ret get_param.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
+                ret dynamic_bit_slice.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
             }}"#,
                 width, start, width, width
             )),
@@ -1704,14 +1708,14 @@ pub mod test_utils {
             solver_config,
             &format!(
                 r#"fn f(input: bits[8]) -> bits[{}] {{
-                ret get_param.1: bits[{}] = bit_slice(input, start={}, width={}, id=1)
+                ret bit_slice.1: bits[{}] = bit_slice(input, start={}, width={}, id=1)
             }}"#,
                 width, width, start, width
             ),
             &format!(
                 r#"fn f(input: bits[8]) -> bits[{}] {{
                 start: bits[4] = literal(value={}, id=2)
-                ret get_param.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
+                ret dynamic_bit_slice.1: bits[{}] = dynamic_bit_slice(input, start, width={}, id=1)
             }}"#,
                 width, start, width, width
             ),
@@ -1725,7 +1729,7 @@ pub mod test_utils {
             solver_config,
             r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
                     start: bits[4] = literal(value=0, id=2)
-                    ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
+                    ret bit_slice_update.1: bits[8] = bit_slice_update(input, start, slice, id=1)
                 }"#,
             |solver: &mut S, inputs: &FnInputs<S::Term>| {
                 let input = inputs.inputs.get("input").unwrap().bitvec.clone();
@@ -1743,7 +1747,7 @@ pub mod test_utils {
             solver_config,
             r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
                     start: bits[4] = literal(value=1, id=2)
-                    ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
+                    ret bit_slice_update.1: bits[8] = bit_slice_update(input, start, slice, id=1)
                 }"#,
             |solver: &mut S, inputs: &FnInputs<S::Term>| {
                 let input = inputs.inputs.get("input").unwrap().bitvec.clone();
@@ -1763,7 +1767,7 @@ pub mod test_utils {
             solver_config,
             r#"fn f(input: bits[8], slice: bits[4]) -> bits[8] {
                     start: bits[4] = literal(value=4, id=2)
-                    ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
+                    ret bit_slice_update.1: bits[8] = bit_slice_update(input, start, slice, id=1)
                 }"#,
             |solver: &mut S, inputs: &FnInputs<S::Term>| {
                 let input = inputs.inputs.get("input").unwrap().bitvec.clone();
@@ -1781,7 +1785,7 @@ pub mod test_utils {
             solver_config,
             r#"fn f(input: bits[8], slice: bits[10]) -> bits[8] {
                     start: bits[4] = literal(value=4, id=2)
-                    ret get_param.1: bits[8] = bit_slice_update(input, start, slice, id=1)
+                    ret bit_slice_update.1: bits[8] = bit_slice_update(input, start, slice, id=1)
                 }"#,
             |solver: &mut S, inputs: &FnInputs<S::Term>| {
                 let input = inputs.inputs.get("input").unwrap().bitvec.clone();
@@ -1798,12 +1802,12 @@ pub mod test_utils {
         assert_ir_fn_equiv::<S>(
             solver_config,
             r#"fn f(input: bits[7] id=1) -> bits[5] {
-                    slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
-                    ret upd.3: bits[5] = bit_slice_update(slice.2, input, input, id=3)
+                    dynamic_bit_slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
+                    ret bit_slice_update.3: bits[5] = bit_slice_update(dynamic_bit_slice.2, input, input, id=3)
                 }"#,
             r#"fn f(input: bits[7] id=1) -> bits[5] {
-                    slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
-                    ret upd.3: bits[5] = bit_slice_update(slice.2, input, input, id=3)
+                    dynamic_bit_slice.2: bits[5] = dynamic_bit_slice(input, input, width=5, id=2)
+                    ret bit_slice_update.3: bits[5] = bit_slice_update(dynamic_bit_slice.2, input, input, id=3)
                 }"#,
             false,
         );
@@ -1860,7 +1864,7 @@ pub mod test_utils {
         test_ir_fn_equiv_to_self::<S>(
             solver_config,
             r#"fn f(x: bits[8], y: bits[8]) -> bits[8] {
-                ret get_param.1: bits[8] = identity(x, id=1)
+                ret identity.1: bits[8] = identity(x, id=1)
             }"#,
         );
     }
@@ -1869,10 +1873,10 @@ pub mod test_utils {
         assert_ir_fn_inequiv::<S>(
             solver_config,
             r#"fn f(x: bits[8]) -> bits[8] {
-                    ret get_param.1: bits[8] = identity(x, id=1)
+                    ret identity.1: bits[8] = identity(x, id=1)
                 }"#,
             r#"fn g(x: bits[8]) -> bits[8] {
-                    ret get_param.1: bits[8] = not(x, id=1)
+                    ret not.1: bits[8] = not(x, id=1)
                 }"#,
             false,
         );
@@ -1895,7 +1899,7 @@ pub mod test_utils {
             solver_config,
             &format!(
                 r#"fn f(a: bits[4], b: bits[4], c: bits[4]) -> bits[4] {{
-                    ret nary.1: bits[4] = {op_name}(a, b, c, id=1)
+                    ret {op_name}.1: bits[4] = {op_name}(a, b, c, id=1)
                 }}"#,
             ),
             |solver: &mut S, inputs: &FnInputs<S::Term>| {
@@ -1916,7 +1920,7 @@ pub mod test_utils {
             solver_config,
             &format!(
                 r#"fn f(x: bits[{iw}]) -> bits[{ow}] {{
-    ret d.1: bits[{ow}] = decode(x, width={ow}, id=1)
+    ret decode.1: bits[{ow}] = decode(x, width={ow}, id=1)
 }}"#,
                 iw = in_width,
                 ow = out_width
@@ -1937,7 +1941,7 @@ pub mod test_utils {
             solver_config,
             &format!(
                 r#"fn f(x: bits[{iw}]) -> bits[{ow}] {{
-                        ret e.1: bits[{ow}] = encode(x, id=1)
+                        ret encode.1: bits[{ow}] = encode(x, id=1)
                     }}"#,
                 iw = in_width,
                 ow = out_width
@@ -1954,11 +1958,11 @@ pub mod test_utils {
             solver_config,
             if lsb_prio {
                 r#"fn f(x: bits[16]) -> bits[16] {
-                        ret oh.1: bits[16] = one_hot(x, lsb_prio=true, id=1)
+                        ret one_hot.1: bits[16] = one_hot(x, lsb_prio=true, id=1)
                     }"#
             } else {
                 r#"fn f(x: bits[16]) -> bits[16] {
-                        ret oh.1: bits[16] = one_hot(x, lsb_prio=false, id=1)
+                        ret one_hot.1: bits[16] = one_hot(x, lsb_prio=false, id=1)
                     }"#
             },
             |solver: &mut S, inputs: &FnInputs<S::Term>| {
@@ -2118,7 +2122,7 @@ pub mod test_utils {
             {op}.2: bits[1] = {op}(a, literal.1, id=2)
             assert.3: token = assert(__token, {op}.2, message="Assertion failure!", label="a", id=3)
             literal.4: bits[4] = literal(value={ret_value}, id=4)
-            ret tuple.5: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
+            ret tuple.4: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
         }}"#,
             op = if is_lt { "ult" } else { "uge" },
             ret_value = ret_value,
@@ -2324,7 +2328,7 @@ pub mod test_utils {
         r#"fn f(__token: token, __activate: bits[1], tok: token, a: bits[4]) -> (token, bits[4]) {
                 assert.3: token = assert(__token, __activate, message="Assertion failure!", label="a", id=3)
                 literal.4: bits[4] = literal(value=1, id=4)
-                ret tuple.5: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
+                ret tuple.4: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
             }"#
     }
 
@@ -2333,7 +2337,7 @@ pub mod test_utils {
                 not.2: bits[1] = not(__activate, id=2)
                 assert.3: token = assert(__token, not.2, message="Assertion failure!", label="a", id=3)
                 literal.4: bits[4] = literal(value=1, id=4)
-                ret tuple.5: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
+                ret tuple.4: (token, bits[4]) = tuple(assert.3, literal.4, id=4)
             }"#
     }
 
@@ -2410,10 +2414,10 @@ pub mod test_utils {
         // IR pair intentionally inequivalent: returns different parameters to force a
         // counterexample.
         let lhs_ir = r#"fn lhs(a: bits[8], b: bits[8]) -> bits[8] {
-                ret id.1: bits[8] = identity(a, id=1)
+                ret identity.1: bits[8] = identity(a, id=1)
             }"#;
         let rhs_ir = r#"fn rhs(a: bits[8], b: bits[8]) -> bits[8] {
-                ret id.1: bits[8] = identity(b, id=1)
+                ret identity.1: bits[8] = identity(b, id=1)
             }"#;
         // Parse the IR text into functions.
         let mut parser = ir_parser::Parser::new(lhs_ir);
@@ -2463,7 +2467,7 @@ pub mod test_utils {
     pub fn test_param_domains_equiv<S: Solver>(solver_config: &S::Config) {
         let lhs_ir = r#"
             fn f(x: bits[2]) -> bits[2] {
-                ret id.1: bits[2] = identity(x, id=1)
+                ret identity.1: bits[2] = identity(x, id=1)
             }
         "#;
         let rhs_ir = r#"

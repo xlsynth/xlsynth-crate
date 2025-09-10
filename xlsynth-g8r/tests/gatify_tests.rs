@@ -481,7 +481,7 @@ bit_count_test_cases!(test_width_slice_static_start_to_gates, |input_bits: u32,
  -> () {
     let ir_tmpl = "package sample
 fn f(x: bits[32]) -> bits[$BIT_COUNT] {
-    ret result.2: bits[$BIT_COUNT] = bit_slice(x, start=1, width=$BIT_COUNT, id=2)
+    ret result: bits[$BIT_COUNT] = bit_slice(x, start=1, width=$BIT_COUNT, id=2)
 }";
     let ir_text = ir_tmpl.replace("$BIT_COUNT", &input_bits.to_string());
     do_test_ir_conversion(&ir_text, opt);

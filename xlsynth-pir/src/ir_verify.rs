@@ -223,7 +223,7 @@ mod tests {
         let ir = r#"
 fn foo(x: bits[8] id=1) -> bits[16] {
   add.2: bits[16] = add(x, x, id=2)
-  ret id.3: bits[16] = identity(add.2, id=3)
+  ret identity.3: bits[16] = identity(add.2, id=3)
 }
 "#;
         let mut parser = Parser::new(ir);

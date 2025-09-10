@@ -850,7 +850,7 @@ mod tests {
     fn outline_param_inside_selection() {
         let ir = r#"fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
   t: bits[8] = add(a, b, id=3)
-  ret id.4: bits[8] = identity(t, id=4)
+  ret identity.4: bits[8] = identity(t, id=4)
 }"#;
         let (mut pkg, f) = parse_single_fn(ir);
         // Select the 'a' parameter node and the add node to ensure a param node

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use xlsynth_pir::ir_rebase_ids::rebase_fn_ids;
 use xlsynth_pir::{
     ir, ir_parser,
     ir_utils::get_topological,
@@ -109,17 +110,101 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     println!("  LHS IR copied to: {}", lhs_copy_path.display());
     println!("  RHS IR copied to: {}", rhs_copy_path.display());
 
-    let lhs_pkg = ir_parser::parse_path_to_package(lhs_path).unwrap();
-    let rhs_pkg = ir_parser::parse_path_to_package(rhs_path).unwrap();
+    // Prefer showing xlsynth parse/verify results first.
+    match std::fs::read_to_string(&lhs_path) {
+        Ok(lhs_text) => match xlsynth::IrPackage::parse_ir(&lhs_text, None) {
+            Ok(mut pkg) => {
+                if let Some(top) = lhs_ir_top {
+                    let _ = pkg.set_top_by_name(top.as_str());
+                }
+                match pkg.verify() {
+                    Ok(()) => println!("  LHS input (xlsynth verify): OK"),
+                    Err(e) => println!("  LHS input (xlsynth verify) FAILED: {}", e),
+                }
+            }
+            Err(e) => println!("  LHS input (xlsynth parse) FAILED: {}", e),
+        },
+        Err(e) => println!("  LHS input (read) FAILED: {}", e),
+    }
+    match std::fs::read_to_string(&rhs_path) {
+        Ok(rhs_text) => match xlsynth::IrPackage::parse_ir(&rhs_text, None) {
+            Ok(mut pkg) => {
+                if let Some(top) = rhs_ir_top {
+                    let _ = pkg.set_top_by_name(top.as_str());
+                }
+                match pkg.verify() {
+                    Ok(()) => println!("  RHS input (xlsynth verify): OK"),
+                    Err(e) => println!("  RHS input (xlsynth verify) FAILED: {}", e),
+                }
+            }
+            Err(e) => println!("  RHS input (xlsynth parse) FAILED: {}", e),
+        },
+        Err(e) => println!("  RHS input (read) FAILED: {}", e),
+    }
+
+    let lhs_pkg = match ir_parser::parse_path_to_package(lhs_path) {
+        Ok(pkg) => pkg,
+        Err(e) => {
+            println!("  LHS input (PIR parse) FAILED: {}", e);
+            return;
+        }
+    };
+    let rhs_pkg = match ir_parser::parse_path_to_package(rhs_path) {
+        Ok(pkg) => pkg,
+        Err(e) => {
+            println!("  RHS input (PIR parse) FAILED: {}", e);
+            return;
+        }
+    };
 
     let lhs_fn = match lhs_ir_top {
-        Some(top) => lhs_pkg.get_fn(top).unwrap(),
-        None => lhs_pkg.get_top().unwrap(),
+        Some(top) => match lhs_pkg.get_fn(top) {
+            Some(f) => f,
+            None => {
+                println!(
+                    "  LHS input: top function '{}' not found in package; aborting",
+                    top
+                );
+                return;
+            }
+        },
+        None => match lhs_pkg.get_top() {
+            Some(f) => f,
+            None => {
+                println!("  LHS input: no top set and no --lhs_ir_top provided; aborting");
+                return;
+            }
+        },
     };
     let rhs_fn = match rhs_ir_top {
-        Some(top) => rhs_pkg.get_fn(top).unwrap(),
-        None => rhs_pkg.get_top().unwrap(),
+        Some(top) => match rhs_pkg.get_fn(top) {
+            Some(f) => f,
+            None => {
+                println!(
+                    "  RHS input: top function '{}' not found in package; aborting",
+                    top
+                );
+                return;
+            }
+        },
+        None => match rhs_pkg.get_top() {
+            Some(f) => f,
+            None => {
+                println!("  RHS input: no top set and no --rhs_ir_top provided; aborting");
+                return;
+            }
+        },
     };
+
+    // Early verification of inputs: PIR verify (after xlsynth reporting above).
+    match ir_parser::parse_and_validate_path_to_package(lhs_path) {
+        Ok(_pkg) => println!("  LHS input (PIR verify): OK"),
+        Err(e) => println!("  LHS input (PIR verify) FAILED: {}", e),
+    }
+    match ir_parser::parse_and_validate_path_to_package(rhs_path) {
+        Ok(_pkg) => println!("  RHS input (PIR verify): OK"),
+        Err(e) => println!("  RHS input (PIR verify) FAILED: {}", e),
+    }
 
     let (recs, lhs_ret_depth, rhs_ret_depth) =
         compute_structural_discrepancies_dual(lhs_fn, rhs_fn);
@@ -225,9 +310,23 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     }
 
     // Write diff packages: common outer (from LHS) + side-specific inner.
+    // Rebase inner ids so they start after the max id used by the outer to avoid
+    // package-wide duplicate text ids during PIR validation.
+    let outer_max_id = lhs_fn
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.payload, ir::NodePayload::Nil))
+        .map(|n| n.text_id)
+        .max()
+        .unwrap_or(0);
+    let base = outer_max_id.saturating_add(1);
+
+    let lhs_sub_rebased = rebase_fn_ids(&lhs_sub, base);
+    let rhs_sub_rebased = rebase_fn_ids(&rhs_sub, base);
+
     let outer_text = ir::emit_fn_with_human_pos_comments(lhs_fn, &lhs_pkg.file_table);
-    let lhs_inner_text = ir::emit_fn_with_human_pos_comments(&lhs_sub, &lhs_pkg.file_table);
-    let rhs_inner_text = ir::emit_fn_with_human_pos_comments(&rhs_sub, &rhs_pkg.file_table);
+    let lhs_inner_text = ir::emit_fn_with_human_pos_comments(&lhs_sub_rebased, &lhs_pkg.file_table);
+    let rhs_inner_text = ir::emit_fn_with_human_pos_comments(&rhs_sub_rebased, &rhs_pkg.file_table);
 
     let lhs_diff_pkg = format!("package lhs_diff\n\n{}\n\n{}\n", outer_text, lhs_inner_text);
     let rhs_diff_pkg = format!("package rhs_diff\n\n{}\n\n{}\n", outer_text, rhs_inner_text);
@@ -281,6 +380,13 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     // lhs_orig) and (rhs_diff ≡ rhs_orig).
     match std::fs::read_to_string(&lhs_copy_path) {
         Ok(lhs_orig_text) => {
+            println!(
+                "  Equiv plan: {}\n    - top: {}\n    - lhs: {}\n    - rhs: {}",
+                "lhs_diff ≡ lhs_orig",
+                lhs_fn.name,
+                lhs_diff_path.display(),
+                lhs_copy_path.display()
+            );
             print_equiv_result(
                 "lhs_diff ≡ lhs_orig",
                 &lhs_diff_pkg,
@@ -292,6 +398,13 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     }
     match std::fs::read_to_string(&rhs_copy_path) {
         Ok(rhs_orig_text) => {
+            println!(
+                "  Equiv plan: {}\n    - top: {}\n    - lhs: {}\n    - rhs: {}",
+                "rhs_diff ≡ rhs_orig",
+                lhs_fn.name,
+                rhs_diff_path.display(),
+                rhs_copy_path.display()
+            );
             print_equiv_result(
                 "rhs_diff ≡ rhs_orig",
                 &rhs_diff_pkg,
