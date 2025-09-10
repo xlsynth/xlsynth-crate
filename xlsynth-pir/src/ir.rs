@@ -538,15 +538,21 @@ impl NodePayload {
             }
         };
         let result = match self {
-            NodePayload::Tuple(nodes) => format!(
-                "tuple({}, id={})",
-                nodes
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", "),
-                id
-            ),
+            NodePayload::Tuple(nodes) => {
+                if nodes.is_empty() {
+                    format!("tuple(id={})", id)
+                } else {
+                    format!(
+                        "tuple({}, id={})",
+                        nodes
+                            .iter()
+                            .map(|n| get_name(*n))
+                            .collect::<Vec<String>>()
+                            .join(", "),
+                        id
+                    )
+                }
+            }
             NodePayload::Array(nodes) => format!(
                 "array({}, id={})",
                 nodes
