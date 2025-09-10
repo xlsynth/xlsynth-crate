@@ -538,15 +538,21 @@ impl NodePayload {
             }
         };
         let result = match self {
-            NodePayload::Tuple(nodes) => format!(
-                "tuple({}, id={})",
-                nodes
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", "),
-                id
-            ),
+            NodePayload::Tuple(nodes) => {
+                if nodes.is_empty() {
+                    format!("tuple(id={})", id)
+                } else {
+                    format!(
+                        "tuple({}, id={})",
+                        nodes
+                            .iter()
+                            .map(|n| get_name(*n))
+                            .collect::<Vec<String>>()
+                            .join(", "),
+                        id
+                    )
+                }
+            }
             NodePayload::Array(nodes) => format!(
                 "array({}, id={})",
                 nodes
@@ -1431,6 +1437,19 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
+    // -- Helpers
+    fn assert_round_trip_fn(ir_text: &str) {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+        assert_eq!(ir_fn.to_string(), ir_text);
+    }
+
+    fn assert_round_trip_pkg(pkg_text: &str) {
+        let mut parser = ir_parser::Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        assert_eq!(pkg.to_string(), pkg_text);
+    }
+
     #[test]
     fn params_are_dense_node_refs() {
         let ir_text = r#"fn add(x: bits[8] id=10, y: bits[8] id=20) -> bits[8] {
@@ -1501,31 +1520,25 @@ mod tests {
 
     #[test]
     fn test_round_trip_and_gate_ir() {
-        let ir_text = "fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+        let ir_text = r#"fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
   ret and.3: bits[1] = and(a, b, id=3)
-}";
-        let mut parser = ir_parser::Parser::new(ir_text);
-        let ir_fn = parser.parse_fn().unwrap();
-        assert_eq!(ir_fn.to_string(), ir_text);
+}"#;
+        assert_round_trip_fn(ir_text);
     }
 
     #[test]
     fn test_round_trip_multidim_array_ir() {
-        let ir_text = "fn f() -> bits[32][2][3][1] {
+        let ir_text = r#"fn f() -> bits[32][2][3][1] {
   ret literal.1: bits[32][2][3][1] = literal(value=[[[0, 1], [2, 3], [4, 5]]], id=1)
-}";
-        let mut parser = ir_parser::Parser::new(ir_text);
-        let ir_fn = parser.parse_fn().unwrap();
-        assert_eq!(ir_fn.to_string(), ir_text);
+}"#;
+        assert_round_trip_fn(ir_text);
     }
     #[test]
     fn test_invoke_round_trip() {
         let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
   ret r: bits[8] = invoke(x, to_apply=g, id=2)
 }"#;
-        let mut parser = ir_parser::Parser::new(ir_text);
-        let ir_fn = parser.parse_fn().unwrap();
-        assert_eq!(ir_fn.to_string(), ir_text);
+        assert_round_trip_fn(ir_text);
     }
 
     #[test]
@@ -1533,8 +1546,14 @@ mod tests {
         let ir_text = r#"fn f() -> bits[8] {
   ret r: bits[8] = invoke(to_apply=g, id=1)
 }"#;
-        let mut parser = ir_parser::Parser::new(ir_text);
-        let ir_fn = parser.parse_fn().unwrap();
-        assert_eq!(ir_fn.to_string(), ir_text);
+        assert_round_trip_fn(ir_text);
+    }
+
+    #[test]
+    fn test_round_trip_nil_tuple_return_formats_as_tuple_id() {
+        let ir_text = r#"fn unit() -> () {
+  ret tuple.1: () = tuple(id=1)
+}"#;
+        assert_round_trip_fn(ir_text);
     }
 }
