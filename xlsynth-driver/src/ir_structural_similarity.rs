@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use xlsynth_pir::ir_outline;
 use xlsynth_pir::ir_rebase_ids::rebase_fn_ids;
 use xlsynth_pir::{
     ir, ir_parser,
@@ -273,8 +274,8 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     // Also emit minimized subgraphs and metadata for the unmatched parts (dual
     // matching).
     let meta = extract_dual_difference_subgraphs_with_shared_params_and_metadata(lhs_fn, rhs_fn);
-    let lhs_sub = meta.lhs_inner;
-    let rhs_sub = meta.rhs_inner;
+    let lhs_sub = meta.lhs_inner.clone();
+    let rhs_sub = meta.rhs_inner.clone();
     // Unified return mapping before printing subgraphs.
     println!("\nUnified return type: {}", lhs_sub.ret_ty);
     println!("Unified return slots (index -> consumer[operand_index] : signature):");
@@ -309,27 +310,55 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
         println!("  {} -> [{}]", prod, users.join(", "));
     }
 
-    // Write diff packages: common outer (from LHS) + side-specific inner.
-    // Rebase inner ids so they start after the max id used by the outer to avoid
-    // package-wide duplicate text ids during PIR validation.
-    let outer_max_id = lhs_fn
+    // Build a single LHS outer by outlining over the LHS differing region.
+    let mut lhs_pkg_for_outline = lhs_pkg.clone();
+    let lhs_out_name = lhs_fn.name.clone();
+    let common_inner_name = format!("{}_inner", lhs_fn.name);
+    let lhs_outline = ir_outline::outline(
+        lhs_fn,
+        &meta.lhs_region,
+        lhs_out_name.as_str(),
+        common_inner_name.as_str(),
+        &mut lhs_pkg_for_outline,
+    );
+
+    // Rebase both inners above the LHS outer's max id to avoid collisions.
+    let lhs_outer_max = lhs_outline
+        .outer
         .nodes
         .iter()
         .filter(|n| !matches!(n.payload, ir::NodePayload::Nil))
         .map(|n| n.text_id)
         .max()
-        .unwrap_or(0);
-    let base = outer_max_id.saturating_add(1);
+        .unwrap_or(0)
+        .saturating_add(1);
 
-    let lhs_sub_rebased = rebase_fn_ids(&lhs_sub, base);
-    let rhs_sub_rebased = rebase_fn_ids(&rhs_sub, base);
+    // Use the meta-produced inners (which share union ordering). Rename RHS inner
+    // to the common inner name if needed so the LHS outer's invoke callee matches.
+    let mut lhs_inner = meta.lhs_inner.clone();
+    lhs_inner.name = common_inner_name.clone();
+    let mut rhs_inner = meta.rhs_inner.clone();
+    rhs_inner.name = common_inner_name.clone();
 
-    let outer_text = ir::emit_fn_with_human_pos_comments(lhs_fn, &lhs_pkg.file_table);
-    let lhs_inner_text = ir::emit_fn_with_human_pos_comments(&lhs_sub_rebased, &lhs_pkg.file_table);
-    let rhs_inner_text = ir::emit_fn_with_human_pos_comments(&rhs_sub_rebased, &rhs_pkg.file_table);
+    let lhs_inner_rebased = rebase_fn_ids(&lhs_inner, lhs_outer_max);
+    let rhs_inner_rebased = rebase_fn_ids(&rhs_inner, lhs_outer_max);
 
-    let lhs_diff_pkg = format!("package lhs_diff\n\n{}\n\n{}\n", outer_text, lhs_inner_text);
-    let rhs_diff_pkg = format!("package rhs_diff\n\n{}\n\n{}\n", outer_text, rhs_inner_text);
+    // Emit packages: same LHS outer used in both; only the inner body differs.
+    let lhs_outer_text =
+        ir::emit_fn_with_human_pos_comments(&lhs_outline.outer, &lhs_pkg.file_table);
+    let lhs_inner_text =
+        ir::emit_fn_with_human_pos_comments(&lhs_inner_rebased, &lhs_pkg.file_table);
+    let rhs_inner_text =
+        ir::emit_fn_with_human_pos_comments(&rhs_inner_rebased, &rhs_pkg.file_table);
+
+    let lhs_diff_pkg = format!(
+        "package lhs_diff\n\n{}\n\n{}\n",
+        lhs_inner_text, lhs_outer_text
+    );
+    let rhs_diff_pkg = format!(
+        "package rhs_diff\n\n{}\n\n{}\n",
+        rhs_inner_text, lhs_outer_text
+    );
 
     let lhs_diff_path = out_dir.join("lhs_diff.ir");
     let rhs_diff_path = out_dir.join("rhs_diff.ir");
@@ -357,7 +386,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     // xlsynth parse + verify
     match xlsynth::IrPackage::parse_ir(&lhs_diff_pkg, None) {
         Ok(mut pkg) => {
-            let _ = pkg.set_top_by_name(lhs_fn.name.as_str());
+            let _ = pkg.set_top_by_name(lhs_outline.outer.name.as_str());
             match pkg.verify() {
                 Ok(()) => println!("  LHS diff (xlsynth verify): OK"),
                 Err(e) => println!("  LHS diff (xlsynth verify) FAILED: {}", e),
@@ -367,7 +396,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
     }
     match xlsynth::IrPackage::parse_ir(&rhs_diff_pkg, None) {
         Ok(mut pkg) => {
-            let _ = pkg.set_top_by_name(lhs_fn.name.as_str());
+            let _ = pkg.set_top_by_name(lhs_outline.outer.name.as_str());
             match pkg.verify() {
                 Ok(()) => println!("  RHS diff (xlsynth verify): OK"),
                 Err(e) => println!("  RHS diff (xlsynth verify) FAILED: {}", e),
@@ -383,7 +412,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
             println!(
                 "  Equiv plan: {}\n    - top: {}\n    - lhs: {}\n    - rhs: {}",
                 "lhs_diff ≡ lhs_orig",
-                lhs_fn.name,
+                lhs_outline.outer.name,
                 lhs_diff_path.display(),
                 lhs_copy_path.display()
             );
@@ -391,7 +420,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
                 "lhs_diff ≡ lhs_orig",
                 &lhs_diff_pkg,
                 &lhs_orig_text,
-                lhs_fn.name.as_str(),
+                lhs_outline.outer.name.as_str(),
             );
         }
         Err(e) => println!("  Equiv (lhs_diff ≡ lhs_orig): skipped (read error: {})", e),
@@ -401,7 +430,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
             println!(
                 "  Equiv plan: {}\n    - top: {}\n    - lhs: {}\n    - rhs: {}",
                 "rhs_diff ≡ rhs_orig",
-                lhs_fn.name,
+                lhs_outline.outer.name,
                 rhs_diff_path.display(),
                 rhs_copy_path.display()
             );
@@ -409,7 +438,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
                 "rhs_diff ≡ rhs_orig",
                 &rhs_diff_pkg,
                 &rhs_orig_text,
-                lhs_fn.name.as_str(),
+                lhs_outline.outer.name.as_str(),
             );
         }
         Err(e) => println!("  Equiv (rhs_diff ≡ rhs_orig): skipped (read error: {})", e),

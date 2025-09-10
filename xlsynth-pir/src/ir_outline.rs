@@ -886,10 +886,12 @@ mod tests {
         // Equivalence: original vs outlined outer
         assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
     }
+
+    #[test]
     fn outline_basic_region_with_params() {
         let ir = r#"fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
   t: bits[8] = add(a, b, id=3)
-  ret id.4: bits[8] = identity(t, id=4)
+  ret identity.4: bits[8] = identity(t, id=4)
 }"#;
         let (mut pkg, f) = parse_single_fn(ir);
         let before_pkg = pkg.to_string();
