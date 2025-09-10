@@ -616,7 +616,7 @@ Cosliced creates self-checks, cross-slice checks, and a skeleton by stitching sl
 
 - Validation:
 
-  - At least two slices on each side; counts must match
+  - At least one slice on each side; counts must match
   - All `func_name` values must be valid identifiers
   - Composed names must be valid identifiers
 

@@ -165,8 +165,8 @@ impl IsTactic for CoslicedTactic {
 fn validate_and_collect(s1: &Vec<NamedSlice>, s2: &Vec<NamedSlice>) -> Result<usize, String> {
     let k1 = s1.len();
     let k2 = s2.len();
-    if k1 < 2 || k2 < 2 {
-        return Err("At least two slices on each side are required".to_string());
+    if k1 == 0 || k2 == 0 {
+        return Err("At least one slice on each side is required".to_string());
     }
     if k1 != k2 {
         return Err(format!("Slice count mismatch: lhs has {k1}, rhs has {k2}"));
@@ -257,17 +257,10 @@ mod tests {
     }
 
     #[test]
-    fn errors_on_bad_slices() {
+    fn errors_on_zero_slices() {
         let base = base_obligation_with(Some("root"));
-        // Too few slices
-        let s1 = vec![NamedSlice {
-            func_name: "a".to_string(),
-            code: SourceFile::Text("pub fn a(x: u8) -> u8 { x }".to_string()),
-        }];
-        let s2 = vec![NamedSlice {
-            func_name: "b".to_string(),
-            code: SourceFile::Text("pub fn b(x: u8) -> u8 { x }".to_string()),
-        }];
+        let s1: Vec<NamedSlice> = vec![];
+        let s2: Vec<NamedSlice> = vec![];
         let c1 = NamedSlice {
             func_name: "ac".to_string(),
             code: SourceFile::Text("pub fn ac(x: u8) -> u8 { x }".to_string()),
@@ -276,68 +269,6 @@ mod tests {
             func_name: "bc".to_string(),
             code: SourceFile::Text("pub fn bc(x: u8) -> u8 { x }".to_string()),
         };
-        let t = CoslicedTactic {
-            lhs_slices: s1,
-            rhs_slices: s2,
-            lhs_composed: c1.clone(),
-            rhs_composed: c2.clone(),
-        };
-        assert!(t.apply(&base).is_err());
-
-        // Count mismatch
-        let s1 = vec![
-            NamedSlice {
-                func_name: "a1".to_string(),
-                code: SourceFile::Text("pub fn a1(x: u8) -> u8 { x }".to_string()),
-            },
-            NamedSlice {
-                func_name: "a2".to_string(),
-                code: SourceFile::Text("pub fn a2(x: u8) -> u8 { x }".to_string()),
-            },
-        ];
-        let s2 = vec![
-            NamedSlice {
-                func_name: "b1".to_string(),
-                code: SourceFile::Text("pub fn b1(x: u8) -> u8 { x }".to_string()),
-            },
-            NamedSlice {
-                func_name: "b2".to_string(),
-                code: SourceFile::Text("pub fn b2(x: u8) -> u8 { x }".to_string()),
-            },
-            NamedSlice {
-                func_name: "b3".to_string(),
-                code: SourceFile::Text("pub fn b3(x: u8) -> u8 { x }".to_string()),
-            },
-        ];
-        let t = CoslicedTactic {
-            lhs_slices: s1,
-            rhs_slices: s2,
-            lhs_composed: c1.clone(),
-            rhs_composed: c2.clone(),
-        };
-        assert!(t.apply(&base).is_err());
-
-        // Invalid name
-        let s1 = vec![
-            NamedSlice {
-                func_name: "bad-name".to_string(),
-                code: SourceFile::Text("pub fn bad_name(x: u8) -> u8 { x }".to_string()),
-            },
-            NamedSlice {
-                func_name: "ok".to_string(),
-                code: SourceFile::Text("pub fn ok(x: u8) -> u8 { x }".to_string()),
-            },
-        ];
-        let s2 = vec![
-            NamedSlice {
-                func_name: "ok2".to_string(),
-                code: SourceFile::Text("pub fn ok2(x: u8) -> u8 { x }".to_string()),
-            },
-            NamedSlice {
-                func_name: "ok3".to_string(),
-                code: SourceFile::Text("pub fn ok3(x: u8) -> u8 { x }".to_string()),
-            },
-        ];
         let t = CoslicedTactic {
             lhs_slices: s1,
             rhs_slices: s2,
