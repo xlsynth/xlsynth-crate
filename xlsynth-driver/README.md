@@ -448,7 +448,7 @@ if any engine finds a counter-example. Errors are printed to **stderr**.
 
 ### `dslx-equiv`
 
-Checks two DSLX functions for functional equivalence. By default it converts both to IR and uses the selected solver/toolchain to prove equivalence.
+Checks two DSLX functions for functional equivalence. By default it converts both to IR and uses the selected solver/toolchain to prove equivalence. Alternatively, you can provide a tactic script to drive a tactic-based prover flow.
 
 - Positional arguments: `<lhs.x> <rhs.x>`
 - Entry-point selection: either `--dslx_top <NAME>` or both `--lhs_dslx_top <NAME>` and `--rhs_dslx_top <NAME>`.
@@ -464,12 +464,202 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
   - `--type_inference_v2=<BOOL>` (requires `--toolchain`)
   - `--lhs_uf <func_name:uf_name>` (may be specified multiple times)
   - `--rhs_uf <func_name:uf_name>` (may be specified multiple times)
+  - `--tactic-script <PATH>` Use tactic-based proving driven by a script (JSON array or JSONL of `ScriptStep`). When present, the driver builds a tactic obligation tree and executes it instead of direct equivalence.
   - `--output_json <PATH>`
 
 UF semantics:
 
 - Functions mapped to the same uf_name are treated as the same uninterpreted symbol and are assumed equivalent at call sites.
 - Assertions inside uninterpreted functions are ignored during proving.
+
+#### Tactic script format (JSON / JSONL)
+
+When `--tactic-script <PATH>` is supplied, `dslx-equiv` executes a tactic-driven plan defined by a script. The script can be either:
+
+- A JSON array of steps
+- JSON Lines (JSONL): one `ScriptStep` per line; blank lines and lines starting with `#` are ignored
+
+Each step has the shape:
+
+```json
+{
+  "selector": ["root", "..."],
+  "command": "Solve" | { "Apply": <Tactic> }
+}
+```
+
+- `selector` is a path from the root node identifying where the step applies.
+- `command` is either:
+  - `"Solve"` — mark the selected leaf to be proved
+  - `{ "Apply": <Tactic> }` — apply a tactic that replaces the selected leaf with children obligations
+
+Current tactics and their JSON shapes:
+
+- `Focus` — focus on pairs of top functions and also produce a “skeleton” with shared UFs
+
+  ```json
+  { "Focus": { "pairs": [ { "lhs": "foo", "rhs": "bar" } ] } }
+  ```
+
+  Children created under the selected node: `pair_1`, `pair_2`, … and `skeleton`.
+
+- `Cosliced` — build per-slice self/cross obligations and a skeleton from DSLX fragments
+
+  ```json
+  {
+    "Cosliced": {
+      "lhs_slices": [ { "func_name": "a1", "code": { "Path": "/path/a1.x" } } ],
+      "rhs_slices": [ { "func_name": "b1", "code": { "Text": "pub fn b1(x: u8) -> u8 { x }" } } ],
+      "lhs_composed": { "func_name": "a_comp", "code": { "Path": "/path/a_comp.x" } },
+      "rhs_composed": { "func_name": "b_comp", "code": { "Path": "/path/b_comp.x" } }
+    }
+  }
+  ```
+
+  `code` accepts either `{ "Path": "/abs/or/relative.x" }` or `{ "Text": "...dslx..." }`.
+  Children created: `lhs_self`, `rhs_self`, `slice_1`…`slice_K`, and `skeleton`.
+
+Minimal end-to-end example (JSON array):
+
+```json
+[
+  { "selector": ["root"], "command": { "Apply": { "Focus": { "pairs": [ { "lhs": "evaluate_polynomial", "rhs": "evaluate_polynomial" } ] } } } },
+  { "selector": ["root", "pair_1"], "command": { "Apply": { "Cosliced": {
+      "lhs_slices": [ { "func_name": "lhs_s1", "code": { "Path": "slices/ref_slice1.x" } } ],
+      "rhs_slices": [ { "func_name": "rhs_s1", "code": { "Path": "slices/cand_slice1.x" } } ],
+      "lhs_composed": { "func_name": "lhs_comp", "code": { "Path": "slices/ref_composed.x" } },
+      "rhs_composed": { "func_name": "rhs_comp", "code": { "Path": "slices/cand_composed.x" } }
+  } } } },
+  { "selector": ["root", "pair_1", "lhs_self"], "command": "Solve" },
+  { "selector": ["root", "pair_1", "rhs_self"], "command": "Solve" },
+  { "selector": ["root", "pair_1", "slice_1"], "command": "Solve" },
+  { "selector": ["root", "pair_1", "skeleton"], "command": "Solve" },
+  { "selector": ["root", "skeleton"], "command": "Solve" }
+]
+```
+
+JSONL equivalent:
+
+```text
+{ "selector": ["root"], "command": { "Apply": { "Focus": { "pairs": [ { "lhs": "A", "rhs": "B" } ] } } } }
+{ "selector": ["root", "pair_1"], "command": { "Apply": { "Cosliced": { "lhs_slices": [], "rhs_slices": [], "lhs_composed": { "func_name": "a", "code": { "Text": "pub fn a(x:u8)->u8{x}" } }, "rhs_composed": { "func_name": "b", "code": { "Text": "pub fn b(x:u8)->u8{x}" } } } } } }
+{ "selector": ["root", "pair_1", "skeleton"], "command": "Solve" }
+```
+
+Invocation:
+
+```shell
+xlsynth-driver dslx-equiv lhs.x rhs.x \
+  --dslx_top main \
+  --tactic-script tactic.json \
+  --output_json report.json
+```
+
+Notes:
+
+- Start at selector `["root"]`. Child segment names are created by the tactic.
+- `func_name` values must be valid identifiers (ASCII alphanumeric or `_`).
+- You can pass `--tactic-script -` to read the script from stdin.
+
+##### Focus tactic: semantics and obligations
+
+Focus narrows attention to specific pairs of functions while leaving the base tops unchanged. It produces per-pair equivalence leaves plus a skeleton that treats each focused pair as the same uninterpreted function (UF).
+
+- Input shape:
+
+  ```json
+  { "Focus": { "pairs": [ { "lhs": "foo", "rhs": "bar" }, { "lhs": "g", "rhs": "h" } ] } }
+  ```
+
+- Validation: each `lhs`/`rhs` must be a valid identifier (ASCII alphanumeric or `_`).
+
+- Children created under the node where it is applied:
+
+  - `pair_1`, `pair_2`, … — pairwise checks
+  - `skeleton` — leaves the original tops in place and introduces UF aliases
+
+- Per-pair leaves (`pair_i`):
+
+  - `top(lhs) = pairs[i].lhs`
+  - `top(rhs) = pairs[i].rhs`
+  - No source edits are applied
+
+- Skeleton leaf:
+
+  - `top(lhs)` and `top(rhs)` remain the base tops
+  - UF aliases are set for each pair: `(pairs[i].lhs, pairs[i].rhs) -> __uf_focus_{i+1}` on both sides
+  - No source edits are applied
+
+- Typical workflow:
+
+  1. Apply `Focus` at `selector=["root"]` with the function pairs
+  1. Mark `pair_*` and `skeleton` for `Solve`
+
+When the skeleton succeeds, it establishes that the focused functions can be abstracted as the same UF without breaking the high-level proof at the base tops.
+
+##### Cosliced tactic: semantics and obligations
+
+Cosliced creates self-checks, cross-slice checks, and a skeleton by stitching slices and a composed function per side. It supports sourcing DSLX from paths or inline text.
+
+- Input shape:
+
+  ```json
+  {
+    "Cosliced": {
+      "lhs_slices": [ { "func_name": "a1", "code": { "Path": "/path/a1.x" } }, { "func_name": "a2", "code": { "Text": "pub fn a2(x:u8)->u8{x}" } } ],
+      "rhs_slices": [ { "func_name": "b1", "code": { "Path": "/path/b1.x" } }, { "func_name": "b2", "code": { "Path": "/path/b2.x" } } ],
+      "lhs_composed": { "func_name": "a_comp", "code": { "Path": "/path/a_comp.x" } },
+      "rhs_composed": { "func_name": "b_comp", "code": { "Path": "/path/b_comp.x" } }
+    }
+  }
+  ```
+
+- Validation:
+
+  - At least two slices on each side; counts must match
+  - All `func_name` values must be valid identifiers
+  - Composed names must be valid identifiers
+
+- Children created under the node where it is applied:
+
+  - `lhs_self` — prove left composed function equals the left base under left code
+  - `rhs_self` — prove right composed function equals the right base under right code
+  - `slice_1 … slice_K` — cross checks per slice index
+  - `skeleton` — prove composed vs composed with slices present and per-index UF mapping
+
+- Source model and edits:
+
+  - Each side has a working text file (from the base obligation)
+  - `Edit::AppendSource` appends DSLX fragments; `code` may be `{ "Path": "..." }` or `{ "Text": "..." }`
+
+- Leaf semantics:
+
+  - `lhs_self`:
+    - Both sides start from the left base file
+    - Append all `lhs_slices` and then `lhs_composed` to the RHS side
+    - Set `top(rhs) = lhs_composed.func_name`; `top(lhs)` remains the base left top
+  - `rhs_self`:
+    - Both sides start from the right base file
+    - Append all `rhs_slices` and then `rhs_composed` to the RHS side
+    - Set `top(rhs) = rhs_composed.func_name`; `top(lhs)` remains the base right top
+  - `slice_i`:
+    - Start from the unmodified base files
+    - Append only the `i`‑th slice to each respective side
+    - Set `top(lhs) = lhs_slices[i].func_name`, `top(rhs) = rhs_slices[i].func_name`
+  - `skeleton`:
+    - Start from the unmodified base files
+    - Append all slices to their respective sides, then append each `*_composed`
+    - Set `top(lhs) = lhs_composed.func_name`, `top(rhs) = rhs_composed.func_name`
+    - Set UF aliases per index: `(lhs_slices[i].func_name, rhs_slices[i].func_name) -> __uf_{i}` on both sides
+
+- Typical workflow:
+
+  1. Apply `Cosliced` at some node (often a child of `Focus`)
+  1. Mark `lhs_self`, `rhs_self`, all `slice_*`, and `skeleton` for `Solve`
+
+Hints:
+
+- Using `{ "Text": "..." }` is convenient for tiny helpers; prefer `{ "Path": "..." }` for real code.
 
 ### `prove-quickcheck`
 
