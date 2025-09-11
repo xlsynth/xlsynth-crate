@@ -40,6 +40,22 @@ fn add_bool(cmd: &mut Command, name: &str, value: Option<bool>) {
     }
 }
 
+fn resolve_driver_exe() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("CARGO_BIN_EXE_xlsynth-driver") {
+        return std::path::PathBuf::from(p);
+    }
+    let cur = std::env::current_exe().expect("resolve current exe");
+    if let Some(deps_dir) = cur.parent() {
+        if let Some(debug_dir) = deps_dir.parent() {
+            let candidate = debug_dir.join("xlsynth-driver");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    cur
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IrEquivConfig {
     pub lhs_ir_file: PathBuf,
@@ -111,7 +127,7 @@ pub trait ToDriverCommand {
 
 impl ToDriverCommand for IrEquivConfig {
     fn to_command(&self) -> Command {
-        let exe = std::env::current_exe().expect("resolve current exe");
+        let exe = resolve_driver_exe();
         let mut cmd = Command::new(exe);
         cmd.arg("ir-equiv");
         cmd.arg(self.lhs_ir_file.as_os_str());
@@ -157,7 +173,7 @@ impl ToDriverCommand for IrEquivConfig {
 
 impl ToDriverCommand for DslxEquivConfig {
     fn to_command(&self) -> Command {
-        let exe = std::env::current_exe().expect("resolve current exe");
+        let exe = resolve_driver_exe();
         let mut cmd = Command::new(exe);
         cmd.arg("dslx-equiv");
         cmd.arg(self.lhs_dslx_file.as_os_str());
@@ -232,7 +248,7 @@ impl ToDriverCommand for DslxEquivConfig {
 
 impl ToDriverCommand for ProveQuickcheckConfig {
     fn to_command(&self) -> Command {
-        let exe = std::env::current_exe().expect("resolve current exe");
+        let exe = resolve_driver_exe();
         let mut cmd = Command::new(exe);
         cmd.arg("prove-quickcheck");
         add_flag(
