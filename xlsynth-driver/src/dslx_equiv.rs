@@ -5,7 +5,8 @@ use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
 use crate::proofs::obligations::{LecObligation, LecSide};
 use crate::proofs::script::{
-    execute_script, read_script_steps_from_path, OblTree, OblTreeConfig, ScriptStep,
+    execute_script, read_script_steps_from_json_path, read_script_steps_from_jsonl_path, OblTree,
+    OblTreeConfig, ScriptStep,
 };
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
@@ -135,7 +136,14 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let lhs_file = matches.get_one::<String>("lhs_dslx_file").unwrap();
     let rhs_file = matches.get_one::<String>("rhs_dslx_file").unwrap();
 
-    let tactic_script_path = matches.get_one::<String>("tactic_script").cloned();
+    let tactic_json_path = matches.get_one::<String>("tactic_json").cloned();
+    let tactic_jsonl_path = matches.get_one::<String>("tactic_jsonl").cloned();
+    if tactic_json_path.is_some() && tactic_jsonl_path.is_some() {
+        eprintln!("Error: --tactic_json and --tactic_jsonl cannot be used together");
+        std::process::exit(1);
+    }
+    let tactic_script_json = tactic_json_path.clone();
+    let tactic_script_jsonl = tactic_jsonl_path.clone();
 
     let mut lhs_top = matches
         .get_one::<String>("lhs_dslx_top")
@@ -240,7 +248,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let rhs_uf_map = parse_uf_spec(rhs_module_name, matches.get_many::<String>("rhs_uf"));
     let use_unoptimized_ir = !lhs_uf_map.is_empty() || !rhs_uf_map.is_empty();
 
-    if let Some(script_path) = tactic_script_path {
+    if tactic_script_json.is_some() || tactic_script_jsonl.is_some() {
         // Use tactic-based prover path.
         // Build root obligation from DSLX files.
         let lhs_top_str = lhs_top.unwrap();
@@ -281,12 +289,24 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         let mut tree = OblTree::new(root_ob, cfg);
 
         // Read & parse tactic script from file (JSON array or JSONL).
-        let steps: Vec<ScriptStep> = match read_script_steps_from_path(&script_path) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[{}] {}", SUBCOMMAND, e);
-                std::process::exit(2);
+        let steps: Vec<ScriptStep> = if let Some(path) = tactic_script_json {
+            match read_script_steps_from_json_path(&path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[{}] {}", SUBCOMMAND, e);
+                    std::process::exit(2);
+                }
             }
+        } else if let Some(path) = tactic_script_jsonl {
+            match read_script_steps_from_jsonl_path(&path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[{}] {}", SUBCOMMAND, e);
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            unreachable!("tactic script presence already checked");
         };
 
         let start = std::time::Instant::now();

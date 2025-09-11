@@ -229,51 +229,63 @@ pub struct ScriptReport {
     pub rolled_back: Vec<RollbackEntry>,
 }
 
-/// Parses a tactic script from a string.
-/// Accepts either a JSON array of ScriptStep or JSONL (one ScriptStep per
-/// line).
-pub fn parse_script_steps_from_str(input: &str) -> Result<Vec<ScriptStep>, String> {
-    match serde_json::from_str::<Vec<ScriptStep>>(input) {
-        Ok(v) => Ok(v),
-        Err(_) => {
-            let mut steps: Vec<ScriptStep> = Vec::new();
-            for (lineno, line) in input.lines().enumerate() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if line.starts_with('#') {
-                    continue;
-                }
-                match serde_json::from_str::<ScriptStep>(line) {
-                    Ok(step) => steps.push(step),
-                    Err(e) => {
-                        return Err(format!(
-                            "tactic script parse error on line {}: {}",
-                            lineno + 1,
-                            e
-                        ));
-                    }
-                }
-            }
-            Ok(steps)
-        }
-    }
+/// Parses a tactic script from a string as a JSON array of ScriptStep objects.
+pub fn parse_script_steps_from_json_str(input: &str) -> Result<Vec<ScriptStep>, String> {
+    serde_json::from_str::<Vec<ScriptStep>>(input)
+        .map_err(|e| format!("tactic script: expected JSON array of ScriptStep: {}", e))
 }
 
-/// Reads and parses a tactic script from a path ("-" for stdin).
-pub fn read_script_steps_from_path(path: &str) -> Result<Vec<ScriptStep>, String> {
-    let text = if path == "-" {
+/// Parses a tactic script from a string as JSONL (one ScriptStep JSON object
+/// per non-empty, non-comment line).
+pub fn parse_script_steps_from_jsonl_str(input: &str) -> Result<Vec<ScriptStep>, String> {
+    let mut steps: Vec<ScriptStep> = Vec::new();
+    for (lineno, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        match serde_json::from_str::<ScriptStep>(line) {
+            Ok(step) => steps.push(step),
+            Err(e) => {
+                return Err(format!(
+                    "tactic script (jsonl) parse error on line {}: {}",
+                    lineno + 1,
+                    e
+                ));
+            }
+        }
+    }
+    Ok(steps)
+}
+
+/// Reads the raw script text from a path ("-" for stdin) with contextualized
+/// errors.
+fn read_script_text_from_path(path: &str, kind: &str) -> Result<String, String> {
+    if path == "-" {
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
-            .map_err(|e| format!("failed to read tactic script from stdin: {}", e))?;
-        buf
+            .map_err(|e| format!("failed to read tactic script ({} ) from stdin: {}", kind, e))?;
+        Ok(buf)
     } else {
         std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read tactic script {}: {}", path, e))?
-    };
-    parse_script_steps_from_str(&text)
+            .map_err(|e| format!("failed to read tactic script ({}) {}: {}", kind, path, e))
+    }
+}
+
+/// Reads and parses a tactic script from a path ("-" for stdin) as JSON array.
+pub fn read_script_steps_from_json_path(path: &str) -> Result<Vec<ScriptStep>, String> {
+    let text = read_script_text_from_path(path, "json")?;
+    parse_script_steps_from_json_str(&text)
+}
+
+/// Reads and parses a tactic script from a path ("-" for stdin) as JSONL.
+pub fn read_script_steps_from_jsonl_path(path: &str) -> Result<Vec<ScriptStep>, String> {
+    let text = read_script_text_from_path(path, "jsonl")?;
+    parse_script_steps_from_jsonl_str(&text)
 }
 
 pub fn execute_script(tree: &mut OblTree, steps: &[ScriptStep]) -> Result<ScriptReport, String> {
