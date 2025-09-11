@@ -474,47 +474,42 @@ UF semantics:
 
 #### Tactic Scripts
 
-Sometimes two DSLX top functions are equivalent, but **proving that directly** means throwing an SMT solver at the entire design.
-That can be slow or even time out, even if only one small helper truly changed.
-**Tactic scripts** let you describe a proof plan, and the driver turns the plan into a tree of proof obligations and solves the leaves.
+When two DSLX top functions are equivalent but a direct whole-design proof is too heavy or times out, **tactic scripts** let you describe a structured proof plan. The driver turns that plan into an obligation tree and discharges the leaves with SMT.
 
-##### Workflow at a glance
+##### Workflow
 
-1. **Start at `root`**. This is the default "prove `LHS:top ≡ RHS:top`" obligation.
-1. **Apply a tactic**. This decomposes an obligation into smaller child obligations. You may further apply tactics on the children to form an obligation tree.
-1. **Mark leaves as `Solve`**. We directly prove those checks that are tractable with SMT solvers.
-1. **All leaves succeed**. When all leaves succeed, the whole proof succeeds.
+1. Start at `root` – the default “prove `LHS:top ≡ RHS:top`” obligation.
+1. Apply a tactic – decompose the obligation into named child obligations. Tactics can also be further applied to the child obligations.
+1. Mark leaves with `Solve` – those leaves are proved directly.
+1. Succeed when all leaves succeed.
 
-Provide the plan with `--tactic-script` as either a JSON array or JSONL (one step per line).
+Provide the plan to `--tactic-script` as either a JSON array or JSONL (one JSON object per line).
 
-```bash
+```shell
 xlsynth-driver dslx-equiv lhs.x rhs.x \
   --dslx_top main \
   --tactic-script tactic.json \
   --output_json report.json
 ```
 
-##### The Proof Script
+##### Script anatomy
 
-Each step specifies **where** to act and **what** to do:
+Each step says **where** to act and **what** to do:
 
 ```json
-{
-  "selector": ["root", "..."],
-  "command": "Solve"
-}
+{ "selector": ["root", "..."], "command": "Solve" }
 ```
 
-- `selector`: a path like `["root", "pair_1", "skeleton"]`. Tactics create *named* children, and you refer to them with the names from `root`.
-- `command`:
-  - `"Solve"`: mark that leaf to be proved by the SMT solver.
-  - `{ "Apply": <Tactic> }`: replace that leaf with children (new obligations).
+- `selector`: a path like `["root", "pair_1", "skeleton"]`. Tactics create named children; select them by name.
+- `command` is either:
+  - `"Solve"` – mark the selected leaf to be proved directly, or
+  - `{ "Apply": <Tactic> }` – replace the leaf with children (new obligations).
 
-You can supply steps as a JSON array, or stream them as JSONL (one JSON object per line). Blank lines and lines starting with `#` are ignored.
+You can supply steps as a JSON array, or stream them as JSONL (one object per line). Blank lines and `#` comments are ignored.
 
-##### Quickstart Example
+##### Quickstart
 
-**Goal**: Prove that the `LHS:top ≡ RHS:top`.
+Goal: prove `LHS:top ≡ RHS:top`.
 
 LHS (`lhs.x`):
 
@@ -523,7 +518,7 @@ pub fn f1(x: u32) -> u32 { x + u32:1 }
 
 pub fn top(x: u32) -> u32 {
   let y = f1(x);
-  y * u32:2 // some heavy computation
+  y * x // some heavy computation
 }
 ```
 
@@ -534,32 +529,31 @@ pub fn f1(x: u32) -> u32 { u32:1 + x }  // different body; same semantics
 
 pub fn top(x: u32) -> u32 {
   let y = f1(x);
-  y * u32:2 // some heavy computation
+  y * x // some heavy computation
 }
 ```
 
-**Tactic**: Use `Focus` and (1) prove `LHS:f1 ≡ RHS:f1` directly, and (2) prove the original tops while treating calls to `f1` as the same **opaque uninterpreted function (UF)**.
-This could be effective if the `top` is not changed, performs very heavy arithmetics, while the `f1`s are easy to prove.
+Use `Focus` to (1) prove `LHS:f1 ≡ RHS:f1`, then (2) prove the tops while treating calls to `f1` as the same uninterpreted function (UF).
 
-**Script (JSONL)**:
+Script (JSONL):
 
 ```json
 { "selector": ["root"], "command": { "Apply": { "Focus": { "pairs": [ { "lhs": "f1", "rhs": "f1" } ] } } } }
-{ "selector": ["root", "pair_1"], "command": "Solve" },
+{ "selector": ["root", "pair_1"], "command": "Solve" }
 { "selector": ["root", "skeleton"], "command": "Solve" }
 ```
 
-This produces the following obligation tree and both leaves can be solved easily.
+This yields:
 
 ```text
 root
 ├─ pair_1     (prove LHS:f1 ≡ RHS:f1)
-└─ skeleton   (prove LHS:top ≡ RHS:top with calls to f1 treated as the same UF)
+└─ skeleton   (prove LHS:top ≡ RHS:top with f1 treated as a shared UF)
 ```
 
-##### Tactic Reference
+##### Tactic reference
 
-###### `Focus`: Prove a few helper pairs; treat them as UFs elsewhere
+###### `Focus` – prove helper pairs and treat them as UFs elsewhere
 
 Input:
 
@@ -569,14 +563,20 @@ Input:
 
 Creates:
 
-- `pair_1`, `pair_2`: direct leaf proofs for each pair.
-- `skeleton`: keeps the original top functions, maps each pair to a shared UF so callers don't blow up.
+- `pair_1`, `pair_2` – direct leaves for the listed pairs.
+- `skeleton` – the original tops, but with each pair mapped to a shared UF to keep callers small.
 
-###### `Cosliced` -- Factor both sides into slices plus a composed function
+Rationale:
+
+- Shrinks difficult top-level obligations by proving small helper pairs directly and modeling them as a shared UF at call sites.
+- Use when tops are expensive (heavy arithmetic/large fan-in) but helpers are easy to prove.
+- Soundness relies on solving each listed `pair_*` leaf; the UF abstraction is used only in the `skeleton` leaf once those pairs are established.
+
+###### `Cosliced` – factor both sides into slices plus a composed function
 
 Use when both designs can be expressed as the same composition of smaller pieces.
 
-Left (`lhs.x`):
+LHS (`lhs.x`):
 
 ```dslx
 pub fn top (x: u16, y: u16, z: u16) -> u16 {
@@ -585,7 +585,7 @@ pub fn top (x: u16, y: u16, z: u16) -> u16 {
 }
 ```
 
-Rhs (`rhs.x`):
+RHS (`rhs.x`):
 
 ```dslx
 pub fn top (x: u16, y: u16, z: u16) -> u16 {
@@ -594,9 +594,9 @@ pub fn top (x: u16, y: u16, z: u16) -> u16 {
 }
 ```
 
-Here, it could be the case that the adder and/or the multiplier is too complex so their composition cannot be proven. However, we can refactor the code:
+The adder and/or multiplier may be complex, making the combined proof hard. Instead, refactor into slices and prove the pieces:
 
-Left refactored:
+LHS refactor:
 
 ```dslx
 pub fn top (x: u16, y: u16, z: u16) -> u16 {
@@ -604,13 +604,9 @@ pub fn top (x: u16, y: u16, z: u16) -> u16 {
   specialized_adder(p, z)
 }
 
-pub fn slice1(x: u16, y: u16) -> u16 {
-  x * y
-}
+pub fn slice1(x: u16, y: u16) -> u16 { x * y }
 
-pub fn slice2(p: u16, z: u16) -> u16 {
-  specialized_adder(p, z)
-}
+pub fn slice2(p: u16, z: u16) -> u16 { specialized_adder(p, z) }
 
 pub fn composed(x: u16, y: u16, z: u16) -> u16 {
   let p = slice1(x, y);
@@ -618,40 +614,43 @@ pub fn composed(x: u16, y: u16, z: u16) -> u16 {
 }
 ```
 
-Right can be refactored in a similar way.
+Proof plan:
 
-To prove that `LHS:top` is equivalent to `RHS:top`, we may prove that
+- `slice_1`: prove `LHS:slice1 ≡ RHS:slice1`.
+- `slice_2`: prove `LHS:slice2 ≡ RHS:slice2`.
+- `lhs_self`: prove `LHS:top ≡ LHS:composed`.
+- `rhs_self`: prove `RHS:top ≡ RHS:composed`.
+- `skeleton`: under the UF assumption for `slice1`/`slice2`, prove `LHS:composed ≡ RHS:composed`.
 
-- `slice_1`: `LHS:slice1 ≡ RHS:slice1`
-- `slice_2`: `LHS:slice2 ≡ RHS:slice2`
-- `lhs_self`: `LHS:top ≡ LHS:composed`
-- `rhs_self`: `RHS:top ≡ RHS:composed`
-- `skeleton`: assuming `LHS:slice1 ≡ RHS:slice1` and `LHS:slice2 ≡ RHS:slice2` by replacing them as shared uninterpreted function, prove `LHS:composed ≡ RHS:composed`
+Rationale:
 
-Here, we can avoid proving the complex composition of adders and multiplers.
+- Decomposes a hard monolithic proof into small slice equivalences plus simple per-side self-equivalences, reducing solver search space.
+- Avoids re-proving heavy internals in the final step by treating slices as a shared UF in the `skeleton` leaf.
+- Works best when both sides share the same composition shape and slice boundaries align.
+- Useful for refactors where complexity moves between helpers while the overall composition remains stable.
 
-With `Cosliced` we can prove the pieces and stitch them. Here the code can be specified by the raw text or the path to the file containing it.
+Script (JSON array). Code can be inlined via `Text` or referenced via `Path`:
 
 ```json
 [
   { "selector": ["root"], "command": { "Apply": { "Cosliced": {
     "lhs_slices": [
-      { "func_name": "slice1", "code": { "Text": "pub fn slice1(x: u16, y: u16) -> u16 { x * y }" } }
+      { "func_name": "slice1", "code": { "Text": "pub fn slice1(x: u16, y: u16) -> u16 { x * y }" } },
       { "func_name": "slice2", "code": { "Text": "pub fn slice2(p: u16, z: u16) -> u16 { specialized_adder(p, z) }" } }
     ],
     "rhs_slices": [
-      { "func_name": "slice1", "code": { "Path": "path_to_rhs_slice1.x" } }
+      { "func_name": "slice1", "code": { "Path": "path_to_rhs_slice1.x" } },
       { "func_name": "slice2", "code": { "Path": "path_to_rhs_slice2.x" } }
     ],
     "lhs_composed": { "func_name": "lhs_comp", "code": { "Text": "pub fn composed(x:u16,y:u16,z:u16)->u16{ let p = slice1(x, y); slice2(p, z) }" } },
     "rhs_composed": { "func_name": "rhs_comp", "code": { "Path": "path_to_rhs_composed.x" } }
   } } } },
 
-  { "selector": ["root","lhs_self"], "command": "Solve" },
-  { "selector": ["root","rhs_self"], "command": "Solve" },
-  { "selector": ["root","slice_1"],  "command": "Solve" },
-  { "selector": ["root","slice_2"],  "command": "Solve" },
-  { "selector": ["root","skeleton"], "command": "Solve" }
+  { "selector": ["root", "lhs_self"], "command": "Solve" },
+  { "selector": ["root", "rhs_self"], "command": "Solve" },
+  { "selector": ["root", "slice_1"],  "command": "Solve" },
+  { "selector": ["root", "slice_2"],  "command": "Solve" },
+  { "selector": ["root", "skeleton"], "command": "Solve" }
 ]
 ```
 
@@ -666,14 +665,14 @@ root
 └─ skeleton
 ```
 
-##### Troubleshooting / pitfalls
+##### Troubleshooting
 
-- Invalid selector path: ensure each `selector` matches a created node.
-- Invalid identifiers: `func_name`, `lhs`, `rhs`, and composed names must be valid identifiers.
-- Slice count mismatch: `lhs_slices.len()` must equal `rhs_slices.len()`.
-- Forgot to solve the skeleton: many proofs hinge on the `skeleton` leaf.
-- JSON vs JSONL: JSONL is one object per line.
-- Inline `Text` fragments: ensure names in code match `func_name`.
+- Invalid selector path – ensure each `selector` matches a created node.
+- Invalid identifiers – `func_name`, `lhs`, `rhs`, and composed names must be valid identifiers.
+- Slice count mismatch – `lhs_slices.len()` must equal `rhs_slices.len()`.
+- Forgot to solve the skeleton – many proofs hinge on the `skeleton` leaf.
+- JSON vs JSONL – JSONL is one object per line (no trailing commas).
+- Inline `Text` fragments – ensure names in code match `func_name`.
 
 ### `prove-quickcheck`
 
