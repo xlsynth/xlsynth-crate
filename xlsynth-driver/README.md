@@ -464,7 +464,8 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
   - `--type_inference_v2=<BOOL>` (requires `--toolchain`)
   - `--lhs_uf <func_name:uf_name>` (may be specified multiple times)
   - `--rhs_uf <func_name:uf_name>` (may be specified multiple times)
-  - `--tactic-script <PATH>` Use tactic-based proving driven by a script (JSON array or JSONL of `ScriptStep`). When present, the driver builds a tactic obligation tree and executes it instead of direct equivalence.
+  - `--tactic_json <PATH>` Provide a tactic script as a JSON array of `ScriptStep` (mutually exclusive with `--tactic_jsonl`). When present, the driver builds a tactic obligation tree and executes it instead of direct equivalence.
+  - `--tactic_jsonl <PATH>` Provide a tactic script as JSONL (one `ScriptStep` per line; `#` comments and blank lines allowed).
   - `--output_json <PATH>`
 
 UF semantics:
@@ -483,12 +484,12 @@ When two DSLX top functions are equivalent but a direct whole-design proof is to
 1. Mark leaves with `Solve` – those leaves are proved directly.
 1. Succeed when all leaves succeed.
 
-Provide the plan to `--tactic-script` as either a JSON array or JSONL (one JSON object per line).
+Provide the plan via `--tactic_json` for a JSON array, or `--tactic_jsonl` for JSONL (one JSON object per line).
 
 ```shell
 xlsynth-driver dslx-equiv lhs.x rhs.x \
   --dslx_top main \
-  --tactic-script tactic.json \
+  --tactic_json tactic.json \
   --output_json report.json
 ```
 
