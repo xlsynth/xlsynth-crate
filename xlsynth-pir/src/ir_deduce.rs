@@ -73,6 +73,21 @@ pub fn deduce_result_type(
     payload: &NodePayload,
     operand_types: &[Type],
 ) -> Result<Option<Type>, DeduceError> {
+    // Backwards-compatible entry point: no callee resolution provided.
+    deduce_result_type_with(payload, operand_types, |_| None)
+}
+
+/// Like `deduce_result_type` but allows callers to provide a resolver for
+/// callee return types (e.g., to deduce `invoke` result types with package
+/// context available).
+pub fn deduce_result_type_with<F>(
+    payload: &NodePayload,
+    operand_types: &[Type],
+    mut resolve_callee_ret_ty: F,
+) -> Result<Option<Type>, DeduceError>
+where
+    F: FnMut(&str) -> Option<Type>,
+{
     match payload {
         NodePayload::Nil => Ok(Some(Type::nil())),
         NodePayload::GetParam(_) => Ok(None),
@@ -386,8 +401,15 @@ pub fn deduce_result_type(
             Ok(Some(init_ty.clone()))
         }
         NodePayload::Cover { .. } => Ok(Some(Type::Token)),
-        // We need package context to look up the invoked function type.
-        NodePayload::Invoke { .. } => Ok(None),
+        // We can deduce invoke result types if the caller provides a callee
+        // return type resolver.
+        NodePayload::Invoke { to_apply, .. } => {
+            if let Some(ret_ty) = resolve_callee_ret_ty(to_apply.as_str()) {
+                Ok(Some(ret_ty))
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
