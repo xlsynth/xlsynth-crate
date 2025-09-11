@@ -533,7 +533,7 @@ pub fn top(x: u32) -> u32 {
 }
 ```
 
-Use `Focus` to (1) prove `LHS:f1 ≡ RHS:f1`, then (2) prove the tops while treating calls to `f1` as the same uninterpreted function (UF).
+Use `Focus` to (1) prove `LHS:f1 ≡ RHS:f1`, then (2) prove the skeletons are equivalent, where a skeleton is the top function with calls to `f1` treated as the same uninterpreted function (UF), so the solver no longer need to reason about the internals of `f1`.
 
 Script (JSONL):
 
