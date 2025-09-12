@@ -253,13 +253,23 @@ impl Parser {
         self.drop_whitespace_and_comments();
         self.drop_or_error("\"")?;
         let mut string = String::new();
+        let mut closed = false;
         while let Some(c) = self.peekc() {
             if c == '"' {
                 self.dropc()?;
+                closed = true;
                 break;
+            }
+            if c == '\n' || c == '\r' {
+                // Strings cannot span lines in XLS IR; treat newline before closing
+                // quote as unterminated.
+                return Err(ParseError::new("unterminated quoted string".to_string()));
             }
             string.push(c);
             self.dropc()?;
+        }
+        if !closed {
+            return Err(ParseError::new("unterminated quoted string".to_string()));
         }
         Ok(string)
     }
