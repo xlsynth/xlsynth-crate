@@ -17,6 +17,11 @@ fuzz_target!(|ir_text: String| {
     if ir_text.len() > 64 * 1024 {
         return;
     }
+    // Skip inputs that contain interior NULs; upstream xlsynth C API rejects
+    // these when converting to a C string, which would cause a harness panic.
+    if ir_text.contains('\0') {
+        return;
+    }
 
     // First, require that PIR parses as a package; otherwise, skip the sample.
     let pkg = match xlsynth_pir::ir_parser::Parser::new(&ir_text).parse_package() {
