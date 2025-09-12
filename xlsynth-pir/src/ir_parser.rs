@@ -187,10 +187,9 @@ impl Parser {
     }
 
     fn drop_whitespace(&mut self) {
-        // Consume consecutive whitespace characters.
+        // Consume only ASCII whitespace characters: space, tab, CR, LF.
         while let Some(c) = self.peekc() {
-            if c.is_whitespace() {
-                // Safe to unwrap because we just peeked a character.
+            if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
                 self.dropc().unwrap();
             } else {
                 break;
