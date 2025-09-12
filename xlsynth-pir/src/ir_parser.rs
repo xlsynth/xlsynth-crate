@@ -1487,7 +1487,7 @@ impl Parser {
         param: &ir::Param,
         node_env: &mut IrNodeEnv,
         nodes: &mut Vec<ir::Node>,
-    ) {
+    ) -> Result<(), ParseError> {
         assert!(!nodes.is_empty(), "nodes should not be empty");
         let node = ir::Node {
             text_id: param.id.get_wrapped_id(),
@@ -1497,8 +1497,11 @@ impl Parser {
             pos: None,
         };
         let node_ref = ir::NodeRef { index: nodes.len() };
-        node_env.add(Some(param.name.clone()), node.text_id, node_ref);
+        node_env
+            .add(Some(param.name.clone()), node.text_id, node_ref)
+            .map_err(ParseError::new)?;
         nodes.push(node);
+        Ok(())
     }
 
     pub fn parse_fn(&mut self) -> Result<ir::Fn, ParseError> {
@@ -1526,7 +1529,7 @@ impl Parser {
 
         // For each of the params add it as a node.
         for param in params.iter() {
-            self.add_param_as_node(param, &mut node_env, &mut nodes)
+            self.add_param_as_node(param, &mut node_env, &mut nodes)?
         }
 
         let mut ret_node_ref: Option<ir::NodeRef> = None;
@@ -1558,11 +1561,15 @@ impl Parser {
                     // Do not add a duplicate; use the existing node ref.
                     node_ref = existing;
                 } else {
-                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    node_env
+                        .add(node.name.clone(), node.text_id, node_ref)
+                        .map_err(ParseError::new)?;
                     nodes.push(node);
                 }
             } else {
-                node_env.add(node.name.clone(), node.text_id, node_ref);
+                node_env
+                    .add(node.name.clone(), node.text_id, node_ref)
+                    .map_err(ParseError::new)?;
                 nodes.push(node);
             }
             if is_ret {
@@ -1766,7 +1773,9 @@ impl Parser {
                         pos: None,
                     };
                     let node_ref = ir::NodeRef { index: nodes.len() };
-                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    node_env
+                        .add(node.name.clone(), node.text_id, node_ref)
+                        .map_err(ParseError::new)?;
                     nodes.push(node);
                     // Record input param for fn signature.
                     input_params.push((port_name, node_ty, id_val));
@@ -1826,7 +1835,9 @@ impl Parser {
                     self.offset = saved_offset;
                     let node = self.parse_node(&mut node_env)?;
                     let node_ref = ir::NodeRef { index: nodes.len() };
-                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    node_env
+                        .add(node.name.clone(), node.text_id, node_ref)
+                        .map_err(ParseError::new)?;
                     nodes.push(node);
                 }
                 Err(e) => return Err(e),
@@ -1932,7 +1943,7 @@ impl Parser {
             pos: None,
         };
         let ret_node_ref = ir::NodeRef { index: nodes.len() };
-        node_env.add(None, next_id, ret_node_ref);
+        let _ = node_env.add(None, next_id, ret_node_ref);
         nodes.push(tuple_node);
 
         Ok((
@@ -2399,8 +2410,8 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_tuple_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
-        node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
+        let _ = node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
         let input = "tuple.7: (token, bits[32]) = tuple(x, y, id=7)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2450,7 +2461,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_after_all_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
+        let _ = node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
         let input = "after_all.19: token = after_all(trace.17, id=19)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2464,7 +2475,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_after_all_node_with_pos() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
+        let _ = node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
         let input = "after_all.19: token = after_all(trace.17, id=19, pos=[(1,1,1)])";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
