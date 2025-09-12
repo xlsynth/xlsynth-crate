@@ -346,6 +346,46 @@ impl Parser {
         true
     }
 
+    fn is_ident_rest(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+
+    fn peek_keyword_is(&self, kw: &str) -> bool {
+        if !self.peek_is(kw) {
+            return false;
+        }
+        let next_index = self.offset + kw.len();
+        if next_index >= self.chars.len() {
+            return true;
+        }
+        let next_c = self.chars[next_index];
+        !Self::is_ident_rest(next_c)
+    }
+
+    fn try_drop_keyword(&mut self, kw: &str) -> bool {
+        self.drop_whitespace_and_comments();
+        if self.peek_keyword_is(kw) {
+            self.offset += kw.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn drop_keyword_or_error(&mut self, kw: &str, ctx: &str) -> Result<(), ParseError> {
+        self.drop_whitespace_and_comments();
+        if self.try_drop_keyword(kw) {
+            Ok(())
+        } else {
+            Err(ParseError::new(format!(
+                "expected keyword {:?} in {}; line: {:?}",
+                kw,
+                ctx,
+                self.current_line()
+            )))
+        }
+    }
+
     fn try_drop(&mut self, s: &str) -> bool {
         self.drop_whitespace_and_comments();
         if self.peek_is(s) {
@@ -1875,7 +1915,7 @@ impl Parser {
         let mut members: Vec<PackageMember> = Vec::new();
         let mut top_name: Option<String> = None;
 
-        self.drop_or_error("package")?;
+        self.drop_keyword_or_error("package", "package header")?;
         let package_name = self.pop_identifier_or_error("package name")?;
         log::debug!("package_name: {}", package_name);
 
@@ -1899,14 +1939,14 @@ impl Parser {
                 // Continue scanning for the next member after the attribute.
                 self.drop_whitespace_and_comments();
             }
-            if self.try_drop("top") {
+            if self.try_drop_keyword("top") {
                 // Allow whitespace/comments between `top` and the next keyword.
                 self.drop_whitespace_and_comments();
-                if self.peek_is("fn") {
+                if self.peek_keyword_is("fn") {
                     let f = self.parse_fn()?;
                     top_name = Some(f.name.clone());
                     members.push(PackageMember::Function(f));
-                } else if self.peek_is("block") {
+                } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
                     let (f, port_info) = self.parse_block_to_fn_with_ports()?;
                     top_name = Some(f.name.clone());
@@ -1917,23 +1957,23 @@ impl Parser {
                         self.rest()
                     )));
                 }
-            } else if self.peek_is("fn") {
+            } else if self.peek_keyword_is("fn") {
                 let f = self.parse_fn()?;
                 members.push(PackageMember::Function(f));
-            } else if self.peek_is("block") {
+            } else if self.peek_keyword_is("block") {
                 let (f, port_info) = self.parse_block_to_fn_with_ports()?;
                 members.push(PackageMember::Block { func: f, port_info });
-            } else if self.peek_is("proc") {
+            } else if self.peek_keyword_is("proc") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got proc; rest: {:?}",
                     self.rest()
                 )));
-            } else if self.peek_is("chan") {
+            } else if self.peek_keyword_is("chan") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got chan; rest: {:?}",
                     self.rest()
                 )));
-            } else if self.peek_is("file_number") {
+            } else if self.peek_keyword_is("file_number") {
                 self.parse_file_number(&mut file_table)?;
             } else {
                 return Err(ParseError::new(format!(
