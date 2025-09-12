@@ -445,6 +445,12 @@ impl Parser {
         } else {
             default_id
         };
+        if raw_id == 0 {
+            return Err(ParseError::new(format!(
+                "parameter id must be greater than zero, got 0; rest_of_line: {:?}",
+                self.rest_of_line()
+            )));
+        }
         let id = ir::ParamId::new(raw_id);
         Ok(ir::Param { name, ty, id })
     }
@@ -1328,6 +1334,12 @@ impl Parser {
                 let _name = self.pop_identifier_or_error("param name")?;
                 self.drop_or_error(",")?;
                 let raw_id = self.parse_id_attribute()?;
+                if raw_id == 0 {
+                    return Err(ParseError::new(format!(
+                        "param id must be greater than zero, got 0; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
                 let pid = ir::ParamId::new(raw_id);
                 (ir::NodePayload::GetParam(pid), raw_id)
             }
@@ -1651,6 +1663,11 @@ impl Parser {
                                 lhs_name
                             ))
                         })?;
+                    if id_val == 0 {
+                        return Err(ParseError::new(
+                            "input_port id must be greater than zero".to_string(),
+                        ));
+                    }
                     let pid = ir::ParamId::new(id_val);
                     let node = ir::Node {
                         text_id: id_val,
@@ -1732,6 +1749,12 @@ impl Parser {
         let mut params: Vec<ir::Param> = Vec::new();
         for (hname, hty) in header_ports.iter() {
             if let Some((_, _, id)) = input_params.iter().find(|(n, _, _)| n == hname) {
+                if *id == 0 {
+                    return Err(ParseError::new(format!(
+                        "input_port '{}' id must be greater than zero",
+                        hname
+                    )));
+                }
                 params.push(ir::Param {
                     name: hname.clone(),
                     ty: hty.clone(),
