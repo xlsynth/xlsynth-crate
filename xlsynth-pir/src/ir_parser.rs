@@ -241,6 +241,12 @@ impl Parser {
                 identifier.push(c);
             }
         }
+        if identifier.is_empty() {
+            return Err(ParseError::new(format!(
+                "in {} expected identifier, got EOF",
+                ctx
+            )));
+        }
         Ok(identifier)
     }
 
