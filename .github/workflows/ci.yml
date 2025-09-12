@@ -216,7 +216,7 @@ jobs:
       - name: Download and set up Boolector
         run: |
           mkdir -p boolector_libs
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
           sudo cp boolector_libs/libboolector.so /usr/lib/
           sudo ldconfig
           echo "Listing /usr/lib for libboolector.so:"
@@ -458,6 +458,14 @@ jobs:
           echo "LIBRARY_PATH=/usr/local/lib:$LIBRARY_PATH" >> $GITHUB_ENV
           echo "LDFLAGS=-L/usr/local/lib $LDFLAGS" >> $GITHUB_ENV
 
+      - name: Download Boolector dylib (macOS arm64)
+        run: |
+          sudo mkdir -p /usr/local/lib
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o libboolector-osx-arm64.dylib https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-osx-arm64.dylib
+          sudo install -m 0644 libboolector-osx-arm64.dylib /usr/local/lib/libboolector.dylib
+          sudo install_name_tool -id "@rpath/libboolector.dylib" /usr/local/lib/libboolector.dylib
+          rm -f libboolector-osx-arm64.dylib
+
       - name: Install protobuf compiler
         run: |
           curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-osx-aarch_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
@@ -527,7 +535,7 @@ jobs:
           DYLD_LIBRARY_PATH: /usr/local/lib
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-built,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
@@ -821,7 +829,7 @@ jobs:
       - name: Download and set up Boolector
         run: |
           mkdir -p boolector_libs
-          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
           sudo cp boolector_libs/libboolector.so /usr/lib/
           sudo ldconfig
 
