@@ -10,6 +10,7 @@ pub enum ErrorCategory {
     OperandUsesUndefined,
     DuplicateTextId,
     ReturnTypeMismatch,
+    MissingReturnNode,
     DuplicateParamName,
     MissingParamNode,
     ExtraParamNode,
@@ -27,6 +28,7 @@ pub fn categorize_pir_error(err: &ValidationError) -> ErrorCategory {
         ValidationError::OperandUsesUndefined { .. } => OperandUsesUndefined,
         ValidationError::DuplicateTextId { .. } => DuplicateTextId,
         ValidationError::ReturnTypeMismatch { .. } => ReturnTypeMismatch,
+        ValidationError::MissingReturnNode { .. } => MissingReturnNode,
         ValidationError::DuplicateParamName { .. } => DuplicateParamName,
         ValidationError::MissingParamNode { .. } => MissingParamNode,
         ValidationError::ExtraParamNode { .. } => ExtraParamNode,
@@ -63,6 +65,9 @@ pub fn categorize_xls_error_text(s: &str) -> ErrorCategory {
     }
     if lower.contains("return type") && lower.contains("mismatch") {
         return ReturnTypeMismatch;
+    }
+    if lower.contains("expected 'ret' in function") {
+        return MissingReturnNode;
     }
     if lower.contains("duplicate param") || lower.contains("duplicate parameter") {
         return DuplicateParamName;

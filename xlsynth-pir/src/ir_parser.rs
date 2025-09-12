@@ -321,7 +321,13 @@ impl Parser {
 
     fn pop_number_usize_or_error(&mut self, ctx: &str) -> Result<usize, ParseError> {
         let number = self.pop_number_string_or_error(ctx)?;
-        Ok(number.parse::<usize>().unwrap())
+        match number.parse::<usize>() {
+            Ok(v) => Ok(v),
+            Err(e) => Err(ParseError::new(format!(
+                "in {} expected unsigned integer, got {:?}: {}",
+                ctx, number, e
+            ))),
+        }
     }
 
     fn pop_bits_value_or_error(
@@ -1392,6 +1398,8 @@ impl Parser {
                 // If either the provided name or id refer to an existing parameter
                 // (from the function signature), require that they refer to the same
                 // node. This prevents mismatches like name=x but id=2 when x is id=1.
+                // If neither refer to an existing parameter, this is an unknown
+                // parameter name/id reference and should be rejected.
                 let by_name = node_env.name_id_to_ref(&NameOrId::Name(name_attr.clone()));
                 let by_id = node_env.name_id_to_ref(&NameOrId::Id(raw_id));
                 if by_name.is_some() || by_id.is_some() {
@@ -1404,6 +1412,11 @@ impl Parser {
                             )));
                         }
                     }
+                } else {
+                    return Err(ParseError::new(format!(
+                        "unknown parameter name in param node: {}",
+                        name_attr
+                    )));
                 }
                 let pid = ir::ParamId::new(raw_id);
                 (ir::NodePayload::GetParam(pid), raw_id)
@@ -2526,7 +2539,10 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = "x: bits[2][1] = param(name=x, id=1)";
         let mut parser = Parser::new(input);
-        let node = parser.parse_node(&mut IrNodeEnv::new()).unwrap();
+        let mut env = IrNodeEnv::new();
+        // Seed environment to simulate presence of header param x id=1
+        env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let node = parser.parse_node(&mut env).unwrap();
         println!("{:?}", node);
     }
 

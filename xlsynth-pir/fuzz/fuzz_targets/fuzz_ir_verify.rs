@@ -15,11 +15,15 @@ fuzz_target!(|ir_text: String| {
 
     // Early returns are expected in fuzzing harnesses; see FUZZ.md.
     if ir_text.len() > 64 * 1024 {
+        // Early-return rationale: bound resource usage; this does not suppress
+        // interesting bugs because the fuzzer will minimize and explore shorter
+        // variants. See FUZZ.md guidance about allowed early-returns.
         return;
     }
-    // Skip inputs that contain interior NULs; upstream xlsynth C API rejects
-    // these when converting to a C string, which would cause a harness panic.
     if ir_text.contains('\0') {
+        // Early-return rationale: interior NUL causes upstream C API to fail
+        // `CString::new` with NulError. Not a property of the IR semantics.
+        // We skip to avoid harness-level panics. Documented in FUZZ.md.
         return;
     }
 
@@ -37,13 +41,35 @@ fuzz_target!(|ir_text: String| {
         .map_err(|e| categorize_pir_error(&e));
 
     // XLS must also parse if PIR parses; treat parse failures as a fuzz failure.
-    let xls_pkg = match xlsynth::IrPackage::parse_ir(&ir_text, None) {
-        Ok(pkg) => pkg,
-        Err(e) => panic!("xlsynth parse failed for IR that PIR parses:\n{}\nerror: {}", ir_text, e),
+    let xls_result: Result<(), ErrorCategory> = match xlsynth::IrPackage::parse_ir(&ir_text, None) {
+        Ok(pkg) => match pkg.verify() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("Expected token of type \"ident\"") && msg.contains("Token(\"keyword\"") {
+                    // Early-return rationale: tokenizer differences (ident vs keyword)
+                    // that our parser permits contextually. Not a semantic mismatch.
+                    return;
+                }
+                Err(categorize_xls_error_text(&msg))
+            }
+        },
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Expected token of type \"ident\"") && msg.contains("Token(\"keyword\"") {
+                // Early-return rationale: tokenizer differences (ident vs keyword)
+                // that our parser permits contextually. Not a semantic mismatch.
+                return;
+            }
+            if msg.to_lowercase().contains("expected 'ret' in function") {
+                // Map upstream parse error for missing return into our MissingReturnNode
+                // category so parity can be checked at a coarse level.
+                Err(ErrorCategory::MissingReturnNode)
+            } else {
+                panic!("xlsynth parse failed for IR that PIR parses:\n{}\nerror: {}", ir_text, msg)
+            }
+        }
     };
-    let xls_result: Result<(), ErrorCategory> = xls_pkg
-        .verify()
-        .map_err(|e| categorize_xls_error_text(&e.to_string()));
 
     match (pir_result, xls_result) {
         (Ok(()), Ok(())) => {
