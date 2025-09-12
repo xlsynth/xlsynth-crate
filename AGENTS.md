@@ -35,6 +35,8 @@ All fuzz targets must be documented in `FUZZ.md` with a short paragraph describi
 
 When a fuzz target chooses to early-return on an error (instead of panicking), include a brief comment explaining why the error is not considered a sample failure. Examples: degenerate inputs, known unsupported generator outputs, or infrastructure issues that are not properties of the fuzz sample. This makes intent clear and prevents future regressions from reclassifying benign cases as failures.
 
+Document these rationales as comments immediately above the early-returning block or condition in the fuzz target source, not in `FUZZ.md`. `FUZZ.md` should remain an overview map of targets and their aims.
+
 ### Prefer Flagging Unexpected Failures (Overtesting is OK)
 
 It's acceptable (and encouraged) for fuzz targets to flag failures that are not strictly the primary focus of that target, when those failures indicate violations of normal API expectations or invariants (e.g., parse failures on our own pretty-printed text). Our goal is an overall system with strong, composable guarantees; surfacing unexpected failures early helps preserve those guarantees.
