@@ -731,12 +731,12 @@ mod tests {
         }
         "#;
         let mut parser = Parser::new(ir);
-        let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
-        assert!(matches!(
-            validate_fn(f, &pkg),
-            Err(ValidationError::ParamIdMismatch { .. })
-        ));
+        // Now rejected at parse-time due to name/id mismatch on param node.
+        let err = parser.parse_package().unwrap_err();
+        assert_eq!(
+            format!("{}", err),
+            "ParseError: param name/id mismatch: name=x id=1"
+        );
     }
 
     #[test]

@@ -1380,7 +1380,7 @@ impl Parser {
             }
             "param" => {
                 self.drop_or_error("name=")?;
-                let _name = self.pop_identifier_or_error("param name")?;
+                let name_attr = self.pop_identifier_or_error("param name")?;
                 self.drop_or_error(",")?;
                 let raw_id = self.parse_id_attribute()?;
                 if raw_id == 0 {
@@ -1388,6 +1388,22 @@ impl Parser {
                         "param id must be greater than zero, got 0; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
+                }
+                // If either the provided name or id refer to an existing parameter
+                // (from the function signature), require that they refer to the same
+                // node. This prevents mismatches like name=x but id=2 when x is id=1.
+                let by_name = node_env.name_id_to_ref(&NameOrId::Name(name_attr.clone()));
+                let by_id = node_env.name_id_to_ref(&NameOrId::Id(raw_id));
+                if by_name.is_some() || by_id.is_some() {
+                    match (by_name, by_id) {
+                        (Some(nr_name), Some(nr_id)) if nr_name == nr_id => {}
+                        _ => {
+                            return Err(ParseError::new(format!(
+                                "param name/id mismatch: name={} id={}",
+                                name_attr, raw_id
+                            )));
+                        }
+                    }
                 }
                 let pid = ir::ParamId::new(raw_id);
                 (ir::NodePayload::GetParam(pid), raw_id)
