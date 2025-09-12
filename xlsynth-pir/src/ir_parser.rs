@@ -220,7 +220,7 @@ impl Parser {
         let mut identifier = String::new();
         while let Some(c) = self.peekc() {
             if identifier.is_empty() {
-                let is_valid_start = c.is_alphabetic() || c == '_';
+                let is_valid_start = Self::is_ident_start(c);
                 if !is_valid_start {
                     return Err(ParseError::new(format!(
                         "in {} expected identifier, got {:?}; rest_of_line: {:?}",
@@ -232,7 +232,7 @@ impl Parser {
                 self.dropc()?;
                 identifier.push(c);
             } else {
-                let is_valid_rest = c.is_alphanumeric() || c == '_';
+                let is_valid_rest = Self::is_ident_rest(c);
                 if !is_valid_rest {
                     return Ok(identifier);
                 }
@@ -346,8 +346,12 @@ impl Parser {
         true
     }
 
+    fn is_ident_start(c: char) -> bool {
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+    }
+
     fn is_ident_rest(c: char) -> bool {
-        c.is_alphanumeric() || c == '_'
+        Self::is_ident_start(c) || (c >= '0' && c <= '9')
     }
 
     fn peek_keyword_is(&self, kw: &str) -> bool {

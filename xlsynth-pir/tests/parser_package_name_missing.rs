@@ -32,3 +32,20 @@ fn package_keyword_requires_delimiter() {
         msg
     );
 }
+
+#[test]
+fn non_ascii_identifier_is_rejected() {
+    // Non-ASCII letter in package name should be rejected.
+    let ir =
+        "package Қ\n\nfn f() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1)\n}\n";
+    let mut p = Parser::new(ir);
+    let err = p
+        .parse_package()
+        .expect_err("expected parse error for non-ascii identifier");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("expected identifier"),
+        "unexpected error: {}",
+        msg
+    );
+}
