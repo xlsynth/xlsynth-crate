@@ -223,7 +223,8 @@ pub fn verify_fn_types_agree_with_deduction_in_pkg(f: &Fn, pkg: &Package) -> Res
         for nr in op_refs.iter() {
             op_types.push(f.get_node(*nr).ty.clone());
         }
-        let resolver = |name: &str| -> Option<Type> { pkg.get_fn_ret_type(name) };
+        let resolver =
+            |name: &str| -> Option<Type> { pkg.get_fn_type(name).map(|ft| ft.return_type) };
         match deduce_result_type_with(&node.payload, &op_types, resolver)
             .map_err(|e| e.to_string())?
         {
