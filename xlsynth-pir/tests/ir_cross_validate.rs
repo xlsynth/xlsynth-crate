@@ -2,7 +2,10 @@
 
 use xlsynth::IrPackage as XlsIrPackage;
 use xlsynth_pir::ir_parser::Parser as PirParser;
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_validate::{self};
+use xlsynth_pir::ir_verify_parity::{
+    ErrorCategory, categorize_pir_error, categorize_xls_error_text,
+};
 
 fn verify_with_pir(ir_text: &str) -> bool {
     let mut p = PirParser::new(ir_text);
@@ -26,6 +29,32 @@ fn assert_cross_validates_same(ir_text: &str) {
         pir_ok, xls_ok,
         "verification parity mismatch for IR:\n{}",
         ir_text
+    );
+}
+
+fn assert_error_category_matches(ir_text: &str) {
+    // PIR
+    let pir_err = {
+        let mut p = PirParser::new(ir_text);
+        let pkg = p.parse_package().expect("parse package");
+        ir_validate::validate_package(&pkg).expect_err("expect PIR verify to fail")
+    };
+    let pir_cat = categorize_pir_error(&pir_err);
+
+    // XLS reference
+    let xls_err = match XlsIrPackage::parse_ir(ir_text, None) {
+        Ok(pkg) => pkg
+            .verify()
+            .expect_err("expect xls verify to fail")
+            .to_string(),
+        Err(e) => e.to_string(),
+    };
+    let xls_cat = categorize_xls_error_text(&xls_err);
+
+    assert_eq!(
+        pir_cat, xls_cat,
+        "category mismatch: PIR={:?} XLS={}\nIR=\n{}",
+        pir_cat, xls_err, ir_text
     );
 }
 
@@ -62,4 +91,22 @@ fn f(x: bits[8] id=1) -> bits[8] {
 }
 "#;
     assert_cross_validates_same(ir);
+    assert_error_category_matches(ir);
+}
+
+#[test]
+fn cross_validate_invoke_type_mismatch_category_matches() {
+    let ir = r#"
+package test
+
+fn callee(x: bits[1] id=1) -> (bits[1], bits[1]) {
+  ret tuple.3: (bits[1], bits[1]) = tuple(x, x, id=3)
+}
+
+fn foo(x: bits[1] id=1) -> bits[1] {
+  invoke.2: bits[1] = invoke(x, to_apply=callee, id=2)
+  ret identity.3: bits[1] = identity(invoke.2, id=3)
+}
+"#;
+    assert_error_category_matches(ir);
 }

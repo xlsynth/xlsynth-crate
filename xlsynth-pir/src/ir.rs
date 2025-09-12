@@ -1386,6 +1386,12 @@ impl Package {
             }
         }
     }
+
+    /// Returns the function type (parameter types and return type) for the
+    /// function named `name`, if present in the package.
+    pub fn get_fn_type(&self, name: &str) -> Option<FunctionType> {
+        self.get_fn(name).map(|f| f.get_type())
+    }
 }
 
 impl std::fmt::Display for Package {

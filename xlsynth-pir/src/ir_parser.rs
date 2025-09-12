@@ -187,10 +187,9 @@ impl Parser {
     }
 
     fn drop_whitespace(&mut self) {
-        // Consume consecutive whitespace characters.
+        // Consume only ASCII whitespace characters: space, tab, CR, LF.
         while let Some(c) = self.peekc() {
-            if c.is_whitespace() {
-                // Safe to unwrap because we just peeked a character.
+            if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
                 self.dropc().unwrap();
             } else {
                 break;
@@ -221,7 +220,7 @@ impl Parser {
         let mut identifier = String::new();
         while let Some(c) = self.peekc() {
             if identifier.is_empty() {
-                let is_valid_start = c.is_alphabetic() || c == '_';
+                let is_valid_start = Self::is_ident_start(c);
                 if !is_valid_start {
                     return Err(ParseError::new(format!(
                         "in {} expected identifier, got {:?}; rest_of_line: {:?}",
@@ -233,13 +232,19 @@ impl Parser {
                 self.dropc()?;
                 identifier.push(c);
             } else {
-                let is_valid_rest = c.is_alphanumeric() || c == '_';
+                let is_valid_rest = Self::is_ident_rest(c);
                 if !is_valid_rest {
                     return Ok(identifier);
                 }
                 self.dropc()?;
                 identifier.push(c);
             }
+        }
+        if identifier.is_empty() {
+            return Err(ParseError::new(format!(
+                "in {} expected identifier, got EOF",
+                ctx
+            )));
         }
         Ok(identifier)
     }
@@ -248,13 +253,23 @@ impl Parser {
         self.drop_whitespace_and_comments();
         self.drop_or_error("\"")?;
         let mut string = String::new();
+        let mut closed = false;
         while let Some(c) = self.peekc() {
             if c == '"' {
                 self.dropc()?;
+                closed = true;
                 break;
+            }
+            if c == '\n' || c == '\r' {
+                // Strings cannot span lines in XLS IR; treat newline before closing
+                // quote as unterminated.
+                return Err(ParseError::new("unterminated quoted string".to_string()));
             }
             string.push(c);
             self.dropc()?;
+        }
+        if !closed {
+            return Err(ParseError::new("unterminated quoted string".to_string()));
         }
         Ok(string)
     }
@@ -316,7 +331,13 @@ impl Parser {
 
     fn pop_number_usize_or_error(&mut self, ctx: &str) -> Result<usize, ParseError> {
         let number = self.pop_number_string_or_error(ctx)?;
-        Ok(number.parse::<usize>().unwrap())
+        match number.parse::<usize>() {
+            Ok(v) => Ok(v),
+            Err(e) => Err(ParseError::new(format!(
+                "in {} expected unsigned integer, got {:?}: {}",
+                ctx, number, e
+            ))),
+        }
     }
 
     fn pop_bits_value_or_error(
@@ -339,6 +360,50 @@ impl Parser {
             }
         }
         true
+    }
+
+    fn is_ident_start(c: char) -> bool {
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+    }
+
+    fn is_ident_rest(c: char) -> bool {
+        Self::is_ident_start(c) || (c >= '0' && c <= '9')
+    }
+
+    fn peek_keyword_is(&self, kw: &str) -> bool {
+        if !self.peek_is(kw) {
+            return false;
+        }
+        let next_index = self.offset + kw.len();
+        if next_index >= self.chars.len() {
+            return true;
+        }
+        let next_c = self.chars[next_index];
+        !Self::is_ident_rest(next_c)
+    }
+
+    fn try_drop_keyword(&mut self, kw: &str) -> bool {
+        self.drop_whitespace_and_comments();
+        if self.peek_keyword_is(kw) {
+            self.offset += kw.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn drop_keyword_or_error(&mut self, kw: &str, ctx: &str) -> Result<(), ParseError> {
+        self.drop_whitespace_and_comments();
+        if self.try_drop_keyword(kw) {
+            Ok(())
+        } else {
+            Err(ParseError::new(format!(
+                "expected keyword {:?} in {}; line: {:?}",
+                kw,
+                ctx,
+                self.current_line()
+            )))
+        }
     }
 
     fn try_drop(&mut self, s: &str) -> bool {
@@ -445,6 +510,12 @@ impl Parser {
         } else {
             default_id
         };
+        if raw_id == 0 {
+            return Err(ParseError::new(format!(
+                "parameter id must be greater than zero, got 0; rest_of_line: {:?}",
+                self.rest_of_line()
+            )));
+        }
         let id = ir::ParamId::new(raw_id);
         Ok(ir::Param { name, ty, id })
     }
@@ -1325,9 +1396,38 @@ impl Parser {
             }
             "param" => {
                 self.drop_or_error("name=")?;
-                let _name = self.pop_identifier_or_error("param name")?;
+                let name_attr = self.pop_identifier_or_error("param name")?;
                 self.drop_or_error(",")?;
                 let raw_id = self.parse_id_attribute()?;
+                if raw_id == 0 {
+                    return Err(ParseError::new(format!(
+                        "param id must be greater than zero, got 0; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                // If either the provided name or id refer to an existing parameter
+                // (from the function signature), require that they refer to the same
+                // node. This prevents mismatches like name=x but id=2 when x is id=1.
+                // If neither refer to an existing parameter, this is an unknown
+                // parameter name/id reference and should be rejected.
+                let by_name = node_env.name_id_to_ref(&NameOrId::Name(name_attr.clone()));
+                let by_id = node_env.name_id_to_ref(&NameOrId::Id(raw_id));
+                if by_name.is_some() || by_id.is_some() {
+                    match (by_name, by_id) {
+                        (Some(nr_name), Some(nr_id)) if nr_name == nr_id => {}
+                        _ => {
+                            return Err(ParseError::new(format!(
+                                "param name/id mismatch: name={} id={}",
+                                name_attr, raw_id
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(ParseError::new(format!(
+                        "unknown parameter name in param node: {}",
+                        name_attr
+                    )));
+                }
                 let pid = ir::ParamId::new(raw_id);
                 (ir::NodePayload::GetParam(pid), raw_id)
             }
@@ -1397,7 +1497,7 @@ impl Parser {
         param: &ir::Param,
         node_env: &mut IrNodeEnv,
         nodes: &mut Vec<ir::Node>,
-    ) {
+    ) -> Result<(), ParseError> {
         assert!(!nodes.is_empty(), "nodes should not be empty");
         let node = ir::Node {
             text_id: param.id.get_wrapped_id(),
@@ -1407,8 +1507,11 @@ impl Parser {
             pos: None,
         };
         let node_ref = ir::NodeRef { index: nodes.len() };
-        node_env.add(Some(param.name.clone()), node.text_id, node_ref);
+        node_env
+            .add(Some(param.name.clone()), node.text_id, node_ref)
+            .map_err(ParseError::new)?;
         nodes.push(node);
+        Ok(())
     }
 
     pub fn parse_fn(&mut self) -> Result<ir::Fn, ParseError> {
@@ -1436,7 +1539,7 @@ impl Parser {
 
         // For each of the params add it as a node.
         for param in params.iter() {
-            self.add_param_as_node(param, &mut node_env, &mut nodes)
+            self.add_param_as_node(param, &mut node_env, &mut nodes)?
         }
 
         let mut ret_node_ref: Option<ir::NodeRef> = None;
@@ -1454,14 +1557,29 @@ impl Parser {
                     .name_id_to_ref(&crate::ir_node_env::NameOrId::Id(node.text_id))
                     .copied()
                 {
+                    // If a GetParam node with this id already exists (from the
+                    // function signature), ensure the textual node's type matches
+                    // the existing param node type. If not, this is a parse-time
+                    // error (mirrors upstream xlsynth behavior).
+                    let existing_ty = &nodes[existing.index].ty;
+                    if existing_ty != &node.ty {
+                        return Err(ParseError::new(format!(
+                            "param id={} type mismatch: header {} vs node {}",
+                            node.text_id, existing_ty, node.ty
+                        )));
+                    }
                     // Do not add a duplicate; use the existing node ref.
                     node_ref = existing;
                 } else {
-                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    node_env
+                        .add(node.name.clone(), node.text_id, node_ref)
+                        .map_err(ParseError::new)?;
                     nodes.push(node);
                 }
             } else {
-                node_env.add(node.name.clone(), node.text_id, node_ref);
+                node_env
+                    .add(node.name.clone(), node.text_id, node_ref)
+                    .map_err(ParseError::new)?;
                 nodes.push(node);
             }
             if is_ret {
@@ -1651,6 +1769,11 @@ impl Parser {
                                 lhs_name
                             ))
                         })?;
+                    if id_val == 0 {
+                        return Err(ParseError::new(
+                            "input_port id must be greater than zero".to_string(),
+                        ));
+                    }
                     let pid = ir::ParamId::new(id_val);
                     let node = ir::Node {
                         text_id: id_val,
@@ -1660,7 +1783,9 @@ impl Parser {
                         pos: None,
                     };
                     let node_ref = ir::NodeRef { index: nodes.len() };
-                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    node_env
+                        .add(node.name.clone(), node.text_id, node_ref)
+                        .map_err(ParseError::new)?;
                     nodes.push(node);
                     // Record input param for fn signature.
                     input_params.push((port_name, node_ty, id_val));
@@ -1720,7 +1845,9 @@ impl Parser {
                     self.offset = saved_offset;
                     let node = self.parse_node(&mut node_env)?;
                     let node_ref = ir::NodeRef { index: nodes.len() };
-                    node_env.add(node.name.clone(), node.text_id, node_ref);
+                    node_env
+                        .add(node.name.clone(), node.text_id, node_ref)
+                        .map_err(ParseError::new)?;
                     nodes.push(node);
                 }
                 Err(e) => return Err(e),
@@ -1732,6 +1859,12 @@ impl Parser {
         let mut params: Vec<ir::Param> = Vec::new();
         for (hname, hty) in header_ports.iter() {
             if let Some((_, _, id)) = input_params.iter().find(|(n, _, _)| n == hname) {
+                if *id == 0 {
+                    return Err(ParseError::new(format!(
+                        "input_port '{}' id must be greater than zero",
+                        hname
+                    )));
+                }
                 params.push(ir::Param {
                     name: hname.clone(),
                     ty: hty.clone(),
@@ -1820,7 +1953,7 @@ impl Parser {
             pos: None,
         };
         let ret_node_ref = ir::NodeRef { index: nodes.len() };
-        node_env.add(None, next_id, ret_node_ref);
+        let _ = node_env.add(None, next_id, ret_node_ref);
         nodes.push(tuple_node);
 
         Ok((
@@ -1847,7 +1980,7 @@ impl Parser {
         let mut members: Vec<PackageMember> = Vec::new();
         let mut top_name: Option<String> = None;
 
-        self.drop_or_error("package")?;
+        self.drop_keyword_or_error("package", "package header")?;
         let package_name = self.pop_identifier_or_error("package name")?;
         log::debug!("package_name: {}", package_name);
 
@@ -1871,14 +2004,14 @@ impl Parser {
                 // Continue scanning for the next member after the attribute.
                 self.drop_whitespace_and_comments();
             }
-            if self.try_drop("top") {
+            if self.try_drop_keyword("top") {
                 // Allow whitespace/comments between `top` and the next keyword.
                 self.drop_whitespace_and_comments();
-                if self.peek_is("fn") {
+                if self.peek_keyword_is("fn") {
                     let f = self.parse_fn()?;
                     top_name = Some(f.name.clone());
                     members.push(PackageMember::Function(f));
-                } else if self.peek_is("block") {
+                } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
                     let (f, port_info) = self.parse_block_to_fn_with_ports()?;
                     top_name = Some(f.name.clone());
@@ -1889,23 +2022,23 @@ impl Parser {
                         self.rest()
                     )));
                 }
-            } else if self.peek_is("fn") {
+            } else if self.peek_keyword_is("fn") {
                 let f = self.parse_fn()?;
                 members.push(PackageMember::Function(f));
-            } else if self.peek_is("block") {
+            } else if self.peek_keyword_is("block") {
                 let (f, port_info) = self.parse_block_to_fn_with_ports()?;
                 members.push(PackageMember::Block { func: f, port_info });
-            } else if self.peek_is("proc") {
+            } else if self.peek_keyword_is("proc") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got proc; rest: {:?}",
                     self.rest()
                 )));
-            } else if self.peek_is("chan") {
+            } else if self.peek_keyword_is("chan") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got chan; rest: {:?}",
                     self.rest()
                 )));
-            } else if self.peek_is("file_number") {
+            } else if self.peek_keyword_is("file_number") {
                 self.parse_file_number(&mut file_table)?;
             } else {
                 return Err(ParseError::new(format!(
@@ -2287,8 +2420,8 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_tuple_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
-        node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
+        let _ = node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
         let input = "tuple.7: (token, bits[32]) = tuple(x, y, id=7)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2338,7 +2471,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_after_all_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
+        let _ = node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
         let input = "after_all.19: token = after_all(trace.17, id=19)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2352,7 +2485,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_after_all_node_with_pos() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
+        let _ = node_env.add(Some("trace".to_string()), 17, ir::NodeRef { index: 17 });
         let input = "after_all.19: token = after_all(trace.17, id=19, pos=[(1,1,1)])";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2427,7 +2560,10 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = "x: bits[2][1] = param(name=x, id=1)";
         let mut parser = Parser::new(input);
-        let node = parser.parse_node(&mut IrNodeEnv::new()).unwrap();
+        let mut env = IrNodeEnv::new();
+        // Seed environment to simulate presence of header param x id=1
+        env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let node = parser.parse_node(&mut env).unwrap();
         println!("{:?}", node);
     }
 

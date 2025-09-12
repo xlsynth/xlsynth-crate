@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use crate::ir::{self, Fn, NodePayload, Package, PackageMember, Type};
-use crate::ir_deduce::deduce_result_type;
+use crate::ir_deduce::{deduce_result_type, deduce_result_type_with};
 use crate::ir_utils::operands;
 
 /// Verifies that all node text IDs within a function are unique.
@@ -213,6 +213,38 @@ pub fn verify_package_unique_node_ids(pkg: &Package) -> Result<(), String> {
     Ok(())
 }
 
+/// Like `verify_fn_types_agree_with_deduction`, but allows providing a
+/// resolver for callee return types so that `invoke` result types can be
+/// checked when package context is available.
+pub fn verify_fn_types_agree_with_deduction_in_pkg(f: &Fn, pkg: &Package) -> Result<(), String> {
+    for (i, node) in f.nodes.iter().enumerate() {
+        let op_refs = operands(&node.payload);
+        let mut op_types: Vec<Type> = Vec::with_capacity(op_refs.len());
+        for nr in op_refs.iter() {
+            op_types.push(f.get_node(*nr).ty.clone());
+        }
+        let resolver =
+            |name: &str| -> Option<Type> { pkg.get_fn_type(name).map(|ft| ft.return_type) };
+        match deduce_result_type_with(&node.payload, &op_types, resolver)
+            .map_err(|e| e.to_string())?
+        {
+            Some(deduced) => {
+                if deduced != node.ty {
+                    return Err(format!(
+                        "type mismatch for node {} ({}): deduced {} vs actual {}",
+                        i,
+                        node.payload.get_operator(),
+                        deduced,
+                        node.ty
+                    ));
+                }
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +262,32 @@ fn foo(x: bits[8] id=1) -> bits[16] {
         let f = parser.parse_fn().expect("parse fn");
         // add node is declared bits[16] but deduction expects bits[8]; should error.
         assert!(verify_fn_types_agree_with_deduction(&f).is_err());
+    }
+
+    #[test]
+    fn type_mismatch_on_invoke_is_flagged_with_pkg_context() {
+        let ir = r#"
+package test
+
+fn callee(x: bits[1] id=1) -> (bits[1], bits[1]) {
+  ret tuple.3: (bits[1], bits[1]) = tuple(x, x, id=3)
+}
+
+fn foo(x: bits[1] id=1) -> bits[1] {
+  invoke.2: bits[1] = invoke(x, to_apply=callee, id=2)
+  ret identity.3: bits[1] = identity(invoke.2, id=3)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().expect("parse package");
+        let foo_fn = pkg
+            .members
+            .iter()
+            .find_map(|m| match m {
+                PackageMember::Function(f) if f.name == "foo" => Some(f.clone()),
+                _ => None,
+            })
+            .expect("find foo");
+        assert!(verify_fn_types_agree_with_deduction_in_pkg(&foo_fn, &pkg).is_err());
     }
 }

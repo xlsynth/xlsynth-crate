@@ -1,6 +1,6 @@
 ## Fuzz Targets Overview
 
-This document lists the fuzz targets in the repository and summarizes what each one exercises at a high level. Each entry describes the essential property under test and the major failure modes it is intended to surface.
+This document lists the fuzz targets in the repository and summarizes what each one exercises at a high level. Each entry describes the essential property under test and the major failure modes it is intended to surface. Per-target early-return rationales are documented inline in the target source above the relevant condition, not here.
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
@@ -51,11 +51,7 @@ Differentially compares our Rust IR function interpreter (`eval_fn`) with the xl
 - Samples argument values that match the function parameter types using an `Arbitrary`-driven seed.
 - Evaluates with both engines and asserts the results are equal.
 
-Early-return rationale:
-
-- Skips inputs that contain IR operations not yet supported by `eval_pure`/`eval_fn` (e.g., reverse, concat, extends, etc.). These are tracked and will be enabled as support lands.
-- Skips degenerate generator inputs (e.g., empty op lists, zero-width inputs) to avoid biasing toward trivial cases.
-- If the external interpreter or parser rejects a sample due to unrelated infrastructure issues, the target returns early rather than classify as a sample failure.
+See inline comments in the target source for early-return rationales.
 
 Primarily tests:
 
@@ -116,11 +112,7 @@ Generates a random XLS IR function via the C++ builder, reparses into the Rust I
 
 Non-default orderings are constructed by permuting the default `OutlineOrdering` while preserving validity (same coverage, no duplicates). The PRNG is seeded from a stable hash of the package text, ensuring reproducible behavior for a given sample.
 
-Early-return rationale:
-
-- Skips degenerate generator inputs (e.g., empty op lists, zero-width inputs) as they are uninformative for outlining.
-- Skips selections that produce no boundary outputs (e.g., fully internal islands that are not used externally), since outlining such regions would be vacuous.
-- If the C++ package string fails to parse in Rust (unexpected), the target panics to flag a systemic issue rather than silently skip.
+See inline comments in the target source for early-return rationales.
 
 Primarily tests:
 

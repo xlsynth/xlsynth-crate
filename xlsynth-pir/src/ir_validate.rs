@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use super::ir::{Fn, NaryOp, NodePayload, Package, PackageMember, Type};
+use super::ir_deduce::deduce_result_type_with;
 use super::ir_utils::operands;
 
 /// Errors that can arise during validation of XLS IR structures.
@@ -76,6 +77,20 @@ pub enum ValidationError {
         node_index: usize,
         name: String,
         expected_id: usize,
+    },
+    /// A node's declared type does not match the type deduced from its
+    /// operator and operand types.
+    NodeTypeMismatch {
+        func: String,
+        node_index: usize,
+        deduced: Type,
+        actual: Type,
+    },
+    /// Type deduction failed for a node due to an internal error.
+    TypeDeductionFailure {
+        func: String,
+        node_index: usize,
+        reason: String,
     },
 }
 
@@ -202,6 +217,29 @@ impl std::fmt::Display for ValidationError {
                     func, node_index, name, expected_id
                 )
             }
+            ValidationError::NodeTypeMismatch {
+                func,
+                node_index,
+                deduced,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} type mismatch: deduced {} vs actual {}",
+                    func, node_index, deduced, actual
+                )
+            }
+            ValidationError::TypeDeductionFailure {
+                func,
+                node_index,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} type deduction failed: {}",
+                    func, node_index, reason
+                )
+            }
         }
     }
 }
@@ -261,6 +299,21 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
 
 /// Validates a function within the context of its parent package.
 pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
+    validate_fn_with(f, parent, |name: &str| {
+        parent.get_fn_type(name).map(|ft| ft.return_type)
+    })
+}
+
+/// Validates a function within the context of its parent package, using a
+/// dependency-injected resolver for callee return types.
+pub fn validate_fn_with<F>(
+    f: &Fn,
+    parent: &Package,
+    callee_ret_type_resolver: F,
+) -> Result<(), ValidationError>
+where
+    F: std::ops::Fn(&str) -> Option<Type>,
+{
     // Track ids used by non-parameter nodes to ensure uniqueness.
     let mut seen_nonparam_ids: HashSet<usize> = HashSet::new();
     // Track GetParam node ids to verify 1:1 mapping with signature params.
@@ -425,6 +478,37 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
                 NaryOp::Concat => {
                     // Does not require identical types across all operands.
                 }
+            }
+        }
+
+        // After structural checks, ensure deduced node type matches declared.
+        let op_refs = operands(&node.payload);
+        let mut op_types: Vec<Type> = Vec::with_capacity(op_refs.len());
+        for nr in op_refs.iter() {
+            op_types.push(f.get_node(*nr).ty.clone());
+        }
+        match deduce_result_type_with(&node.payload, &op_types, |callee| {
+            callee_ret_type_resolver(callee)
+        }) {
+            Ok(Some(deduced)) => {
+                if deduced != node.ty {
+                    return Err(ValidationError::NodeTypeMismatch {
+                        func: f.name.clone(),
+                        node_index: i,
+                        deduced,
+                        actual: node.ty.clone(),
+                    });
+                }
+            }
+            Ok(None) => {
+                // No deduction available for this payload; skip.
+            }
+            Err(e) => {
+                return Err(ValidationError::TypeDeductionFailure {
+                    func: f.name.clone(),
+                    node_index: i,
+                    reason: e.to_string(),
+                });
             }
         }
     }
@@ -647,12 +731,12 @@ mod tests {
         }
         "#;
         let mut parser = Parser::new(ir);
-        let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
-        assert!(matches!(
-            validate_fn(f, &pkg),
-            Err(ValidationError::ParamIdMismatch { .. })
-        ));
+        // Now rejected at parse-time due to name/id mismatch on param node.
+        let err = parser.parse_package().unwrap_err();
+        assert_eq!(
+            format!("{}", err),
+            "ParseError: param name/id mismatch: name=x id=1"
+        );
     }
 
     #[test]
@@ -749,5 +833,29 @@ mod tests {
             validate_fn(f, &pkg),
             Err(ValidationError::DuplicateParamName { .. })
         ));
+    }
+
+    #[test]
+    fn package_level_invoke_type_mismatch_fails() {
+        let ir = r#"
+        package test
+
+        fn callee(x: bits[1] id=1) -> (bits[1], bits[1]) {
+          ret tuple.3: (bits[1], bits[1]) = tuple(x, x, id=3)
+        }
+
+        fn foo(x: bits[1] id=1) -> bits[1] {
+          invoke.2: bits[1] = invoke(x, to_apply=callee, id=2)
+          ret identity.3: bits[1] = identity(invoke.2, id=3)
+        }
+        "#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        // Public entry point should surface a node type mismatch error.
+        let err = validate_package(&pkg).unwrap_err();
+        match err {
+            ValidationError::NodeTypeMismatch { .. } => {}
+            other => panic!("expected NodeTypeMismatch, got {:?}", other),
+        }
     }
 }

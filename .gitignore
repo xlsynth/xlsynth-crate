@@ -4,6 +4,9 @@ target/
 xlsynth-g8r/fuzz/Cargo.lock
 xlsynth-g8r/fuzz/corpus/
 xlsynth-g8r/fuzz/artifacts/
+xlsynth-pir/fuzz/Cargo.lock
+xlsynth-pir/fuzz/corpus/
+xlsynth-pir/fuzz/artifacts/
 __pycache__
 .pytest_cache
 .ruff_cache

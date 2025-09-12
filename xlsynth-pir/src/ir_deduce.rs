@@ -73,6 +73,21 @@ pub fn deduce_result_type(
     payload: &NodePayload,
     operand_types: &[Type],
 ) -> Result<Option<Type>, DeduceError> {
+    // Backwards-compatible entry point: no callee resolution provided.
+    deduce_result_type_with(payload, operand_types, |_| None)
+}
+
+/// Like `deduce_result_type` but allows callers to provide a resolver for
+/// callee return types (e.g., to deduce `invoke` result types with package
+/// context available).
+pub fn deduce_result_type_with<F>(
+    payload: &NodePayload,
+    operand_types: &[Type],
+    mut resolve_callee_ret_ty: F,
+) -> Result<Option<Type>, DeduceError>
+where
+    F: FnMut(&str) -> Option<Type>,
+{
     match payload {
         NodePayload::Nil => Ok(Some(Type::nil())),
         NodePayload::GetParam(_) => Ok(None),
@@ -375,7 +390,7 @@ pub fn deduce_result_type(
                 .get(0)
                 .ok_or(DeduceError::MissingOperand("encode.arg"))?;
             match arg_ty {
-                Type::Bits(w) => Ok(Some(Type::Bits(ceil_log2_with_min_one(*w)))),
+                Type::Bits(w) => Ok(Some(Type::Bits(ceil_log2(*w)))),
                 _ => Err(DeduceError::ExpectedBits("encode")),
             }
         }
@@ -386,21 +401,27 @@ pub fn deduce_result_type(
             Ok(Some(init_ty.clone()))
         }
         NodePayload::Cover { .. } => Ok(Some(Type::Token)),
-        // We need package context to look up the invoked function type.
-        NodePayload::Invoke { .. } => Ok(None),
+        // We can deduce invoke result types if the caller provides a callee
+        // return type resolver.
+        NodePayload::Invoke { to_apply, .. } => {
+            if let Some(ret_ty) = resolve_callee_ret_ty(to_apply.as_str()) {
+                Ok(Some(ret_ty))
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
-fn ceil_log2_with_min_one(n: usize) -> usize {
+fn ceil_log2(n: usize) -> usize {
     if n <= 1 {
-        1
-    } else {
-        let mut v = n - 1;
-        let mut k = 0usize;
-        while v > 0 {
-            k += 1;
-            v >>= 1;
-        }
-        k
+        return 0;
     }
+    let mut v = n - 1;
+    let mut k = 0usize;
+    while v > 0 {
+        k += 1;
+        v >>= 1;
+    }
+    k
 }

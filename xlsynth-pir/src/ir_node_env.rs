@@ -24,8 +24,17 @@ impl IrNodeEnv {
 
     /// We add nodes by providing their `id` (always) but also an optional
     /// `name` they are also known by.
-    pub fn add(&mut self, name: Option<String>, id: usize, node: ir::NodeRef) {
-        assert!(id > 0, "Invalid node id {}, must be greater than zero", id);
+    ///
+    /// Returns an error if `id == 0`.
+    pub fn add(
+        &mut self,
+        name: Option<String>,
+        id: usize,
+        node: ir::NodeRef,
+    ) -> Result<(), String> {
+        if id == 0 {
+            return Err("invalid node id 0".to_string());
+        }
         log::debug!(
             "NodeEnv::add; name: {:?}; id: {:?}; node: {:?}",
             name,
@@ -36,6 +45,7 @@ impl IrNodeEnv {
             self.name_to_node.insert(name, node);
         }
         self.id_to_node.insert(id, node);
+        Ok(())
     }
 
     /// We look up nodes by either their `id` or `name` -- in references either
