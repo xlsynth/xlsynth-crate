@@ -16,3 +16,19 @@ fn package_without_name_is_rejected() {
         msg
     );
 }
+
+#[test]
+fn package_keyword_requires_delimiter() {
+    // Without whitespace delimiter, this should NOT be accepted as 'package'.
+    let ir = "packagette test\n\nfn f() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1)\n}\n";
+    let mut p = Parser::new(ir);
+    let err = p
+        .parse_package()
+        .expect_err("expected parse error for missing 'package' keyword");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("expected keyword \"package\"") || msg.contains("expected \"package\""),
+        "unexpected error: {}",
+        msg
+    );
+}
