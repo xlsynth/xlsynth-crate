@@ -80,6 +80,11 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             // For golden comparison files (i.e. ones we compare to literally for code
             // generation facilities) we don't require SPDX identifiers.
             let path_str = path.as_os_str().to_str().unwrap();
+
+            // Exclude fuzz corpora; these are inputs, not source files.
+            if path_str.contains("/fuzz/corpus/") {
+                continue;
+            }
             let filename = path.file_name().unwrap().to_str().unwrap();
             if path_str.ends_with(".golden.sv")
                 || path_str.ends_with(".golden.v")
