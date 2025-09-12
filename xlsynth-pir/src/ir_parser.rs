@@ -1511,6 +1511,17 @@ impl Parser {
                     .name_id_to_ref(&crate::ir_node_env::NameOrId::Id(node.text_id))
                     .copied()
                 {
+                    // If a GetParam node with this id already exists (from the
+                    // function signature), ensure the textual node's type matches
+                    // the existing param node type. If not, this is a parse-time
+                    // error (mirrors upstream xlsynth behavior).
+                    let existing_ty = &nodes[existing.index].ty;
+                    if existing_ty != &node.ty {
+                        return Err(ParseError::new(format!(
+                            "param id={} type mismatch: header {} vs node {}",
+                            node.text_id, existing_ty, node.ty
+                        )));
+                    }
                     // Do not add a duplicate; use the existing node ref.
                     node_ref = existing;
                 } else {
