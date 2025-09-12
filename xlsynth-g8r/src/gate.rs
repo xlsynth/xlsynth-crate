@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::ir_value_utils::ir_bits_from_bitvec_lsb_is_0;
 use bitvec::vec::BitVec;
 use xlsynth::IrBits;
+use xlsynth_pir::ir_value_utils::ir_bits_from_bitvec_lsb_is_0;
 
 use crate::topo::post_order_operands;
 use xlsynth_pir::ir;

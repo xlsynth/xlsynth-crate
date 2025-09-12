@@ -3,19 +3,16 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
-#[cfg(feature = "has-bitwuzla")]
-use xlsynth_g8r::equiv::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
-#[cfg(feature = "has-boolector")]
-use xlsynth_g8r::equiv::boolector_backend::{Boolector, BoolectorConfig};
-#[cfg(feature = "has-easy-smt")]
-use xlsynth_g8r::equiv::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
-use xlsynth_g8r::equiv::types::{AssertionSemantics, EquivResult, IrFn};
-use xlsynth_g8r::equiv::prove_equiv::{
-    prove_ir_fn_equiv,
-    prove_ir_fn_equiv_output_bits_parallel,
-};
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
 use xlsynth_pir::ir_parser;
-use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
+#[cfg(feature = "has-boolector")]
+use xlsynth_prover::boolector_backend::{Boolector, BoolectorConfig};
+#[cfg(feature = "has-easy-smt")]
+use xlsynth_prover::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
+use xlsynth_prover::prove_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
+use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn};
 
 // Insert helper that checks consistency among the external tool, a primary
 // solver result, and an optional per-bit parallel solver result.
@@ -29,7 +26,12 @@ fn validate_equiv_result(
     match ext_equiv {
         Ok(()) => {
             // External tool says equivalent – solver must prove equivalence.
-            if let EquivResult::Disproved { lhs_inputs, rhs_inputs, .. } = solver_result {
+            if let EquivResult::Disproved {
+                lhs_inputs,
+                rhs_inputs,
+                ..
+            } = solver_result
+            {
                 log::info!("==== IR disagreement detected ====");
                 log::info!("Original IR:\n{}", orig_ir);
                 log::info!("Optimized IR:\n{}", opt_ir);

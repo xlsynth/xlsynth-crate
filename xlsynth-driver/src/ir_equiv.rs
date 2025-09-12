@@ -8,18 +8,18 @@ use crate::common::{infer_uf_signature, merge_uf_signature};
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
-use xlsynth_g8r::equiv::solver_interface::Solver;
 use xlsynth_pir::ir;
+use xlsynth_prover::solver_interface::Solver;
 
 use std::collections::HashMap;
 use xlsynth::IrValue;
-use xlsynth_g8r::equiv::prove_equiv::{
+use xlsynth_pir::ir_parser;
+use xlsynth_prover::prove_equiv::{
     prove_ir_fn_equiv_full, prove_ir_fn_equiv_output_bits_parallel,
     prove_ir_fn_equiv_split_input_bit,
 };
-use xlsynth_g8r::equiv::prover::{ExternalProver, Prover};
-use xlsynth_g8r::equiv::types::{AssertionSemantics, EquivResult, EquivSide, IrFn};
-use xlsynth_pir::ir_parser;
+use xlsynth_prover::prover::{ExternalProver, Prover};
+use xlsynth_prover::types::{AssertionSemantics, EquivResult, EquivSide, IrFn};
 
 use crate::parallelism::ParallelismStrategy;
 
@@ -226,7 +226,7 @@ pub fn dispatch_ir_equiv(
     match solver_choice {
         #[cfg(feature = "has-boolector")]
         Some(SolverChoice::Boolector) => {
-            use xlsynth_g8r::equiv::boolector_backend::BoolectorConfig;
+            use xlsynth_prover::boolector_backend::BoolectorConfig;
             let prover = BoolectorConfig::new();
             run_equiv_with_prover(&prover, inputs)
         }
@@ -234,7 +234,7 @@ pub fn dispatch_ir_equiv(
         Some(SolverChoice::Z3Binary)
         | Some(SolverChoice::BitwuzlaBinary)
         | Some(SolverChoice::BoolectorBinary) => {
-            use xlsynth_g8r::equiv::easy_smt_backend::EasySmtConfig;
+            use xlsynth_prover::easy_smt_backend::EasySmtConfig;
             let cfg = match solver_choice {
                 Some(SolverChoice::Z3Binary) => EasySmtConfig::z3(),
                 Some(SolverChoice::BitwuzlaBinary) => EasySmtConfig::bitwuzla(),
@@ -245,7 +245,7 @@ pub fn dispatch_ir_equiv(
         }
         #[cfg(feature = "has-bitwuzla")]
         Some(SolverChoice::Bitwuzla) => {
-            use xlsynth_g8r::equiv::bitwuzla_backend::BitwuzlaOptions;
+            use xlsynth_prover::bitwuzla_backend::BitwuzlaOptions;
             let opts = BitwuzlaOptions::new();
             run_equiv_with_prover(&opts, inputs)
         }
@@ -264,7 +264,7 @@ pub fn dispatch_ir_equiv(
             run_equiv_with_prover(&prover, inputs)
         }
         None => {
-            let prover = xlsynth_g8r::equiv::prover::auto_selected_prover();
+            let prover = xlsynth_prover::prover::auto_selected_prover();
             run_equiv_with_prover(&*prover, inputs)
         }
     }

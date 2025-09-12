@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use xlsynth::IrValue;
 
-use crate::equiv::{
+use crate::{
     solver_interface::{BitVec, Solver},
     types::{Assertion, FnInputs, IrFn, IrTypedBitVec, SmtFn, UfRegistry},
 };

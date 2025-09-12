@@ -6,7 +6,7 @@
 //! This invokes the upstream tool directly and maps its exit status to a
 //! library-friendly `BoolPropertyResult` without printing.
 
-use crate::equiv::types::BoolPropertyResult;
+use crate::types::BoolPropertyResult;
 
 fn prove_quickcheck_with_exe_internal(
     exe: &std::path::Path,

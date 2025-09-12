@@ -7,7 +7,9 @@ use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
 
 fuzz_target!(|graph: FuzzGraph| {
     let _ = env_logger::builder().is_test(true).try_init();
-    let Some(g) = build_graph(&graph) else { return; };
+    let Some(g) = build_graph(&graph) else {
+        return;
+    };
     let text = g.to_string();
     let parsed = match GateFn::from_str(&text) {
         Ok(p) => p,

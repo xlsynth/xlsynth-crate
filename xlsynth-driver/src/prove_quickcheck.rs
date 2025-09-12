@@ -14,9 +14,9 @@ use crate::solver_choice::SolverChoice;
 use regex::Regex;
 use serde::Serialize;
 use xlsynth::DslxConvertOptions;
-use xlsynth_g8r::equiv::prover::Prover;
-use xlsynth_g8r::equiv::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
 use xlsynth_pir::ir_parser;
+use xlsynth_prover::prover::Prover;
+use xlsynth_prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckTestOutcome {
@@ -156,7 +156,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         qc_names: &[String],
         semantics: QuickCheckAssertionSemantics,
         uf_map: &std::collections::HashMap<String, String>,
-        uf_sigs: &std::collections::HashMap<String, xlsynth_g8r::equiv::types::UfSignature>,
+        uf_sigs: &std::collections::HashMap<String, xlsynth_prover::types::UfSignature>,
     ) -> Vec<QuickCheckTestOutcome> {
         let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(qc_names.len());
         for qc_name in qc_names {
@@ -200,7 +200,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
     let results: Vec<QuickCheckTestOutcome> = match solver_choice_opt {
         None => {
-            let prover = xlsynth_g8r::equiv::prover::auto_selected_prover();
+            let prover = xlsynth_prover::prover::auto_selected_prover();
             run_for_prover(
                 &*prover,
                 input_path,
@@ -211,7 +211,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             )
         }
         Some(SolverChoice::Toolchain) => {
-            let prover = xlsynth_g8r::equiv::prover::ExternalProver::Toolchain;
+            let prover = xlsynth_prover::prover::ExternalProver::Toolchain;
             run_for_prover(
                 &prover,
                 input_path,
@@ -223,7 +223,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         }
         #[cfg(feature = "has-boolector")]
         Some(SolverChoice::Boolector) => {
-            use xlsynth_g8r::equiv::boolector_backend::BoolectorConfig;
+            use xlsynth_prover::boolector_backend::BoolectorConfig;
             let prover = BoolectorConfig::new();
             run_for_prover(
                 &prover,
@@ -236,7 +236,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         }
         #[cfg(feature = "has-bitwuzla")]
         Some(SolverChoice::Bitwuzla) => {
-            use xlsynth_g8r::equiv::bitwuzla_backend::BitwuzlaOptions;
+            use xlsynth_prover::bitwuzla_backend::BitwuzlaOptions;
             let prover = BitwuzlaOptions::new();
             run_for_prover(
                 &prover,
@@ -251,7 +251,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         Some(SolverChoice::Z3Binary)
         | Some(SolverChoice::BitwuzlaBinary)
         | Some(SolverChoice::BoolectorBinary) => {
-            use xlsynth_g8r::equiv::easy_smt_backend::EasySmtConfig;
+            use xlsynth_prover::easy_smt_backend::EasySmtConfig;
             let prover = match solver_choice_opt.unwrap() {
                 SolverChoice::Z3Binary => EasySmtConfig::z3(),
                 SolverChoice::BitwuzlaBinary => EasySmtConfig::bitwuzla(),

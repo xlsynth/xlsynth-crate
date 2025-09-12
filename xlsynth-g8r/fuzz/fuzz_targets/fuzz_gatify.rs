@@ -3,8 +3,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::ir2gate::gatify;
-use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::ir_parser;
 
 fuzz_target!(|sample: FuzzSample| {
     // Check for necessary environment variables first.
@@ -25,17 +25,18 @@ fuzz_target!(|sample: FuzzSample| {
         return;
     }
 
-    let parsed_package = match ir_parser::Parser::new(&package.to_string()).parse_and_validate_package() {
-        Ok(parsed_package) => parsed_package,
-        Err(e) => {
-            log::error!(
-                "Error parsing IR package: {}\npackage:\n{}",
-                e,
-                package.to_string()
-            );
-            return;
-        }
-    };
+    let parsed_package =
+        match ir_parser::Parser::new(&package.to_string()).parse_and_validate_package() {
+            Ok(parsed_package) => parsed_package,
+            Err(e) => {
+                log::error!(
+                    "Error parsing IR package: {}\npackage:\n{}",
+                    e,
+                    package.to_string()
+                );
+                return;
+            }
+        };
     let parsed_fn = parsed_package.get_top().unwrap();
 
     // Convert to gates with folding disabled to make less machinery under test.
