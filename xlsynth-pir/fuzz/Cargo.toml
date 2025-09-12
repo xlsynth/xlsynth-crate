@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "xlsynth-pir-fuzz"
+edition = "2021"
+publish = false
+
+[package.metadata]
+fuzz = true
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = { version = "0.4" }
+# Local crates
+xlsynth-pir = { path = ".." }
+xlsynth = { path = "../../xlsynth" }
+
+# Fuzz targets
+[[bin]]
+name = "fuzz_ir_verify"
+path = "fuzz_targets/fuzz_ir_verify.rs"
+test = false
+doc = false

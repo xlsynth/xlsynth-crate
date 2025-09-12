@@ -18,6 +18,7 @@ pub mod ir_rebase_ids;
 pub mod ir_utils;
 pub mod ir_validate;
 pub mod ir_verify;
+pub mod ir_verify_parity;
 pub mod localized_eco2;
 pub mod node_hashing;
 pub mod simple_rebase;

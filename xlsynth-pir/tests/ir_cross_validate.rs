@@ -2,7 +2,10 @@
 
 use xlsynth::IrPackage as XlsIrPackage;
 use xlsynth_pir::ir_parser::Parser as PirParser;
-use xlsynth_pir::ir_validate::{self, ValidationError};
+use xlsynth_pir::ir_validate::{self};
+use xlsynth_pir::ir_verify_parity::{
+    ErrorCategory, categorize_pir_error, categorize_xls_error_text,
+};
 
 fn verify_with_pir(ir_text: &str) -> bool {
     let mut p = PirParser::new(ir_text);
@@ -27,80 +30,6 @@ fn assert_cross_validates_same(ir_text: &str) {
         "verification parity mismatch for IR:\n{}",
         ir_text
     );
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ErrorCategory {
-    UnknownCallee,
-    NodeTypeMismatch,
-    OperandOutOfBounds,
-    OperandUsesUndefined,
-    DuplicateTextId,
-    ReturnTypeMismatch,
-    DuplicateParamName,
-    MissingParamNode,
-    ExtraParamNode,
-    NodeNameOpMismatch,
-    NodeNameIdSuffixMismatch,
-    Other,
-}
-
-fn categorize_pir_error(err: &ValidationError) -> ErrorCategory {
-    use ErrorCategory::*;
-    match err {
-        ValidationError::UnknownCallee { .. } => UnknownCallee,
-        ValidationError::NodeTypeMismatch { .. } => NodeTypeMismatch,
-        ValidationError::OperandOutOfBounds { .. } => OperandOutOfBounds,
-        ValidationError::OperandUsesUndefined { .. } => OperandUsesUndefined,
-        ValidationError::DuplicateTextId { .. } => DuplicateTextId,
-        ValidationError::ReturnTypeMismatch { .. } => ReturnTypeMismatch,
-        ValidationError::DuplicateParamName { .. } => DuplicateParamName,
-        ValidationError::MissingParamNode { .. } => MissingParamNode,
-        ValidationError::ExtraParamNode { .. } => ExtraParamNode,
-        ValidationError::NodeNameOpMismatch { .. } => NodeNameOpMismatch,
-        ValidationError::NodeNameIdSuffixMismatch { .. } => NodeNameIdSuffixMismatch,
-        _ => Other,
-    }
-}
-
-fn categorize_xls_error_text(s: &str) -> ErrorCategory {
-    use ErrorCategory::*;
-    let lower = s.to_lowercase();
-    if lower.contains("unknown callee")
-        || lower.contains("unknown function")
-        || lower.contains("cannot find function")
-        || lower.contains("does not have a function with name")
-    {
-        return UnknownCallee;
-    }
-    if lower.contains("type mismatch")
-        || (lower.contains("type") && lower.contains("mismatch"))
-        || lower.contains("does not match expected type")
-    {
-        return NodeTypeMismatch; // coarse bucket for our purposes
-    }
-    if lower.contains("out of bounds") {
-        return OperandOutOfBounds;
-    }
-    if lower.contains("before definition") || lower.contains("uses operand") {
-        return OperandUsesUndefined;
-    }
-    if lower.contains("duplicate") && lower.contains("id") {
-        return DuplicateTextId;
-    }
-    if lower.contains("return type") && lower.contains("mismatch") {
-        return ReturnTypeMismatch;
-    }
-    if lower.contains("duplicate param") || lower.contains("duplicate parameter") {
-        return DuplicateParamName;
-    }
-    if lower.contains("missing getparam") || lower.contains("missing param") {
-        return MissingParamNode;
-    }
-    if lower.contains("not declared in signature") || lower.contains("extra param") {
-        return ExtraParamNode;
-    }
-    Other
 }
 
 fn assert_error_category_matches(ir_text: &str) {
