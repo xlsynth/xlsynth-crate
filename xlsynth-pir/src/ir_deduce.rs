@@ -390,7 +390,7 @@ where
                 .get(0)
                 .ok_or(DeduceError::MissingOperand("encode.arg"))?;
             match arg_ty {
-                Type::Bits(w) => Ok(Some(Type::Bits(ceil_log2_with_min_one(*w)))),
+                Type::Bits(w) => Ok(Some(Type::Bits(ceil_log2(*w)))),
                 _ => Err(DeduceError::ExpectedBits("encode")),
             }
         }
@@ -413,16 +413,15 @@ where
     }
 }
 
-fn ceil_log2_with_min_one(n: usize) -> usize {
+fn ceil_log2(n: usize) -> usize {
     if n <= 1 {
-        1
-    } else {
-        let mut v = n - 1;
-        let mut k = 0usize;
-        while v > 0 {
-            k += 1;
-            v >>= 1;
-        }
-        k
+        return 0;
     }
+    let mut v = n - 1;
+    let mut k = 0usize;
+    while v > 0 {
+        k += 1;
+        v >>= 1;
+    }
+    k
 }
