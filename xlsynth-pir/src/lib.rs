@@ -21,5 +21,6 @@ pub mod ir_verify;
 pub mod ir_verify_parity;
 pub mod localized_eco2;
 pub mod node_hashing;
+pub mod prove_equiv_via_toolchain;
 pub mod simple_rebase;
 pub mod structural_similarity;

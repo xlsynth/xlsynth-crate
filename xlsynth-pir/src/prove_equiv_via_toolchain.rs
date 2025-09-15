@@ -2,8 +2,14 @@
 
 //! IR equivalence via external toolchain `check_ir_equivalence_main`.
 
-use crate::equiv::types::EquivResult;
-use xlsynth_pir::ir::Fn;
+use crate::ir::Fn;
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ToolchainEquivResult {
+    Proved,
+    Disproved(String),
+    Error(String),
+}
 
 /// Prove equivalence by invoking an external toolchain binary.
 /// The `tool_dir` must contain `check_ir_equivalence_main`.
@@ -15,17 +21,17 @@ pub fn prove_ir_pkg_equiv_with_tool_exe<P: AsRef<std::path::Path>>(
     rhs_pkg_text: &str,
     top: Option<&str>,
     tool_exe: P,
-) -> EquivResult {
+) -> ToolchainEquivResult {
     let exe = tool_exe.as_ref();
     if !exe.exists() {
-        return EquivResult::Error(format!("tool not found: {}", exe.display()));
+        return ToolchainEquivResult::Error(format!("tool not found: {}", exe.display()));
     }
     let lhs_tmp = tempfile::NamedTempFile::new().unwrap();
     let rhs_tmp = tempfile::NamedTempFile::new().unwrap();
     if std::fs::write(lhs_tmp.path(), lhs_pkg_text).is_err()
         || std::fs::write(rhs_tmp.path(), rhs_pkg_text).is_err()
     {
-        return EquivResult::Error("failed to write temp files".to_string());
+        return ToolchainEquivResult::Error("failed to write temp files".to_string());
     }
     let mut cmd = std::process::Command::new(exe);
     // Note: flag like "--alsologtostderr" can be added for extra logs when
@@ -37,7 +43,7 @@ pub fn prove_ir_pkg_equiv_with_tool_exe<P: AsRef<std::path::Path>>(
         cmd.arg(t);
     }
     match cmd.output() {
-        Ok(output) if output.status.success() => EquivResult::Proved,
+        Ok(output) if output.status.success() => ToolchainEquivResult::Proved,
         Ok(output) => {
             // Include stderr snippet to aid debugging, but do not print directly.
             let mut msg = format!("tool exited with status {}", output.status);
@@ -53,9 +59,9 @@ pub fn prove_ir_pkg_equiv_with_tool_exe<P: AsRef<std::path::Path>>(
                 msg.push_str(": ");
                 msg.push_str(&snippet);
             }
-            EquivResult::ToolchainDisproved(msg)
+            ToolchainEquivResult::Disproved(msg)
         }
-        Err(e) => EquivResult::Error(format!("spawn failed: {}", e)),
+        Err(e) => ToolchainEquivResult::Error(format!("spawn failed: {}", e)),
     }
 }
 
@@ -64,10 +70,10 @@ pub fn prove_ir_pkg_equiv_with_tool_dir<P: AsRef<std::path::Path>>(
     rhs_pkg_text: &str,
     top: Option<&str>,
     tool_dir: P,
-) -> EquivResult {
+) -> ToolchainEquivResult {
     let exe = tool_dir.as_ref().join("check_ir_equivalence_main");
     if !exe.exists() {
-        return EquivResult::Error(format!(
+        return ToolchainEquivResult::Error(format!(
             "check_ir_equivalence_main not found in {}",
             tool_dir.as_ref().display()
         ));
@@ -79,10 +85,10 @@ pub fn prove_ir_fn_equiv_with_tool_dir<P: AsRef<std::path::Path>>(
     lhs: &Fn,
     rhs: &Fn,
     tool_dir: P,
-) -> EquivResult {
+) -> ToolchainEquivResult {
     let exe = tool_dir.as_ref().join("check_ir_equivalence_main");
     if !exe.exists() {
-        return EquivResult::Error(format!(
+        return ToolchainEquivResult::Error(format!(
             "check_ir_equivalence_main not found in {}",
             tool_dir.as_ref().display()
         ));
@@ -94,18 +100,18 @@ pub fn prove_ir_fn_equiv_with_tool_dir<P: AsRef<std::path::Path>>(
 
 /// As above, but where the caller has already done `lhs.to_string()` and
 /// `rhs.to_string()` on the `ir::Fn` objects.
-pub fn prove_ir_fn_strings_equiv_via_toolchain(lhs: &str, rhs: &str) -> EquivResult {
+pub fn prove_ir_fn_strings_equiv_via_toolchain(lhs: &str, rhs: &str) -> ToolchainEquivResult {
     let lhs_pkg = format!("package lhs\n\ntop {}\n", lhs);
     let rhs_pkg = format!("package rhs\n\ntop {}\n", rhs);
     match std::env::var("XLSYNTH_TOOLS") {
         Ok(dir) => prove_ir_pkg_equiv_with_tool_dir(&lhs_pkg, &rhs_pkg, None, dir),
-        Err(_) => EquivResult::Error(
+        Err(_) => ToolchainEquivResult::Error(
             "XLSYNTH_TOOLS is not set; cannot run toolchain equivalence".to_string(),
         ),
     }
 }
 
 /// Convenience wrapper: reads `XLSYNTH_TOOLS` env var to locate the toolchain.
-pub fn prove_ir_fn_equiv_via_toolchain(lhs: &Fn, rhs: &Fn) -> EquivResult {
+pub fn prove_ir_fn_equiv_via_toolchain(lhs: &Fn, rhs: &Fn) -> ToolchainEquivResult {
     prove_ir_fn_strings_equiv_via_toolchain(&lhs.to_string(), &rhs.to_string())
 }
