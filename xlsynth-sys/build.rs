@@ -6,8 +6,29 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.0.228";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.0.229";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
+
+fn version_tuple_from_tag(tag: &str) -> (u32, u32, u32) {
+    let s = tag.strip_prefix('v').unwrap_or(tag);
+    let mut parts = s.split('.');
+    let major: u32 = parts
+        .next()
+        .expect("version tag should have major")
+        .parse()
+        .expect("major version should be numeric");
+    let minor: u32 = parts
+        .next()
+        .expect("version tag should have minor")
+        .parse()
+        .expect("minor version should be numeric");
+    let patch: u32 = parts
+        .next()
+        .expect("version tag should have patch")
+        .parse()
+        .expect("patch version should be numeric");
+    (major, minor, patch)
+}
 
 struct DsoInfo {
     extension: &'static str,
@@ -457,6 +478,20 @@ fn main() {
         println!("cargo:rustc-env=XLS_DSO_PATH=/does/not/exist/libxls.so");
         println!("cargo:rustc-env=DSLX_STDLIB_PATH=/does/not/exist/stdlib/");
         return;
+    }
+
+    // As of v0.0.229 and later, there is no macOS x64 (x86_64) DSO available.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    if version_tuple_from_tag(RELEASE_LIB_VERSION_TAG) >= (0, 0, 229)
+        && target_os == "macos"
+        && target_arch == "x86_64"
+    {
+        panic!(
+            "No macOS x64 (x86_64) DSO is available for XLS {}.\nPlease use a different architecture (e.g., arm64) or a different XLS version.\nSee: https://github.com/xlsynth/xlsynth/releases/tag/{} for available assets.",
+            RELEASE_LIB_VERSION_TAG,
+            RELEASE_LIB_VERSION_TAG
+        );
     }
 
     if std::env::var("XLS_DSO_PATH").is_ok() && std::env::var("DSLX_STDLIB_PATH").is_ok() {
