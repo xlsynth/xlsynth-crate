@@ -3,8 +3,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_g8r::equiv::types::EquivResult;
-use xlsynth_g8r::equiv::prove_equiv_via_toolchain::{self};
+use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_pir::ir_validate::validate_fn;
 use xlsynth_pir::simple_rebase::rebase_onto;
@@ -98,12 +97,12 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     }
 
     match prove_equiv_via_toolchain::prove_ir_fn_equiv_via_toolchain(&desired, &rebased) {
-        EquivResult::Proved => {}
+        ToolchainEquivResult::Proved => {}
         other => {
             // Treat tool infra failure as non-sample failure; but equivalence disproved
             // must panic.
             match other {
-                EquivResult::Error(_) => return,
+                ToolchainEquivResult::Error(_) => return,
                 // No other variant currently, but keep match exhaustive for clarity.
                 _ => panic!("rebase_onto failed equivalence: {:?}", other),
             }

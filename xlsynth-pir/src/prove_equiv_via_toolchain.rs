@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! IR equivalence via external toolchain `check_ir_equivalence_main`.
+//!
+//! Note that this lives in the `xlsynth-pir` crate to avoid a circular
+//! dependency with the solver code -- we use this in some tests and it is
+//! assumed that the $XLSYNTH_TOOLS are available for use in testing generally
+//! throughout the xlsynth-crate codebase.
 
 use crate::ir::Fn;
 
