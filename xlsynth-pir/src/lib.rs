@@ -8,6 +8,7 @@
 pub mod edit_distance;
 pub mod fuzz_utils;
 pub mod graph_edit;
+pub mod greedy_graph_edit;
 pub mod ir;
 pub mod ir_deduce;
 pub mod ir_eval;

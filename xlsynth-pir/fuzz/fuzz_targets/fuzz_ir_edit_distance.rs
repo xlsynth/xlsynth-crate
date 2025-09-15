@@ -4,7 +4,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use xlsynth::IrPackage;
-use xlsynth_g8r::xls_ir::graph_edit::{apply_function_edits, compute_function_edit_distance};
+use xlsynth_g8r::xls_ir::graph_edit::apply_function_edits;
+use xlsynth_g8r::xls_ir::greedy_graph_edit::compute_function_edit_distance;
 use xlsynth_g8r::xls_ir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_g8r::xls_ir::{ir_isomorphism::is_ir_isomorphic, ir_parser};
 

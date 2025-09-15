@@ -1,45 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Skeleton library for computing and applying IR graph edits between two
-//! XLS IR functions. For now this returns an empty set of edits when computing,
-//! and applying is a no-op that returns the input function unmodified.
+//! Greedy edit-distance computation between two XLS IR functions.
+//! Contains the matching machinery and conversion of matches into concrete
+//! edits.
 
+use crate::graph_edit::{IrEdit, IrEditSet};
 use crate::ir::{Fn, Node, NodeRef};
 use crate::ir_utils::{operands, remap_payload_with};
+use crate::node_hashing::compute_node_local_structural_hash;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-
-use crate::greedy_graph_edit::MatchAction;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
-/// Represents a concrete IR edit operation to be applied to a function.
-#[derive(Debug, Clone)]
-pub enum IrEdit {
-    /// Adds a concrete node; its payload operands should reference either
-    /// existing old-node indices or previously added nodes by their original
-    /// new indices (resolved during application).
-    AddNode { new_index: usize, node: Node },
-    /// Deletes a node from the "old" function by index in `old_fn.nodes`.
-    DeleteNode { index: usize },
-    /// Redirects a specific operand of a user node to a different target node.
+/// Represents an edit to transform one IR function into another.
+///
+/// This is a placeholder skeleton; variants will be expanded in future work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchAction {
+    /// Delete a node present in the old function by index in `old_fn.nodes`.
+    DeleteNode { old_index: usize },
+    /// Add a node present in the new function by index in `new_fn.nodes`.
+    AddNode { new_index: usize, is_return: bool },
+    /// Match an old node to a new node, with optional operand substitutions.
     ///
-    /// - `user_index`: index of the node whose operand will be rewritten
-    /// - `operand_slot`: which operand position on the user node to rewrite
-    /// - `new_target_index`: node index that the operand should reference
-    SubstituteOperand {
-        user_index: usize,
-        operand_slot: usize,
-        new_target_index: usize,
+    /// Operand substitutions specify how operands of the old node map to
+    /// operands of the new node. Each pair is (old_operand_index,
+    /// new_operand_index), both indices refer to node indices in their
+    /// respective functions.
+    MatchNodes {
+        old_index: usize,
+        new_index: usize,
+        operand_substitutions: Vec<(usize, usize)>,
+        is_return: bool,
     },
-    /// Sets the function return to reference either an existing old node index
-    /// or a newly added node index (resolved during application via mapping).
-    SetReturn { index: usize, is_new: bool },
-}
-
-/// A collection of edits that convert `old` into `new`.
-#[derive(Debug, Clone, Default)]
-pub struct IrEditSet {
-    pub edits: Vec<IrEdit>,
 }
 
 /// A collection of match decisions produced by the matcher.
@@ -51,8 +45,8 @@ pub struct IrMatchSet {
 /// Dependency information for a single node.
 #[derive(Debug, Clone)]
 pub struct DepNode {
-    pub operands: Vec<usize>, // deps (by node index)
-    pub users: Vec<usize>,    // use-list (by node index)
+    pub operands: Vec<usize>,       // deps (by node index)
+    pub users: Vec<(usize, usize)>, // (user index, operand slot)
 }
 
 /// Dependency graph for a function: collection of per-node dependency info.
@@ -71,10 +65,10 @@ pub fn build_dependency_graph(f: &Fn) -> DepGraph {
             .map(|r| r.index)
             .collect();
     }
-    let mut users_list: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut users_list: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
     for (idx, ops) in operands_list.iter().enumerate() {
-        for &d in ops {
-            users_list[d].push(idx);
+        for (slot, &d) in ops.iter().enumerate() {
+            users_list[d].push((idx, slot));
         }
     }
     let mut nodes: Vec<DepNode> = Vec::with_capacity(n);
@@ -121,7 +115,7 @@ pub trait MatchSelector {
 
 /// Default selector that mimics the previous behavior: a simple FIFO-like
 /// priority over ready deletes/adds with stable ordering.
-pub struct DefaultEditSelector<'a> {
+pub struct NaiveMatchSelector<'a> {
     order_counter: usize,
     heap: BinaryHeap<QueueEntry>,
     old: &'a Fn,
@@ -149,7 +143,7 @@ impl PartialOrd for QueueEntry {
     }
 }
 
-impl<'a> DefaultEditSelector<'a> {
+impl<'a> NaiveMatchSelector<'a> {
     pub fn new(old: &'a Fn, new: &'a Fn) -> Self {
         let mut sel = Self {
             order_counter: 0,
@@ -205,7 +199,7 @@ impl<'a> DefaultEditSelector<'a> {
     }
 }
 
-impl<'a> MatchSelector for DefaultEditSelector<'a> {
+impl<'a> MatchSelector for NaiveMatchSelector<'a> {
     fn add_ready_node(&mut self, node: ReadyNode) {
         match node.side {
             NodeSide::Old => {
@@ -244,10 +238,207 @@ impl<'a> MatchSelector for DefaultEditSelector<'a> {
     }
 }
 
+/// Greedy selector that pre-scores candidate matches using a reverse traversal
+/// and then performs forward-direction matching guided by those scores.
+pub struct GreedyMatchSelector<'a> {
+    old: &'a Fn,
+    new: &'a Fn,
+    /// Pairs of (old_index, new_index) that were reverse-identified as perfect
+    /// matches (same structure/signature and recursively identical children).
+    reverse_perfect_matches: Vec<(usize, usize)>,
+    /// Pairs of (old_index, new_index) that were reverse-identified as strong
+    /// matches (same local shape/signature; children may differ but
+    /// compatible).
+    reverse_strong_matches: Vec<(usize, usize)>,
+    /// Forward priority queue for applying actions. Placeholder for now.
+    heap: BinaryHeap<QueueEntry>,
+    order_counter: usize,
+}
+
+impl<'a> GreedyMatchSelector<'a> {
+    pub fn new(old: &'a Fn, new: &'a Fn) -> Self {
+        let (reverse_perfect_matches, reverse_strong_matches) = compute_reverse_matches(old, new);
+        Self {
+            old,
+            new,
+            reverse_perfect_matches,
+            reverse_strong_matches,
+            heap: BinaryHeap::new(),
+            order_counter: 0,
+        }
+    }
+
+    fn push_action(&mut self, action: MatchAction) {
+        let entry = QueueEntry {
+            cost: 1,
+            order: self.order_counter,
+            action,
+        };
+        self.order_counter += 1;
+        self.heap.push(entry);
+    }
+}
+
+impl<'a> MatchSelector for GreedyMatchSelector<'a> {
+    fn add_ready_node(&mut self, node: ReadyNode) {
+        // Skeleton only: enqueue basic add/delete like the naive selector for now.
+        match node.side {
+            NodeSide::Old => {
+                if matches!(
+                    self.old.nodes[node.index].payload,
+                    crate::ir::NodePayload::GetParam(_)
+                ) {
+                    return;
+                }
+                self.push_action(MatchAction::DeleteNode {
+                    old_index: node.index,
+                });
+            }
+            NodeSide::New => {
+                if matches!(
+                    self.new.nodes[node.index].payload,
+                    crate::ir::NodePayload::GetParam(_)
+                ) {
+                    return;
+                }
+                self.push_action(MatchAction::AddNode {
+                    new_index: node.index,
+                    is_return: self
+                        .new
+                        .ret_node_ref
+                        .map(|nr| nr.index)
+                        .map_or(false, |ri| ri == node.index),
+                });
+            }
+        }
+    }
+
+    fn select_next_match(&mut self) -> Option<MatchAction> {
+        let entry = self.heap.pop()?;
+        Some(entry.action)
+    }
+}
+
+/// Computes reverse-direction candidate match pairs by walking old/new graphs
+/// from returns to inputs. For now this is a stub that returns empty sets.
+pub fn compute_reverse_matches(old: &Fn, new: &Fn) -> (Vec<(usize, usize)>, Vec<(usize, usize)>) {
+    let mut perfect_pairs: Vec<(usize, usize)> = Vec::new();
+    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
+    let mut new_to_old: HashMap<usize, usize> = HashMap::new();
+
+    // Build user info for reverse traversal checks.
+    let old_graph = build_dependency_graph(old);
+    let new_graph = build_dependency_graph(new);
+
+    // Helper: check local shape compatibility via local structural hash.
+    let shapes_equal = |oi: usize, ni: usize| {
+        compute_node_local_structural_hash(old, NodeRef { index: oi })
+            == compute_node_local_structural_hash(new, NodeRef { index: ni })
+    };
+
+    // Seed with return pair; assume both defined and same shape.
+    let mut work_q: VecDeque<(usize, usize)> = VecDeque::new();
+    let or = old
+        .ret_node_ref
+        .expect("compute_reverse_matches requires old return");
+    let nr = new
+        .ret_node_ref
+        .expect("compute_reverse_matches requires new return");
+    assert!(
+        shapes_equal(or.index, nr.index),
+        "Return nodes must have the same local shape"
+    );
+    old_to_new.insert(or.index, nr.index);
+    new_to_old.insert(nr.index, or.index);
+    perfect_pairs.push((or.index, nr.index));
+    work_q.push_back((or.index, nr.index));
+
+    // Helper function tests whether (oi, ni) can be declared perfectly
+    // matched based on already-known perfect user pairs.
+    fn are_nodes_perfect(
+        _old: &crate::ir::Fn,
+        _new: &crate::ir::Fn,
+        old_graph: &DepGraph,
+        new_graph: &DepGraph,
+        old_to_new: &HashMap<usize, usize>,
+        shapes_equal: &dyn std::ops::Fn(usize, usize) -> bool,
+        oi: usize,
+        ni: usize,
+    ) -> bool {
+        // Local shape must match.
+        if !shapes_equal(oi, ni) {
+            return false;
+        }
+        // Uses count must match exactly.
+        let old_users = &old_graph.nodes[oi].users;
+        let new_users = &new_graph.nodes[ni].users;
+        if old_users.len() != new_users.len() {
+            return false;
+        }
+        // For every user (user, slot) of old, ensure mapped new user uses ni at same
+        // slot.
+        for &(old_use, old_slot) in old_users.iter() {
+            let Some(&new_use) = old_to_new.get(&old_use) else {
+                return false;
+            };
+            if !new_users.contains(&(new_use, old_slot)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // Propagate reverse-perfect matches down to operands when criteria are met.
+    while let Some((uo, un)) = work_q.pop_front() {
+        let old_ops: Vec<usize> = operands(&old.nodes[uo].payload)
+            .into_iter()
+            .map(|r| r.index)
+            .collect();
+        let new_ops: Vec<usize> = operands(&new.nodes[un].payload)
+            .into_iter()
+            .map(|r| r.index)
+            .collect();
+        if old_ops.len() != new_ops.len() {
+            continue;
+        }
+        for (oo, nn) in old_ops.into_iter().zip(new_ops.into_iter()) {
+            // Respect already established mappings if present.
+            if let Some(&mapped) = old_to_new.get(&oo) {
+                if mapped != nn {
+                    continue;
+                }
+            }
+            if let Some(&mapped) = new_to_old.get(&nn) {
+                if mapped != oo {
+                    continue;
+                }
+            }
+            if are_nodes_perfect(
+                old,
+                new,
+                &old_graph,
+                &new_graph,
+                &old_to_new,
+                &shapes_equal,
+                oo,
+                nn,
+            ) {
+                if old_to_new.insert(oo, nn).is_none() {
+                    new_to_old.insert(nn, oo);
+                    perfect_pairs.push((oo, nn));
+                    work_q.push_back((oo, nn));
+                }
+            }
+        }
+    }
+
+    (perfect_pairs, Vec::new())
+}
+
 /// Computes an edit set (distance) required to transform `old` into `new`.
 /// Internally computes a match set, then converts matches to concrete edits.
 pub fn compute_function_edit_distance(old: &Fn, new: &Fn) -> Result<IrEditSet, String> {
-    let mut selector = DefaultEditSelector::new(old, new);
+    let mut selector = NaiveMatchSelector::new(old, new);
     let matches = compute_function_edit(old, new, &mut selector)?;
     Ok(convert_match_set_to_edit_set(old, new, &matches))
 }
@@ -309,7 +500,7 @@ pub fn compute_function_edit<S: MatchSelector>(
     // Helper: decrement users' remaining counts and enqueue when they become ready.
     let mut update_ready = |idx: usize, side: NodeSide, selector: &mut S| match side {
         NodeSide::Old => {
-            for &user in old_graph.nodes[idx].users.iter() {
+            for &(user, _slot) in old_graph.nodes[idx].users.iter() {
                 if old_remain[user] > 0 {
                     old_remain[user] -= 1;
                     if old_remain[user] == 0 {
@@ -319,7 +510,7 @@ pub fn compute_function_edit<S: MatchSelector>(
             }
         }
         NodeSide::New => {
-            for &user in new_graph.nodes[idx].users.iter() {
+            for &(user, _slot) in new_graph.nodes[idx].users.iter() {
                 if new_remain[user] > 0 {
                     new_remain[user] -= 1;
                     if new_remain[user] == 0 {
@@ -377,73 +568,6 @@ pub fn compute_function_edit<S: MatchSelector>(
     Ok(IrMatchSet { matches })
 }
 
-/// Applies a sequence of IrEdits to `old`, using `new` as the source of truth
-/// for any nodes that must be added. Returns the transformed function.
-pub fn apply_function_edits(old: &Fn, edits: &IrEditSet) -> Result<Fn, String> {
-    let mut patched = old.clone();
-
-    // Map from original-new indices (carried in AddNode payloads) to patched
-    // indices.
-    let mut new_to_patched: HashMap<usize, usize> = HashMap::new();
-
-    for e in edits.edits.iter() {
-        match e.clone() {
-            IrEdit::DeleteNode { index } => {
-                if index >= patched.nodes.len() {
-                    return Err(format!("DeleteNode index {} out of bounds", index));
-                }
-                patched.nodes[index].payload = crate::ir::NodePayload::Nil;
-            }
-            IrEdit::AddNode { new_index, node } => {
-                // Remap payload operands: if operand index exists in new_to_patched, use
-                // mapped; otherwise treat it as an old index that already
-                // exists in `patched`.
-                let remapped_payload = remap_payload_with(&node.payload, |nr: NodeRef| {
-                    if let Some(&mapped) = new_to_patched.get(&nr.index) {
-                        NodeRef { index: mapped }
-                    } else {
-                        nr
-                    }
-                });
-                let cloned = crate::ir::Node {
-                    text_id: node.text_id,
-                    name: node.name.clone(),
-                    ty: node.ty.clone(),
-                    payload: remapped_payload,
-                    pos: node.pos.clone(),
-                };
-                let patched_index = patched.nodes.len();
-                patched.nodes.push(cloned);
-                new_to_patched.insert(new_index, patched_index);
-                // If this node originated from a new graph index, the
-                // conversion should have embedded that index in
-                // operand references of dependents, which will update
-                // via new_to_patched when those dependents are applied.
-            }
-            IrEdit::SubstituteOperand {
-                user_index: _,
-                operand_slot: _,
-                new_target_index: _,
-            } => {
-                // Not yet implemented; current matcher does not produce operand
-                // redirects. Leave as a no-op for now.
-            }
-            IrEdit::SetReturn { index, is_new } => {
-                let target_idx = if is_new {
-                    *new_to_patched
-                        .get(&index)
-                        .expect("SetReturn refers to new node not yet added")
-                } else {
-                    index
-                };
-                patched.ret_node_ref = Some(NodeRef { index: target_idx });
-            }
-        }
-    }
-
-    Ok(patched)
-}
-
 /// Converts a set of `MatchAction`s into concrete `IrEdit`s, using `old` and
 /// `new`.
 pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEditSet {
@@ -481,7 +605,7 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                         nr
                     }
                 });
-                let cloned = crate::ir::Node {
+                let cloned = Node {
                     text_id: src.text_id,
                     name: src.name.clone(),
                     ty: src.ty.clone(),
@@ -549,15 +673,10 @@ fn format_function_type(f: &Fn) -> String {
     format!("fn({}) -> {}", params, f.ret_ty)
 }
 
-/// Returns true if two functions are structurally isomorphic when traversed
-/// from their return nodes. Names/ids may differ; operators, attributes,
-/// types, and ordered operand relationships must match.
-// Intentionally do not re-export isomorphism to avoid module import ordering
-// issues in some build contexts; tests refer to it by full path.
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_edit::apply_function_edits;
     use crate::ir_parser::Parser;
 
     fn parse_ir_from_string(s: &str) -> crate::ir::Package {
@@ -613,22 +732,6 @@ mod tests {
 
         let result = compute_function_edit_distance(lhs, rhs);
         assert!(result.is_err());
-    }
-
-    #[test]
-
-    fn apply_is_noop_for_now() {
-        let pkg = parse_ir_from_string(
-            r#"package p
-            top fn f(x: bits[8]) -> bits[8] {
-                ret identity.2: bits[8] = identity(x, id=2)
-            }
-            "#,
-        );
-        let f = pkg.get_top().unwrap();
-        let edits = IrEditSet::default();
-        let applied = apply_function_edits(f, &edits).unwrap();
-        assert_eq!(applied.to_string(), f.to_string());
     }
 
     #[test]
@@ -734,6 +837,8 @@ mod tests {
 
         let edits = compute_function_edit_distance(old_fn, new_fn).unwrap();
         let patched = apply_function_edits(old_fn, &edits).unwrap();
-        assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, new_fn));
+        assert!(crate::xls_ir::ir_isomorphism::is_ir_isomorphic(
+            &patched, new_fn
+        ));
     }
 }
