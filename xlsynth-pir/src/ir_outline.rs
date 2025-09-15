@@ -795,7 +795,7 @@ mod tests {
     use crate::ir::{self, NodePayload, PackageMember};
     use crate::ir_parser::Parser;
     use crate::prove_equiv_via_toolchain;
-    use xlsynth_g8r::equiv::types::EquivResult;
+    use crate::prove_equiv_via_toolchain::ToolchainEquivResult;
 
     fn parse_single_fn(ir: &str) -> (Package, IrFn) {
         let pkg_text = format!("package test\n\n{}\n", ir);
@@ -840,7 +840,7 @@ mod tests {
             &lhs_pkg, &rhs_pkg, None, tool_dir,
         );
         assert!(
-            matches!(res, prove_equiv_via_toolchain::ToolchainEquivResult::Proved),
+            matches!(res, ToolchainEquivResult::Proved),
             "Outlining equivalence failed: {:?}",
             res
         );
