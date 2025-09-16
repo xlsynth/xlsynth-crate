@@ -535,7 +535,7 @@ jobs:
           DYLD_LIBRARY_PATH: /usr/local/lib
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
-          cargo test --features with-boolector-built,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
+          cargo test --features with-boolector-system,with-z3-system,with-bitwuzla-system,with-easy-smt,with-z3-binary-test --workspace
 
   # -----------------------------------------------------------
   # 5) Rocky Linux job
