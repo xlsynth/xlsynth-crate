@@ -72,3 +72,27 @@ fn conversions_shifts_and_slices() -> Result<(), XlsynthError> {
 
     Ok(())
 }
+
+#[test]
+fn comparison_methods_require_matching_widths() -> Result<(), XlsynthError> {
+    let small = IrBits::make_ubits(4, 0b0011)?;
+    let medium = IrBits::make_ubits(4, 0b0100)?;
+    let wide = IrBits::make_ubits(8, 0b0000_0100)?;
+
+    assert!(small.ult(&medium));
+    assert!(medium.ugt(&small));
+    assert!(small.ule(&small));
+    assert!(medium.uge(&small));
+
+    let negative = IrBits::make_sbits(4, -1)?;
+    let positive = IrBits::make_sbits(4, 1)?;
+    assert!(negative.slt(&positive));
+    assert!(positive.sgt(&negative));
+    assert!(negative.sle(&negative));
+    assert!(positive.sge(&negative));
+
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| small.ult(&wide)));
+    assert!(panic_result.is_err());
+
+    Ok(())
+}
