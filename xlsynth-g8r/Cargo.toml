@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-g8r"
-version = "0.0.184"
+version = "0.0.185"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "XLS IR to gate mapping"
@@ -10,8 +10,8 @@ documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.0.184" }
-xlsynth-pir = { path = "../xlsynth-pir", version = "0.0.184" }
+xlsynth = { path = "../xlsynth", version = "0.0.185" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.0.185" }
 env_logger = "0.11"
 log = "0.4"
 clap = { version = "4.5.21", features = ["derive"] }
@@ -52,7 +52,7 @@ test-case = "3.3.1"
 maplit = "1.0.2"
 prost-build = "0.12"
 tempfile = "3.20"
-xlsynth-test-helpers = { path = "../xlsynth-test-helpers", version = "0.0.184" }
+xlsynth-test-helpers = { path = "../xlsynth-test-helpers", version = "0.0.185" }
 
 [build-dependencies]
 prost-build = "0.12"
