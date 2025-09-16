@@ -21,8 +21,8 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     let _ = env_logger::builder().is_test(true).try_init();
 
-    let mut pkg1 = IrPackage::new("first")
-        .expect("IrPackage::new should not fail; treat as infra error");
+    let mut pkg1 =
+        IrPackage::new("first").expect("IrPackage::new should not fail; treat as infra error");
     let func1 = match generate_ir_fn(
         pair.first.input_bits,
         pair.first.ops.clone(),
@@ -36,8 +36,8 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
         }
     };
 
-    let mut pkg2 = IrPackage::new("second")
-        .expect("IrPackage::new should not fail; treat as infra error");
+    let mut pkg2 =
+        IrPackage::new("second").expect("IrPackage::new should not fail; treat as infra error");
     let func2 = match generate_ir_fn(
         pair.second.input_bits,
         pair.second.ops.clone(),
@@ -62,11 +62,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     for i in 0..t1.param_count() {
         let p1: IrType = t1.param_type(i).expect("param type");
         let p2: IrType = t2.param_type(i).expect("param type");
-        assert_eq!(
-            p1.to_string(),
-            p2.to_string(),
-            "param {i} width mismatch"
-        );
+        assert_eq!(p1.to_string(), p2.to_string(), "param {i} width mismatch");
     }
     assert_eq!(
         t1.return_type().to_string(),

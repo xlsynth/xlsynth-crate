@@ -17,6 +17,7 @@ rand = "0.8"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
 xlsynth-pir = { path = "../../xlsynth-pir" }
 xlsynth-g8r = { path = "../../xlsynth-g8r" }
+xlsynth-prover = { path = "../../xlsynth-prover" }
 
 [lib]
 name = "xlsynth_g8r_fuzz"
@@ -101,17 +102,17 @@ doc = false
 [features]
 # No default optional features; required solver integrations are always enabled via dependency specification above.
 default = []
-has-boolector = ["xlsynth-g8r/has-boolector"]
-has-easy-smt = ["xlsynth-g8r/has-easy-smt"]
-has-bitwuzla = ["xlsynth-g8r/has-bitwuzla"]
-# Forward selected optional solver/testing features to xlsynth-g8r so callers can enable them on this crate.
-with-easy-smt = ["xlsynth-g8r/with-easy-smt", "has-easy-smt"]
-with-boolector-binary-test = ["has-easy-smt", "xlsynth-g8r/with-boolector-binary-test"]
-with-bitwuzla-binary-test = ["has-easy-smt", "xlsynth-g8r/with-bitwuzla-binary-test"]
-with-z3-binary-test = ["has-easy-smt", "xlsynth-g8r/with-z3-binary-test"]
-with-bitwuzla-system = ["has-bitwuzla", "xlsynth-g8r/with-bitwuzla-system"]
-with-bitwuzla-built = ["has-bitwuzla", "xlsynth-g8r/with-bitwuzla-built"]
-with-boolector-system = ["has-boolector", "xlsynth-g8r/with-boolector-system"]
-with-boolector-built = ["has-boolector", "xlsynth-g8r/with-boolector-built"]
+has-boolector = ["xlsynth-prover/has-boolector"]
+has-easy-smt = ["xlsynth-prover/has-easy-smt"]
+has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]
+# Forward selected optional solver/testing features to xlsynth-prover so callers can enable them on this crate.
+with-easy-smt = ["xlsynth-prover/with-easy-smt", "has-easy-smt"]
+with-boolector-binary-test = ["has-easy-smt", "xlsynth-prover/with-boolector-binary-test"]
+with-bitwuzla-binary-test = ["has-easy-smt", "xlsynth-prover/with-bitwuzla-binary-test"]
+with-z3-binary-test = ["has-easy-smt", "xlsynth-prover/with-z3-binary-test"]
+with-bitwuzla-system = ["has-bitwuzla", "xlsynth-prover/with-bitwuzla-system"]
+with-bitwuzla-built = ["has-bitwuzla", "xlsynth-prover/with-bitwuzla-built"]
+with-boolector-system = ["has-boolector", "xlsynth-prover/with-boolector-system"]
+with-boolector-built = ["has-boolector", "xlsynth-prover/with-boolector-built"]
 with-z3-system = ["xlsynth-g8r/with-z3-system"]
 with-z3-built = ["xlsynth-g8r/with-z3-built"]

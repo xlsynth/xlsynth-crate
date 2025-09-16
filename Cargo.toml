@@ -6,6 +6,7 @@ members = [
     "xlsynth-estimator",
     "xlsynth-g8r",
     "xlsynth-pir",
+    "xlsynth-prover",
     "sample-usage",
 ]
 resolver = "2"

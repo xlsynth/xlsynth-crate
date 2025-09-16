@@ -1,0 +1,40 @@
+[package]
+name = "xlsynth-prover"
+version = "0.0.185"
+edition = "2024"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "XLS formal pProvers"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth"
+homepage = "https://github.com/xlsynth/xlsynth-crate"
+
+[dependencies]
+xlsynth = { path = "../xlsynth", version = "0.0.185" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.0.185" }
+tempfile = "3.20"
+num_cpus = "1.16"
+clap = { version = "4.5.21", features = ["derive"] }
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+boolector-sys = { version = "0.7.2", optional = true }
+bitwuzla-sys = { version = "0.8.0", optional = true }
+easy-smt = { version = "0.3.1", optional = true }
+
+[features]
+default = []
+has-boolector = []
+has-bitwuzla = []
+has-easy-smt = []
+with-boolector-system = ["dep:boolector-sys", "dep:boolector-sys", "has-boolector"]
+with-boolector-built = ["dep:boolector-sys", "dep:boolector-sys", "boolector-sys/vendor-lgl", "has-boolector"]
+with-easy-smt = ["dep:easy-smt", "has-easy-smt"]
+with-boolector-binary-test = ["with-easy-smt"]
+with-bitwuzla-binary-test = ["with-easy-smt"]
+with-z3-binary-test = ["with-easy-smt"]
+with-bitwuzla-system = ["dep:bitwuzla-sys", "has-bitwuzla"]
+with-bitwuzla-built = ["dep:bitwuzla-sys", "bitwuzla-sys/vendor-cadical", "has-bitwuzla"]
+
+[lib]
+name = "xlsynth_prover"
+path = "src/lib.rs"

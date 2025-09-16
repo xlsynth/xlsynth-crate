@@ -2,9 +2,9 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_pir::{ir, ir_parser};
-use xlsynth_pir::structural_similarity::structurally_equivalent_ir;
 use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::structural_similarity::structurally_equivalent_ir;
+use xlsynth_pir::{ir, ir_parser};
 
 fuzz_target!(|sample: FuzzSample| {
     // Skip degenerate samples early.
@@ -44,7 +44,8 @@ fuzz_target!(|sample: FuzzSample| {
         .parse_fn()
         .expect("Function pretty-printer emitted text that failed to reparse");
 
-    // 5) Sanity: re-serialize package and reparse to ensure package-level printer is sound
+    // 5) Sanity: re-serialize package and reparse to ensure package-level printer
+    //    is sound
     let reparsed_pkg = ir_parser::Parser::new(&parsed_pkg.to_string())
         .parse_and_validate_package()
         .expect("Package pretty-printer emitted IR that failed to reparse/validate");
@@ -52,7 +53,8 @@ fuzz_target!(|sample: FuzzSample| {
         .get_top()
         .expect("package pretty-printer should preserve top function");
 
-    // 6) Structural equivalence checks between original parsed top and both reparsed variants
+    // 6) Structural equivalence checks between original parsed top and both
+    //    reparsed variants
     assert!(structurally_equivalent_ir(parsed_top, &reparsed_top));
     assert!(structurally_equivalent_ir(parsed_top, reparsed_pkg_top));
 });
