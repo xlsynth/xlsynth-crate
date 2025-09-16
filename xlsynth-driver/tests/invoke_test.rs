@@ -25,6 +25,68 @@ tool_path = \"{}\"",
     )
 }
 
+#[cfg(feature = "with-z3-binary-test")]
+#[test]
+fn test_irequiv_subcommand_include_assert_label() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let lhs_ir = "package p\nfn my_main(__token: token, a: bits[1]) -> bits[1] {\n  assert.10: token = assert(__token, a, message=\"rf\", label=\"red\", id=10)\n  ret literal.20: bits[1] = literal(value=1, id=20)\n}";
+    let rhs_ir = "package p\nfn my_main(__token: token, a: bits[1]) -> bits[1] {\n  literal.101: bits[1] = literal(value=1, id=101)\n  assert.102: token = assert(__token, literal.101, message=\"bf\", label=\"blue\", id=102)\n  ret literal.103: bits[1] = literal(value=1, id=103)\n}";
+
+    let lhs_path = temp_dir.path().join("lhs.ir");
+    std::fs::write(&lhs_path, lhs_ir).unwrap();
+    let rhs_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_path, rhs_ir).unwrap();
+
+    // Toolchain config
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // 1) Without include filter: expect non-equivalent (LHS may fail, RHS passes)
+    let out1 = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg("--solver=z3-binary")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .output()
+        .unwrap();
+    assert!(
+        !out1.status.success(),
+        "Expected ir-equiv to fail without include filter; stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    // 2) With include filter for only 'blue' labels: should prove equivalence
+    let out2 = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg("--solver=z3-binary")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .arg("--include-assert-label")
+        .arg("blue")
+        .output()
+        .unwrap();
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        out2.status.success(),
+        "Expected ir-equiv to succeed with include filter; stderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert!(stdout2.contains("[ir-equiv] success: Solver proved equivalence"));
+}
+
 // dslx-show tests
 
 #[test]

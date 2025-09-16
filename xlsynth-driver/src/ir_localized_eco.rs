@@ -350,6 +350,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
             rhs_param_domains: None,
             lhs_uf_map: std::collections::HashMap::new(),
             rhs_uf_map: std::collections::HashMap::new(),
+            assert_label_include: None,
         };
         let outcome = dispatch_ir_equiv(None, Some(tool_path), &inputs);
         let dur = std::time::Duration::from_micros(outcome.time_micros as u64);

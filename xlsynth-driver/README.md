@@ -32,6 +32,7 @@ Key flags:
 - `--drop_params <CSV>`
 - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
 - `--assertion-semantics <ignore|never|same|assume|implies>`
+- `--include-assert-label <REGEX>` (repeatable) – include only assertions whose label matches at least one regex
 - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
 - `--output_json <PATH>` to write the JSON result.
 
@@ -459,6 +460,7 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
   - `--drop_params <CSV>`
   - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
   - `--assertion-semantics <ignore|never|same|assume|implies>`
+  - `--include-assert-label <REGEX>` (repeatable) – include only assertions whose label matches at least one regex
   - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
   - `--assume-enum-in-bound=<BOOL>`
   - `--type_inference_v2=<BOOL>` (requires `--toolchain`)
@@ -479,6 +481,7 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
 - Backend: `--solver <...>` selects the solver/toolchain.
 - Semantics: `--assertion-semantics <ignore|never|assume>`.
+- Assertion filter: `--include-assert-label <REGEX>` (repeatable) – include only assertions whose label matches at least one regex.
 - UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
 - Output: `--output_json <PATH>` to write results as JSON.
 

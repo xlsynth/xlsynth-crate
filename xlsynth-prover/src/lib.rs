@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod assertion_filter;
 pub mod bitwuzla_backend;
 pub mod boolector_backend;
 pub mod easy_smt_backend;

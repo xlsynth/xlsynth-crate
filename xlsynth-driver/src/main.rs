@@ -657,6 +657,13 @@ fn main() {
                         .default_value("same")
                         .action(ArgAction::Set),
                 )
+                .arg(
+                    Arg::new("include_assert_label")
+                        .long("include-assert-label")
+                        .value_name("REGEX")
+                        .help("Include only assertions whose label matches this regex (repeatable)")
+                        .action(ArgAction::Append),
+                )
                 .add_bool_arg(
                     "lhs_fixed_implicit_activation",
                     "Fix the implicit activation bit to true for the LHS IR, useful when only LHS or RHS has implicit token",
@@ -1209,6 +1216,13 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
+                    clap::Arg::new("include_assert_label")
+                        .long("include-assert-label")
+                        .value_name("REGEX")
+                        .help("Include only assertions whose label matches this regex (repeatable)")
+                        .action(clap::ArgAction::Append),
+                )
+                .arg(
                     clap::Arg::new("output_json")
                         .long("output_json")
                         .value_name("PATH")
@@ -1349,6 +1363,13 @@ fn main() {
                         .value_parser(["ignore", "never", "same", "assume", "implies"])
                         .default_value("same")
                         .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("include_assert_label")
+                        .long("include-assert-label")
+                        .value_name("REGEX")
+                        .help("Include only assertions whose label matches this regex (repeatable)")
+                        .action(clap::ArgAction::Append),
                 )
                 .add_bool_arg(
                     "lhs_fixed_implicit_activation",
