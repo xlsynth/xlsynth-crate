@@ -1,3 +1,5 @@
+# xlsynth-crate guidance for "agents"
+
 ## Engineering conventions for xlsynth-crate
 
 - Prefer placing reusable functionality in library crates (e.g., `xlsynth-g8r`) rather than inside `xlsynth-driver`.
@@ -13,7 +15,7 @@
 
 This separation makes functionality testable without a CLI, keeps dependencies focused, and avoids duplication across binaries.
 
-# AGENTS.md
+## `pre-commit`
 
 All pull requests must be clean with respect to `pre-commit`.
 

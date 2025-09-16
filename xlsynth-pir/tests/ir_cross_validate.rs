@@ -3,9 +3,7 @@
 use xlsynth::IrPackage as XlsIrPackage;
 use xlsynth_pir::ir_parser::Parser as PirParser;
 use xlsynth_pir::ir_validate::{self};
-use xlsynth_pir::ir_verify_parity::{
-    ErrorCategory, categorize_pir_error, categorize_xls_error_text,
-};
+use xlsynth_pir::ir_verify_parity::{categorize_pir_error, categorize_xls_error_text};
 
 fn verify_with_pir(ir_text: &str) -> bool {
     let mut p = PirParser::new(ir_text);

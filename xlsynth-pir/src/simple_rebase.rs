@@ -200,6 +200,7 @@ mod tests {
     use super::*;
     use crate::ir::{Binop, NaryOp, NodePayload, PackageMember};
     use crate::ir_parser::Parser;
+    use crate::prove_equiv_via_toolchain;
 
     fn parse_fn(ir: &str) -> IrFn {
         let pkg_text = format!("package test\n\n{}\n", ir);
@@ -216,13 +217,12 @@ mod tests {
     }
 
     fn check_desired_equivalence(desired: &IrFn, result: &IrFn) {
-        let res =
-            xlsynth_g8r::equiv::prove_equiv_via_toolchain::prove_ir_fn_strings_equiv_via_toolchain(
-                &desired.to_string(),
-                &result.to_string(),
-            );
+        let res = prove_equiv_via_toolchain::prove_ir_fn_strings_equiv_via_toolchain(
+            &desired.to_string(),
+            &result.to_string(),
+        );
         assert!(
-            matches!(res, xlsynth_g8r::equiv::types::EquivResult::Proved),
+            matches!(res, prove_equiv_via_toolchain::ToolchainEquivResult::Proved),
             "Toolchain IR equivalence failed: {:?}",
             res
         );

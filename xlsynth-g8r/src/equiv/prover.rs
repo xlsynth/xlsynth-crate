@@ -8,6 +8,7 @@ use crate::equiv::types::{
     QuickCheckAssertionSemantics, UfSignature,
 };
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
 use xlsynth_pir::{ir, ir_parser};
 
 pub trait Prover {
@@ -311,6 +312,16 @@ impl<S: SolverConfig> Prover for S {
     }
 }
 
+impl From<ToolchainEquivResult> for EquivResult {
+    fn from(result: ToolchainEquivResult) -> Self {
+        match result {
+            ToolchainEquivResult::Proved => EquivResult::Proved,
+            ToolchainEquivResult::Disproved(msg) => EquivResult::ToolchainDisproved(msg),
+            ToolchainEquivResult::Error(msg) => EquivResult::Error(msg),
+        }
+    }
+}
+
 pub enum ExternalProver {
     ToolExe(PathBuf),
     ToolDir(PathBuf),
@@ -326,20 +337,22 @@ impl Prover for ExternalProver {
     ) -> EquivResult {
         match self {
             ExternalProver::ToolExe(path) => {
-                crate::equiv::prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_exe(
+                prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_exe(
                     lhs_pkg_text,
                     rhs_pkg_text,
                     top,
                     path,
                 )
+                .into()
             }
             ExternalProver::ToolDir(path) => {
-                crate::equiv::prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
+                prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
                     lhs_pkg_text,
                     rhs_pkg_text,
                     top,
                     path,
                 )
+                .into()
             }
             ExternalProver::Toolchain => match std::env::var("XLSYNTH_TOOLS") {
                 Ok(dir) => ExternalProver::ToolDir(PathBuf::from(dir)).prove_ir_pkg_text_equiv(
