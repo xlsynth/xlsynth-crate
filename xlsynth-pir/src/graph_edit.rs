@@ -11,6 +11,7 @@ use std::collections::BinaryHeap;
 
 use crate::greedy_graph_edit::MatchAction;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Represents a concrete IR edit operation to be applied to a function.
 #[derive(Debug, Clone)]
@@ -102,6 +103,46 @@ pub struct ReadyNode {
     pub index: usize,
 }
 
+/// Computes MatchNodes actions that pair parameters (GetParam nodes) in `old`
+/// and `new` functions by parameter name.
+pub fn compute_parameter_matches(old: &Fn, new: &Fn) -> Vec<MatchAction> {
+    let mut old_param_to_idx: HashMap<String, usize> = HashMap::new();
+    for (idx, node) in old.nodes.iter().enumerate() {
+        if let crate::ir::NodePayload::GetParam(pid) = node.payload {
+            if let Some(p) = old.params.iter().find(|p| p.id == pid) {
+                old_param_to_idx.insert(p.name.clone(), idx);
+            }
+        }
+    }
+    let mut new_param_to_idx: HashMap<String, usize> = HashMap::new();
+    for (idx, node) in new.nodes.iter().enumerate() {
+        if let crate::ir::NodePayload::GetParam(pid) = node.payload {
+            if let Some(p) = new.params.iter().find(|p| p.id == pid) {
+                new_param_to_idx.insert(p.name.clone(), idx);
+            }
+        }
+    }
+
+    let mut matches: Vec<MatchAction> = Vec::new();
+    for op in old.params.iter() {
+        if let (Some(&oi), Some(&ni)) = (
+            old_param_to_idx.get(&op.name),
+            new_param_to_idx.get(&op.name),
+        ) {
+            matches.push(MatchAction::MatchNodes {
+                old_index: oi,
+                new_index: ni,
+                operand_substitutions: Vec::new(),
+                is_new_return: new
+                    .ret_node_ref
+                    .map(|nr| nr.index)
+                    .map_or(false, |ri| ri == ni),
+            });
+        }
+    }
+    matches
+}
+
 /// Abstraction for prioritizing and selecting edits.
 ///
 /// Implementations maintain internal state (e.g., priority queues) and decide
@@ -121,7 +162,7 @@ pub trait MatchSelector {
 
 /// Default selector that mimics the previous behavior: a simple FIFO-like
 /// priority over ready deletes/adds with stable ordering.
-pub struct DefaultEditSelector<'a> {
+pub struct NaiveMatchSelector<'a> {
     order_counter: usize,
     heap: BinaryHeap<QueueEntry>,
     old: &'a Fn,
@@ -149,7 +190,7 @@ impl PartialOrd for QueueEntry {
     }
 }
 
-impl<'a> DefaultEditSelector<'a> {
+impl<'a> NaiveMatchSelector<'a> {
     pub fn new(old: &'a Fn, new: &'a Fn) -> Self {
         let mut sel = Self {
             order_counter: 0,
@@ -158,37 +199,9 @@ impl<'a> DefaultEditSelector<'a> {
             new,
         };
 
-        // Seed parameter matches by name: map each parameter name to its
-        // GetParam node index in old and new, and enqueue MatchNodes.
-        let mut old_param_to_idx: HashMap<String, usize> = HashMap::new();
-        for (idx, node) in old.nodes.iter().enumerate() {
-            if let crate::ir::NodePayload::GetParam(pid) = node.payload {
-                // Find the name for this pid
-                if let Some(p) = old.params.iter().find(|p| p.id == pid) {
-                    old_param_to_idx.insert(p.name.clone(), idx);
-                }
-            }
-        }
-        let mut new_param_to_idx: HashMap<String, usize> = HashMap::new();
-        for (idx, node) in new.nodes.iter().enumerate() {
-            if let crate::ir::NodePayload::GetParam(pid) = node.payload {
-                if let Some(p) = new.params.iter().find(|p| p.id == pid) {
-                    new_param_to_idx.insert(p.name.clone(), idx);
-                }
-            }
-        }
-        for op in old.params.iter() {
-            if let (Some(&oi), Some(&ni)) = (
-                old_param_to_idx.get(&op.name),
-                new_param_to_idx.get(&op.name),
-            ) {
-                sel.push_action(MatchAction::MatchNodes {
-                    old_index: oi,
-                    new_index: ni,
-                    operand_substitutions: Vec::new(),
-                    is_return: false,
-                });
-            }
+        // Seed parameter matches by name and enqueue them.
+        for m in compute_parameter_matches(old, new).into_iter() {
+            sel.push_action(m);
         }
 
         sel
@@ -205,7 +218,7 @@ impl<'a> DefaultEditSelector<'a> {
     }
 }
 
-impl<'a> MatchSelector for DefaultEditSelector<'a> {
+impl<'a> MatchSelector for NaiveMatchSelector<'a> {
     fn add_ready_node(&mut self, node: ReadyNode) {
         match node.side {
             NodeSide::Old => {
@@ -228,7 +241,7 @@ impl<'a> MatchSelector for DefaultEditSelector<'a> {
                 }
                 self.push_action(MatchAction::AddNode {
                     new_index: node.index,
-                    is_return: self
+                    is_new_return: self
                         .new
                         .ret_node_ref
                         .map(|nr| nr.index)
@@ -247,7 +260,7 @@ impl<'a> MatchSelector for DefaultEditSelector<'a> {
 /// Computes an edit set (distance) required to transform `old` into `new`.
 /// Internally computes a match set, then converts matches to concrete edits.
 pub fn compute_function_edit_distance(old: &Fn, new: &Fn) -> Result<IrEditSet, String> {
-    let mut selector = DefaultEditSelector::new(old, new);
+    let mut selector = NaiveMatchSelector::new(old, new);
     let matches = compute_function_edit(old, new, &mut selector)?;
     Ok(convert_match_set_to_edit_set(old, new, &matches))
 }
@@ -347,7 +360,7 @@ pub fn compute_function_edit<S: MatchSelector>(
                     .map_or(false, |ri| ri == index);
                 matches.push(MatchAction::AddNode {
                     new_index: index,
-                    is_return: is_ret,
+                    is_new_return: is_ret,
                 });
                 update_ready(index, NodeSide::New, selector);
                 selector.update_after_match(&edit);
@@ -363,8 +376,7 @@ pub fn compute_function_edit<S: MatchSelector>(
                     old_index,
                     new_index,
                     operand_substitutions: operand_substitutions.clone(),
-                    is_return: old.ret_node_ref.map(|nr| nr.index) == Some(old_index)
-                        && new.ret_node_ref.map(|nr| nr.index) == Some(new_index),
+                    is_new_return: new.ret_node_ref.map(|nr| nr.index) == Some(new_index),
                 });
                 // Propagate readiness in old/new graphs.
                 update_ready(old_index, NodeSide::Old, selector);
@@ -454,7 +466,7 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
             old_index,
             new_index,
             operand_substitutions: _,
-            is_return: _,
+            is_new_return: _,
         } = action
         {
             new_to_old.insert(*new_index, *old_index);
@@ -466,7 +478,7 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
         match action {
             MatchAction::AddNode {
                 new_index,
-                is_return: _,
+                is_new_return: _,
             } => {
                 // Clone new node and remap operands that refer to matched new nodes to their
                 // corresponding old indices. References to other new nodes remain as new
@@ -500,7 +512,7 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                 old_index,
                 new_index: _,
                 operand_substitutions,
-                is_return: _,
+                is_new_return: _,
             } => {
                 // For each substitution (old_operand_idx -> new_operand_idx), redirect
                 // the operand slot(s) on the old user node to the mapped old target if known.
@@ -687,8 +699,8 @@ mod tests {
         let pkg_old = parse_ir_from_string(
             r#"package p
             top fn f() -> bits[1] {
-                lit.1: bits[1] = literal(value=1, id=1)
-                ret identity.2: bits[1] = identity(lit.1, id=2)
+                literal.1: bits[1] = literal(value=1, id=1)
+                ret identity.2: bits[1] = identity(literal.1, id=2)
             }
             "#,
         );
@@ -698,8 +710,8 @@ mod tests {
         let pkg_new = parse_ir_from_string(
             r#"package p
             top fn f() -> bits[1] {
-                ret lit.1: bits[1] = literal(value=1, id=1)
-                identity.2: bits[1] = identity(lit.1, id=2)
+                ret literal.1: bits[1] = literal(value=1, id=1)
+                identity.2: bits[1] = identity(literal.1, id=2)
             }
             "#,
         );
@@ -725,8 +737,8 @@ mod tests {
         let pkg_new = parse_ir_from_string(
             r#"package p
             top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
-                s.103: bits[8] = add(a, b, id=103)
-                ret id.104: bits[8] = identity(s.103, id=104)
+                add.103: bits[8] = add(a, b, id=103)
+                ret identity.104: bits[8] = identity(add.103, id=104)
             }
             "#,
         );
