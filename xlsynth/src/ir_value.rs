@@ -38,6 +38,17 @@ impl IrBits {
         Self::from_raw(result)
     }
 
+    fn assert_matching_bit_count(&self, other: &IrBits) {
+        let self_count = self.get_bit_count();
+        let other_count = other.get_bit_count();
+        assert!(
+            self_count == other_count,
+            "Bit width mismatch: left bits[{}] vs right bits[{}]",
+            self_count,
+            other_count
+        );
+    }
+
     /// Converts a `&[bool]` slice into an IR `Bits` value.
     ///
     /// ```
@@ -205,6 +216,46 @@ impl IrBits {
 
     pub fn xor(&self, rhs: &IrBits) -> IrBits {
         self.apply_binary_op(rhs, xlsynth_sys::xls_bits_xor)
+    }
+
+    pub fn ult(&self, other: &IrBits) -> bool {
+        self.assert_matching_bit_count(other);
+        unsafe { xlsynth_sys::xls_bits_ult(self.ptr, other.ptr) }
+    }
+
+    pub fn ule(&self, other: &IrBits) -> bool {
+        self.assert_matching_bit_count(other);
+        unsafe { xlsynth_sys::xls_bits_ule(self.ptr, other.ptr) }
+    }
+
+    pub fn ugt(&self, other: &IrBits) -> bool {
+        self.assert_matching_bit_count(other);
+        unsafe { xlsynth_sys::xls_bits_ugt(self.ptr, other.ptr) }
+    }
+
+    pub fn uge(&self, other: &IrBits) -> bool {
+        self.assert_matching_bit_count(other);
+        unsafe { xlsynth_sys::xls_bits_uge(self.ptr, other.ptr) }
+    }
+
+    pub fn slt(&self, other: &IrBits) -> bool {
+        self.assert_matching_bit_count(other);
+        unsafe { xlsynth_sys::xls_bits_slt(self.ptr, other.ptr) }
+    }
+
+    pub fn sle(&self, other: &IrBits) -> bool {
+        self.assert_matching_bit_count(other);
+        unsafe { xlsynth_sys::xls_bits_sle(self.ptr, other.ptr) }
+    }
+
+    pub fn sgt(&self, other: &IrBits) -> bool {
+        self.assert_matching_bit_count(other);
+        unsafe { xlsynth_sys::xls_bits_sgt(self.ptr, other.ptr) }
+    }
+
+    pub fn sge(&self, other: &IrBits) -> bool {
+        self.assert_matching_bit_count(other);
+        unsafe { xlsynth_sys::xls_bits_sge(self.ptr, other.ptr) }
     }
 }
 
