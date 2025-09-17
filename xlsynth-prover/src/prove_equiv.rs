@@ -9,9 +9,10 @@ use xlsynth::IrValue;
 use crate::solver_interface::{BitVec, Response, Solver};
 use crate::translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv};
 use crate::types::{
-    Assertion, AssertionSemantics, AssertionViolation, EquivResult, EquivSide, FnInput, FnInputs,
-    FnOutput, IrFn, IrTypedBitVec, ParamDomains, SmtFn, UfRegistry, UfSignature,
+    Assertion, AssertionSemantics, AssertionViolation, EquivResult, FnInput, FnInputs, FnOutput,
+    IrFn, IrTypedBitVec, ParamDomains, ProverFn, SmtFn, UfRegistry, UfSignature,
 };
+use regex::Regex;
 use xlsynth_pir::ir;
 pub struct AlignedFnInputs<'a, R> {
     pub lhs: FnInputs<'a, R>,
@@ -143,6 +144,7 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     lhs: &SmtFn<'a, S::Term>,
     rhs: &SmtFn<'a, S::Term>,
     assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
 ) -> EquivResult {
     // --------------------------------------------
     // Helper: build a 1-bit "failed" flag for each
@@ -150,14 +152,20 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     // violated (active bit == 0).
     // --------------------------------------------
 
+    // Optionally filter assertions by label before applying semantics.
+    let lhs_asserts =
+        crate::assertion_filter::filter_assertions(&lhs.assertions, assert_label_include);
+    let rhs_asserts =
+        crate::assertion_filter::filter_assertions(&rhs.assertions, assert_label_include);
+
     // Build a flag that is true iff ALL assertions are active (i.e., no violation).
-    let mk_success_flag = |solver: &mut S, asserts: &Vec<Assertion<'a, S::Term>>| {
+    let mk_success_flag = |solver: &mut S, asserts: &[&Assertion<'_, S::Term>]| {
         if asserts.is_empty() {
             // No assertions → always succeed (true)
             solver.numerical(1, 1)
         } else {
             let mut acc: Option<BitVec<S::Term>> = None;
-            for a in asserts {
+            for a in asserts.iter() {
                 acc = Some(match acc {
                     None => a.active.clone(),
                     Some(prev) => solver.and(&prev, &a.active),
@@ -167,8 +175,8 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
         }
     };
 
-    let lhs_pass = mk_success_flag(solver, &lhs.assertions);
-    let rhs_pass = mk_success_flag(solver, &rhs.assertions);
+    let lhs_pass = mk_success_flag(solver, &lhs_asserts);
+    let rhs_pass = mk_success_flag(solver, &rhs_asserts);
 
     let lhs_failed = solver.not(&lhs_pass);
     let rhs_failed = solver.not(&rhs_pass);
@@ -206,25 +214,24 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     match solver.check().unwrap() {
         Response::Sat => {
             // Helper to fetch first violated assertion (if any)
-            let get_assertion = |solver: &mut S,
-                                 asserts: &Vec<Assertion<'a, S::Term>>|
-             -> Option<(String, String)> {
-                for a in asserts {
-                    let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
-                    let bits = val.to_bits().unwrap();
-                    let ok = bits.get_bit(0).unwrap();
-                    if !ok {
-                        return Some((a.message.to_string(), a.label.to_string()));
+            let get_assertion =
+                |solver: &mut S, asserts: &[&Assertion<'_, S::Term>]| -> Option<(String, String)> {
+                    for a in asserts.iter() {
+                        let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
+                        let bits = val.to_bits().unwrap();
+                        let ok = bits.get_bit(0).unwrap();
+                        if !ok {
+                            return Some((a.message.to_string(), a.label.to_string()));
+                        }
                     }
-                }
-                None
-            };
+                    None
+                };
 
             let (lhs_violation, rhs_violation) = match assertion_semantics {
                 AssertionSemantics::Ignore => (None, None),
                 _ => (
-                    get_assertion(solver, &lhs.assertions),
-                    get_assertion(solver, &rhs.assertions),
+                    get_assertion(solver, &lhs_asserts),
+                    get_assertion(solver, &rhs_asserts),
                 ),
             };
 
@@ -280,9 +287,10 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
 /// are enums to lie within their defined value sets.
 pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &EquivSide<'a>,
-    rhs: &EquivSide<'a>,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
     assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
     allow_flatten: bool,
     uf_signatures: &HashMap<String, UfSignature>,
 ) -> EquivResult {
@@ -321,7 +329,13 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
     let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &uf_registry);
     let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs.uf_map, &uf_registry);
-    check_aligned_fn_equiv_internal(&mut solver, &smt_lhs, &smt_rhs, assertion_semantics)
+    check_aligned_fn_equiv_internal(
+        &mut solver,
+        &smt_lhs,
+        &smt_rhs,
+        assertion_semantics,
+        assert_label_include,
+    )
 }
 
 pub fn prove_ir_fn_equiv<'a, S: Solver>(
@@ -329,21 +343,23 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     lhs: &IrFn<'a>,
     rhs: &IrFn<'a>,
     assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
     prove_ir_fn_equiv_full::<S>(
         solver_config,
-        &EquivSide {
+        &ProverFn {
             ir_fn: lhs,
             domains: None,
             uf_map: HashMap::new(),
         },
-        &EquivSide {
+        &ProverFn {
             ir_fn: rhs,
             domains: None,
             uf_map: HashMap::new(),
         },
         assertion_semantics,
+        assert_label_include,
         allow_flatten,
         &HashMap::new(),
     )
@@ -388,6 +404,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     lhs: &IrFn<'a>,
     rhs: &IrFn<'a>,
     assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
     let width = lhs.fn_ref.ret_ty.bit_count();
@@ -399,7 +416,14 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     if width == 0 {
         // Zero-width values – fall back to the standard equivalence prover because
         // there is no bit to split on.
-        return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, assertion_semantics, allow_flatten);
+        return prove_ir_fn_equiv::<S>(
+            solver_config,
+            lhs,
+            rhs,
+            assertion_semantics,
+            assert_label_include,
+            allow_flatten,
+        );
     };
 
     let found = Arc::new(AtomicBool::new(false));
@@ -441,6 +465,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
                         &lf,
                         &rf,
                         assertion_semantics.clone(),
+                        assert_label_include,
                         allow_flatten,
                     );
                     if let EquivResult::Disproved { .. } = &res {
@@ -475,10 +500,18 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     split_input_index: usize,
     split_input_bit_index: usize,
     assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
     if lhs.fn_ref.params.is_empty() || rhs.fn_ref.params.is_empty() {
-        return prove_ir_fn_equiv::<S>(solver_config, lhs, rhs, assertion_semantics, allow_flatten);
+        return prove_ir_fn_equiv::<S>(
+            solver_config,
+            lhs,
+            rhs,
+            assertion_semantics,
+            assert_label_include,
+            allow_flatten,
+        );
     }
 
     assert_eq!(
@@ -523,7 +556,13 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         let eq_bv = solver.eq(&bit_bv, &val_bv);
         solver.assert(&eq_bv).unwrap();
 
-        check_aligned_fn_equiv_internal(&mut solver, &smt_lhs, &smt_rhs, assertion_semantics);
+        check_aligned_fn_equiv_internal(
+            &mut solver,
+            &smt_lhs,
+            &smt_rhs,
+            assertion_semantics,
+            assert_label_include,
+        );
     }
 
     EquivResult::Proved
@@ -583,6 +622,7 @@ pub mod test_utils {
                 fixed_implicit_activation: false,
             },
             AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res, super::EquivResult::Proved));
@@ -635,6 +675,7 @@ pub mod test_utils {
                 fixed_implicit_activation: false,
             },
             super::AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res_no_uf, super::EquivResult::Disproved { .. }));
@@ -655,7 +696,7 @@ pub mod test_utils {
 
         let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: call_g,
                     pkg_ref: Some(&pkg),
@@ -664,7 +705,7 @@ pub mod test_utils {
                 domains: None,
                 uf_map: lhs_uf_map,
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: call_h,
                     pkg_ref: Some(&pkg),
@@ -674,6 +715,7 @@ pub mod test_utils {
                 uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
+            None,
             false,
             &uf_sigs,
         );
@@ -733,7 +775,7 @@ pub mod test_utils {
 
         let res = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: top_g,
                     pkg_ref: Some(&pkg),
@@ -742,7 +784,7 @@ pub mod test_utils {
                 domains: None,
                 uf_map: lhs_uf_map,
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: top_h,
                     pkg_ref: Some(&pkg),
@@ -752,6 +794,7 @@ pub mod test_utils {
                 uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
+            None,
             false,
             &uf_sigs,
         );
@@ -802,6 +845,7 @@ pub mod test_utils {
                 fixed_implicit_activation: false,
             },
             super::AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res_no_uf, super::EquivResult::Disproved { .. }));
@@ -822,7 +866,7 @@ pub mod test_utils {
 
         let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: call_g,
                     pkg_ref: Some(&pkg),
@@ -831,7 +875,7 @@ pub mod test_utils {
                 domains: None,
                 uf_map: lhs_uf_map,
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: call_h,
                     pkg_ref: Some(&pkg),
@@ -841,10 +885,87 @@ pub mod test_utils {
                 uf_map: rhs_uf_map,
             },
             super::AssertionSemantics::Same,
+            None,
             false,
             &uf_sigs,
         );
         assert!(matches!(res_uf, super::EquivResult::Proved));
+    }
+
+    /// Assertion-label include filter: without filter, inequivalent due to LHS
+    /// 'red' assertion that can fail while RHS only has a trivially-true
+    /// 'blue' assertion; including only 'blue' labels should prove
+    /// equivalence under AssertionSemantics::Same.
+    pub fn test_assert_label_filter_equiv<S: Solver>(solver_config: &S::Config) {
+        let ir_pkg_text = r#"
+            package p_label_filter
+
+            fn lhs(__token: token, a: bits[1]) -> bits[1] {
+              assert.1: token = assert(__token, a, message="rf", label="red", id=1)
+              ret lit1: bits[1] = literal(value=1, id=2)
+            }
+
+            fn rhs(__token: token, a: bits[1]) -> bits[1] {
+              t: bits[1] = literal(value=1, id=1)
+              assert.2: token = assert(__token, t, message="bf", label="blue", id=2)
+              ret lit1: bits[1] = literal(value=1, id=3)
+            }
+        "#;
+
+        let pkg = ir_parser::Parser::new(ir_pkg_text)
+            .parse_package()
+            .expect("Failed to parse IR package");
+        let lhs = pkg.get_fn("lhs").expect("lhs not found");
+        let rhs = pkg.get_fn("rhs").expect("rhs not found");
+
+        let res_no_filter = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &super::IrFn {
+                fn_ref: lhs,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            &super::IrFn {
+                fn_ref: rhs,
+                pkg_ref: Some(&pkg),
+                fixed_implicit_activation: false,
+            },
+            super::AssertionSemantics::Same,
+            None,
+            false,
+        );
+        assert!(matches!(
+            res_no_filter,
+            super::EquivResult::Disproved { .. }
+        ));
+
+        let include = regex::Regex::new(r"^(?:blue)$").unwrap();
+        let res_filtered = super::prove_ir_fn_equiv_full::<S>(
+            solver_config,
+            &super::ProverFn {
+                ir_fn: &super::IrFn {
+                    fn_ref: lhs,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: std::collections::HashMap::new(),
+            },
+            &super::ProverFn {
+                ir_fn: &super::IrFn {
+                    fn_ref: rhs,
+                    pkg_ref: Some(&pkg),
+                    fixed_implicit_activation: false,
+                },
+                domains: None,
+                uf_map: std::collections::HashMap::new(),
+            },
+            super::AssertionSemantics::Same,
+            Some(&include),
+            false,
+            &std::collections::HashMap::new(),
+        );
+        assert!(matches!(res_filtered, super::EquivResult::Proved));
     }
 
     pub fn test_invoke_two_args<S: Solver>(solver_config: &S::Config) {
@@ -884,6 +1005,7 @@ pub mod test_utils {
                 fixed_implicit_activation: false,
             },
             AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res, super::EquivResult::Proved));
@@ -932,6 +1054,7 @@ pub mod test_utils {
                 fixed_implicit_activation: false,
             },
             AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res, super::EquivResult::Proved));
@@ -979,6 +1102,7 @@ pub mod test_utils {
                 fixed_implicit_activation: false,
             },
             AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res, super::EquivResult::Proved));
@@ -1021,6 +1145,7 @@ pub mod test_utils {
                 fixed_implicit_activation: false,
             },
             AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res, super::EquivResult::Proved));
@@ -1073,6 +1198,7 @@ pub mod test_utils {
                 fixed_implicit_activation: false,
             },
             AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res, super::EquivResult::Proved));
@@ -1172,6 +1298,7 @@ pub mod test_utils {
                 fixed_implicit_activation: rhs_fixed_implicit_activation,
             },
             assertion_semantics,
+            None,
             allow_flatten,
         );
         if expected_proven {
@@ -2227,6 +2354,7 @@ pub mod test_utils {
             &IrFn::new(&lhs_ir_fn, None),
             &IrFn::new(&rhs_ir_fn, None),
             AssertionSemantics::Ignore,
+            None,
             false,
         );
 
@@ -2431,6 +2559,7 @@ pub mod test_utils {
             &IrFn::new(&lhs_fn_ir, None),
             &IrFn::new(&rhs_fn_ir, None),
             AssertionSemantics::Same,
+            None,
             false,
         );
 
@@ -2489,6 +2618,7 @@ pub mod test_utils {
             &lhs_ir_fn,
             &rhs_ir_fn,
             AssertionSemantics::Same,
+            None,
             false,
         );
         assert!(matches!(res, super::EquivResult::Disproved { .. }));
@@ -2504,17 +2634,18 @@ pub mod test_utils {
 
         let res2 = prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &lhs_ir_fn,
                 domains: Some(doms.clone()),
                 uf_map: HashMap::new(),
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &rhs_ir_fn,
                 domains: Some(doms),
                 uf_map: HashMap::new(),
             },
             AssertionSemantics::Same,
+            None,
             false,
             &HashMap::new(),
         );
@@ -3150,6 +3281,10 @@ macro_rules! test_with_solver {
             #[test]
             fn test_uf_implicit_token_two_args_equiv() {
                 test_utils::test_uf_implicit_token_two_args_equiv::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_assert_label_filter_equiv() {
+                test_utils::test_assert_label_filter_equiv::<$solver_type>($solver_config);
             }
         }
     };

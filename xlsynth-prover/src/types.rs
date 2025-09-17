@@ -234,7 +234,7 @@ impl<S: Solver> UfRegistry<S> {
     }
 }
 
-pub struct EquivSide<'a> {
+pub struct ProverFn<'a> {
     pub ir_fn: &'a IrFn<'a>,
     pub domains: Option<ParamDomains>,
     pub uf_map: HashMap<String, String>,

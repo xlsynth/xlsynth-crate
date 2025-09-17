@@ -2,13 +2,14 @@
 
 use crate::{
     solver_interface::{BitVec, Response, Solver},
-    translate::{get_fn_inputs, ir_to_smt},
+    translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
     types::{
-        AssertionViolation, BoolPropertyResult, FnInput, FnOutput, IrFn,
+        AssertionViolation, BoolPropertyResult, FnInput, FnOutput, IrFn, ProverFn,
         QuickCheckAssertionSemantics, UfRegistry, UfSignature,
     },
 };
 
+use regex::Regex;
 use std::collections::HashMap;
 use xlsynth_pir::ir;
 
@@ -27,32 +28,41 @@ pub fn prove_ir_fn_always_true<'a, S>(
     solver_config: &S::Config,
     ir_fn: &IrFn<'a>,
     assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_include: Option<&Regex>,
 ) -> BoolPropertyResult
 where
     S: Solver,
     S::Term: 'a,
 {
-    prove_ir_fn_always_true_with_ufs::<S>(
-        solver_config,
+    let prover_fn = ProverFn {
         ir_fn,
+        domains: None,
+        uf_map: HashMap::new(),
+    };
+    let empty_signatures: HashMap<String, UfSignature> = HashMap::new();
+    prove_ir_fn_always_true_full::<S>(
+        solver_config,
+        &prover_fn,
         assertion_semantics,
-        &HashMap::new(),
-        &HashMap::new(),
+        assert_label_include,
+        &empty_signatures,
     )
 }
 
 /// UF-enabled variant of `prove_ir_fn_always_true`.
-pub fn prove_ir_fn_always_true_with_ufs<'a, S>(
+pub fn prove_ir_fn_always_true_full<'a, S>(
     solver_config: &S::Config,
-    ir_fn: &IrFn<'a>,
+    prover_fn: &ProverFn<'a>,
     assertion_semantics: QuickCheckAssertionSemantics,
-    uf_map: &HashMap<String, String>,
-    uf_sigs: &HashMap<String, UfSignature>,
+    assert_label_include: Option<&Regex>,
+    uf_signatures: &HashMap<String, UfSignature>,
 ) -> BoolPropertyResult
 where
     S: Solver,
     S::Term: 'a,
 {
+    let ir_fn = prover_fn.ir_fn;
+
     // Ensure the function indeed returns a single-bit value.
     assert_eq!(
         ir_fn.fn_ref.ret_ty.bit_count(),
@@ -64,15 +74,42 @@ where
 
     // Generate SMT representation with UF mapping/registry.
     let fn_inputs = get_fn_inputs(&mut solver, ir_fn, None);
-    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, uf_sigs);
-    let smt_fn = ir_to_smt(&mut solver, &fn_inputs, &uf_map, &uf_registry);
 
-    // Build a 1-bit flag that is `1` iff *all* in-function assertions pass.
-    let success_flag: BitVec<S::Term> = if smt_fn.assertions.is_empty() {
+    if let Some(domains) = &prover_fn.domains {
+        for param in fn_inputs.params().iter() {
+            if let Some(allowed) = domains.get(&param.name) {
+                if let Some(sym) = fn_inputs.inputs.get(&param.name) {
+                    let mut domain_constraint: Option<BitVec<S::Term>> = None;
+                    for value in allowed {
+                        let value_bv = ir_value_to_bv(&mut solver, value, &param.ty).bitvec;
+                        let eq = solver.eq(&sym.bitvec, &value_bv);
+                        domain_constraint = Some(match domain_constraint {
+                            None => eq,
+                            Some(prev) => solver.or(&prev, &eq),
+                        });
+                    }
+                    if let Some(expr) = domain_constraint {
+                        solver.assert(&expr).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, uf_signatures);
+    let smt_fn = ir_to_smt(&mut solver, &fn_inputs, &prover_fn.uf_map, &uf_registry);
+
+    // Optionally filter assertions by label before applying semantics.
+    let filtered_assertions =
+        crate::assertion_filter::filter_assertions(&smt_fn.assertions, assert_label_include);
+
+    // Build a 1-bit flag that is `1` iff *all* selected in-function assertions
+    // pass.
+    let success_flag: BitVec<S::Term> = if filtered_assertions.is_empty() {
         solver.numerical(1, 1)
     } else {
         let mut acc_opt: Option<BitVec<S::Term>> = None;
-        for a in &smt_fn.assertions {
+        for a in filtered_assertions.iter() {
             acc_opt = Some(match acc_opt {
                 None => a.active.clone(),
                 Some(prev) => solver.and(&prev, &a.active),
@@ -120,7 +157,7 @@ where
 
             // Determine if any assertion violated and build FnOutput accordingly
             let mut violation: Option<(String, String)> = None;
-            for a in &smt_fn.assertions {
+            for a in filtered_assertions.iter() {
                 let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
                 let bits = val.to_bits().unwrap();
                 if !bits.get_bit(0).unwrap() {
@@ -150,7 +187,8 @@ where
 #[cfg(test)]
 mod test_utils {
     use super::*;
-    use crate::types::IrFn;
+    use crate::types::{IrFn, ParamDomains, ProverFn};
+    use xlsynth::IrValue;
     use xlsynth_pir::ir_parser::Parser;
 
     /// Assert that `prove_ir_fn_always_true` returns `Proved`.
@@ -175,7 +213,7 @@ mod test_utils {
             pkg_ref: None,
             fixed_implicit_activation,
         };
-        let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem);
+        let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem, None);
         assert!(matches!(res, BoolPropertyResult::Proved));
     }
 
@@ -209,7 +247,7 @@ mod test_utils {
             pkg_ref: None,
             fixed_implicit_activation,
         };
-        let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem);
+        let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem, None);
         match res {
             BoolPropertyResult::Disproved { output, .. } => match (expect_violation, output) {
                 (
@@ -302,6 +340,7 @@ mod test_utils {
             solver_config,
             &ir_fn,
             QuickCheckAssertionSemantics::Ignore,
+            None,
         );
 
         match res {
@@ -369,14 +408,131 @@ mod test_utils {
             },
         );
 
-        let res = super::prove_ir_fn_always_true_with_ufs::<S>(
+        let prover_fn = ProverFn {
+            ir_fn: &ir_fn,
+            domains: None,
+            uf_map: uf_map.clone(),
+        };
+
+        let res = super::prove_ir_fn_always_true_full::<S>(
             solver_config,
-            &ir_fn,
+            &prover_fn,
             QuickCheckAssertionSemantics::Assume,
-            &uf_map,
+            None,
             &uf_sigs,
         );
         assert!(matches!(res, super::BoolPropertyResult::Proved));
+    }
+
+    /// Assertion-label include filter for QuickCheck: without filter, 'Never'
+    /// fails due to red assertion depending on input; with include('blue'),
+    /// no included assertions can fail, so the property is proved.
+    pub fn test_qc_assert_label_filter<S: Solver>(solver_config: &S::Config) {
+        let ir_text = r#"
+            fn f(__token: token, a: bits[1]) -> bits[1] {
+              assert.1: token = assert(__token, a, message="rf", label="red", id=1)
+              t: bits[1] = literal(value=1, id=2)
+              assert.3: token = assert(assert.1, t, message="bf", label="blue", id=3)
+              ret lit1: bits[1] = literal(value=1, id=4)
+            }
+        "#;
+
+        let mut parser = Parser::new(ir_text);
+        let f = parser.parse_fn().expect("Failed to parse IR function");
+        let ir_fn = IrFn {
+            fn_ref: &f,
+            pkg_ref: None,
+            fixed_implicit_activation: false,
+        };
+
+        // No filter: 'Never' should be disproved (red may fail for a=0)
+        let prover_fn = ProverFn {
+            ir_fn: &ir_fn,
+            domains: None,
+            uf_map: std::collections::HashMap::new(),
+        };
+        let empty_signatures =
+            std::collections::HashMap::<String, crate::types::UfSignature>::new();
+
+        let res_no_filter = super::prove_ir_fn_always_true_full::<S>(
+            solver_config,
+            &prover_fn,
+            QuickCheckAssertionSemantics::Never,
+            None,
+            &empty_signatures,
+        );
+        assert!(matches!(
+            res_no_filter,
+            super::BoolPropertyResult::Disproved { .. }
+        ));
+
+        // Filter include only 'blue': all included asserts hold -> Proved
+        let include = Regex::new(r"^(?:blue)$").unwrap();
+        let res_filtered = super::prove_ir_fn_always_true_full::<S>(
+            solver_config,
+            &prover_fn,
+            QuickCheckAssertionSemantics::Never,
+            Some(&include),
+            &empty_signatures,
+        );
+        assert!(matches!(res_filtered, super::BoolPropertyResult::Proved));
+    }
+
+    /// Parameter-domain restriction: without domains the property is falsified,
+    /// but constraining the argument to the valid enum set makes it provable.
+    pub fn test_quickcheck_param_domains<S: Solver>(solver_config: &S::Config) {
+        let ir_text = r#"
+            fn f(x: bits[2]) -> bits[1] {
+              literal.1: bits[2] = literal(value=1, id=1)
+              ret eq.2: bits[1] = eq(x, literal.1, id=2)
+            }
+        "#;
+
+        let mut parser = Parser::new(ir_text);
+        let f = parser.parse_fn().expect("Failed to parse IR function");
+        let ir_fn = IrFn {
+            fn_ref: &f,
+            pkg_ref: None,
+            fixed_implicit_activation: false,
+        };
+
+        // Without domains, the property is disproved (e.g. x = 0).
+        let res_no_domains = super::prove_ir_fn_always_true::<S>(
+            solver_config,
+            &ir_fn,
+            QuickCheckAssertionSemantics::Ignore,
+            None,
+        );
+        assert!(matches!(
+            res_no_domains,
+            super::BoolPropertyResult::Disproved { .. }
+        ));
+
+        // Restrict x to {1}; the property now holds.
+        let mut domains: ParamDomains = HashMap::new();
+        domains.insert(
+            "x".to_string(),
+            vec![IrValue::make_ubits(2, 1).expect("make ubits")],
+        );
+
+        let prover_fn = ProverFn {
+            ir_fn: &ir_fn,
+            domains: Some(domains),
+            uf_map: HashMap::new(),
+        };
+        let empty_signatures: HashMap<String, crate::types::UfSignature> = HashMap::new();
+
+        let res_with_domains = super::prove_ir_fn_always_true_full::<S>(
+            solver_config,
+            &prover_fn,
+            QuickCheckAssertionSemantics::Ignore,
+            None,
+            &empty_signatures,
+        );
+        assert!(matches!(
+            res_with_domains,
+            super::BoolPropertyResult::Proved
+        ));
     }
 }
 
@@ -520,6 +676,14 @@ macro_rules! quickcheck_test_with_solver {
             #[test]
             fn quickcheck_uf_basic() {
                 test_utils::test_quickcheck_uf_basic::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn quickcheck_assert_label_filter() {
+                test_utils::test_qc_assert_label_filter::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn quickcheck_param_domains() {
+                test_utils::test_quickcheck_param_domains::<$solver_type>($solver_config);
             }
         }
     };

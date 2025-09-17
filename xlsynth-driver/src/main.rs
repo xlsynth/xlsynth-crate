@@ -658,6 +658,13 @@ fn main() {
                         .default_value("same")
                         .action(ArgAction::Set),
                 )
+                .arg(
+                    Arg::new("assert_label_filter")
+                        .long("assert-label-filter")
+                        .value_name("REGEX")
+                        .help("Include only assertions whose label matches this regex (use `|` to combine labels)")
+                        .action(ArgAction::Set),
+                )
                 .add_bool_arg(
                     "lhs_fixed_implicit_activation",
                     "Fix the implicit activation bit to true for the LHS IR, useful when only LHS or RHS has implicit token",
@@ -1210,6 +1217,13 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
+                    clap::Arg::new("assert_label_filter")
+                        .long("assert-label-filter")
+                        .value_name("REGEX")
+                        .help("Include only assertions whose label matches this regex (use `|` to combine labels)")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
                     clap::Arg::new("output_json")
                         .long("output_json")
                         .value_name("PATH")
@@ -1363,6 +1377,13 @@ fn main() {
                         .help("Assertion semantics")
                         .value_parser(["ignore", "never", "same", "assume", "implies"])
                         .default_value("same")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("assert_label_filter")
+                        .long("assert-label-filter")
+                        .value_name("REGEX")
+                        .help("Include only assertions whose label matches this regex (use `|` to combine labels)")
                         .action(clap::ArgAction::Set),
                 )
                 .add_bool_arg(

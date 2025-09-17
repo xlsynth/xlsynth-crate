@@ -193,6 +193,7 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
         rhs_param_domains: None,
         lhs_uf_map: HashMap::new(),
         rhs_uf_map: HashMap::new(),
+        assert_label_filter: None,
     };
 
     let outcome = dispatch_ir_equiv(solver, tool_path, &inputs);

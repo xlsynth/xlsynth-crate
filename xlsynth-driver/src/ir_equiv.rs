@@ -19,7 +19,7 @@ use xlsynth_prover::prove_equiv::{
     prove_ir_fn_equiv_split_input_bit,
 };
 use xlsynth_prover::prover::{ExternalProver, Prover};
-use xlsynth_prover::types::{AssertionSemantics, EquivResult, EquivSide, IrFn};
+use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn, ProverFn};
 
 use crate::parallelism::ParallelismStrategy;
 
@@ -55,6 +55,7 @@ pub struct EquivInputs<'a> {
     pub rhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
     pub lhs_uf_map: HashMap<String, String>,
     pub rhs_uf_map: HashMap<String, String>,
+    pub assert_label_filter: Option<String>,
 }
 
 // Helper: parse IR text into a Package, pick top (explicit or package top),
@@ -132,6 +133,8 @@ fn run_equiv_with_prover(prover: &dyn Prover, inputs: &EquivInputs) -> EquivOutc
         fixed_implicit_activation: inputs.rhs_fixed_implicit_activation,
     };
 
+    let assert_label_filter = inputs.assert_label_filter.as_deref();
+
     let start_time = std::time::Instant::now();
     let result = match inputs.strategy {
         ParallelismStrategy::SingleThreaded => {
@@ -139,20 +142,22 @@ fn run_equiv_with_prover(prover: &dyn Prover, inputs: &EquivInputs) -> EquivOutc
             let rhs_uf_sigs = infer_uf_signature(&rhs_pkg, &inputs.rhs_uf_map);
             let uf_sigs = merge_uf_signature(lhs_uf_sigs, &rhs_uf_sigs);
 
-            let lhs_side = EquivSide {
+            let lhs_side = ProverFn {
                 ir_fn: &lhs_ir_fn,
                 domains: inputs.lhs_param_domains.clone(),
                 uf_map: inputs.lhs_uf_map.clone(),
             };
-            let rhs_side = EquivSide {
+            let rhs_side = ProverFn {
                 ir_fn: &rhs_ir_fn,
                 domains: inputs.rhs_param_domains.clone(),
                 uf_map: inputs.rhs_uf_map.clone(),
             };
+
             prover.prove_ir_fn_equiv_full(
                 &lhs_side,
                 &rhs_side,
                 inputs.assertion_semantics,
+                assert_label_filter,
                 inputs.flatten_aggregates,
                 &uf_sigs,
             )
@@ -161,6 +166,7 @@ fn run_equiv_with_prover(prover: &dyn Prover, inputs: &EquivInputs) -> EquivOutc
             &lhs_ir_fn,
             &rhs_ir_fn,
             inputs.assertion_semantics,
+            assert_label_filter,
             inputs.flatten_aggregates,
         ),
         ParallelismStrategy::InputBitSplit => prover.prove_ir_fn_equiv_split_input_bit(
@@ -169,6 +175,7 @@ fn run_equiv_with_prover(prover: &dyn Prover, inputs: &EquivInputs) -> EquivOutc
             0,
             0,
             inputs.assertion_semantics,
+            assert_label_filter,
             inputs.flatten_aggregates,
         ),
     };
@@ -353,6 +360,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         rhs_param_domains: None,
         lhs_uf_map: std::collections::HashMap::new(),
         rhs_uf_map: std::collections::HashMap::new(),
+        assert_label_filter: matches.get_one::<String>("assert_label_filter").cloned(),
     };
 
     let outcome = dispatch_ir_equiv(solver, tool_path, &inputs);
