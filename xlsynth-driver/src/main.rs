@@ -63,6 +63,7 @@ mod ir_strip_pos_data;
 mod ir_structural_similarity;
 mod lib2proto;
 mod parallelism;
+mod proofs;
 mod prove_quickcheck;
 mod prover;
 mod prover_config;
@@ -1278,6 +1279,20 @@ fn main() {
                         .help("The right-hand side DSLX file")
                         .required(true)
                         .index(2),
+                )
+                .arg(
+                    clap::Arg::new("tactic_json")
+                        .long("tactic_json")
+                        .value_name("PATH")
+                        .help("Path to a tactic script as a JSON array of steps. When present, uses the tactic-based prover instead of direct equivalence.")
+                        .conflicts_with("tactic_jsonl"),
+                )
+                .arg(
+                    clap::Arg::new("tactic_jsonl")
+                        .long("tactic_jsonl")
+                        .value_name("PATH")
+                        .help("Path to a tactic script as JSONL (one JSON object per line). When present, uses the tactic-based prover instead of direct equivalence.")
+                        .conflicts_with("tactic_json"),
                 )
                 .arg(
                     clap::Arg::new("dslx_top")
