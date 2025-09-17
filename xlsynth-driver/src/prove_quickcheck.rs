@@ -41,9 +41,6 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
     let test_filter = matches.get_one::<String>("test_filter").map(|s| s.as_str());
 
-    // Anchor the filter pattern if provided.
-    let filter_pattern: Option<String> = test_filter.map(|pat| format!("^{}$", pat));
-
     // DSLX search/stdlib path handling.
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
     let dslx_stdlib_path_buf = dslx_stdlib_path.as_deref().map(PathBuf::from);
@@ -135,7 +132,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         &uf_map,
         dslx_stdlib_path_buf.as_deref(),
         &additional_search_paths_refs,
-        filter_pattern.as_deref(),
+        test_filter.as_deref(),
     );
 
     if results.is_empty() {
