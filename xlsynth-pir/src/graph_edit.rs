@@ -46,25 +46,25 @@ impl From<NewNodeRef> for usize {
 
 #[derive(Debug, Clone)]
 pub enum IrEdit {
-    /// Adds a concrete node; its payload operands should reference either
-    /// existing old-node indices or previously added nodes by their original
-    /// new indices (resolved during application).
-    AddNode { new_index: usize, node: Node },
+    /// Adds a concrete node; its payload operands must reference either
+    /// existing old-node indices or previously added nodes by their patched
+    /// indices. Application will push this node to the end of the nodes vec.
+    AddNode { node: Node },
     /// Deletes a node from the "old" function by index in `old_fn.nodes`.
-    DeleteNode { index: usize },
-    /// Redirects a specific operand of a user node to a different target node.
+    DeleteNode { node: NodeRef },
+    /// Redirects a specific operand of a node to a different target node.
     ///
-    /// - `user_index`: index of the node whose operand will be rewritten
-    /// - `operand_slot`: which operand position on the user node to rewrite
-    /// - `new_target_index`: node index that the operand should reference
+    /// - `node`: reference of the node whose operand will be rewritten
+    /// - `operand_slot`: which operand position on the node to rewrite
+    /// - `new_operand`: reference of the node that the operand should target
     SubstituteOperand {
-        user_index: usize,
+        node: NodeRef,
         operand_slot: usize,
-        new_target_index: usize,
+        new_operand: NodeRef,
     },
     /// Sets the function return to reference either an existing old node index
     /// or a newly added node index (resolved during application via mapping).
-    SetReturn { index: usize, is_new: bool },
+    SetReturn { node: NodeRef },
 }
 
 /// A collection of edits that convert `old` into `new`.
@@ -87,7 +87,7 @@ pub enum MatchAction {
     /// Add a node present in the new function.
     AddNode {
         new_index: NewNodeRef,
-        is_new_return: bool,
+        is_return: bool,
     },
     /// Pair an old node with a new node, with optional operand substitutions.
     MatchNodes {
@@ -322,7 +322,7 @@ impl<'a> MatchSelector for NaiveMatchSelector<'a> {
                 }
                 self.push_action(MatchAction::AddNode {
                     new_index: NewNodeRef(node.index),
-                    is_new_return: self
+                    is_return: self
                         .new
                         .ret_node_ref
                         .map(|nr| nr.index)
@@ -446,7 +446,7 @@ pub fn compute_function_match<S: MatchSelector>(
                     .map_or(false, |ri| ri == usize::from(index));
                 matches.push(MatchAction::AddNode {
                     new_index: index,
-                    is_new_return: is_ret,
+                    is_return: is_ret,
                 });
                 update_ready(index.into(), NodeSide::New, selector);
                 selector.update_after_match(&edit);
@@ -481,61 +481,28 @@ pub fn compute_function_match<S: MatchSelector>(
 pub fn apply_function_edits(old: &Fn, edits: &IrEditSet) -> Result<Fn, String> {
     let mut patched = old.clone();
 
-    // Map from original-new indices (carried in AddNode payloads) to patched
-    // indices.
-    let mut new_to_patched: HashMap<usize, usize> = HashMap::new();
-
     for e in edits.edits.iter() {
         match e.clone() {
-            IrEdit::DeleteNode { index } => {
-                if index >= patched.nodes.len() {
-                    return Err(format!("DeleteNode index {} out of bounds", index));
+            IrEdit::DeleteNode { node } => {
+                if node.index >= patched.nodes.len() {
+                    return Err(format!("DeleteNode index {} out of bounds", node.index));
                 }
-                patched.nodes[index].payload = crate::ir::NodePayload::Nil;
+                patched.nodes[node.index].payload = crate::ir::NodePayload::Nil;
             }
-            IrEdit::AddNode { new_index, node } => {
-                // Remap payload operands: if operand index exists in new_to_patched, use
-                // mapped; otherwise treat it as an old index that already
-                // exists in `patched`.
-                let remapped_payload = remap_payload_with(&node.payload, |nr: NodeRef| {
-                    if let Some(&mapped) = new_to_patched.get(&nr.index) {
-                        NodeRef { index: mapped }
-                    } else {
-                        nr
-                    }
-                });
-                let cloned = crate::ir::Node {
-                    text_id: node.text_id,
-                    name: node.name.clone(),
-                    ty: node.ty.clone(),
-                    payload: remapped_payload,
-                    pos: node.pos.clone(),
-                };
-                let patched_index = patched.nodes.len();
-                patched.nodes.push(cloned);
-                new_to_patched.insert(new_index, patched_index);
-                // If this node originated from a new graph index, the
-                // conversion should have embedded that index in
-                // operand references of dependents, which will update
-                // via new_to_patched when those dependents are applied.
+            IrEdit::AddNode { node } => {
+                // Payloads in AddNode must already use old or previously-added patched indices.
+                patched.nodes.push(node);
             }
             IrEdit::SubstituteOperand {
-                user_index: _,
+                node: _,
                 operand_slot: _,
-                new_target_index: _,
+                new_operand: _,
             } => {
                 // Not yet implemented; current matcher does not produce operand
                 // redirects. Leave as a no-op for now.
             }
-            IrEdit::SetReturn { index, is_new } => {
-                let target_idx = if is_new {
-                    *new_to_patched
-                        .get(&index)
-                        .expect("SetReturn refers to new node not yet added")
-                } else {
-                    index
-                };
-                patched.ret_node_ref = Some(NodeRef { index: target_idx });
+            IrEdit::SetReturn { node } => {
+                patched.ret_node_ref = Some(NodeRef { index: node.index });
             }
         }
     }
@@ -561,24 +528,35 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
     }
 
     let mut edits: Vec<IrEdit> = Vec::new();
+    let original_old_len = old.nodes.len();
+    // Map from original-new indices to the eventual patched indices for added
+    // nodes, assigned sequentially starting at original_old_len in the order
+    // AddNode edits are emitted.
+    let mut added_new_to_patched: HashMap<usize, usize> = HashMap::new();
+    let mut add_count: usize = 0;
     for action in m.matches.iter() {
         match action {
             MatchAction::AddNode {
                 new_index,
-                is_new_return: _,
+                is_return: _,
             } => {
                 // Clone new node and remap operands that refer to matched new nodes to their
-                // corresponding old indices. References to other new nodes remain as new
-                // indices and are resolved during application as those nodes
-                // are added earlier in order.
+                // corresponding old indices. References to other new nodes must refer to
+                // previously added nodes; remap those to their patched indices.
                 let ni: usize = (*new_index).into();
                 let src = &new.nodes[ni];
                 let remapped_payload = remap_payload_with(&src.payload, |nr: NodeRef| {
                     if let Some(&old_idx) = new_to_old.get(&nr.index) {
                         NodeRef { index: old_idx }
                     } else {
-                        // Leave as original-new index; apply will resolve via new_to_patched.
-                        nr
+                        if let Some(&patched_idx) = added_new_to_patched.get(&nr.index) {
+                            NodeRef { index: patched_idx }
+                        } else {
+                            panic!(
+                                "AddNode payload references future new node {} which is not yet added",
+                                nr.index
+                            );
+                        }
                     }
                 });
                 let cloned = crate::ir::Node {
@@ -588,14 +566,17 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                     payload: remapped_payload,
                     pos: src.pos.clone(),
                 };
-                edits.push(IrEdit::AddNode {
-                    new_index: ni,
-                    node: cloned,
-                });
+                // Assign patched index for this added node per protocol
+                let patched_index = original_old_len + add_count;
+                added_new_to_patched.insert(ni, patched_index);
+                add_count += 1;
+                edits.push(IrEdit::AddNode { node: cloned });
             }
             MatchAction::DeleteNode { old_index } => {
                 let oi: usize = (*old_index).into();
-                edits.push(IrEdit::DeleteNode { index: oi });
+                edits.push(IrEdit::DeleteNode {
+                    node: NodeRef { index: oi },
+                });
             }
             MatchAction::MatchNodes {
                 old_index,
@@ -615,9 +596,11 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                             let ooi: usize = (*old_operand_idx).into();
                             if nr.index == ooi {
                                 edits.push(IrEdit::SubstituteOperand {
-                                    user_index: oi,
+                                    node: NodeRef { index: oi },
                                     operand_slot: slot,
-                                    new_target_index: mapped_old_target,
+                                    new_operand: NodeRef {
+                                        index: mapped_old_target,
+                                    },
                                 });
                             }
                         }
@@ -649,9 +632,11 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                                 if let Some(&mapped_old_target) = new_to_old.get(&n_ref.index) {
                                     if o_ref.index != mapped_old_target {
                                         edits.push(IrEdit::SubstituteOperand {
-                                            user_index: oi,
+                                            node: NodeRef { index: oi },
                                             operand_slot: slot,
-                                            new_target_index: mapped_old_target,
+                                            new_operand: NodeRef {
+                                                index: mapped_old_target,
+                                            },
                                         });
                                     }
                                 }
@@ -668,14 +653,16 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
             // Only emit SetReturn if the old function does not already return this node.
             if old.ret_node_ref.map(|r| r.index) != Some(old_idx) {
                 edits.push(IrEdit::SetReturn {
-                    index: old_idx,
-                    is_new: false,
+                    node: NodeRef { index: old_idx },
                 });
             }
         } else {
+            // Return refers to a newly added node; map to its patched index assigned above.
+            let patched_idx = *added_new_to_patched
+                .get(&nr.index)
+                .expect("SetReturn refers to a new node that was not added");
             edits.push(IrEdit::SetReturn {
-                index: nr.index,
-                is_new: true,
+                node: NodeRef { index: patched_idx },
             });
         }
     }

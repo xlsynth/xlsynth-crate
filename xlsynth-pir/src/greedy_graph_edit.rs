@@ -170,7 +170,7 @@ impl GreedyMatchSelector {
     fn build_add_node_action(&self, b: &NewNodeRef) -> Option<MatchAction> {
         Some(MatchAction::AddNode {
             new_index: *b,
-            is_new_return: *b == self.new_graph.return_value,
+            is_return: *b == self.new_graph.return_value,
         })
     }
     pub fn new(old: &crate::ir::Fn, new: &crate::ir::Fn) -> Self {
@@ -669,12 +669,8 @@ mod tests {
         );
         // Verify the edit substitutes to the parameter named 'z'.
         match edits.edits[0] {
-            IrEdit::SubstituteOperand {
-                new_target_index, ..
-            } => {
-                let target_node = old_fn.get_node(NodeRef {
-                    index: new_target_index,
-                });
+            IrEdit::SubstituteOperand { new_operand, .. } => {
+                let target_node = old_fn.get_node(new_operand);
                 assert_eq!(target_node.name.as_deref(), Some("z"));
                 assert!(matches!(target_node.payload, NodePayload::GetParam(_)));
             }
@@ -683,5 +679,50 @@ mod tests {
                 other
             ),
         }
+        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, new_fn));
+    }
+
+    #[test]
+    fn multiple_operand_substitutions_in_concat_permutation() {
+        let pkg_old = parse_ir_from_string(
+            r#"package p
+            top fn f(x: bits[8] id=1, y: bits[8] id=2, z: bits[8] id=3) -> bits[24] {
+                ret concat.10: bits[24] = concat(x, y, z, id=10)
+            }
+            "#,
+        );
+        let old_fn = pkg_old.get_top().unwrap();
+
+        let pkg_new = parse_ir_from_string(
+            r#"package p
+            top fn f(x: bits[8] id=1, y: bits[8] id=2, z: bits[8] id=3) -> bits[24] {
+                ret concat.20: bits[24] = concat(z, x, y, id=20)
+            }
+            "#,
+        );
+        let new_fn = pkg_new.get_top().unwrap();
+
+        let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
+        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
+
+        // Expect exactly three operand substitutions, and patched result is isomorphic.
+        assert_eq!(
+            edits.edits.len(),
+            3,
+            "expected exactly three edits, got {:?}",
+            edits.edits
+        );
+        assert!(
+            edits
+                .edits
+                .iter()
+                .all(|e| matches!(e, IrEdit::SubstituteOperand { .. })),
+            "expected only SubstituteOperand edits, got {:?}",
+            edits.edits
+        );
+
+        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, new_fn));
     }
 }
