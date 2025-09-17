@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fmt,
+    path::{Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
 
 use crate::solver_interface::SolverConfig;
 use crate::types::{
@@ -8,7 +14,76 @@ use crate::types::{
     QuickCheckAssertionSemantics, QuickCheckRunResult, UfSignature,
 };
 use regex::Regex;
+use std::str::FromStr;
 use xlsynth::dslx::{ImportData, MatchableModuleMember};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SolverChoice {
+    /// Let the library select an appropriate prover based on available
+    /// features.
+    Auto,
+    #[cfg(feature = "has-easy-smt")]
+    Z3Binary,
+    #[cfg(feature = "has-easy-smt")]
+    BitwuzlaBinary,
+    #[cfg(feature = "has-easy-smt")]
+    BoolectorBinary,
+
+    #[cfg(feature = "has-bitwuzla")]
+    Bitwuzla,
+
+    #[cfg(feature = "has-boolector")]
+    Boolector,
+
+    /// Use the external XLS tool-chain binaries (configured via
+    /// `xlsynth-toolchain.toml`).
+    Toolchain,
+}
+
+impl fmt::Display for SolverChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            SolverChoice::Auto => "auto",
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::Z3Binary => "z3-binary",
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::BitwuzlaBinary => "bitwuzla-binary",
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::BoolectorBinary => "boolector-binary",
+            #[cfg(feature = "has-bitwuzla")]
+            SolverChoice::Bitwuzla => "bitwuzla",
+            #[cfg(feature = "has-boolector")]
+            SolverChoice::Boolector => "boolector",
+            SolverChoice::Toolchain => "toolchain",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl FromStr for SolverChoice {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            #[cfg(feature = "has-easy-smt")]
+            "z3-binary" => Ok(Self::Z3Binary),
+            #[cfg(feature = "has-easy-smt")]
+            "bitwuzla-binary" => Ok(Self::BitwuzlaBinary),
+            #[cfg(feature = "has-easy-smt")]
+            "boolector-binary" => Ok(Self::BoolectorBinary),
+
+            #[cfg(feature = "has-bitwuzla")]
+            "bitwuzla" => Ok(Self::Bitwuzla),
+
+            #[cfg(feature = "has-boolector")]
+            "boolector" => Ok(Self::Boolector),
+
+            "toolchain" => Ok(Self::Toolchain),
+            _ => Err(format!("invalid solver: {}", s)),
+        }
+    }
+}
+
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
 use xlsynth_pir::{ir, ir_parser};
@@ -832,6 +907,37 @@ pub fn auto_selected_prover() -> Box<dyn Prover> {
     }
     #[cfg(all(not(feature = "has-bitwuzla"), not(feature = "has-boolector")))]
     Box::new(ExternalProver::Toolchain)
+}
+
+pub fn prover_for_choice(choice: SolverChoice, tool_path: Option<&Path>) -> Box<dyn Prover> {
+    match choice {
+        SolverChoice::Auto => auto_selected_prover(),
+        #[cfg(feature = "has-bitwuzla")]
+        SolverChoice::Bitwuzla => Box::new(crate::bitwuzla_backend::BitwuzlaOptions::new()),
+        #[cfg(feature = "has-boolector")]
+        SolverChoice::Boolector => Box::new(crate::boolector_backend::BoolectorConfig::new()),
+        #[cfg(feature = "has-easy-smt")]
+        SolverChoice::Z3Binary => Box::new(crate::easy_smt_backend::EasySmtConfig::z3()),
+        #[cfg(feature = "has-easy-smt")]
+        SolverChoice::BitwuzlaBinary => {
+            Box::new(crate::easy_smt_backend::EasySmtConfig::bitwuzla())
+        }
+        #[cfg(feature = "has-easy-smt")]
+        SolverChoice::BoolectorBinary => {
+            Box::new(crate::easy_smt_backend::EasySmtConfig::boolector())
+        }
+        SolverChoice::Toolchain => match tool_path {
+            Some(path) => {
+                let path_buf = path.to_path_buf();
+                if path.is_dir() {
+                    Box::new(ExternalProver::ToolDir(path_buf))
+                } else {
+                    Box::new(ExternalProver::ToolExe(path_buf))
+                }
+            }
+            None => Box::new(ExternalProver::Toolchain),
+        },
+    }
 }
 
 pub fn prove_ir_fn_equiv(lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {

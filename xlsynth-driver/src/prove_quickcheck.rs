@@ -10,11 +10,10 @@ use crate::common::parse_uf_spec;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 
-use crate::solver_choice::SolverChoice;
 use regex::Regex;
 use serde::Serialize;
 use std::path::PathBuf;
-use xlsynth_prover::prover::Prover;
+use xlsynth_prover::prover::{Prover, SolverChoice};
 use xlsynth_prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,86 +123,22 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             .collect()
     }
 
-    let results: Vec<QuickCheckTestOutcome> = match solver_choice_opt {
-        None => {
-            let prover = xlsynth_prover::prover::auto_selected_prover();
-            run_for_prover(
-                &*prover,
-                input_path,
-                *assertion_semantics,
-                assert_label_filter.as_deref(),
-                &uf_map,
-                dslx_stdlib_path_buf.as_deref(),
-                &additional_search_paths_refs,
-                filter_regex.as_ref(),
-            )
-        }
-        Some(SolverChoice::Toolchain) => {
-            let prover = xlsynth_prover::prover::ExternalProver::Toolchain;
-            run_for_prover(
-                &prover,
-                input_path,
-                *assertion_semantics,
-                assert_label_filter.as_deref(),
-                &uf_map,
-                dslx_stdlib_path_buf.as_deref(),
-                &additional_search_paths_refs,
-                filter_regex.as_ref(),
-            )
-        }
-        #[cfg(feature = "has-boolector")]
-        Some(SolverChoice::Boolector) => {
-            use xlsynth_prover::boolector_backend::BoolectorConfig;
-            let prover = BoolectorConfig::new();
-            run_for_prover(
-                &prover,
-                input_path,
-                *assertion_semantics,
-                assert_label_filter.as_deref(),
-                &uf_map,
-                dslx_stdlib_path_buf.as_deref(),
-                &additional_search_paths_refs,
-                filter_regex.as_ref(),
-            )
-        }
-        #[cfg(feature = "has-bitwuzla")]
-        Some(SolverChoice::Bitwuzla) => {
-            use xlsynth_prover::bitwuzla_backend::BitwuzlaOptions;
-            let prover = BitwuzlaOptions::new();
-            run_for_prover(
-                &prover,
-                input_path,
-                *assertion_semantics,
-                assert_label_filter.as_deref(),
-                &uf_map,
-                dslx_stdlib_path_buf.as_deref(),
-                &additional_search_paths_refs,
-                filter_regex.as_ref(),
-            )
-        }
-        #[cfg(feature = "has-easy-smt")]
-        Some(SolverChoice::Z3Binary)
-        | Some(SolverChoice::BitwuzlaBinary)
-        | Some(SolverChoice::BoolectorBinary) => {
-            use xlsynth_prover::easy_smt_backend::EasySmtConfig;
-            let prover = match solver_choice_opt.unwrap() {
-                SolverChoice::Z3Binary => EasySmtConfig::z3(),
-                SolverChoice::BitwuzlaBinary => EasySmtConfig::bitwuzla(),
-                SolverChoice::BoolectorBinary => EasySmtConfig::boolector(),
-                _ => unreachable!(),
-            };
-            run_for_prover(
-                &prover,
-                input_path,
-                *assertion_semantics,
-                assert_label_filter.as_deref(),
-                &uf_map,
-                dslx_stdlib_path_buf.as_deref(),
-                &additional_search_paths_refs,
-                filter_regex.as_ref(),
-            )
-        }
-    };
+    let solver_choice = solver_choice_opt.unwrap_or(SolverChoice::Auto);
+    let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
+    let prover = xlsynth_prover::prover::prover_for_choice(
+        solver_choice,
+        tool_path.map(std::path::Path::new),
+    );
+    let results: Vec<QuickCheckTestOutcome> = run_for_prover(
+        &*prover,
+        input_path,
+        *assertion_semantics,
+        assert_label_filter.as_deref(),
+        &uf_map,
+        dslx_stdlib_path_buf.as_deref(),
+        &additional_search_paths_refs,
+        filter_regex.as_ref(),
+    );
 
     if results.is_empty() {
         report_cli_error_and_exit(

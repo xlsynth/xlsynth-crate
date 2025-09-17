@@ -69,7 +69,6 @@ mod prover;
 mod prover_config;
 mod report_cli_error;
 mod run_verilog_pipeline;
-mod solver_choice;
 mod toolchain_config;
 mod tools;
 
@@ -615,6 +614,7 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
                         .value_parser([
+                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
@@ -627,7 +627,7 @@ fn main() {
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("toolchain")
+                        .default_value("auto")
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -717,6 +717,7 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
                         .value_parser([
+                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
@@ -729,7 +730,7 @@ fn main() {
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("toolchain")
+                        .default_value("auto")
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -1193,6 +1194,7 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Select solver backend")
                         .value_parser([
+                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
@@ -1205,6 +1207,7 @@ fn main() {
                             "boolector",
                             "toolchain",
                         ])
+                        .default_value("auto")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(

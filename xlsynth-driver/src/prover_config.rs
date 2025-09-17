@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::parallelism::ParallelismStrategy;
-use crate::solver_choice::SolverChoice;
 use serde::{Deserialize, Serialize};
+use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::types::AssertionSemantics;
 use xlsynth_prover::types::QuickCheckAssertionSemantics;
 
