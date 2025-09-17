@@ -133,6 +133,8 @@ fn build_ir_for_dslx(
 
 pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_dslx_equiv");
+    // Gather optional assertion-label filter regex for reuse.
+    let assert_label_filter = matches.get_one::<String>("assert_label_filter").cloned();
     let lhs_file = matches.get_one::<String>("lhs_dslx_file").unwrap();
     let rhs_file = matches.get_one::<String>("rhs_dslx_file").unwrap();
 
@@ -388,6 +390,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
             rhs_param_domains: rhs_domains,
             lhs_uf_map: lhs_uf_map,
             rhs_uf_map: rhs_uf_map,
+            assert_label_filter,
         };
 
         let outcome = dispatch_ir_equiv(solver_choice, tool_path, &inputs);

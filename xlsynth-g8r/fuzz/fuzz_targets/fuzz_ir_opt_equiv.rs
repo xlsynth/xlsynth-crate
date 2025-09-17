@@ -110,6 +110,7 @@ fuzz_target!(|sample: FuzzSample| {
             &IrFn::new(orig_fn, None),
             &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
+            None,
             false,
         );
         validate_equiv_result(
@@ -128,6 +129,7 @@ fuzz_target!(|sample: FuzzSample| {
             &IrFn::new(orig_fn, None),
             &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
+            None,
             false,
         );
         validate_equiv_result(
@@ -146,6 +148,7 @@ fuzz_target!(|sample: FuzzSample| {
             &IrFn::new(orig_fn, None),
             &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
+            None,
             false,
         );
         validate_equiv_result(
@@ -164,6 +167,7 @@ fuzz_target!(|sample: FuzzSample| {
             &IrFn::new(orig_fn, None),
             &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
+            None,
             false,
         );
         validate_equiv_result(
@@ -182,6 +186,7 @@ fuzz_target!(|sample: FuzzSample| {
             &IrFn::new(orig_fn, None),
             &IrFn::new(opt_fn, None),
             AssertionSemantics::Same,
+            None,
             false,
         );
         validate_equiv_result(ext_equiv.clone(), z3_result, "Z3 binary", &orig_ir, &opt_ir);
@@ -196,6 +201,7 @@ fuzz_target!(|sample: FuzzSample| {
                 &IrFn::new(orig_fn, None),
                 &IrFn::new(opt_fn, None),
                 AssertionSemantics::Same,
+                None,
                 false,
             );
             validate_equiv_result(

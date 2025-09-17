@@ -7,9 +7,19 @@ use crate::types::{
     AssertionSemantics, BoolPropertyResult, EquivResult, EquivSide, IrFn,
     QuickCheckAssertionSemantics, UfSignature,
 };
+use regex::Regex;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
 use xlsynth_pir::{ir, ir_parser};
+
+fn build_assert_label_regex(filter: Option<&str>) -> Option<Regex> {
+    match filter {
+        None => None,
+        Some(pattern) => {
+            Some(Regex::new(pattern).expect("invalid regular expression in assert label filter"))
+        }
+    }
+}
 
 pub trait Prover {
     fn prove_ir_fn_equiv(self: &Self, lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
@@ -33,6 +43,7 @@ pub trait Prover {
                 uf_map: HashMap::new(),
             },
             AssertionSemantics::Same,
+            None,
             false,
             &HashMap::new(),
         )
@@ -48,6 +59,7 @@ pub trait Prover {
         lhs: &EquivSide<'a>,
         rhs: &EquivSide<'a>,
         assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         allow_flatten: bool,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> EquivResult;
@@ -56,6 +68,7 @@ pub trait Prover {
         lhs: &IrFn,
         rhs: &IrFn,
         assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         allow_flatten: bool,
     ) -> EquivResult;
     fn prove_ir_fn_equiv_split_input_bit(
@@ -65,6 +78,7 @@ pub trait Prover {
         start_input: usize,
         start_bit: usize,
         assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         allow_flatten: bool,
     ) -> EquivResult;
 
@@ -73,10 +87,12 @@ pub trait Prover {
         self: &Self,
         ir_fn: &IrFn<'a>,
         assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
         self.prove_ir_fn_always_true_with_ufs(
             ir_fn,
             assertion_semantics,
+            assert_label_filter,
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -86,6 +102,7 @@ pub trait Prover {
         self: &Self,
         ir_fn: &IrFn<'a>,
         assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult;
@@ -96,11 +113,13 @@ pub trait Prover {
         entry_file: &std::path::Path,
         quickcheck_name: &str,
         assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
         self.prove_dslx_quickcheck_with_ufs(
             entry_file,
             quickcheck_name,
             assertion_semantics,
+            assert_label_filter,
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -111,6 +130,7 @@ pub trait Prover {
         entry_file: &std::path::Path,
         quickcheck_name: &str,
         assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult;
@@ -167,6 +187,7 @@ impl<S: SolverConfig> Prover for S {
             &lhs,
             &rhs,
             AssertionSemantics::Same,
+            None,
             false,
             &HashMap::new(),
         )
@@ -177,14 +198,17 @@ impl<S: SolverConfig> Prover for S {
         lhs: &EquivSide<'a>,
         rhs: &EquivSide<'a>,
         assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         allow_flatten: bool,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> EquivResult {
+        let assert_label_regex = build_assert_label_regex(assert_label_filter);
         crate::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
             self,
             lhs,
             rhs,
             assertion_semantics,
+            assert_label_regex.as_ref(),
             allow_flatten,
             uf_signatures,
         )
@@ -195,13 +219,16 @@ impl<S: SolverConfig> Prover for S {
         lhs: &IrFn,
         rhs: &IrFn,
         assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         allow_flatten: bool,
     ) -> EquivResult {
+        let assert_label_regex = build_assert_label_regex(assert_label_filter);
         crate::prove_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
             self,
             lhs,
             rhs,
             assertion_semantics,
+            assert_label_regex.as_ref(),
             allow_flatten,
         )
     }
@@ -213,8 +240,10 @@ impl<S: SolverConfig> Prover for S {
         start_input: usize,
         start_bit: usize,
         assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         allow_flatten: bool,
     ) -> EquivResult {
+        let assert_label_regex = build_assert_label_regex(assert_label_filter);
         crate::prove_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
             self,
             lhs,
@@ -222,6 +251,7 @@ impl<S: SolverConfig> Prover for S {
             start_input,
             start_bit,
             assertion_semantics,
+            assert_label_regex.as_ref(),
             allow_flatten,
         )
     }
@@ -230,13 +260,16 @@ impl<S: SolverConfig> Prover for S {
         self: &Self,
         ir_fn: &IrFn<'a>,
         assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult {
+        let assert_label_regex = build_assert_label_regex(assert_label_filter);
         crate::prove_quickcheck::prove_ir_fn_always_true_with_ufs::<S::Solver>(
             self,
             ir_fn,
             assertion_semantics,
+            assert_label_regex.as_ref(),
             uf_map,
             uf_signatures,
         )
@@ -247,9 +280,11 @@ impl<S: SolverConfig> Prover for S {
         entry_file: &std::path::Path,
         quickcheck_name: &str,
         assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult {
+        let assert_label_regex = build_assert_label_regex(assert_label_filter);
         // Convert DSLX module to IR text using the runtime API with default options.
         let dslx_contents = std::fs::read_to_string(entry_file)
             .expect("Failed to read DSLX input file for quickcheck");
@@ -306,6 +341,7 @@ impl<S: SolverConfig> Prover for S {
             self,
             &ir_fn,
             assertion_semantics,
+            assert_label_regex.as_ref(),
             uf_map,
             uf_signatures,
         )
@@ -372,6 +408,7 @@ impl Prover for ExternalProver {
         lhs: &EquivSide<'a>,
         rhs: &EquivSide<'a>,
         assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         allow_flatten: bool,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> EquivResult {
@@ -393,6 +430,11 @@ impl Prover for ExternalProver {
         if assertion_semantics != AssertionSemantics::Same {
             return EquivResult::Error(
                 "External provers do not support assertion semantics".to_string(),
+            );
+        }
+        if assert_label_filter.is_some() {
+            return EquivResult::Error(
+                "External provers do not support assertion label filters".to_string(),
             );
         }
         if allow_flatten {
@@ -446,8 +488,14 @@ impl Prover for ExternalProver {
         _lhs: &IrFn,
         _rhs: &IrFn,
         _assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         _allow_flatten: bool,
     ) -> EquivResult {
+        if assert_label_filter.is_some() {
+            return EquivResult::Error(
+                "External provers do not support assertion label filters".to_string(),
+            );
+        }
         EquivResult::Error(
             "External provers do not support output-bits parallel strategy".to_string(),
         )
@@ -460,8 +508,14 @@ impl Prover for ExternalProver {
         _start_input: usize,
         _start_bit: usize,
         _assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
         _allow_flatten: bool,
     ) -> EquivResult {
+        if assert_label_filter.is_some() {
+            return EquivResult::Error(
+                "External provers do not support assertion label filters".to_string(),
+            );
+        }
         EquivResult::Error("External provers do not support input-bit split strategy".to_string())
     }
 
@@ -469,9 +523,15 @@ impl Prover for ExternalProver {
         self: &Self,
         _ir_fn: &IrFn<'a>,
         _assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
         _uf_map: &HashMap<String, String>,
         _uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult {
+        if assert_label_filter.is_some() {
+            return BoolPropertyResult::ToolchainDisproved(
+                "External provers do not support assertion label filters".to_string(),
+            );
+        }
         BoolPropertyResult::ToolchainDisproved(
             "External provers do not support IR-level quickcheck; use prove_dslx_quickcheck"
                 .to_string(),
@@ -483,9 +543,15 @@ impl Prover for ExternalProver {
         entry_file: &std::path::Path,
         quickcheck_name: &str,
         _assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult {
+        if assert_label_filter.is_some() {
+            return BoolPropertyResult::ToolchainDisproved(
+                "External quickcheck does not support assertion label filters".to_string(),
+            );
+        }
         if !uf_map.is_empty() || !uf_signatures.is_empty() {
             return BoolPropertyResult::ToolchainDisproved(
                 "External quickcheck does not support uninterpreted functions".to_string(),
@@ -589,6 +655,7 @@ pub fn prove_ir_fn_equiv_full(
         lhs,
         rhs,
         assertion_semantics,
+        None,
         allow_flatten,
         uf_signatures,
     )
@@ -606,7 +673,7 @@ pub fn prove_ir_fn_always_true(
     ir_fn: &IrFn,
     assertion_semantics: QuickCheckAssertionSemantics,
 ) -> BoolPropertyResult {
-    auto_selected_prover().prove_ir_fn_always_true(ir_fn, assertion_semantics)
+    auto_selected_prover().prove_ir_fn_always_true(ir_fn, assertion_semantics, None)
 }
 
 pub fn prove_ir_fn_always_true_with_ufs(
@@ -618,6 +685,7 @@ pub fn prove_ir_fn_always_true_with_ufs(
     auto_selected_prover().prove_ir_fn_always_true_with_ufs(
         ir_fn,
         assertion_semantics,
+        None,
         uf_map,
         uf_signatures,
     )
@@ -628,7 +696,12 @@ pub fn prove_dslx_quickcheck(
     quickcheck_name: &str,
     assertion_semantics: QuickCheckAssertionSemantics,
 ) -> BoolPropertyResult {
-    auto_selected_prover().prove_dslx_quickcheck(entry_file, quickcheck_name, assertion_semantics)
+    auto_selected_prover().prove_dslx_quickcheck(
+        entry_file,
+        quickcheck_name,
+        assertion_semantics,
+        None,
+    )
 }
 
 pub fn prove_dslx_quickcheck_with_ufs(
@@ -642,6 +715,7 @@ pub fn prove_dslx_quickcheck_with_ufs(
         entry_file,
         quickcheck_name,
         assertion_semantics,
+        None,
         uf_map,
         uf_signatures,
     )
