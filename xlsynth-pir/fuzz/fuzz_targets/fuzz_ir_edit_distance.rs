@@ -66,7 +66,9 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     };
 
     // Compute edit distance, apply to old, and verify isomorphism.
-    let edits = match compute_function_edit_distance(old_fn, new_fn) {
+    let mut selector = xlsynth_pir::graph_edit::NaiveMatchSelector::new(old_fn, new_fn);
+    let edits = match xlsynth_pir::graph_edit::compute_function_edit(old_fn, new_fn, &mut selector)
+    {
         Ok(e) => e,
         Err(_) => return, // mismatch or other benign failure → skip
     };

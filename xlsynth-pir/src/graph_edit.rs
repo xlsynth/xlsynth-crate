@@ -6,14 +6,44 @@
 
 use crate::ir::{Fn, Node, NodeRef};
 use crate::ir_utils::{operands, remap_payload_with};
+use crate::node_hashing::{FwdHash, compute_node_local_structural_hash};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::greedy_graph_edit::MatchAction;
+// MatchAction is defined below in this module
 use std::collections::HashMap;
-use std::collections::HashSet;
 
 /// Represents a concrete IR edit operation to be applied to a function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OldNodeRef(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NewNodeRef(pub usize);
+
+impl From<usize> for OldNodeRef {
+    fn from(v: usize) -> Self {
+        OldNodeRef(v)
+    }
+}
+
+impl From<usize> for NewNodeRef {
+    fn from(v: usize) -> Self {
+        NewNodeRef(v)
+    }
+}
+
+impl From<OldNodeRef> for usize {
+    fn from(v: OldNodeRef) -> Self {
+        v.0
+    }
+}
+
+impl From<NewNodeRef> for usize {
+    fn from(v: NewNodeRef) -> Self {
+        v.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum IrEdit {
     /// Adds a concrete node; its payload operands should reference either
@@ -49,43 +79,94 @@ pub struct IrMatchSet {
     pub matches: Vec<MatchAction>,
 }
 
-/// Dependency information for a single node.
+/// Represents a high-level match/mapping between old and new graph nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchAction {
+    /// Delete a node present in the old function.
+    DeleteNode { old_index: OldNodeRef },
+    /// Add a node present in the new function.
+    AddNode {
+        new_index: NewNodeRef,
+        is_new_return: bool,
+    },
+    /// Pair an old node with a new node, with optional operand substitutions.
+    MatchNodes {
+        old_index: OldNodeRef,
+        new_index: NewNodeRef,
+        operand_substitutions: Vec<(OldNodeRef, NewNodeRef)>,
+        is_new_return: bool,
+    },
+}
+
+/// Dependency information for a single node, parameterized by index type.
 #[derive(Debug, Clone)]
-pub struct DepNode {
-    pub operands: Vec<usize>, // deps (by node index)
-    pub users: Vec<usize>,    // use-list (by node index)
+pub struct DepNode<I> {
+    pub operands: Vec<I>,       // deps (by node index)
+    pub users: Vec<(I, usize)>, // (user index, operand slot)
+    pub structural_hash: FwdHash,
+    pub is_return: bool,
 }
 
 /// Dependency graph for a function: collection of per-node dependency info.
 #[derive(Debug, Clone)]
-pub struct DepGraph {
-    pub nodes: Vec<DepNode>,
+pub struct DepGraph<I> {
+    pub nodes: Vec<DepNode<I>>,
+    pub return_value: I,
 }
 
-/// Builds a dependency graph for the given function.
-pub fn build_dependency_graph(f: &Fn) -> DepGraph {
+impl<I> DepGraph<I>
+where
+    I: Into<usize> + Copy,
+{
+    pub fn get_node(&self, index: I) -> &DepNode<I> {
+        let idx: usize = index.into();
+        &self.nodes[idx]
+    }
+}
+
+/// Builds a dependency graph for the given function using a typed index `I`.
+pub fn build_dependency_graph<I>(f: &Fn) -> DepGraph<I>
+where
+    I: From<usize> + Into<usize> + Copy,
+{
     let n = f.nodes.len();
-    let mut operands_list: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut operands_list: Vec<Vec<I>> = vec![Vec::new(); n];
     for (i, node) in f.nodes.iter().enumerate() {
         operands_list[i] = operands(&node.payload)
             .into_iter()
-            .map(|r| r.index)
+            .map(|r| I::from(r.index))
             .collect();
     }
-    let mut users_list: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut users_list: Vec<Vec<(I, usize)>> = vec![Vec::new(); n];
     for (idx, ops) in operands_list.iter().enumerate() {
-        for &d in ops {
-            users_list[d].push(idx);
+        for (slot, &d) in ops.iter().enumerate() {
+            let du: usize = d.into();
+            users_list[du].push((I::from(idx), slot));
         }
     }
-    let mut nodes: Vec<DepNode> = Vec::with_capacity(n);
+    let mut nodes: Vec<DepNode<I>> = Vec::with_capacity(n);
+    let mut local_hashes: Vec<FwdHash> = Vec::with_capacity(n);
+    for i in 0..n {
+        local_hashes.push(compute_node_local_structural_hash(f, NodeRef { index: i }));
+    }
+    let ret_index_usize: Option<usize> = f.ret_node_ref.map(|nr| nr.index);
     for i in 0..n {
         nodes.push(DepNode {
             operands: operands_list[i].clone(),
             users: users_list[i].clone(),
+            structural_hash: local_hashes[i],
+            is_return: ret_index_usize == Some(i),
         });
     }
-    DepGraph { nodes }
+    assert!(
+        ret_index_usize.is_some(),
+        "build_dependency_graph: function has no return node"
+    );
+    let return_value: I = I::from(ret_index_usize.unwrap());
+    DepGraph {
+        nodes,
+        return_value,
+    }
 }
 
 /// Identifies which function a ready node belongs to when planning edits.
@@ -130,8 +211,8 @@ pub fn compute_parameter_matches(old: &Fn, new: &Fn) -> Vec<MatchAction> {
             new_param_to_idx.get(&op.name),
         ) {
             matches.push(MatchAction::MatchNodes {
-                old_index: oi,
-                new_index: ni,
+                old_index: OldNodeRef(oi),
+                new_index: NewNodeRef(ni),
                 operand_substitutions: Vec::new(),
                 is_new_return: new
                     .ret_node_ref
@@ -229,7 +310,7 @@ impl<'a> MatchSelector for NaiveMatchSelector<'a> {
                     return;
                 }
                 self.push_action(MatchAction::DeleteNode {
-                    old_index: node.index,
+                    old_index: OldNodeRef(node.index),
                 });
             }
             NodeSide::New => {
@@ -240,7 +321,7 @@ impl<'a> MatchSelector for NaiveMatchSelector<'a> {
                     return;
                 }
                 self.push_action(MatchAction::AddNode {
-                    new_index: node.index,
+                    new_index: NewNodeRef(node.index),
                     is_new_return: self
                         .new
                         .ret_node_ref
@@ -257,17 +338,20 @@ impl<'a> MatchSelector for NaiveMatchSelector<'a> {
     }
 }
 
-/// Computes an edit set (distance) required to transform `old` into `new`.
-/// Internally computes a match set, then converts matches to concrete edits.
-pub fn compute_function_edit_distance(old: &Fn, new: &Fn) -> Result<IrEditSet, String> {
-    let mut selector = NaiveMatchSelector::new(old, new);
-    let matches = compute_function_edit(old, new, &mut selector)?;
+/// Computes an edit set required to transform `old` into `new` using the
+/// provided selector.
+pub fn compute_function_edit<S: MatchSelector>(
+    old: &Fn,
+    new: &Fn,
+    selector: &mut S,
+) -> Result<IrEditSet, String> {
+    let matches = compute_function_match(old, new, selector)?;
     Ok(convert_match_set_to_edit_set(old, new, &matches))
 }
 
 /// Computes the match actions required to transform `old` into `new`, using an
 /// externally provided selector that controls priority and edit choice.
-pub fn compute_function_edit<S: MatchSelector>(
+pub fn compute_function_match<S: MatchSelector>(
     old: &Fn,
     new: &Fn,
     selector: &mut S,
@@ -292,8 +376,8 @@ pub fn compute_function_edit<S: MatchSelector>(
     }
 
     // Build dependency graphs for readiness tracking.
-    let old_graph = build_dependency_graph(old);
-    let new_graph = build_dependency_graph(new);
+    let old_graph = build_dependency_graph::<OldNodeRef>(old);
+    let new_graph = build_dependency_graph::<NewNodeRef>(new);
 
     // Remaining unhandled dependency counts per node.
     let mut old_remain: Vec<usize> = old_graph.nodes.iter().map(|n| n.operands.len()).collect();
@@ -322,21 +406,23 @@ pub fn compute_function_edit<S: MatchSelector>(
     // Helper: decrement users' remaining counts and enqueue when they become ready.
     let mut update_ready = |idx: usize, side: NodeSide, selector: &mut S| match side {
         NodeSide::Old => {
-            for &user in old_graph.nodes[idx].users.iter() {
-                if old_remain[user] > 0 {
-                    old_remain[user] -= 1;
-                    if old_remain[user] == 0 {
-                        selector.add_ready_node(ReadyNode { side, index: user });
+            for &(user, _slot) in old_graph.nodes[idx].users.iter() {
+                let u: usize = user.into();
+                if old_remain[u] > 0 {
+                    old_remain[u] -= 1;
+                    if old_remain[u] == 0 {
+                        selector.add_ready_node(ReadyNode { side, index: u });
                     }
                 }
             }
         }
         NodeSide::New => {
-            for &user in new_graph.nodes[idx].users.iter() {
-                if new_remain[user] > 0 {
-                    new_remain[user] -= 1;
-                    if new_remain[user] == 0 {
-                        selector.add_ready_node(ReadyNode { side, index: user });
+            for &(user, _slot) in new_graph.nodes[idx].users.iter() {
+                let u: usize = user.into();
+                if new_remain[u] > 0 {
+                    new_remain[u] -= 1;
+                    if new_remain[u] == 0 {
+                        selector.add_ready_node(ReadyNode { side, index: u });
                     }
                 }
             }
@@ -348,7 +434,7 @@ pub fn compute_function_edit<S: MatchSelector>(
         match edit.clone() {
             MatchAction::DeleteNode { old_index: index } => {
                 matches.push(edit.clone());
-                update_ready(index, NodeSide::Old, selector);
+                update_ready(index.into(), NodeSide::Old, selector);
                 selector.update_after_match(&edit);
             }
             MatchAction::AddNode {
@@ -357,12 +443,12 @@ pub fn compute_function_edit<S: MatchSelector>(
                 let is_ret = new
                     .ret_node_ref
                     .map(|nr| nr.index)
-                    .map_or(false, |ri| ri == index);
+                    .map_or(false, |ri| ri == usize::from(index));
                 matches.push(MatchAction::AddNode {
                     new_index: index,
                     is_new_return: is_ret,
                 });
-                update_ready(index, NodeSide::New, selector);
+                update_ready(index.into(), NodeSide::New, selector);
                 selector.update_after_match(&edit);
             }
             MatchAction::MatchNodes {
@@ -376,11 +462,12 @@ pub fn compute_function_edit<S: MatchSelector>(
                     old_index,
                     new_index,
                     operand_substitutions: operand_substitutions.clone(),
-                    is_new_return: new.ret_node_ref.map(|nr| nr.index) == Some(new_index),
+                    is_new_return: new.ret_node_ref.map(|nr| nr.index)
+                        == Some(usize::from(new_index)),
                 });
                 // Propagate readiness in old/new graphs.
-                update_ready(old_index, NodeSide::Old, selector);
-                update_ready(new_index, NodeSide::New, selector);
+                update_ready(old_index.into(), NodeSide::Old, selector);
+                update_ready(new_index.into(), NodeSide::New, selector);
                 selector.update_after_match(&edit);
             }
         }
@@ -469,7 +556,7 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
             is_new_return: _,
         } = action
         {
-            new_to_old.insert(*new_index, *old_index);
+            new_to_old.insert((*new_index).into(), (*old_index).into());
         }
     }
 
@@ -484,7 +571,8 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                 // corresponding old indices. References to other new nodes remain as new
                 // indices and are resolved during application as those nodes
                 // are added earlier in order.
-                let src = &new.nodes[*new_index];
+                let ni: usize = (*new_index).into();
+                let src = &new.nodes[ni];
                 let remapped_payload = remap_payload_with(&src.payload, |nr: NodeRef| {
                     if let Some(&old_idx) = new_to_old.get(&nr.index) {
                         NodeRef { index: old_idx }
@@ -501,12 +589,13 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                     pos: src.pos.clone(),
                 };
                 edits.push(IrEdit::AddNode {
-                    new_index: *new_index,
+                    new_index: ni,
                     node: cloned,
                 });
             }
             MatchAction::DeleteNode { old_index } => {
-                edits.push(IrEdit::DeleteNode { index: *old_index });
+                let oi: usize = (*old_index).into();
+                edits.push(IrEdit::DeleteNode { index: oi });
             }
             MatchAction::MatchNodes {
                 old_index,
@@ -517,16 +606,55 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                 // For each substitution (old_operand_idx -> new_operand_idx), redirect
                 // the operand slot(s) on the old user node to the mapped old target if known.
                 for (old_operand_idx, new_operand_idx) in operand_substitutions.iter() {
-                    if let Some(&mapped_old_target) = new_to_old.get(new_operand_idx) {
-                        let user_node = &old.nodes[*old_index];
+                    let nn: usize = (*new_operand_idx).into();
+                    if let Some(&mapped_old_target) = new_to_old.get(&nn) {
+                        let oi: usize = (*old_index).into();
+                        let user_node = &old.nodes[oi];
                         let user_operands = operands(&user_node.payload);
                         for (slot, nr) in user_operands.iter().enumerate() {
-                            if nr.index == *old_operand_idx {
+                            let ooi: usize = (*old_operand_idx).into();
+                            if nr.index == ooi {
                                 edits.push(IrEdit::SubstituteOperand {
-                                    user_index: *old_index,
+                                    user_index: oi,
                                     operand_slot: slot,
                                     new_target_index: mapped_old_target,
                                 });
+                            }
+                        }
+                    }
+                }
+
+                // If no explicit substitutions were provided by the matcher, infer
+                // operand substitutions by diffing operands between matched nodes
+                // where mappings are known.
+                if operand_substitutions.is_empty() {
+                    let oi: usize = (*old_index).into();
+                    // Find the matched new node for this old node.
+                    // Use the first match from new_to_old that maps back to this old index.
+                    // More robust: build a reverse map old->new from matches earlier.
+                    // Compute reverse map on-demand.
+                    // Build old->new map
+                    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
+                    for (n_new, n_old) in new_to_old.iter() {
+                        old_to_new.insert(*n_old, *n_new);
+                    }
+                    if let Some(&ni) = old_to_new.get(&oi) {
+                        let old_ops = operands(&old.nodes[oi].payload);
+                        let new_ops = operands(&new.nodes[ni].payload);
+                        if old_ops.len() == new_ops.len() {
+                            for (slot, (o_ref, n_ref)) in
+                                old_ops.iter().zip(new_ops.iter()).enumerate()
+                            {
+                                // Map new operand target to old index if matched
+                                if let Some(&mapped_old_target) = new_to_old.get(&n_ref.index) {
+                                    if o_ref.index != mapped_old_target {
+                                        edits.push(IrEdit::SubstituteOperand {
+                                            user_index: oi,
+                                            operand_slot: slot,
+                                            new_target_index: mapped_old_target,
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -537,10 +665,13 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
     // Ensure the function return matches `new`.
     if let Some(nr) = new.ret_node_ref {
         if let Some(&old_idx) = new_to_old.get(&nr.index) {
-            edits.push(IrEdit::SetReturn {
-                index: old_idx,
-                is_new: false,
-            });
+            // Only emit SetReturn if the old function does not already return this node.
+            if old.ret_node_ref.map(|r| r.index) != Some(old_idx) {
+                edits.push(IrEdit::SetReturn {
+                    index: old_idx,
+                    is_new: false,
+                });
+            }
         } else {
             edits.push(IrEdit::SetReturn {
                 index: nr.index,
@@ -597,7 +728,8 @@ mod tests {
         );
         let rhs = pkg2.get_top().unwrap();
 
-        let edits = compute_function_edit_distance(lhs, rhs).unwrap();
+        let mut selector = NaiveMatchSelector::new(lhs, rhs);
+        let edits = compute_function_edit(lhs, rhs, &mut selector).unwrap();
         assert!(!edits.edits.is_empty());
         let patched = apply_function_edits(lhs, &edits).unwrap();
         assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, rhs));
@@ -623,7 +755,8 @@ mod tests {
         );
         let rhs = pkg2.get_top().unwrap();
 
-        let result = compute_function_edit_distance(lhs, rhs);
+        let mut selector = NaiveMatchSelector::new(lhs, rhs);
+        let result = compute_function_edit(lhs, rhs, &mut selector);
         assert!(result.is_err());
     }
 
@@ -663,7 +796,8 @@ mod tests {
         );
         let new_fn = pkg_new.get_top().unwrap();
 
-        let edits = compute_function_edit_distance(old_fn, new_fn).unwrap();
+        let mut selector = crate::greedy_graph_edit::GreedyMatchSelector::new(old_fn, new_fn);
+        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
         let patched = apply_function_edits(old_fn, &edits).unwrap();
         assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, new_fn));
     }
@@ -689,7 +823,8 @@ mod tests {
         );
         let new_fn = pkg_new.get_top().unwrap();
 
-        let edits = compute_function_edit_distance(old_fn, new_fn).unwrap();
+        let mut selector = NaiveMatchSelector::new(old_fn, new_fn);
+        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
         let patched = apply_function_edits(old_fn, &edits).unwrap();
         assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, new_fn));
     }
@@ -717,7 +852,8 @@ mod tests {
         );
         let new_fn = pkg_new.get_top().unwrap();
 
-        let edits = compute_function_edit_distance(old_fn, new_fn).unwrap();
+        let mut selector = NaiveMatchSelector::new(old_fn, new_fn);
+        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
         let patched = apply_function_edits(old_fn, &edits).unwrap();
         assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, new_fn));
     }
@@ -744,7 +880,8 @@ mod tests {
         );
         let new_fn = pkg_new.get_top().unwrap();
 
-        let edits = compute_function_edit_distance(old_fn, new_fn).unwrap();
+        let mut selector = NaiveMatchSelector::new(old_fn, new_fn);
+        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
         let patched = apply_function_edits(old_fn, &edits).unwrap();
         assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, new_fn));
     }
