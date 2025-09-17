@@ -241,6 +241,7 @@ fuzz_target!(|sample: FuzzSample| {
             &lhs,
             &rhs,
             AssertionSemantics::Same,
+            None,
             false,
         );
         if let EquivResult::Disproved {
@@ -274,6 +275,7 @@ fuzz_target!(|sample: FuzzSample| {
             &lhs,
             &rhs,
             AssertionSemantics::Same,
+            None,
             false,
         );
         if let EquivResult::Disproved {
@@ -306,6 +308,7 @@ fuzz_target!(|sample: FuzzSample| {
             &lhs,
             &rhs,
             AssertionSemantics::Same,
+            None,
             false,
         );
         if let EquivResult::Disproved {
