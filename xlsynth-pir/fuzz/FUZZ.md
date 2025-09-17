@@ -26,3 +26,31 @@ Main failure modes surfaced:
 
 - Divergence in acceptance (one verifier accepts while the other rejects).
 - Divergence in coarse error category (e.g., PIR flags NodeTypeMismatch while xlsynth flags a different class).
+
+---
+
+# Edit Distance (Greedy) Fuzz Target
+
+This fuzz target generates two same-typed random IR functions, computes edits using the greedy match selector, applies those edits to the first function, and asserts the result is isomorphic to the second.
+
+Target name: `fuzz_ir_edit_distance_greedy`
+
+Run:
+
+```bash
+cargo fuzz run fuzz_ir_edit_distance_greedy
+```
+
+Essential property under test:
+
+- The greedy matcher’s produced edits, when applied, should transform the old function into one isomorphic to the new function (modulo ids/names).
+
+Early returns justification:
+
+- Degenerate generator outputs (empty op lists or zero input width) are skipped; these are not interesting samples for edit computation.
+- Parser errors are skipped; infrastructure/transient parsing failures are not properties of the fuzz sample.
+
+Main failure modes surfaced:
+
+- Incorrect edit planning or application that yields a non-isomorphic result.
+- Crashes or panics during greedy selection or edit conversion.

@@ -494,12 +494,38 @@ pub fn apply_function_edits(old: &Fn, edits: &IrEditSet) -> Result<Fn, String> {
                 patched.nodes.push(node);
             }
             IrEdit::SubstituteOperand {
-                node: _,
-                operand_slot: _,
-                new_operand: _,
+                node,
+                operand_slot,
+                new_operand,
             } => {
-                // Not yet implemented; current matcher does not produce operand
-                // redirects. Leave as a no-op for now.
+                let idx = node.index;
+                if idx >= patched.nodes.len() {
+                    return Err(format!(
+                        "SubstituteOperand user node index {} out of bounds",
+                        idx
+                    ));
+                }
+                // Validate slot
+                let op_count = operands(&patched.nodes[idx].payload).len();
+                if operand_slot >= op_count {
+                    return Err(format!(
+                        "SubstituteOperand slot {} out of bounds for node {} ({} operands)",
+                        operand_slot, idx, op_count
+                    ));
+                }
+                // Remap exactly the requested operand slot to new_operand, preserving others.
+                let mut seen: usize = 0;
+                let remapped_payload =
+                    remap_payload_with(&patched.nodes[idx].payload, |nr: NodeRef| {
+                        let out = if seen == operand_slot {
+                            new_operand
+                        } else {
+                            nr
+                        };
+                        seen += 1;
+                        out
+                    });
+                patched.nodes[idx].payload = remapped_payload;
             }
             IrEdit::SetReturn { node } => {
                 patched.ret_node_ref = Some(NodeRef { index: node.index });

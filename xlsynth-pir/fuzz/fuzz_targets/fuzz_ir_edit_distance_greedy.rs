@@ -4,12 +4,15 @@
 
 use libfuzzer_sys::fuzz_target;
 use xlsynth::IrPackage;
-use xlsynth_pir::graph_edit::apply_function_edits;
+use xlsynth_pir::graph_edit::{apply_function_edits, compute_function_edit};
+use xlsynth_pir::greedy_graph_edit::GreedyMatchSelector;
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_pir::{ir_isomorphism::is_ir_isomorphic, ir_parser};
 
 fuzz_target!(|pair: FuzzSampleSameTypedPair| {
-    // Skip degenerate samples early.
+    println!("RUN!");
+
+    // Early-return on degenerate inputs.
     if pair.first.ops.is_empty()
         || pair.second.ops.is_empty()
         || pair.first.input_bits == 0
@@ -22,7 +25,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     // Build two XLS IR functions via the C++ bindings
     let mut pkg1 = IrPackage::new("first").expect("IrPackage::new infra error");
-    let func1 = match generate_ir_fn(
+    let _ = match generate_ir_fn(
         pair.first.input_bits,
         pair.first.ops.clone(),
         &mut pkg1,
@@ -33,7 +36,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     };
 
     let mut pkg2 = IrPackage::new("second").expect("IrPackage::new infra error");
-    let func2 = match generate_ir_fn(
+    let _ = match generate_ir_fn(
         pair.second.input_bits,
         pair.second.ops.clone(),
         &mut pkg2,
@@ -63,11 +66,17 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
         Some(f) => f,
         None => return,
     };
-
-    // Compute edit distance, apply to old, and verify isomorphism.
-    let mut selector = xlsynth_pir::graph_edit::NaiveMatchSelector::new(old_fn, new_fn);
-    let edits = xlsynth_pir::graph_edit::compute_function_edit(old_fn, new_fn, &mut selector)
-        .expect("compute_function_edit returned Err");
-    let patched = apply_function_edits(old_fn, &edits).expect("apply_function_edits returned Err");
+    println!(
+        "*********************** GENERATED PARSABLE SAMPLE (size={}/{})",
+        old_fn.nodes.len(),
+        new_fn.nodes.len()
+    );
+    // Compute edits with the greedy matcher, apply, and verify isomorphism.
+    let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
+    let edits = compute_function_edit(old_fn, new_fn, &mut selector)
+        .expect("compute_function_edit returned Err (greedy)");
+    let patched =
+        apply_function_edits(old_fn, &edits).expect("apply_function_edits returned Err (greedy)");
+    // Print IR texts for old sample, new sample, and the patched result.
     assert!(is_ir_isomorphic(&patched, new_fn));
 });

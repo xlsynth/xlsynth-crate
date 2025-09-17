@@ -29,3 +29,9 @@ name = "fuzz_ir_edit_distance"
 path = "fuzz_targets/fuzz_ir_edit_distance.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_ir_edit_distance_greedy"
+path = "fuzz_targets/fuzz_ir_edit_distance_greedy.rs"
+test = false
+doc = false
