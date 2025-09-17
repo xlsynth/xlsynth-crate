@@ -333,3 +333,10 @@ pub enum BoolPropertyResult {
     /// machine-readable counterexample for QuickCheck-style properties.
     ToolchainDisproved(String),
 }
+
+#[derive(Debug, Clone)]
+pub struct QuickCheckRunResult {
+    pub name: String,
+    pub duration: std::time::Duration,
+    pub result: BoolPropertyResult,
+}
