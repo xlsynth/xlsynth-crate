@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::proofs::obligations::LecObligation;
 use crate::prover_config::{DslxEquivConfig, GroupKind, ProverPlan, ProverTask};
-use crate::solver_choice::SolverChoice;
+use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::types::AssertionSemantics;
 
 fn write_text(

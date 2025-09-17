@@ -27,7 +27,7 @@ Proves two IR functions to be equivalent or provides a counterexample to their e
 Key flags:
 
 - `--top <NAME>` or per-side `--lhs_ir_top <NAME>` / `--rhs_ir_top <NAME>` to select entry points.
-- `--solver <toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+- `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
 - `--flatten_aggregates=<BOOL>`
 - `--drop_params <CSV>`
 - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -43,7 +43,7 @@ Proves two IR blocks to be equivalent by selecting block members from package-fo
 Key flags:
 
 - `--lhs_top <NAME>` / `--rhs_top <NAME>` or shared `--top <NAME>` to select block entry points (by block name in each package). If omitted, the package `top` block is used when present; otherwise the first block member is selected.
-- `--solver <toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+- `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
 - `--flatten_aggregates=<BOOL>`
 - `--drop_params <CSV>`
 - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -455,7 +455,7 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
 - Entry-point selection: either `--dslx_top <NAME>` or both `--lhs_dslx_top <NAME>` and `--rhs_dslx_top <NAME>`.
 - Search paths: `--dslx_path <P1;P2;...>` and `--dslx_stdlib_path <PATH>`.
 - Behavior flags:
-  - `--solver <toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+  - `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
   - `--flatten_aggregates=<BOOL>`
   - `--drop_params <CSV>`
   - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -683,7 +683,7 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 
 - Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
-- Backend: `--solver <...>` selects the solver/toolchain.
+- Backend: `--solver <...>` selects the solver/toolchain (`auto` defers to the library's feature-based default).
 - Semantics: `--assertion-semantics <ignore|never|assume>`.
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
 - UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.

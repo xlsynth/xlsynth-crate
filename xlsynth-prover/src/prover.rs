@@ -1,30 +1,94 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, path::PathBuf};
-
-use crate::solver_interface::SolverConfig;
-use crate::types::{
-    AssertionSemantics, BoolPropertyResult, EquivResult, EquivSide, IrFn,
-    QuickCheckAssertionSemantics, UfSignature,
+use std::{
+    collections::HashMap,
+    fmt,
+    path::{Path, PathBuf},
 };
-use regex::Regex;
-use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
-use xlsynth_pir::{ir, ir_parser};
 
-fn build_assert_label_regex(filter: Option<&str>) -> Option<Regex> {
-    match filter {
-        None => None,
-        Some(pattern) => {
-            Some(Regex::new(pattern).expect("invalid regular expression in assert label filter"))
+use serde::{Deserialize, Serialize};
+
+use crate::types::{
+    AssertionSemantics, BoolPropertyResult, EquivResult, IrFn, ProverFn,
+    QuickCheckAssertionSemantics, QuickCheckRunResult, UfSignature,
+};
+use crate::{prove_quickcheck::build_assert_label_regex, solver_interface::SolverConfig};
+use std::str::FromStr;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SolverChoice {
+    /// Let the library select an appropriate prover based on available
+    /// features.
+    Auto,
+    #[cfg(feature = "has-easy-smt")]
+    Z3Binary,
+    #[cfg(feature = "has-easy-smt")]
+    BitwuzlaBinary,
+    #[cfg(feature = "has-easy-smt")]
+    BoolectorBinary,
+
+    #[cfg(feature = "has-bitwuzla")]
+    Bitwuzla,
+
+    #[cfg(feature = "has-boolector")]
+    Boolector,
+
+    /// Use the external XLS tool-chain binaries (configured via
+    /// `xlsynth-toolchain.toml`).
+    Toolchain,
+}
+
+impl fmt::Display for SolverChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            SolverChoice::Auto => "auto",
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::Z3Binary => "z3-binary",
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::BitwuzlaBinary => "bitwuzla-binary",
+            #[cfg(feature = "has-easy-smt")]
+            SolverChoice::BoolectorBinary => "boolector-binary",
+            #[cfg(feature = "has-bitwuzla")]
+            SolverChoice::Bitwuzla => "bitwuzla",
+            #[cfg(feature = "has-boolector")]
+            SolverChoice::Boolector => "boolector",
+            SolverChoice::Toolchain => "toolchain",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl FromStr for SolverChoice {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            #[cfg(feature = "has-easy-smt")]
+            "z3-binary" => Ok(Self::Z3Binary),
+            #[cfg(feature = "has-easy-smt")]
+            "bitwuzla-binary" => Ok(Self::BitwuzlaBinary),
+            #[cfg(feature = "has-easy-smt")]
+            "boolector-binary" => Ok(Self::BoolectorBinary),
+
+            #[cfg(feature = "has-bitwuzla")]
+            "bitwuzla" => Ok(Self::Bitwuzla),
+
+            #[cfg(feature = "has-boolector")]
+            "boolector" => Ok(Self::Boolector),
+
+            "toolchain" => Ok(Self::Toolchain),
+            _ => Err(format!("invalid solver: {}", s)),
         }
     }
 }
 
+use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
+use xlsynth_pir::{ir, ir_parser};
+
 pub trait Prover {
     fn prove_ir_fn_equiv(self: &Self, lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
         self.prove_ir_fn_equiv_full(
-            &EquivSide {
+            &ProverFn {
                 ir_fn: &IrFn {
                     fn_ref: lhs,
                     pkg_ref: None,
@@ -33,7 +97,7 @@ pub trait Prover {
                 domains: None,
                 uf_map: HashMap::new(),
             },
-            &EquivSide {
+            &ProverFn {
                 ir_fn: &IrFn {
                     fn_ref: rhs,
                     pkg_ref: None,
@@ -56,8 +120,8 @@ pub trait Prover {
     ) -> EquivResult;
     fn prove_ir_fn_equiv_full<'a>(
         self: &Self,
-        lhs: &EquivSide<'a>,
-        rhs: &EquivSide<'a>,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
         assertion_semantics: AssertionSemantics,
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
@@ -82,58 +146,55 @@ pub trait Prover {
         allow_flatten: bool,
     ) -> EquivResult;
 
-    // --- QuickCheck-style proving: f() always returns bits[1]:1 ---
-    fn prove_ir_fn_always_true<'a>(
-        self: &Self,
-        ir_fn: &IrFn<'a>,
-        assertion_semantics: QuickCheckAssertionSemantics,
-        assert_label_filter: Option<&str>,
-    ) -> BoolPropertyResult {
-        self.prove_ir_fn_always_true_with_ufs(
+    fn prove_ir_fn_always_true<'a>(self: &Self, ir_fn: &IrFn<'a>) -> BoolPropertyResult {
+        let prover_fn = ProverFn {
             ir_fn,
-            assertion_semantics,
-            assert_label_filter,
-            &HashMap::new(),
+            domains: None,
+            uf_map: HashMap::new(),
+        };
+        self.prove_ir_fn_always_true_full(
+            &prover_fn,
+            QuickCheckAssertionSemantics::Never,
+            None,
             &HashMap::new(),
         )
     }
 
-    fn prove_ir_fn_always_true_with_ufs<'a>(
+    fn prove_ir_fn_always_true_full<'a>(
         self: &Self,
-        ir_fn: &IrFn<'a>,
+        prover_fn: &ProverFn<'a>,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
-        uf_map: &HashMap<String, String>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult;
 
-    /// Prove a DSLX quickcheck function (by name) directly.
-    fn prove_dslx_quickcheck(
-        &self,
+    fn prove_dslx_quickcheck<'a>(
+        self: &Self,
         entry_file: &std::path::Path,
-        quickcheck_name: &str,
-        assertion_semantics: QuickCheckAssertionSemantics,
-        assert_label_filter: Option<&str>,
-    ) -> BoolPropertyResult {
-        self.prove_dslx_quickcheck_with_ufs(
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
+    ) -> Vec<QuickCheckRunResult> {
+        self.prove_dslx_quickcheck_full(
             entry_file,
-            quickcheck_name,
-            assertion_semantics,
-            assert_label_filter,
-            &HashMap::new(),
+            dslx_stdlib_path,
+            additional_search_paths,
+            None,
+            QuickCheckAssertionSemantics::Never,
+            None,
             &HashMap::new(),
         )
     }
 
-    fn prove_dslx_quickcheck_with_ufs(
+    fn prove_dslx_quickcheck_full(
         &self,
         entry_file: &std::path::Path,
-        quickcheck_name: &str,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
+        test_filter: Option<&str>,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
-        uf_signatures: &HashMap<String, UfSignature>,
-    ) -> BoolPropertyResult;
+    ) -> Vec<QuickCheckRunResult>;
 }
 
 impl<S: SolverConfig> Prover for S {
@@ -163,7 +224,7 @@ impl<S: SolverConfig> Prover for S {
             None => rhs_pkg.get_top().expect("No functions in RHS package"),
         };
 
-        let lhs = EquivSide {
+        let lhs = ProverFn {
             ir_fn: &IrFn {
                 fn_ref: lhs_top,
                 pkg_ref: Some(&lhs_pkg),
@@ -172,7 +233,7 @@ impl<S: SolverConfig> Prover for S {
             domains: None,
             uf_map: HashMap::new(),
         };
-        let rhs = EquivSide {
+        let rhs = ProverFn {
             ir_fn: &IrFn {
                 fn_ref: rhs_top,
                 pkg_ref: Some(&rhs_pkg),
@@ -195,8 +256,8 @@ impl<S: SolverConfig> Prover for S {
 
     fn prove_ir_fn_equiv_full<'a>(
         self: &Self,
-        lhs: &EquivSide<'a>,
-        rhs: &EquivSide<'a>,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
         assertion_semantics: AssertionSemantics,
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
@@ -256,94 +317,42 @@ impl<S: SolverConfig> Prover for S {
         )
     }
 
-    fn prove_ir_fn_always_true_with_ufs<'a>(
+    fn prove_ir_fn_always_true_full<'a>(
         self: &Self,
-        ir_fn: &IrFn<'a>,
+        ir_fn: &ProverFn<'a>,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
-        uf_map: &HashMap<String, String>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult {
         let assert_label_regex = build_assert_label_regex(assert_label_filter);
-        crate::prove_quickcheck::prove_ir_fn_always_true_with_ufs::<S::Solver>(
+        crate::prove_quickcheck::prove_ir_fn_always_true_full::<S::Solver>(
             self,
             ir_fn,
             assertion_semantics,
             assert_label_regex.as_ref(),
-            uf_map,
             uf_signatures,
         )
     }
 
-    fn prove_dslx_quickcheck_with_ufs(
+    fn prove_dslx_quickcheck_full(
         &self,
         entry_file: &std::path::Path,
-        quickcheck_name: &str,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
+        test_filter: Option<&str>,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
-        uf_signatures: &HashMap<String, UfSignature>,
-    ) -> BoolPropertyResult {
-        let assert_label_regex = build_assert_label_regex(assert_label_filter);
-        // Convert DSLX module to IR text using the runtime API with default options.
-        let dslx_contents = std::fs::read_to_string(entry_file)
-            .expect("Failed to read DSLX input file for quickcheck");
-        let options = xlsynth::DslxConvertOptions {
-            dslx_stdlib_path: None,
-            additional_search_paths: Vec::new(),
-            enable_warnings: None,
-            disable_warnings: None,
-        };
-        let ir_text = xlsynth::convert_dslx_to_ir_text(&dslx_contents, entry_file, &options)
-            .expect("DSLX->IR conversion failed for quickcheck")
-            .ir;
-
-        // Parse IR and locate the quickcheck function, accounting for calling
-        // convention.
-        let pkg = Parser::new(&ir_text)
-            .parse_package()
-            .expect("Failed to parse IR package for quickcheck");
-        let module_name = entry_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .expect("valid module name");
-        let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
-            module_name,
-            quickcheck_name,
-            xlsynth::DslxCallingConvention::ImplicitToken,
-        )
-        .expect("mangle itok");
-        let mangled_normal = xlsynth::mangle_dslx_name_with_calling_convention(
-            module_name,
-            quickcheck_name,
-            xlsynth::DslxCallingConvention::Typical,
-        )
-        .expect("mangle normal");
-
-        let (fn_ref, fixed_implicit_activation) = if let Some(f) = pkg.get_fn(&mangled_itok) {
-            (f, true)
-        } else if let Some(f) = pkg.get_fn(&mangled_normal) {
-            (f, false)
-        } else {
-            panic!(
-                "quickcheck function '{}' not found (module '{}')",
-                quickcheck_name, module_name
-            );
-        };
-
-        let ir_fn = IrFn {
-            fn_ref,
-            pkg_ref: Some(&pkg),
-            fixed_implicit_activation,
-        };
-
-        crate::prove_quickcheck::prove_ir_fn_always_true_with_ufs::<S::Solver>(
+    ) -> Vec<QuickCheckRunResult> {
+        crate::prove_quickcheck::prove_dslx_quickcheck_full::<S>(
             self,
-            &ir_fn,
+            entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
+            test_filter,
             assertion_semantics,
-            assert_label_regex.as_ref(),
+            assert_label_filter,
             uf_map,
-            uf_signatures,
         )
     }
 }
@@ -405,8 +414,8 @@ impl Prover for ExternalProver {
 
     fn prove_ir_fn_equiv_full<'a>(
         self: &Self,
-        lhs: &EquivSide<'a>,
-        rhs: &EquivSide<'a>,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
         assertion_semantics: AssertionSemantics,
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
@@ -519,12 +528,11 @@ impl Prover for ExternalProver {
         EquivResult::Error("External provers do not support input-bit split strategy".to_string())
     }
 
-    fn prove_ir_fn_always_true_with_ufs<'a>(
+    fn prove_ir_fn_always_true_full<'a>(
         self: &Self,
-        _ir_fn: &IrFn<'a>,
+        _ir_fn: &ProverFn<'a>,
         _assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
-        _uf_map: &HashMap<String, String>,
         _uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult {
         if assert_label_filter.is_some() {
@@ -538,47 +546,26 @@ impl Prover for ExternalProver {
         )
     }
 
-    fn prove_dslx_quickcheck_with_ufs(
+    fn prove_dslx_quickcheck_full(
         &self,
         entry_file: &std::path::Path,
-        quickcheck_name: &str,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
+        test_filter: Option<&str>,
         _assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
-        uf_signatures: &HashMap<String, UfSignature>,
-    ) -> BoolPropertyResult {
-        if assert_label_filter.is_some() {
-            return BoolPropertyResult::ToolchainDisproved(
-                "External quickcheck does not support assertion label filters".to_string(),
-            );
-        }
-        if !uf_map.is_empty() || !uf_signatures.is_empty() {
-            return BoolPropertyResult::ToolchainDisproved(
-                "External quickcheck does not support uninterpreted functions".to_string(),
-            );
-        }
-        match self {
-            ExternalProver::ToolExe(path) => {
-                crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_exe(
-                    entry_file,
-                    quickcheck_name,
-                    path,
-                )
-            }
-            ExternalProver::ToolDir(path) => {
-                crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_dir(
-                    entry_file,
-                    quickcheck_name,
-                    path,
-                )
-            }
-            ExternalProver::Toolchain => {
-                crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_via_toolchain(
-                    entry_file,
-                    quickcheck_name,
-                )
-            }
-        }
+    ) -> Vec<QuickCheckRunResult> {
+        crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_full_via_toolchain(
+            self,
+            entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
+            test_filter,
+            _assertion_semantics,
+            assert_label_filter,
+            uf_map,
+        )
     }
 }
 
@@ -640,13 +627,44 @@ pub fn auto_selected_prover() -> Box<dyn Prover> {
     Box::new(ExternalProver::Toolchain)
 }
 
+pub fn prover_for_choice(choice: SolverChoice, tool_path: Option<&Path>) -> Box<dyn Prover> {
+    match choice {
+        SolverChoice::Auto => auto_selected_prover(),
+        #[cfg(feature = "has-bitwuzla")]
+        SolverChoice::Bitwuzla => Box::new(crate::bitwuzla_backend::BitwuzlaOptions::new()),
+        #[cfg(feature = "has-boolector")]
+        SolverChoice::Boolector => Box::new(crate::boolector_backend::BoolectorConfig::new()),
+        #[cfg(feature = "has-easy-smt")]
+        SolverChoice::Z3Binary => Box::new(crate::easy_smt_backend::EasySmtConfig::z3()),
+        #[cfg(feature = "has-easy-smt")]
+        SolverChoice::BitwuzlaBinary => {
+            Box::new(crate::easy_smt_backend::EasySmtConfig::bitwuzla())
+        }
+        #[cfg(feature = "has-easy-smt")]
+        SolverChoice::BoolectorBinary => {
+            Box::new(crate::easy_smt_backend::EasySmtConfig::boolector())
+        }
+        SolverChoice::Toolchain => match tool_path {
+            Some(path) => {
+                let path_buf = path.to_path_buf();
+                if path.is_dir() {
+                    Box::new(ExternalProver::ToolDir(path_buf))
+                } else {
+                    Box::new(ExternalProver::ToolExe(path_buf))
+                }
+            }
+            None => Box::new(ExternalProver::Toolchain),
+        },
+    }
+}
+
 pub fn prove_ir_fn_equiv(lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
     auto_selected_prover().prove_ir_fn_equiv(lhs, rhs)
 }
 
 pub fn prove_ir_fn_equiv_full(
-    lhs: &EquivSide<'_>,
-    rhs: &EquivSide<'_>,
+    lhs: &ProverFn<'_>,
+    rhs: &ProverFn<'_>,
     assertion_semantics: AssertionSemantics,
     allow_flatten: bool,
     uf_signatures: &HashMap<String, UfSignature>,
@@ -669,54 +687,52 @@ pub fn prove_ir_pkg_text_equiv(
     auto_selected_prover().prove_ir_pkg_text_equiv(lhs_pkg_text, rhs_pkg_text, top)
 }
 
-pub fn prove_ir_fn_always_true(
-    ir_fn: &IrFn,
-    assertion_semantics: QuickCheckAssertionSemantics,
-) -> BoolPropertyResult {
-    auto_selected_prover().prove_ir_fn_always_true(ir_fn, assertion_semantics, None)
+pub fn prove_ir_fn_always_true(ir_fn: &IrFn<'_>) -> BoolPropertyResult {
+    auto_selected_prover().prove_ir_fn_always_true(ir_fn)
 }
 
-pub fn prove_ir_fn_always_true_with_ufs(
-    ir_fn: &IrFn,
+pub fn prove_ir_fn_always_true_full(
+    prover_fn: &ProverFn<'_>,
     assertion_semantics: QuickCheckAssertionSemantics,
-    uf_map: &HashMap<String, String>,
+    assert_label_filter: Option<&str>,
     uf_signatures: &HashMap<String, UfSignature>,
 ) -> BoolPropertyResult {
-    auto_selected_prover().prove_ir_fn_always_true_with_ufs(
-        ir_fn,
+    auto_selected_prover().prove_ir_fn_always_true_full(
+        &prover_fn,
         assertion_semantics,
-        None,
-        uf_map,
+        assert_label_filter,
         uf_signatures,
     )
 }
 
 pub fn prove_dslx_quickcheck(
     entry_file: &std::path::Path,
-    quickcheck_name: &str,
-    assertion_semantics: QuickCheckAssertionSemantics,
-) -> BoolPropertyResult {
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
+) -> Vec<QuickCheckRunResult> {
     auto_selected_prover().prove_dslx_quickcheck(
         entry_file,
-        quickcheck_name,
-        assertion_semantics,
-        None,
+        dslx_stdlib_path,
+        additional_search_paths,
     )
 }
 
-pub fn prove_dslx_quickcheck_with_ufs(
+pub fn prove_dslx_quickcheck_full(
     entry_file: &std::path::Path,
-    quickcheck_name: &str,
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
+    test_filter: Option<&str>,
     assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_filter: Option<&str>,
     uf_map: &HashMap<String, String>,
-    uf_signatures: &HashMap<String, UfSignature>,
-) -> BoolPropertyResult {
-    auto_selected_prover().prove_dslx_quickcheck_with_ufs(
+) -> Vec<QuickCheckRunResult> {
+    auto_selected_prover().prove_dslx_quickcheck_full(
         entry_file,
-        quickcheck_name,
+        dslx_stdlib_path,
+        additional_search_paths,
+        test_filter,
         assertion_semantics,
-        None,
+        assert_label_filter,
         uf_map,
-        uf_signatures,
     )
 }

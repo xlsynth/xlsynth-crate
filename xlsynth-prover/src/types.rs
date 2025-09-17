@@ -234,7 +234,7 @@ impl<S: Solver> UfRegistry<S> {
     }
 }
 
-pub struct EquivSide<'a> {
+pub struct ProverFn<'a> {
     pub ir_fn: &'a IrFn<'a>,
     pub domains: Option<ParamDomains>,
     pub uf_map: HashMap<String, String>,
@@ -332,4 +332,11 @@ pub enum BoolPropertyResult {
     /// external tools (e.g. `check_ir_equivalence_main`) do not provide a
     /// machine-readable counterexample for QuickCheck-style properties.
     ToolchainDisproved(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct QuickCheckRunResult {
+    pub name: String,
+    pub duration: std::time::Duration,
+    pub result: BoolPropertyResult,
 }

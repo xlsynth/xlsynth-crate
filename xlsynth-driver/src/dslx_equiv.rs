@@ -8,10 +8,10 @@ use crate::proofs::script::{
     execute_script, read_script_steps_from_json_path, read_script_steps_from_jsonl_path, OblTree,
     OblTreeConfig, ScriptStep,
 };
-use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 use crate::tools::{run_ir_converter_main, run_opt_main};
 use xlsynth::{mangle_dslx_name, DslxConvertOptions, IrPackage};
+use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::types::{AssertionSemantics, ParamDomains};
 
 const SUBCOMMAND: &str = "dslx-equiv";

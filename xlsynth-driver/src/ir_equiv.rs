@@ -5,7 +5,6 @@
 #![allow(unused)]
 
 use crate::common::{infer_uf_signature, merge_uf_signature};
-use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_check_ir_equivalence_main;
 use xlsynth_pir::ir;
@@ -18,8 +17,8 @@ use xlsynth_prover::prove_equiv::{
     prove_ir_fn_equiv_full, prove_ir_fn_equiv_output_bits_parallel,
     prove_ir_fn_equiv_split_input_bit,
 };
-use xlsynth_prover::prover::{ExternalProver, Prover};
-use xlsynth_prover::types::{AssertionSemantics, EquivResult, EquivSide, IrFn};
+use xlsynth_prover::prover::{Prover, SolverChoice};
+use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn, ProverFn};
 
 use crate::parallelism::ParallelismStrategy;
 
@@ -142,12 +141,12 @@ fn run_equiv_with_prover(prover: &dyn Prover, inputs: &EquivInputs) -> EquivOutc
             let rhs_uf_sigs = infer_uf_signature(&rhs_pkg, &inputs.rhs_uf_map);
             let uf_sigs = merge_uf_signature(lhs_uf_sigs, &rhs_uf_sigs);
 
-            let lhs_side = EquivSide {
+            let lhs_side = ProverFn {
                 ir_fn: &lhs_ir_fn,
                 domains: inputs.lhs_param_domains.clone(),
                 uf_map: inputs.lhs_uf_map.clone(),
             };
-            let rhs_side = EquivSide {
+            let rhs_side = ProverFn {
                 ir_fn: &rhs_ir_fn,
                 domains: inputs.rhs_param_domains.clone(),
                 uf_map: inputs.rhs_uf_map.clone(),
@@ -229,52 +228,10 @@ pub fn dispatch_ir_equiv(
         solver_choice,
         tool_path
     );
-    // Construct a Prover for the selected native solver via unified interface.
-    match solver_choice {
-        #[cfg(feature = "has-boolector")]
-        Some(SolverChoice::Boolector) => {
-            use xlsynth_prover::boolector_backend::BoolectorConfig;
-            let prover = BoolectorConfig::new();
-            run_equiv_with_prover(&prover, inputs)
-        }
-        #[cfg(feature = "has-easy-smt")]
-        Some(SolverChoice::Z3Binary)
-        | Some(SolverChoice::BitwuzlaBinary)
-        | Some(SolverChoice::BoolectorBinary) => {
-            use xlsynth_prover::easy_smt_backend::EasySmtConfig;
-            let cfg = match solver_choice {
-                Some(SolverChoice::Z3Binary) => EasySmtConfig::z3(),
-                Some(SolverChoice::BitwuzlaBinary) => EasySmtConfig::bitwuzla(),
-                Some(SolverChoice::BoolectorBinary) => EasySmtConfig::boolector(),
-                _ => unreachable!(),
-            };
-            run_equiv_with_prover(&cfg, inputs)
-        }
-        #[cfg(feature = "has-bitwuzla")]
-        Some(SolverChoice::Bitwuzla) => {
-            use xlsynth_prover::bitwuzla_backend::BitwuzlaOptions;
-            let opts = BitwuzlaOptions::new();
-            run_equiv_with_prover(&opts, inputs)
-        }
-        Some(SolverChoice::Toolchain) => {
-            let prover = match tool_path {
-                Some(p) => {
-                    let pb = std::path::Path::new(p);
-                    if pb.is_dir() {
-                        ExternalProver::ToolDir(pb.to_path_buf())
-                    } else {
-                        ExternalProver::ToolExe(pb.to_path_buf())
-                    }
-                }
-                None => ExternalProver::Toolchain,
-            };
-            run_equiv_with_prover(&prover, inputs)
-        }
-        None => {
-            let prover = xlsynth_prover::prover::auto_selected_prover();
-            run_equiv_with_prover(&*prover, inputs)
-        }
-    }
+    let choice = solver_choice.unwrap_or(SolverChoice::Auto);
+    let tool_path_ref = tool_path.map(std::path::Path::new);
+    let prover = xlsynth_prover::prover::prover_for_choice(choice, tool_path_ref);
+    run_equiv_with_prover(&*prover, inputs)
 }
 
 /// Implements the "ir-equiv" subcommand.

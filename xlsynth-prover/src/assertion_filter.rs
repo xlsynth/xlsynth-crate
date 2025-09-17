@@ -2,17 +2,17 @@
 
 use regex::Regex;
 
-/// Returns a filtered view of `assertions`, including only those whose labels
-/// match the given regex `include`, or all assertions if `include` is `None`.
+use crate::types::Assertion;
+
 pub fn filter_assertions<'a, R>(
-    assertions: &'a [crate::types::Assertion<'a, R>],
-    include: Option<&Regex>,
-) -> Vec<&'a crate::types::Assertion<'a, R>> {
-    match include {
+    assertions: &'a [Assertion<'a, R>],
+    include_filter: Option<&Regex>,
+) -> Vec<&'a Assertion<'a, R>> {
+    match include_filter {
         None => assertions.iter().collect(),
         Some(regex) => assertions
             .iter()
-            .filter(|a| regex.is_match(a.label))
+            .filter(|assertion| regex.is_match(assertion.label))
             .collect(),
     }
 }

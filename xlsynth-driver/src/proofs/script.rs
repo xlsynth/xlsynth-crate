@@ -12,8 +12,8 @@ use crate::proofs::plans::{build_plan_from_obligations, ObligationPlan};
 use crate::proofs::tactics::cosliced::{CoslicedTactic, NamedSlice};
 use crate::proofs::tactics::{IsTactic, Tactic};
 use crate::prover::{run_prover_plan, ProverReport, ProverReportNode, TaskOutcome};
-use crate::solver_choice::SolverChoice;
 use serde::{Deserialize, Serialize};
+use xlsynth_prover::prover::SolverChoice;
 
 pub type Selector = Vec<String>;
 
@@ -492,7 +492,7 @@ mod tests {
         };
         #[cfg(any(feature = "with-bitwuzla-built", feature = "with-bitwuzla-system"))]
         {
-            cfg.solver = Some(crate::solver_choice::SolverChoice::Bitwuzla);
+            cfg.solver = Some(SolverChoice::Bitwuzla);
         }
         cfg
     }

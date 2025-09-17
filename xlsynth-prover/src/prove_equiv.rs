@@ -9,8 +9,8 @@ use xlsynth::IrValue;
 use crate::solver_interface::{BitVec, Response, Solver};
 use crate::translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv};
 use crate::types::{
-    Assertion, AssertionSemantics, AssertionViolation, EquivResult, EquivSide, FnInput, FnInputs,
-    FnOutput, IrFn, IrTypedBitVec, ParamDomains, SmtFn, UfRegistry, UfSignature,
+    Assertion, AssertionSemantics, AssertionViolation, EquivResult, FnInput, FnInputs, FnOutput,
+    IrFn, IrTypedBitVec, ParamDomains, ProverFn, SmtFn, UfRegistry, UfSignature,
 };
 use regex::Regex;
 use xlsynth_pir::ir;
@@ -287,8 +287,8 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
 /// are enums to lie within their defined value sets.
 pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &EquivSide<'a>,
-    rhs: &EquivSide<'a>,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
     assertion_semantics: AssertionSemantics,
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
@@ -348,12 +348,12 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
 ) -> EquivResult {
     prove_ir_fn_equiv_full::<S>(
         solver_config,
-        &EquivSide {
+        &ProverFn {
             ir_fn: lhs,
             domains: None,
             uf_map: HashMap::new(),
         },
-        &EquivSide {
+        &ProverFn {
             ir_fn: rhs,
             domains: None,
             uf_map: HashMap::new(),
@@ -696,7 +696,7 @@ pub mod test_utils {
 
         let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: call_g,
                     pkg_ref: Some(&pkg),
@@ -705,7 +705,7 @@ pub mod test_utils {
                 domains: None,
                 uf_map: lhs_uf_map,
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: call_h,
                     pkg_ref: Some(&pkg),
@@ -775,7 +775,7 @@ pub mod test_utils {
 
         let res = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: top_g,
                     pkg_ref: Some(&pkg),
@@ -784,7 +784,7 @@ pub mod test_utils {
                 domains: None,
                 uf_map: lhs_uf_map,
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: top_h,
                     pkg_ref: Some(&pkg),
@@ -866,7 +866,7 @@ pub mod test_utils {
 
         let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: call_g,
                     pkg_ref: Some(&pkg),
@@ -875,7 +875,7 @@ pub mod test_utils {
                 domains: None,
                 uf_map: lhs_uf_map,
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: call_h,
                     pkg_ref: Some(&pkg),
@@ -942,7 +942,7 @@ pub mod test_utils {
         let include = regex::Regex::new(r"^(?:blue)$").unwrap();
         let res_filtered = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: lhs,
                     pkg_ref: Some(&pkg),
@@ -951,7 +951,7 @@ pub mod test_utils {
                 domains: None,
                 uf_map: std::collections::HashMap::new(),
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &super::IrFn {
                     fn_ref: rhs,
                     pkg_ref: Some(&pkg),
@@ -2634,12 +2634,12 @@ pub mod test_utils {
 
         let res2 = prove_ir_fn_equiv_full::<S>(
             solver_config,
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &lhs_ir_fn,
                 domains: Some(doms.clone()),
                 uf_map: HashMap::new(),
             },
-            &super::EquivSide {
+            &super::ProverFn {
                 ir_fn: &rhs_ir_fn,
                 domains: Some(doms),
                 uf_map: HashMap::new(),

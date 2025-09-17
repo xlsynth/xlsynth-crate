@@ -7,5 +7,4 @@ pub mod proofs;
 pub mod prover;
 pub mod prover_config;
 pub mod report_cli_error;
-pub mod solver_choice;
 pub mod toolchain_config;
