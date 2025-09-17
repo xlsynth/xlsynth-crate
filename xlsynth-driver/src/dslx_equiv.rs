@@ -3,6 +3,11 @@
 use crate::common::{get_function_enum_param_domains, parse_uf_spec, resolve_type_inference_v2};
 use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
+use crate::proofs::obligations::{LecObligation, LecSide};
+use crate::proofs::script::{
+    execute_script, read_script_steps_from_json_path, read_script_steps_from_jsonl_path, OblTree,
+    OblTreeConfig, ScriptStep,
+};
 use crate::solver_choice::SolverChoice;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 use crate::tools::{run_ir_converter_main, run_opt_main};
@@ -131,6 +136,15 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let lhs_file = matches.get_one::<String>("lhs_dslx_file").unwrap();
     let rhs_file = matches.get_one::<String>("rhs_dslx_file").unwrap();
 
+    let tactic_json_path = matches.get_one::<String>("tactic_json").cloned();
+    let tactic_jsonl_path = matches.get_one::<String>("tactic_jsonl").cloned();
+    if tactic_json_path.is_some() && tactic_jsonl_path.is_some() {
+        eprintln!("Error: --tactic_json and --tactic_jsonl cannot be used together");
+        std::process::exit(1);
+    }
+    let tactic_script_json = tactic_json_path.clone();
+    let tactic_script_jsonl = tactic_jsonl_path.clone();
+
     let mut lhs_top = matches
         .get_one::<String>("lhs_dslx_top")
         .map(|s| s.as_str());
@@ -234,75 +248,165 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let rhs_uf_map = parse_uf_spec(rhs_module_name, matches.get_many::<String>("rhs_uf"));
     let use_unoptimized_ir = !lhs_uf_map.is_empty() || !rhs_uf_map.is_empty();
 
-    let OptimizedIrText {
-        ir_text: lhs_ir_text,
-        mangled_top: lhs_mangled_top,
-        param_domains: lhs_domains,
-    } = build_ir_for_dslx(
-        lhs_path,
-        lhs_top.unwrap(),
-        dslx_stdlib_path,
-        dslx_path,
-        enable_warnings,
-        disable_warnings,
-        tool_path,
-        type_inference_v2,
-        assume_enum_in_bound,
-        !use_unoptimized_ir,
-    );
-    let OptimizedIrText {
-        ir_text: rhs_ir_text,
-        mangled_top: rhs_mangled_top,
-        param_domains: rhs_domains,
-    } = build_ir_for_dslx(
-        rhs_path,
-        rhs_top.unwrap(),
-        dslx_stdlib_path,
-        dslx_path,
-        enable_warnings,
-        disable_warnings,
-        tool_path,
-        type_inference_v2,
-        assume_enum_in_bound,
-        !use_unoptimized_ir,
-    );
+    if tactic_script_json.is_some() || tactic_script_jsonl.is_some() {
+        // Use tactic-based prover path.
+        // Build root obligation from DSLX files.
+        let lhs_top_str = lhs_top.unwrap();
+        let rhs_top_str = rhs_top.unwrap();
+        let lhs_pb = lhs_path.to_path_buf();
+        let rhs_pb = rhs_path.to_path_buf();
+        let mut lhs_side = LecSide::from_path(lhs_top_str, &lhs_pb);
+        let mut rhs_side = LecSide::from_path(rhs_top_str, &rhs_pb);
+        // UF mappings per side.
+        lhs_side.uf_map = lhs_uf_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        rhs_side.uf_map = rhs_uf_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let root_ob = LecObligation {
+            selector_segment: "root".to_string(),
+            lhs: lhs_side,
+            rhs: rhs_side,
+            description: None,
+        };
+        let dslx_paths_vec: Vec<std::path::PathBuf> = dslx_path
+            .map(|s| {
+                s.split(';')
+                    .filter(|p| !p.is_empty())
+                    .map(|p| std::path::PathBuf::from(p))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cfg = OblTreeConfig {
+            dslx_stdlib_path: dslx_stdlib_path.map(|p| std::path::PathBuf::from(p)),
+            dslx_paths: dslx_paths_vec,
+            solver: solver_choice,
+            timeout_ms: None,
+        };
+        let mut tree = OblTree::new(root_ob, cfg);
 
-    let inputs = EquivInputs {
-        lhs_ir_text: &lhs_ir_text,
-        rhs_ir_text: &rhs_ir_text,
-        lhs_top: Some(&lhs_mangled_top),
-        rhs_top: Some(&rhs_mangled_top),
-        flatten_aggregates,
-        drop_params: &drop_params,
-        strategy,
-        assertion_semantics,
-        lhs_fixed_implicit_activation,
-        rhs_fixed_implicit_activation,
-        subcommand: SUBCOMMAND,
-        lhs_origin: lhs_file,
-        rhs_origin: rhs_file,
-        lhs_param_domains: lhs_domains,
-        rhs_param_domains: rhs_domains,
-        lhs_uf_map: lhs_uf_map,
-        rhs_uf_map: rhs_uf_map,
-    };
-
-    let outcome = dispatch_ir_equiv(solver_choice, tool_path, &inputs);
-    if let Some(path) = output_json {
-        std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
-    }
-    let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-    if outcome.success {
-        println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-        println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
-        std::process::exit(0);
-    } else {
-        eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-        if let Some(cex) = outcome.counterexample {
-            eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
+        // Read & parse tactic script from file (JSON array or JSONL).
+        let steps: Vec<ScriptStep> = if let Some(path) = tactic_script_json {
+            match read_script_steps_from_json_path(&path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[{}] {}", SUBCOMMAND, e);
+                    std::process::exit(2);
+                }
+            }
+        } else if let Some(path) = tactic_script_jsonl {
+            match read_script_steps_from_jsonl_path(&path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[{}] {}", SUBCOMMAND, e);
+                    std::process::exit(2);
+                }
+            }
         } else {
-            eprintln!("[{}] failure", SUBCOMMAND);
+            unreachable!("tactic script presence already checked");
+        };
+
+        let start = std::time::Instant::now();
+        let report = match execute_script(&mut tree, &steps) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[{}] execute_script error: {}", SUBCOMMAND, e);
+                std::process::exit(2);
+            }
+        };
+        let dur = start.elapsed();
+        let success = report.failed.is_empty() && report.indefinite.is_empty();
+        if let Some(path) = output_json {
+            let json = serde_json::json!({
+                "success": success,
+                "report": report,
+            });
+            std::fs::write(path, serde_json::to_string(&json).unwrap()).unwrap();
         }
-        std::process::exit(1);
+        if success {
+            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
+            std::process::exit(0);
+        } else {
+            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            eprintln!("[{}] failure", SUBCOMMAND);
+            std::process::exit(1);
+        }
+    } else {
+        // Original direct prover path.
+        let OptimizedIrText {
+            ir_text: lhs_ir_text,
+            mangled_top: lhs_mangled_top,
+            param_domains: lhs_domains,
+        } = build_ir_for_dslx(
+            lhs_path,
+            lhs_top.unwrap(),
+            dslx_stdlib_path,
+            dslx_path,
+            enable_warnings,
+            disable_warnings,
+            tool_path,
+            type_inference_v2,
+            assume_enum_in_bound,
+            !use_unoptimized_ir,
+        );
+        let OptimizedIrText {
+            ir_text: rhs_ir_text,
+            mangled_top: rhs_mangled_top,
+            param_domains: rhs_domains,
+        } = build_ir_for_dslx(
+            rhs_path,
+            rhs_top.unwrap(),
+            dslx_stdlib_path,
+            dslx_path,
+            enable_warnings,
+            disable_warnings,
+            tool_path,
+            type_inference_v2,
+            assume_enum_in_bound,
+            !use_unoptimized_ir,
+        );
+
+        let inputs = EquivInputs {
+            lhs_ir_text: &lhs_ir_text,
+            rhs_ir_text: &rhs_ir_text,
+            lhs_top: Some(&lhs_mangled_top),
+            rhs_top: Some(&rhs_mangled_top),
+            flatten_aggregates,
+            drop_params: &drop_params,
+            strategy,
+            assertion_semantics,
+            lhs_fixed_implicit_activation,
+            rhs_fixed_implicit_activation,
+            subcommand: SUBCOMMAND,
+            lhs_origin: lhs_file,
+            rhs_origin: rhs_file,
+            lhs_param_domains: lhs_domains,
+            rhs_param_domains: rhs_domains,
+            lhs_uf_map: lhs_uf_map,
+            rhs_uf_map: rhs_uf_map,
+        };
+
+        let outcome = dispatch_ir_equiv(solver_choice, tool_path, &inputs);
+        if let Some(path) = output_json {
+            std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
+        }
+        let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
+        if outcome.success {
+            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
+            std::process::exit(0);
+        } else {
+            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            if let Some(cex) = outcome.counterexample {
+                eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
+            } else {
+                eprintln!("[{}] failure", SUBCOMMAND);
+            }
+            std::process::exit(1);
+        }
     }
 }

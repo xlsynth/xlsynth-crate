@@ -211,6 +211,29 @@ pub enum ProverReportNode {
     },
 }
 
+impl ProverReportNode {
+    pub fn find_task_node<'a>(&'a self, task_id: &str) -> Option<&'a ProverReportNode> {
+        match self {
+            ProverReportNode::Task { task_id: tid, .. } => {
+                if let Some(t) = tid {
+                    if t == task_id {
+                        return Some(self);
+                    }
+                }
+                None
+            }
+            ProverReportNode::Group { tasks, .. } => {
+                for t in tasks {
+                    if let Some(found) = t.find_task_node(task_id) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct ProverReport {
     pub success: bool,
