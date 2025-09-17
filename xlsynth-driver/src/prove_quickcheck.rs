@@ -39,18 +39,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         .expect("dslx_input_file arg missing");
     let input_path = std::path::Path::new(input_file_str);
 
-    // Compile optional assertion-label include filter (regex list).
-    let assert_label_include: Option<regex::RegexSet> = {
-        let pats: Vec<String> = matches
-            .get_many::<String>("include_assert_label")
-            .map(|vals| vals.map(|s| s.to_string()).collect())
-            .unwrap_or_else(Vec::new);
-        if pats.is_empty() {
-            None
-        } else {
-            Some(regex::RegexSet::new(pats).unwrap())
-        }
-    };
+    // Gather optional assertion-label filter regex.
+    let assert_label_filter = matches.get_one::<String>("assert_label_filter").cloned();
 
     let test_filter = matches.get_one::<String>("test_filter").map(|s| s.as_str());
 
@@ -168,7 +158,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         entry_file: &std::path::Path,
         qc_names: &[String],
         semantics: QuickCheckAssertionSemantics,
-        assert_label_include: Option<&regex::RegexSet>,
+        assert_label_filter: Option<&str>,
         uf_map: &std::collections::HashMap<String, String>,
         uf_sigs: &std::collections::HashMap<String, xlsynth_prover::types::UfSignature>,
     ) -> Vec<QuickCheckTestOutcome> {
@@ -179,7 +169,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 entry_file,
                 qc_name,
                 semantics,
-                assert_label_include,
+                assert_label_filter,
                 uf_map,
                 uf_sigs,
             );
@@ -226,7 +216,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 input_path,
                 &qc_names,
                 *assertion_semantics,
-                assert_label_include.as_ref(),
+                assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
             )
@@ -238,7 +228,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 input_path,
                 &qc_names,
                 *assertion_semantics,
-                assert_label_include.as_ref(),
+                assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
             )
@@ -252,7 +242,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 input_path,
                 &qc_names,
                 *assertion_semantics,
-                assert_label_include.as_ref(),
+                assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
             )
@@ -266,7 +256,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 input_path,
                 &qc_names,
                 *assertion_semantics,
-                assert_label_include.as_ref(),
+                assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
             )
@@ -287,7 +277,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 input_path,
                 &qc_names,
                 *assertion_semantics,
-                assert_label_include.as_ref(),
+                assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
             )

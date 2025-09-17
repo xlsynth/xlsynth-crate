@@ -12,7 +12,7 @@ use crate::types::{
     Assertion, AssertionSemantics, AssertionViolation, EquivResult, EquivSide, FnInput, FnInputs,
     FnOutput, IrFn, IrTypedBitVec, ParamDomains, SmtFn, UfRegistry, UfSignature,
 };
-use regex::RegexSet;
+use regex::Regex;
 use xlsynth_pir::ir;
 pub struct AlignedFnInputs<'a, R> {
     pub lhs: FnInputs<'a, R>,
@@ -144,7 +144,7 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     lhs: &SmtFn<'a, S::Term>,
     rhs: &SmtFn<'a, S::Term>,
     assertion_semantics: AssertionSemantics,
-    assert_label_include: Option<&RegexSet>,
+    assert_label_include: Option<&Regex>,
 ) -> EquivResult {
     // --------------------------------------------
     // Helper: build a 1-bit "failed" flag for each
@@ -290,7 +290,7 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     lhs: &EquivSide<'a>,
     rhs: &EquivSide<'a>,
     assertion_semantics: AssertionSemantics,
-    assert_label_include: Option<&RegexSet>,
+    assert_label_include: Option<&Regex>,
     allow_flatten: bool,
     uf_signatures: &HashMap<String, UfSignature>,
 ) -> EquivResult {
@@ -343,7 +343,7 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     lhs: &IrFn<'a>,
     rhs: &IrFn<'a>,
     assertion_semantics: AssertionSemantics,
-    assert_label_include: Option<&RegexSet>,
+    assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
     prove_ir_fn_equiv_full::<S>(
@@ -404,7 +404,7 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     lhs: &IrFn<'a>,
     rhs: &IrFn<'a>,
     assertion_semantics: AssertionSemantics,
-    assert_label_include: Option<&RegexSet>,
+    assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
     let width = lhs.fn_ref.ret_ty.bit_count();
@@ -500,7 +500,7 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     split_input_index: usize,
     split_input_bit_index: usize,
     assertion_semantics: AssertionSemantics,
-    assert_label_include: Option<&RegexSet>,
+    assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
     if lhs.fn_ref.params.is_empty() || rhs.fn_ref.params.is_empty() {
@@ -939,7 +939,7 @@ pub mod test_utils {
             super::EquivResult::Disproved { .. }
         ));
 
-        let include = regex::RegexSet::new(["blue"]).unwrap();
+        let include = regex::Regex::new(r"^(?:blue)$").unwrap();
         let res_filtered = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
             &super::EquivSide {

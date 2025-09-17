@@ -658,11 +658,11 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
-                    Arg::new("include_assert_label")
-                        .long("include-assert-label")
+                    Arg::new("assert_label_filter")
+                        .long("assert-label-filter")
                         .value_name("REGEX")
-                        .help("Include only assertions whose label matches this regex (repeatable)")
-                        .action(ArgAction::Append),
+                        .help("Include only assertions whose label matches this regex (use `|` to combine labels)")
+                        .action(ArgAction::Set),
                 )
                 .add_bool_arg(
                     "lhs_fixed_implicit_activation",
@@ -1216,11 +1216,11 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
-                    clap::Arg::new("include_assert_label")
-                        .long("include-assert-label")
+                    clap::Arg::new("assert_label_filter")
+                        .long("assert-label-filter")
                         .value_name("REGEX")
-                        .help("Include only assertions whose label matches this regex (repeatable)")
-                        .action(clap::ArgAction::Append),
+                        .help("Include only assertions whose label matches this regex (use `|` to combine labels)")
+                        .action(clap::ArgAction::Set),
                 )
                 .arg(
                     clap::Arg::new("output_json")
@@ -1365,11 +1365,11 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
-                    clap::Arg::new("include_assert_label")
-                        .long("include-assert-label")
+                    clap::Arg::new("assert_label_filter")
+                        .long("assert-label-filter")
                         .value_name("REGEX")
-                        .help("Include only assertions whose label matches this regex (repeatable)")
-                        .action(clap::ArgAction::Append),
+                        .help("Include only assertions whose label matches this regex (use `|` to combine labels)")
+                        .action(clap::ArgAction::Set),
                 )
                 .add_bool_arg(
                     "lhs_fixed_implicit_activation",

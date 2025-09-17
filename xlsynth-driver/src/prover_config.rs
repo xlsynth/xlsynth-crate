@@ -56,8 +56,8 @@ pub struct IrEquivConfig {
     pub assertion_semantics: Option<AssertionSemantics>,
     pub lhs_fixed_implicit_activation: Option<bool>,
     pub rhs_fixed_implicit_activation: Option<bool>,
-    /// Repeatable: include only assertions whose label matches any regex.
-    pub include_assert_label: Option<Vec<String>>, // each entry is a regex
+    /// Include only assertions whose label matches this regex.
+    pub assert_label_filter: Option<String>,
 
     pub json: Option<bool>,
 }
@@ -86,8 +86,8 @@ pub struct DslxEquivConfig {
     pub rhs_fixed_implicit_activation: Option<bool>,
     pub assume_enum_in_bound: Option<bool>,
     pub type_inference_v2: Option<bool>, // external toolchain only
-    /// Repeatable: include only assertions whose label matches any regex.
-    pub include_assert_label: Option<Vec<String>>, // each entry is a regex
+    /// Include only assertions whose label matches this regex.
+    pub assert_label_filter: Option<String>,
 
     /// Treat DSLX function on the LHS/RHS as uninterpreted function (repeated).
     /// Each entry is "func_name:uf_name".
@@ -106,8 +106,8 @@ pub struct ProveQuickcheckConfig {
     /// Treat DSLX function as uninterpreted function (repeated), entries
     /// "func_name:uf_name".
     pub uf: Option<Vec<String>>,
-    /// Repeatable: include only assertions whose label matches any regex.
-    pub include_assert_label: Option<Vec<String>>, // each entry is a regex
+    /// Include only assertions whose label matches this regex.
+    pub assert_label_filter: Option<String>,
     pub json: Option<bool>,
 }
 
@@ -146,10 +146,8 @@ impl ToDriverCommand for IrEquivConfig {
         if let Some(sem) = &self.assertion_semantics {
             add_flag(&mut cmd, "assertion-semantics", &sem.to_string());
         }
-        if let Some(pats) = &self.include_assert_label {
-            for pat in pats {
-                add_flag(&mut cmd, "include-assert-label", pat);
-            }
+        if let Some(pat) = &self.assert_label_filter {
+            add_flag(&mut cmd, "assert-label-filter", pat);
         }
         add_bool(
             &mut cmd,
@@ -212,10 +210,8 @@ impl ToDriverCommand for DslxEquivConfig {
         if let Some(sem) = &self.assertion_semantics {
             add_flag(&mut cmd, "assertion-semantics", &sem.to_string());
         }
-        if let Some(pats) = &self.include_assert_label {
-            for pat in pats {
-                add_flag(&mut cmd, "include-assert-label", pat);
-            }
+        if let Some(pat) = &self.assert_label_filter {
+            add_flag(&mut cmd, "assert-label-filter", pat);
         }
         add_bool(
             &mut cmd,
@@ -270,10 +266,8 @@ impl ToDriverCommand for ProveQuickcheckConfig {
                 add_flag(&mut cmd, "uf", entry);
             }
         }
-        if let Some(pats) = &self.include_assert_label {
-            for pat in pats {
-                add_flag(&mut cmd, "include-assert-label", pat);
-            }
+        if let Some(pat) = &self.assert_label_filter {
+            add_flag(&mut cmd, "assert-label-filter", pat);
         }
         add_bool(&mut cmd, "json", self.json);
         cmd

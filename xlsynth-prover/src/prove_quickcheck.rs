@@ -9,7 +9,7 @@ use crate::{
     },
 };
 
-use regex::RegexSet;
+use regex::Regex;
 use std::collections::HashMap;
 use xlsynth_pir::ir;
 
@@ -28,7 +28,7 @@ pub fn prove_ir_fn_always_true<'a, S>(
     solver_config: &S::Config,
     ir_fn: &IrFn<'a>,
     assertion_semantics: QuickCheckAssertionSemantics,
-    assert_label_include: Option<&RegexSet>,
+    assert_label_include: Option<&Regex>,
 ) -> BoolPropertyResult
 where
     S: Solver,
@@ -49,7 +49,7 @@ pub fn prove_ir_fn_always_true_with_ufs<'a, S>(
     solver_config: &S::Config,
     ir_fn: &IrFn<'a>,
     assertion_semantics: QuickCheckAssertionSemantics,
-    assert_label_include: Option<&RegexSet>,
+    assert_label_include: Option<&Regex>,
     uf_map: &HashMap<String, String>,
     uf_sigs: &HashMap<String, UfSignature>,
 ) -> BoolPropertyResult
@@ -426,7 +426,7 @@ mod test_utils {
         ));
 
         // Filter include only 'blue': all included asserts hold -> Proved
-        let include = regex::RegexSet::new(["blue"]).unwrap();
+        let include = regex::Regex::new(r"^(?:blue)$").unwrap();
         let res_filtered = super::prove_ir_fn_always_true_with_ufs::<S>(
             solver_config,
             &ir_fn,

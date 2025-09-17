@@ -128,18 +128,8 @@ fn build_ir_for_dslx(
 
 pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_dslx_equiv");
-    // Compile optional assertion-label include filter (regex list) for reuse.
-    let assert_label_include: Option<regex::RegexSet> = {
-        let pats: Vec<String> = matches
-            .get_many::<String>("include_assert_label")
-            .map(|vals| vals.map(|s| s.to_string()).collect())
-            .unwrap_or_else(Vec::new);
-        if pats.is_empty() {
-            None
-        } else {
-            Some(regex::RegexSet::new(pats).unwrap())
-        }
-    };
+    // Gather optional assertion-label filter regex for reuse.
+    let assert_label_filter = matches.get_one::<String>("assert_label_filter").cloned();
     let lhs_file = matches.get_one::<String>("lhs_dslx_file").unwrap();
     let rhs_file = matches.get_one::<String>("rhs_dslx_file").unwrap();
 
@@ -297,7 +287,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         rhs_param_domains: rhs_domains,
         lhs_uf_map: lhs_uf_map,
         rhs_uf_map: rhs_uf_map,
-        assert_label_include,
+        assert_label_filter,
     };
 
     let outcome = dispatch_ir_equiv(solver_choice, tool_path, &inputs);
