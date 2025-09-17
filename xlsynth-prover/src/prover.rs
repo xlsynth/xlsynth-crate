@@ -8,13 +8,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::prove_quickcheck::{build_assert_label_regex, prove_dslx_quickcheck_full};
-use crate::solver_interface::SolverConfig;
 use crate::types::{
     AssertionSemantics, BoolPropertyResult, EquivResult, IrFn, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckRunResult, UfSignature,
 };
-use regex::Regex;
+use crate::{prove_quickcheck::build_assert_label_regex, solver_interface::SolverConfig};
 use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -148,61 +146,43 @@ pub trait Prover {
         allow_flatten: bool,
     ) -> EquivResult;
 
-    // --- QuickCheck-style proving: f() always returns bits[1]:1 ---
-    fn prove_ir_fn_always_true<'a>(
-        self: &Self,
-        ir_fn: &IrFn<'a>,
-        assertion_semantics: QuickCheckAssertionSemantics,
-        assert_label_filter: Option<&str>,
-    ) -> BoolPropertyResult {
+    fn prove_ir_fn_always_true<'a>(self: &Self, ir_fn: &IrFn<'a>) -> BoolPropertyResult {
         let prover_fn = ProverFn {
             ir_fn,
             domains: None,
             uf_map: HashMap::new(),
         };
-        let empty_signatures: HashMap<String, UfSignature> = HashMap::new();
         self.prove_ir_fn_always_true_full(
             &prover_fn,
-            assertion_semantics,
-            assert_label_filter,
-            &empty_signatures,
+            QuickCheckAssertionSemantics::Never,
+            None,
+            &HashMap::new(),
         )
     }
 
     fn prove_ir_fn_always_true_full<'a>(
         self: &Self,
-        ir_fn: &ProverFn<'a>,
+        prover_fn: &ProverFn<'a>,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult;
 
-    /// Prove a DSLX quickcheck function (by name) directly.
-    fn prove_dslx_quickcheck(
-        &self,
+    fn prove_dslx_quickcheck<'a>(
+        self: &Self,
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
-        quickcheck_name: &str,
-        assertion_semantics: QuickCheckAssertionSemantics,
-        assert_label_filter: Option<&str>,
-    ) -> BoolPropertyResult {
-        let exact_pattern = format!("^{}$", regex::escape(quickcheck_name));
-        let empty_map: HashMap<String, String> = HashMap::new();
-        let results = self.prove_dslx_quickcheck_full(
+    ) -> Vec<QuickCheckRunResult> {
+        self.prove_dslx_quickcheck_full(
             entry_file,
             dslx_stdlib_path,
             additional_search_paths,
-            Some(&exact_pattern),
-            assertion_semantics,
-            assert_label_filter,
-            &empty_map,
-        );
-        results
-            .into_iter()
-            .find(|r| r.name == quickcheck_name)
-            .map(|r| r.result)
-            .unwrap_or_else(|| panic!("quickcheck function '{}' not found", quickcheck_name))
+            None,
+            QuickCheckAssertionSemantics::Never,
+            None,
+            &HashMap::new(),
+        )
     }
 
     fn prove_dslx_quickcheck_full(
@@ -364,7 +344,7 @@ impl<S: SolverConfig> Prover for S {
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
     ) -> Vec<QuickCheckRunResult> {
-        prove_dslx_quickcheck_full::<S>(
+        crate::prove_quickcheck::prove_dslx_quickcheck_full::<S>(
             self,
             entry_file,
             dslx_stdlib_path,
@@ -707,28 +687,20 @@ pub fn prove_ir_pkg_text_equiv(
     auto_selected_prover().prove_ir_pkg_text_equiv(lhs_pkg_text, rhs_pkg_text, top)
 }
 
-pub fn prove_ir_fn_always_true(
-    ir_fn: &IrFn,
-    assertion_semantics: QuickCheckAssertionSemantics,
-) -> BoolPropertyResult {
-    auto_selected_prover().prove_ir_fn_always_true(ir_fn, assertion_semantics, None)
+pub fn prove_ir_fn_always_true(ir_fn: &IrFn<'_>) -> BoolPropertyResult {
+    auto_selected_prover().prove_ir_fn_always_true(ir_fn)
 }
 
-pub fn prove_ir_fn_always_true_with_ufs(
-    ir_fn: &IrFn,
+pub fn prove_ir_fn_always_true_full(
+    prover_fn: &ProverFn<'_>,
     assertion_semantics: QuickCheckAssertionSemantics,
-    uf_map: &HashMap<String, String>,
+    assert_label_filter: Option<&str>,
     uf_signatures: &HashMap<String, UfSignature>,
 ) -> BoolPropertyResult {
-    let prover_fn = ProverFn {
-        ir_fn,
-        domains: None,
-        uf_map: uf_map.clone(),
-    };
     auto_selected_prover().prove_ir_fn_always_true_full(
         &prover_fn,
         assertion_semantics,
-        None,
+        assert_label_filter,
         uf_signatures,
     )
 }
@@ -737,41 +709,30 @@ pub fn prove_dslx_quickcheck(
     entry_file: &std::path::Path,
     dslx_stdlib_path: Option<&std::path::Path>,
     additional_search_paths: &[&std::path::Path],
-    quickcheck_name: &str,
-    assertion_semantics: QuickCheckAssertionSemantics,
-) -> BoolPropertyResult {
+) -> Vec<QuickCheckRunResult> {
     auto_selected_prover().prove_dslx_quickcheck(
         entry_file,
         dslx_stdlib_path,
         additional_search_paths,
-        quickcheck_name,
-        assertion_semantics,
-        None,
     )
 }
 
-pub fn prove_dslx_quickcheck_with_ufs(
+pub fn prove_dslx_quickcheck_full(
     entry_file: &std::path::Path,
     dslx_stdlib_path: Option<&std::path::Path>,
     additional_search_paths: &[&std::path::Path],
-    quickcheck_name: &str,
+    test_filter: Option<&str>,
     assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_filter: Option<&str>,
     uf_map: &HashMap<String, String>,
-) -> BoolPropertyResult {
-    let exact_pattern = format!("^{}$", regex::escape(quickcheck_name));
-    let filter = Regex::new(&exact_pattern).expect("invalid quickcheck name regex");
-    let results = auto_selected_prover().prove_dslx_quickcheck_full(
+) -> Vec<QuickCheckRunResult> {
+    auto_selected_prover().prove_dslx_quickcheck_full(
         entry_file,
         dslx_stdlib_path,
         additional_search_paths,
-        Some(filter.as_str()),
+        test_filter,
         assertion_semantics,
-        None,
+        assert_label_filter,
         uf_map,
-    );
-    results
-        .into_iter()
-        .find(|r| r.name == quickcheck_name)
-        .map(|r| r.result)
-        .unwrap_or_else(|| panic!("quickcheck function '{}' not found", quickcheck_name))
+    )
 }
