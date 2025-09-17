@@ -13,6 +13,7 @@ use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConf
 use crate::solver_choice::SolverChoice;
 use regex::Regex;
 use serde::Serialize;
+use std::path::PathBuf;
 use xlsynth::DslxConvertOptions;
 use xlsynth_pir::ir_parser;
 use xlsynth_prover::prover::Prover;
@@ -50,7 +51,17 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
     // DSLX search/stdlib path handling.
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
+    let dslx_stdlib_path_buf = dslx_stdlib_path.as_deref().map(PathBuf::from);
     let dslx_path = get_dslx_path(matches, config);
+    let additional_search_paths: Vec<PathBuf> = dslx_path
+        .as_deref()
+        .map(|s| {
+            s.split(';')
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
 
     let dslx_contents = match std::fs::read_to_string(input_path) {
         Ok(s) => s,
@@ -62,14 +73,14 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
     // Gather quickcheck function names via parse+type-check.
     let module_name = input_path.file_stem().unwrap().to_str().unwrap();
-    let mut import_data = {
-        let stdlib_opt = dslx_stdlib_path.as_deref().map(|p| std::path::Path::new(p));
-        let addl_paths: Vec<&std::path::Path> = dslx_path
-            .as_deref()
-            .map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect())
-            .unwrap_or_default();
-        xlsynth::dslx::ImportData::new(stdlib_opt, &addl_paths)
-    };
+    let additional_search_paths_refs: Vec<&std::path::Path> = additional_search_paths
+        .iter()
+        .map(|p| p.as_path())
+        .collect();
+    let mut import_data = xlsynth::dslx::ImportData::new(
+        dslx_stdlib_path_buf.as_deref(),
+        &additional_search_paths_refs,
+    );
     let tcm = match xlsynth::dslx::parse_and_typecheck(
         &dslx_contents,
         input_path.to_str().unwrap(),
@@ -113,11 +124,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
     // Convert whole module to IR text once.
     let options = DslxConvertOptions {
-        dslx_stdlib_path: dslx_stdlib_path.as_deref().map(|p| std::path::Path::new(p)),
-        additional_search_paths: dslx_path
-            .as_deref()
-            .map(|s| s.split(';').map(|p| std::path::Path::new(p)).collect())
-            .unwrap_or_default(),
+        dslx_stdlib_path: dslx_stdlib_path_buf.as_deref(),
+        additional_search_paths: additional_search_paths_refs.clone(),
         enable_warnings: None,
         disable_warnings: None,
     };
@@ -161,12 +169,16 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         assert_label_filter: Option<&str>,
         uf_map: &std::collections::HashMap<String, String>,
         uf_sigs: &std::collections::HashMap<String, xlsynth_prover::types::UfSignature>,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
     ) -> Vec<QuickCheckTestOutcome> {
         let mut results: Vec<QuickCheckTestOutcome> = Vec::with_capacity(qc_names.len());
         for qc_name in qc_names {
             let start_time = std::time::Instant::now();
             let res = prover.prove_dslx_quickcheck_full(
                 entry_file,
+                dslx_stdlib_path,
+                additional_search_paths,
                 qc_name,
                 semantics,
                 assert_label_filter,
@@ -219,6 +231,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
+                dslx_stdlib_path_buf.as_deref(),
+                &additional_search_paths_refs,
             )
         }
         Some(SolverChoice::Toolchain) => {
@@ -231,6 +245,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
+                dslx_stdlib_path_buf.as_deref(),
+                &additional_search_paths_refs,
             )
         }
         #[cfg(feature = "has-boolector")]
@@ -245,6 +261,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
+                dslx_stdlib_path_buf.as_deref(),
+                &additional_search_paths_refs,
             )
         }
         #[cfg(feature = "has-bitwuzla")]
@@ -259,6 +277,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
+                dslx_stdlib_path_buf.as_deref(),
+                &additional_search_paths_refs,
             )
         }
         #[cfg(feature = "has-easy-smt")]
@@ -280,6 +300,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                 assert_label_filter.as_deref(),
                 &uf_map,
                 &uf_sigs,
+                dslx_stdlib_path_buf.as_deref(),
+                &additional_search_paths_refs,
             )
         }
     };

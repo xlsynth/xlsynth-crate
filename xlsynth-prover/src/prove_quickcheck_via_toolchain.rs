@@ -11,6 +11,8 @@ use crate::types::BoolPropertyResult;
 fn prove_quickcheck_with_exe_internal(
     exe: &std::path::Path,
     entry_file: &std::path::Path,
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
     quickcheck_name: &str,
 ) -> BoolPropertyResult {
     if !exe.exists() {
@@ -22,6 +24,17 @@ fn prove_quickcheck_with_exe_internal(
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--test_filter").arg(quickcheck_name);
     cmd.arg(entry_file);
+    if let Some(stdlib) = dslx_stdlib_path {
+        cmd.arg("--dslx_stdlib_path").arg(stdlib);
+    }
+    if !additional_search_paths.is_empty() {
+        let joined = additional_search_paths
+            .iter()
+            .map(|p| p.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(";");
+        cmd.arg("--dslx_path").arg(joined);
+    }
 
     match cmd.output() {
         Ok(output) if output.status.success() => BoolPropertyResult::Proved,
@@ -43,19 +56,29 @@ fn prove_quickcheck_with_exe_internal(
 /// Prove a single DSLX quickcheck function using a specific
 /// `prove_quickcheck_main` executable.
 pub fn prove_dslx_quickcheck_with_tool_exe<P: AsRef<std::path::Path>>(
-    entry_file: &std::path::Path,
-    quickcheck_name: &str,
     tool_exe: P,
+    entry_file: &std::path::Path,
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
+    quickcheck_name: &str,
 ) -> BoolPropertyResult {
-    prove_quickcheck_with_exe_internal(tool_exe.as_ref(), entry_file, quickcheck_name)
+    prove_quickcheck_with_exe_internal(
+        tool_exe.as_ref(),
+        entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
+        quickcheck_name,
+    )
 }
 
 /// Prove a single DSLX quickcheck function by locating `prove_quickcheck_main`
 /// in `tool_dir`.
 pub fn prove_dslx_quickcheck_with_tool_dir<P: AsRef<std::path::Path>>(
-    entry_file: &std::path::Path,
-    quickcheck_name: &str,
     tool_dir: P,
+    entry_file: &std::path::Path,
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
+    quickcheck_name: &str,
 ) -> BoolPropertyResult {
     let exe = tool_dir.as_ref().join("prove_quickcheck_main");
     if !exe.exists() {
@@ -64,17 +87,31 @@ pub fn prove_dslx_quickcheck_with_tool_dir<P: AsRef<std::path::Path>>(
             tool_dir.as_ref().display()
         ));
     }
-    prove_quickcheck_with_exe_internal(&exe, entry_file, quickcheck_name)
+    prove_quickcheck_with_exe_internal(
+        &exe,
+        entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
+        quickcheck_name,
+    )
 }
 
 /// Reads `XLSYNTH_TOOLS` to locate the toolchain directory and runs a single
 /// quickcheck.
 pub fn prove_dslx_quickcheck_via_toolchain(
     entry_file: &std::path::Path,
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
     quickcheck_name: &str,
 ) -> BoolPropertyResult {
     match std::env::var("XLSYNTH_TOOLS") {
-        Ok(dir) => prove_dslx_quickcheck_with_tool_dir(entry_file, quickcheck_name, dir),
+        Ok(dir) => prove_dslx_quickcheck_with_tool_dir(
+            dir,
+            entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
+            quickcheck_name,
+        ),
         Err(_) => BoolPropertyResult::ToolchainDisproved(
             "XLSYNTH_TOOLS is not set; cannot run toolchain quickcheck".to_string(),
         ),

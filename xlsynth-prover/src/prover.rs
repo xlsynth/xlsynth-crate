@@ -115,12 +115,16 @@ pub trait Prover {
     fn prove_dslx_quickcheck(
         &self,
         entry_file: &std::path::Path,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
         quickcheck_name: &str,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
         self.prove_dslx_quickcheck_full(
             entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
             quickcheck_name,
             assertion_semantics,
             assert_label_filter,
@@ -132,6 +136,8 @@ pub trait Prover {
     fn prove_dslx_quickcheck_full(
         &self,
         entry_file: &std::path::Path,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
         quickcheck_name: &str,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
@@ -280,6 +286,8 @@ impl<S: SolverConfig> Prover for S {
     fn prove_dslx_quickcheck_full(
         &self,
         entry_file: &std::path::Path,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
         quickcheck_name: &str,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
@@ -291,8 +299,8 @@ impl<S: SolverConfig> Prover for S {
         let dslx_contents = std::fs::read_to_string(entry_file)
             .expect("Failed to read DSLX input file for quickcheck");
         let options = xlsynth::DslxConvertOptions {
-            dslx_stdlib_path: None,
-            additional_search_paths: Vec::new(),
+            dslx_stdlib_path,
+            additional_search_paths: additional_search_paths.iter().copied().collect(),
             enable_warnings: None,
             disable_warnings: None,
         };
@@ -547,6 +555,8 @@ impl Prover for ExternalProver {
     fn prove_dslx_quickcheck_full(
         &self,
         entry_file: &std::path::Path,
+        dslx_stdlib_path: Option<&std::path::Path>,
+        additional_search_paths: &[&std::path::Path],
         quickcheck_name: &str,
         _assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
@@ -566,21 +576,27 @@ impl Prover for ExternalProver {
         match self {
             ExternalProver::ToolExe(path) => {
                 crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_exe(
-                    entry_file,
-                    quickcheck_name,
                     path,
+                    entry_file,
+                    dslx_stdlib_path,
+                    additional_search_paths,
+                    quickcheck_name,
                 )
             }
             ExternalProver::ToolDir(path) => {
                 crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_dir(
-                    entry_file,
-                    quickcheck_name,
                     path,
+                    entry_file,
+                    dslx_stdlib_path,
+                    additional_search_paths,
+                    quickcheck_name,
                 )
             }
             ExternalProver::Toolchain => {
                 crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_via_toolchain(
                     entry_file,
+                    dslx_stdlib_path,
+                    additional_search_paths,
                     quickcheck_name,
                 )
             }
@@ -703,11 +719,15 @@ pub fn prove_ir_fn_always_true_with_ufs(
 
 pub fn prove_dslx_quickcheck(
     entry_file: &std::path::Path,
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
     quickcheck_name: &str,
     assertion_semantics: QuickCheckAssertionSemantics,
 ) -> BoolPropertyResult {
     auto_selected_prover().prove_dslx_quickcheck(
         entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
         quickcheck_name,
         assertion_semantics,
         None,
@@ -716,6 +736,8 @@ pub fn prove_dslx_quickcheck(
 
 pub fn prove_dslx_quickcheck_with_ufs(
     entry_file: &std::path::Path,
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
     quickcheck_name: &str,
     assertion_semantics: QuickCheckAssertionSemantics,
     uf_map: &HashMap<String, String>,
@@ -723,6 +745,8 @@ pub fn prove_dslx_quickcheck_with_ufs(
 ) -> BoolPropertyResult {
     auto_selected_prover().prove_dslx_quickcheck_full(
         entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
         quickcheck_name,
         assertion_semantics,
         None,
