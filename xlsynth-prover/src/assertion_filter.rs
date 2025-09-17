@@ -16,4 +16,3 @@ pub fn filter_assertions<'a, R>(
             .collect(),
     }
 }
-

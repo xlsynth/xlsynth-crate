@@ -8,6 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::prove_quickcheck::{build_assert_label_regex, prove_dslx_quickcheck_full};
 use crate::solver_interface::SolverConfig;
 use crate::types::{
     AssertionSemantics, BoolPropertyResult, EquivResult, IrFn, ProverFn,
@@ -15,7 +16,6 @@ use crate::types::{
 };
 use regex::Regex;
 use std::str::FromStr;
-use xlsynth::dslx::{ImportData, MatchableModuleMember};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SolverChoice {
@@ -84,117 +84,8 @@ impl FromStr for SolverChoice {
     }
 }
 
-use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
 use xlsynth_pir::{ir, ir_parser};
-
-fn build_assert_label_regex(filter: Option<&str>) -> Option<Regex> {
-    match filter {
-        None => None,
-        Some(pattern) => {
-            Some(Regex::new(pattern).expect("invalid regular expression in assert label filter"))
-        }
-    }
-}
-
-fn load_quickcheck_context(
-    entry_file: &std::path::Path,
-    dslx_stdlib_path: Option<&std::path::Path>,
-    additional_search_paths: &[&std::path::Path],
-    test_filter: Option<&Regex>,
-) -> (String, Vec<(String, bool)>) {
-    let dslx_contents = std::fs::read_to_string(entry_file)
-        .expect("Failed to read DSLX input file for quickcheck discovery");
-    let module_name = entry_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .expect("valid module name");
-
-    let mut import_data = ImportData::new(dslx_stdlib_path, additional_search_paths);
-    let type_checked = xlsynth::dslx::parse_and_typecheck(
-        &dslx_contents,
-        entry_file
-            .to_str()
-            .expect("DSLX quickcheck entry file must be valid UTF-8"),
-        module_name,
-        &mut import_data,
-    )
-    .expect("DSLX parse/type-check failed for quickcheck discovery");
-
-    let module = type_checked.get_module();
-    let type_info = type_checked.get_type_info();
-    let mut quickchecks = Vec::new();
-    for idx in 0..module.get_member_count() {
-        if let Some(MatchableModuleMember::Quickcheck(qc)) = module.get_member(idx).to_matchable() {
-            let function = qc.get_function();
-            let fn_ident = function.get_identifier().to_string();
-            if test_filter
-                .map(|re| re.is_match(fn_ident.as_str()))
-                .unwrap_or(true)
-            {
-                let requires_itok = type_info
-                    .requires_implicit_token(&function)
-                    .expect("requires_implicit_token query");
-                quickchecks.push((fn_ident, requires_itok));
-            }
-        }
-    }
-
-    (dslx_contents, quickchecks)
-}
-
-fn infer_uf_signatures_from_map(
-    pkg: &ir::Package,
-    uf_map: &HashMap<String, String>,
-) -> HashMap<String, UfSignature> {
-    let mut uf_sigs = HashMap::new();
-    for (fn_name, uf_sym) in uf_map {
-        let (ir_fn, skip_implicit) = match pkg.get_fn(fn_name) {
-            Some(f) => (f, false),
-            None => {
-                let itok_name = format!("__itok{}", fn_name);
-                match pkg.get_fn(&itok_name) {
-                    Some(f) => (f, true),
-                    None => {
-                        panic!(
-                            "Unknown function '{}' when inferring UF signature for symbol '{}'",
-                            fn_name, uf_sym
-                        );
-                    }
-                }
-            }
-        };
-
-        let arg_widths: Vec<usize> = if skip_implicit {
-            ir_fn
-                .params
-                .iter()
-                .skip(2)
-                .map(|p| p.ty.bit_count())
-                .collect()
-        } else {
-            ir_fn.params.iter().map(|p| p.ty.bit_count()).collect()
-        };
-        let ret_width = ir_fn.ret_ty.bit_count();
-        let sig = UfSignature {
-            arg_widths,
-            ret_width,
-        };
-
-        if let Some(prev) = uf_sigs.get(uf_sym) {
-            if prev != &sig {
-                panic!(
-                    "Conflicting UF signature for symbol '{}': {:?} vs {:?}",
-                    uf_sym, prev, sig
-                );
-            }
-        } else {
-            uf_sigs.insert(uf_sym.clone(), sig);
-        }
-    }
-
-    uf_sigs
-}
 
 pub trait Prover {
     fn prove_ir_fn_equiv(self: &Self, lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
@@ -297,13 +188,12 @@ pub trait Prover {
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
         let exact_pattern = format!("^{}$", regex::escape(quickcheck_name));
-        let filter = Regex::new(&exact_pattern).expect("invalid quickcheck name regex");
         let empty_map: HashMap<String, String> = HashMap::new();
         let results = self.prove_dslx_quickcheck_full(
             entry_file,
             dslx_stdlib_path,
             additional_search_paths,
-            Some(&filter),
+            Some(&exact_pattern),
             assertion_semantics,
             assert_label_filter,
             &empty_map,
@@ -320,7 +210,7 @@ pub trait Prover {
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
-        test_filter: Option<&Regex>,
+        test_filter: Option<&str>,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
@@ -469,108 +359,21 @@ impl<S: SolverConfig> Prover for S {
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
-        test_filter: Option<&Regex>,
+        test_filter: Option<&str>,
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
     ) -> Vec<QuickCheckRunResult> {
-        let assert_label_regex = build_assert_label_regex(assert_label_filter);
-        let (dslx_contents, quickchecks) = load_quickcheck_context(
+        prove_dslx_quickcheck_full::<S>(
+            self,
             entry_file,
             dslx_stdlib_path,
             additional_search_paths,
             test_filter,
-        );
-        if quickchecks.is_empty() {
-            return Vec::new();
-        }
-
-        let options = xlsynth::DslxConvertOptions {
-            dslx_stdlib_path,
-            additional_search_paths: additional_search_paths.iter().copied().collect(),
-            enable_warnings: None,
-            disable_warnings: None,
-        };
-        let ir_text = xlsynth::convert_dslx_to_ir_text(&dslx_contents, entry_file, &options)
-            .expect("DSLX->IR conversion failed for quickcheck")
-            .ir;
-
-        let pkg = Parser::new(&ir_text)
-            .parse_package()
-            .expect("Failed to parse IR package for quickcheck");
-        let module_name = entry_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .expect("valid module name");
-
-        let uf_signatures = infer_uf_signatures_from_map(&pkg, uf_map);
-
-        let mut results = Vec::with_capacity(quickchecks.len());
-        for (quickcheck_name, requires_itok) in quickchecks {
-            let start_time = std::time::Instant::now();
-            let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
-                module_name,
-                quickcheck_name.as_str(),
-                xlsynth::DslxCallingConvention::ImplicitToken,
-            )
-            .expect("mangle itok");
-            let mangled_normal = xlsynth::mangle_dslx_name_with_calling_convention(
-                module_name,
-                quickcheck_name.as_str(),
-                xlsynth::DslxCallingConvention::Typical,
-            )
-            .expect("mangle normal");
-
-            let (fn_ref, fixed_implicit_activation) = if requires_itok {
-                if let Some(f) = pkg.get_fn(&mangled_itok) {
-                    (f, true)
-                } else if let Some(f) = pkg.get_fn(&mangled_normal) {
-                    (f, false)
-                } else {
-                    panic!(
-                        "quickcheck function '{}' not found (module '{}')",
-                        quickcheck_name, module_name
-                    );
-                }
-            } else if let Some(f) = pkg.get_fn(&mangled_normal) {
-                (f, false)
-            } else if let Some(f) = pkg.get_fn(&mangled_itok) {
-                (f, true)
-            } else {
-                panic!(
-                    "quickcheck function '{}' not found (module '{}')",
-                    quickcheck_name, module_name
-                );
-            };
-
-            let ir_fn = IrFn {
-                fn_ref,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation,
-            };
-
-            let prover_fn = ProverFn {
-                ir_fn: &ir_fn,
-                domains: None,
-                uf_map: uf_map.clone(),
-            };
-
-            let result = crate::prove_quickcheck::prove_ir_fn_always_true_full::<S::Solver>(
-                self,
-                &prover_fn,
-                assertion_semantics,
-                assert_label_regex.as_ref(),
-                &uf_signatures,
-            );
-
-            results.push(QuickCheckRunResult {
-                name: quickcheck_name,
-                duration: start_time.elapsed(),
-                result,
-            });
-        }
-
-        results
+            assertion_semantics,
+            assert_label_filter,
+            uf_map,
+        )
     }
 }
 
@@ -768,86 +571,21 @@ impl Prover for ExternalProver {
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
-        test_filter: Option<&Regex>,
+        test_filter: Option<&str>,
         _assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
     ) -> Vec<QuickCheckRunResult> {
-        let (_, quickchecks) = load_quickcheck_context(
+        crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_full_via_toolchain(
+            self,
             entry_file,
             dslx_stdlib_path,
             additional_search_paths,
             test_filter,
-        );
-        if quickchecks.is_empty() {
-            return Vec::new();
-        }
-
-        if assert_label_filter.is_some() {
-            return quickchecks
-                .into_iter()
-                .map(|(name, _)| QuickCheckRunResult {
-                    name,
-                    duration: std::time::Duration::default(),
-                    result: BoolPropertyResult::ToolchainDisproved(
-                        "External quickcheck does not support assertion label filters".to_string(),
-                    ),
-                })
-                .collect();
-        }
-        if !uf_map.is_empty() {
-            return quickchecks
-                .into_iter()
-                .map(|(name, _)| QuickCheckRunResult {
-                    name,
-                    duration: std::time::Duration::default(),
-                    result: BoolPropertyResult::ToolchainDisproved(
-                        "External quickcheck does not support uninterpreted functions".to_string(),
-                    ),
-                })
-                .collect();
-        }
-
-        let mut results = Vec::with_capacity(quickchecks.len());
-        for (quickcheck_name, _) in quickchecks {
-            let start_time = std::time::Instant::now();
-            let filter = format!("^{}$", regex::escape(quickcheck_name.as_str()));
-            let result = match self {
-                ExternalProver::ToolExe(path) => {
-                    crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_exe(
-                        path,
-                        entry_file,
-                        dslx_stdlib_path,
-                        additional_search_paths,
-                        filter.as_str(),
-                    )
-                }
-                ExternalProver::ToolDir(path) => {
-                    crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_with_tool_dir(
-                        path,
-                        entry_file,
-                        dslx_stdlib_path,
-                        additional_search_paths,
-                        filter.as_str(),
-                    )
-                }
-                ExternalProver::Toolchain => {
-                    crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_via_toolchain(
-                        entry_file,
-                        dslx_stdlib_path,
-                        additional_search_paths,
-                        filter.as_str(),
-                    )
-                }
-            };
-
-            results.push(QuickCheckRunResult {
-                name: quickcheck_name,
-                duration: start_time.elapsed(),
-                result,
-            });
-        }
-        results
+            _assertion_semantics,
+            assert_label_filter,
+            uf_map,
+        )
     }
 }
 
@@ -1026,7 +764,7 @@ pub fn prove_dslx_quickcheck_with_ufs(
         entry_file,
         dslx_stdlib_path,
         additional_search_paths,
-        Some(&filter),
+        Some(filter.as_str()),
         assertion_semantics,
         None,
         uf_map,

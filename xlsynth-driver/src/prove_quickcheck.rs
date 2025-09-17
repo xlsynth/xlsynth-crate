@@ -10,7 +10,6 @@ use crate::common::parse_uf_spec;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 
-use regex::Regex;
 use serde::Serialize;
 use std::path::PathBuf;
 use xlsynth_prover::prover::{Prover, SolverChoice};
@@ -42,9 +41,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
     let test_filter = matches.get_one::<String>("test_filter").map(|s| s.as_str());
 
-    // Compile regex filter if provided; we enforce full-name match by anchoring.
-    let filter_regex: Option<Regex> =
-        test_filter.map(|pat| Regex::new(&format!("^{}$", pat)).unwrap());
+    // Anchor the filter pattern if provided.
+    let filter_pattern: Option<String> = test_filter.map(|pat| format!("^{}$", pat));
 
     // DSLX search/stdlib path handling.
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
@@ -90,7 +88,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         uf_map: &std::collections::HashMap<String, String>,
         dslx_stdlib_path: Option<&std::path::Path>,
         additional_search_paths: &[&std::path::Path],
-        test_filter: Option<&Regex>,
+        test_filter: Option<&str>,
     ) -> Vec<QuickCheckTestOutcome> {
         let runs = prover.prove_dslx_quickcheck_full(
             entry_file,
@@ -137,7 +135,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         &uf_map,
         dslx_stdlib_path_buf.as_deref(),
         &additional_search_paths_refs,
-        filter_regex.as_ref(),
+        filter_pattern.as_deref(),
     );
 
     if results.is_empty() {

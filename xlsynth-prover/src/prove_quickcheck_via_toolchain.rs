@@ -6,7 +6,11 @@
 //! This invokes the upstream tool directly and maps its exit status to a
 //! library-friendly `BoolPropertyResult` without printing.
 
-use crate::types::BoolPropertyResult;
+use crate::prove_quickcheck::load_quickcheck_context;
+use crate::prover::ExternalProver;
+use crate::types::{BoolPropertyResult, QuickCheckAssertionSemantics, QuickCheckRunResult};
+use std::collections::HashMap;
+use std::path::Path;
 
 fn prove_quickcheck_with_exe_internal(
     exe: &std::path::Path,
@@ -116,4 +120,88 @@ pub fn prove_dslx_quickcheck_via_toolchain(
             "XLSYNTH_TOOLS is not set; cannot run toolchain quickcheck".to_string(),
         ),
     }
+}
+
+pub(crate) fn prove_dslx_quickcheck_full_via_toolchain(
+    prover: &ExternalProver,
+    entry_file: &Path,
+    dslx_stdlib_path: Option<&Path>,
+    additional_search_paths: &[&Path],
+    test_filter: Option<&str>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_filter: Option<&str>,
+    uf_map: &HashMap<String, String>,
+) -> Vec<QuickCheckRunResult> {
+    let (_, quickchecks) = load_quickcheck_context(
+        entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
+        test_filter,
+    );
+    if quickchecks.is_empty() {
+        return Vec::new();
+    }
+
+    if assert_label_filter.is_some() {
+        return quickchecks
+            .into_iter()
+            .map(|(name, _)| QuickCheckRunResult {
+                name,
+                duration: std::time::Duration::default(),
+                result: BoolPropertyResult::ToolchainDisproved(
+                    "External quickcheck does not support assertion label filters".to_string(),
+                ),
+            })
+            .collect();
+    }
+    if !uf_map.is_empty() {
+        return quickchecks
+            .into_iter()
+            .map(|(name, _)| QuickCheckRunResult {
+                name,
+                duration: std::time::Duration::default(),
+                result: BoolPropertyResult::ToolchainDisproved(
+                    "External quickcheck does not support uninterpreted functions".to_string(),
+                ),
+            })
+            .collect();
+    }
+
+    let mut results = Vec::with_capacity(quickchecks.len());
+    for (quickcheck_name, _) in quickchecks {
+        let start_time = std::time::Instant::now();
+        let filter = format!("^{}$", regex::escape(quickcheck_name.as_str()));
+        let result = match prover {
+            ExternalProver::ToolExe(path) => prove_dslx_quickcheck_with_tool_exe(
+                path,
+                entry_file,
+                dslx_stdlib_path,
+                additional_search_paths,
+                filter.as_str(),
+            ),
+            ExternalProver::ToolDir(path) => prove_dslx_quickcheck_with_tool_dir(
+                path,
+                entry_file,
+                dslx_stdlib_path,
+                additional_search_paths,
+                filter.as_str(),
+            ),
+            ExternalProver::Toolchain => prove_dslx_quickcheck_via_toolchain(
+                entry_file,
+                dslx_stdlib_path,
+                additional_search_paths,
+                filter.as_str(),
+            ),
+        };
+
+        results.push(QuickCheckRunResult {
+            name: quickcheck_name,
+            duration: start_time.elapsed(),
+            result,
+        });
+    }
+
+    let _ = assertion_semantics;
+
+    results
 }

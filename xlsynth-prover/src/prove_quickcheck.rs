@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    solver_interface::{BitVec, Response, Solver},
+    solver_interface::{BitVec, Response, Solver, SolverConfig},
     translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
     types::{
         AssertionViolation, BoolPropertyResult, FnInput, FnOutput, IrFn, ProverFn,
-        QuickCheckAssertionSemantics, UfRegistry, UfSignature,
+        QuickCheckAssertionSemantics, QuickCheckRunResult, UfRegistry, UfSignature,
     },
 };
 
 use regex::Regex;
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use xlsynth::dslx::{ImportData, MatchableModuleMember};
 use xlsynth_pir::ir;
+use xlsynth_pir::ir_parser::Parser;
 
 /// Prove that a given `IrFn` always returns boolean `true` (`bits[1] == 1`) for
 /// all possible inputs.
@@ -182,6 +186,227 @@ where
         }
         Response::Unknown => panic!("Solver returned unknown"),
     }
+}
+
+pub(crate) fn build_assert_label_regex(filter: Option<&str>) -> Option<Regex> {
+    filter.map(|pattern| {
+        Regex::new(pattern).expect("invalid regular expression in assert label filter")
+    })
+}
+
+pub(crate) fn load_quickcheck_context(
+    entry_file: &Path,
+    dslx_stdlib_path: Option<&Path>,
+    additional_search_paths: &[&Path],
+    test_filter: Option<&str>,
+) -> (String, Vec<(String, bool)>) {
+    let dslx_contents = fs::read_to_string(entry_file)
+        .expect("Failed to read DSLX input file for quickcheck discovery");
+    let module_name = entry_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("valid module name");
+
+    let mut import_data = ImportData::new(dslx_stdlib_path, additional_search_paths);
+    let type_checked = xlsynth::dslx::parse_and_typecheck(
+        &dslx_contents,
+        entry_file
+            .to_str()
+            .expect("DSLX quickcheck entry file must be valid UTF-8"),
+        module_name,
+        &mut import_data,
+    )
+    .expect("DSLX parse/type-check failed for quickcheck discovery");
+
+    let module = type_checked.get_module();
+    let type_info = type_checked.get_type_info();
+    let test_regex = test_filter.map(|pattern| {
+        Regex::new(pattern).expect("invalid regular expression in quickcheck test filter")
+    });
+    let mut quickchecks = Vec::new();
+    for idx in 0..module.get_member_count() {
+        if let Some(MatchableModuleMember::Quickcheck(qc)) = module.get_member(idx).to_matchable() {
+            let function = qc.get_function();
+            let fn_ident = function.get_identifier().to_string();
+            if test_regex
+                .as_ref()
+                .map(|re| re.is_match(fn_ident.as_str()))
+                .unwrap_or(true)
+            {
+                let requires_itok = type_info
+                    .requires_implicit_token(&function)
+                    .expect("requires_implicit_token query");
+                quickchecks.push((fn_ident, requires_itok));
+            }
+        }
+    }
+
+    (dslx_contents, quickchecks)
+}
+
+pub(crate) fn infer_uf_signatures_from_map(
+    pkg: &ir::Package,
+    uf_map: &HashMap<String, String>,
+) -> HashMap<String, UfSignature> {
+    let mut uf_sigs = HashMap::new();
+    for (fn_name, uf_sym) in uf_map {
+        let (ir_fn, skip_implicit) = match pkg.get_fn(fn_name) {
+            Some(f) => (f, false),
+            None => {
+                let itok_name = format!("__itok{}", fn_name);
+                match pkg.get_fn(&itok_name) {
+                    Some(f) => (f, true),
+                    None => {
+                        panic!(
+                            "Unknown function '{}' when inferring UF signature for symbol '{}'",
+                            fn_name, uf_sym
+                        );
+                    }
+                }
+            }
+        };
+
+        let arg_widths: Vec<usize> = if skip_implicit {
+            ir_fn
+                .params
+                .iter()
+                .skip(2)
+                .map(|p| p.ty.bit_count())
+                .collect()
+        } else {
+            ir_fn.params.iter().map(|p| p.ty.bit_count()).collect()
+        };
+        let ret_width = ir_fn.ret_ty.bit_count();
+        let sig = UfSignature {
+            arg_widths,
+            ret_width,
+        };
+
+        if let Some(prev) = uf_sigs.get(uf_sym) {
+            if prev != &sig {
+                panic!(
+                    "Conflicting UF signature for symbol '{}': {:?} vs {:?}",
+                    uf_sym, prev, sig
+                );
+            }
+        } else {
+            uf_sigs.insert(uf_sym.clone(), sig);
+        }
+    }
+
+    uf_sigs
+}
+
+pub(crate) fn prove_dslx_quickcheck_full<SConfig>(
+    solver_config: &SConfig,
+    entry_file: &Path,
+    dslx_stdlib_path: Option<&Path>,
+    additional_search_paths: &[&Path],
+    test_filter: Option<&str>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_filter: Option<&str>,
+    uf_map: &HashMap<String, String>,
+) -> Vec<QuickCheckRunResult>
+where
+    SConfig: SolverConfig,
+{
+    let assert_label_regex = build_assert_label_regex(assert_label_filter);
+    let (dslx_contents, quickchecks) = load_quickcheck_context(
+        entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
+        test_filter,
+    );
+    if quickchecks.is_empty() {
+        return Vec::new();
+    }
+
+    let options = xlsynth::DslxConvertOptions {
+        dslx_stdlib_path,
+        additional_search_paths: additional_search_paths.iter().copied().collect(),
+        enable_warnings: None,
+        disable_warnings: None,
+    };
+    let ir_text = xlsynth::convert_dslx_to_ir_text(&dslx_contents, entry_file, &options)
+        .expect("DSLX->IR conversion failed for quickcheck")
+        .ir;
+
+    let pkg = Parser::new(&ir_text)
+        .parse_package()
+        .expect("Failed to parse IR package for quickcheck");
+    let module_name = entry_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("valid module name");
+
+    let uf_signatures = infer_uf_signatures_from_map(&pkg, uf_map);
+
+    let mut results = Vec::with_capacity(quickchecks.len());
+    for (quickcheck_name, requires_itok) in quickchecks {
+        let start_time = std::time::Instant::now();
+        let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
+            module_name,
+            quickcheck_name.as_str(),
+            xlsynth::DslxCallingConvention::ImplicitToken,
+        )
+        .expect("mangle itok");
+        let mangled_normal = xlsynth::mangle_dslx_name_with_calling_convention(
+            module_name,
+            quickcheck_name.as_str(),
+            xlsynth::DslxCallingConvention::Typical,
+        )
+        .expect("mangle normal");
+
+        let (fn_ref, fixed_implicit_activation) = if requires_itok {
+            if let Some(f) = pkg.get_fn(&mangled_itok) {
+                (f, true)
+            } else if let Some(f) = pkg.get_fn(&mangled_normal) {
+                (f, false)
+            } else {
+                panic!(
+                    "quickcheck function '{}' not found (module '{}')",
+                    quickcheck_name, module_name
+                );
+            }
+        } else if let Some(f) = pkg.get_fn(&mangled_normal) {
+            (f, false)
+        } else if let Some(f) = pkg.get_fn(&mangled_itok) {
+            (f, true)
+        } else {
+            panic!(
+                "quickcheck function '{}' not found (module '{}')",
+                quickcheck_name, module_name
+            );
+        };
+
+        let ir_fn = IrFn {
+            fn_ref,
+            pkg_ref: Some(&pkg),
+            fixed_implicit_activation,
+        };
+
+        let prover_fn = ProverFn {
+            ir_fn: &ir_fn,
+            domains: None,
+            uf_map: uf_map.clone(),
+        };
+
+        let result = prove_ir_fn_always_true_full::<SConfig::Solver>(
+            solver_config,
+            &prover_fn,
+            assertion_semantics,
+            assert_label_regex.as_ref(),
+            &uf_signatures,
+        );
+
+        results.push(QuickCheckRunResult {
+            name: quickcheck_name,
+            duration: start_time.elapsed(),
+            result,
+        });
+    }
+
+    results
 }
 
 #[cfg(test)]
