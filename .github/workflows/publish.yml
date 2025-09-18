@@ -137,6 +137,26 @@ jobs:
       - name: Wait for xlsynth-g8r on crates.io
         run: python3 sleep_until_version_seen.py xlsynth-g8r "${{ steps.version_vars.outputs.version_no_v }}"
 
+      - name: Publish xlsynth-estimator
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cd xlsynth-estimator
+          cargo publish --token $CARGO_REGISTRY_TOKEN
+
+      - name: Wait for xlsynth-estimator on crates.io
+        run: python3 sleep_until_version_seen.py xlsynth-estimator "${{ steps.version_vars.outputs.version_no_v }}"
+
+      - name: Publish xlsynth-prover
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          cd xlsynth-prover
+          cargo publish --token $CARGO_REGISTRY_TOKEN
+
+      - name: Wait for xlsynth-prover on crates.io
+        run: python3 sleep_until_version_seen.py xlsynth-prover "${{ steps.version_vars.outputs.version_no_v }}"
+
       - name: Publish xlsynth-driver
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
