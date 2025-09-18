@@ -665,6 +665,16 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                                             },
                                         });
                                     }
+                                } else if let Some(&patched_idx) =
+                                    added_new_to_patched.get(&n_ref.index)
+                                {
+                                    if o_ref.index != patched_idx {
+                                        edits.push(IrEdit::SubstituteOperand {
+                                            node: NodeRef { index: oi },
+                                            operand_slot: slot,
+                                            new_operand: NodeRef { index: patched_idx },
+                                        });
+                                    }
                                 }
                             }
                         }

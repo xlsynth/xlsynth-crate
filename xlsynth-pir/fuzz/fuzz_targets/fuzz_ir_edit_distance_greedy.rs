@@ -3,6 +3,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use log::{debug, info};
 use xlsynth::IrPackage;
 use xlsynth_pir::graph_edit::{apply_function_edits, compute_function_edit};
 use xlsynth_pir::greedy_graph_edit::GreedyMatchSelector;
@@ -10,8 +11,6 @@ use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_pir::{ir_isomorphism::is_ir_isomorphic, ir_parser};
 
 fuzz_target!(|pair: FuzzSampleSameTypedPair| {
-    println!("RUN!");
-
     // Early-return on degenerate inputs.
     if pair.first.ops.is_empty()
         || pair.second.ops.is_empty()
@@ -66,17 +65,20 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
         Some(f) => f,
         None => return,
     };
-    println!(
-        "*********************** GENERATED PARSABLE SAMPLE (size={}/{})",
+    info!(
+        "Parsable sample generated. sizes: old={}, new={}",
         old_fn.nodes.len(),
         new_fn.nodes.len()
     );
+    debug!("OLD IR TEXT:\n{}", pkg1_text);
+    debug!("NEW IR TEXT:\n{}", pkg2_text);
     // Compute edits with the greedy matcher, apply, and verify isomorphism.
     let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
     let edits = compute_function_edit(old_fn, new_fn, &mut selector)
         .expect("compute_function_edit returned Err (greedy)");
     let patched =
         apply_function_edits(old_fn, &edits).expect("apply_function_edits returned Err (greedy)");
-    // Print IR texts for old sample, new sample, and the patched result.
+    debug!("PATCHED IR TEXT:\n{}", patched);
+    debug!("IR EDITS ({}):\n{:#?}", edits.edits.len(), edits);
     assert!(is_ir_isomorphic(&patched, new_fn));
 });
