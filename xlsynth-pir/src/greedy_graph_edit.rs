@@ -43,9 +43,6 @@ impl GreedyMatchSelector {
 
     /// Generic opportunity cost using a supplied match score lambda.
     fn best_unready_match_score(&self, a: Option<OldNodeRef>, b: Option<NewNodeRef>) -> i32 {
-        let fwd_match_score = |oa: OldNodeRef, nb: NewNodeRef| self.forward_match_score(oa, nb);
-        let rev_match_score =
-            |oa: OldNodeRef, nb: NewNodeRef| *self.reverse_scores.get(&(oa, nb)).unwrap_or(&0);
         match (a, b) {
             (Some(a_idx), Some(b_idx)) => {
                 assert!(self.ready_old.contains(&a_idx));
@@ -124,17 +121,19 @@ impl GreedyMatchSelector {
     /// opportunity_cost_reverse)
     fn match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
         let fwd = self.forward_match_score(*a, *b);
+        let fwd = if fwd == Self::SCORE_DENOMINATOR {
+            Self::PERFECT_MATCH_SCORE
+        } else {
+            fwd
+        };
         let rev = *self.reverse_scores.get(&(*a, *b)).unwrap_or(&0);
+        let rev = if rev == Self::SCORE_DENOMINATOR {
+            Self::PERFECT_MATCH_SCORE
+        } else {
+            rev
+        };
         let is_perfect_match = fwd == Self::SCORE_DENOMINATOR || rev == Self::SCORE_DENOMINATOR;
-        (
-            is_perfect_match,
-            fwd + rev
-                + if is_perfect_match {
-                    Self::PERFECT_MATCH_SCORE
-                } else {
-                    0
-                },
-        )
+        (is_perfect_match, fwd + rev)
     }
     fn net_match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
         let (is_perfect_match, score) = self.match_score(a, b);
@@ -146,7 +145,7 @@ impl GreedyMatchSelector {
 
     /// Score for deleting a ready old node `a`.
     /// score = -(best_forward_alt_for_a + best_reverse_alt_for_a)
-    fn delete_node_score(&self, a: &OldNodeRef) -> i32 {
+    fn delete_node_score(&self, _a: &OldNodeRef) -> i32 {
         0
     }
     fn net_delete_node_score(&self, a: &OldNodeRef) -> i32 {
@@ -155,7 +154,7 @@ impl GreedyMatchSelector {
 
     /// Score for adding a ready new node `b`.
     /// score = -(best_forward_alt_for_b + best_reverse_alt_for_b)
-    fn add_node_score(&self, b: &NewNodeRef) -> i32 {
+    fn add_node_score(&self, _b: &NewNodeRef) -> i32 {
         0
     }
     fn net_add_node_score(&self, b: &NewNodeRef) -> i32 {
@@ -307,13 +306,21 @@ impl GreedyMatchSelector {
                         score,
                         is_perfect_match
                     );
-                    if is_perfect_match || score > best_score {
+                    // if is_perfect_match || score > best_score {
+                    //     trace!("New best score: {}", score);
+                    //     best_score = score;
+                    //     best_action = Some(self.build_match_action(&a, &b));
+                    //     if is_perfect_match {
+                    //         return Some((score, best_action.unwrap()));
+                    //     }
+                    // }
+                    if score > best_score {
                         trace!("New best score: {}", score);
                         best_score = score;
                         best_action = Some(self.build_match_action(&a, &b));
-                        if is_perfect_match {
-                            return Some((score, best_action.unwrap()));
-                        }
+                        // if is_perfect_match {
+                        //return Some((score, best_action.unwrap()));
+                        //}
                     }
                 }
             }
@@ -483,23 +490,60 @@ pub fn compute_reverse_matches(
     //     }
     // }
 
-    // Recompute helper: compute M(a,b) from current scores of user pairs.
+    // Compute liveness masks (reachable from return via operands) for old and new.
+    fn compute_live_mask<I: Into<usize> + Copy>(g: &DepGraph<I>) -> Vec<bool> {
+        let n = g.nodes.len();
+        let mut live: Vec<bool> = vec![false; n];
+        let mut stack: Vec<usize> = vec![g.return_value.into()];
+        while let Some(i) = stack.pop() {
+            if live[i] {
+                continue;
+            }
+            live[i] = true;
+            for op in g.nodes[i].operands.iter() {
+                stack.push((*op).into());
+            }
+        }
+        live
+    }
+
+    let live_old: Vec<bool> = compute_live_mask(old_graph);
+    let live_new: Vec<bool> = compute_live_mask(new_graph);
+
+    // Recompute helper: compute M(a,b) from current scores of user pairs, ignoring
+    // dead nodes/uses.
     let recompute_score =
         |a: OldNodeRef, b: NewNodeRef, m: &HashMap<(OldNodeRef, NewNodeRef), i32>| -> i32 {
             if !shapes_equal(a, b) {
                 return 0;
             }
-            let z = std::cmp::max(
-                old_graph.get_node(a).users.len(),
-                new_graph.get_node(b).users.len(),
-            );
+            let ai: usize = a.into();
+            let bi: usize = b.into();
+            if !live_old[ai] || !live_new[bi] {
+                return 0;
+            }
+            let a_users_live: Vec<(OldNodeRef, usize)> = old_graph
+                .get_node(a)
+                .users
+                .iter()
+                .copied()
+                .filter(|(u, _)| live_old[usize::from(*u)])
+                .collect();
+            let b_users_live: Vec<(NewNodeRef, usize)> = new_graph
+                .get_node(b)
+                .users
+                .iter()
+                .copied()
+                .filter(|(u, _)| live_new[usize::from(*u)])
+                .collect();
+            let z = std::cmp::max(a_users_live.len(), b_users_live.len());
             if z == 0 {
                 return GreedyMatchSelector::SCORE_DENOMINATOR;
             }
             let mut sum: i32 = 0;
-            for &(u_a, slot) in old_graph.get_node(a).users.iter() {
+            for &(u_a, slot) in a_users_live.iter() {
                 let mut best: i32 = 0;
-                for &(u_b, slot_b) in new_graph.get_node(b).users.iter() {
+                for &(u_b, slot_b) in b_users_live.iter() {
                     if slot_b != slot {
                         continue;
                     }
@@ -554,7 +598,7 @@ mod tests {
     use super::*;
     use crate::graph_edit::{
         IrEdit, MatchAction, NewNodeRef, NodeSide, OldNodeRef, ReadyNode, apply_function_edits,
-        compute_function_edit,
+        build_dependency_graph, compute_function_edit,
     };
     use crate::ir::{NodePayload, NodeRef};
     use crate::ir_parser::Parser;
@@ -615,6 +659,64 @@ mod tests {
         let mut selector = GreedyMatchSelector::new(lhs, rhs);
         let result = compute_function_edit(lhs, rhs, &mut selector);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reverse_matches_ignore_dead_nodes_and_dead_uses() {
+        // Build old/new identical functions with a live return identity, a dead user of
+        // the return, and a dead literal. Reverse matches should:
+        // - Give SCORE_DENOMINATOR for the live return node pair
+        // - Give 0 for dead user pair and dead literal pair
+        let pkg_old = parse_ir_from_string(
+            r#"package p
+            top fn f(x: bits[8]) -> bits[8] {
+                ret identity.10: bits[8] = identity(x, id=10)
+                identity.11: bits[8] = identity(identity.10, id=11)
+                literal.12: bits[8] = literal(value=0, id=12)
+            }
+            "#,
+        );
+        let old_fn = pkg_old.get_top().unwrap();
+
+        let pkg_new = parse_ir_from_string(
+            r#"package p2
+            top fn f2(x: bits[8]) -> bits[8] {
+                ret identity.10: bits[8] = identity(x, id=10)
+                identity.11: bits[8] = identity(identity.10, id=11)
+                literal.12: bits[8] = literal(value=0, id=12)
+            }
+            "#,
+        );
+        let new_fn = pkg_new.get_top().unwrap();
+
+        let old_graph = build_dependency_graph::<OldNodeRef>(old_fn);
+        let new_graph = build_dependency_graph::<NewNodeRef>(new_fn);
+        let reverse = compute_reverse_matches(&old_graph, &new_graph);
+        let den = GreedyMatchSelector::SCORE_DENOMINATOR;
+
+        // Helper to index by text id
+        let find_id = |f: &crate::ir::Fn, tid: usize| -> usize {
+            f.nodes
+                .iter()
+                .position(|n| n.text_id == tid)
+                .expect("node by text_id not found")
+        };
+
+        let o_ret = find_id(old_fn, 10);
+        let n_ret = find_id(new_fn, 10);
+        let o_du = find_id(old_fn, 11);
+        let n_du = find_id(new_fn, 11);
+        let o_dl = find_id(old_fn, 12);
+        let n_dl = find_id(new_fn, 12);
+
+        let rev = |oi: usize, ni: usize| -> i32 {
+            *reverse.get(&(OldNodeRef(oi), NewNodeRef(ni))).unwrap_or(&0)
+        };
+
+        // Live return pair gets full score, dead pairs get 0.
+        assert_eq!(rev(o_ret, n_ret), den);
+        assert_eq!(rev(o_du, n_du), 0);
+        assert_eq!(rev(o_dl, n_dl), 0);
     }
 
     #[test]

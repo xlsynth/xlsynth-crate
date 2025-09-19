@@ -6,11 +6,13 @@ use libfuzzer_sys::fuzz_target;
 use log::{debug, info};
 use xlsynth::IrPackage;
 use xlsynth_pir::graph_edit::{
-    IrEdit, IrEditSet, IrMatchSet, MatchAction, apply_function_edits, compute_forward_equivalences,
-    compute_function_match, convert_match_set_to_edit_set, format_ir_edits, format_match_set,
+    IrMatchSet, MatchAction, apply_function_edits, compute_forward_equivalences,
+    compute_function_match, compute_reverse_equivalences_to_return, convert_match_set_to_edit_set,
+    format_ir_edits, format_match_set,
 };
 use xlsynth_pir::greedy_graph_edit::GreedyMatchSelector;
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
+use xlsynth_pir::ir_utils::get_dead_nodes;
 use xlsynth_pir::{ir_isomorphism::is_ir_isomorphic, ir_parser};
 
 fn unique_forward_equivalent_pairs(
@@ -34,10 +36,30 @@ fn unique_forward_equivalent_pairs(
     pairs
 }
 
+fn unique_reverse_equivalent_pairs(
+    old_fn: &xlsynth_pir::ir::Fn,
+    new_fn: &xlsynth_pir::ir::Fn,
+) -> Vec<(usize, usize)> {
+    let (old_to_new_eq, new_to_old_eq) = compute_reverse_equivalences_to_return(old_fn, new_fn);
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for (old_ref, news) in old_to_new_eq.iter() {
+        if news.len() != 1 {
+            continue;
+        }
+        let oi: usize = usize::from(*old_ref);
+        let ni: usize = usize::from(news[0]);
+        if let Some(olds) = new_to_old_eq.get(&news[0]) {
+            if olds.len() == 1 && usize::from(olds[0]) == oi {
+                pairs.push((oi, ni));
+            }
+        }
+    }
+    pairs
+}
+
 fn assert_pairs_have_matches(
     old_fn: &xlsynth_pir::ir::Fn,
     new_fn: &xlsynth_pir::ir::Fn,
-    pairs: &[(usize, usize)],
     matches: &IrMatchSet,
 ) {
     use std::collections::HashSet;
@@ -52,10 +74,40 @@ fn assert_pairs_have_matches(
             matched_pairs.insert((usize::from(*old_index), usize::from(*new_index)));
         }
     }
-    for &(oi, ni) in pairs.iter() {
+    // Precompute dead node sets (by index) for both functions.
+    let dead_old: std::collections::HashSet<usize> = get_dead_nodes(old_fn)
+        .into_iter()
+        .map(|nr| nr.index)
+        .collect();
+    let dead_new: std::collections::HashSet<usize> = get_dead_nodes(new_fn)
+        .into_iter()
+        .map(|nr| nr.index)
+        .collect();
+
+    // Compute uniquely equivalent pairs (forward) and ensure matches exist,
+    // skipping pairs where either node is dead.
+    let fwd_pairs = unique_forward_equivalent_pairs(old_fn, new_fn);
+    for (oi, ni) in fwd_pairs.into_iter() {
+        if dead_old.contains(&oi) || dead_new.contains(&ni) {
+            continue;
+        }
         if !matched_pairs.contains(&(oi, ni)) {
             panic!(
                 "missing MatchNodes for uniquely forward-equivalent pair: {} <-> {}",
+                xlsynth_pir::ir::node_textual_id(old_fn, xlsynth_pir::ir::NodeRef { index: oi }),
+                xlsynth_pir::ir::node_textual_id(new_fn, xlsynth_pir::ir::NodeRef { index: ni }),
+            );
+        }
+    }
+    // Compute uniquely equivalent pairs (reverse) and ensure matches exist.
+    let rev_pairs = unique_reverse_equivalent_pairs(old_fn, new_fn);
+    for (oi, ni) in rev_pairs.into_iter() {
+        if dead_old.contains(&oi) || dead_new.contains(&ni) {
+            continue;
+        }
+        if !matched_pairs.contains(&(oi, ni)) {
+            panic!(
+                "missing MatchNodes for uniquely reverse-equivalent pair: {} <-> {}",
                 xlsynth_pir::ir::node_textual_id(old_fn, xlsynth_pir::ir::NodeRef { index: oi }),
                 xlsynth_pir::ir::node_textual_id(new_fn, xlsynth_pir::ir::NodeRef { index: ni }),
             );
@@ -135,8 +187,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
         matches.matches.len(),
         format_match_set(old_fn, new_fn, &matches)
     );
-    let unique_pairs = unique_forward_equivalent_pairs(old_fn, new_fn);
-    assert_pairs_have_matches(old_fn, new_fn, &unique_pairs, &matches);
+    assert_pairs_have_matches(old_fn, new_fn, &matches);
     let edits = convert_match_set_to_edit_set(old_fn, new_fn, &matches);
     let patched =
         apply_function_edits(old_fn, &edits).expect("apply_function_edits returned Err (greedy)");

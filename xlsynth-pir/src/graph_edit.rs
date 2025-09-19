@@ -7,7 +7,8 @@
 use crate::ir::{self, Fn, Node, NodeRef};
 use crate::ir_utils::{get_topological, operands, remap_payload_with};
 use crate::node_hashing::{
-    FwdHash, compute_node_local_structural_hash, compute_node_structural_hash,
+    BwdHash, FwdHash, compute_node_backward_structural_hash, compute_node_local_structural_hash,
+    compute_node_structural_hash,
 };
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -236,6 +237,233 @@ pub fn compute_forward_equivalences(
     for (idx, h) in new_hashes.iter().enumerate() {
         let mut v = by_hash_old.get(h).cloned().unwrap_or_default();
         v.sort_by_key(|nr| nr.0);
+        new_to_old.insert(NewNodeRef(idx), v);
+    }
+
+    (old_to_new, new_to_old)
+}
+
+#[cfg(test)]
+mod reverse_equiv_tests {
+    use super::*;
+    use crate::ir::PackageMember;
+    use crate::ir_parser::Parser;
+
+    fn parse_fn(ir: &str) -> Fn {
+        let pkg_text = format!("package p\n\n{}\n", ir);
+        let mut p = Parser::new(&pkg_text);
+        let pkg = p.parse_and_validate_package().unwrap();
+        pkg.members
+            .iter()
+            .find_map(|m| match m {
+                PackageMember::Function(f) => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn index_by_text_id(f: &Fn, text_id: usize) -> usize {
+        f.nodes
+            .iter()
+            .position(|n| n.text_id == text_id)
+            .expect("node by text_id not found")
+    }
+
+    #[test]
+    fn reverse_equivalences_self_maps_nodes_by_name() {
+        let f_old = parse_fn(
+            r#"fn f(a: bits[8] id=1) -> bits[8] {
+  a: bits[8] = param(name=a, id=1)
+  add.10: bits[8] = add(a, a, id=10)
+  ret identity.11: bits[8] = identity(add.10, id=11)
+}"#,
+        );
+        let f_new = parse_fn(
+            r#"fn f(a: bits[8] id=1) -> bits[8] {
+  a: bits[8] = param(name=a, id=1)
+  add.10: bits[8] = add(a, a, id=10)
+  ret identity.11: bits[8] = identity(add.10, id=11)
+}"#,
+        );
+
+        let (old_to_new, new_to_old) = compute_reverse_equivalences_to_return(&f_old, &f_new);
+
+        for &tid in &[1usize, 10usize, 11usize] {
+            let oi = index_by_text_id(&f_old, tid);
+            let ni = index_by_text_id(&f_new, tid);
+            let v = old_to_new.get(&OldNodeRef(oi)).unwrap();
+            assert!(
+                v.contains(&NewNodeRef(ni)),
+                "expected mapping for text_id {}",
+                tid
+            );
+
+            let v2 = new_to_old.get(&NewNodeRef(ni)).unwrap();
+            assert!(
+                v2.contains(&OldNodeRef(oi)),
+                "expected reverse mapping for text_id {}",
+                tid
+            );
+        }
+    }
+
+    #[test]
+    fn reverse_equivalences_multiple_equivalent_leaf_nodes() {
+        // Two identical unused literals in each function should be reverse-equivalent
+        // because their backward hashes equal their local structural hashes.
+        let f_old = parse_fn(
+            r#"fn f() -> bits[1] {
+  u100: bits[1] = literal(value=1, id=100)
+  u101: bits[1] = literal(value=1, id=101)
+  ret r: bits[1] = literal(value=0, id=1)
+}"#,
+        );
+        let f_new = parse_fn(
+            r#"fn f() -> bits[1] {
+  v200: bits[1] = literal(value=1, id=200)
+  v201: bits[1] = literal(value=1, id=201)
+  ret r: bits[1] = literal(value=0, id=2)
+}"#,
+        );
+
+        let (old_to_new, new_to_old) = compute_reverse_equivalences_to_return(&f_old, &f_new);
+
+        let old_u100 = index_by_text_id(&f_old, 100);
+        let old_u101 = index_by_text_id(&f_old, 101);
+        let new_v200 = index_by_text_id(&f_new, 200);
+        let new_v201 = index_by_text_id(&f_new, 201);
+
+        assert!(
+            old_to_new.get(&OldNodeRef(old_u100)).unwrap().is_empty(),
+            "dead old u100 should not map to any new node"
+        );
+        assert!(
+            old_to_new.get(&OldNodeRef(old_u101)).unwrap().is_empty(),
+            "dead old u101 should not map to any new node"
+        );
+        assert!(
+            new_to_old.get(&NewNodeRef(new_v200)).unwrap().is_empty(),
+            "dead new v200 should not map to any old node"
+        );
+        assert!(
+            new_to_old.get(&NewNodeRef(new_v201)).unwrap().is_empty(),
+            "dead new v201 should not map to any old node"
+        );
+    }
+}
+
+/// Computes reverse-equivalent nodes between two functions restricted to the
+/// subgraphs reachable from their return nodes. Backward hashes are computed by
+/// iterating topological order in reverse (users before operands) and including
+/// only live users (reachable from return). Dead nodes are not considered
+/// equivalent to any other node and map to empty sets.
+pub fn compute_reverse_equivalences_to_return(
+    old: &Fn,
+    new: &Fn,
+) -> (
+    HashMap<OldNodeRef, Vec<NewNodeRef>>,
+    HashMap<NewNodeRef, Vec<OldNodeRef>>,
+) {
+    assert!(
+        old.ret_node_ref.is_some(),
+        "compute_reverse_equivalences_to_return: old function has no return node"
+    );
+    assert!(
+        new.ret_node_ref.is_some(),
+        "compute_reverse_equivalences_to_return: new function has no return node"
+    );
+    fn compute_backward_hashes(f: &Fn) -> Vec<Option<BwdHash>> {
+        let n = f.nodes.len();
+        if n == 0 {
+            return vec![];
+        }
+        // Build users with operand slots for the entire graph.
+        let mut users: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+        for (ui, node) in f.nodes.iter().enumerate() {
+            for (slot, dep) in operands(&node.payload).into_iter().enumerate() {
+                users[dep.index].push((ui, slot));
+            }
+        }
+        // On-the-fly liveness: start all nodes as not live; walk in reverse topo
+        // and mark a node live if it's the return node or if any of its users is live.
+        let mut is_live: Vec<bool> = vec![false; n];
+        let ret_index: Option<usize> = f.ret_node_ref.map(|nr| nr.index);
+        let order = get_topological(f);
+        let mut out: Vec<Option<BwdHash>> = vec![None; n];
+        for nr in order.into_iter().rev() {
+            let i = nr.index;
+            // A node is live if it is the return node, or any user is live.
+            let mut live_due_to_user = false;
+            for (u, _slot) in users[i].iter() {
+                if is_live[*u] {
+                    live_due_to_user = true;
+                    break;
+                }
+            }
+            let live_now = (ret_index == Some(i)) || live_due_to_user;
+            if live_now {
+                is_live[i] = true;
+                let mut pairs: Vec<(BwdHash, usize)> = Vec::new();
+                for (u, slot) in users[i].iter() {
+                    if !is_live[*u] {
+                        continue;
+                    }
+                    let h =
+                        out[*u].expect("live user backward hash must be computed before operands");
+                    pairs.push((h, *slot));
+                }
+                out[i] = Some(compute_node_backward_structural_hash(
+                    f,
+                    NodeRef { index: i },
+                    &pairs,
+                ));
+            }
+        }
+        out
+    }
+
+    let old_bwd = compute_backward_hashes(old);
+    let new_bwd = compute_backward_hashes(new);
+
+    // Build reverse indices by backward hash for all nodes (hashes exist for all
+    // nodes in a DAG).
+    let mut by_hash_old: HashMap<BwdHash, Vec<OldNodeRef>> = HashMap::new();
+    for (idx, ob) in old_bwd.iter().enumerate() {
+        if let Some(bh) = ob {
+            by_hash_old.entry(*bh).or_default().push(OldNodeRef(idx));
+        }
+    }
+    let mut by_hash_new: HashMap<BwdHash, Vec<NewNodeRef>> = HashMap::new();
+    for (idx, nb) in new_bwd.iter().enumerate() {
+        if let Some(bh) = nb {
+            by_hash_new.entry(*bh).or_default().push(NewNodeRef(idx));
+        }
+    }
+
+    // Produce dense maps with deterministic order.
+    let mut old_to_new: HashMap<OldNodeRef, Vec<NewNodeRef>> = HashMap::new();
+    for (idx, ob) in old_bwd.iter().enumerate() {
+        let v = match ob {
+            Some(bh) => {
+                let mut v = by_hash_new.get(bh).cloned().unwrap_or_default();
+                v.sort_by_key(|nr| nr.0);
+                v
+            }
+            None => Vec::new(),
+        };
+        old_to_new.insert(OldNodeRef(idx), v);
+    }
+
+    let mut new_to_old: HashMap<NewNodeRef, Vec<OldNodeRef>> = HashMap::new();
+    for (idx, nb) in new_bwd.iter().enumerate() {
+        let v = match nb {
+            Some(bh) => {
+                let mut v = by_hash_old.get(bh).cloned().unwrap_or_default();
+                v.sort_by_key(|nr| nr.0);
+                v
+            }
+            None => Vec::new(),
+        };
         new_to_old.insert(NewNodeRef(idx), v);
     }
 
@@ -769,7 +997,6 @@ pub fn format_ir_edit(old: &Fn, e: &IrEdit) -> String {
         } => {
             let node_idx = node.index;
             let payload = &old.nodes[node_idx].payload;
-            let op = payload.get_operator();
             let orig_ops = operands(payload);
             let orig_name = if operand_slot < orig_ops.len() {
                 name_for_index(orig_ops[operand_slot].index)

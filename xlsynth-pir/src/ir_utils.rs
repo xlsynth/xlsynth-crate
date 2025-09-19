@@ -205,6 +205,48 @@ pub fn get_topological_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     topo_from_nodes(nodes)
 }
 
+/// Returns a list of nodes that are dead (unreachable from the function's
+/// return value by following operand edges).
+///
+/// The returned vector is sorted by node index ascending to ensure
+/// deterministic ordering.
+pub fn get_dead_nodes(f: &Fn) -> Vec<NodeRef> {
+    let n = f.nodes.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Mark nodes reachable from the return node via operands.
+    let mut live: Vec<bool> = vec![false; n];
+    assert!(
+        f.ret_node_ref.is_some(),
+        "get_dead_nodes: function has no return node"
+    );
+    let ret = f.ret_node_ref.unwrap();
+    let mut stack: Vec<NodeRef> = vec![ret];
+    while let Some(nr) = stack.pop() {
+        if live[nr.index] {
+            continue;
+        }
+        live[nr.index] = true;
+        let node = f.get_node(nr);
+        for dep in operands(&node.payload) {
+            if !live[dep.index] {
+                stack.push(dep);
+            }
+        }
+    }
+
+    // Dead nodes are those never marked live.
+    let mut dead: Vec<NodeRef> = Vec::new();
+    for i in 0..n {
+        if !live[i] {
+            dead.push(NodeRef { index: i });
+        }
+    }
+    dead
+}
+
 /// Computes the immediate users of each node in the function.
 ///
 /// Returns a mapping from each `NodeRef` to the set of `NodeRef`s that
@@ -799,5 +841,51 @@ mod users_tests {
         assert!(users.get(&b).unwrap().contains(&and));
         assert!(users.get(&and).unwrap().contains(&ret));
         assert!(users.get(&ret).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dead_nodes_unreachable_literal() {
+        let f = parse_fn(
+            r#"fn f() -> bits[1] {
+  u: bits[1] = literal(value=0, id=1)
+  a: bits[1] = literal(value=1, id=2)
+  b: bits[1] = literal(value=0, id=3)
+  and.4: bits[1] = and(a, b, id=4)
+  ret identity.5: bits[1] = identity(and.4, id=5)
+}"#,
+        );
+
+        // Identify the unreachable literal node 'u' as the literal that is not
+        // an operand of the 'and' node.
+        let mut a_ref: Option<NodeRef> = None;
+        let mut b_ref: Option<NodeRef> = None;
+        let mut and_ref: Option<NodeRef> = None;
+        for (i, node) in f.nodes.iter().enumerate() {
+            if let NodePayload::Nary(NaryOp::And, elems) = &node.payload {
+                assert_eq!(elems.len(), 2);
+                and_ref = Some(NodeRef { index: i });
+                a_ref = Some(elems[0]);
+                b_ref = Some(elems[1]);
+            }
+        }
+        let a = a_ref.expect("expected lhs operand");
+        let b = b_ref.expect("expected rhs operand");
+
+        let mut u_ref: Option<NodeRef> = None;
+        for (i, node) in f.nodes.iter().enumerate() {
+            if let NodePayload::Literal(_) = &node.payload {
+                let nr = NodeRef { index: i };
+                if nr != a && nr != b {
+                    u_ref = Some(nr);
+                }
+            }
+        }
+        let u = u_ref.expect("expected unreachable literal");
+
+        let dead = get_dead_nodes(&f);
+        assert!(dead.contains(&u), "unreachable literal should be dead");
+        assert!(!dead.contains(&a));
+        assert!(!dead.contains(&b));
+        assert!(!dead.contains(&and_ref.unwrap()));
     }
 }
