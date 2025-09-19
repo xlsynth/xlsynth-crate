@@ -9,6 +9,7 @@ use crate::graph_edit::{
     build_dependency_graph,
 };
 use crate::node_hashing::FwdHash;
+use log::{Level, debug, log_enabled, trace};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -38,6 +39,7 @@ pub struct GreedyMatchSelector {
 impl GreedyMatchSelector {
     /// Score scaling factor used for integer-based similarity.
     const SCORE_DENOMINATOR: i32 = 1000;
+    const PERFECT_MATCH_SCORE: i32 = Self::SCORE_DENOMINATOR * 100;
 
     /// Generic opportunity cost using a supplied match score lambda.
     fn best_unready_match_score(&self, a: Option<OldNodeRef>, b: Option<NewNodeRef>) -> i32 {
@@ -51,10 +53,13 @@ impl GreedyMatchSelector {
                 let mut best = 0i32;
                 if let Some(bs) = self.old_to_new_by_hash.get(&a_idx) {
                     for &b2 in bs.iter() {
-                        if b2 == b_idx || self.ready_new.contains(&b2) {
+                        if b2 == b_idx
+                            || self.ready_new.contains(&b2)
+                            || self.handled_new.contains(&b2)
+                        {
                             continue;
                         }
-                        let v = fwd_match_score(a_idx, b2) + rev_match_score(a_idx, b2);
+                        let v = self.match_score(&a_idx, &b2).1;
                         if v > best {
                             best = v;
                         }
@@ -62,10 +67,13 @@ impl GreedyMatchSelector {
                 }
                 if let Some(as_) = self.new_to_old_by_hash.get(&b_idx) {
                     for &a2 in as_.iter() {
-                        if a2 == a_idx || self.ready_old.contains(&a2) {
+                        if a2 == a_idx
+                            || self.ready_old.contains(&a2)
+                            || self.handled_old.contains(&a2)
+                        {
                             continue;
                         }
-                        let v = fwd_match_score(a2, b_idx) + rev_match_score(a2, b_idx);
+                        let v = self.match_score(&a2, &b_idx).1;
                         if v > best {
                             best = v;
                         }
@@ -78,10 +86,10 @@ impl GreedyMatchSelector {
                 let mut best = 0i32;
                 if let Some(bs) = self.old_to_new_by_hash.get(&a_idx) {
                     for &b2 in bs.iter() {
-                        if self.ready_new.contains(&b2) {
+                        if self.ready_new.contains(&b2) || self.handled_new.contains(&b2) {
                             continue;
                         }
-                        let v = fwd_match_score(a_idx, b2) + rev_match_score(a_idx, b2);
+                        let v = self.match_score(&a_idx, &b2).1;
                         if v > best {
                             best = v;
                         }
@@ -94,10 +102,10 @@ impl GreedyMatchSelector {
                 let mut best = 0i32;
                 if let Some(as_) = self.new_to_old_by_hash.get(&b_idx) {
                     for &a2 in as_.iter() {
-                        if self.ready_old.contains(&a2) {
+                        if self.ready_old.contains(&a2) || self.handled_old.contains(&a2) {
                             continue;
                         }
-                        let v = fwd_match_score(a2, b_idx) + rev_match_score(a2, b_idx);
+                        let v = self.match_score(&a2, &b_idx).1;
                         if v > best {
                             best = v;
                         }
@@ -117,9 +125,15 @@ impl GreedyMatchSelector {
     fn match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
         let fwd = self.forward_match_score(*a, *b);
         let rev = *self.reverse_scores.get(&(*a, *b)).unwrap_or(&0);
+        let is_perfect_match = fwd == Self::SCORE_DENOMINATOR || rev == Self::SCORE_DENOMINATOR;
         (
-            fwd == Self::SCORE_DENOMINATOR || rev == Self::SCORE_DENOMINATOR,
-            fwd + rev,
+            is_perfect_match,
+            fwd + rev
+                + if is_perfect_match {
+                    Self::PERFECT_MATCH_SCORE
+                } else {
+                    0
+                },
         )
     }
     fn net_match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
@@ -150,10 +164,17 @@ impl GreedyMatchSelector {
 
     /// Build a MatchNodes action for (a, b).
     fn build_match_action(&self, a: &OldNodeRef, b: &NewNodeRef) -> MatchAction {
+        let new_operands = self
+            .new_graph
+            .get_node(*b)
+            .operands
+            .iter()
+            .copied()
+            .collect::<Vec<NewNodeRef>>();
         MatchAction::MatchNodes {
             old_index: *a,
             new_index: *b,
-            operand_substitutions: Vec::new(),
+            new_operands,
             is_new_return: *b == self.new_graph.return_value,
         }
     }
@@ -279,7 +300,15 @@ impl GreedyMatchSelector {
                         continue;
                     }
                     let (is_perfect_match, score) = self.net_match_score(&a, &b);
+                    trace!(
+                        "Considering match action: {} <-> {}, score={}, is_perfect_match={}",
+                        self.old_graph.get_node(a).name,
+                        self.new_graph.get_node(b).name,
+                        score,
+                        is_perfect_match
+                    );
                     if is_perfect_match || score > best_score {
+                        trace!("New best score: {}", score);
                         best_score = score;
                         best_action = Some(self.build_match_action(&a, &b));
                         if is_perfect_match {
@@ -293,7 +322,13 @@ impl GreedyMatchSelector {
         // 2) Consider delete actions for each ready old.
         for &a in self.ready_old.iter() {
             let score = self.net_delete_node_score(&a);
+            trace!(
+                "Considering delete node action: {}, score={}",
+                self.old_graph.get_node(a).name,
+                score,
+            );
             if score > best_score {
+                trace!("New best score: {}", score);
                 best_score = score;
                 best_action = Some(self.build_delete_node_action(&a));
             }
@@ -302,7 +337,13 @@ impl GreedyMatchSelector {
         // 3) Consider add actions for each ready new.
         for &b in self.ready_new.iter() {
             let score = self.net_add_node_score(&b);
+            trace!(
+                "Considering add node action: {}, score={}",
+                self.new_graph.get_node(b).name,
+                score,
+            );
             if score > best_score {
+                trace!("New best score: {}", score);
                 best_score = score;
                 best_action = Some(self.build_add_node_action(&b));
             }
@@ -316,6 +357,13 @@ impl GreedyMatchSelector {
 
 impl MatchSelector for GreedyMatchSelector {
     fn add_ready_node(&mut self, node: ReadyNode) {
+        trace!(
+            "Adding ready node: {:?}",
+            match node.side {
+                NodeSide::Old => format!("old:{}", self.old_graph.nodes[node.index].name),
+                NodeSide::New => format!("new:{}", self.new_graph.nodes[node.index].name),
+            }
+        );
         match node.side {
             NodeSide::Old => {
                 self.ready_old.insert(OldNodeRef(node.index));
@@ -327,12 +375,40 @@ impl MatchSelector for GreedyMatchSelector {
     }
 
     fn select_next_match(&mut self) -> Option<MatchAction> {
+        trace!("Selecting next match");
+        if log_enabled!(Level::Debug) {
+            let ready_old_names: Vec<String> = self
+                .ready_old
+                .iter()
+                .map(|o| self.old_graph.get_node(*o).name.clone())
+                .collect();
+            let ready_new_names: Vec<String> = self
+                .ready_new
+                .iter()
+                .map(|n| self.new_graph.get_node(*n).name.clone())
+                .collect();
+            trace!("Ready old: [{}]", ready_old_names.join(", "));
+            trace!("Ready new: [{}]", ready_new_names.join(", "));
+        }
         match self.select_best_action() {
             Some((score, action)) => {
                 //              println!("best_action (score={:.2}): {:?}", score, action);
+                debug!(
+                    "best_action (score={}): {}",
+                    score,
+                    crate::graph_edit::format_match_action(&action, |side, idx| match side {
+                        NodeSide::Old =>
+                            format!("old:{}", self.old_graph.get_node(OldNodeRef(idx)).name),
+                        NodeSide::New =>
+                            format!("new:{}", self.new_graph.get_node(NewNodeRef(idx)).name),
+                    })
+                );
                 Some(action)
             }
-            None => None,
+            None => {
+                debug!("No best action found");
+                None
+            }
         }
     }
 
@@ -384,23 +460,28 @@ pub fn compute_reverse_matches(
     // Worklist seeded with all compatible sink pairs (nodes with no users).
     let mut worklist: VecDeque<(OldNodeRef, NewNodeRef)> = VecDeque::new();
     let mut on_worklist: HashSet<(OldNodeRef, NewNodeRef)> = HashSet::new();
-    for (oi_us, on) in old_graph.nodes.iter().enumerate() {
-        if !on.users.is_empty() {
-            continue;
-        }
-        for (ni_us, nn) in new_graph.nodes.iter().enumerate() {
-            if !nn.users.is_empty() {
-                continue;
-            }
-            let oi = OldNodeRef(oi_us);
-            let ni = NewNodeRef(ni_us);
-            if shapes_equal(oi, ni) {
-                if on_worklist.insert((oi, ni)) {
-                    worklist.push_back((oi, ni));
-                }
-            }
-        }
-    }
+    // Just seed the worklist with the return values.
+    worklist.push_back((old_graph.return_value, new_graph.return_value));
+    on_worklist.insert((old_graph.return_value, new_graph.return_value));
+
+    //for (oi_us, on) in old_graph.nodes.iter().enumerate() {
+    // for (oi_us, on) in old_graph.nodes.iter().enumerate() {
+    //     if !on.users.is_empty() {
+    //         continue;
+    //     }
+    //     for (ni_us, nn) in new_graph.nodes.iter().enumerate() {
+    //         if !nn.users.is_empty() {
+    //             continue;
+    //         }
+    //         let oi = OldNodeRef(oi_us);
+    //         let ni = NewNodeRef(ni_us);
+    //         if shapes_equal(oi, ni) {
+    //             if on_worklist.insert((oi, ni)) {
+    //                 worklist.push_back((oi, ni));
+    //             }
+    //         }
+    //     }
+    // }
 
     // Recompute helper: compute M(a,b) from current scores of user pairs.
     let recompute_score =
@@ -856,7 +937,7 @@ mod tests {
             let action = MatchAction::MatchNodes {
                 old_index: OldNodeRef(oi),
                 new_index: NewNodeRef(ni),
-                operand_substitutions: Vec::new(),
+                new_operands: Vec::new(),
                 is_new_return: false,
             };
             sel.update_after_match(&action);

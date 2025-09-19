@@ -4,9 +4,11 @@
 //! XLS IR functions. For now this returns an empty set of edits when computing,
 //! and applying is a no-op that returns the input function unmodified.
 
-use crate::ir::{Fn, Node, NodeRef};
-use crate::ir_utils::{operands, remap_payload_with};
-use crate::node_hashing::{FwdHash, compute_node_local_structural_hash};
+use crate::ir::{self, Fn, Node, NodeRef};
+use crate::ir_utils::{get_topological, operands, remap_payload_with};
+use crate::node_hashing::{
+    FwdHash, compute_node_local_structural_hash, compute_node_structural_hash,
+};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
@@ -93,7 +95,8 @@ pub enum MatchAction {
     MatchNodes {
         old_index: OldNodeRef,
         new_index: NewNodeRef,
-        operand_substitutions: Vec<(OldNodeRef, NewNodeRef)>,
+        /// Full ordered operand list for the matched new node
+        new_operands: Vec<NewNodeRef>,
         is_new_return: bool,
     },
 }
@@ -105,6 +108,7 @@ pub struct DepNode<I> {
     pub users: Vec<(I, usize)>, // (user index, operand slot)
     pub structural_hash: FwdHash,
     pub is_return: bool,
+    pub name: String,
 }
 
 /// Dependency graph for a function: collection of per-node dependency info.
@@ -156,6 +160,7 @@ where
             users: users_list[i].clone(),
             structural_hash: local_hashes[i],
             is_return: ret_index_usize == Some(i),
+            name: crate::ir::node_textual_id(f, NodeRef { index: i }),
         });
     }
     assert!(
@@ -167,6 +172,74 @@ where
         nodes,
         return_value,
     }
+}
+
+/// Computes forward-equivalent nodes between two functions by hashing each node
+/// using an ordered combination of its operands' hashes. Two nodes are forward
+/// equivalent if:
+/// - Their local structure (operator, type, attributes) is identical, and
+/// - For every operand position i, the i-th operands are themselves forward
+///   equivalent.
+///
+/// Returns:
+/// - A map from every node in `old` to the vector of forward-equivalent nodes
+///   in `new` (possibly empty).
+/// - A map from every node in `new` to the vector of forward-equivalent nodes
+///   in `old` (possibly empty).
+pub fn compute_forward_equivalences(
+    old: &Fn,
+    new: &Fn,
+) -> (
+    HashMap<OldNodeRef, Vec<NewNodeRef>>,
+    HashMap<NewNodeRef, Vec<OldNodeRef>>,
+) {
+    // Helper: compute forward structural hashes for all nodes via topo order.
+    fn compute_forward_hashes(f: &Fn) -> Vec<FwdHash> {
+        let order = get_topological(f);
+        let mut hashes: Vec<Option<FwdHash>> = vec![None; f.nodes.len()];
+        for nr in order {
+            let child_hashes: Vec<FwdHash> = operands(&f.get_node(nr).payload)
+                .into_iter()
+                .map(|c| hashes[c.index].expect("child hash must be computed first"))
+                .collect();
+            let h = compute_node_structural_hash(f, nr, &child_hashes);
+            hashes[nr.index] = Some(h);
+        }
+        hashes
+            .into_iter()
+            .map(|o| o.expect("hash must be set"))
+            .collect()
+    }
+
+    let old_hashes = compute_forward_hashes(old);
+    let new_hashes = compute_forward_hashes(new);
+
+    // Build reverse indices by hash.
+    let mut by_hash_old: HashMap<FwdHash, Vec<OldNodeRef>> = HashMap::new();
+    for (idx, h) in old_hashes.iter().enumerate() {
+        by_hash_old.entry(*h).or_default().push(OldNodeRef(idx));
+    }
+    let mut by_hash_new: HashMap<FwdHash, Vec<NewNodeRef>> = HashMap::new();
+    for (idx, h) in new_hashes.iter().enumerate() {
+        by_hash_new.entry(*h).or_default().push(NewNodeRef(idx));
+    }
+
+    // Produce dense maps including keys for nodes with no equivalents (empty vecs).
+    let mut old_to_new: HashMap<OldNodeRef, Vec<NewNodeRef>> = HashMap::new();
+    for (idx, h) in old_hashes.iter().enumerate() {
+        let mut v = by_hash_new.get(h).cloned().unwrap_or_default();
+        v.sort_by_key(|nr| nr.0);
+        old_to_new.insert(OldNodeRef(idx), v);
+    }
+
+    let mut new_to_old: HashMap<NewNodeRef, Vec<OldNodeRef>> = HashMap::new();
+    for (idx, h) in new_hashes.iter().enumerate() {
+        let mut v = by_hash_old.get(h).cloned().unwrap_or_default();
+        v.sort_by_key(|nr| nr.0);
+        new_to_old.insert(NewNodeRef(idx), v);
+    }
+
+    (old_to_new, new_to_old)
 }
 
 /// Identifies which function a ready node belongs to when planning edits.
@@ -213,7 +286,7 @@ pub fn compute_parameter_matches(old: &Fn, new: &Fn) -> Vec<MatchAction> {
             matches.push(MatchAction::MatchNodes {
                 old_index: OldNodeRef(oi),
                 new_index: NewNodeRef(ni),
-                operand_substitutions: Vec::new(),
+                new_operands: Vec::new(),
                 is_new_return: new
                     .ret_node_ref
                     .map(|nr| nr.index)
@@ -454,14 +527,18 @@ pub fn compute_function_match<S: MatchSelector>(
             MatchAction::MatchNodes {
                 old_index,
                 new_index,
-                operand_substitutions,
                 ..
             } => {
-                // Record match edit.
+                // Record match edit with explicit new_operands and return flag.
+                let ni: usize = new_index.into();
+                let new_operands: Vec<NewNodeRef> = operands(&new.nodes[ni].payload)
+                    .into_iter()
+                    .map(|r| NewNodeRef(r.index))
+                    .collect();
                 matches.push(MatchAction::MatchNodes {
                     old_index,
                     new_index,
-                    operand_substitutions: operand_substitutions.clone(),
+                    new_operands,
                     is_new_return: new.ret_node_ref.map(|nr| nr.index)
                         == Some(usize::from(new_index)),
                 });
@@ -545,8 +622,7 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
         if let MatchAction::MatchNodes {
             old_index,
             new_index,
-            operand_substitutions: _,
-            is_new_return: _,
+            ..
         } = action
         {
             new_to_old.insert((*new_index).into(), (*old_index).into());
@@ -607,20 +683,19 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
             MatchAction::MatchNodes {
                 old_index,
                 new_index: _,
-                operand_substitutions,
+                new_operands,
                 is_new_return: _,
             } => {
-                // For each substitution (old_operand_idx -> new_operand_idx), redirect
-                // the operand slot(s) on the old user node to the mapped old target if known.
-                for (old_operand_idx, new_operand_idx) in operand_substitutions.iter() {
-                    let nn: usize = (*new_operand_idx).into();
-                    if let Some(&mapped_old_target) = new_to_old.get(&nn) {
-                        let oi: usize = (*old_index).into();
-                        let user_node = &old.nodes[oi];
-                        let user_operands = operands(&user_node.payload);
-                        for (slot, nr) in user_operands.iter().enumerate() {
-                            let ooi: usize = (*old_operand_idx).into();
-                            if nr.index == ooi {
+                // Infer operand substitutions using provided new_operands.
+                let oi: usize = (*old_index).into();
+                let old_ops = operands(&old.nodes[oi].payload);
+                if old_ops.len() == new_operands.len() {
+                    for (slot, (o_ref, n_new_ref)) in
+                        old_ops.iter().zip(new_operands.iter()).enumerate()
+                    {
+                        let nidx: usize = (*n_new_ref).into();
+                        if let Some(&mapped_old_target) = new_to_old.get(&nidx) {
+                            if o_ref.index != mapped_old_target {
                                 edits.push(IrEdit::SubstituteOperand {
                                     node: NodeRef { index: oi },
                                     operand_slot: slot,
@@ -629,53 +704,13 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                                     },
                                 });
                             }
-                        }
-                    }
-                }
-
-                // If no explicit substitutions were provided by the matcher, infer
-                // operand substitutions by diffing operands between matched nodes
-                // where mappings are known.
-                if operand_substitutions.is_empty() {
-                    let oi: usize = (*old_index).into();
-                    // Find the matched new node for this old node.
-                    // Use the first match from new_to_old that maps back to this old index.
-                    // More robust: build a reverse map old->new from matches earlier.
-                    // Compute reverse map on-demand.
-                    // Build old->new map
-                    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
-                    for (n_new, n_old) in new_to_old.iter() {
-                        old_to_new.insert(*n_old, *n_new);
-                    }
-                    if let Some(&ni) = old_to_new.get(&oi) {
-                        let old_ops = operands(&old.nodes[oi].payload);
-                        let new_ops = operands(&new.nodes[ni].payload);
-                        if old_ops.len() == new_ops.len() {
-                            for (slot, (o_ref, n_ref)) in
-                                old_ops.iter().zip(new_ops.iter()).enumerate()
-                            {
-                                // Map new operand target to old index if matched
-                                if let Some(&mapped_old_target) = new_to_old.get(&n_ref.index) {
-                                    if o_ref.index != mapped_old_target {
-                                        edits.push(IrEdit::SubstituteOperand {
-                                            node: NodeRef { index: oi },
-                                            operand_slot: slot,
-                                            new_operand: NodeRef {
-                                                index: mapped_old_target,
-                                            },
-                                        });
-                                    }
-                                } else if let Some(&patched_idx) =
-                                    added_new_to_patched.get(&n_ref.index)
-                                {
-                                    if o_ref.index != patched_idx {
-                                        edits.push(IrEdit::SubstituteOperand {
-                                            node: NodeRef { index: oi },
-                                            operand_slot: slot,
-                                            new_operand: NodeRef { index: patched_idx },
-                                        });
-                                    }
-                                }
+                        } else if let Some(&patched_idx) = added_new_to_patched.get(&nidx) {
+                            if o_ref.index != patched_idx {
+                                edits.push(IrEdit::SubstituteOperand {
+                                    node: NodeRef { index: oi },
+                                    operand_slot: slot,
+                                    new_operand: NodeRef { index: patched_idx },
+                                });
                             }
                         }
                     }
@@ -703,6 +738,127 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
         }
     }
     IrEditSet { edits }
+}
+
+/// Formats a single IrEdit into a human-friendly string using names from `old`.
+pub fn format_ir_edit(old: &Fn, e: &IrEdit) -> String {
+    let name_for_index = |idx: usize| -> String {
+        if idx < old.nodes.len() {
+            ir::node_textual_id(old, NodeRef { index: idx })
+        } else {
+            format!("added.{}", idx)
+        }
+    };
+    match e.clone() {
+        IrEdit::DeleteNode { node } => {
+            format!("DeleteNode: {}", name_for_index(node.index))
+        }
+        IrEdit::AddNode { node } => {
+            // Use the same identifier style as DeleteNode: name if present, else
+            // "op.text_id".
+            let added_name = node
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{}.{}", node.payload.get_operator(), node.text_id));
+            format!("AddNode: {}", added_name)
+        }
+        IrEdit::SubstituteOperand {
+            node,
+            operand_slot,
+            new_operand,
+        } => {
+            let node_idx = node.index;
+            let payload = &old.nodes[node_idx].payload;
+            let op = payload.get_operator();
+            let orig_ops = operands(payload);
+            let orig_name = if operand_slot < orig_ops.len() {
+                name_for_index(orig_ops[operand_slot].index)
+            } else {
+                format!("<slot {} oob>", operand_slot)
+            };
+            let rendered = orig_ops
+                .iter()
+                .enumerate()
+                .map(|(i, nr)| {
+                    if i == operand_slot {
+                        format!("**{}**", name_for_index(new_operand.index))
+                    } else {
+                        name_for_index(nr.index)
+                    }
+                })
+                .collect::<Vec<String>>()
+                .join(", ");
+            format!(
+                "SubstituteOperand: {}({}), was {}",
+                ir::node_textual_id(old, NodeRef { index: node_idx }),
+                rendered,
+                orig_name
+            )
+        }
+        IrEdit::SetReturn { node } => {
+            format!("SetReturn: {}", name_for_index(node.index))
+        }
+    }
+}
+
+/// Formats an IrEditSet into a multiline string using names from `old`.
+pub fn format_ir_edits(old: &Fn, edits: &IrEditSet) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for e in edits.edits.iter() {
+        lines.push(format_ir_edit(old, e));
+    }
+    lines.join("\n")
+}
+
+/// Formats a single MatchAction into a human-friendly string using names from
+/// both `old` and `new` functions.
+pub fn format_match_action<F>(m: &MatchAction, to_string: F) -> String
+where
+    F: std::ops::Fn(NodeSide, usize) -> String,
+{
+    match m.clone() {
+        MatchAction::DeleteNode { old_index } => {
+            format!("DeleteNode: {}", to_string(NodeSide::Old, old_index.0))
+        }
+        MatchAction::AddNode {
+            new_index,
+            is_return,
+        } => {
+            let s = to_string(NodeSide::New, new_index.0);
+            if is_return {
+                format!("AddNode (ret): {}", s)
+            } else {
+                format!("AddNode: {}", s)
+            }
+        }
+        MatchAction::MatchNodes {
+            old_index,
+            new_index,
+            new_operands: _,
+            is_new_return,
+        } => {
+            let old_s = to_string(NodeSide::Old, old_index.0);
+            let new_s = to_string(NodeSide::New, new_index.0);
+            if is_new_return {
+                format!("MatchNodes (ret): {} <-> {}", old_s, new_s)
+            } else {
+                format!("MatchNodes: {} <-> {}", old_s, new_s)
+            }
+        }
+    }
+}
+
+/// Formats a Match set into a multiline string using names from the provided
+/// `old` and `new` functions.
+pub fn format_match_set(old: &Fn, new: &Fn, ms: &IrMatchSet) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for m in ms.matches.iter() {
+        lines.push(format_match_action(m, |side, idx| match side {
+            NodeSide::Old => ir::node_textual_id(old, NodeRef { index: idx }),
+            NodeSide::New => ir::node_textual_id(new, NodeRef { index: idx }),
+        }));
+    }
+    lines.join("\n")
 }
 
 fn format_function_type(f: &Fn) -> String {
@@ -850,6 +1006,81 @@ mod tests {
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
         let patched = apply_function_edits(old_fn, &edits).unwrap();
         assert!(crate::ir_isomorphism::is_ir_isomorphic(&patched, new_fn));
+    }
+
+    #[test]
+    fn forward_equivalence_self_maps_each_node_to_itself() {
+        let pkg = parse_ir_from_string(
+            r#"package p
+            top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+                lit: bits[8] = literal(value=3, id=10)
+                sum: bits[8] = add(a, lit, id=11)
+                ret idnode: bits[8] = identity(sum, id=12)
+            }
+            "#,
+        );
+        let f = pkg.get_top().unwrap();
+
+        let (old_to_new, new_to_old) = compute_forward_equivalences(f, f);
+
+        for i in 0..f.nodes.len() {
+            let oi = OldNodeRef(i);
+            let ni = NewNodeRef(i);
+            let targets = old_to_new.get(&oi).expect("key must exist");
+            assert!(targets.contains(&ni), "node {} not equivalent to itself", i);
+
+            let sources = new_to_old.get(&ni).expect("key must exist");
+            assert!(
+                sources.contains(&oi),
+                "node {} not reverse-equivalent to itself",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn forward_equivalence_respects_operand_order_mismatch() {
+        // Old: sum = add(a, b); New: sum = add(b, a)
+        let pkg_old = parse_ir_from_string(
+            r#"package p
+            top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+                ret sum: bits[8] = add(a, b, id=10)
+            }
+            "#,
+        );
+        let old_fn = pkg_old.get_top().unwrap();
+
+        let pkg_new = parse_ir_from_string(
+            r#"package p2
+            top fn f2(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+                ret sum: bits[8] = add(b, a, id=10)
+            }
+            "#,
+        );
+        let new_fn = pkg_new.get_top().unwrap();
+
+        let find_named = |f: &crate::ir::Fn, name: &str| -> usize {
+            f.nodes
+                .iter()
+                .position(|n| n.name.as_deref() == Some(name))
+                .expect("node by name not found")
+        };
+
+        let (old_to_new, new_to_old) = compute_forward_equivalences(old_fn, new_fn);
+
+        // Params map to themselves by name/ordinal.
+        let a_old = OldNodeRef(find_named(old_fn, "a"));
+        let b_old = OldNodeRef(find_named(old_fn, "b"));
+        let a_new = NewNodeRef(find_named(new_fn, "a"));
+        let b_new = NewNodeRef(find_named(new_fn, "b"));
+        assert!(old_to_new.get(&a_old).unwrap().contains(&a_new));
+        assert!(old_to_new.get(&b_old).unwrap().contains(&b_new));
+
+        // The add nodes differ by operand order, so they are not forward equivalent.
+        let sum_old = OldNodeRef(find_named(old_fn, "sum"));
+        let sum_new = NewNodeRef(find_named(new_fn, "sum"));
+        assert!(!old_to_new.get(&sum_old).unwrap().contains(&sum_new));
+        assert!(!new_to_old.get(&sum_new).unwrap().contains(&sum_old));
     }
 
     #[test]
