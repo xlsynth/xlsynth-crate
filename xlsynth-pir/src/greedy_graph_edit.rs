@@ -132,7 +132,7 @@ impl GreedyMatchSelector {
         } else {
             rev
         };
-        let is_perfect_match = fwd == Self::SCORE_DENOMINATOR || rev == Self::SCORE_DENOMINATOR;
+        let is_perfect_match = fwd == Self::PERFECT_MATCH_SCORE || rev == Self::PERFECT_MATCH_SCORE;
         (is_perfect_match, fwd + rev)
     }
     fn net_match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
@@ -491,59 +491,23 @@ pub fn compute_reverse_matches(
     // }
 
     // Compute liveness masks (reachable from return via operands) for old and new.
-    fn compute_live_mask<I: Into<usize> + Copy>(g: &DepGraph<I>) -> Vec<bool> {
-        let n = g.nodes.len();
-        let mut live: Vec<bool> = vec![false; n];
-        let mut stack: Vec<usize> = vec![g.return_value.into()];
-        while let Some(i) = stack.pop() {
-            if live[i] {
-                continue;
-            }
-            live[i] = true;
-            for op in g.nodes[i].operands.iter() {
-                stack.push((*op).into());
-            }
-        }
-        live
-    }
-
-    let live_old: Vec<bool> = compute_live_mask(old_graph);
-    let live_new: Vec<bool> = compute_live_mask(new_graph);
-
-    // Recompute helper: compute M(a,b) from current scores of user pairs, ignoring
-    // dead nodes/uses.
+    // Recompute helper: compute M(a,b) from current scores of user pairs.
     let recompute_score =
         |a: OldNodeRef, b: NewNodeRef, m: &HashMap<(OldNodeRef, NewNodeRef), i32>| -> i32 {
             if !shapes_equal(a, b) {
                 return 0;
             }
-            let ai: usize = a.into();
-            let bi: usize = b.into();
-            if !live_old[ai] || !live_new[bi] {
-                return 0;
-            }
-            let a_users_live: Vec<(OldNodeRef, usize)> = old_graph
-                .get_node(a)
-                .users
-                .iter()
-                .copied()
-                .filter(|(u, _)| live_old[usize::from(*u)])
-                .collect();
-            let b_users_live: Vec<(NewNodeRef, usize)> = new_graph
-                .get_node(b)
-                .users
-                .iter()
-                .copied()
-                .filter(|(u, _)| live_new[usize::from(*u)])
-                .collect();
-            let z = std::cmp::max(a_users_live.len(), b_users_live.len());
+            let z = std::cmp::max(
+                old_graph.get_node(a).users.len(),
+                new_graph.get_node(b).users.len(),
+            );
             if z == 0 {
                 return GreedyMatchSelector::SCORE_DENOMINATOR;
             }
             let mut sum: i32 = 0;
-            for &(u_a, slot) in a_users_live.iter() {
+            for &(u_a, slot) in old_graph.get_node(a).users.iter() {
                 let mut best: i32 = 0;
-                for &(u_b, slot_b) in b_users_live.iter() {
+                for &(u_b, slot_b) in new_graph.get_node(b).users.iter() {
                     if slot_b != slot {
                         continue;
                     }
@@ -659,64 +623,6 @@ mod tests {
         let mut selector = GreedyMatchSelector::new(lhs, rhs);
         let result = compute_function_edit(lhs, rhs, &mut selector);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn reverse_matches_ignore_dead_nodes_and_dead_uses() {
-        // Build old/new identical functions with a live return identity, a dead user of
-        // the return, and a dead literal. Reverse matches should:
-        // - Give SCORE_DENOMINATOR for the live return node pair
-        // - Give 0 for dead user pair and dead literal pair
-        let pkg_old = parse_ir_from_string(
-            r#"package p
-            top fn f(x: bits[8]) -> bits[8] {
-                ret identity.10: bits[8] = identity(x, id=10)
-                identity.11: bits[8] = identity(identity.10, id=11)
-                literal.12: bits[8] = literal(value=0, id=12)
-            }
-            "#,
-        );
-        let old_fn = pkg_old.get_top().unwrap();
-
-        let pkg_new = parse_ir_from_string(
-            r#"package p2
-            top fn f2(x: bits[8]) -> bits[8] {
-                ret identity.10: bits[8] = identity(x, id=10)
-                identity.11: bits[8] = identity(identity.10, id=11)
-                literal.12: bits[8] = literal(value=0, id=12)
-            }
-            "#,
-        );
-        let new_fn = pkg_new.get_top().unwrap();
-
-        let old_graph = build_dependency_graph::<OldNodeRef>(old_fn);
-        let new_graph = build_dependency_graph::<NewNodeRef>(new_fn);
-        let reverse = compute_reverse_matches(&old_graph, &new_graph);
-        let den = GreedyMatchSelector::SCORE_DENOMINATOR;
-
-        // Helper to index by text id
-        let find_id = |f: &crate::ir::Fn, tid: usize| -> usize {
-            f.nodes
-                .iter()
-                .position(|n| n.text_id == tid)
-                .expect("node by text_id not found")
-        };
-
-        let o_ret = find_id(old_fn, 10);
-        let n_ret = find_id(new_fn, 10);
-        let o_du = find_id(old_fn, 11);
-        let n_du = find_id(new_fn, 11);
-        let o_dl = find_id(old_fn, 12);
-        let n_dl = find_id(new_fn, 12);
-
-        let rev = |oi: usize, ni: usize| -> i32 {
-            *reverse.get(&(OldNodeRef(oi), NewNodeRef(ni))).unwrap_or(&0)
-        };
-
-        // Live return pair gets full score, dead pairs get 0.
-        assert_eq!(rev(o_ret, n_ret), den);
-        assert_eq!(rev(o_du, n_du), 0);
-        assert_eq!(rev(o_dl, n_dl), 0);
     }
 
     #[test]
@@ -1015,6 +921,7 @@ mod tests {
 
         let mut sel = GreedyMatchSelector::new(old_fn, new_fn);
         let den = GreedyMatchSelector::SCORE_DENOMINATOR;
+        let perf = GreedyMatchSelector::PERFECT_MATCH_SCORE;
 
         // Helper to get node indices by name.
         let find_named = |f: &crate::ir::Fn, name: &str| -> usize {
@@ -1063,10 +970,10 @@ mod tests {
             let ni = find_named(new_fn, new_name);
             sel.match_score(&OldNodeRef(oi), &NewNodeRef(ni))
         };
-        assert_eq!(match_score("a", "a"), (true, 2 * den));
-        assert_eq!(match_score("b", "b"), (true, 3 * den / 2));
-        assert_eq!(match_score("c", "c"), (true, 2 * den));
-        assert_eq!(match_score("foo", "foo"), (true, den));
+        assert_eq!(match_score("a", "a"), (true, 2 * perf));
+        assert_eq!(match_score("b", "b"), (true, perf + den / 2));
+        assert_eq!(match_score("c", "c"), (true, 2 * perf));
+        assert_eq!(match_score("foo", "foo"), (true, perf));
 
         // Helper: opportunity cost via names (use None to omit a side).
         let best_unready = |a: Option<&str>, b: Option<&str>| -> i32 {
@@ -1078,7 +985,7 @@ mod tests {
         assert_eq!(best_unready(Some("a"), Some("a")), 0);
         assert_eq!(best_unready(Some("c"), Some("c")), den / 2);
         assert_eq!(best_unready(Some("a"), Some("c")), 0);
-        assert_eq!(best_unready(Some("b"), Some("a")), 3 * den / 2);
+        assert_eq!(best_unready(Some("b"), Some("a")), perf + den / 2);
 
         // Helpers for name-based selector scores.
         let match_score = |old_name: &str, new_name: &str| -> (bool, i32) {
@@ -1086,8 +993,8 @@ mod tests {
             let ni = NewNodeRef(find_named(new_fn, new_name));
             sel.match_score(&oi, &ni)
         };
-        assert_eq!(match_score("a", "a"), (true, 2 * den));
+        assert_eq!(match_score("a", "a"), (true, 2 * perf));
         assert_eq!(match_score("b", "c"), (false, den / 2));
-        assert_eq!(match_score("c", "c"), (true, 2 * den));
+        assert_eq!(match_score("c", "c"), (true, 2 * perf));
     }
 }

@@ -247,6 +247,83 @@ pub fn get_dead_nodes(f: &Fn) -> Vec<NodeRef> {
     dead
 }
 
+/// Returns a new function with dead nodes (unreachable from the return value)
+/// removed and all remaining node indices compacted. Operand references are
+/// remapped to the new indices. GetParam nodes are preserved even if they would
+/// otherwise be considered dead, to satisfy validation rules requiring a
+/// GetParam for each declared parameter.
+pub fn remove_dead_nodes(f: &Fn) -> Fn {
+    let n = f.nodes.len();
+    assert!(n > 0, "remove_dead_nodes: function has no nodes");
+    assert!(
+        f.ret_node_ref.is_some(),
+        "remove_dead_nodes: function has no return node"
+    );
+
+    // Compute liveness from the return.
+    let mut live: Vec<bool> = vec![false; n];
+    let mut stack: Vec<NodeRef> = vec![f.ret_node_ref.unwrap()];
+    while let Some(nr) = stack.pop() {
+        if live[nr.index] {
+            continue;
+        }
+        live[nr.index] = true;
+        let node = f.get_node(nr);
+        for dep in operands(&node.payload) {
+            if !live[dep.index] {
+                stack.push(dep);
+            }
+        }
+    }
+    // Always keep GetParam nodes to satisfy validation rules.
+    for (i, node) in f.nodes.iter().enumerate() {
+        if matches!(node.payload, crate::ir::NodePayload::GetParam(_)) {
+            live[i] = true;
+        }
+    }
+
+    // Build mapping old index -> new index for live nodes.
+    let mut mapping: Vec<Option<usize>> = vec![None; n];
+    let mut next: usize = 0;
+    for i in 0..n {
+        if live[i] {
+            mapping[i] = Some(next);
+            next += 1;
+        }
+    }
+
+    // Remap payloads using the mapping. Only live nodes are copied.
+    let mut new_nodes: Vec<crate::ir::Node> = Vec::with_capacity(next);
+    for (i, node) in f.nodes.iter().enumerate() {
+        if !live[i] {
+            continue;
+        }
+        let remapped_payload = remap_payload_with(&node.payload, |nr: NodeRef| {
+            let ni = mapping[nr.index].expect("live node must not reference a dead operand");
+            NodeRef { index: ni }
+        });
+        new_nodes.push(crate::ir::Node {
+            text_id: node.text_id,
+            name: node.name.clone(),
+            ty: node.ty.clone(),
+            payload: remapped_payload,
+            pos: node.pos.clone(),
+        });
+    }
+
+    // Remap return node.
+    let ret_old = f.ret_node_ref.unwrap().index;
+    let ret_new = mapping[ret_old].expect("return node must be live");
+
+    crate::ir::Fn {
+        name: f.name.clone(),
+        params: f.params.clone(),
+        ret_ty: f.ret_ty.clone(),
+        nodes: new_nodes,
+        ret_node_ref: Some(NodeRef { index: ret_new }),
+    }
+}
+
 /// Computes the immediate users of each node in the function.
 ///
 /// Returns a mapping from each `NodeRef` to the set of `NodeRef`s that
@@ -578,6 +655,48 @@ mod tests {
         );
         // And ret should be last in topo (since it depends on a3 only).
         assert_eq!(order.last().unwrap().index, f.nodes.len() - 1);
+    }
+
+    #[test]
+    fn remove_dead_nodes_keeps_params_and_live_graph() {
+        let f = parse_fn(
+            r#"fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  a: bits[8] = param(name=a, id=1)
+  b: bits[8] = param(name=b, id=2)
+  add.10: bits[8] = add(a, a, id=10)
+  add.11: bits[8] = add(b, b, id=11)
+  ret identity.12: bits[8] = identity(add.10, id=12)
+}
+"#,
+        );
+        let dead = get_dead_nodes(&f);
+        assert!(
+            dead.iter().any(|nr| {
+                let n = &f.nodes[nr.index];
+                matches!(n.payload, crate::ir::NodePayload::Binop(_, _, _)) && n.text_id == 11
+            }),
+            "expected add.11 to be dead"
+        );
+        let g = remove_dead_nodes(&f);
+        // Validate function still has GetParam for both a and b (even if b was dead)
+        let mut seen_params = 0usize;
+        for node in g.nodes.iter() {
+            if matches!(node.payload, crate::ir::NodePayload::GetParam(_)) {
+                seen_params += 1;
+            }
+        }
+        assert_eq!(
+            seen_params, 2,
+            "expected both GetParam nodes to be preserved"
+        );
+        // Ensure return remains and only live path nodes are present besides params.
+        assert!(g.ret_node_ref.is_some());
+        // Ensure no node references are out of bounds post-remap.
+        for i in 0..g.nodes.len() {
+            for dep in operands(&g.nodes[i].payload) {
+                assert!(dep.index < g.nodes.len());
+            }
+        }
     }
 }
 

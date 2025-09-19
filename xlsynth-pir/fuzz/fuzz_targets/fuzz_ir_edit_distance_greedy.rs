@@ -7,12 +7,12 @@ use log::{debug, info};
 use xlsynth::IrPackage;
 use xlsynth_pir::graph_edit::{
     IrMatchSet, MatchAction, apply_function_edits, compute_forward_equivalences,
-    compute_function_match, compute_reverse_equivalences_to_return, convert_match_set_to_edit_set,
-    format_ir_edits, format_match_set,
+    compute_function_edit, compute_function_match, compute_reverse_equivalences_to_return,
+    convert_match_set_to_edit_set, format_ir_edits, format_match_set,
 };
 use xlsynth_pir::greedy_graph_edit::GreedyMatchSelector;
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
-use xlsynth_pir::ir_utils::get_dead_nodes;
+use xlsynth_pir::ir_utils::{get_dead_nodes, remove_dead_nodes};
 use xlsynth_pir::{ir_isomorphism::is_ir_isomorphic, ir_parser};
 
 fn unique_forward_equivalent_pairs(
@@ -180,15 +180,9 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     // Compute matches with the greedy matcher, verify unique forward equivalences
     // are represented as matches, then convert to edits and verify isomorphism.
     let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-    let matches =
-        compute_function_match(old_fn, new_fn, &mut selector).expect("compute_function_match Err");
-    debug!(
-        "MATCHES ({}):\n{}",
-        matches.matches.len(),
-        format_match_set(old_fn, new_fn, &matches)
-    );
-    assert_pairs_have_matches(old_fn, new_fn, &matches);
-    let edits = convert_match_set_to_edit_set(old_fn, new_fn, &matches);
+    let edits =
+        compute_function_edit(old_fn, new_fn, &mut selector).expect("compute_function_edit Err");
+
     let patched =
         apply_function_edits(old_fn, &edits).expect("apply_function_edits returned Err (greedy)");
     debug!("PATCHED IR TEXT:\n{}", patched);
@@ -198,4 +192,39 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
         format_ir_edits(old_fn, &edits)
     );
     assert!(is_ir_isomorphic(&patched, new_fn));
+
+    // Additional step: run dead code elimination on both functions, then perform
+    // greedy matching+edits on the DCE'd graphs. Verify isomorphism and that
+    // uniquely equivalent pairs (both directions) have matches.
+    let old_dce = remove_dead_nodes(old_fn);
+    let new_dce = remove_dead_nodes(new_fn);
+    debug!("OLD IR (AFTER DCE):\n{}", old_dce);
+    debug!("NEW IR (AFTER DCE):\n{}", new_dce);
+
+    // Compute matches on DCE'd functions with greedy selector.
+    let mut sel_dce = GreedyMatchSelector::new(&old_dce, &new_dce);
+    let matches = compute_function_match(&old_dce, &new_dce, &mut sel_dce)
+        .expect("compute_function_match Err (AFTER DCE)");
+    // Optionally debug print matches.
+    debug!(
+        "MATCHES (AFTER DCE) ({}):\n{}",
+        matches.matches.len(),
+        format_match_set(&old_dce, &new_dce, &matches)
+    );
+    assert_pairs_have_matches(&old_dce, &new_dce, &matches);
+
+    // Convert matches to edits and verify isomorphism on DCE'd graphs.
+    let edits_dce = convert_match_set_to_edit_set(&old_dce, &new_dce, &matches);
+    let patched_dce = apply_function_edits(&old_dce, &edits_dce)
+        .expect("apply_function_edits returned Err (AFTER DCE)");
+    debug!("PATCHED IR (AFTER DCE):\n{}", patched_dce);
+    assert!(is_ir_isomorphic(&patched_dce, &new_dce));
+
+    // debug!(
+    //     "MATCHES ({}):\n{}",
+    //     matches.matches.len(),
+    //     format_match_set(old_fn, new_fn, &matches)
+    // );
+    // assert_pairs_have_matches(old_fn, new_fn, &matches);
+    // let edits = convert_match_set_to_edit_set(old_fn, new_fn, &matches);
 });
