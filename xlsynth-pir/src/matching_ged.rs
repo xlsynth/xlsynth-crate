@@ -503,17 +503,16 @@ pub fn apply_function_edits(old: &Fn, edits: &IrEditSet) -> Result<Fn, String> {
                     ));
                 }
                 // Remap exactly the requested operand slot to new_operand, preserving others.
-                let mut seen: usize = 0;
-                let remapped_payload =
-                    remap_payload_with(&patched.nodes[idx].payload, |nr: NodeRef| {
-                        let out = if seen == operand_slot {
+                let remapped_payload = remap_payload_with(
+                    &patched.nodes[idx].payload,
+                    |(slot, nr): (usize, NodeRef)| {
+                        if slot == operand_slot {
                             new_operand
                         } else {
                             nr
-                        };
-                        seen += 1;
-                        out
-                    });
+                        }
+                    },
+                );
                 patched.nodes[idx].payload = remapped_payload;
             }
             IrEdit::SetReturn { node } => {
@@ -559,11 +558,12 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                 // previously added nodes; remap those to their patched indices.
                 let ni: usize = (*new_index).into();
                 let src = &new.nodes[ni];
-                let remapped_payload = remap_payload_with(&src.payload, |nr: NodeRef| {
-                    if let Some(&old_idx) = new_to_old.get(&nr.index) {
-                        NodeRef { index: old_idx }
-                    } else {
-                        if let Some(&patched_idx) = added_new_to_patched.get(&nr.index) {
+                let remapped_payload = remap_payload_with(
+                    &src.payload,
+                    |(_, nr): (usize, NodeRef)| {
+                        if let Some(&old_idx) = new_to_old.get(&nr.index) {
+                            NodeRef { index: old_idx }
+                        } else if let Some(&patched_idx) = added_new_to_patched.get(&nr.index) {
                             NodeRef { index: patched_idx }
                         } else {
                             panic!(
@@ -571,8 +571,8 @@ pub fn convert_match_set_to_edit_set(old: &Fn, new: &Fn, m: &IrMatchSet) -> IrEd
                                 nr.index
                             );
                         }
-                    }
-                });
+                    },
+                );
                 let cloned = crate::ir::Node {
                     text_id: src.text_id,
                     name: src.name.clone(),

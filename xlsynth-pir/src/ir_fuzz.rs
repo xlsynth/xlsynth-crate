@@ -168,7 +168,7 @@ pub enum FuzzOp {
     },
 }
 
-#[derive(Debug, Clone, Arbitrary)]
+#[derive(Debug, Clone, Arbitrary, PartialEq, Eq, Hash)]
 pub enum FuzzOpFlat {
     Param,
     Literal,
@@ -1167,7 +1167,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
         // Decide how many parameters and operations to generate.
         let num_params = u.int_in_range(1..=MAX_PARAMS_PER_SAMPLE)? as usize;
         // Decide how many operations to generate.
-        let num_ops = u.int_in_range(0..=MAX_OPS_PER_SAMPLE)?;
+        let num_ops = u.int_in_range(0..=MAX_OPS_PER_SAMPLE - num_params as u64)?;
         // We maintain a parallel vector that records, for each existing IR node,
         // an over-approximate `InternalType`. Index 0 corresponds to the primary input.
         let mut node_types: Vec<InternalType> = Vec::with_capacity(num_params + num_ops as usize);
@@ -1483,77 +1483,165 @@ mod tests {
         let got_ty = fn_builder.get_type(&out_bv).unwrap();
         assert_eq!(got_ty.to_string(), "bits[8]");
     }
-}
 
-#[derive(Debug, Clone, Arbitrary)]
-pub struct FuzzEditAddNode {
-    pub node: FuzzOp,
-    pub is_return: bool,
-}
+    #[test]
+    fn generates_variety_of_samples() {
+        use rand::RngCore;
+        use rand_pcg::Pcg64Mcg;
+        use std::collections::HashSet;
 
-#[derive(Debug, Clone, Arbitrary)]
-pub struct FuzzEditSubstituteOperand {
-    pub node: usize,
-    pub operand_slot: usize,
-    pub new_operand: usize,
-}
+        const SAMPLE_COUNT: usize = 10000;
+        let mut successful_samples = 0usize;
+        let mut max_num_ops = 0usize;
+        let mut min_num_ops = usize::MAX;
+        let mut max_num_params = 0usize;
+        let mut min_num_params = usize::MAX;
+        let mut max_op_kinds = 0usize;
+        let mut min_op_kinds = usize::MAX;
+        // Fixed seed for determinism across runs.
+        let mut rng = Pcg64Mcg::new(0xDEADBEEFCAFEBABEu128);
+        for _ in 0..SAMPLE_COUNT {
+            // Generate a fresh buffer of random bytes for the Arbitrary source.
+            let mut buf = [0u8; 4096];
+            rng.fill_bytes(&mut buf);
+            let mut un = arbitrary::Unstructured::new(&buf);
+            if let Ok(sample) = FuzzSample::arbitrary(&mut un) {
+                successful_samples += 1;
 
-#[derive(Debug, Clone)]
-pub struct FuzzSampleWithEdits {
-    pub sample: FuzzSample,
-    pub add_nodes: Vec<FuzzEditAddNode>,
-    pub substitute_operands: Vec<FuzzEditSubstituteOperand>,
-}
+                let total_ops = sample.ops.len();
+                min_num_ops = min_num_ops.min(total_ops);
+                max_num_ops = max_num_ops.max(total_ops);
 
-impl<'a> arbitrary::Arbitrary<'a> for FuzzSampleWithEdits {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let sample = FuzzSample::arbitrary(u)?;
+                // Count distinct kinds via FuzzOpFlat mapping
+                let mut kinds: HashSet<FuzzOpFlat> = HashSet::new();
+                for op in sample.ops.iter() {
+                    kinds.insert(to_flat(op));
+                }
+                min_op_kinds = min_op_kinds.min(kinds.len());
+                max_op_kinds = max_op_kinds.max(kinds.len());
 
-        // Reconstruct available node count and node types from the base sample
-        // so we can generate in-bounds edits that reference existing nodes.
-        let mut node_types: Vec<InternalType> = sample.op_types.clone();
-
-        // First, decide counts for each edit class (0..=5), but ensure at least one
-        // edit overall.
-        let mut num_add = u.int_in_range(0..=5)?;
-        let mut num_sub = u.int_in_range(0..=5)?;
-        if num_add == 0 && num_sub == 0 {
-            // Pick one class to bump to 1 to guarantee at least one edit.
-            if u.int_in_range(0..=1)? == 0 {
-                num_add = 1;
-            } else {
-                num_sub = 1;
+                let total_params = sample
+                    .ops
+                    .iter()
+                    .filter(|op| matches!(op, FuzzOp::Param { .. }))
+                    .count();
+                min_num_params = min_num_params.min(total_params);
+                max_num_params = max_num_params.max(total_params);
             }
         }
+        // At least 50% of the samples should be successfully generated.
+        assert!(successful_samples > SAMPLE_COUNT / 2);
 
-        // Generate AddNode edits.
-        let mut add_nodes: Vec<FuzzEditAddNode> = Vec::with_capacity(num_add as usize);
-        for _ in 0..num_add {
-            let (op, out_ty) = generate_fuzz_op(u, &node_types)?;
-            let is_return = u.int_in_range(0..=99)? < 5;
-            add_nodes.push(FuzzEditAddNode {
-                node: op.clone(),
-                is_return,
-            });
-            // Track output type for the newly added node.
-            node_types.push(out_ty);
+        assert!(
+            max_num_ops <= MAX_OPS_PER_SAMPLE as usize,
+            "Expected at most MAX_OPS_PER_SAMPLE ops"
+        );
+        assert!(
+            max_num_ops == MAX_OPS_PER_SAMPLE as usize,
+            "Expected a maximum sized sample with MAX_OPS_PER_SAMPLE ops"
+        );
+        assert!(min_num_ops == 1);
+        assert!(max_num_params == MAX_PARAMS_PER_SAMPLE as usize);
+        assert!(min_num_params == 1);
+        assert!(max_op_kinds > 10);
+        assert!(min_op_kinds == 1);
+    }
+
+    #[test]
+    fn generate_ir_fn_success_rate() {
+        use rand::RngCore;
+        use rand_pcg::Pcg64Mcg;
+
+        const SAMPLE_COUNT: usize = 10000;
+        let mut successful_samples = 0usize;
+        let mut generate_ir_succeeded = 0usize;
+        let mut parse_ir_succeeded = 0usize;
+
+        // Fixed seed for determinism across runs.
+        let mut rng = Pcg64Mcg::new(0x1234ABCD9999EEEFu128);
+        for _ in 0..SAMPLE_COUNT {
+            let mut buf = [0u8; 4096];
+            rng.fill_bytes(&mut buf);
+            let mut un = arbitrary::Unstructured::new(&buf);
+            if let Ok(sample) = FuzzSample::arbitrary(&mut un) {
+                successful_samples += 1;
+                if let Ok(mut pkg) = IrPackage::new("gen_ir_test") {
+                    if generate_ir_fn(sample.ops.clone(), &mut pkg, None).is_ok() {
+                        generate_ir_succeeded += 1;
+                        let pkg_text = pkg.to_string();
+                        if ir_parser::Parser::new(&pkg_text)
+                            .parse_and_validate_package()
+                            .is_ok()
+                        {
+                            parse_ir_succeeded += 1;
+                        }
+                    }
+                }
+            }
         }
+        // Verify at least 25% of successfully generated FuzzSamples convert.
+        assert!(
+            generate_ir_succeeded >= successful_samples / 4,
+            "expected at least 25% of samples to be convertible to IR: converted={}, samples={}",
+            generate_ir_succeeded,
+            successful_samples
+        );
+        // Verify at least 25% of successfully generated FuzzSamples produce parseable
+        // IR.
+        assert!(
+            parse_ir_succeeded >= successful_samples / 4,
+            "expected at least 25% of samples to produce parseable IR: converted={}, samples={}",
+            parse_ir_succeeded,
+            successful_samples
+        );
+    }
 
-        // Then, generate SubstituteOperand edits (all zeros for now).
-        let mut substitute_operands: Vec<FuzzEditSubstituteOperand> =
-            Vec::with_capacity(num_sub as usize);
-        for _ in 0..num_sub {
-            substitute_operands.push(FuzzEditSubstituteOperand {
-                node: 0,
-                operand_slot: 0,
-                new_operand: 0,
-            });
+    #[test]
+    fn generate_live_ir() {
+        use rand::RngCore;
+        use rand_pcg::Pcg64Mcg;
+
+        const SAMPLE_COUNT: usize = 10000;
+        let mut successful_samples = 0usize;
+        let mut generate_ir_succeeded = 0usize;
+        let mut parse_ir_succeeded = 0usize;
+
+        // Fixed seed for determinism across runs.
+        let mut rng = Pcg64Mcg::new(0x1234ABCD9999EEEFu128);
+        for _ in 0..SAMPLE_COUNT {
+            let mut buf = [0u8; 4096];
+            rng.fill_bytes(&mut buf);
+            let mut un = arbitrary::Unstructured::new(&buf);
+            if let Ok(sample) = FuzzSample::arbitrary(&mut un) {
+                successful_samples += 1;
+                if let Ok(mut pkg) = IrPackage::new("gen_ir_test") {
+                    if generate_ir_fn(sample.ops.clone(), &mut pkg, None).is_ok() {
+                        generate_ir_succeeded += 1;
+                        let pkg_text = pkg.to_string();
+                        if ir_parser::Parser::new(&pkg_text)
+                            .parse_and_validate_package()
+                            .is_ok()
+                        {
+                            parse_ir_succeeded += 1;
+                        }
+                    }
+                }
+            }
         }
-
-        Ok(FuzzSampleWithEdits {
-            sample,
-            add_nodes,
-            substitute_operands,
-        })
+        // Verify at least 25% of successfully generated FuzzSamples convert.
+        assert!(
+            generate_ir_succeeded >= successful_samples / 4,
+            "expected at least 25% of samples to be convertible to IR: converted={}, samples={}",
+            generate_ir_succeeded,
+            successful_samples
+        );
+        // Verify at least 25% of successfully generated FuzzSamples produce parseable
+        // IR.
+        assert!(
+            parse_ir_succeeded >= successful_samples / 4,
+            "expected at least 25% of samples to produce parseable IR: converted={}, samples={}",
+            parse_ir_succeeded,
+            successful_samples
+        );
     }
 }

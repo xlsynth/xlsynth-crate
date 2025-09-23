@@ -2,7 +2,7 @@
 
 //! Utility functions for working with / on XLS IR.
 
-use crate::ir::{Fn, Node, NodePayload, NodeRef};
+use crate::ir::{Fn, Node, NodePayload, NodeRef, PackageMember};
 use std::collections::{HashMap, HashSet};
 
 /// Returns the list of operands for the provided node.
@@ -205,6 +205,127 @@ pub fn get_topological_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     topo_from_nodes(nodes)
 }
 
+/// Returns a list of nodes that are dead (unreachable from the function's
+/// return value by following operand edges).
+///
+/// The returned vector is sorted by node index ascending to ensure
+/// deterministic ordering.
+pub fn get_dead_nodes(f: &Fn) -> Vec<NodeRef> {
+    let n = f.nodes.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Mark nodes reachable from the return node via operands.
+    let mut live: Vec<bool> = vec![false; n];
+    assert!(
+        f.ret_node_ref.is_some(),
+        "get_dead_nodes: function has no return node"
+    );
+    let ret = f.ret_node_ref.unwrap();
+    let mut stack: Vec<NodeRef> = vec![ret];
+    while let Some(nr) = stack.pop() {
+        if live[nr.index] {
+            continue;
+        }
+        live[nr.index] = true;
+        let node = f.get_node(nr);
+        for dep in operands(&node.payload) {
+            if !live[dep.index] {
+                stack.push(dep);
+            }
+        }
+    }
+
+    // Dead nodes are those never marked live.
+    let mut dead: Vec<NodeRef> = Vec::new();
+    for i in 0..n {
+        if !live[i] {
+            dead.push(NodeRef { index: i });
+        }
+    }
+    dead
+}
+
+/// Returns a new function with dead nodes (unreachable from the return value)
+/// removed and all remaining node indices compacted. Operand references are
+/// remapped to the new indices. GetParam nodes are preserved even if they would
+/// otherwise be considered dead, to satisfy validation rules requiring a
+/// GetParam for each declared parameter.
+pub fn remove_dead_nodes(f: &Fn) -> Fn {
+    let n = f.nodes.len();
+    assert!(n > 0, "remove_dead_nodes: function has no nodes");
+    assert!(
+        f.ret_node_ref.is_some(),
+        "remove_dead_nodes: function has no return node"
+    );
+
+    // Compute liveness from the return.
+    let mut live: Vec<bool> = vec![false; n];
+    let mut stack: Vec<NodeRef> = vec![f.ret_node_ref.unwrap()];
+    while let Some(nr) = stack.pop() {
+        if live[nr.index] {
+            continue;
+        }
+        live[nr.index] = true;
+        let node = f.get_node(nr);
+        for dep in operands(&node.payload) {
+            if !live[dep.index] {
+                stack.push(dep);
+            }
+        }
+    }
+    // Always keep GetParam nodes to satisfy validation rules.
+    for (i, node) in f.nodes.iter().enumerate() {
+        if matches!(node.payload, NodePayload::GetParam(_)) {
+            live[i] = true;
+        }
+    }
+
+    // Build mapping old index -> new index for live nodes.
+    let mut mapping: Vec<Option<usize>> = vec![None; n];
+    let mut next: usize = 0;
+    for i in 0..n {
+        if live[i] {
+            mapping[i] = Some(next);
+            next += 1;
+        }
+    }
+
+    // Remap payloads using the mapping. Only live nodes are copied.
+    let mut new_nodes: Vec<Node> = Vec::with_capacity(next);
+    for (i, node) in f.nodes.iter().enumerate() {
+        if !live[i] {
+            continue;
+        }
+        let remapped_payload = remap_payload_with(&node.payload, |(_, nr): (usize, NodeRef)| {
+            let ni = mapping[nr.index].expect("live node must not reference a dead operand");
+            NodeRef { index: ni }
+        });
+        new_nodes.push(Node {
+            text_id: node.text_id,
+            name: node.name.clone(),
+            ty: node.ty.clone(),
+            payload: remapped_payload,
+            pos: node.pos.clone(),
+        });
+    }
+
+    // Remap return node.
+    let ret_old = f.ret_node_ref.unwrap().index;
+    let ret_new = mapping[ret_old].expect("return node must be live");
+
+    Fn {
+        name: f.name.clone(),
+        params: f.params.clone(),
+        ret_ty: f.ret_ty.clone(),
+        nodes: new_nodes,
+        ret_node_ref: Some(NodeRef { index: ret_new }),
+        outer_attrs: f.outer_attrs.clone(),
+        inner_attrs: f.inner_attrs.clone(),
+    }
+}
+
 /// Computes the immediate users of each node in the function.
 ///
 /// Returns a mapping from each `NodeRef` to the set of `NodeRef`s that
@@ -234,26 +355,39 @@ pub fn compute_users(f: &Fn) -> HashMap<NodeRef, HashSet<NodeRef>> {
 
 pub fn remap_payload_with<FMap>(payload: &NodePayload, mut map: FMap) -> NodePayload
 where
-    FMap: FnMut(NodeRef) -> NodeRef,
+    // Map function takes the operand slot and the existing operand and returns the new operand.
+    FMap: FnMut((usize, NodeRef)) -> NodeRef,
 {
     match payload {
         NodePayload::Nil => NodePayload::Nil,
         NodePayload::GetParam(p) => NodePayload::GetParam(*p),
-        NodePayload::Tuple(elems) => NodePayload::Tuple(elems.iter().map(|r| map(*r)).collect()),
-        NodePayload::Array(elems) => NodePayload::Array(elems.iter().map(|r| map(*r)).collect()),
+        NodePayload::Tuple(elems) => NodePayload::Tuple(
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
+        NodePayload::Array(elems) => NodePayload::Array(
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
         NodePayload::TupleIndex { tuple, index } => NodePayload::TupleIndex {
-            tuple: map(*tuple),
+            tuple: map((0, *tuple)),
             index: *index,
         },
-        NodePayload::Binop(op, a, b) => NodePayload::Binop(*op, map(*a), map(*b)),
-        NodePayload::Unop(op, a) => NodePayload::Unop(*op, map(*a)),
+        NodePayload::Binop(op, a, b) => NodePayload::Binop(*op, map((0, *a)), map((1, *b))),
+        NodePayload::Unop(op, a) => NodePayload::Unop(*op, map((0, *a))),
         NodePayload::Literal(v) => NodePayload::Literal(v.clone()),
         NodePayload::SignExt { arg, new_bit_count } => NodePayload::SignExt {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             new_bit_count: *new_bit_count,
         },
         NodePayload::ZeroExt { arg, new_bit_count } => NodePayload::ZeroExt {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             new_bit_count: *new_bit_count,
         },
         NodePayload::ArrayUpdate {
@@ -262,9 +396,13 @@ where
             indices,
             assumed_in_bounds,
         } => NodePayload::ArrayUpdate {
-            array: map(*array),
-            value: map(*value),
-            indices: indices.iter().map(|r| map(*r)).collect(),
+            array: map((0, *array)),
+            value: map((1, *value)),
+            indices: indices
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 2, *r)))
+                .collect(),
             assumed_in_bounds: *assumed_in_bounds,
         },
         NodePayload::ArrayIndex {
@@ -272,8 +410,12 @@ where
             indices,
             assumed_in_bounds,
         } => NodePayload::ArrayIndex {
-            array: map(*array),
-            indices: indices.iter().map(|r| map(*r)).collect(),
+            array: map((0, *array)),
+            indices: indices
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
             assumed_in_bounds: *assumed_in_bounds,
         },
         NodePayload::ArraySlice {
@@ -281,17 +423,17 @@ where
             start,
             width,
         } => NodePayload::ArraySlice {
-            array: map(*array),
-            start: map(*start),
+            array: map((0, *array)),
+            start: map((1, *start)),
             width: *width,
         },
         NodePayload::DynamicBitSlice { arg, start, width } => NodePayload::DynamicBitSlice {
-            arg: map(*arg),
-            start: map(*start),
+            arg: map((0, *arg)),
+            start: map((1, *start)),
             width: *width,
         },
         NodePayload::BitSlice { arg, start, width } => NodePayload::BitSlice {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             start: *start,
             width: *width,
         },
@@ -300,9 +442,9 @@ where
             start,
             update_value,
         } => NodePayload::BitSliceUpdate {
-            arg: map(*arg),
-            start: map(*start),
-            update_value: map(*update_value),
+            arg: map((0, *arg)),
+            start: map((1, *start)),
+            update_value: map((2, *update_value)),
         },
         NodePayload::Assert {
             token,
@@ -310,8 +452,8 @@ where
             message,
             label,
         } => NodePayload::Assert {
-            token: map(*token),
-            activate: map(*activate),
+            token: map((0, *token)),
+            activate: map((1, *activate)),
             message: message.clone(),
             label: label.clone(),
         },
@@ -321,36 +463,61 @@ where
             format,
             operands,
         } => NodePayload::Trace {
-            token: map(*token),
-            activated: map(*activated),
+            token: map((0, *token)),
+            activated: map((1, *activated)),
             format: format.clone(),
-            operands: operands.iter().map(|r| map(*r)).collect(),
+            operands: operands
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 2, *r)))
+                .collect(),
         },
-        NodePayload::AfterAll(elems) => {
-            NodePayload::AfterAll(elems.iter().map(|r| map(*r)).collect())
-        }
-        NodePayload::Nary(op, elems) => {
-            NodePayload::Nary(*op, elems.iter().map(|r| map(*r)).collect())
-        }
+        NodePayload::AfterAll(elems) => NodePayload::AfterAll(
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
+        NodePayload::Nary(op, elems) => NodePayload::Nary(
+            *op,
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
         NodePayload::Invoke { to_apply, operands } => NodePayload::Invoke {
             to_apply: to_apply.clone(),
-            operands: operands.iter().map(|r| map(*r)).collect(),
+            operands: operands
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
         },
         NodePayload::PrioritySel {
             selector,
             cases,
             default,
         } => NodePayload::PrioritySel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
-            default: default.map(|d| map(d)),
+            selector: map((0, *selector)),
+            cases: cases
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
+            default: default.map(|d| map((cases.len() + 1, d))),
         },
         NodePayload::OneHotSel { selector, cases } => NodePayload::OneHotSel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
+            selector: map((0, *selector)),
+            cases: cases
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
         },
         NodePayload::OneHot { arg, lsb_prio } => NodePayload::OneHot {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             lsb_prio: *lsb_prio,
         },
         NodePayload::Sel {
@@ -358,19 +525,25 @@ where
             cases,
             default,
         } => NodePayload::Sel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
-            default: default.map(|d| map(d)),
+            selector: map((0, *selector)),
+            cases: cases
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
+            default: default.map(|d| map((cases.len() + 1, d))),
         },
         NodePayload::Cover { predicate, label } => NodePayload::Cover {
-            predicate: map(*predicate),
+            predicate: map((0, *predicate)),
             label: label.clone(),
         },
         NodePayload::Decode { arg, width } => NodePayload::Decode {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             width: *width,
         },
-        NodePayload::Encode { arg } => NodePayload::Encode { arg: map(*arg) },
+        NodePayload::Encode { arg } => NodePayload::Encode {
+            arg: map((0, *arg)),
+        },
         NodePayload::CountedFor {
             init,
             trip_count,
@@ -378,11 +551,15 @@ where
             body,
             invariant_args,
         } => NodePayload::CountedFor {
-            init: map(*init),
+            init: map((0, *init)),
             trip_count: *trip_count,
             stride: *stride,
             body: body.clone(),
-            invariant_args: invariant_args.iter().map(|r| map(*r)).collect(),
+            invariant_args: invariant_args
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
         },
     }
 }
@@ -537,6 +714,48 @@ mod tests {
         // And ret should be last in topo (since it depends on a3 only).
         assert_eq!(order.last().unwrap().index, f.nodes.len() - 1);
     }
+
+    #[test]
+    fn remove_dead_nodes_keeps_params_and_live_graph() {
+        let f = parse_fn(
+            r#"fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  a: bits[8] = param(name=a, id=1)
+  b: bits[8] = param(name=b, id=2)
+  add.10: bits[8] = add(a, a, id=10)
+  add.11: bits[8] = add(b, b, id=11)
+  ret identity.12: bits[8] = identity(add.10, id=12)
+}
+"#,
+        );
+        let dead = get_dead_nodes(&f);
+        assert!(
+            dead.iter().any(|nr| {
+                let n = &f.nodes[nr.index];
+                matches!(n.payload, crate::ir::NodePayload::Binop(_, _, _)) && n.text_id == 11
+            }),
+            "expected add.11 to be dead"
+        );
+        let g = remove_dead_nodes(&f);
+        // Validate function still has GetParam for both a and b (even if b was dead)
+        let mut seen_params = 0usize;
+        for node in g.nodes.iter() {
+            if matches!(node.payload, crate::ir::NodePayload::GetParam(_)) {
+                seen_params += 1;
+            }
+        }
+        assert_eq!(
+            seen_params, 2,
+            "expected both GetParam nodes to be preserved"
+        );
+        // Ensure return remains and only live path nodes are present besides params.
+        assert!(g.ret_node_ref.is_some());
+        // Ensure no node references are out of bounds post-remap.
+        for i in 0..g.nodes.len() {
+            for dep in operands(&g.nodes[i].payload) {
+                assert!(dep.index < g.nodes.len());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -544,8 +763,8 @@ mod remap_tests {
     use super::*;
     use crate::ir::{NodePayload, NodeRef};
 
-    fn add(delta: usize) -> impl FnMut(NodeRef) -> NodeRef {
-        move |nr: NodeRef| NodeRef {
+    fn add(delta: usize) -> impl FnMut((usize, NodeRef)) -> NodeRef {
+        move |(_i, nr): (usize, NodeRef)| NodeRef {
             index: nr.index + delta,
         }
     }
@@ -799,5 +1018,51 @@ mod users_tests {
         assert!(users.get(&b).unwrap().contains(&and));
         assert!(users.get(&and).unwrap().contains(&ret));
         assert!(users.get(&ret).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dead_nodes_unreachable_literal() {
+        let f = parse_fn(
+            r#"fn f() -> bits[1] {
+  u: bits[1] = literal(value=0, id=1)
+  a: bits[1] = literal(value=1, id=2)
+  b: bits[1] = literal(value=0, id=3)
+  and.4: bits[1] = and(a, b, id=4)
+  ret identity.5: bits[1] = identity(and.4, id=5)
+}"#,
+        );
+
+        // Identify the unreachable literal node 'u' as the literal that is not
+        // an operand of the 'and' node.
+        let mut a_ref: Option<NodeRef> = None;
+        let mut b_ref: Option<NodeRef> = None;
+        let mut and_ref: Option<NodeRef> = None;
+        for (i, node) in f.nodes.iter().enumerate() {
+            if let NodePayload::Nary(NaryOp::And, elems) = &node.payload {
+                assert_eq!(elems.len(), 2);
+                and_ref = Some(NodeRef { index: i });
+                a_ref = Some(elems[0]);
+                b_ref = Some(elems[1]);
+            }
+        }
+        let a = a_ref.expect("expected lhs operand");
+        let b = b_ref.expect("expected rhs operand");
+
+        let mut u_ref: Option<NodeRef> = None;
+        for (i, node) in f.nodes.iter().enumerate() {
+            if let NodePayload::Literal(_) = &node.payload {
+                let nr = NodeRef { index: i };
+                if nr != a && nr != b {
+                    u_ref = Some(nr);
+                }
+            }
+        }
+        let u = u_ref.expect("expected unreachable literal");
+
+        let dead = get_dead_nodes(&f);
+        assert!(dead.contains(&u), "unreachable literal should be dead");
+        assert!(!dead.contains(&a));
+        assert!(!dead.contains(&b));
+        assert!(!dead.contains(&and_ref.unwrap()));
     }
 }

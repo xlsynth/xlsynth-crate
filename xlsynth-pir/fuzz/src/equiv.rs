@@ -8,10 +8,16 @@
 
 use std::collections::{HashMap, HashSet};
 
+<<<<<<< HEAD
 use xlsynth_pir::dce::get_dead_nodes;
 use xlsynth_pir::ir::Fn;
 use xlsynth_pir::ir::NodeRef;
 use xlsynth_pir::ir_utils::{get_topological, operands};
+=======
+use xlsynth_pir::ir::Fn;
+use xlsynth_pir::ir::NodeRef;
+use xlsynth_pir::ir_utils::{get_dead_nodes, get_topological, operands};
+>>>>>>> 5cee27d (Add a greedy ECO computation algorithm.)
 use xlsynth_pir::node_hashing::{
     BwdHash, FwdHash, compute_node_backward_structural_hash, compute_node_structural_hash,
 };

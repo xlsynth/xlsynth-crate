@@ -98,7 +98,7 @@ pub fn remove_dead_nodes(f: &Fn) -> Fn {
         if !live[i] {
             continue;
         }
-        let remapped_payload = remap_payload_with(&node.payload, |nr: NodeRef| {
+        let remapped_payload = remap_payload_with(&node.payload, |(_, nr): (usize, NodeRef)| {
             let ni = mapping[nr.index].expect("live node must not reference a dead operand");
             NodeRef { index: ni }
         });
