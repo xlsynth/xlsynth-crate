@@ -3,6 +3,7 @@
 //! Helpers for computing structural hashes of XLS IR nodes.
 
 use crate::ir::{self, Fn, NodePayload, NodeRef, ParamId, Type};
+use crate::ir_utils::{get_topological, operands};
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
 pub struct FwdHash(pub blake3::Hash);
@@ -168,7 +169,7 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
     }
 }
 
-pub(crate) fn compute_node_structural_hash(
+pub fn compute_node_structural_hash(
     f: &Fn,
     node_ref: NodeRef,
     child_hashes: &[FwdHash],
@@ -184,7 +185,7 @@ pub(crate) fn compute_node_structural_hash(
     FwdHash(hasher.finalize())
 }
 
-pub(crate) fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> FwdHash {
+pub fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> FwdHash {
     // Hash operator tag + type + payload attributes only; ignore children.
     let node = f.get_node(node_ref);
     let mut hasher = blake3::Hasher::new();
@@ -198,7 +199,7 @@ pub(crate) fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> F
 /// structural hash with its users' backward hashes and the operand indices
 /// at which this node appears. The user pairs are sorted by (hash bytes,
 /// operand index) to produce a stable characterization.
-pub(crate) fn compute_node_backward_structural_hash(
+pub fn compute_node_backward_structural_hash(
     f: &Fn,
     node_ref: NodeRef,
     user_pairs: &[(BwdHash, usize)],
@@ -221,4 +222,117 @@ pub(crate) fn compute_node_backward_structural_hash(
         hasher.update(&(u64::try_from(idx).unwrap_or(0)).to_le_bytes());
     }
     BwdHash(hasher.finalize())
+}
+
+/// Returns true if two functions are structurally isomorphic between the
+/// parameters and the return node. That is, the functions have the same
+/// signature and the return value is equivalent in the CSE (common
+/// subexpression elimination) sense.
+pub fn functions_structurally_equivalent(lhs: &Fn, rhs: &Fn) -> bool {
+    if lhs.get_type() != rhs.get_type() {
+        return false;
+    }
+    if lhs.params.len() != rhs.params.len() {
+        return false;
+    }
+    if lhs.ret_node_ref.is_none() || rhs.ret_node_ref.is_none() {
+        return false;
+    }
+
+    fn compute_forward_hashes(f: &Fn) -> Vec<FwdHash> {
+        let n = f.nodes.len();
+        if n == 0 {
+            return vec![];
+        }
+        let order = get_topological(f);
+        let mut out: Vec<Option<FwdHash>> = vec![None; n];
+        for nr in order {
+            let deps = operands(&f.get_node(nr).payload);
+            let child_hashes: Vec<FwdHash> = deps
+                .into_iter()
+                .map(|c| out[c.index].expect("child hash must be computed first"))
+                .collect();
+            let h = compute_node_structural_hash(f, nr, &child_hashes);
+            out[nr.index] = Some(h);
+        }
+        out.into_iter()
+            .map(|o| o.expect("hash must be computed for all nodes"))
+            .collect()
+    }
+
+    let lhs_fwd = compute_forward_hashes(lhs);
+    let rhs_fwd = compute_forward_hashes(rhs);
+    lhs_fwd[lhs.ret_node_ref.unwrap().index] == rhs_fwd[rhs.ret_node_ref.unwrap().index]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir_parser::Parser;
+
+    fn parse_top_fn(ir_pkg_text: &str) -> Fn {
+        let mut p = Parser::new(ir_pkg_text);
+        let pkg = p.parse_and_validate_package().unwrap();
+        pkg.get_top().unwrap().clone()
+    }
+
+    #[test]
+    fn isomorphic_functions_return_true() {
+        let lhs = parse_top_fn(
+            r#"package p
+            top fn f(a: bits[8]) -> bits[8] {
+              ret add.3: bits[8] = add(a, a)
+            }
+            "#,
+        );
+        let rhs = parse_top_fn(
+            r#"package q
+            top fn g(a: bits[8]) -> bits[8] {
+              ret add.3: bits[8] = add(a, a)
+            }
+            "#,
+        );
+        assert!(functions_structurally_equivalent(&lhs, &rhs));
+    }
+
+    #[test]
+    fn extra_parameter_can_still_be_equivalent() {
+        let lhs = parse_top_fn(
+            r#"package p
+            top fn f(a: bits[8]) -> bits[8] {
+              ret identity.2: bits[8] = identity(a)
+            }
+            "#,
+        );
+        let rhs = parse_top_fn(
+            r#"package q
+            top fn g(a: bits[8], b: bits[8]) -> bits[8] {
+              ret identity.3: bits[8] = identity(a)
+            }
+            "#,
+        );
+        assert!(functions_structurally_equivalent(&lhs, &rhs));
+    }
+
+    #[test]
+    fn different_graphs_but_dead_uses_ignored_are_equivalent() {
+        let lhs = parse_top_fn(
+            r#"package p
+            top fn f(a: bits[8]) -> bits[8] {
+              ret identity.2: bits[8] = identity(a)
+            }
+            "#,
+        );
+        let rhs = parse_top_fn(
+            r#"package q
+            top fn g(a: bits[8]) -> bits[8] {
+              d: bits[8] = literal(value=7, id=2)
+              u: bits[8] = add(a, d, id=3)
+              ret x: bits[8] = identity(a, id=4)
+              q: bits[8] = identity(x, id=5)
+            }
+            "#,
+        );
+        assert!(functions_structurally_equivalent(&lhs, &rhs));
+    }
 }
