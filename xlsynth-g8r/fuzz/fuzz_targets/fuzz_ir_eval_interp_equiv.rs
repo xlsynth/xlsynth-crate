@@ -3,13 +3,13 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_pir::ir_eval::{eval_fn, FnEvalResult};
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzBinop, FuzzOp, FuzzSampleWithArgs, FuzzUnop};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzSampleWithArgs, FuzzUnop, generate_ir_fn};
 use xlsynth_pir::{ir, ir_parser};
 
 fuzz_target!(|with: FuzzSampleWithArgs| {
     // Skip degenerate base cases as in other targets.
-    if with.sample.ops.is_empty() || with.sample.input_bits == 0 {
+    if with.sample.ops.is_empty() {
         // Early return on degenerate generator inputs (see FUZZ.md for target policy).
         return;
     }
@@ -52,7 +52,7 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
         })
         .collect();
     let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").expect("IrPackage::new should not fail");
-    let ir_fn = match generate_ir_fn(with.sample.input_bits, filtered_ops, &mut pkg, None) {
+    let ir_fn = match generate_ir_fn(filtered_ops, &mut pkg, None) {
         Ok(f) => f,
         Err(_) => {
             // Generator can yield edge cases that are not useful here; skip.

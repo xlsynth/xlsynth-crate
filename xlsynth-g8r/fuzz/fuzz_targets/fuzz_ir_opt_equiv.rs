@@ -3,7 +3,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
@@ -62,7 +62,7 @@ fuzz_target!(|sample: FuzzSample| {
         panic!("XLSYNTH_TOOLS environment variable must be set for fuzzing.");
     }
 
-    if sample.ops.is_empty() || sample.input_bits == 0 {
+    if sample.ops.is_empty() {
         return;
     }
 
@@ -70,7 +70,7 @@ fuzz_target!(|sample: FuzzSample| {
 
     // Build an XLS IR package from the fuzz sample
     let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").unwrap();
-    if let Err(e) = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg, None) {
+    if let Err(e) = generate_ir_fn(sample.ops.clone(), &mut pkg, None) {
         log::info!("IR generation failed: {}", e);
         return;
     }
