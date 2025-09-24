@@ -27,7 +27,7 @@ Main failure modes surfaced:
 - Divergence in acceptance (one verifier accepts while the other rejects).
 - Divergence in coarse error category (e.g., PIR flags NodeTypeMismatch while xlsynth flags a different class).
 
----
+______________________________________________________________________
 
 # Graph Edit Distance (GED) Fuzz Target
 
