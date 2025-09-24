@@ -70,15 +70,19 @@ def get_latest_release(max_attempts):
     return latest_version
 
 
-def parse_semver_tag(tag: str) -> Tuple[int, int, int]:
+def parse_xlsynth_release_tag(tag: str) -> Tuple[int, int, int, int]:
     """
-    Parses a version tag like 'v0.0.219' into a tuple (0, 0, 219).
+    Parses a version tag like 'v0.0.219' or 'v0.0.219-1' into a tuple (0, 0, 219, 0) or (0, 0, 219, 1).
     """
     assert tag.startswith("v"), f"expected tag to start with 'v', got: {tag}"
-    parts = tag[1:].split(".")
-    assert len(parts) == 3, f"expected semantic version 'vX.Y.Z', got: {tag}"
-    major, minor, patch = parts
-    return (int(major), int(minor), int(patch))
+    main_and_patch2 = tag[1:].split("-")
+    main_parts = main_and_patch2[0].split(".")
+    assert (
+        len(main_parts) == 3
+    ), f"expected semantic version 'vX.Y.Z' or 'vX.Y.Z-N', got: {tag}"
+    major, minor, patch = main_parts
+    patch2 = int(main_and_patch2[1]) if len(main_and_patch2) > 1 else 0
+    return (int(major), int(minor), int(patch), patch2)
 
 
 def check_sha256sum(artifact_path: str, sha256_path: str) -> bool:
@@ -243,7 +247,7 @@ def main():
     output_dir = options.output_dir if options.output_dir else version
 
     base_url = f"https://github.com/xlsynth/xlsynth/releases/download/{version}"
-    ver_tuple = parse_semver_tag(version)
+    ver_tuple = parse_xlsynth_release_tag(version)
 
     # Tuples of `(artifact_to_download, is_binary)` -- if it's noted to be a binary it is marked
     # as executable.
