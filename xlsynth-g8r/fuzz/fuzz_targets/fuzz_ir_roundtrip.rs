@@ -2,13 +2,14 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::structural_similarity::structurally_equivalent_ir;
 use xlsynth_pir::{ir, ir_parser};
 
 fuzz_target!(|sample: FuzzSample| {
+    log::debug!("Testing FuzzSample IR roundtrip");
     // Skip degenerate samples early.
-    if sample.ops.is_empty() || sample.input_bits == 0 {
+    if sample.ops.is_empty() {
         // Degenerate generator inputs (no ops or zero-width inputs) are not
         // interesting for this target and can arise frequently. We intentionally
         // skip rather than crash to avoid biasing the corpus toward trivial cases.
@@ -20,12 +21,13 @@ fuzz_target!(|sample: FuzzSample| {
     // 1) Generate XLS IR via C++ bindings into a package
     let mut pkg = xlsynth::IrPackage::new("fuzz_pkg")
         .expect("IrPackage::new should not fail; treat as infra error");
-    if let Err(_) = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut pkg, None) {
+    if let Err(_) = generate_ir_fn(sample.ops.clone(), &mut pkg, None) {
         // The generator can deliberately produce edge-case or temporarily unsupported
         // constructs; those are not failures of this roundtrip target. Skip to let
         // the generator evolve without turning such cases into crashes here.
         return;
     }
+    log::debug!("FuzzSample generated valid IR");
 
     // 2) Serialize to text and parse back via our Rust parser
     let pkg_text = pkg.to_string();

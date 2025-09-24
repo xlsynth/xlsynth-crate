@@ -3,7 +3,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::ir2gate::gatify;
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
 
 fuzz_target!(|sample: FuzzSample| {
@@ -11,8 +11,8 @@ fuzz_target!(|sample: FuzzSample| {
     let _ = std::env::var("XLSYNTH_TOOLS")
         .expect("XLSYNTH_TOOLS environment variable must be set for fuzzing.");
 
-    // Skip empty operation lists or empty input bits
-    if sample.ops.is_empty() || sample.input_bits == 0 {
+    // Skip empty operation lists
+    if sample.ops.is_empty() {
         return;
     }
 
@@ -20,7 +20,7 @@ fuzz_target!(|sample: FuzzSample| {
 
     // Generate IR function from fuzz input
     let mut package = xlsynth::IrPackage::new("fuzz_test").unwrap();
-    if let Err(e) = generate_ir_fn(sample.input_bits, sample.ops, &mut package, None) {
+    if let Err(e) = generate_ir_fn(sample.ops, &mut package, None) {
         log::info!("Error generating IR function: {}", e);
         return;
     }

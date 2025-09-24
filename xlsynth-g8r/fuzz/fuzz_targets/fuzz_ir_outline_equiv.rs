@@ -15,8 +15,8 @@ use xlsynth_prover::prove_equiv::prove_ir_fn_equiv;
 use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn as EqIrFn};
 
 use xlsynth_pir::ir::{Fn as IrFn, NodePayload, NodeRef, PackageMember};
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
-use xlsynth_pir::ir_outline::{compute_default_ordering, outline_with_ordering, OutlineOrdering};
+use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
+use xlsynth_pir::ir_outline::{OutlineOrdering, compute_default_ordering, outline_with_ordering};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::operands;
 
@@ -135,18 +135,22 @@ fuzz_target!(|sample: FuzzSample| {
     let _ = env_logger::builder().is_test(true).try_init();
 
     // Degenerate fuzz samples are not informative for outlining, skip.
-    if sample.ops.is_empty() || sample.input_bits == 0 {
-        return; // Early-return: degenerate input (no ops or zero-width inputs)
+    if sample.ops.is_empty() {
+        // Early-return: degenerate input (no ops or zero-width inputs)
+        return;
     }
 
     // Build an XLS IR package via C++ bindings
     let mut cpp_pkg = match xlsynth::IrPackage::new("outline_fuzz_pkg") {
         Ok(p) => p,
-        Err(_) => return, // Early-return: infra issue constructing package
+        Err(_) => {
+            // Early-return: infra issue constructing package
+            return;
+        }
     };
-    if let Err(_e) = generate_ir_fn(sample.input_bits, sample.ops.clone(), &mut cpp_pkg, None) {
-        return; // Early-return: generator could not build function with given
-                // ops
+    if let Err(_e) = generate_ir_fn(sample.ops.clone(), &mut cpp_pkg, None) {
+        // Early-return: generator could not build function with given ops
+        return;
     }
 
     // Parse into Rust IR (g8r)
@@ -169,7 +173,8 @@ fuzz_target!(|sample: FuzzSample| {
     let orig_fn = orig_pkg.get_top().expect("missing top function").clone();
     let n = orig_fn.nodes.len();
     if n < 2 {
-        return; // Early-return: not enough nodes to outline a nontrivial region
+        // Early-return: not enough nodes to outline a nontrivial region
+        return;
     }
 
     // Derive deterministic seed and target size from the IR text to avoid external
@@ -188,8 +193,8 @@ fuzz_target!(|sample: FuzzSample| {
         return;
     }
     if !has_boundary_output(&orig_fn, &region) {
-        return; // Early-return: selected region produces no boundary outputs
-                // (uninformative)
+        // Early-return: selected region produces no boundary outputs (uninformative)
+        return;
     }
 
     // Convert region into NodeRef set

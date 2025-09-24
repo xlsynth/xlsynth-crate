@@ -8,6 +8,25 @@ use rand::Rng;
 use std::collections::BTreeMap;
 use xlsynth::{BValue, FnBuilder, IrFunction, IrType, XlsynthError};
 
+const MAX_OPS_PER_SAMPLE: u64 = 20;
+const MAX_ELEMENTS_PER_TUPLE: u64 = 8;
+const MAX_ELEMENTS_PER_ARRAY: u64 = 8;
+const MAX_PARAMS_PER_SAMPLE: u64 = 4;
+// Maximum number of recursive elements in a type.
+const MAX_TOTAL_ELEMENTS_PER_TYPE: u64 = 64;
+
+// Return the number of leaf elements in the type.
+pub fn count_type_leaves(ty: &InternalType) -> usize {
+    match ty {
+        InternalType::Bits(_) => 1,
+        InternalType::Tuple(ts) => ts.iter().map(|t| count_type_leaves(t)).sum(),
+        InternalType::Array(a) => a
+            .element_count
+            .saturating_mul(count_type_leaves(&a.element_type)),
+        InternalType::Token => 0,
+    }
+}
+
 #[derive(Debug, Arbitrary, Clone)]
 pub enum FuzzUnop {
     // bitwise not (one's complement negation)
@@ -71,6 +90,9 @@ pub struct FuzzOperand {
 
 #[derive(Debug, Arbitrary, Clone)]
 pub enum FuzzOp {
+    Param {
+        bits: u8,
+    },
     Literal {
         bits: u8,
         value: u64,
@@ -148,6 +170,7 @@ pub enum FuzzOp {
 
 #[derive(Debug, Clone, Arbitrary)]
 pub enum FuzzOpFlat {
+    Param,
     Literal,
     Unop,
     Binop,
@@ -174,6 +197,7 @@ pub enum FuzzOpFlat {
 #[allow(dead_code)]
 fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
     match op {
+        FuzzOp::Param { .. } => FuzzOpFlat::Param,
         FuzzOp::Literal { .. } => FuzzOpFlat::Literal,
         FuzzOp::Unop { .. } => FuzzOpFlat::Unop,
         FuzzOp::Binop { .. } => FuzzOpFlat::Binop,
@@ -356,34 +380,27 @@ pub fn build_return_value_with_type(
 /// Builds an xlsynth function by enqueueing the operations given by `ops` into
 /// a `FnBuilder` and returning the built result.
 pub fn generate_ir_fn(
-    input_bits: u8,
     ops: Vec<FuzzOp>,
     package: &mut xlsynth::IrPackage,
     target_return_type: Option<&InternalType>,
 ) -> Result<IrFunction, XlsynthError> {
-    assert!(input_bits > 0, "input_bits must be greater than 0");
-
     let mut fn_builder = FnBuilder::new(package, "fuzz_test", true);
 
-    // Add a single input parameter
-    let input_type: IrType = package.get_bits_type(input_bits as u64);
-    let input_node = fn_builder.param("input", &input_type);
-    let input_type_str = input_type.to_string();
-    let mut parser = ir_parser::Parser::new(&input_type_str);
-    let internal_input_type = parser.parse_type().expect("Failed to parse input type");
-
     // Track all available nodes that can be used as operands
-    let mut available_nodes: Vec<BValue> = vec![input_node.clone()];
+    let mut param_count: usize = 0;
+    let mut available_nodes: Vec<BValue> = Vec::new();
     let mut type_map: BTreeMap<InternalType, Vec<BValue>> = BTreeMap::new();
-    type_map
-        .entry(internal_input_type.clone())
-        .or_default()
-        .push(input_node.clone());
 
     // Process each operation
     for op in ops {
-        fn_builder.last_value()?;
         let node = match op {
+            FuzzOp::Param { bits } => {
+                assert!(bits > 0, "param bits must be > 0");
+                let ty: IrType = package.get_bits_type(bits as u64);
+                let name = format!("p{}", param_count);
+                param_count += 1;
+                fn_builder.param(&name, &ty)
+            }
             FuzzOp::Literal { bits, value } => {
                 assert!(bits > 0, "literal op has no bits");
                 let ir_value = xlsynth::IrValue::make_ubits(bits as usize, value)?;
@@ -627,276 +644,565 @@ pub fn generate_ir_fn(
 
 #[derive(Debug, Clone)]
 pub struct FuzzSample {
-    pub input_bits: u8,
     pub ops: Vec<FuzzOp>,
+    /// Parallel to nodes: index 0 is the primary input, then one entry per op.
+    pub op_types: Vec<InternalType>,
+}
+
+/// Picks and returns a Bits type from the given list.  Returns the index of the
+/// chosen type and the type itself.
+fn pick_bits_type(
+    u: &mut arbitrary::Unstructured,
+    types: &[InternalType],
+) -> arbitrary::Result<(usize, InternalType)> {
+    let candidates: Vec<usize> = types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| match t {
+            InternalType::Bits(_) => Some(i),
+            _ => None,
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    let which = u.int_in_range(0..=((candidates.len() as u64) - 1))? as usize;
+    let idx = candidates[which];
+    Ok((idx, types[idx].clone()))
+}
+
+/// Picks and returns an Array type from the given list.  Returns the index of
+/// the chosen type and the type itself.
+fn pick_array_type(
+    u: &mut arbitrary::Unstructured,
+    types: &[InternalType],
+) -> arbitrary::Result<(usize, InternalType)> {
+    let candidates: Vec<usize> = types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| match t {
+            InternalType::Array(_) => Some(i),
+            _ => None,
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    let which = u.int_in_range(0..=((candidates.len() as u64) - 1))? as usize;
+    let idx = candidates[which];
+    Ok((idx, types[idx].clone()))
+}
+
+/// Picks and returns a Tuple type from the given list.  Returns the index of
+/// the chosen type and the type itself.
+fn pick_tuple_type(
+    u: &mut arbitrary::Unstructured,
+    types: &[InternalType],
+) -> arbitrary::Result<(usize, InternalType)> {
+    let candidates: Vec<usize> = types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| match t {
+            InternalType::Tuple(_) => Some(i),
+            _ => None,
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    let which = u.int_in_range(0..=((candidates.len() as u64) - 1))? as usize;
+    let idx = candidates[which];
+    Ok((idx, types[idx].clone()))
+}
+
+/// Returns indices of `n` nodes that all have identical type.
+fn pick_same_types(
+    u: &mut arbitrary::Unstructured,
+    types: &[InternalType],
+    n: usize,
+) -> arbitrary::Result<(Vec<usize>, InternalType)> {
+    if types.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    // Pick a random pivot node; use its type as the target type.
+    let pivot = u.int_in_range(0..=((types.len() as u64) - 1))? as usize;
+    let target_ty = &types[pivot];
+    // Gather all indices that share the same type as the pivot.
+    let candidates: Vec<usize> = types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| if t == target_ty { Some(i) } else { None })
+        .collect();
+    if candidates.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    // Pick n indices with replacement from candidates.
+    let mut out: Vec<usize> = Vec::with_capacity(n);
+    for _ in 0..n {
+        let which = u.int_in_range(0..=((candidates.len() as u64) - 1))? as usize;
+        out.push(candidates[which]);
+    }
+    Ok((out, target_ty.clone()))
+}
+
+/// Returns indices of `n` nodes that all have identical Bits type.
+fn pick_same_bits_types(
+    u: &mut arbitrary::Unstructured,
+    types: &[InternalType],
+    n: usize,
+) -> arbitrary::Result<(Vec<usize>, InternalType)> {
+    // Restrict pivot selection to Bits-typed nodes only.
+    let bit_indices: Vec<usize> = types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| match t {
+            InternalType::Bits(_) => Some(i),
+            _ => None,
+        })
+        .collect();
+    if bit_indices.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    let pivot_in_bits = u.int_in_range(0..=((bit_indices.len() as u64) - 1))? as usize;
+    let pivot = bit_indices[pivot_in_bits];
+    let target_ty = &types[pivot];
+    // Gather all indices that share the same bits type as the pivot.
+    let candidates: Vec<usize> = types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| if t == target_ty { Some(i) } else { None })
+        .collect();
+    if candidates.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    // Pick n indices with replacement from candidates.
+    let mut out: Vec<usize> = Vec::with_capacity(n);
+    for _ in 0..n {
+        let which = u.int_in_range(0..=((candidates.len() as u64) - 1))? as usize;
+        out.push(candidates[which]);
+    }
+    Ok((out, target_ty.clone()))
+}
+
+fn generate_fuzz_op(
+    u: &mut arbitrary::Unstructured,
+    node_types: &[InternalType],
+) -> arbitrary::Result<(FuzzOp, InternalType)> {
+    log::trace!("Generating fuzz op");
+    // Randomly decide which kind of operation to generate (excluding Param). Params
+    // are generated explicitly at FuzzSample creation time.
+    let op_type = {
+        let mut attempts: u8 = 0;
+        loop {
+            attempts = attempts.saturating_add(1);
+            if attempts > 10 {
+                return Err(arbitrary::Error::IncorrectFormat);
+            }
+            let t = u.arbitrary::<FuzzOpFlat>()?;
+            if let FuzzOpFlat::Param = t {
+                continue;
+            }
+            break t;
+        }
+    };
+    let (op, out_ty) = match op_type {
+        FuzzOpFlat::Param => unreachable!("Param is generated only as explicit ops at start"),
+        FuzzOpFlat::Literal => {
+            // Literal op: generate a literal byte value.
+            let literal_bits = u.int_in_range(1..=8)?;
+            let value = u.int_in_range(0..=((1 << literal_bits) - 1))?;
+            (
+                FuzzOp::Literal {
+                    bits: literal_bits,
+                    value,
+                },
+                InternalType::Bits(literal_bits as usize),
+            )
+        }
+        FuzzOpFlat::Unop => {
+            let (idx, ty) = pick_bits_type(u, node_types)?;
+            let unop = u.arbitrary::<FuzzUnop>()?;
+            let operand_bits = match ty {
+                InternalType::Bits(w) => w,
+                _ => 1usize,
+            };
+            let out_bits = match unop {
+                FuzzUnop::OrReduce | FuzzUnop::AndReduce | FuzzUnop::XorReduce => 1usize,
+                FuzzUnop::Encode => operand_bits.next_power_of_two().trailing_zeros() as usize,
+                _ => operand_bits,
+            };
+            (FuzzOp::Unop(unop, idx), InternalType::Bits(out_bits))
+        }
+        FuzzOpFlat::Binop => {
+            let (pair, _sty) = pick_same_bits_types(u, node_types, 2)?;
+            let idx1 = pair[0];
+            let idx2 = pair[1];
+            let binop = u.arbitrary::<FuzzBinop>()?;
+            let b1 = match node_types.get(idx1) {
+                Some(InternalType::Bits(w)) => *w,
+                _ => 1usize,
+            };
+            let b2 = match node_types.get(idx2) {
+                Some(InternalType::Bits(w)) => *w,
+                _ => 1usize,
+            };
+            let out_bits = match binop {
+                FuzzBinop::Eq
+                | FuzzBinop::Ne
+                | FuzzBinop::Ugt
+                | FuzzBinop::Ule
+                | FuzzBinop::Ult
+                | FuzzBinop::Uge
+                | FuzzBinop::Sge
+                | FuzzBinop::Sgt
+                | FuzzBinop::Slt
+                | FuzzBinop::Sle => 1usize,
+                FuzzBinop::Concat => b1.saturating_add(b2),
+                FuzzBinop::Shrl | FuzzBinop::Shra | FuzzBinop::Shll => b1,
+                _ => b1.max(b2),
+            };
+            (
+                FuzzOp::Binop(binop, idx1, idx2),
+                InternalType::Bits(out_bits),
+            )
+        }
+        FuzzOpFlat::ZeroExt => {
+            let (index, _) = pick_bits_type(u, node_types)?;
+            let new_bit_count = u.int_in_range(1..=8)? as u64;
+            (
+                FuzzOp::ZeroExt {
+                    operand: FuzzOperand { index },
+                    new_bit_count,
+                },
+                InternalType::Bits(new_bit_count as usize),
+            )
+        }
+        FuzzOpFlat::SignExt => {
+            let (index, _) = pick_bits_type(u, node_types)?;
+            let new_bit_count = u.int_in_range(1..=8)? as u64;
+            (
+                FuzzOp::SignExt {
+                    operand: FuzzOperand { index },
+                    new_bit_count,
+                },
+                InternalType::Bits(new_bit_count as usize),
+            )
+        }
+        FuzzOpFlat::BitSlice => {
+            // Slice a random bits-typed operand using its own width.
+            let (index, ty) = pick_bits_type(u, node_types)?;
+            let op_bits: usize = match ty {
+                InternalType::Bits(w) => w,
+                _ => 1usize,
+            };
+            let start = if op_bits <= 1 {
+                0u64
+            } else {
+                u.int_in_range(0..=((op_bits as u64) - 1))? as u64
+            };
+            let max_width = (op_bits as u64).saturating_sub(start);
+            let width = u.int_in_range(1..=max_width)? as u64;
+            (
+                FuzzOp::BitSlice {
+                    operand: FuzzOperand { index },
+                    start,
+                    width,
+                },
+                InternalType::Bits(width as usize),
+            )
+        }
+        FuzzOpFlat::OneHot => {
+            let (index, ty) = pick_bits_type(u, node_types)?;
+            let lsb_prio = u.int_in_range(0..=1)? == 1;
+            let operand_bits = match ty {
+                InternalType::Bits(w) => w,
+                _ => 1usize,
+            };
+            (
+                FuzzOp::OneHot {
+                    arg: FuzzOperand { index },
+                    lsb_prio,
+                },
+                InternalType::Bits(operand_bits),
+            )
+        }
+        FuzzOpFlat::PrioritySel => {
+            let (index, _) = pick_bits_type(u, node_types)?;
+            let num_cases = u.int_in_range(1..=8)?;
+            let (same, shared_ty) = pick_same_types(u, node_types, num_cases as usize)?;
+            let cases: Vec<FuzzOperand> = same
+                .into_iter()
+                .map(|index| FuzzOperand { index })
+                .collect();
+            let last_case: FuzzOperand = cases.last().unwrap().clone();
+            (
+                FuzzOp::PrioritySel {
+                    selector: FuzzOperand { index },
+                    cases: cases.clone(),
+                    default: last_case.clone(),
+                },
+                shared_ty,
+            )
+        }
+        FuzzOpFlat::OneHotSel => {
+            let (index, _) = pick_bits_type(u, node_types)?;
+            let num_cases = u.int_in_range(1..=8)?;
+            let (same, shared_ty) = pick_same_types(u, node_types, num_cases as usize)?;
+            let cases: Vec<FuzzOperand> = same
+                .into_iter()
+                .map(|index| FuzzOperand { index })
+                .collect();
+            (
+                FuzzOp::OneHotSel {
+                    selector: FuzzOperand { index },
+                    cases: cases.clone(),
+                },
+                shared_ty,
+            )
+        }
+        FuzzOpFlat::Decode => {
+            let (index, _) = pick_bits_type(u, node_types)?;
+            let width = u.int_in_range(1..=8)? as u64;
+            (
+                FuzzOp::Decode {
+                    arg: FuzzOperand { index },
+                    width,
+                },
+                InternalType::Bits(width as usize),
+            )
+        }
+        FuzzOpFlat::ArrayIndex => {
+            let (index, aty) = pick_array_type(u, node_types)?;
+            let op = FuzzOp::ArrayIndex {
+                array: FuzzOperand { index },
+                index: FuzzOperand { index },
+            };
+            let out_ty = match aty {
+                InternalType::Array(arr) => (*arr.element_type).clone(),
+                _ => InternalType::Bits(1),
+            };
+            (op, out_ty)
+        }
+        FuzzOpFlat::Array => {
+            let num_elements = u.int_in_range(1..=MAX_ELEMENTS_PER_ARRAY)?;
+            let (same, shared_ty) = pick_same_types(u, node_types, num_elements as usize)?;
+            let elem_leaves: u64 = count_type_leaves(&shared_ty) as u64;
+            let allowed = if num_elements * elem_leaves > MAX_TOTAL_ELEMENTS_PER_TYPE {
+                MAX_TOTAL_ELEMENTS_PER_TYPE / elem_leaves
+            } else {
+                num_elements
+            };
+            let mut elements: Vec<FuzzOperand> = same
+                .into_iter()
+                .map(|index| FuzzOperand { index })
+                .collect();
+            if elements.len() > allowed as usize {
+                elements.truncate(allowed as usize);
+            }
+            (
+                FuzzOp::Array {
+                    elements: elements.clone(),
+                },
+                InternalType::Array(crate::ir::ArrayTypeData {
+                    element_type: Box::new(shared_ty),
+                    element_count: elements.len(),
+                }),
+            )
+        }
+        FuzzOpFlat::Tuple => {
+            if node_types.is_empty() {
+                // Explicitly generate an empty tuple when no operands exist.
+                (
+                    FuzzOp::Tuple {
+                        elements: Vec::new(),
+                    },
+                    InternalType::Tuple(Vec::new()),
+                )
+            } else {
+                let num_elements = u.int_in_range(1..=MAX_ELEMENTS_PER_TUPLE)?;
+                // For tuple, allow mixed types; select indices within available_nodes (with
+                // replacement).
+                let mut elements: Vec<FuzzOperand> = Vec::with_capacity(num_elements as usize);
+                let mut leaf_count: usize = 0;
+                for _ in 0..num_elements {
+                    let element_index =
+                        u.int_in_range(0..=((node_types.len() as u64) - 1)).unwrap() as usize;
+                    let element_leaf_count = count_type_leaves(&node_types[element_index]);
+                    if leaf_count + element_leaf_count > MAX_TOTAL_ELEMENTS_PER_TYPE as usize {
+                        break;
+                    }
+                    elements.push(FuzzOperand {
+                        index: element_index,
+                    });
+                    leaf_count += element_leaf_count;
+                }
+                if elements.is_empty() {
+                    return Ok((
+                        FuzzOp::Tuple {
+                            elements: Vec::new(),
+                        },
+                        InternalType::Tuple(Vec::new()),
+                    ));
+                }
+                let elem_types: Vec<Box<InternalType>> = elements
+                    .iter()
+                    .map(|e| Box::new(node_types[e.index].clone()))
+                    .collect();
+                (FuzzOp::Tuple { elements }, InternalType::Tuple(elem_types))
+            }
+        }
+        FuzzOpFlat::TupleIndex => {
+            // Choose only from nodes that are tuples so we can stay in-bounds.
+            let (tuple_idx, tty) = pick_tuple_type(u, node_types)?;
+            let tuple_len = match &tty {
+                InternalType::Tuple(elems) => elems.len(),
+                _ => unreachable!("chosen index must be tuple typed"),
+            };
+            if tuple_len == 0 {
+                return Err(arbitrary::Error::IncorrectFormat);
+            }
+            let index: usize = u.int_in_range(0..=((tuple_len - 1) as u64))? as usize;
+            let elem_ty = match &tty {
+                InternalType::Tuple(elems) => elems[index].as_ref().clone(),
+                _ => unreachable!("tuple_candidates built from tuples only"),
+            };
+            (
+                FuzzOp::TupleIndex {
+                    tuple: FuzzOperand { index: tuple_idx },
+                    index,
+                },
+                elem_ty,
+            )
+        }
+        FuzzOpFlat::UMul => {
+            let (pair, _ty) = pick_same_bits_types(u, node_types, 2)?;
+            let idx1 = pair[0];
+            let idx2 = pair[1];
+            let b1 = match node_types.get(idx1) {
+                Some(InternalType::Bits(w)) => *w,
+                _ => 1usize,
+            };
+            let b2 = match node_types.get(idx2) {
+                Some(InternalType::Bits(w)) => *w,
+                _ => 1usize,
+            };
+            (
+                FuzzOp::UMul {
+                    lhs: FuzzOperand { index: idx1 },
+                    rhs: FuzzOperand { index: idx2 },
+                },
+                InternalType::Bits(b1.max(b2)),
+            )
+        }
+        FuzzOpFlat::SMul => {
+            let (pair, _ty) = pick_same_bits_types(u, node_types, 2)?;
+            let idx1 = pair[0];
+            let idx2 = pair[1];
+            let b1 = match node_types.get(idx1) {
+                Some(InternalType::Bits(w)) => *w,
+                _ => 1usize,
+            };
+            let b2 = match node_types.get(idx2) {
+                Some(InternalType::Bits(w)) => *w,
+                _ => 1usize,
+            };
+            (
+                FuzzOp::SMul {
+                    lhs: FuzzOperand { index: idx1 },
+                    rhs: FuzzOperand { index: idx2 },
+                },
+                InternalType::Bits(b1.max(b2)),
+            )
+        }
+        FuzzOpFlat::Sel => {
+            let (index, _) = pick_bits_type(u, node_types)?;
+            let num_cases = u.int_in_range(1..=8)?;
+            let (same, shared_ty) = pick_same_types(u, node_types, num_cases as usize)?;
+            let cases: Vec<FuzzOperand> = same
+                .iter()
+                .copied()
+                .map(|index| FuzzOperand { index })
+                .collect();
+            let default = cases[0].index;
+            let out_ty = shared_ty;
+            (
+                FuzzOp::Sel {
+                    selector: FuzzOperand { index },
+                    cases,
+                    default: FuzzOperand { index: default },
+                },
+                out_ty,
+            )
+        }
+        FuzzOpFlat::DynamicBitSlice => {
+            let (arg, _) = pick_bits_type(u, node_types)?;
+            let (start, _) = pick_bits_type(u, node_types)?;
+            let width = u.int_in_range(1..=8)? as u64;
+            (
+                FuzzOp::DynamicBitSlice {
+                    arg: FuzzOperand { index: arg },
+                    start: FuzzOperand { index: start },
+                    width,
+                },
+                InternalType::Bits(width as usize),
+            )
+        }
+        FuzzOpFlat::BitSliceUpdate => {
+            let (pair, shared_ty) = pick_same_bits_types(u, node_types, 2)?;
+            let value_idx = pair[0];
+            let update_idx = pair[1];
+            let (start_idx, _) = pick_bits_type(u, node_types)?;
+            let out_ty = shared_ty;
+            (
+                FuzzOp::BitSliceUpdate {
+                    value: FuzzOperand { index: value_idx },
+                    start: FuzzOperand { index: start_idx },
+                    update: FuzzOperand { index: update_idx },
+                },
+                out_ty,
+            )
+        }
+    };
+    log::trace!("Generated fuzz op: {:?}", op);
+    if let InternalType::Bits(w) = out_ty {
+        // Zero-width types may cause downstream issues, so error out.
+        if w == 0 {
+            return Err(arbitrary::Error::IncorrectFormat);
+        }
+    }
+    Ok((op, out_ty))
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzSample {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let input_bits = u.int_in_range(1..=8)?;
+        log::debug!("Generating fuzz sample");
+        // Decide how many parameters and operations to generate.
+        let num_params = u.int_in_range(1..=MAX_PARAMS_PER_SAMPLE)? as usize;
         // Decide how many operations to generate.
-        let num_ops = u.int_in_range(0..=20)?;
+        let num_ops = u.int_in_range(0..=MAX_OPS_PER_SAMPLE)?;
         // We maintain a parallel vector that records, for each existing IR node,
-        // whether it is a tuple and how many elements it contains. `None` means
-        // the node is *not* a tuple. This lets us generate in-bounds indices
-        // for `TupleIndex` operations.
-        let mut available_nodes = 1; // starts with the primary input (not a tuple)
-        let mut tuple_sizes: Vec<Option<u8>> = vec![None];
-        let mut ops = Vec::with_capacity(num_ops as usize);
+        // an over-approximate `InternalType`. Index 0 corresponds to the primary input.
+        let mut node_types: Vec<InternalType> = Vec::with_capacity(num_params + num_ops as usize);
+        let mut ops = Vec::with_capacity(num_params + num_ops as usize);
 
-        // TODO: In the long term we may want to carry an {IrOp: IrType} mapping so we
-        // can ensure that we don't generate invalid IR.
-        //
-        // There has been multiple pull requests related to temporary fixes due to this
-        // issue. See #428 and $432.
+        // Generate parameter ops first.
+        for _ in 0..num_params {
+            let bits = u.int_in_range(1..=8)?;
+            ops.push(FuzzOp::Param { bits });
+            node_types.push(InternalType::Bits(bits as usize));
+        }
 
         for _ in 0..num_ops {
-            // Randomly decide which kind of operation to generate
-            let op_type = u.arbitrary::<FuzzOpFlat>()?;
-            match op_type {
-                FuzzOpFlat::Literal => {
-                    // Literal op: nothing to sample, just generate a literal byte value.
-                    let literal_bits = u.int_in_range(1..=8)?;
-                    let value = u.int_in_range(0..=((1 << literal_bits) - 1))?;
-                    ops.push(FuzzOp::Literal {
-                        bits: literal_bits,
-                        value,
-                    });
-                }
-                FuzzOpFlat::Unop => {
-                    // NOT op: sample an index from [0, available_nodes)
-                    let idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let unop = u.arbitrary::<FuzzUnop>()?;
-                    ops.push(FuzzOp::Unop(unop, idx));
-                }
-                FuzzOpFlat::Binop => {
-                    // Binary op: sample two valid indices.
-                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let binop = u.arbitrary::<FuzzBinop>()?;
-                    ops.push(FuzzOp::Binop(binop, idx1, idx2));
-                }
-                FuzzOpFlat::ZeroExt => {
-                    // ZeroExt op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let new_bit_count = u.int_in_range(1..=8)? as u64;
-                    ops.push(FuzzOp::ZeroExt {
-                        operand: FuzzOperand { index },
-                        new_bit_count,
-                    });
-                }
-                FuzzOpFlat::SignExt => {
-                    // SignExt op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let new_bit_count = u.int_in_range(1..=8)? as u64;
-                    ops.push(FuzzOp::SignExt {
-                        operand: FuzzOperand { index },
-                        new_bit_count,
-                    });
-                }
-                FuzzOpFlat::BitSlice => {
-                    // Generate an in-bounds BitSlice that always refers to the primary input (index
-                    // 0) whose width is `input_bits`. This guarantees the slice
-                    // is legal without having to track the widths of all
-                    // intermediate IR nodes.
-                    let index: usize = 0; // primary input
-
-                    // Choose a valid start such that 0 <= start < input_bits
-                    let start = u.int_in_range(0..=((input_bits as u64) - 1))? as u64;
-
-                    // Width must be at least 1 and satisfy start + width <= input_bits
-                    let max_width = (input_bits as u64) - start;
-                    let width = u.int_in_range(1..=(max_width as u64))? as u64;
-
-                    ops.push(FuzzOp::BitSlice {
-                        operand: FuzzOperand { index },
-                        start,
-                        width,
-                    });
-                }
-                FuzzOpFlat::OneHot => {
-                    // OneHot op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let lsb_prio = u.int_in_range(0..=1)? == 1;
-                    ops.push(FuzzOp::OneHot {
-                        arg: FuzzOperand { index },
-                        lsb_prio,
-                    });
-                }
-                FuzzOpFlat::PrioritySel => {
-                    // PrioritySel op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let num_cases = u.int_in_range(1..=8)?;
-                    let mut cases: Vec<FuzzOperand> = Vec::with_capacity(num_cases as usize);
-                    for _ in 0..num_cases {
-                        cases.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
-                        });
-                    }
-                    let last_case: FuzzOperand = cases.last().unwrap().clone();
-                    ops.push(FuzzOp::PrioritySel {
-                        selector: FuzzOperand { index },
-                        cases,
-                        default: last_case,
-                    });
-                }
-                FuzzOpFlat::OneHotSel => {
-                    // OneHotSel op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let num_cases = u.int_in_range(1..=8)?;
-                    let mut cases: Vec<FuzzOperand> = Vec::with_capacity(num_cases as usize);
-                    for _ in 0..num_cases {
-                        cases.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
-                        });
-                    }
-                    ops.push(FuzzOp::OneHotSel {
-                        selector: FuzzOperand { index },
-                        cases,
-                    });
-                }
-                FuzzOpFlat::Decode => {
-                    // Decode op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let width = u.int_in_range(1..=8)? as u64;
-                    ops.push(FuzzOp::Decode {
-                        arg: FuzzOperand { index },
-                        width,
-                    });
-                }
-                FuzzOpFlat::ArrayIndex => {
-                    // ArrayIndex op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    ops.push(FuzzOp::ArrayIndex {
-                        array: FuzzOperand { index },
-                        index: FuzzOperand { index },
-                    });
-                }
-                FuzzOpFlat::Array => {
-                    // Array op: pick up to 8 elements to put in an array.
-                    let num_elements = u.int_in_range(1..=8)?;
-                    let mut elements: Vec<FuzzOperand> = Vec::with_capacity(num_elements as usize);
-                    for _ in 0..num_elements {
-                        elements.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
-                        });
-                    }
-                    ops.push(FuzzOp::Array { elements });
-                }
-                FuzzOpFlat::Tuple => {
-                    let num_elements = u.int_in_range(1..=8)?;
-                    let mut elements: Vec<FuzzOperand> = Vec::with_capacity(num_elements as usize);
-                    for _ in 0..num_elements {
-                        elements.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
-                        });
-                    }
-                    ops.push(FuzzOp::Tuple { elements });
-                    // Record that the new node is a tuple with `num_elements` elements.
-                    tuple_sizes.push(Some(num_elements as u8));
-                }
-                FuzzOpFlat::TupleIndex => {
-                    // Choose only from nodes that are tuples so we can stay in-bounds.
-                    let tuple_candidates: Vec<(usize, u8)> = tuple_sizes
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, sz)| sz.map(|s| (idx, s)))
-                        .collect();
-
-                    if !tuple_candidates.is_empty() {
-                        // Pick a random tuple node.
-                        let which =
-                            u.int_in_range(0..=(tuple_candidates.len() as u64 - 1))? as usize;
-                        let (tuple_idx, tuple_len) = tuple_candidates[which];
-                        // Now pick an element index that is definitely in-bounds.
-                        let index: usize = if tuple_len == 1 {
-                            0usize
-                        } else {
-                            u.int_in_range(0..=((tuple_len - 1) as u64))? as usize
-                        };
-                        ops.push(FuzzOp::TupleIndex {
-                            tuple: FuzzOperand { index: tuple_idx },
-                            index,
-                        });
-                    } else {
-                        // No tuple exists yet – fall back to a no-op literal so we still
-                        // generate the expected number of ops without causing an error.
-                        let literal_bits = 1u8;
-                        ops.push(FuzzOp::Literal {
-                            bits: literal_bits,
-                            value: 0,
-                        });
-                    }
-                    // The result of TupleIndex is not a tuple.
-                    tuple_sizes.push(None);
-                }
-                FuzzOpFlat::UMul => {
-                    // UMul op: sample two valid indices.
-                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    ops.push(FuzzOp::UMul {
-                        lhs: FuzzOperand { index: idx1 },
-                        rhs: FuzzOperand { index: idx2 },
-                    });
-                }
-                FuzzOpFlat::SMul => {
-                    // SMul op: sample two valid indices.
-                    let idx1 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let idx2 = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    ops.push(FuzzOp::SMul {
-                        lhs: FuzzOperand { index: idx1 },
-                        rhs: FuzzOperand { index: idx2 },
-                    });
-                }
-                FuzzOpFlat::Sel => {
-                    // Sel op: sample an index from [0, available_nodes)
-                    let index = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let num_cases = u.int_in_range(1..=8)?;
-                    let mut cases: Vec<FuzzOperand> = Vec::with_capacity(num_cases as usize);
-                    for _ in 0..num_cases {
-                        cases.push(FuzzOperand {
-                            index: u.int_in_range(0..=(available_nodes as u64 - 1))? as usize,
-                        });
-                    }
-                    let default = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    ops.push(FuzzOp::Sel {
-                        selector: FuzzOperand { index },
-                        cases,
-                        default: FuzzOperand { index: default },
-                    });
-                }
-                FuzzOpFlat::DynamicBitSlice => {
-                    // DynamicBitSlice op: sample an index from [0, available_nodes)
-                    let arg = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let start = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let width = u.int_in_range(1..=8)? as u64;
-                    ops.push(FuzzOp::DynamicBitSlice {
-                        arg: FuzzOperand { index: arg },
-                        start: FuzzOperand { index: start },
-                        width,
-                    });
-                }
-                FuzzOpFlat::BitSliceUpdate => {
-                    // BitSliceUpdate op: sample three valid indices.
-                    let value_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let start_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    let update_idx = u.int_in_range(0..=(available_nodes as u64 - 1))? as usize;
-                    ops.push(FuzzOp::BitSliceUpdate {
-                        value: FuzzOperand { index: value_idx },
-                        start: FuzzOperand { index: start_idx },
-                        update: FuzzOperand { index: update_idx },
-                    });
-                }
-            }
-            // For non-tuple ops that didn’t manually push into `tuple_sizes`, record None.
-            if tuple_sizes.len() < (available_nodes + 1) as usize {
-                tuple_sizes.push(None);
-            }
-
-            // Each operation produces one new IR node.
-            available_nodes += 1;
+            let (op, out_ty) = generate_fuzz_op(u, &node_types)?;
+            // Push op and its output type.
+            ops.push(op);
+            node_types.push(out_ty);
         }
-        Ok(FuzzSample { input_bits, ops })
+        log::debug!("Generated fuzz sample: {:?}", ops);
+        Ok(FuzzSample {
+            ops,
+            op_types: node_types,
+        })
     }
 }
 
@@ -907,91 +1213,129 @@ impl FuzzSample {
         pkg_for_orig: &mut xlsynth::IrPackage,
         _pkg_for_tmp: &mut xlsynth::IrPackage,
     ) -> arbitrary::Result<Self> {
-        let (_ret_bits, orig_internal_ret_type): (u64, Option<InternalType>) =
-            generate_ir_fn(orig.input_bits, orig.ops.clone(), pkg_for_orig, None)
+        let (param_types, orig_internal_ret_type): (Vec<InternalType>, Option<InternalType>) =
+            generate_ir_fn(orig.ops.clone(), pkg_for_orig, None)
                 .ok()
                 .and_then(|f| {
                     f.get_type().ok().map(|t| {
+                        // Extract parameter types
+                        let mut pts: Vec<InternalType> = Vec::with_capacity(t.param_count());
+                        for i in 0..t.param_count() {
+                            if let Ok(pt) = t.param_type(i) {
+                                let s = pt.to_string();
+                                let mut p = ir_parser::Parser::new(&s);
+                                if let Ok(ip) = p.parse_type() {
+                                    pts.push(ip);
+                                }
+                            }
+                        }
+                        // Extract return type
                         let ret_ty = t.return_type();
                         let ret_ty_str = ret_ty.to_string();
                         let mut parser = ir_parser::Parser::new(&ret_ty_str);
                         let internal = parser.parse_type().ok();
-                        (ret_ty.get_flat_bit_count() as u64, internal)
+                        (pts, internal)
                     })
                 })
-                .unwrap_or((orig.input_bits as u64, None));
+                .unwrap_or((Vec::new(), None));
 
-        let mut sample = FuzzSample::arbitrary(u)?;
-        sample.input_bits = orig.input_bits;
-
-        for op in &mut sample.ops {
-            if let FuzzOp::BitSlice { start, width, .. } = op {
-                if *start >= sample.input_bits as u64 {
-                    *start = 0;
-                }
-                let max_width = (sample.input_bits as u64) - *start;
-                if max_width == 0 {
-                    *width = 1;
-                } else if *width > max_width {
-                    *width = max_width;
-                }
-            }
-        }
-
-        // Append ops to synthesize a value of the original return type so the
-        // last node definitely has the same type.
-        fn append_ops_for_type(sample: &mut FuzzSample, ty: &InternalType) -> FuzzOperand {
-            match ty {
-                InternalType::Bits(w) => {
-                    let lit_bits: u8 = (*w as u8).clamp(1, u8::MAX);
-                    sample.ops.push(FuzzOp::Literal {
-                        bits: lit_bits,
-                        value: 0,
-                    });
-                    FuzzOperand {
-                        index: sample.ops.len(),
-                    }
-                }
-                InternalType::Tuple(types) => {
-                    let mut elems: Vec<FuzzOperand> = Vec::with_capacity(types.len());
-                    for t in types {
-                        elems.push(append_ops_for_type(sample, t));
-                    }
-                    sample.ops.push(FuzzOp::Tuple {
-                        elements: elems.clone(),
-                    });
-                    FuzzOperand {
-                        index: sample.ops.len(),
-                    }
-                }
-                InternalType::Array(arr) => {
-                    let mut elems: Vec<FuzzOperand> = Vec::with_capacity(arr.element_count);
-                    for _ in 0..arr.element_count {
-                        elems.push(append_ops_for_type(sample, &arr.element_type));
-                    }
-                    sample.ops.push(FuzzOp::Array {
-                        elements: elems.clone(),
-                    });
-                    FuzzOperand {
-                        index: sample.ops.len(),
-                    }
-                }
-                InternalType::Token => {
-                    // Token is not generated by current ops; synthesize a u1 literal to keep
-                    // progress.
-                    sample.ops.push(FuzzOp::Literal { bits: 1, value: 0 });
-                    FuzzOperand {
-                        index: sample.ops.len(),
-                    }
-                }
-            }
-        }
         if let Some(ref want_ty) = orig_internal_ret_type {
-            let _ = append_ops_for_type(&mut sample, want_ty);
+            return generate_fuzz_sample_with_type(u, &param_types, want_ty);
         }
-
-        Ok(sample)
+        // If we couldn't determine the original function's return type, treat
+        // this fuzz input as unusable instead of generating a random sample.
+        Err(arbitrary::Error::IncorrectFormat)
     }
+}
+
+/// Appends operations to `sample` that synthesize a value of `ty` and returns
+/// the corresponding operand reference.
+fn append_ops_for_type(sample: &mut FuzzSample, ty: &InternalType) -> FuzzOperand {
+    match ty {
+        InternalType::Bits(w) => {
+            let lit_bits: u8 = (*w as u8).clamp(1, u8::MAX);
+            sample.ops.push(FuzzOp::Literal {
+                bits: lit_bits,
+                value: 0,
+            });
+            sample.op_types.push(InternalType::Bits(lit_bits as usize));
+            FuzzOperand {
+                index: sample.op_types.len() - 1,
+            }
+        }
+        InternalType::Tuple(types) => {
+            let mut elems: Vec<FuzzOperand> = Vec::with_capacity(types.len());
+            for t in types {
+                elems.push(append_ops_for_type(sample, t));
+            }
+            sample.ops.push(FuzzOp::Tuple {
+                elements: elems.clone(),
+            });
+            sample.op_types.push(ty.clone());
+            FuzzOperand {
+                index: sample.op_types.len() - 1,
+            }
+        }
+        InternalType::Array(arr) => {
+            let mut elems: Vec<FuzzOperand> = Vec::with_capacity(arr.element_count);
+            for _ in 0..arr.element_count {
+                elems.push(append_ops_for_type(sample, &arr.element_type));
+            }
+            sample.ops.push(FuzzOp::Array {
+                elements: elems.clone(),
+            });
+            sample.op_types.push(ty.clone());
+            FuzzOperand {
+                index: sample.op_types.len() - 1,
+            }
+        }
+        InternalType::Token => {
+            // Not supported directly; produce a u1 literal to keep progress.
+            sample.ops.push(FuzzOp::Literal { bits: 1, value: 0 });
+            sample.op_types.push(InternalType::Bits(1));
+            FuzzOperand {
+                index: sample.op_types.len() - 1,
+            }
+        }
+    }
+}
+
+/// Generates a FuzzSample that conforms to the provided function signature
+/// (parameter types and return type). For now, parameters are encoded as
+/// `Param { bits }` ops for bit-typed parameters; non-bits params are mapped to
+/// `bits[1]`.
+pub fn generate_fuzz_sample_with_type<'a>(
+    u: &mut arbitrary::Unstructured<'a>,
+    param_types: &[InternalType],
+    return_type: &InternalType,
+) -> arbitrary::Result<FuzzSample> {
+    let mut sample = FuzzSample {
+        ops: Vec::new(),
+        op_types: Vec::new(),
+    };
+    // Emit params
+    for pt in param_types {
+        match pt {
+            InternalType::Bits(w) => {
+                let bits: u8 = (*w as u8).clamp(1, 8);
+                sample.ops.push(FuzzOp::Param { bits });
+                sample.op_types.push(InternalType::Bits(bits as usize));
+            }
+            _ => {
+                sample.ops.push(FuzzOp::Param { bits: 1 });
+                sample.op_types.push(InternalType::Bits(1));
+            }
+        }
+    }
+    let extra_ops = u.int_in_range(0..=MAX_OPS_PER_SAMPLE)?;
+    for _ in 0..extra_ops {
+        let (op, out_ty) = generate_fuzz_op(u, &sample.op_types)?;
+        sample.ops.push(op);
+        sample.op_types.push(out_ty);
+    }
+    // Ensure the sample ends with a value of the desired return type
+    let _ = append_ops_for_type(&mut sample, return_type);
+    Ok(sample)
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -1025,6 +1369,7 @@ pub struct FuzzSampleSameTypedPair {
 impl<'a> arbitrary::Arbitrary<'a> for FuzzSampleSameTypedPair {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let first = FuzzSample::arbitrary(u)?;
+
         // Dependency-inject packages for internal type probing to avoid creating them
         // inside.
         let mut pkg_for_orig = xlsynth::IrPackage::new("pair_gen_orig")
@@ -1149,5 +1494,78 @@ mod tests {
         let out_bv = out.unwrap();
         let got_ty = fn_builder.get_type(&out_bv).unwrap();
         assert_eq!(got_ty.to_string(), "bits[8]");
+    }
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzEditAddNode {
+    pub node: FuzzOp,
+    pub is_return: bool,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzEditSubstituteOperand {
+    pub node: usize,
+    pub operand_slot: usize,
+    pub new_operand: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct FuzzSampleWithEdits {
+    pub sample: FuzzSample,
+    pub add_nodes: Vec<FuzzEditAddNode>,
+    pub substitute_operands: Vec<FuzzEditSubstituteOperand>,
+}
+
+impl<'a> arbitrary::Arbitrary<'a> for FuzzSampleWithEdits {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let sample = FuzzSample::arbitrary(u)?;
+
+        // Reconstruct available node count and node types from the base sample
+        // so we can generate in-bounds edits that reference existing nodes.
+        let mut node_types: Vec<InternalType> = sample.op_types.clone();
+
+        // First, decide counts for each edit class (0..=5), but ensure at least one
+        // edit overall.
+        let mut num_add = u.int_in_range(0..=5)?;
+        let mut num_sub = u.int_in_range(0..=5)?;
+        if num_add == 0 && num_sub == 0 {
+            // Pick one class to bump to 1 to guarantee at least one edit.
+            if u.int_in_range(0..=1)? == 0 {
+                num_add = 1;
+            } else {
+                num_sub = 1;
+            }
+        }
+
+        // Generate AddNode edits.
+        let mut add_nodes: Vec<FuzzEditAddNode> = Vec::with_capacity(num_add as usize);
+        for _ in 0..num_add {
+            let (op, out_ty) = generate_fuzz_op(u, &node_types)?;
+            let is_return = u.int_in_range(0..=99)? < 5;
+            add_nodes.push(FuzzEditAddNode {
+                node: op.clone(),
+                is_return,
+            });
+            // Track output type for the newly added node.
+            node_types.push(out_ty);
+        }
+
+        // Then, generate SubstituteOperand edits (all zeros for now).
+        let mut substitute_operands: Vec<FuzzEditSubstituteOperand> =
+            Vec::with_capacity(num_sub as usize);
+        for _ in 0..num_sub {
+            substitute_operands.push(FuzzEditSubstituteOperand {
+                node: 0,
+                operand_slot: 0,
+                new_operand: 0,
+            });
+        }
+
+        Ok(FuzzSampleWithEdits {
+            sample,
+            add_nodes,
+            substitute_operands,
+        })
     }
 }

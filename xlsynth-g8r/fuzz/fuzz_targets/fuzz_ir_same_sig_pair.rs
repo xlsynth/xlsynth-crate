@@ -4,15 +4,11 @@
 
 use libfuzzer_sys::fuzz_target;
 use xlsynth::{IrPackage, IrType};
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSampleSameTypedPair};
+use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 
 fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     // Skip degenerate samples early.
-    if pair.first.ops.is_empty()
-        || pair.second.ops.is_empty()
-        || pair.first.input_bits == 0
-        || pair.second.input_bits == 0
-    {
+    if pair.first.ops.is_empty() || pair.second.ops.is_empty() {
         // Degenerate generator inputs (no ops or zero-width inputs) are not
         // interesting for this target and can arise frequently. We intentionally
         // skip rather than crash to avoid biasing the corpus toward trivial cases.
@@ -23,12 +19,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     let mut pkg1 =
         IrPackage::new("first").expect("IrPackage::new should not fail; treat as infra error");
-    let func1 = match generate_ir_fn(
-        pair.first.input_bits,
-        pair.first.ops.clone(),
-        &mut pkg1,
-        None,
-    ) {
+    let func1 = match generate_ir_fn(pair.first.ops.clone(), &mut pkg1, None) {
         Ok(f) => f,
         Err(_) => {
             // The generator can produce constructs not yet supported; skip such cases.
@@ -38,12 +29,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     let mut pkg2 =
         IrPackage::new("second").expect("IrPackage::new should not fail; treat as infra error");
-    let func2 = match generate_ir_fn(
-        pair.second.input_bits,
-        pair.second.ops.clone(),
-        &mut pkg2,
-        None,
-    ) {
+    let func2 = match generate_ir_fn(pair.second.ops.clone(), &mut pkg2, None) {
         Ok(f) => f,
         Err(_) => {
             // The generator can produce constructs not yet supported; skip such cases.
