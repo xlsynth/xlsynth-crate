@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn extra_parameter_can_still_be_equivalent() {
+    fn extra_parameter_is_notequivalent() {
         let lhs = parse_top_fn(
             r#"package p
             top fn f(a: bits[8]) -> bits[8] {
@@ -311,7 +311,7 @@ mod tests {
             }
             "#,
         );
-        assert!(functions_structurally_equivalent(&lhs, &rhs));
+        assert!(!functions_structurally_equivalent(&lhs, &rhs));
     }
 
     #[test]
