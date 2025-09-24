@@ -391,6 +391,8 @@ Example:
 xlsynth-driver ir-localized-eco old.opt.ir new.opt.ir \
   --old_ir_top=main --new_ir_top=main \
   --output_dir=eco_out --sanity-samples=10 --sanity-seed=0
+```
+
 ### `greedy-eco`
 
 Computes greedy graph edits to transform an old IR function into a new one, applies those edits to the old function, and emits the patched IR package.
@@ -408,8 +410,6 @@ xlsynth-driver greedy-eco old.opt.ir new.opt.ir \
   --old_ir_top=main --new_ir_top=main \
   --patched_out=patched.opt.ir \
   --edits_debug_out=edits.txt
-```
-
 ```
 
 ### `ir2gates`: IR to GateFn statistics
