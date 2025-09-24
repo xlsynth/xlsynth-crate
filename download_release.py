@@ -196,7 +196,7 @@ def main():
         "-p",
         "--platform",
         dest="platform",
-        help="Target platform (e.g., ubuntu2004, ubuntu2204, rocky8, arm64, x64)",
+        help=f"Target platform (one of: {', '.join(SUPPORTED_PLATFORMS.keys())})",
     )
     parser.add_option(
         "-d",
@@ -225,8 +225,10 @@ def main():
     if args:
         parser.error("No positional arguments are allowed.")
 
-    if not options.output_dir or not options.platform:
-        parser.error("output directory argument and -p/--platform flag are required.")
+    if not options.platform:
+        parser.error(
+            f"-p/--platform flag is required. Supported platforms: {', '.join(SUPPORTED_PLATFORMS.keys())}"
+        )
 
     if options.platform not in SUPPORTED_PLATFORMS:
         parser.error(
@@ -236,6 +238,10 @@ def main():
     version = (
         options.version if options.version else get_latest_release(options.max_attempts)
     )
+
+    # If output_dir is not provided, use the version as the directory name in CWD.
+    output_dir = options.output_dir if options.output_dir else version
+
     base_url = f"https://github.com/xlsynth/xlsynth/releases/download/{version}"
     ver_tuple = parse_semver_tag(version)
 
@@ -254,13 +260,13 @@ def main():
             dso_name += ".gz"
         artifacts.append((dso_name, False))
 
-    os.makedirs(options.output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     for filename, is_binary in artifacts:
         high_integrity_download(
             base_url,
             filename,
-            options.output_dir,
+            output_dir,
             options.max_attempts,
             is_binary,
             options.platform,
@@ -271,13 +277,11 @@ def main():
     high_integrity_download(
         base_url,
         stdlib_filename,
-        options.output_dir,
+        output_dir,
         options.max_attempts,
         is_binary=False,
     )
-    shutil.unpack_archive(
-        os.path.join(options.output_dir, stdlib_filename), options.output_dir
-    )
+    shutil.unpack_archive(os.path.join(output_dir, stdlib_filename), output_dir)
 
 
 if __name__ == "__main__":
