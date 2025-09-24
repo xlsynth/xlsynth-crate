@@ -70,7 +70,7 @@ def get_latest_release(max_attempts):
     return latest_version
 
 
-def parse_semver_tag(tag: str) -> Tuple[int, int, int, int]:
+def parse_xlsynth_release_tag(tag: str) -> Tuple[int, int, int, int]:
     """
     Parses a version tag like 'v0.0.219' or 'v0.0.219-1' into a tuple (0, 0, 219, 0) or (0, 0, 219, 1).
     """
@@ -247,7 +247,7 @@ def main():
     output_dir = options.output_dir if options.output_dir else version
 
     base_url = f"https://github.com/xlsynth/xlsynth/releases/download/{version}"
-    ver_tuple = parse_semver_tag(version)
+    ver_tuple = parse_xlsynth_release_tag(version)
 
     # Tuples of `(artifact_to_download, is_binary)` -- if it's noted to be a binary it is marked
     # as executable.
