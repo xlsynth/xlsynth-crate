@@ -116,3 +116,9 @@ pre-commit run --all-files
 ```
 
 This `pre-commit` step is also run as part of continuous integration.
+
+### Release Versioning
+
+Occasionally, we need to create a successor to a patch release without bumping the minor or major version. In these cases, we use a dash-suffixed version tag (e.g., `v0.0.219-1`, `v0.0.219-2`). The plain form (e.g., `v0.0.219`) is implicitly equivalent to `v0.0.219-0`. This allows us to cherry-pick fixes onto a patch release when necessary.
+
+**Note:** We hope to eventually switch to bumping the `v0.X.0` field for such successors, so that these dash releases can instead become patch releases, using the patch field as intended by semantic versioning. Until then, please be aware of this convention when working with release artifacts and tooling.

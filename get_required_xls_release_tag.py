@@ -17,7 +17,9 @@ from typing import Optional
 
 
 def extract_release_tag_from_build_rs(text: str) -> Optional[str]:
-    m = re.search(r'RELEASE_LIB_VERSION_TAG:\s*&str\s*=\s*"(v\d+\.\d+\.\d+)"', text)
+    m = re.search(
+        r'RELEASE_LIB_VERSION_TAG:\s*&str\s*=\s*"(v\d+\.\d+\.\d+(?:-\d+)?)"', text
+    )
     return m.group(1) if m else None
 
 

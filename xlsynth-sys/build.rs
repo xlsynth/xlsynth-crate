@@ -9,9 +9,15 @@ use std::process::Command;
 const RELEASE_LIB_VERSION_TAG: &str = "v0.0.229";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
 
-fn version_tuple_from_tag(tag: &str) -> (u32, u32, u32) {
+fn version_tuple_from_tag(tag: &str) -> (u32, u32, u32, u32) {
     let s = tag.strip_prefix('v').unwrap_or(tag);
-    let mut parts = s.split('.');
+    let mut dash_split = s.splitn(2, '-');
+    let main = dash_split.next().unwrap();
+    let patch2 = dash_split
+        .next()
+        .map(|x| x.parse().expect("patch2 should be numeric"))
+        .unwrap_or(0);
+    let mut parts = main.split('.');
     let major: u32 = parts
         .next()
         .expect("version tag should have major")
@@ -27,7 +33,7 @@ fn version_tuple_from_tag(tag: &str) -> (u32, u32, u32) {
         .expect("version tag should have patch")
         .parse()
         .expect("patch version should be numeric");
-    (major, minor, patch)
+    (major, minor, patch, patch2)
 }
 
 struct DsoInfo {
@@ -483,7 +489,7 @@ fn main() {
     // As of v0.0.229 and later, there is no macOS x64 (x86_64) DSO available.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    if version_tuple_from_tag(RELEASE_LIB_VERSION_TAG) >= (0, 0, 229)
+    if version_tuple_from_tag(RELEASE_LIB_VERSION_TAG) >= (0, 0, 229, 0)
         && target_os == "macos"
         && target_arch == "x86_64"
     {
