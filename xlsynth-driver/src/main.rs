@@ -45,6 +45,7 @@ mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod g8r2v;
 mod g8r_equiv;
+mod greedy_eco;
 mod gv2ir;
 mod gv_read_stats;
 mod ir2combo;
@@ -973,6 +974,44 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("greedy-eco")
+                .about("Computes an ECO based on a greedy graph-edit-distance heurisitic")
+                .arg(
+                    Arg::new("old_ir_file")
+                        .help("The old/original IR file (package)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("new_ir_file")
+                        .help("The new/target IR file (package)")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("old_ir_top")
+                        .long("old_ir_top")
+                        .help("Top-level entry point for the old IR package"),
+                )
+                .arg(
+                    Arg::new("new_ir_top")
+                        .long("new_ir_top")
+                        .help("Top-level entry point for the new IR package"),
+                )
+                .arg(
+                    Arg::new("patched_out")
+                        .long("patched_out")
+                        .value_name("PATH")
+                        .help("Write the patched IR package to PATH; if omitted, prints to stdout"),
+                )
+                .arg(
+                    Arg::new("edits_debug_out")
+                        .long("edits_debug_out")
+                        .value_name("PATH")
+                        .help("Write the debug string of IrEdits to PATH (optional)"),
+                ),
+        )
+        .subcommand(
             clap::Command::new("lib2proto")
                 .about("Converts Liberty file(s) to proto or textproto")
                 .arg(
@@ -1508,6 +1547,8 @@ fn main() {
         ir2gates::handle_ir2gates(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2g8r") {
         ir2gates::handle_ir2g8r(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("greedy-eco") {
+        greedy_eco::handle_greedy_eco(matches);
     } else if let Some(matches) = matches.subcommand_matches("lib2proto") {
         lib2proto::handle_lib2proto(matches);
     } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
