@@ -37,6 +37,7 @@
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
+mod dslx2pipeline_eco;
 mod dslx2sv_types;
 mod dslx_equiv;
 mod dslx_g8r_stats;
@@ -45,7 +46,6 @@ mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod g8r2v;
 mod g8r_equiv;
-mod greedy_eco;
 mod gv2ir;
 mod gv_read_stats;
 mod ir2combo;
@@ -975,41 +975,31 @@ fn main() {
                 )
         )
         .subcommand(
-            clap::Command::new("greedy-eco")
-                .about("Computes an ECO based on a greedy graph-edit-distance heurisitic")
+            clap::Command::new("dslx2pipeline-eco")
+                .about("Produces Verilog with minimal edits from baseline_unopt_ir to current DSLX, using greedy GED edits; accepts dslx2pipeline args + --baseline_unopt_ir")
                 .arg(
-                    Arg::new("old_ir_file")
-                        .help("The old/original IR file (package)")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    Arg::new("new_ir_file")
-                        .help("The new/target IR file (package)")
-                        .required(true)
-                        .index(2),
-                )
-                .arg(
-                    Arg::new("old_ir_top")
-                        .long("old_ir_top")
-                        .help("Top-level entry point for the old IR package"),
-                )
-                .arg(
-                    Arg::new("new_ir_top")
-                        .long("new_ir_top")
-                        .help("Top-level entry point for the new IR package"),
-                )
-                .arg(
-                    Arg::new("patched_out")
-                        .long("patched_out")
+                    clap::Arg::new("baseline_unopt_ir")
+                        .long("baseline_unopt_ir")
                         .value_name("PATH")
-                        .help("Write the patched IR package to PATH; if omitted, prints to stdout"),
+                        .help("Path to the baseline unoptimized IR (package) before the source change")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .add_delay_model_arg()
+                .add_dslx_input_args(true)
+                .add_pipeline_args()
+                .add_codegen_args()
+                .add_bool_arg("keep_temps", "Keep temporary files")
+                .add_bool_arg(
+                    "type_inference_v2",
+                    "Enable the experimental type-inference v2 algorithm",
                 )
                 .arg(
-                    Arg::new("edits_debug_out")
+                    clap::Arg::new("edits_debug_out")
                         .long("edits_debug_out")
                         .value_name("PATH")
-                        .help("Write the debug string of IrEdits to PATH (optional)"),
+                        .help("Write the debug string of IrEdits to PATH (optional)")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -1590,8 +1580,8 @@ fn main() {
         ir2gates::handle_ir2gates(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2g8r") {
         ir2gates::handle_ir2g8r(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("greedy-eco") {
-        greedy_eco::handle_greedy_eco(matches);
+    } else if let Some(matches) = matches.subcommand_matches("dslx2pipeline-eco") {
+        dslx2pipeline_eco::handle_dslx2pipeline_eco(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("lib2proto") {
         lib2proto::handle_lib2proto(matches);
     } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
