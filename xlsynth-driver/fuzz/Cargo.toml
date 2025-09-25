@@ -28,12 +28,6 @@ path = "fuzz_targets/fuzz_prover_scheduler.rs"
 test = false
 doc = false
 
-[[bin]]
-name = "fuzz_block_roundtrip"
-path = "fuzz_targets/fuzz_block_roundtrip.rs"
-test = false
-doc = false
-
 [features]
 # Pass-through toggles for optional solver integrations if needed later.
 default = []
