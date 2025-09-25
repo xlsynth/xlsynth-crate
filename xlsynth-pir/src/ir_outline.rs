@@ -587,6 +587,8 @@ pub fn outline_with_ordering(
         ret_ty: inner_ret_ty,
         nodes: remapped_inner_nodes,
         ret_node_ref: remapped_inner_ret,
+        outer_attrs: Vec::new(),
+        inner_attrs: Vec::new(),
     };
 
     // Build the new outer: clone and then splice in an invoke that replaces the
@@ -755,6 +757,8 @@ pub fn outline_with_ordering(
         ret_ty: outer.ret_ty.clone(),
         nodes: remapped_outer_nodes,
         ret_node_ref: outer_ret_ref,
+        outer_attrs: Vec::new(),
+        inner_attrs: Vec::new(),
     };
 
     // Register both functions in the package for caller convenience.

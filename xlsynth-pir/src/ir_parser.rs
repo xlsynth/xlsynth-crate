@@ -1514,8 +1514,39 @@ impl Parser {
         Ok(())
     }
 
-    pub fn parse_fn(&mut self) -> Result<ir::Fn, ParseError> {
-        log::debug!("parse_fn");
+    /// Parses inner attributes at the current position (lines `#![...]` or
+    /// `#[...]`).
+    pub fn parse_inner_attributes(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut attrs: Vec<String> = Vec::new();
+        loop {
+            self.drop_whitespace_and_comments();
+            if self.peek_is("#![") || self.peek_is("#[") {
+                let mut s = String::new();
+                if self.try_drop("#![") {
+                    s.push_str("#![");
+                } else if self.try_drop("#[") {
+                    s.push_str("#[");
+                } else {
+                    unreachable!("attr must start with '#![' or '#['");
+                }
+                while let Some(c) = self.peekc() {
+                    self.dropc()?;
+                    s.push(c);
+                    if c == ']' {
+                        break;
+                    }
+                }
+                attrs.push(s);
+                continue;
+            }
+            break;
+        }
+        Ok(attrs)
+    }
+
+    /// Like parse_fn but with pre-scanned outer attributes supplied by caller.
+    pub fn parse_fn_with_outer(&mut self, outer_attrs: Vec<String>) -> Result<ir::Fn, ParseError> {
+        log::debug!("parse_fn_with_outer");
         self.drop_or_error("fn")?;
         let fn_name = self.pop_identifier_or_error("fn name")?;
 
@@ -1526,6 +1557,9 @@ impl Parser {
         self.drop_or_error("->")?;
         let ret_ty = self.parse_type()?;
         self.drop_or_error("{")?;
+
+        // Collect inner attributes immediately after the signature.
+        let inner_attrs: Vec<String> = self.parse_inner_attributes()?;
 
         let mut nodes = vec![ir::Node {
             text_id: 0,
@@ -1546,10 +1580,6 @@ impl Parser {
         while !self.try_drop("}") {
             let is_ret = self.try_drop("ret ");
             let node = self.parse_node(&mut node_env)?;
-            // Special handling: avoid duplicating GetParam nodes if we've already
-            // created one for this param id from the function signature. If a
-            // duplicate param(...) appears (e.g., for a return), just reference
-            // the existing node instead of adding a new one.
             let mut node_ref = ir::NodeRef { index: nodes.len() };
             let is_get_param = matches!(node.payload, ir::NodePayload::GetParam(_));
             if is_get_param {
@@ -1557,10 +1587,6 @@ impl Parser {
                     .name_id_to_ref(&crate::ir_node_env::NameOrId::Id(node.text_id))
                     .copied()
                 {
-                    // If a GetParam node with this id already exists (from the
-                    // function signature), ensure the textual node's type matches
-                    // the existing param node type. If not, this is a parse-time
-                    // error (mirrors upstream xlsynth behavior).
                     let existing_ty = &nodes[existing.index].ty;
                     if existing_ty != &node.ty {
                         return Err(ParseError::new(format!(
@@ -1568,7 +1594,6 @@ impl Parser {
                             node.text_id, existing_ty, node.ty
                         )));
                     }
-                    // Do not add a duplicate; use the existing node ref.
                     node_ref = existing;
                 } else {
                     node_env
@@ -1587,8 +1612,6 @@ impl Parser {
             }
         }
 
-        // If the return type is not the same type as the return node, then we flag a
-        // validation error.
         if let Some(ret_nr) = ret_node_ref {
             let ret_node = &nodes[ret_nr.index];
             if ret_node.ty != ret_ty {
@@ -1605,7 +1628,13 @@ impl Parser {
             ret_ty,
             nodes,
             ret_node_ref,
+            outer_attrs,
+            inner_attrs,
         })
+    }
+
+    pub fn parse_fn(&mut self) -> Result<ir::Fn, ParseError> {
+        self.parse_fn_with_outer(Vec::new())
     }
 
     /// Parses a combinational `block` and converts it to an equivalent `fn`.
@@ -1621,30 +1650,10 @@ impl Parser {
         Ok(f)
     }
 
-    pub fn parse_block_to_fn_with_ports(&mut self) -> Result<(ir::Fn, BlockPortInfo), ParseError> {
-        // Skip optional outer attributes like `#[signature("""...""")]`.
-        loop {
-            self.drop_whitespace_and_comments();
-            if self.peek_is("#![") || self.peek_is("#[") {
-                if self.try_drop("#![") {
-                    // ok
-                } else if self.try_drop("#[") {
-                    // ok
-                } else {
-                    unreachable!("attribute must start with '#![' or '#[' after peek");
-                }
-                // Scan until ']'.
-                while let Some(c) = self.peekc() {
-                    self.dropc()?;
-                    if c == ']' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            break;
-        }
-
+    pub fn parse_block_to_fn_with_ports_outer(
+        &mut self,
+        outer_attrs: Vec<String>,
+    ) -> Result<(ir::Fn, BlockPortInfo), ParseError> {
         self.drop_or_error("block")?;
         let block_name = self.pop_identifier_or_error("block name")?;
 
@@ -1684,35 +1693,11 @@ impl Parser {
         let mut output_ids_by_name: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
 
-        // Helper to maybe skip inner attributes like `#![provenance(...)]`.
-        let skip_inner_attribute = |this: &mut Parser| -> Result<bool, ParseError> {
-            this.drop_whitespace_and_comments();
-            if this.peek_is("#![") || this.peek_is("#[") {
-                if this.try_drop("#![") {
-                    // ok
-                } else if this.try_drop("#[") {
-                    // ok
-                } else {
-                    unreachable!("attribute must start with '#![' or '#[' after peek");
-                }
-                while let Some(c) = this.peekc() {
-                    this.dropc()?;
-                    if c == ']' {
-                        break;
-                    }
-                }
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        };
+        // Collect inner attributes at the top of the block body.
+        let inner_attrs: Vec<String> = self.parse_inner_attributes()?;
 
         // Parse body lines until '}'.
         while !self.try_drop("}") {
-            // Skip attributes and blank/comment lines.
-            if skip_inner_attribute(self)? {
-                continue;
-            }
             self.drop_whitespace_and_comments();
             // If this is an input_port or output_port, handle specially.
             // Peek ahead to capture the operator by temporarily parsing the LHS name and
@@ -1925,6 +1910,8 @@ impl Parser {
                     ret_ty,
                     nodes,
                     ret_node_ref: Some(ret_node_ref),
+                    outer_attrs,
+                    inner_attrs,
                 },
                 BlockPortInfo {
                     input_port_ids: input_params
@@ -1963,6 +1950,8 @@ impl Parser {
                 ret_ty,
                 nodes,
                 ret_node_ref: Some(ret_node_ref),
+                outer_attrs,
+                inner_attrs,
             },
             BlockPortInfo {
                 input_port_ids: input_params
@@ -1973,6 +1962,12 @@ impl Parser {
                 output_names: header_output_names,
             },
         ))
+    }
+
+    pub fn parse_block_to_fn_with_ports(&mut self) -> Result<(ir::Fn, BlockPortInfo), ParseError> {
+        // Skip and capture optional outer attributes like `#[signature("""...""")]`.
+        let outer_attrs: Vec<String> = Vec::new();
+        self.parse_block_to_fn_with_ports_outer(outer_attrs)
     }
 
     pub fn parse_package(&mut self) -> Result<ir::Package, ParseError> {
@@ -1986,21 +1981,25 @@ impl Parser {
 
         let mut file_table = FileTable::new();
 
+        let mut pending_outer_attrs: Vec<String> = Vec::new();
         while !self.at_eof() {
             // Allow standalone attributes between members (commonly preceding a block).
             self.drop_whitespace_and_comments();
             if self.peek_is("#![") || self.peek_is("#[") {
+                let mut s = String::new();
                 if self.try_drop("#![") {
-                    // ok
+                    s.push_str("#![");
                 } else if self.try_drop("#[") {
-                    // ok
+                    s.push_str("#[");
                 }
                 while let Some(c) = self.peekc() {
                     self.dropc()?;
+                    s.push(c);
                     if c == ']' {
                         break;
                     }
                 }
+                pending_outer_attrs.push(s);
                 // Continue scanning for the next member after the attribute.
                 self.drop_whitespace_and_comments();
             }
@@ -2008,12 +2007,14 @@ impl Parser {
                 // Allow whitespace/comments between `top` and the next keyword.
                 self.drop_whitespace_and_comments();
                 if self.peek_keyword_is("fn") {
-                    let f = self.parse_fn()?;
+                    let f = self.parse_fn_with_outer(pending_outer_attrs.drain(..).collect())?;
                     top_name = Some(f.name.clone());
                     members.push(PackageMember::Function(f));
                 } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
-                    let (f, port_info) = self.parse_block_to_fn_with_ports()?;
+                    let (f, port_info) = self.parse_block_to_fn_with_ports_outer(
+                        pending_outer_attrs.drain(..).collect(),
+                    )?;
                     top_name = Some(f.name.clone());
                     members.push(PackageMember::Block { func: f, port_info });
                 } else {
@@ -2023,10 +2024,11 @@ impl Parser {
                     )));
                 }
             } else if self.peek_keyword_is("fn") {
-                let f = self.parse_fn()?;
+                let f = self.parse_fn_with_outer(pending_outer_attrs.drain(..).collect())?;
                 members.push(PackageMember::Function(f));
             } else if self.peek_keyword_is("block") {
-                let (f, port_info) = self.parse_block_to_fn_with_ports()?;
+                let (f, port_info) = self
+                    .parse_block_to_fn_with_ports_outer(pending_outer_attrs.drain(..).collect())?;
                 members.push(PackageMember::Block { func: f, port_info });
             } else if self.peek_keyword_is("proc") {
                 return Err(ParseError::new(format!(
@@ -2171,6 +2173,10 @@ pub fn emit_fn_as_block(
 
     // Emit body lines.
     let mut lines: Vec<String> = Vec::new();
+    // Inner attributes preserved at the top of the block body.
+    for attr in &f.inner_attrs {
+        lines.push(format!("  {}", attr));
+    }
     // input_port lines for each param (in order).
     for p in f.params.iter() {
         let input_id = if let Some(pi) = port_ids {
@@ -2230,12 +2236,19 @@ pub fn emit_fn_as_block(
         ));
     }
 
-    format!(
+    // Prepend any preserved outer attributes before the block header.
+    let mut out = String::new();
+    for attr in &f.outer_attrs {
+        out.push_str(attr);
+        out.push('\n');
+    }
+    out.push_str(&format!(
         "block {}({}) {{\n{}\n}}",
         f.name,
         header_parts.join(", "),
         lines.join("\n")
-    )
+    ));
+    out
 }
 
 impl Parser {
@@ -3015,8 +3028,7 @@ top fn main() -> bits[32] {
     #[test]
     fn test_parse_block_to_fn_simple() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let input = r#"#[signature("""module_name: \"my_main\" data_ports { direction: PORT_DIRECTION_INPUT name: \"x\" width: 8 type { type_enum: BITS bit_count: 8 } } data_ports { direction: PORT_DIRECTION_OUTPUT name: \"out\" width: 8 type { type_enum: BITS bit_count: 8 } } combinational { } """)]
-block my_main(x: bits[8], out: bits[8]) {
+        let input = r#"block my_main(x: bits[8], out: bits[8]) {
   #![provenance(name=\"my_main\", kind=\"function\")]
   x: bits[8] = input_port(name=x, id=5)
   one: bits[8] = literal(value=1, id=6)
@@ -3025,7 +3037,11 @@ block my_main(x: bits[8], out: bits[8]) {
 }"#;
         let mut parser = Parser::new(input);
         let f = parser.parse_block_to_fn().unwrap();
-        let want = "fn my_main(x: bits[8] id=5) -> bits[8] {\n  one: bits[8] = literal(value=1, id=6)\n  ret add.7: bits[8] = add(x, one, id=7)\n}";
+        let want = r#"fn my_main(x: bits[8] id=5) -> bits[8] {
+  #![provenance(name=\"my_main\", kind=\"function\")]
+  one: bits[8] = literal(value=1, id=6)
+  ret add.7: bits[8] = add(x, one, id=7)
+}"#;
         assert_eq!(f.to_string(), want);
     }
 

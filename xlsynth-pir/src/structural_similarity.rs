@@ -1126,6 +1126,8 @@ fn build_inner_with_union_user_slots(
         ret_ty,
         nodes: inner_nodes,
         ret_node_ref: ret_ref_opt,
+        outer_attrs: Vec::new(),
+        inner_attrs: Vec::new(),
     }
 }
 pub struct DualDifferenceExtraction {
