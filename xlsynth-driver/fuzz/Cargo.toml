@@ -14,10 +14,6 @@ log = "0.4"
 env_logger = "0.11"
 xlsynth-driver = { path = "..", features = ["enable-fake-task"], version = "0.6.0" }
 
-xlsynth-pir = { path = "../../xlsynth-pir" }
-xlsynth = { path = "../../xlsynth" }
-tempfile = "3"
-
 [lib]
 name = "xlsynth_driver_fuzz"
 path = "src/lib.rs"
@@ -29,12 +25,6 @@ members = ["."]
 [[bin]]
 name = "fuzz_prover_scheduler"
 path = "fuzz_targets/fuzz_prover_scheduler.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fuzz_block_roundtrip"
-path = "fuzz_targets/fuzz_block_roundtrip.rs"
 test = false
 doc = false
 
