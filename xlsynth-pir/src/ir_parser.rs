@@ -1577,10 +1577,6 @@ impl Parser {
         while !self.try_drop("}") {
             let is_ret = self.try_drop("ret ");
             let node = self.parse_node(&mut node_env)?;
-            // Special handling: avoid duplicating GetParam nodes if we've already
-            // created one for this param id from the function signature. If a
-            // duplicate param(...) appears (e.g., for a return), just reference
-            // the existing node instead of adding a new one.
             let mut node_ref = ir::NodeRef { index: nodes.len() };
             let is_get_param = matches!(node.payload, ir::NodePayload::GetParam(_));
             if is_get_param {
@@ -1588,10 +1584,6 @@ impl Parser {
                     .name_id_to_ref(&crate::ir_node_env::NameOrId::Id(node.text_id))
                     .copied()
                 {
-                    // If a GetParam node with this id already exists (from the
-                    // function signature), ensure the textual node's type matches
-                    // the existing param node type. If not, this is a parse-time
-                    // error (mirrors upstream xlsynth behavior).
                     let existing_ty = &nodes[existing.index].ty;
                     if existing_ty != &node.ty {
                         return Err(ParseError::new(format!(
@@ -1599,7 +1591,6 @@ impl Parser {
                             node.text_id, existing_ty, node.ty
                         )));
                     }
-                    // Do not add a duplicate; use the existing node ref.
                     node_ref = existing;
                 } else {
                     node_env

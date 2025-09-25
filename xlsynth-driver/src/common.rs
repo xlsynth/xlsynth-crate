@@ -56,7 +56,7 @@ pub fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CodegenFlags {
     input_valid_signal: Option<String>,
     output_valid_signal: Option<String>,
@@ -76,6 +76,35 @@ pub struct CodegenFlags {
     assert_format: Option<String>,
     output_schedule_path: Option<String>,
     output_verilog_line_map_path: Option<String>,
+    output_block_ir_path: Option<String>,
+    output_residual_data_path: Option<String>,
+    reference_residual_data_path: Option<String>,
+}
+
+impl CodegenFlags {
+    pub fn set_output_block_ir_path<'a, P: AsRef<std::path::Path>>(
+        &'a mut self,
+        path: P,
+    ) -> &'a mut Self {
+        self.output_block_ir_path = Some(path.as_ref().to_string_lossy().into_owned());
+        self
+    }
+
+    pub fn set_output_residual_data_path<'a, P: AsRef<std::path::Path>>(
+        &'a mut self,
+        path: P,
+    ) -> &'a mut Self {
+        self.output_residual_data_path = Some(path.as_ref().to_string_lossy().into_owned());
+        self
+    }
+
+    pub fn set_reference_residual_data_path<'a, P: AsRef<std::path::Path>>(
+        &'a mut self,
+        path: P,
+    ) -> &'a mut Self {
+        self.reference_residual_data_path = Some(path.as_ref().to_string_lossy().into_owned());
+        self
+    }
 }
 
 /// Extracts flags that we pass to the "codegen" step of the process (i.e.
@@ -149,6 +178,15 @@ pub fn extract_codegen_flags(
             .map(|s| s.to_string()),
         output_verilog_line_map_path: matches
             .get_one::<String>("output_verilog_line_map_path")
+            .map(|s| s.to_string()),
+        output_block_ir_path: matches
+            .get_one::<String>("output_block_ir_path")
+            .map(|s| s.to_string()),
+        output_residual_data_path: matches
+            .get_one::<String>("output_residual_data_path")
+            .map(|s| s.to_string()),
+        reference_residual_data_path: matches
+            .get_one::<String>("reference_residual_data_path")
             .map(|s| s.to_string()),
     };
 
@@ -243,6 +281,20 @@ pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
             "output_verilog_line_map_path: \"{output_verilog_line_map_path}\""
         ));
     }
+    if let Some(output_block_ir_path) = &codegen_flags.output_block_ir_path {
+        pieces.push(format!("output_block_ir_path: \"{output_block_ir_path}\""));
+    }
+    if let Some(output_residual_data_path) = &codegen_flags.output_residual_data_path {
+        pieces.push(format!(
+            "output_residual_data_path: \"{output_residual_data_path}\""
+        ));
+    }
+
+    if let Some(reference_residual_data_path) = &codegen_flags.reference_residual_data_path {
+        pieces.push(format!(
+            "reference_residual_data_path: \"{reference_residual_data_path}\""
+        ));
+    }
     pieces.push(format!("assertion_macro_names: \"ASSERT_ON\""));
     pieces.join("\n")
 }
@@ -314,6 +366,19 @@ pub fn add_codegen_flags(command: &mut Command, codegen_flags: &CodegenFlags) {
         command
             .arg("--output_verilog_line_map_path")
             .arg(output_verilog_line_map_path);
+    }
+    if let Some(output_block_ir_path) = &codegen_flags.output_block_ir_path {
+        command.arg(format!("--output_block_ir_path={output_block_ir_path}"));
+    }
+    if let Some(output_residual_data_path) = &codegen_flags.output_residual_data_path {
+        command.arg(format!(
+            "--output_residual_data_path={output_residual_data_path}"
+        ));
+    }
+    if let Some(reference_residual_data_path) = &codegen_flags.reference_residual_data_path {
+        command.arg(format!(
+            "--reference_residual_data_path={reference_residual_data_path}"
+        ));
     }
 }
 

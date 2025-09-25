@@ -393,24 +393,13 @@ xlsynth-driver ir-localized-eco old.opt.ir new.opt.ir \
   --output_dir=eco_out --sanity-samples=10 --sanity-seed=0
 ```
 
-### `greedy-eco`
+### `dslx2pipeline-eco`
 
-Computes greedy graph edits to transform an old IR function into a new one, applies those edits to the old function, and emits the patched IR package.
+Produces a patched Verilog file which has minimal changes against a baseline.  Accepts same arguments as `dslx2pipeline` as well as an input file `--baseline_unopt_ir` which contains the unoptimized baseline XLS IR before the source change was applied. The resulting Verilog is printed on **stdout**.
 
-- Positional arguments: `<old.ir> <new.ir>` (both must be package-form IR)
-- Entry-point selection (optional): `--old_ir_top <NAME>` and `--new_ir_top <NAME>`; if omitted, the package `top` or first function is used on each side.
-- Outputs:
-  - `--patched_out <PATH>` – write the patched package IR to this path. If omitted, the patched package IR is printed to stdout.
+Additional outputs:
+
   - `--edits_debug_out <PATH>` – write the debug string (`{:#?}`) of the IrEdits to a file (optional).
-
-Example:
-
-```shell
-xlsynth-driver greedy-eco old.opt.ir new.opt.ir \
-  --old_ir_top=main --new_ir_top=main \
-  --patched_out=patched.opt.ir \
-  --edits_debug_out=edits.txt
-```
 
 ### `ir2gates`: IR to GateFn statistics
 
