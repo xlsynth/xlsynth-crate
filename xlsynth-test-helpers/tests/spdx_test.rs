@@ -82,7 +82,7 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             let path_str = path.as_os_str().to_str().unwrap();
 
             // Exclude fuzz corpora; these are inputs, not source files.
-            if path_str.contains("/fuzz/corpus/") {
+            if path_str.contains("/fuzz/corpus/") || path_str.contains("/fuzz/artifacts/") {
                 continue;
             }
             let filename = path.file_name().unwrap().to_str().unwrap();
