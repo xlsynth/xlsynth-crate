@@ -1514,20 +1514,17 @@ impl Parser {
         Ok(())
     }
 
-    /// Parses inner attributes at the current position (lines `#![...]` or
-    /// `#[...]`).
+    /// Parses inner attributes at the current position (`#![...]`).
     pub fn parse_inner_attributes(&mut self) -> Result<Vec<String>, ParseError> {
         let mut attrs: Vec<String> = Vec::new();
         loop {
             self.drop_whitespace_and_comments();
-            if self.peek_is("#![") || self.peek_is("#[") {
+            if self.peek_is("#![") {
                 let mut s = String::new();
                 if self.try_drop("#![") {
                     s.push_str("#![");
-                } else if self.try_drop("#[") {
-                    s.push_str("#[");
                 } else {
-                    unreachable!("attr must start with '#![' or '#['");
+                    unreachable!("inner attribute must start with '#!['");
                 }
                 while let Some(c) = self.peekc() {
                     self.dropc()?;
@@ -1583,10 +1580,18 @@ impl Parser {
             let mut node_ref = ir::NodeRef { index: nodes.len() };
             let is_get_param = matches!(node.payload, ir::NodePayload::GetParam(_));
             if is_get_param {
+                // Special handling: avoid duplicating GetParam nodes if we've already
+                // created one for this param id from the function signature. If a
+                // duplicate param(...) appears (e.g., for a return), just reference
+                // the existing node instead of adding a new one.
                 if let Some(existing) = node_env
                     .name_id_to_ref(&crate::ir_node_env::NameOrId::Id(node.text_id))
                     .copied()
                 {
+                    // If a GetParam node with this id already exists (from the
+                    // function signature), ensure the textual node's type matches
+                    // the existing param node type. If not, this is a parse-time
+                    // error (mirrors upstream xlsynth behavior).
                     let existing_ty = &nodes[existing.index].ty;
                     if existing_ty != &node.ty {
                         return Err(ParseError::new(format!(
@@ -1594,6 +1599,7 @@ impl Parser {
                             node.text_id, existing_ty, node.ty
                         )));
                     }
+                    // Do not add a duplicate; use the existing node ref.
                     node_ref = existing;
                 } else {
                     node_env
@@ -1611,7 +1617,8 @@ impl Parser {
                 ret_node_ref = Some(node_ref);
             }
         }
-
+        // If the return type is not the same type as the return node, then we flag a
+        // validation error.
         if let Some(ret_nr) = ret_node_ref {
             let ret_node = &nodes[ret_nr.index];
             if ret_node.ty != ret_ty {
@@ -1965,7 +1972,6 @@ impl Parser {
     }
 
     pub fn parse_block_to_fn_with_ports(&mut self) -> Result<(ir::Fn, BlockPortInfo), ParseError> {
-        // Skip and capture optional outer attributes like `#[signature("""...""")]`.
         let outer_attrs: Vec<String> = Vec::new();
         self.parse_block_to_fn_with_ports_outer(outer_attrs)
     }
@@ -1983,14 +1989,13 @@ impl Parser {
 
         let mut pending_outer_attrs: Vec<String> = Vec::new();
         while !self.at_eof() {
-            // Allow standalone attributes between members (commonly preceding a block).
             self.drop_whitespace_and_comments();
-            if self.peek_is("#![") || self.peek_is("#[") {
+            if self.peek_is("#[") {
                 let mut s = String::new();
-                if self.try_drop("#![") {
-                    s.push_str("#![");
-                } else if self.try_drop("#[") {
+                if self.try_drop("#[") {
                     s.push_str("#[");
+                } else {
+                    unreachable!("outer attribute must start with '#['");
                 }
                 while let Some(c) = self.peekc() {
                     self.dropc()?;
