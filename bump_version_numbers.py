@@ -4,6 +4,7 @@
 import os
 import re
 import sys
+import difflib
 
 
 class VersionBumpError(Exception):
@@ -345,11 +346,27 @@ def set_package_version(
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(
-            "Usage: bump_version_numbers.py "
-            "[check|bump|bump-patch|bump-minor|transition|transition-minor|transition-patch|transition-arbitrary]"
+    def usage() -> str:
+        return (
+            "Usage: bump_version_numbers.py <command> [args]\n\n"
+            "Commands:\n"
+            "  check                                  Validate current Cargo.toml versions are consistent (no write)\n"
+            "  bump                                    Alias for bump-patch\n"
+            "  bump-patch                              Bump X.Y.Z -> X.Y.(Z+1) across workspace\n"
+            "  bump-minor                              Bump X.Y.0 -> X.(Y+1).0 across workspace (enforced)\n"
+            "  transition <old> <new>                  Infer minor/patch, validate, then apply old->new\n"
+            "  transition-minor <old> <new>            Validate minor shape, then apply old->new\n"
+            "  transition-patch <old> <new>            Validate patch shape, then apply old->new\n"
+            "  transition-arbitrary <old> <new>        Validate forward-only semver, then apply old->new\n\n"
+            "Examples:\n"
+            "  python3 bump_version_numbers.py check\n"
+            "  python3 bump_version_numbers.py bump-minor\n"
+            "  python3 bump_version_numbers.py transition 0.3.0 0.4.0\n"
+            "  python3 bump_version_numbers.py transition-arbitrary 0.3.1 0.4.0\n"
         )
+
+    if len(sys.argv) < 2:
+        print(usage())
         sys.exit(1)
     arg = sys.argv[1]
 
@@ -361,9 +378,7 @@ def main():
         "transition-arbitrary",
     ):
         if len(sys.argv) != 4:
-            print(
-                "Usage: bump_version_numbers.py transition[(-minor|-patch|-arbitrary)] <old_version> <new_version>"
-            )
+            print(usage())
             sys.exit(1)
         old_version = sys.argv[2]
         new_version = sys.argv[3]
@@ -404,10 +419,20 @@ def main():
         return
 
     if arg not in ("check", "bump", "bump-patch", "bump-minor"):
-        print(
-            "Usage: bump_version_numbers.py "
-            "[check|bump|bump-patch|bump-minor|transition|transition-minor|transition-patch|transition-arbitrary]"
-        )
+        valid = [
+            "check",
+            "bump",
+            "bump-patch",
+            "bump-minor",
+            "transition",
+            "transition-minor",
+            "transition-patch",
+            "transition-arbitrary",
+        ]
+        suggestion = difflib.get_close_matches(arg, valid, n=1)
+        if suggestion:
+            print(f"Unknown command: {arg}. Did you mean: {suggestion[0]}?\n")
+        print(usage())
         sys.exit(1)
 
     do_bump = arg != "check"
