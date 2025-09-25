@@ -202,16 +202,214 @@ def update_dependency_versions(file_path, workspace_info, do_bump):
     return updated
 
 
+def _parse_version_tuple(version_str: str) -> tuple[int, int, int]:
+    parts = version_str.split(".")
+    if len(parts) != 3:
+        raise VersionBumpError(f"Invalid version format: {version_str}")
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        raise VersionBumpError(f"Invalid numeric components in version: {version_str}")
+
+
+def validate_transition_arbitrary(old_version: str, new_version: str) -> None:
+    """Validate that new_version is a strictly greater semver than old_version.
+
+    This allows transitions like 0.3.1 -> 0.4.0 that are not strictly a patch or
+    minor bump shape, but still move forward in version order.
+    """
+    old_t = _parse_version_tuple(old_version)
+    new_t = _parse_version_tuple(new_version)
+    if new_t <= old_t:
+        raise VersionBumpError(
+            f"Arbitrary transition must increase version: {old_version} -> {new_version}"
+        )
+
+
+def infer_and_validate_transition(old_version: str, new_version: str) -> str:
+    """Infer whether the transition is a valid 'minor' or 'patch' bump and validate.
+
+    Returns the inferred bump kind ('minor' or 'patch') if valid, otherwise raises.
+    """
+    # Try minor first to strongly enforce the X.Y.0 -> X.(Y+1).0 discipline.
+    try:
+        expected_minor = compute_bumped_version(old_version, "minor")
+        if expected_minor == new_version:
+            validate_transition(old_version, new_version, "minor")
+            return "minor"
+    except VersionBumpError:
+        pass
+
+    # Try patch next.
+    try:
+        expected_patch = compute_bumped_version(old_version, "patch")
+        if expected_patch == new_version:
+            validate_transition(old_version, new_version, "patch")
+            return "patch"
+    except VersionBumpError:
+        pass
+
+    raise VersionBumpError(
+        f"Transition not recognized as minor or patch: {old_version} -> {new_version}"
+    )
+
+
+def check_all_packages_at_version(expected_version: str) -> dict:
+    """Ensure all packages in the workspace currently have expected_version.
+
+    Returns a map of package name to (file_path, old_version) for use in follow-on updates.
+    Raises VersionBumpError on any mismatch.
+    """
+    mismatches = []
+    pkg_info: dict[str, tuple[str, str]] = {}
+    for file in find_cargo_toml_files():
+        with open(file, "r") as f:
+            lines = f.readlines()
+        in_package = False
+        pkg_name = None
+        found_version = None
+        for line in lines:
+            stripped = line.strip()
+            if stripped == "[package]":
+                in_package = True
+                continue
+            if in_package and stripped.startswith("[") and stripped != "[package]":
+                break
+            if in_package:
+                m = re.match(r'\s*name\s*=\s*"([^"]+)"', line)
+                if m:
+                    pkg_name = m.group(1)
+                m = re.match(r'\s*version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', line)
+                if m:
+                    found_version = m.group(1)
+                    break
+        if pkg_name and found_version:
+            pkg_info[pkg_name] = (file, found_version)
+            if found_version != expected_version:
+                mismatches.append((file, found_version, expected_version))
+    if mismatches:
+        details = "; ".join(
+            [f"{f} has {cur}, expected {exp}" for (f, cur, exp) in mismatches]
+        )
+        raise VersionBumpError(f"Version mismatch before transition: {details}")
+    if not pkg_info:
+        raise VersionBumpError("No workspace package info found.")
+    return pkg_info
+
+
+def set_package_version(
+    file_path: str, new_version: str, do_write: bool
+) -> tuple[bool, str | None, str | None]:
+    """Replace the [package] version in a Cargo.toml file with new_version."""
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+    in_package = False
+    version_line_index = None
+    old_version = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "[package]":
+            in_package = True
+            continue
+        if in_package and stripped.startswith("[") and stripped != "[package]":
+            break
+        if in_package:
+            m = re.match(r'\s*version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', line)
+            if m:
+                if version_line_index is not None:
+                    raise VersionBumpError(
+                        f"Multiple version lines found in [package] section of {file_path}"
+                    )
+                version_line_index = i
+                old_version = m.group(1)
+    if version_line_index is None:
+        return (False, None, None)
+    new_line = re.sub(
+        r'(\s*version\s*=\s*")([0-9]+\.[0-9]+\.[0-9]+)(")',
+        rf"\g<1>{new_version}\3",
+        lines[version_line_index],
+        count=1,
+    )
+    if do_write:
+        lines[version_line_index] = new_line
+        with open(file_path, "w") as f:
+            f.writelines(lines)
+        print(
+            f"Updated {file_path}: set [package] version from {old_version} to {new_version}."
+        )
+    else:
+        print(
+            f"Would update {file_path}: set [package] version from {old_version} to {new_version}."
+        )
+    return (True, old_version, new_version)
+
+
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in (
-        "check",
-        "bump",
-        "bump-patch",
-        "bump-minor",
-    ):
-        print("Usage: bump_version_numbers.py [check|bump|bump-patch|bump-minor]")
+    if len(sys.argv) < 2:
+        print(
+            "Usage: bump_version_numbers.py "
+            "[check|bump|bump-patch|bump-minor|transition|transition-minor|transition-patch|transition-arbitrary]"
+        )
         sys.exit(1)
     arg = sys.argv[1]
+
+    # Transition validation mode
+    if arg in (
+        "transition",
+        "transition-minor",
+        "transition-patch",
+        "transition-arbitrary",
+    ):
+        if len(sys.argv) != 4:
+            print(
+                "Usage: bump_version_numbers.py transition[(-minor|-patch|-arbitrary)] <old_version> <new_version>"
+            )
+            sys.exit(1)
+        old_version = sys.argv[2]
+        new_version = sys.argv[3]
+        try:
+            if arg == "transition-minor":
+                validate_transition(old_version, new_version, "minor")
+                inferred = "minor"
+            elif arg == "transition-patch":
+                validate_transition(old_version, new_version, "patch")
+                inferred = "patch"
+            elif arg == "transition-arbitrary":
+                validate_transition_arbitrary(old_version, new_version)
+                inferred = "arbitrary"
+            else:
+                inferred = infer_and_validate_transition(old_version, new_version)
+
+            # Ensure workspace at old_version before applying transition to new_version.
+            pkg_info_current = check_all_packages_at_version(old_version)
+
+            # Build workspace_info with explicit new_version for dependency updates.
+            workspace_info_for_update = {
+                pkg: (file, old, new_version)
+                for pkg, (file, old) in pkg_info_current.items()
+            }
+
+            # Update package versions across all Cargo.toml files.
+            for file in find_cargo_toml_files():
+                set_package_version(file, new_version, True)
+
+            # Update dependency versions to match new_version for local packages.
+            for file in find_cargo_toml_files():
+                update_dependency_versions(file, workspace_info_for_update, True)
+
+            print(f"OK: applied {inferred} transition {old_version} -> {new_version}")
+        except VersionBumpError as e:
+            print(str(e))
+            sys.exit(1)
+        return
+
+    if arg not in ("check", "bump", "bump-patch", "bump-minor"):
+        print(
+            "Usage: bump_version_numbers.py "
+            "[check|bump|bump-patch|bump-minor|transition|transition-minor|transition-patch|transition-arbitrary]"
+        )
+        sys.exit(1)
+
     do_bump = arg != "check"
     bump_kind = (
         "patch"
@@ -304,3 +502,29 @@ def test_validate_transition_patch_rejects_cross_minor_or_major():
         validate_transition("0.3.4", "0.4.0", "patch")
     with pytest.raises(VersionBumpError):
         validate_transition("0.3.4", "1.0.0", "patch")
+
+
+def test_infer_and_validate_transition_identifies_minor_and_patch():
+    assert infer_and_validate_transition("0.3.0", "0.4.0") == "minor"
+    assert infer_and_validate_transition("0.3.4", "0.3.5") == "patch"
+
+
+def test_infer_and_validate_transition_rejects_invalid():
+    import pytest
+
+    with pytest.raises(VersionBumpError):
+        infer_and_validate_transition("0.3.1", "0.4.0")
+
+
+def test_validate_transition_arbitrary_accepts_forward_and_rejects_equal_or_backward():
+    # Forward transitions allowed
+    validate_transition_arbitrary("0.3.1", "0.4.0")
+    validate_transition_arbitrary("0.3.1", "0.3.2")
+
+    # Equal or backward rejected
+    import pytest
+
+    with pytest.raises(VersionBumpError):
+        validate_transition_arbitrary("0.3.1", "0.3.1")
+    with pytest.raises(VersionBumpError):
+        validate_transition_arbitrary("0.3.2", "0.3.1")
