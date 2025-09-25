@@ -490,18 +490,6 @@ pub fn generate_ir_fn(
                 width,
             } => {
                 assert!(width > 0, "bit slice has no width");
-                let operand_bv = &available_nodes[operand.index % available_nodes.len()];
-                let operand_width = fn_builder
-                    .get_type(operand_bv)
-                    .unwrap()
-                    .get_flat_bit_count() as u64;
-                assert!(
-                    start + width <= operand_width,
-                    "The bit-width of operand ({}) must be greater than or equal to start ({}) + width ({})",
-                    operand_width,
-                    start,
-                    width
-                );
                 let operand = &available_nodes[operand.index % available_nodes.len()];
                 fn_builder.bit_slice(operand, start as u64, width as u64, None)
             }
