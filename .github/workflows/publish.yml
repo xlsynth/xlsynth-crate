@@ -31,6 +31,9 @@ jobs:
           VERSION_NO_V="${FULL_VERSION#v}"
           echo "VERSION_NO_V=$VERSION_NO_V"
           echo "::set-output name=version_no_v::$VERSION_NO_V"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NO_V"
+          echo "MAJOR=$MAJOR MINOR=$MINOR PATCH=$PATCH"
+          echo "::set-output name=patch::$PATCH"
 
       - name: Validate version matches
         run: |
@@ -166,15 +169,25 @@ jobs:
 
       # No wait needed after the last crate published in the sequence
 
-      - name: Bump version numbers
-        if: success()
+      - name: Bump version numbers (minor bump for mainline release)
+        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
         run: |
           cargo clean
-          python bump_version_numbers.py bump
+          python bump_version_numbers.py bump-minor
           cargo generate-lockfile
 
+      - name: Validate post-bump version equals expected next minor
+        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
+        run: |
+          VERSION_NO_V="${{ steps.version_vars.outputs.version_no_v }}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NO_V"
+          NEXT_MINOR=$((MINOR+1))
+          EXPECTED_NEXT="${MAJOR}.${NEXT_MINOR}.0"
+          echo "Expecting post-bump version: $EXPECTED_NEXT"
+          python3 check_version_is.py "$EXPECTED_NEXT"
+
       - name: Commit bumped version numbers
-        if: success()
+        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
         run: |
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"
