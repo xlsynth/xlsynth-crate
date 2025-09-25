@@ -8,6 +8,8 @@ pub use simulate_sv::{
     simulate_pipeline_single_pulse, simulate_pipeline_single_pulse_custom, simulate_sv_flist,
 };
 
+use pretty_assertions::assert_eq;
+
 /// Compare arbitrary text against a golden file on disk, with an opt-in
 /// update mechanism controlled by the XLSYNTH_UPDATE_GOLDEN environment
 /// variable. Uses full-string equality (no trimming) for exactness.
