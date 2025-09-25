@@ -17,6 +17,7 @@ blake3 = "1"
 # Local crates
 xlsynth-pir = { path = ".." }
 xlsynth = { path = "../../xlsynth" }
+tempfile = "3"
 
 # Fuzz targets
 [[bin]]
@@ -34,5 +35,11 @@ doc = false
 [[bin]]
 name = "fuzz_greedy_matching_ged"
 path = "fuzz_targets/fuzz_greedy_matching_ged.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_block_roundtrip"
+path = "fuzz_targets/fuzz_block_roundtrip.rs"
 test = false
 doc = false

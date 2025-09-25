@@ -121,6 +121,8 @@ pub fn remove_dead_nodes(f: &Fn) -> Fn {
         ret_ty: f.ret_ty.clone(),
         nodes: new_nodes,
         ret_node_ref: Some(NodeRef { index: ret_new }),
+        outer_attrs: f.outer_attrs.clone(),
+        inner_attrs: f.inner_attrs.clone(),
     }
 }
 

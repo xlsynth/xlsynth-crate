@@ -249,19 +249,26 @@ impl std::error::Error for ValidationError {}
 /// Validates an entire package, ensuring all member names are unique, the top
 /// function (if set) exists, and all contained functions are valid.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
-    let mut names = HashSet::new();
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum MemberType {
+        Function,
+        Block,
+    }
+    let mut names = HashSet::<(String, MemberType)>::new();
     for member in &p.members {
-        let name = match member {
-            PackageMember::Function(f) => &f.name,
-            PackageMember::Block { func, .. } => &func.name,
+        let (name, member_type) = match member {
+            PackageMember::Function(f) => (f.name.clone(), MemberType::Function),
+            PackageMember::Block { func, .. } => (func.name.clone(), MemberType::Block),
         };
-        if !names.insert(name.clone()) {
-            return Err(ValidationError::DuplicateMemberName(name.clone()));
+        if !names.insert((name.clone(), member_type)) {
+            return Err(ValidationError::DuplicateMemberName(name));
         }
     }
 
     if let Some(top) = &p.top_name {
-        if !names.contains(top) {
+        if names.get(&(top.clone(), MemberType::Function)).is_none()
+            && names.get(&(top.clone(), MemberType::Block)).is_none()
+        {
             return Err(ValidationError::MissingTopFunction(top.clone()));
         }
     }
@@ -711,6 +718,8 @@ mod tests {
                 lit_node,
             ],
             ret_node_ref: Some(ir::NodeRef { index: 1 }),
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
         };
         pkg.members.push(ir::PackageMember::Function(f.clone()));
         let fref = pkg.get_top().unwrap();

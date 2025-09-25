@@ -112,18 +112,24 @@ fn test_ir_round_trip_multi_output_block_preserves_order_and_ids() {
 
 #[test]
 fn test_ir_round_trip_block_with_attributes_and_pos() {
-    // Outer attribute and inner attribute should be ignored; pos attributes should
-    // be parsed and dropped.
-    let input = r#"#[signature("""")]
+    let input = r#"package my_test
+
+#[signature("""")]
 block attr_test(a: bits[1], out: bits[1]) {
   #![provenance(name="attr_test", kind="function")]
   a: bits[1] = input_port(name=a, id=1, pos=[(0,0,0)])
   out: () = output_port(a, name=out, id=2, pos=[(0,1,0)])
-}"#;
-    let want = r#"block attr_test(a: bits[1], out: bits[1]) {
+}
+"#;
+    let want = r#"package my_test
+
+#[signature("""")]
+block attr_test(a: bits[1], out: bits[1]) {
+  #![provenance(name="attr_test", kind="function")]
   a: bits[1] = input_port(name=a, id=1)
   out: () = output_port(a, name=out, id=2)
-}"#;
+}
+"#;
 
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("attrs.block.ir");

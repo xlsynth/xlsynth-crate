@@ -984,6 +984,8 @@ pub struct Fn {
     pub ret_ty: Type,
     pub nodes: Vec<Node>,
     pub ret_node_ref: Option<NodeRef>,
+    pub outer_attrs: Vec<String>,
+    pub inner_attrs: Vec<String>,
 }
 
 impl Fn {
@@ -1121,6 +1123,10 @@ impl Fn {
 
 impl std::fmt::Display for Fn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Emit outer attributes (verbatim lines) before the signature.
+        for attr in &self.outer_attrs {
+            writeln!(f, "{}", attr)?;
+        }
         let params_str = self
             .params
             .iter()
@@ -1133,6 +1139,11 @@ impl std::fmt::Display for Fn {
             "fn {}({}) -> {} {{\n",
             self.name, params_str, return_type_str
         )?;
+
+        // Emit inner attributes immediately after the signature.
+        for attr in &self.inner_attrs {
+            writeln!(f, "  {}", attr)?;
+        }
 
         // Now that we've emitted the signature, emit the nodes in the function body.
         for (i, node) in self.nodes.iter().enumerate() {
