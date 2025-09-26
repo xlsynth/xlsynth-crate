@@ -11,7 +11,8 @@ use crate::tools::{
     run_block_to_verilog, run_codegen_pipeline, run_ir_converter_main, run_opt_main,
 };
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
-use xlsynth_pir::matching_ged::{apply_function_edits, compute_function_edit};
+use xlsynth_pir::ir::PackageMember;
+use xlsynth_pir::matching_ged::{apply_block_edits, compute_block_edit};
 
 fn dslx2pipeline_eco(
     input_file: &std::path::Path,
@@ -131,23 +132,43 @@ fn dslx2pipeline_eco(
     std::fs::write(&sv_path, &sv).unwrap();
 
     // Parse the baseline and new block IRs
-    let baseline_block_ir =
+    let mut baseline_block_ir =
         xlsynth_pir::ir_parser::parse_path_to_package(&baseline_block_ir_path).unwrap();
-    let baseline_block = baseline_block_ir.get_top_block().unwrap();
+    let baseline_block = baseline_block_ir.get_block(ir_top.as_str()).unwrap();
     let new_block_ir = xlsynth_pir::ir_parser::parse_path_to_package(&new_block_ir_path).unwrap();
-    let new_block = new_block_ir.get_top_block().unwrap();
+    let new_block = new_block_ir.get_block(ir_top.as_str()).unwrap();
 
     // Compute the edit.
-    let mut selector = GreedyMatchSelector::new(baseline_block, new_block);
-    let edits = compute_function_edit(baseline_block, new_block, &mut selector).unwrap();
-    let patched_block_ir = apply_function_edits(baseline_block, &edits).unwrap();
+    let (old_name, old_fn, new_fn) = match (baseline_block, new_block) {
+        (PackageMember::Block { func: o, .. }, PackageMember::Block { func: n, .. }) => {
+            (o.name.clone(), o, n)
+        }
+        _ => unreachable!("get_top_block should return a Block"),
+    };
+    let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
+    let edits = compute_block_edit(baseline_block, new_block, &mut selector).unwrap();
+    let patched_block = apply_block_edits(baseline_block, &edits).unwrap();
 
-    // Write out the patched block IR.
+    let edits_path = temp_dir.path().join("edits.txt");
+    std::fs::write(&edits_path, format!("{:#?}\n", edits)).unwrap();
+    if let Some(path) = edits_debug_out {
+        std::fs::write(path, format!("{:#?}\n", edits)).unwrap();
+    }
+
+    // Set the patched block to top, and write out the patched block IR.
+    let patched_block_name = match &patched_block {
+        PackageMember::Block { func, .. } => func.name.as_str(),
+        _ => unreachable!("patched_block should be a Block"),
+    };
+    baseline_block_ir.set_top_block(patched_block_name).unwrap();
     let patched_block_ir_path = temp_dir.path().join("patched.block.ir");
-    std::fs::write(&patched_block_ir_path, patched_block_ir.to_string()).unwrap();
+    baseline_block_ir
+        .replace_block(&old_name, patched_block)
+        .unwrap();
+    std::fs::write(&patched_block_ir_path, baseline_block_ir.to_string()).unwrap();
 
     // Call block_to_verilog to generate the patched SV.
-    let mut block_to_verilog_flags = new_codegen_flags.clone();
+    let mut block_to_verilog_flags = codegen_flags.clone();
     block_to_verilog_flags.set_reference_residual_data_path(&baseline_residual_data_path);
     let patched_sv = run_block_to_verilog(&patched_block_ir_path, &codegen_flags, tool_path);
     println!("Edit count: {}", edits.edits.len());

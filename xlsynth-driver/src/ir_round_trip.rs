@@ -48,7 +48,7 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
                                     n.pos = None;
                                 }
                             }
-                            let block_text = emit_fn_as_block(&f, None, Some(&port_info));
+                            let block_text = emit_fn_as_block(&f, None, Some(&port_info), false);
                             print!("{}", block_text);
                         }
                         Err(_e2) => {
@@ -73,7 +73,7 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
                 n.pos = None;
             }
         }
-        let block_text = emit_fn_as_block(&f, None, Some(&port_info));
+        let block_text = emit_fn_as_block(&f, None, Some(&port_info), false);
         print!("{}", block_text);
     }
 }

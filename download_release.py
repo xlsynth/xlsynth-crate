@@ -214,7 +214,7 @@ def main():
         "--binaries",
         dest="binaries",
         help="Binaries to download, comma separated",
-        default="dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main",
+        default="dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main,block_to_verilog_main",
     )
     parser.add_option(
         "--max_attempts",
