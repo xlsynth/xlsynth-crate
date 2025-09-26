@@ -15,7 +15,7 @@ fn test_dslx2pipeline_eco_basic() {
     let keep_temps = std::env::var("KEEP_TEMPS").as_deref() == Ok("1");
     // Temp directory for this test.
     let mut temp_dir = tempfile::Builder::new()
-        .prefix("dslx2pipeline_eco_test")
+        .prefix("dslx2pipeline_eco_test.")
         .tempdir()
         .unwrap();
     if keep_temps {
@@ -36,7 +36,7 @@ fn test_dslx2pipeline_eco_basic() {
     std::fs::write(&baseline_path, baseline_dslx).unwrap();
 
     // Modified DSLX: add2 (slightly different), written to temp_dir/source.x
-    let modified_dslx = "fn main(x: u32) -> u32 { x + u32:2 }\n";
+    let modified_dslx = "fn main(x: u32) -> u32 { !x + u32:1 }\n";
     let modified_path = temp_dir.path().join("source.x");
     std::fs::write(&modified_path, modified_dslx).unwrap();
 

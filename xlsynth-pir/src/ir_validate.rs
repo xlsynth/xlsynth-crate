@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use super::ir::{Fn, NaryOp, NodePayload, Package, PackageMember, Type};
+use super::ir::{Fn, MemberType, NaryOp, NodePayload, Package, PackageMember, Type};
 use super::ir_deduce::deduce_result_type_with;
 use super::ir_utils::operands;
 
@@ -14,7 +14,7 @@ pub enum ValidationError {
     /// Two package members share the same name.
     DuplicateMemberName(String),
     /// The `top` attribute references a missing function.
-    MissingTopFunction(String),
+    MissingTop(String),
     /// A node references an undefined operand (index out of bounds).
     OperandOutOfBounds {
         func: String,
@@ -100,8 +100,8 @@ impl std::fmt::Display for ValidationError {
             ValidationError::DuplicateMemberName(name) => {
                 write!(f, "duplicate member name '{}'", name)
             }
-            ValidationError::MissingTopFunction(name) => {
-                write!(f, "top function '{}' not found", name)
+            ValidationError::MissingTop(name) => {
+                write!(f, "top member '{}' not found", name)
             }
             ValidationError::OperandOutOfBounds {
                 func,
@@ -249,11 +249,6 @@ impl std::error::Error for ValidationError {}
 /// Validates an entire package, ensuring all member names are unique, the top
 /// function (if set) exists, and all contained functions are valid.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    enum MemberType {
-        Function,
-        Block,
-    }
     let mut names = HashSet::<(String, MemberType)>::new();
     for member in &p.members {
         let (name, member_type) = match member {
@@ -265,11 +260,9 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
         }
     }
 
-    if let Some(top) = &p.top_name {
-        if names.get(&(top.clone(), MemberType::Function)).is_none()
-            && names.get(&(top.clone(), MemberType::Block)).is_none()
-        {
-            return Err(ValidationError::MissingTopFunction(top.clone()));
+    if let Some(top) = &p.top {
+        if !names.contains(top) {
+            return Err(ValidationError::MissingTop(top.0.clone()));
         }
     }
 
