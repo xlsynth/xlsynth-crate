@@ -136,7 +136,7 @@ mod tests {
             }
             "#,
         );
-        let inverter = inverter_pkg.get_top().unwrap();
+        let inverter = inverter_pkg.get_top_fn().unwrap();
         let identity_pkg = parse_ir_from_string(
             r#"package identity_pkg
             top fn identity(x: bits[1]) -> bits[1] {
@@ -144,7 +144,7 @@ mod tests {
             }
             "#,
         );
-        let identity = identity_pkg.get_top().unwrap();
+        let identity = identity_pkg.get_top_fn().unwrap();
         let edit_distance = compute_edit_distance(&inverter, &identity);
         // The only difference is the operator in the node ("not" vs "identity").
         assert_eq!(edit_distance, 1);
@@ -159,7 +159,7 @@ mod tests {
             }
             "#,
         );
-        let and_fn = and_pkg.get_top().unwrap();
+        let and_fn = and_pkg.get_top_fn().unwrap();
         let and_converse_pkg = parse_ir_from_string(
             r#"package and_converse_pkg
             top fn and_converse(x: bits[1], y: bits[1]) -> bits[1] {
@@ -167,7 +167,7 @@ mod tests {
             }
             "#,
         );
-        let and_converse_fn = and_converse_pkg.get_top().unwrap();
+        let and_converse_fn = and_converse_pkg.get_top_fn().unwrap();
         let edit_distance = compute_edit_distance(&and_fn, &and_converse_fn);
         // For the "and" node the operands differ in order,
         // causing a substitution cost of 1.
@@ -183,7 +183,7 @@ mod tests {
             }
             "#,
         );
-        let not_fn = not_pkg.get_top().unwrap();
+        let not_fn = not_pkg.get_top_fn().unwrap();
         let neg_pkg = parse_ir_from_string(
             r#"package neg_pkg
             top fn neg(x: bits[1]) -> bits[1] {
@@ -191,7 +191,7 @@ mod tests {
             }
             "#,
         );
-        let neg_fn = neg_pkg.get_top().unwrap();
+        let neg_fn = neg_pkg.get_top_fn().unwrap();
         let edit_distance = compute_edit_distance(&not_fn, &neg_fn);
         // The only difference is the operator in the node ("not" vs "neg").
         assert_eq!(edit_distance, 1);
@@ -207,7 +207,7 @@ mod tests {
             }
             "#,
         );
-        let not_not_fn = not_not_pkg.get_top().unwrap();
+        let not_not_fn = not_not_pkg.get_top_fn().unwrap();
         let neg_neg_pkg = parse_ir_from_string(
             r#"package neg_neg_pkg
             top fn neg_neg(x: bits[1]) -> bits[1] {
@@ -216,7 +216,7 @@ mod tests {
             }
             "#,
         );
-        let neg_neg_fn = neg_neg_pkg.get_top().unwrap();
+        let neg_neg_fn = neg_neg_pkg.get_top_fn().unwrap();
         let edit_distance = compute_edit_distance(&not_not_fn, &neg_neg_fn);
         assert_eq!(edit_distance, 2);
     }
@@ -230,7 +230,7 @@ mod tests {
             }
             "#,
         );
-        let two_tuple_fn = two_tuple_pkg.get_top().unwrap();
+        let two_tuple_fn = two_tuple_pkg.get_top_fn().unwrap();
         let singleton_pkg = parse_ir_from_string(
             r#"package singleton_pkg
             top fn singleton(x: bits[1]) -> (bits[1]) {
@@ -238,7 +238,7 @@ mod tests {
             }
             "#,
         );
-        let singleton_fn = singleton_pkg.get_top().unwrap();
+        let singleton_fn = singleton_pkg.get_top_fn().unwrap();
         let edit_distance = compute_edit_distance(&two_tuple_fn, &singleton_fn);
         // The only difference is the operator in the node ("tuple" vs "identity").
         assert_eq!(edit_distance, 1);

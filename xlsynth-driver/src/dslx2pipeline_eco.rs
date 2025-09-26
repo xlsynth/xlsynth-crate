@@ -7,7 +7,11 @@ use crate::common::{
     CodegenFlags, PipelineSpec,
 };
 use crate::toolchain_config::ToolchainConfig;
-use crate::tools::{run_codegen_pipeline, run_ir_converter_main, run_opt_main};
+use crate::tools::{
+    run_block_to_verilog, run_codegen_pipeline, run_ir_converter_main, run_opt_main,
+};
+use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
+use xlsynth_pir::matching_ged::{apply_function_edits, compute_function_edit};
 
 fn dslx2pipeline_eco(
     input_file: &std::path::Path,
@@ -36,8 +40,17 @@ fn dslx2pipeline_eco(
     };
 
     log::info!("dslx2pipeline using tool path: {}", tool_path);
-    let temp_dir = tempfile::TempDir::new().unwrap();
-
+    let mut temp_dir = tempfile::Builder::new()
+        .prefix("dslx2pipeline_eco.")
+        .tempdir()
+        .unwrap();
+    if let Some(_) = keep_temps {
+        temp_dir.disable_cleanup(true);
+        eprintln!(
+            "`dslx2pipeline_eco` working directory: {}",
+            temp_dir.path().display()
+        );
+    }
     let dslx_stdlib_path = config
         .as_ref()
         .and_then(|c| c.dslx.as_ref()?.dslx_stdlib_path.as_deref());
@@ -67,7 +80,7 @@ fn dslx2pipeline_eco(
     let unopt_ir_path = temp_dir.path().join("unopt.ir");
     std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
 
-    // Run the baseline unopt IR and new unopt IR through the optimizer
+    // Run the baseline unopt IR through the optimizer
     let baseline_opt_ir = run_opt_main(&baseline_unopt_ir_path, Some(&ir_top), tool_path);
     let baseline_opt_ir_path = temp_dir.path().join("baseline_opt.ir");
     std::fs::write(&baseline_opt_ir_path, baseline_opt_ir).unwrap();
@@ -89,6 +102,7 @@ fn dslx2pipeline_eco(
     let baseline_sv_path = temp_dir.path().join("baseline_sv.sv");
     std::fs::write(&baseline_sv_path, &baseline_sv).unwrap();
 
+    // Run the new unopt IR through the optimizer
     let opt_ir = run_opt_main(&unopt_ir_path, Some(&ir_top), tool_path);
     let opt_ir_path = temp_dir.path().join("opt.ir");
     std::fs::write(&opt_ir_path, opt_ir.clone()).unwrap();
@@ -106,7 +120,6 @@ fn dslx2pipeline_eco(
     let mut new_codegen_flags = codegen_flags.clone();
     let new_block_ir_path = temp_dir.path().join("new.block.ir");
     new_codegen_flags.set_output_block_ir_path(&new_block_ir_path);
-    new_codegen_flags.set_reference_residual_data_path(&baseline_residual_data_path);
     let sv = run_codegen_pipeline(
         &opt_ir_path,
         delay_model,
@@ -117,18 +130,28 @@ fn dslx2pipeline_eco(
     let sv_path = temp_dir.path().join("output.sv");
     std::fs::write(&sv_path, &sv).unwrap();
 
-    // compute the edit distance between the baseline and new block IRs.
+    // Parse the baseline and new block IRs
+    let baseline_block_ir =
+        xlsynth_pir::ir_parser::parse_path_to_package(&baseline_block_ir_path).unwrap();
+    let baseline_block = baseline_block_ir.get_top_block().unwrap();
+    let new_block_ir = xlsynth_pir::ir_parser::parse_path_to_package(&new_block_ir_path).unwrap();
+    let new_block = new_block_ir.get_top_block().unwrap();
 
-    // Run block_to_verilog to get the patched SV.
+    // Compute the edit.
+    let mut selector = GreedyMatchSelector::new(baseline_block, new_block);
+    let edits = compute_function_edit(baseline_block, new_block, &mut selector).unwrap();
+    let patched_block_ir = apply_function_edits(baseline_block, &edits).unwrap();
 
-    if let Some(_) = keep_temps {
-        let temp_dir_path = temp_dir.keep();
-        eprintln!(
-            "Pipeline generation successful. Output written to: {}",
-            temp_dir_path.to_str().unwrap()
-        );
-    }
-    println!("{}", sv);
+    // Write out the patched block IR.
+    let patched_block_ir_path = temp_dir.path().join("patched.block.ir");
+    std::fs::write(&patched_block_ir_path, patched_block_ir.to_string()).unwrap();
+
+    // Call block_to_verilog to generate the patched SV.
+    let mut block_to_verilog_flags = new_codegen_flags.clone();
+    block_to_verilog_flags.set_reference_residual_data_path(&baseline_residual_data_path);
+    let patched_sv = run_block_to_verilog(&patched_block_ir_path, &codegen_flags, tool_path);
+    println!("Edit count: {}", edits.edits.len());
+    println!("{}", patched_sv);
 }
 
 pub fn handle_dslx2pipeline_eco(matches: &ArgMatches, config: &Option<ToolchainConfig>) {

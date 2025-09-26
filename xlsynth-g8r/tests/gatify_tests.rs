@@ -31,7 +31,7 @@ fn do_test_ir_conversion_with_top(
     let ir_package = parser.parse_and_validate_package().unwrap();
     let ir_fn = match top_name {
         Some(name) => ir_package.get_fn(name).unwrap(),
-        None => ir_package.get_top().unwrap(),
+        None => ir_package.get_top_fn().unwrap(),
     };
     let gatify_output = gatify(
         &ir_fn,
@@ -66,7 +66,7 @@ fn do_test_ir_conversion_no_equiv(ir_package_text: &str, opt: Opt) {
     let _ = env_logger::builder().is_test(true).try_init();
     let mut parser = ir_parser::Parser::new(&ir_package_text);
     let ir_package = parser.parse_and_validate_package().unwrap();
-    let ir_fn = ir_package.get_top().unwrap();
+    let ir_fn = ir_package.get_top_fn().unwrap();
     let _ = gatify(
         &ir_fn,
         GatifyOptions {

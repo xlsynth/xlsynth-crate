@@ -212,7 +212,7 @@ fn ir_to_gatefn_with_stats(
         eprintln!("Error encountered parsing XLS IR package: {:?}", err);
         std::process::exit(1);
     });
-    let ir_top = match ir_package.get_top() {
+    let ir_top = match ir_package.get_top_fn() {
         Some(ir_top) => ir_top,
         None => {
             eprintln!("No top module found in the IR package");

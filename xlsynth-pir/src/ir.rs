@@ -1331,7 +1331,7 @@ pub struct BlockPortInfo {
 }
 
 impl Package {
-    pub fn get_top(&self) -> Option<&Fn> {
+    pub fn get_top_fn(&self) -> Option<&Fn> {
         match &self.top_name {
             Some(name) => self
                 .members
@@ -1352,7 +1352,7 @@ impl Package {
         }
     }
 
-    pub fn get_top_mut(&mut self) -> Option<&mut Fn> {
+    pub fn get_top_fn_mut(&mut self) -> Option<&mut Fn> {
         match &mut self.top_name {
             Some(name) => self
                 .members
@@ -1373,6 +1373,47 @@ impl Package {
         }
     }
 
+    pub fn get_top_block(&self) -> Option<&Fn> {
+        match &self.top_name {
+            Some(name) => self
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => None,
+                    PackageMember::Block { func, .. } => Some(func),
+                })
+                .find(|f| f.name == *name),
+            None => self
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => None,
+                    PackageMember::Block { func, .. } => Some(func),
+                })
+                .next(),
+        }
+    }
+
+    pub fn get_top_block_mut(&mut self) -> Option<&mut Fn> {
+        match &mut self.top_name {
+            Some(name) => self
+                .members
+                .iter_mut()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => None,
+                    PackageMember::Block { func, .. } => Some(func),
+                })
+                .find(|f| f.name == *name),
+            None => self
+                .members
+                .iter_mut()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => None,
+                    PackageMember::Block { func, .. } => Some(func),
+                })
+                .next(),
+        }
+    }
     pub fn get_fn(&self, name: &str) -> Option<&Fn> {
         self.members.iter().find_map(|m| match m {
             PackageMember::Function(f) if f.name == name => Some(f),

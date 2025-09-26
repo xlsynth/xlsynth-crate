@@ -803,7 +803,7 @@ mod tests {
             }
             "#,
         );
-        let lhs = pkg.get_top().unwrap();
+        let lhs = pkg.get_top_fn().unwrap();
 
         let pkg2 = parse_ir_from_string(
             r#"package p2
@@ -812,7 +812,7 @@ mod tests {
             }
             "#,
         );
-        let rhs = pkg2.get_top().unwrap();
+        let rhs = pkg2.get_top_fn().unwrap();
 
         let mut selector = NaiveMatchSelector::new(lhs, rhs);
         let edits = compute_function_edit(lhs, rhs, &mut selector).unwrap();
@@ -832,7 +832,7 @@ mod tests {
             }
             "#,
         );
-        let lhs = pkg.get_top().unwrap();
+        let lhs = pkg.get_top_fn().unwrap();
 
         let pkg2 = parse_ir_from_string(
             r#"package p2
@@ -841,7 +841,7 @@ mod tests {
             }
             "#,
         );
-        let rhs = pkg2.get_top().unwrap();
+        let rhs = pkg2.get_top_fn().unwrap();
 
         let mut selector = NaiveMatchSelector::new(lhs, rhs);
         let result = compute_function_edit(lhs, rhs, &mut selector);
@@ -858,7 +858,7 @@ mod tests {
             }
             "#,
         );
-        let f = pkg.get_top().unwrap();
+        let f = pkg.get_top_fn().unwrap();
         let edits = IrEditSet::default();
         let applied = apply_function_edits(f, &edits).unwrap();
         assert_eq!(applied.to_string(), f.to_string());
@@ -873,7 +873,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -882,7 +882,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = crate::greedy_matching_ged::GreedyMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -901,7 +901,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -911,7 +911,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = NaiveMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -931,7 +931,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         // Same nodes, but return points to a different node (the literal).
         let pkg_new = parse_ir_from_string(
@@ -942,7 +942,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = NaiveMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -961,7 +961,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         // Different structure: wrap the add in an identity, keep params identical.
         let pkg_new = parse_ir_from_string(
@@ -972,7 +972,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = NaiveMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();

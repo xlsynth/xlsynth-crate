@@ -247,7 +247,7 @@ mod tests {
 ";
         let mut parser = ir_parser::Parser::new(simple_xor_ir);
         let ir_package = parser.parse_and_validate_package().unwrap();
-        let ir_top = ir_package.get_top().unwrap();
+        let ir_top = ir_package.get_top_fn().unwrap();
 
         // Now we make a simple one bit gate fn.
         let mut gate_builder = GateBuilder::new("my_xor".to_string(), GateBuilderOptions::opt());

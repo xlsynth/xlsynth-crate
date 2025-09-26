@@ -3008,7 +3008,7 @@ top fn main() -> bits[32] {
 "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let main_fn = pkg.get_top().unwrap();
+        let main_fn = pkg.get_top_fn().unwrap();
         let data = main_fn.nodes[1].pos.as_ref().unwrap();
         assert_eq!(data.len(), 2);
         assert_eq!(
@@ -3026,7 +3026,7 @@ top fn main() -> bits[32] {
         let ir = "package nopos\n\nfn main() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1, pos=[(0,0,0)])\n}\n";
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let main_fn = pkg.get_top().unwrap();
+        let main_fn = pkg.get_top_fn().unwrap();
         assert!(main_fn.nodes[1].pos.is_some());
     }
 
