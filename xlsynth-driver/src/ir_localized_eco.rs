@@ -132,7 +132,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
                 vec![("name", top)],
             ),
         },
-        None => match old_pkg.get_top() {
+        None => match old_pkg.get_top_fn() {
             Some(f) => f,
             None => {
                 let msg = format!(
@@ -152,7 +152,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
                 vec![("name", top)],
             ),
         },
-        None => match new_pkg.get_top() {
+        None => match new_pkg.get_top_fn() {
             Some(f) => f,
             None => {
                 let msg = format!(

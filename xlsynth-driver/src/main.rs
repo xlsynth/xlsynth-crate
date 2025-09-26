@@ -246,6 +246,24 @@ impl AppExt for clap::Command {
                     .value_name("OUTPUT_VERILOG_LINE_MAP_PATH")
                     .help("Write Verilog line map textproto to this path"),
             )
+            .arg(
+                Arg::new("output_block_ir_path")
+                    .long("output_block_ir_path")
+                    .value_name("OUTPUT_BLOCK_IR_PATH")
+                    .help("Write block IR text to this path"),
+            )
+            .arg(
+                Arg::new("output_residual_data_path")
+                    .long("output_residual_data_path")
+                    .value_name("OUTPUT_RESIDUAL_DATA_PATH")
+                    .help("Write residual data to this path"),
+            )
+            .arg(
+                Arg::new("reference_residual_data_path")
+                    .long("reference_residual_data_path")
+                    .value_name("REFERENCE_RESIDUAL_DATA_PATH")
+                    .help("Path to reference residual data for comparison"),
+            )
     }
 
     fn add_ir_top_arg(self, required: bool) -> Self {
@@ -977,6 +995,22 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx2pipeline-eco")
                 .about("Produces Verilog with minimal edits from baseline_unopt_ir to current DSLX, using greedy GED edits; accepts dslx2pipeline args + --baseline_unopt_ir")
+                .arg(
+                    clap::Arg::new("output_unopt_ir")
+                        .long("output_unopt_ir")
+                        .value_name("PATH")
+                        .help("Path to write the unoptimized IR (package) output")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_opt_ir")
+                        .long("output_opt_ir")
+                        .value_name("PATH")
+                        .help("Path to write the optimized IR (package) output")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
                 .arg(
                     clap::Arg::new("baseline_unopt_ir")
                         .long("baseline_unopt_ir")

@@ -273,7 +273,7 @@ mod tests {
     fn parse_top_fn(ir_pkg_text: &str) -> Fn {
         let mut p = Parser::new(ir_pkg_text);
         let pkg = p.parse_and_validate_package().unwrap();
-        pkg.get_top().unwrap().clone()
+        pkg.get_top_fn().unwrap().clone()
     }
 
     #[test]

@@ -2148,7 +2148,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
 ";
         let mut parser = ir_parser::Parser::new(ir_text);
         let ir_package = parser.parse_and_validate_package().unwrap();
-        let ir_fn = ir_package.get_top().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
 
         let gatify_output = gatify(
             &ir_fn,

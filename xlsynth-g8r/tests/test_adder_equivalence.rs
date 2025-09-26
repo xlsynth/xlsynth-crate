@@ -21,7 +21,7 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
     let mut parser = ir_parser::Parser::new(&original_ir);
     let orig_package = parser.parse_and_validate_package().unwrap();
     let orig_package_ir_text = orig_package.to_string();
-    let orig_ir_fn = orig_package.get_top().unwrap();
+    let orig_ir_fn = orig_package.get_top_fn().unwrap();
     let gatify_output = ir2gate::gatify(
         &orig_ir_fn,
         ir2gate::GatifyOptions {

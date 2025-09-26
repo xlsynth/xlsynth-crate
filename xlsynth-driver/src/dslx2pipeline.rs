@@ -33,7 +33,10 @@ fn dslx2pipeline(
 
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         log::info!("dslx2pipeline using tool path: {}", tool_path);
-        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_dir = tempfile::Builder::new()
+            .prefix("dslx2pipeline.")
+            .tempdir()
+            .unwrap();
 
         let dslx_stdlib_path = config
             .as_ref()

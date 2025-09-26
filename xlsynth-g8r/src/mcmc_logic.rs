@@ -891,7 +891,7 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
                     anyhow::anyhow!("Failed to parse IR package '{}': {:?}", p_str, e)
                 })?;
 
-                let top_entity = package.get_top().ok_or_else(|| {
+                let top_entity = package.get_top_fn().ok_or_else(|| {
                     anyhow::anyhow!("No top entity found in IR package '{}'", p_str)
                 })?;
                 println!("Found top function: {}", top_entity.name);

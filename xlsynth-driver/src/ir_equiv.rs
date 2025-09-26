@@ -88,7 +88,7 @@ fn parse_and_prepare_fn(
             std::process::exit(1);
         })
     } else {
-        pkg.get_top().cloned().unwrap_or_else(|| {
+        pkg.get_top_fn().cloned().unwrap_or_else(|| {
             eprintln!(
                 "[{}] No top function found in {} IR (origin: {})",
                 subcommand, side, origin

@@ -169,7 +169,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
                 return;
             }
         },
-        None => match lhs_pkg.get_top() {
+        None => match lhs_pkg.get_top_fn() {
             Some(f) => f,
             None => {
                 println!("  LHS input: no top set and no --lhs_ir_top provided; aborting");
@@ -188,7 +188,7 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
                 return;
             }
         },
-        None => match rhs_pkg.get_top() {
+        None => match rhs_pkg.get_top_fn() {
             Some(f) => f,
             None => {
                 println!("  RHS input: no top set and no --rhs_ir_top provided; aborting");

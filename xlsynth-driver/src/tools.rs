@@ -288,3 +288,35 @@ pub fn run_codegen_block_ir_to_string(
 
     std::fs::read_to_string(output_block_ir_path).expect("reading output block IR should succeed")
 }
+
+/// Runs block_to_verilog_main to emit Verilog from a block IR file, honoring
+/// the same codegen flags used by codegen_main.
+pub fn run_block_to_verilog(
+    block_ir_file: &std::path::Path,
+    codegen_flags: &CodegenFlags,
+    tool_path: &str,
+) -> String {
+    log::info!("run_block_to_verilog");
+    let b2v_path = tool_path_or_exit(tool_path, "block_to_verilog_main", "block_to_verilog_main");
+    let mut command = Command::new(b2v_path);
+    command.arg(block_ir_file);
+
+    // Reuse the same flag population as codegen_main.
+    add_codegen_flags(&mut command, codegen_flags);
+
+    log::info!("Running command: {:?}", command);
+    let output = command
+        .output()
+        .expect("block_to_verilog_main should succeed");
+
+    if !output.status.success() {
+        eprintln!(
+            "block_to_verilog_main failed with status: {}",
+            output.status
+        );
+        eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        process::exit(1);
+    }
+
+    String::from_utf8_lossy(&output.stdout).to_string()
+}

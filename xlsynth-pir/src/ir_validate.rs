@@ -662,7 +662,7 @@ mod tests {
         "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
+        let f = pkg.get_top_fn().unwrap();
         assert!(matches!(
             validate_fn(f, &pkg),
             Err(ValidationError::DuplicateTextId { .. })
@@ -722,7 +722,7 @@ mod tests {
             inner_attrs: Vec::new(),
         };
         pkg.members.push(ir::PackageMember::Function(f.clone()));
-        let fref = pkg.get_top().unwrap();
+        let fref = pkg.get_top_fn().unwrap();
         assert!(matches!(
             super::validate_fn(fref, &pkg),
             Err(ValidationError::NodeNameOpMismatch { .. })
@@ -759,7 +759,7 @@ mod tests {
         "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
+        let f = pkg.get_top_fn().unwrap();
         assert!(matches!(
             validate_fn(f, &pkg),
             Err(ValidationError::UnknownCallee { .. })
@@ -778,7 +778,7 @@ mod tests {
         let mut parser = Parser::new(ir);
         let mut pkg = parser.parse_package().unwrap();
         {
-            let f = pkg.get_top_mut().unwrap();
+            let f = pkg.get_top_fn_mut().unwrap();
             // Manually insert a duplicate GetParam node with the same id as 'x'.
             let pid = f.params[0].id;
             let dup = ir::Node {
@@ -790,7 +790,7 @@ mod tests {
             };
             f.nodes.push(dup);
         }
-        let f_ro = pkg.get_top().unwrap();
+        let f_ro = pkg.get_top_fn().unwrap();
         assert!(matches!(
             validate_fn(f_ro, &pkg),
             Err(ValidationError::DuplicateTextId { .. })
@@ -809,7 +809,7 @@ mod tests {
         let mut parser = Parser::new(ir);
         let mut pkg = parser.parse_package().unwrap();
         {
-            let f = pkg.get_top_mut().unwrap();
+            let f = pkg.get_top_fn_mut().unwrap();
             // Remove the GetParam node for 'x'. It should be at index 1.
             let idx = f
                 .nodes
@@ -818,7 +818,7 @@ mod tests {
                 .unwrap();
             f.nodes.remove(idx);
         }
-        let f_ro = pkg.get_top().unwrap();
+        let f_ro = pkg.get_top_fn().unwrap();
         let err = validate_fn(f_ro, &pkg).unwrap_err();
         assert!(matches!(
             err,
@@ -837,7 +837,7 @@ mod tests {
         "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
+        let f = pkg.get_top_fn().unwrap();
         assert!(matches!(
             validate_fn(f, &pkg),
             Err(ValidationError::DuplicateParamName { .. })
