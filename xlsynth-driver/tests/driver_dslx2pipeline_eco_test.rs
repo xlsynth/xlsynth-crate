@@ -8,6 +8,26 @@ fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
     format!("{}\ntool_path = \"{}\"", toolchain_toml_contents, tool_path)
 }
 
+fn differ_in_one_line(a: &str, b: &str) -> bool {
+    let a_lines: Vec<_> = a.lines().collect();
+    let b_lines: Vec<_> = b.lines().collect();
+
+    if a_lines.len() != b_lines.len() {
+        return false;
+    }
+
+    let mut diffs = 0;
+    for (la, lb) in a_lines.iter().zip(b_lines.iter()) {
+        if la != lb {
+            diffs += 1;
+            if diffs > 1 {
+                return false;
+            }
+        }
+    }
+    diffs == 1
+}
+
 #[test]
 fn test_dslx2pipeline_eco_basic() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -102,4 +122,9 @@ fn test_dslx2pipeline_eco_basic() {
         String::from_utf8_lossy(&out_eco.stdout),
         String::from_utf8_lossy(&out_eco.stderr)
     );
+
+    assert!(differ_in_one_line(
+        &String::from_utf8_lossy(&out_eco.stdout),
+        &String::from_utf8_lossy(&out_baseline.stdout)
+    ));
 }
