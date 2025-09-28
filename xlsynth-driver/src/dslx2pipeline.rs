@@ -33,7 +33,7 @@ fn dslx2pipeline(
 
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         log::info!("dslx2pipeline using tool path: {}", tool_path);
-        let temp_dir = tempfile::Builder::new()
+        let mut temp_dir = tempfile::Builder::new()
             .prefix("dslx2pipeline.")
             .tempdir()
             .unwrap();
@@ -92,10 +92,10 @@ fn dslx2pipeline(
         std::fs::write(&sv_path, &sv).unwrap();
 
         if let Some(_) = keep_temps {
-            let temp_dir_path = temp_dir.keep();
+            temp_dir.disable_cleanup(true);
             eprintln!(
                 "Pipeline generation successful. Output written to: {}",
-                temp_dir_path.to_str().unwrap()
+                temp_dir.path().to_str().unwrap()
             );
         }
         println!("{}", sv);

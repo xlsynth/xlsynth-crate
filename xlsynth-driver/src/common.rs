@@ -12,6 +12,7 @@ pub const DEFAULT_WARNINGS_AS_ERRORS: bool = true;
 
 // Specification for a pipeline generation can be either stages-based or
 // clock-period-based.
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PipelineSpec {
     Stages(u64),
     ClockPeriodPs(u64),
@@ -58,53 +59,27 @@ pub fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
 
 #[derive(Debug, Clone)]
 pub struct CodegenFlags {
-    input_valid_signal: Option<String>,
-    output_valid_signal: Option<String>,
-    use_system_verilog: Option<bool>,
-    flop_inputs: Option<bool>,
-    flop_outputs: Option<bool>,
-    add_idle_output: Option<bool>,
-    add_invariant_assertions: Option<bool>,
-    module_name: Option<String>,
-    array_index_bounds_checking: Option<bool>,
-    separate_lines: Option<bool>,
-    reset: Option<String>,
-    reset_active_low: Option<bool>,
-    reset_asynchronous: Option<bool>,
-    reset_data_path: Option<bool>,
-    gate_format: Option<String>,
-    assert_format: Option<String>,
-    output_schedule_path: Option<String>,
-    output_verilog_line_map_path: Option<String>,
-    output_block_ir_path: Option<String>,
-    output_residual_data_path: Option<String>,
-    reference_residual_data_path: Option<String>,
-}
-
-impl CodegenFlags {
-    pub fn set_output_block_ir_path<'a, P: AsRef<std::path::Path>>(
-        &'a mut self,
-        path: P,
-    ) -> &'a mut Self {
-        self.output_block_ir_path = Some(path.as_ref().to_string_lossy().into_owned());
-        self
-    }
-
-    pub fn set_output_residual_data_path<'a, P: AsRef<std::path::Path>>(
-        &'a mut self,
-        path: P,
-    ) -> &'a mut Self {
-        self.output_residual_data_path = Some(path.as_ref().to_string_lossy().into_owned());
-        self
-    }
-
-    pub fn set_reference_residual_data_path<'a, P: AsRef<std::path::Path>>(
-        &'a mut self,
-        path: P,
-    ) -> &'a mut Self {
-        self.reference_residual_data_path = Some(path.as_ref().to_string_lossy().into_owned());
-        self
-    }
+    pub input_valid_signal: Option<String>,
+    pub output_valid_signal: Option<String>,
+    pub use_system_verilog: Option<bool>,
+    pub flop_inputs: Option<bool>,
+    pub flop_outputs: Option<bool>,
+    pub add_idle_output: Option<bool>,
+    pub add_invariant_assertions: Option<bool>,
+    pub module_name: Option<String>,
+    pub array_index_bounds_checking: Option<bool>,
+    pub separate_lines: Option<bool>,
+    pub reset: Option<String>,
+    pub reset_active_low: Option<bool>,
+    pub reset_asynchronous: Option<bool>,
+    pub reset_data_path: Option<bool>,
+    pub gate_format: Option<String>,
+    pub assert_format: Option<String>,
+    pub output_schedule_path: Option<String>,
+    pub output_verilog_line_map_path: Option<String>,
+    pub output_block_ir_path: Option<String>,
+    pub output_residual_data_path: Option<String>,
+    pub reference_residual_data_path: Option<String>,
 }
 
 /// Extracts flags that we pass to the "codegen" step of the process (i.e.
@@ -289,7 +264,6 @@ pub fn codegen_flags_to_textproto(codegen_flags: &CodegenFlags) -> String {
             "output_residual_data_path: \"{output_residual_data_path}\""
         ));
     }
-
     if let Some(reference_residual_data_path) = &codegen_flags.reference_residual_data_path {
         pieces.push(format!(
             "reference_residual_data_path: \"{reference_residual_data_path}\""

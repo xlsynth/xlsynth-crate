@@ -64,7 +64,7 @@ mod tests {
             name: "test_pkg".to_string(),
             file_table: ir::FileTable::new(),
             members: vec![ir::PackageMember::Function(f.clone())],
-            top_name: Some(f.name.clone()),
+            top: Some((f.name.clone(), ir::MemberType::Function)),
         }
     }
 

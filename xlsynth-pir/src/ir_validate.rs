@@ -687,7 +687,7 @@ mod tests {
             name: "test".to_string(),
             file_table: ir::FileTable::new(),
             members: Vec::new(),
-            top_name: Some("f".to_string()),
+            top: Some(("f".to_string(), ir::MemberType::Function)),
         };
         let lit_node = ir::Node {
             text_id: 2,

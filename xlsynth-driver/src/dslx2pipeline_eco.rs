@@ -90,9 +90,11 @@ fn dslx2pipeline_eco(
     // metadata.
     let baseline_block_ir_path = temp_dir.path().join("baseline.block.ir");
     let baseline_residual_data_path = temp_dir.path().join("residual_data.pb");
-    let mut baseline_codegen_flags = codegen_flags.clone();
-    baseline_codegen_flags.set_output_block_ir_path(&baseline_block_ir_path);
-    baseline_codegen_flags.set_output_residual_data_path(&baseline_residual_data_path);
+    let baseline_codegen_flags = CodegenFlags {
+        output_block_ir_path: Some(baseline_block_ir_path.to_string_lossy().into_owned()),
+        output_residual_data_path: Some(baseline_residual_data_path.to_string_lossy().into_owned()),
+        ..codegen_flags.clone()
+    };
     let baseline_sv = run_codegen_pipeline(
         &baseline_opt_ir_path,
         delay_model,
@@ -118,9 +120,11 @@ fn dslx2pipeline_eco(
     }
 
     // Run the new opt IR through codegen to get the new block IR.
-    let mut new_codegen_flags = codegen_flags.clone();
     let new_block_ir_path = temp_dir.path().join("new.block.ir");
-    new_codegen_flags.set_output_block_ir_path(&new_block_ir_path);
+    let new_codegen_flags = CodegenFlags {
+        output_block_ir_path: Some(new_block_ir_path.to_string_lossy().into_owned()),
+        ..codegen_flags.clone()
+    };
     let sv = run_codegen_pipeline(
         &opt_ir_path,
         delay_model,
@@ -167,11 +171,29 @@ fn dslx2pipeline_eco(
         .unwrap();
     std::fs::write(&patched_block_ir_path, baseline_block_ir.to_string()).unwrap();
 
-    // Call block_to_verilog to generate the patched SV.
-    let mut block_to_verilog_flags = codegen_flags.clone();
-    block_to_verilog_flags.set_reference_residual_data_path(&baseline_residual_data_path);
-    let patched_sv = run_block_to_verilog(&patched_block_ir_path, &codegen_flags, tool_path);
-    println!("Edit count: {}", edits.edits.len());
+    // Call block_to_verilog to generate the patched SV. Using esidual data only
+    // works with combinational generator so check that the options are for a
+    // single-statge pipeline with no IO flops.
+    if codegen_flags.flop_inputs == Some(true) || codegen_flags.flop_outputs == Some(true) {
+        if *pipeline_spec == PipelineSpec::Stages(1) {
+            eprintln!(
+            "`dslx2pipeline_eco` only works with combinational blocks (single-stage, no IO flops)"
+        );
+            std::process::exit(1);
+        }
+    }
+    let block_to_verilog_flags = CodegenFlags {
+        reference_residual_data_path: Some(
+            baseline_residual_data_path.to_string_lossy().into_owned(),
+        ),
+
+        ..codegen_flags.clone()
+    };
+    let patched_sv =
+        run_block_to_verilog(&patched_block_ir_path, &block_to_verilog_flags, tool_path);
+    let patched_sv_path = temp_dir.path().join("patched.sv");
+    std::fs::write(&patched_sv_path, &patched_sv).unwrap();
+
     println!("{}", patched_sv);
 }
 

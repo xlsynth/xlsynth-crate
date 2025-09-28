@@ -23,13 +23,6 @@ fn test_ir_round_trip_standalone_block() {
 
 #[test]
 fn test_ir_round_trip_package_with_top_block() {
-    let pkg_ir = r#"package p
-
-block myb(a: bits[1], out: bits[1]) {
-  a: bits[1] = input_port(name=a, id=1)
-  out: () = output_port(a, name=out, id=2)
-}
-"#;
     // Input package that includes a top block equivalent to the expected emission.
     let input_ir = r#"package p
 
@@ -50,7 +43,7 @@ top block myb(a: bits[1], out: bits[1]) {
         .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout, pkg_ir);
+    assert_eq!(stdout, input_ir);
 }
 
 #[test]

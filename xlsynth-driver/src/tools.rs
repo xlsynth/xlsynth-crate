@@ -303,7 +303,6 @@ pub fn run_block_to_verilog(
 
     // Reuse the same flag population as codegen_main.
     add_codegen_flags(&mut command, codegen_flags);
-
     log::info!("Running command: {:?}", command);
     let output = command
         .output()
