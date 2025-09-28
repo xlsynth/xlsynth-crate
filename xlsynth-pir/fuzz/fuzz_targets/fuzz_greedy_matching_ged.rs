@@ -5,15 +5,9 @@
 use libfuzzer_sys::fuzz_target;
 use log::{debug, info};
 use xlsynth::IrPackage;
-<<<<<<< HEAD
 use xlsynth_pir::dce::{get_dead_nodes, remove_dead_nodes};
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
-=======
-use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
-use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
-use xlsynth_pir::ir_utils::{get_dead_nodes, remove_dead_nodes};
->>>>>>> 5cee27d (Add a greedy ECO computation algorithm.)
 use xlsynth_pir::matching_ged::{
     IrMatchSet, MatchAction, NodeSide, apply_function_edits, compute_function_edit,
     compute_function_match, convert_match_set_to_edit_set, format_ir_edits, format_match_actions,
