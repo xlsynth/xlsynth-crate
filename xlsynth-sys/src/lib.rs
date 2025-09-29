@@ -307,6 +307,14 @@ pub struct XlsDslxParametricEnvItem {
     pub value: *const CDslxInterpValue,
 }
 
+#[repr(C)]
+pub struct CDslxInvocationRewriteRule {
+    pub from_callee: *mut CDslxFunction,
+    pub to_callee: *mut CDslxFunction,
+    pub match_callee_env: *const CDslxParametricEnv,
+    pub to_callee_env: *const CDslxParametricEnv,
+}
+
 extern "C" {
     pub fn xls_convert_dslx_to_ir(
         dslx: *const std::os::raw::c_char,
@@ -874,6 +882,18 @@ extern "C" {
         import_data: *const CDslxImportData,
         error_out: *mut *mut std::os::raw::c_char,
         typechecked_module_out: *mut *mut CDslxTypecheckedModule,
+    ) -> bool;
+
+    pub fn xls_dslx_replace_invocations_in_module(
+        tm: *mut CDslxTypecheckedModule,
+        callers: *const *mut CDslxFunction,
+        callers_count: libc::size_t,
+        rules: *const CDslxInvocationRewriteRule,
+        rules_count: libc::size_t,
+        import_data: *mut CDslxImportData,
+        install_subject: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
     // bool xls_schedule_and_codegen_package(
