@@ -576,11 +576,10 @@ fn __itok__target(__token: token id=1, x: bits[2] id=2) -> (token, bits[2]) {
 }"#;
 
     const EXPECTED_PROPERTY_IR: &str = r#"fn __enum_in_bound_property____itok__target(__token: token id=24, __activation: bits[1] id=25, x: bits[2] id=26, y: bits[2] id=27) -> bits[1] {
-  enum_in_bound_activation_literal____itok__target: bits[1] = literal(value=1, id=28)
-  enum_in_bound_invoke____itok__target: (token, bits[2], bits[2]) = invoke(__token, enum_in_bound_activation_literal____itok__target, x, y, to_apply=__itok__target, id=29)
-  enum_in_bound_true: bits[1] = literal(value=1, id=30)
-  enum_in_bound_pair: ((token, bits[2], bits[2]), bits[1]) = tuple(enum_in_bound_invoke____itok__target, enum_in_bound_true, id=31)
-  ret enum_in_bound_result: bits[1] = tuple_index(enum_in_bound_pair, index=1, id=32)
+  enum_in_bound_invoke____itok__target: (token, bits[2], bits[2]) = invoke(__token, __activation, x, y, to_apply=__itok__target, id=28)
+  enum_in_bound_true: bits[1] = literal(value=1, id=29)
+  enum_in_bound_pair: ((token, bits[2], bits[2]), bits[1]) = tuple(enum_in_bound_invoke____itok__target, enum_in_bound_true, id=30)
+  ret enum_in_bound_result: bits[1] = tuple_index(enum_in_bound_pair, index=1, id=31)
 }"#;
 
     #[test]
