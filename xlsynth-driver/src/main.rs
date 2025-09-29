@@ -65,6 +65,7 @@ mod ir_structural_similarity;
 mod lib2proto;
 mod parallelism;
 mod proofs;
+mod prove_enum_in_bound;
 mod prove_quickcheck;
 mod prover;
 mod prover_config;
@@ -1281,6 +1282,48 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("prove-enum-in-bound")
+                .about("Prove that target functions receive in-bound enum arguments when invoked from a DSLX top")
+                .add_dslx_input_args(true)
+                .arg(
+                    clap::Arg::new("target")
+                        .long("target")
+                        .value_name("FUNCTION")
+                        .help("Target function whose enum parameters must remain in-bound (repeatable)")
+                        .required(true)
+                        .action(clap::ArgAction::Append),
+                )
+                .arg(
+                    clap::Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Select solver backend")
+                        .value_parser([
+                            "auto",
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector-binary",
+                            #[cfg(feature = "has-bitwuzla")]
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            "toolchain",
+                        ])
+                        .default_value("auto")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("prover")
                 .about("Run a prover plan with a process-based scheduler")
                 .arg(
@@ -1569,6 +1612,8 @@ fn main() {
         ir_strip_pos_data::handle_ir_strip_pos_data(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("prove-quickcheck") {
         prove_quickcheck::handle_prove_quickcheck(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("prove-enum-in-bound") {
+        prove_enum_in_bound::handle_prove_enum_in_bound(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("prover") {
         prover::handle_prover(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2combo") {

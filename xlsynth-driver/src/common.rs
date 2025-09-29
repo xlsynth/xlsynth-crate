@@ -498,16 +498,18 @@ pub fn get_enum_domain(
 pub fn get_function_enum_param_domains(
     tcm: &xlsynth::dslx::TypecheckedModule,
     dslx_top: &str,
-) -> ParamDomains {
+) -> Result<ParamDomains, String> {
     let module = tcm.get_module();
     let type_info = tcm.get_type_info();
     let mut domains: ParamDomains = std::collections::HashMap::new();
+    let mut found = false;
 
     for i in 0..module.get_member_count() {
         if let Some(xlsynth::dslx::MatchableModuleMember::Function(f)) =
             module.get_member(i).to_matchable()
         {
             if f.get_identifier() == dslx_top {
+                found = true;
                 for pidx in 0..f.get_param_count() {
                     let p = f.get_param(pidx);
                     let name = p.get_name();
@@ -523,7 +525,24 @@ pub fn get_function_enum_param_domains(
         }
     }
 
-    domains
+    if found {
+        Ok(domains)
+    } else {
+        Err(format!(
+            "Function '{}' not found in module '{}': available members: {}",
+            dslx_top,
+            module.get_name(),
+            (0..module.get_member_count())
+                .filter_map(|idx| module.get_member(idx).to_matchable())
+                .filter_map(|member| match member {
+                    xlsynth::dslx::MatchableModuleMember::Function(func) =>
+                        Some(func.get_identifier()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
 }
 
 /// Parses uninterpreted-function mappings from CLI values into a map from
@@ -671,7 +690,7 @@ mod tests {
         .expect("parse_and_typecheck success");
 
         // Exercise the helper under test.
-        let domains = get_function_enum_param_domains(&tcm, "top");
+        let domains = get_function_enum_param_domains(&tcm, "top").expect("function exists");
         assert!(domains.contains_key("x"));
         let values = domains.get("x").unwrap();
         assert_eq!(values.len(), 2);

@@ -49,6 +49,7 @@ pub struct DslxConvertOptions<'a> {
     pub additional_search_paths: Vec<&'a std::path::Path>,
     pub enable_warnings: Option<&'a [String]>,
     pub disable_warnings: Option<&'a [String]>,
+    pub force_implicit_token_calling_convention: bool,
 }
 
 pub struct DslxToIrTextResult {
@@ -146,6 +147,8 @@ pub fn convert_dslx_to_ir_text(
         let mut warnings_out: *mut *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut warnings_out_count: usize = 0;
 
+        let force_itok = options.force_implicit_token_calling_convention;
+
         // Call the function
         let success = xlsynth_sys::xls_convert_dslx_to_ir_with_warnings(
             dslx.as_ptr(),
@@ -159,6 +162,7 @@ pub fn convert_dslx_to_ir_text(
             disable_warnings_ptr,
             disable_warnings_len,
             false,
+            force_itok,
             &mut warnings_out,
             &mut warnings_out_count,
             &mut error_out,

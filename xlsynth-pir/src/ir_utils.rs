@@ -2,7 +2,7 @@
 
 //! Utility functions for working with / on XLS IR.
 
-use crate::ir::{Fn, Node, NodePayload, NodeRef};
+use crate::ir::{Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
 use std::collections::{HashMap, HashSet};
 
 /// Returns the list of operands for the provided node.
@@ -203,6 +203,56 @@ pub fn get_topological(f: &Fn) -> Vec<NodeRef> {
 /// list. Useful when nodes are not yet wrapped in an `Fn`.
 pub fn get_topological_nodes(nodes: &[Node]) -> Vec<NodeRef> {
     topo_from_nodes(nodes)
+}
+
+pub fn next_text_id(pkg: &Package) -> usize {
+    pkg.members
+        .iter()
+        .flat_map(|member| match member {
+            PackageMember::Function(f) => &f.nodes,
+            PackageMember::Block { func, .. } => &func.nodes,
+        })
+        .map(|n| n.text_id)
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+/// Returns the `NodeRef` corresponding to the `index`-th parameter of `f`, if
+/// it exists.
+pub fn param_node_ref_by_index(f: &Fn, param_index: usize) -> Option<NodeRef> {
+    let param = f.params.get(param_index)?;
+    f.nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, node)| match node.payload {
+            NodePayload::GetParam(pid) if pid == param.id => Some(NodeRef { index: idx }),
+            _ => None,
+        })
+}
+
+/// Returns the `NodeRef` corresponding to the parameter named `param_name` in
+/// `f`, if any.
+pub fn param_node_ref_by_name(f: &Fn, param_name: &str) -> Option<NodeRef> {
+    let (index, _) = f
+        .params
+        .iter()
+        .enumerate()
+        .find(|(_, param)| param.name == param_name)?;
+    param_node_ref_by_index(f, index)
+}
+
+/// Returns the `Type` of the `index`-th parameter of `f`, if it exists.
+pub fn param_type_by_index(f: &Fn, param_index: usize) -> Option<Type> {
+    f.params.get(param_index).map(|param| param.ty.clone())
+}
+
+/// Returns the `Type` of the parameter named `param_name` in `f`, if any.
+pub fn param_type_by_name(f: &Fn, param_name: &str) -> Option<Type> {
+    f.params
+        .iter()
+        .find(|param| param.name == param_name)
+        .map(|param| param.ty.clone())
 }
 
 /// Computes the immediate users of each node in the function.
@@ -416,7 +466,7 @@ pub fn sanitize_text_id_to_identifier_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::PackageMember;
+    use crate::ir::{FileTable, PackageMember};
     use crate::ir_parser::Parser;
 
     fn parse_fn(ir: &str) -> Fn {
@@ -536,6 +586,76 @@ mod tests {
         );
         // And ret should be last in topo (since it depends on a3 only).
         assert_eq!(order.last().unwrap().index, f.nodes.len() - 1);
+    }
+
+    #[test]
+    fn next_text_id_advances() {
+        let f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}"#,
+        );
+        let pkg = Package {
+            name: "test".to_string(),
+            file_table: FileTable::new(),
+            members: vec![PackageMember::Function(f.clone())],
+            top_name: None,
+        };
+        let max_id = f
+            .nodes
+            .iter()
+            .map(|n| n.text_id)
+            .max()
+            .expect("function has nodes");
+        assert_eq!(next_text_id(&pkg), max_id + 1);
+    }
+
+    #[test]
+    fn next_text_id_handles_zero_ids() {
+        let mut f = parse_fn(
+            r#"fn f() -> bits[1] {
+  lit: bits[1] = literal(value=0, id=1)
+  ret identity.2: bits[1] = identity(lit, id=2)
+}"#,
+        );
+        for node in f.nodes.iter_mut() {
+            node.text_id = 0;
+        }
+        let pkg = Package {
+            name: "test".to_string(),
+            file_table: FileTable::new(),
+            members: vec![PackageMember::Function(f)],
+            top_name: None,
+        };
+        assert_eq!(next_text_id(&pkg), 1);
+    }
+
+    #[test]
+    fn param_node_lookups() {
+        let f = parse_fn(
+            r#"fn g(a: bits[8] id=1, b: bits[1] id=2) -> bits[8] {
+  ret identity.3: bits[8] = identity(a, id=3)
+}"#,
+        );
+
+        let a_ref = param_node_ref_by_index(&f, 0).expect("param 0 node");
+        match &f.nodes[a_ref.index].payload {
+            NodePayload::GetParam(pid) => assert_eq!(*pid, f.params[0].id),
+            other => panic!("expected get_param, found {other:?}"),
+        }
+
+        let b_ref = param_node_ref_by_name(&f, "b").expect("param b node");
+        match &f.nodes[b_ref.index].payload {
+            NodePayload::GetParam(pid) => assert_eq!(*pid, f.params[1].id),
+            other => panic!("expected get_param, found {other:?}"),
+        }
+
+        assert!(matches!(param_type_by_index(&f, 0), Some(Type::Bits(8))));
+        assert!(matches!(param_type_by_name(&f, "b"), Some(Type::Bits(1))));
+        assert!(param_node_ref_by_index(&f, 2).is_none());
+        assert!(param_node_ref_by_name(&f, "missing").is_none());
+        assert!(param_type_by_index(&f, 2).is_none());
+        assert!(param_type_by_name(&f, "missing").is_none());
     }
 }
 

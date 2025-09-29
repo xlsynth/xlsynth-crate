@@ -105,7 +105,8 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
                         let cex_str = format!("inputs: {:?}, output: {:?}", inputs, output);
                         (false, Some(cex_str))
                     }
-                    BoolPropertyResult::ToolchainDisproved(msg) => (false, Some(msg)),
+                    BoolPropertyResult::ToolchainDisproved(msg)
+                    | BoolPropertyResult::Error(msg) => (false, Some(msg)),
                 };
 
                 QuickCheckTestOutcome {

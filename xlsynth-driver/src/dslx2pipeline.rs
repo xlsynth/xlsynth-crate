@@ -132,6 +132,7 @@ fn dslx2pipeline(
             additional_search_paths: dslx_path_vec,
             enable_warnings: enable_warnings,
             disable_warnings: disable_warnings,
+            force_implicit_token_calling_convention: false,
         };
         let convert_result: xlsynth::DslxToIrPackageResult =
             xlsynth::convert_dslx_to_ir(&dslx, input_file, &convert_options)

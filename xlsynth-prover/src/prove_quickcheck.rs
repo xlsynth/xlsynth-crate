@@ -77,7 +77,7 @@ where
     let mut solver = S::new(solver_config).unwrap();
 
     // Generate SMT representation with UF mapping/registry.
-    let fn_inputs = get_fn_inputs(&mut solver, ir_fn, None);
+    let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
 
     if let Some(domains) = &prover_fn.domains {
         for param in fn_inputs.params().iter() {
@@ -326,6 +326,7 @@ where
         additional_search_paths: additional_search_paths.iter().copied().collect(),
         enable_warnings: None,
         disable_warnings: None,
+        ..Default::default()
     };
     let ir_text = xlsynth::convert_dslx_to_ir_text(&dslx_contents, entry_file, &options)
         .expect("DSLX->IR conversion failed for quickcheck")

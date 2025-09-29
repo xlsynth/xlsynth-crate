@@ -73,7 +73,7 @@ const fn min_bits_u128(n: u128) -> usize {
 
 pub fn get_fn_inputs<'a, S: Solver>(
     solver: &mut S,
-    ir_fn: &'a IrFn<'a>,
+    ir_fn: IrFn<'a>,
     name_prefix: Option<&str>,
 ) -> FnInputs<'a, S::Term> {
     let mut params_iter = ir_fn.fn_ref.params.iter();
@@ -118,14 +118,14 @@ pub fn get_fn_inputs<'a, S: Solver>(
     FnInputs { ir_fn, inputs }
 }
 
-pub fn ir_to_smt<'a, S: Solver>(
+pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
     solver: &mut S,
-    inputs: &'a FnInputs<'a, S::Term>,
+    inputs: &'inputs FnInputs<'ir, S::Term>,
     uf_map: &HashMap<String, String>,
     uf_registry: &UfRegistry<S>,
-) -> SmtFn<'a, S::Term> {
+) -> SmtFn<'ir, S::Term> {
     let topo = get_topological(inputs.ir_fn.fn_ref);
-    let mut env: HashMap<NodeRef, IrTypedBitVec<'a, S::Term>> = HashMap::new();
+    let mut env: HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>> = HashMap::new();
     let mut assertions = Vec::new();
     for nr in topo {
         let node = &inputs.ir_fn.fn_ref.nodes[nr.index];
@@ -142,7 +142,7 @@ pub fn ir_to_smt<'a, S: Solver>(
             };
             max_indexable_elements.min(num_elements)
         }
-        let exp: IrTypedBitVec<'a, S::Term> = match &node.payload {
+        let exp: IrTypedBitVec<'ir, S::Term> = match &node.payload {
             NodePayload::Nil => continue,
             NodePayload::GetParam(pid) => {
                 let p = inputs.params().iter().find(|p| p.id == *pid).unwrap();
@@ -266,7 +266,7 @@ pub fn ir_to_smt<'a, S: Solver>(
                         ));
 
                     let callee_inputs = FnInputs {
-                        ir_fn: &callee_ir_fn,
+                        ir_fn: callee_ir_fn.clone(),
                         inputs: callee_input_map,
                     };
                     let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
@@ -701,7 +701,7 @@ pub fn ir_to_smt<'a, S: Solver>(
                     "Invoke operand count does not match callee params"
                 );
 
-                let mut callee_input_map: HashMap<String, IrTypedBitVec<'a, S::Term>> =
+                let mut callee_input_map: HashMap<String, IrTypedBitVec<'ir, S::Term>> =
                     HashMap::new();
                 for (param, arg_ref) in callee.params.iter().zip(operands.iter()) {
                     let arg_bv = env
@@ -788,19 +788,20 @@ pub fn ir_to_smt<'a, S: Solver>(
                     }
                 } else {
                     // Otherwise inline the callee recursively.
-                    let callee_ir_fn = IrFn {
-                        fn_ref: callee,
-                        pkg_ref: inputs.ir_fn.pkg_ref,
-                        fixed_implicit_activation: false,
-                    };
                     let callee_inputs = FnInputs {
-                        ir_fn: &callee_ir_fn,
+                        ir_fn: IrFn {
+                            fn_ref: callee,
+                            pkg_ref: inputs.ir_fn.pkg_ref,
+                            fixed_implicit_activation: false,
+                        },
                         inputs: callee_input_map,
                     };
                     let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
+                    assertions.extend(callee_smt.assertions.iter().cloned());
+                    let callee_output_bv = callee_smt.output.bitvec;
                     IrTypedBitVec {
                         ir_type: &node.ty,
-                        bitvec: callee_smt.output.bitvec,
+                        bitvec: callee_output_bv,
                     }
                 }
             }
@@ -948,7 +949,7 @@ pub fn ir_to_smt<'a, S: Solver>(
     }
     let ret = inputs.ir_fn.fn_ref.ret_node_ref.unwrap();
     // Collect inputs in the same order as they are declared in the IR function
-    let mut ordered_inputs: Vec<IrTypedBitVec<'a, S::Term>> = Vec::new();
+    let mut ordered_inputs: Vec<IrTypedBitVec<'ir, S::Term>> = Vec::new();
     for param in inputs.params() {
         if let Some(bv) = inputs.inputs.get(&param.name) {
             ordered_inputs.push(bv.clone());
