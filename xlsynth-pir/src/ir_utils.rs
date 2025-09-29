@@ -2,7 +2,7 @@
 
 //! Utility functions for working with / on XLS IR.
 
-use crate::ir::{Fn, Node, NodePayload, NodeRef, PackageMember};
+use crate::ir::{Fn, Node, NodePayload, NodeRef};
 use std::collections::{HashMap, HashSet};
 
 /// Returns the list of operands for the provided node.

@@ -2536,7 +2536,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_bit_slice_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
         let input = "bit_slice.6: bits[2] = bit_slice(x, start=0, width=2, id=6)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2553,9 +2553,9 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     #[test]
     fn test_parse_priority_sel() {
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("selector".to_string()), 1, ir::NodeRef { index: 1 });
-        node_env.add(Some("one_case".to_string()), 2, ir::NodeRef { index: 2 });
-        node_env.add(Some("my_default".to_string()), 3, ir::NodeRef { index: 3 });
+        let _ = node_env.add(Some("selector".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("one_case".to_string()), 2, ir::NodeRef { index: 2 });
+        let _ = node_env.add(Some("my_default".to_string()), 3, ir::NodeRef { index: 3 });
         let input = "priority_sel.8: bits[2] = priority_sel(selector, cases=[one_case], default=my_default, id=8)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2580,7 +2580,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         let mut parser = Parser::new(input);
         let mut env = IrNodeEnv::new();
         // Seed environment to simulate presence of header param x id=1
-        env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
         let node = parser.parse_node(&mut env).unwrap();
         println!("{:?}", node);
     }
@@ -2589,7 +2589,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_cover_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("and".to_string()), 7, ir::NodeRef { index: 7 });
+        let _ = node_env.add(Some("and".to_string()), 7, ir::NodeRef { index: 7 });
         let input = "cover.8: () = cover(and.7, label=\"x_less_than_0\", id=8)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2600,7 +2600,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_cover_node_with_pos() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("and".to_string()), 7, ir::NodeRef { index: 7 });
+        let _ = node_env.add(Some("and".to_string()), 7, ir::NodeRef { index: 7 });
         let input = "cover.8: () = cover(and.7, label=\"x_less_than_0\", id=8, pos=[(2,42,30)])";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2665,7 +2665,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_pos_attr_with_spaces() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("y".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("y".to_string()), 1, ir::NodeRef { index: 1 });
         let input =
             "  y_bexp__2: bits[8] = tuple_index(y, index=1, id=91812, pos=[(6,22,72), (6,58,17)])";
         let mut parser = Parser::new(input);
@@ -2677,7 +2677,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_not_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("ugt".to_string()), 92055, ir::NodeRef { index: 92055 });
+        let _ = node_env.add(Some("ugt".to_string()), 92055, ir::NodeRef { index: 92055 });
         let input =
             "not.92066: bits[1] = not(ugt.92055, id=92066, pos=[(3,39,68), (5,31,32), (5,58,17)])";
         let mut parser = Parser::new(input);
@@ -2690,13 +2690,13 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_nor_with_name_only_arg() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(
+        let _ = node_env.add(
             Some("which_path".to_string()),
             92029,
             ir::NodeRef { index: 92029 },
         );
-        node_env.add(Some("eq".to_string()), 92056, ir::NodeRef { index: 92056 });
-        node_env.add(Some("not".to_string()), 92066, ir::NodeRef { index: 92066 });
+        let _ = node_env.add(Some("eq".to_string()), 92056, ir::NodeRef { index: 92056 });
+        let _ = node_env.add(Some("not".to_string()), 92066, ir::NodeRef { index: 92066 });
         let input = "  nor.92075: bits[1] = nor(which_path, eq.92056, not.92066, id=92075, pos=[(3,39,68), (5,31,32), (5,58,17)])";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2725,7 +2725,7 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
     fn test_parse_sel_with_default() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("input".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("input".to_string()), 1, ir::NodeRef { index: 1 });
         let input = "sel.2: bits[8] = sel(input, cases=[input], default=input, id=2)";
         let mut parser = Parser::new(input);
         let node = parser.parse_node(&mut node_env).unwrap();
@@ -2752,22 +2752,22 @@ top fn main(t: token id=1) -> token {
         let _ = env_logger::builder().is_test(true).try_init();
         // Build a small node environment for the n-ary OR node we want to parse.
         let mut node_env = IrNodeEnv::new();
-        node_env.add(
+        let _ = node_env.add(
             Some("is_result_nan".to_string()),
             1,
             ir::NodeRef { index: 1 },
         );
-        node_env.add(
+        let _ = node_env.add(
             Some("is_operand_inf".to_string()),
             2,
             ir::NodeRef { index: 2 },
         );
-        node_env.add(
+        let _ = node_env.add(
             Some("bit_slice".to_string()),
             90408,
             ir::NodeRef { index: 90408 },
         );
-        node_env.add(
+        let _ = node_env.add(
             Some("and_reduce".to_string()),
             90409,
             ir::NodeRef { index: 90409 },
@@ -2799,7 +2799,7 @@ top fn main(t: token id=1) -> token {
         let mut node_env = IrNodeEnv::new();
         // Provide a mapping for the init literal referenced as `literal.5` in the input
         // string.
-        node_env.add(Some("literal".to_string()), 5, ir::NodeRef { index: 5 });
+        let _ = node_env.add(Some("literal".to_string()), 5, ir::NodeRef { index: 5 });
         let input = "counted_for.6: bits[11] = counted_for(literal.5, trip_count=7, stride=1, body=body1, id=6)";
         let mut parser = Parser::new(input);
         let node = parser
@@ -2827,9 +2827,9 @@ top fn main(t: token id=1) -> token {
     fn test_parse_counted_for_node_with_invariant_args() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("init_lit".to_string()), 5, ir::NodeRef { index: 5 });
-        node_env.add(Some("x".to_string()), 7, ir::NodeRef { index: 7 });
-        node_env.add(Some("y".to_string()), 8, ir::NodeRef { index: 8 });
+        let _ = node_env.add(Some("init_lit".to_string()), 5, ir::NodeRef { index: 5 });
+        let _ = node_env.add(Some("x".to_string()), 7, ir::NodeRef { index: 7 });
+        let _ = node_env.add(Some("y".to_string()), 8, ir::NodeRef { index: 8 });
         let input = "counted_for.6: bits[11] = counted_for(init_lit.5, trip_count=4, stride=2, body=body2, invariant_args=[x, y], id=6)";
         let mut parser = Parser::new(input);
         let node = parser
@@ -2861,8 +2861,8 @@ top fn main(t: token id=1) -> token {
         let input = "array_index.2: bits[32] = array_index(x, indices=[literal.1], assumed_in_bounds=true, id=2)";
         let mut parser = Parser::new(input);
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
-        node_env.add(Some("literal.1".to_string()), 2, ir::NodeRef { index: 2 });
+        let _ = node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("literal.1".to_string()), 2, ir::NodeRef { index: 2 });
         let node = parser.parse_node(&mut node_env).unwrap();
         assert!(matches!(
             node.payload,
@@ -2879,8 +2879,8 @@ top fn main(t: token id=1) -> token {
         let input = "array_index.2: bits[32] = array_index(x, indices=[literal.1],assumed_in_bounds=true, id=2)";
         let mut parser = Parser::new(input);
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
-        node_env.add(Some("literal.1".to_string()), 2, ir::NodeRef { index: 2 });
+        let _ = node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("literal.1".to_string()), 2, ir::NodeRef { index: 2 });
         let node = parser.parse_node(&mut node_env).unwrap();
         assert!(matches!(
             node.payload,
@@ -2897,9 +2897,9 @@ top fn main(t: token id=1) -> token {
         let input = "array_update.2: bits[32][1] = array_update(x, y, indices=[literal.1], assumed_in_bounds=true, id=2)";
         let mut parser = Parser::new(input);
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
-        node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
-        node_env.add(Some("literal.1".to_string()), 3, ir::NodeRef { index: 3 });
+        let _ = node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
+        let _ = node_env.add(Some("literal.1".to_string()), 3, ir::NodeRef { index: 3 });
         let node = parser.parse_node(&mut node_env).unwrap();
         assert!(matches!(
             node.payload,
@@ -2916,9 +2916,9 @@ top fn main(t: token id=1) -> token {
         let input = "array_update.2: bits[32][1] = array_update(x, y, indices=[literal.1],assumed_in_bounds=true, id=2)";
         let mut parser = Parser::new(input);
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
-        node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
-        node_env.add(Some("literal.1".to_string()), 3, ir::NodeRef { index: 3 });
+        let _ = node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
+        let _ = node_env.add(Some("literal.1".to_string()), 3, ir::NodeRef { index: 3 });
         let node = parser.parse_node(&mut node_env).unwrap();
         assert!(matches!(
             node.payload,
@@ -2935,8 +2935,8 @@ top fn main(t: token id=1) -> token {
         let input = " dynamic_bit_slice.1: bits[14] = dynamic_bit_slice(x, y, width=14, id=1)";
         let mut parser = Parser::new(input);
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
-        node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
+        let _ = node_env.add(Some("x".to_string()), 1, ir::NodeRef { index: 1 });
+        let _ = node_env.add(Some("y".to_string()), 2, ir::NodeRef { index: 2 });
         let node = parser.parse_node(&mut node_env).unwrap();
         assert!(matches!(
             node.payload,
@@ -2953,8 +2953,8 @@ top fn main(t: token id=1) -> token {
         let mut node_env = IrNodeEnv::new();
         let x_node_ref = ir::NodeRef { index: 1 };
         let y_node_ref = ir::NodeRef { index: 2 };
-        node_env.add(Some("x".to_string()), 1, x_node_ref);
-        node_env.add(Some("y".to_string()), 2, y_node_ref);
+        let _ = node_env.add(Some("x".to_string()), 1, x_node_ref);
+        let _ = node_env.add(Some("y".to_string()), 2, y_node_ref);
         let node = parser.parse_node(&mut node_env).unwrap();
         let want = ir::NodePayload::Nary(ir::NaryOp::And, vec![x_node_ref, y_node_ref]);
         assert_eq!(node.payload, want);
@@ -2967,7 +2967,7 @@ top fn main(t: token id=1) -> token {
         let mut parser = Parser::new(input);
         let mut node_env = IrNodeEnv::new();
         let x_node_ref = ir::NodeRef { index: 1 };
-        node_env.add(Some("x".to_string()), 1, x_node_ref);
+        let _ = node_env.add(Some("x".to_string()), 1, x_node_ref);
         let node = parser.parse_node(&mut node_env).unwrap();
         assert_eq!(
             node.payload,

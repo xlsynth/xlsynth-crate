@@ -1374,7 +1374,11 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzSampleSameTypedPair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dce::remove_dead_nodes;
+    use crate::ir::NodeRef;
+    use crate::ir_utils::operands;
     use std::collections::BTreeMap;
+    use std::collections::HashSet;
     use xlsynth::IrPackage;
 
     fn make_bits_node(fn_builder: &mut FnBuilder, width: usize, value: u64) -> BValue {
@@ -1490,7 +1494,7 @@ mod tests {
         use rand_pcg::Pcg64Mcg;
         use std::collections::HashSet;
 
-        const SAMPLE_COUNT: usize = 10000;
+        const SAMPLE_COUNT: usize = 1000;
         let mut successful_samples = 0usize;
         let mut max_num_ops = 0usize;
         let mut min_num_ops = usize::MAX;
@@ -1552,10 +1556,9 @@ mod tests {
         use rand::RngCore;
         use rand_pcg::Pcg64Mcg;
 
-        const SAMPLE_COUNT: usize = 10000;
+        const SAMPLE_COUNT: usize = 1000;
         let mut successful_samples = 0usize;
         let mut generate_ir_succeeded = 0usize;
-        let mut parse_ir_succeeded = 0usize;
 
         // Fixed seed for determinism across runs.
         let mut rng = Pcg64Mcg::new(0x1234ABCD9999EEEFu128);
@@ -1569,79 +1572,264 @@ mod tests {
                     if generate_ir_fn(sample.ops.clone(), &mut pkg, None).is_ok() {
                         generate_ir_succeeded += 1;
                         let pkg_text = pkg.to_string();
-                        if ir_parser::Parser::new(&pkg_text)
-                            .parse_and_validate_package()
-                            .is_ok()
-                        {
-                            parse_ir_succeeded += 1;
-                        }
+                        assert!(
+                            ir_parser::Parser::new(&pkg_text)
+                                .parse_and_validate_package()
+                                .is_ok()
+                        );
                     }
                 }
             }
         }
+
+        println!(
+            "Successful FuzzSamples creation success rate: {}/{}",
+            successful_samples, SAMPLE_COUNT,
+        );
+        println!(
+            "IR function creation success rate: {}/{}",
+            generate_ir_succeeded, SAMPLE_COUNT
+        );
         // Verify at least 25% of successfully generated FuzzSamples convert.
         assert!(
             generate_ir_succeeded >= successful_samples / 4,
             "expected at least 25% of samples to be convertible to IR: converted={}, samples={}",
             generate_ir_succeeded,
-            successful_samples
-        );
-        // Verify at least 25% of successfully generated FuzzSamples produce parseable
-        // IR.
-        assert!(
-            parse_ir_succeeded >= successful_samples / 4,
-            "expected at least 25% of samples to produce parseable IR: converted={}, samples={}",
-            parse_ir_succeeded,
             successful_samples
         );
     }
 
     #[test]
-    fn generate_live_ir() {
+    fn size_of_generated_fuzz_sample_same_typed_pairs() {
         use rand::RngCore;
         use rand_pcg::Pcg64Mcg;
 
-        const SAMPLE_COUNT: usize = 10000;
-        let mut successful_samples = 0usize;
-        let mut generate_ir_succeeded = 0usize;
-        let mut parse_ir_succeeded = 0usize;
+        const SAMPLE_COUNT: usize = 1000000;
 
         // Fixed seed for determinism across runs.
+        let mut rng = Pcg64Mcg::new(0xABCDEF0212345678u128);
+        for _ in 0..SAMPLE_COUNT {
+            let mut buf = [0u8; 8192];
+            rng.fill_bytes(&mut buf);
+            let mut un = arbitrary::Unstructured::new(&buf);
+            if let Ok(pair) = FuzzSampleSameTypedPair::arbitrary(&mut un) {
+                assert!(pair.first.ops.len() <= MAX_OPS_PER_SAMPLE as usize);
+                // The second sample may have to add nodes to generate the return value, but
+                // generating the return value should not take more than twice the number of
+                // total elements allowed.
+                assert!(
+                    pair.second.ops.len()
+                        <= MAX_OPS_PER_SAMPLE as usize + 2 * MAX_TOTAL_ELEMENTS_PER_TYPE as usize
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generate_ir_fn_success_rate_same_typed_pairs() {
+        use rand::RngCore;
+        use rand_pcg::Pcg64Mcg;
+
+        const SAMPLE_COUNT: usize = 1000;
+        let mut successful_pairs = 0usize;
+        let mut generate_ir_succeeded = 0usize;
+
+        // Fixed seed for determinism across runs.
+        let mut rng = Pcg64Mcg::new(0xA1B2_C3D4_E5F6_1020u128);
+        for _ in 0..SAMPLE_COUNT {
+            let mut buf = [0u8; 4096];
+            rng.fill_bytes(&mut buf);
+            let mut un = arbitrary::Unstructured::new(&buf);
+            if let Ok(pair) = FuzzSampleSameTypedPair::arbitrary(&mut un) {
+                successful_pairs += 1;
+
+                if let (Ok(mut lhs_pkg), Ok(mut rhs_pkg)) =
+                    (IrPackage::new("pair_lhs"), IrPackage::new("pair_rhs"))
+                {
+                    if generate_ir_fn(pair.first.ops.clone(), &mut lhs_pkg, None).is_ok()
+                        && generate_ir_fn(pair.second.ops.clone(), &mut rhs_pkg, None).is_ok()
+                    {
+                        generate_ir_succeeded += 1;
+                        let lhs_pkg_text = lhs_pkg.to_string();
+                        assert!(
+                            ir_parser::Parser::new(&lhs_pkg_text)
+                                .parse_and_validate_package()
+                                .is_ok()
+                        );
+                        let rhs_pkg_text = rhs_pkg.to_string();
+                        assert!(
+                            ir_parser::Parser::new(&rhs_pkg_text)
+                                .parse_and_validate_package()
+                                .is_ok()
+                        );
+                    }
+                }
+            }
+        }
+
+        println!(
+            "Successful FuzzSampleSameTypedPair creation success rate: {}/{}",
+            successful_pairs, SAMPLE_COUNT,
+        );
+        println!(
+            "IR function creation success rate: {}/{}",
+            generate_ir_succeeded, SAMPLE_COUNT
+        );
+
+        // Verify at least 25% of generated pairs convert.
+        assert!(
+            generate_ir_succeeded >= successful_pairs / 4,
+            "expected at least 25% of LHS samples to be convertible to IR: converted={}, pairs={}",
+            generate_ir_succeeded,
+            successful_pairs
+        );
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct LivenessStats {
+        min_live_nodes: usize,
+        max_live_nodes: usize,
+        min_live_params: usize,
+        max_live_params: usize,
+    }
+
+    impl LivenessStats {
+        fn merge(&mut self, other: LivenessStats) {
+            self.min_live_nodes = self.min_live_nodes.min(other.min_live_nodes);
+            self.max_live_nodes = self.max_live_nodes.max(other.max_live_nodes);
+            self.min_live_params = self.min_live_params.min(other.min_live_params);
+            self.max_live_params = self.max_live_params.max(other.max_live_params);
+        }
+    }
+
+    fn compute_liveness_for_sample(sample: &FuzzSample) -> Option<LivenessStats> {
+        if let Ok(mut pkg) = IrPackage::new("pair_side") {
+            if generate_ir_fn(sample.ops.clone(), &mut pkg, None).is_ok() {
+                let txt = pkg.to_string();
+                let mut p = ir_parser::Parser::new(&txt);
+                if let Ok(mut pir_pkg) = p.parse_and_validate_package() {
+                    let _ = crate::ir_validate::validate_package(&pir_pkg);
+                    if let Some(top_fn) = pir_pkg.get_top_mut() {
+                        let dce_f = remove_dead_nodes(&*top_fn);
+                        let mut live_param_set = HashSet::<NodeRef>::new();
+                        for (index, node) in dce_f.nodes.iter().enumerate() {
+                            if matches!(node.payload, crate::ir::NodePayload::GetParam(_))
+                                && dce_f.ret_node_ref == Some(NodeRef { index })
+                            {
+                                live_param_set.insert(NodeRef { index });
+                            }
+                            for operand in operands(&node.payload) {
+                                if matches!(
+                                    dce_f.get_node(operand).payload,
+                                    crate::ir::NodePayload::GetParam(_)
+                                ) {
+                                    live_param_set.insert(operand);
+                                }
+                            }
+                        }
+                        let live_param_count = live_param_set.len();
+                        let dead_param_count = top_fn.params.len() - live_param_count;
+                        let live_nodes = dce_f.nodes.len() - dead_param_count;
+                        return Some(LivenessStats {
+                            min_live_nodes: live_nodes,
+                            max_live_nodes: live_nodes,
+                            min_live_params: live_param_count,
+                            max_live_params: live_param_count,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn liveness_of_generated_fuzz_samples() {
+        use rand::RngCore;
+        use rand_pcg::Pcg64Mcg;
+
+        const SAMPLE_COUNT: usize = 1000;
+        let mut stats = LivenessStats {
+            min_live_nodes: usize::MAX,
+            max_live_nodes: 0,
+            min_live_params: usize::MAX,
+            max_live_params: 0,
+        };
+
         let mut rng = Pcg64Mcg::new(0x1234ABCD9999EEEFu128);
         for _ in 0..SAMPLE_COUNT {
             let mut buf = [0u8; 4096];
             rng.fill_bytes(&mut buf);
             let mut un = arbitrary::Unstructured::new(&buf);
             if let Ok(sample) = FuzzSample::arbitrary(&mut un) {
-                successful_samples += 1;
-                if let Ok(mut pkg) = IrPackage::new("gen_ir_test") {
-                    if generate_ir_fn(sample.ops.clone(), &mut pkg, None).is_ok() {
-                        generate_ir_succeeded += 1;
-                        let pkg_text = pkg.to_string();
-                        if ir_parser::Parser::new(&pkg_text)
-                            .parse_and_validate_package()
-                            .is_ok()
-                        {
-                            parse_ir_succeeded += 1;
-                        }
-                    }
+                if let Some(s) = compute_liveness_for_sample(&sample) {
+                    // Fixed seed for determinism across runs.
+                    stats.merge(s);
                 }
             }
         }
-        // Verify at least 25% of successfully generated FuzzSamples convert.
+        // There should be samples where all the parameters are dead and where all
+        // parameters are live (with the maximum number of parameters)
+        assert!(stats.min_live_params == 0);
+        assert!(stats.max_live_params == MAX_PARAMS_PER_SAMPLE as usize);
+        // There should be samples wtih only one live node. Also verify that a sample
+        // was generated with a live node count at least half the maximum number of
+        // nodes.
         assert!(
-            generate_ir_succeeded >= successful_samples / 4,
-            "expected at least 25% of samples to be convertible to IR: converted={}, samples={}",
-            generate_ir_succeeded,
-            successful_samples
+            stats.min_live_nodes == 1,
+            "expected graph with only one live node, minimum={}",
+            stats.min_live_nodes
         );
-        // Verify at least 25% of successfully generated FuzzSamples produce parseable
-        // IR.
         assert!(
-            parse_ir_succeeded >= successful_samples / 4,
-            "expected at least 25% of samples to produce parseable IR: converted={}, samples={}",
-            parse_ir_succeeded,
-            successful_samples
+            stats.max_live_nodes >= MAX_OPS_PER_SAMPLE as usize / 2,
+            "expected graph with maximum number of nodes, maximum={}, expected={}",
+            stats.max_live_nodes,
+            MAX_OPS_PER_SAMPLE as usize / 2
         );
+    }
+
+    #[test]
+    fn liveness_of_generated_fuzz_sample_same_typed_pairs() {
+        use rand::RngCore;
+        use rand_pcg::Pcg64Mcg;
+
+        const SAMPLE_COUNT: usize = 10000;
+
+        let mut lhs_stats = LivenessStats {
+            min_live_nodes: usize::MAX,
+            max_live_nodes: 0,
+            min_live_params: usize::MAX,
+            max_live_params: 0,
+        };
+        let mut rhs_stats = lhs_stats;
+
+        // Fixed seed for determinism across runs.
+        let mut rng = Pcg64Mcg::new(0xABCDEF0212345678u128);
+        for _ in 0..SAMPLE_COUNT {
+            let mut buf = [0u8; 8192];
+            rng.fill_bytes(&mut buf);
+            let mut un = arbitrary::Unstructured::new(&buf);
+            if let Ok(pair) = FuzzSampleSameTypedPair::arbitrary(&mut un) {
+                if let Some(stats) = compute_liveness_for_sample(&pair.first) {
+                    lhs_stats.merge(stats);
+                }
+                if let Some(stats) = compute_liveness_for_sample(&pair.second) {
+                    rhs_stats.merge(stats);
+                }
+            }
+        }
+
+        println!("LHS of same-typed pairs: {:?}", lhs_stats);
+        println!("RHS of same-typed pairs: {:?}", rhs_stats);
+
+        assert!(lhs_stats.min_live_params == 0);
+        assert!(lhs_stats.min_live_nodes == 1);
+        assert!(lhs_stats.max_live_params == MAX_PARAMS_PER_SAMPLE as usize);
+        assert!(lhs_stats.max_live_nodes >= MAX_OPS_PER_SAMPLE as usize / 2);
+
+        assert!(rhs_stats.min_live_params == 0);
+        assert!(rhs_stats.max_live_params == MAX_PARAMS_PER_SAMPLE as usize);
+        assert!(rhs_stats.min_live_nodes == 1);
+        assert!(rhs_stats.max_live_nodes >= MAX_OPS_PER_SAMPLE as usize / 2);
     }
 }

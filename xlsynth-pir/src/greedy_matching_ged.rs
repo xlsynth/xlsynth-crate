@@ -519,7 +519,7 @@ pub fn compute_reverse_match_scores(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{NodePayload, NodeRef};
+    use crate::ir::NodePayload;
     use crate::ir_parser::Parser;
     use crate::matching_ged::{
         IrEdit, MatchAction, NewNodeRef, NodeSide, OldNodeRef, ReadyNode, apply_function_edits,

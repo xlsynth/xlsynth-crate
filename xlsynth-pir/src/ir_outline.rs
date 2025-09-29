@@ -913,7 +913,7 @@ mod tests {
         let after_pkg = pkg.to_string();
         println!("AFTER:\n{}", after_pkg);
         // Outer should invoke inner and return its result
-        let outer_s = res.outer.to_string();
+        let _outer_s = res.outer.to_string();
         // Expect exact package print before
         let expected_before = r#"package test
 
@@ -1152,7 +1152,7 @@ fn h_inner(a: bits[8] id=1, b: bits[8] id=2) -> (bits[8], bits[8]) {
   ret or.9: bits[8] = or(xor.7, and.8, id=9)
 }"#;
         let (mut pkg, f) = parse_single_fn(ir);
-        let before_pkg = pkg.to_string();
+        let _before_pkg = pkg.to_string();
         // Outline the add and umul producers together
         let mut to_sel: HashSet<NodeRef> = HashSet::new();
         for (i, n) in f.nodes.iter().enumerate() {
