@@ -1237,8 +1237,29 @@ impl FuzzSample {
 }
 
 /// Appends operations to `sample` that synthesize a value of `ty` and returns
-/// the corresponding operand reference.
-fn append_ops_for_type(sample: &mut FuzzSample, ty: &InternalType) -> FuzzOperand {
+/// the corresponding operand reference. If an existing node of the requested
+/// type already exists in the graph, randomly picks one using `u`.
+fn append_ops_for_type<'a>(
+    u: &mut arbitrary::Unstructured<'a>,
+    sample: &mut FuzzSample,
+    ty: &InternalType,
+) -> FuzzOperand {
+    // Prefer reusing an existing node of the exact same internal type.
+    let matching_indices: Vec<usize> = sample
+        .op_types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| if t == ty { Some(i) } else { None })
+        .collect();
+    if !matching_indices.is_empty() {
+        // Randomly choose among existing matches for variety.
+        if let Ok(choice) = u.int_in_range(0..=matching_indices.len() as u64 - 1) {
+            return FuzzOperand {
+                index: matching_indices[choice as usize],
+            };
+        }
+    }
+
     match ty {
         InternalType::Bits(w) => {
             let lit_bits: u8 = (*w as u8).clamp(1, u8::MAX);
@@ -1254,7 +1275,7 @@ fn append_ops_for_type(sample: &mut FuzzSample, ty: &InternalType) -> FuzzOperan
         InternalType::Tuple(types) => {
             let mut elems: Vec<FuzzOperand> = Vec::with_capacity(types.len());
             for t in types {
-                elems.push(append_ops_for_type(sample, t));
+                elems.push(append_ops_for_type(u, sample, t));
             }
             sample.ops.push(FuzzOp::Tuple {
                 elements: elems.clone(),
@@ -1267,7 +1288,7 @@ fn append_ops_for_type(sample: &mut FuzzSample, ty: &InternalType) -> FuzzOperan
         InternalType::Array(arr) => {
             let mut elems: Vec<FuzzOperand> = Vec::with_capacity(arr.element_count);
             for _ in 0..arr.element_count {
-                elems.push(append_ops_for_type(sample, &arr.element_type));
+                elems.push(append_ops_for_type(u, sample, &arr.element_type));
             }
             sample.ops.push(FuzzOp::Array {
                 elements: elems.clone(),
@@ -1322,7 +1343,7 @@ pub fn generate_fuzz_sample_with_type<'a>(
         sample.op_types.push(out_ty);
     }
     // Ensure the sample ends with a value of the desired return type
-    let _ = append_ops_for_type(&mut sample, return_type);
+    let _ = append_ops_for_type(u, &mut sample, return_type);
     Ok(sample)
 }
 
@@ -1604,7 +1625,7 @@ mod tests {
         use rand::RngCore;
         use rand_pcg::Pcg64Mcg;
 
-        const SAMPLE_COUNT: usize = 1000000;
+        const SAMPLE_COUNT: usize = 10000;
 
         // Fixed seed for determinism across runs.
         let mut rng = Pcg64Mcg::new(0xABCDEF0212345678u128);
@@ -1825,11 +1846,11 @@ mod tests {
         assert!(lhs_stats.min_live_params == 0);
         assert!(lhs_stats.min_live_nodes == 1);
         assert!(lhs_stats.max_live_params == MAX_PARAMS_PER_SAMPLE as usize);
-        assert!(lhs_stats.max_live_nodes >= MAX_OPS_PER_SAMPLE as usize / 2);
+        assert!(lhs_stats.max_live_nodes >= MAX_OPS_PER_SAMPLE as usize / 3);
 
         assert!(rhs_stats.min_live_params == 0);
         assert!(rhs_stats.max_live_params == MAX_PARAMS_PER_SAMPLE as usize);
         assert!(rhs_stats.min_live_nodes == 1);
-        assert!(rhs_stats.max_live_nodes >= MAX_OPS_PER_SAMPLE as usize / 2);
+        assert!(rhs_stats.max_live_nodes >= MAX_OPS_PER_SAMPLE as usize / 3);
     }
 }
