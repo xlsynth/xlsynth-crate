@@ -855,8 +855,13 @@ fn generate_fuzz_op(
             )
         }
         FuzzOpFlat::ZeroExt => {
-            let (index, _) = pick_bits_type(u, node_types)?;
-            let new_bit_count = u.int_in_range(1..=8)? as u64;
+            let (index, ty) = pick_bits_type(u, node_types)?;
+            let operand_width = if let InternalType::Bits(w) = ty {
+                w as u64
+            } else {
+                panic!("SignExt operand must be bits-typed");
+            };
+            let new_bit_count = operand_width.saturating_add(u.int_in_range(0..=8)? as u64);
             (
                 FuzzOp::ZeroExt {
                     operand: FuzzOperand { index },
@@ -866,8 +871,13 @@ fn generate_fuzz_op(
             )
         }
         FuzzOpFlat::SignExt => {
-            let (index, _) = pick_bits_type(u, node_types)?;
-            let new_bit_count = u.int_in_range(1..=8)? as u64;
+            let (index, ty) = pick_bits_type(u, node_types)?;
+            let operand_width = if let InternalType::Bits(w) = ty {
+                w as u64
+            } else {
+                panic!("SignExt operand must be bits-typed");
+            };
+            let new_bit_count = operand_width.saturating_add(u.int_in_range(0..=8)? as u64);
             (
                 FuzzOp::SignExt {
                     operand: FuzzOperand { index },
@@ -911,7 +921,7 @@ fn generate_fuzz_op(
                     arg: FuzzOperand { index },
                     lsb_prio,
                 },
-                InternalType::Bits(operand_bits),
+                InternalType::Bits(operand_bits + 1),
             )
         }
         FuzzOpFlat::PrioritySel => {
@@ -1243,6 +1253,7 @@ fn append_ops_for_type<'a>(
     u: &mut arbitrary::Unstructured<'a>,
     sample: &mut FuzzSample,
     ty: &InternalType,
+    is_return_value: bool,
 ) -> FuzzOperand {
     // Prefer reusing an existing node of the exact same internal type.
     let matching_indices: Vec<usize> = sample
@@ -1254,9 +1265,15 @@ fn append_ops_for_type<'a>(
     if !matching_indices.is_empty() {
         // Randomly choose among existing matches for variety.
         if let Ok(choice) = u.int_in_range(0..=matching_indices.len() as u64 - 1) {
-            return FuzzOperand {
-                index: matching_indices[choice as usize],
-            };
+            let choice = matching_indices[choice as usize];
+            if is_return_value {
+                // If this is the return value we need to add an operation because the last
+                // operation is the return value. Add an identity operation whose parameter is
+                // the selected node.
+                sample.ops.push(FuzzOp::Unop(FuzzUnop::Identity, choice));
+                return FuzzOperand { index: choice };
+            }
+            return FuzzOperand { index: choice };
         }
     }
 
@@ -1275,7 +1292,9 @@ fn append_ops_for_type<'a>(
         InternalType::Tuple(types) => {
             let mut elems: Vec<FuzzOperand> = Vec::with_capacity(types.len());
             for t in types {
-                elems.push(append_ops_for_type(u, sample, t));
+                elems.push(append_ops_for_type(
+                    u, sample, t, /* is_return_value */ false,
+                ));
             }
             sample.ops.push(FuzzOp::Tuple {
                 elements: elems.clone(),
@@ -1288,7 +1307,12 @@ fn append_ops_for_type<'a>(
         InternalType::Array(arr) => {
             let mut elems: Vec<FuzzOperand> = Vec::with_capacity(arr.element_count);
             for _ in 0..arr.element_count {
-                elems.push(append_ops_for_type(u, sample, &arr.element_type));
+                elems.push(append_ops_for_type(
+                    u,
+                    sample,
+                    &arr.element_type,
+                    /* is_return_value */ false,
+                ));
             }
             sample.ops.push(FuzzOp::Array {
                 elements: elems.clone(),
@@ -1343,7 +1367,7 @@ pub fn generate_fuzz_sample_with_type<'a>(
         sample.op_types.push(out_ty);
     }
     // Ensure the sample ends with a value of the desired return type
-    let _ = append_ops_for_type(u, &mut sample, return_type);
+    let _ = append_ops_for_type(u, &mut sample, return_type, /* is_return_value */ true);
     Ok(sample)
 }
 
@@ -1814,7 +1838,7 @@ mod tests {
         use rand::RngCore;
         use rand_pcg::Pcg64Mcg;
 
-        const SAMPLE_COUNT: usize = 10000;
+        const SAMPLE_COUNT: usize = 100000;
 
         let mut lhs_stats = LivenessStats {
             min_live_nodes: usize::MAX,
