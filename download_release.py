@@ -20,6 +20,19 @@ SUPPORTED_PLATFORMS = {
 }
 
 
+DEFAULT_BINARIES = [
+    "dslx_interpreter_main",
+    "ir_converter_main",
+    "codegen_main",
+    "opt_main",
+    "check_ir_equivalence_main",
+    "dslx_fmt",
+    "typecheck_main",
+    "prove_quickcheck_main",
+    "delay_info_main",
+]
+
+
 def get_headers():
     """
     Returns a dictionary of HTTP headers to use in requests.
@@ -210,11 +223,16 @@ def main():
         action="store_true",
         default=False,
     )
+    default_binaries_csv = ",".join(DEFAULT_BINARIES)
     parser.add_option(
+        "-b",
         "--binaries",
         dest="binaries",
-        help="Binaries to download, comma separated",
-        default="dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main",
+        help=(
+            "Binaries to download, comma separated (default: "
+            f"{default_binaries_csv})"
+        ),
+        default=default_binaries_csv,
     )
     parser.add_option(
         "--max_attempts",
@@ -249,11 +267,13 @@ def main():
     base_url = f"https://github.com/xlsynth/xlsynth/releases/download/{version}"
     ver_tuple = parse_xlsynth_release_tag(version)
 
+    binary_names = [b.strip() for b in options.binaries.split(",")]
+    if any(not binary for binary in binary_names):
+        parser.error("Binaries list must not contain empty entries.")
+
     # Tuples of `(artifact_to_download, is_binary)` -- if it's noted to be a binary it is marked
     # as executable.
-    artifacts = [
-        (f"{binary}-{options.platform}", True) for binary in options.binaries.split(",")
-    ]
+    artifacts = [(f"{binary}-{options.platform}", True) for binary in binary_names]
 
     if options.dso:
         # lib suffix (.so, .dylib, etc.) depends on the platform
