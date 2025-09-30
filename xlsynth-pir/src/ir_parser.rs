@@ -3031,6 +3031,19 @@ top fn main() -> bits[32] {
     }
 
     #[test]
+    fn package_named_top_parses_ok() {
+        let ir = r#"package top
+
+fn id(x: bits[1] id=1) -> bits[1] {
+  ret x: bits[1] = param(name=x, id=1)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().expect("parse package named 'top'");
+        assert_eq!(pkg.name, "top");
+    }
+
+    #[test]
     fn test_parse_block_to_fn_simple() {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = r#"block my_main(x: bits[8], out: bits[8]) {
