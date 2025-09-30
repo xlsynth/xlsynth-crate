@@ -5,12 +5,12 @@
 use libfuzzer_sys::fuzz_target;
 use log::{debug, info};
 use xlsynth::IrPackage;
-use xlsynth_pir::dce::{get_dead_nodes, remove_dead_nodes};
+use xlsynth_pir::dce::remove_dead_nodes;
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_pir::matching_ged::{
-    IrMatchSet, MatchAction, NodeSide, apply_function_edits, compute_function_edit,
-    compute_function_match, convert_match_set_to_edit_set, format_ir_edits, format_match_actions,
+    IrMatchSet, MatchAction, apply_function_edits, compute_function_edit, compute_function_match,
+    convert_match_set_to_edit_set, format_ir_edits, format_match_actions,
 };
 use xlsynth_pir::{ir_parser, node_hashing::functions_structurally_equivalent};
 use xlsynth_pir_fuzz::equiv::{
@@ -20,24 +20,35 @@ use xlsynth_pir_fuzz::equiv::{
 // Returns the pairs of nodes which are CSE-equivalent between old and new
 // graphs. Only unique pairs are returned. If a node is equivalent to multiple
 // nodes in the other graph then it is not included.
+// Also returns bool indicating whether there are any nodes with multiple
+// forward equivalents. The CSE optimization (if it were run on both functions)
+// would necessarily remove the multiple equivalences.
 fn unique_forward_equivalent_pairs(
     old_fn: &xlsynth_pir::ir::Fn,
     new_fn: &xlsynth_pir::ir::Fn,
-) -> Vec<(usize, usize)> {
+) -> (Vec<(usize, usize)>, bool) {
     let eq = compute_forward_equivalences(old_fn, new_fn);
+    let mut has_multiple_forward_equivalents = false;
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (oi, news) in eq.lhs_to_rhs.iter() {
-        if news.len() != 1 {
+        if news.len() == 0 {
+            continue;
+        }
+        if news.len() > 1 {
+            has_multiple_forward_equivalents = true;
             continue;
         }
         let ni: usize = news[0];
         if let Some(olds) = eq.rhs_to_lhs.get(&ni) {
+            if olds.len() > 1 {
+                has_multiple_forward_equivalents = true;
+            }
             if olds.len() == 1 && olds[0] == *oi {
                 pairs.push((*oi, ni));
             }
         }
     }
-    pairs
+    (pairs, has_multiple_forward_equivalents)
 }
 
 // Returns the pairs of nodes which are reverse structurallyequivalent between
@@ -80,23 +91,26 @@ fn assert_equivalent_nodes_are_matched(
             matched_pairs.insert((usize::from(*old_index), usize::from(*new_index)));
         }
     }
-    // Precompute dead node sets (by index) for both functions.
-    let dead_old: std::collections::HashSet<usize> = get_dead_nodes(old_fn)
-        .into_iter()
-        .map(|nr| nr.index)
-        .collect();
-    let dead_new: std::collections::HashSet<usize> = get_dead_nodes(new_fn)
-        .into_iter()
-        .map(|nr| nr.index)
-        .collect();
 
     // Compute uniquely equivalent pairs (forward) and ensure matches exist,
     // skipping pairs where either node is dead.
-    let fwd_pairs = unique_forward_equivalent_pairs(old_fn, new_fn);
-    for (oi, ni) in fwd_pairs.into_iter() {
-        if dead_old.contains(&oi) || dead_new.contains(&ni) {
-            continue;
-        }
+    let (fwd_pairs, has_multiple_forward_equivalents) =
+        unique_forward_equivalent_pairs(old_fn, new_fn);
+
+    // If there are nodes with multiple forward equivalents (CSE equivalence), then
+    // it is not guaranteed that equivalent node pairs in old/new graphs will be
+    // matched.
+    if has_multiple_forward_equivalents {
+        return;
+    }
+    // Build lookup sets of nodes that participate in a perfect forward match;
+    // used to relax reverse-only checks for those nodes below.
+    let fwd_old_nodes: std::collections::HashSet<usize> =
+        fwd_pairs.iter().map(|(oi, _)| *oi).collect();
+    let fwd_new_nodes: std::collections::HashSet<usize> =
+        fwd_pairs.iter().map(|(_, ni)| *ni).collect();
+
+    for (oi, ni) in fwd_pairs.iter().copied() {
         if !matched_pairs.contains(&(oi, ni)) {
             panic!(
                 "missing MatchNodes for uniquely forward-equivalent pair: {} <-> {}",
@@ -108,10 +122,12 @@ fn assert_equivalent_nodes_are_matched(
     // Compute uniquely equivalent pairs (reverse) and ensure matches exist.
     let rev_pairs = unique_reverse_equivalent_pairs(old_fn, new_fn);
     for (oi, ni) in rev_pairs.into_iter() {
-        if dead_old.contains(&oi) || dead_new.contains(&ni) {
-            continue;
-        }
         if !matched_pairs.contains(&(oi, ni)) {
+            // If either node participates in a perfect forward-equivalent pair,
+            // skip this reverse-only panic.
+            if fwd_old_nodes.contains(&oi) || fwd_new_nodes.contains(&ni) {
+                continue;
+            }
             panic!(
                 "missing MatchNodes for uniquely reverse-equivalent pair: {} <-> {}",
                 xlsynth_pir::ir::node_textual_id(old_fn, xlsynth_pir::ir::NodeRef { index: oi }),

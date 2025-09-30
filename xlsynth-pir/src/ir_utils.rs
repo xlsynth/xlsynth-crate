@@ -234,26 +234,39 @@ pub fn compute_users(f: &Fn) -> HashMap<NodeRef, HashSet<NodeRef>> {
 
 pub fn remap_payload_with<FMap>(payload: &NodePayload, mut map: FMap) -> NodePayload
 where
-    FMap: FnMut(NodeRef) -> NodeRef,
+    // Map function takes the operand slot and the existing operand and returns the new operand.
+    FMap: FnMut((usize, NodeRef)) -> NodeRef,
 {
     match payload {
         NodePayload::Nil => NodePayload::Nil,
         NodePayload::GetParam(p) => NodePayload::GetParam(*p),
-        NodePayload::Tuple(elems) => NodePayload::Tuple(elems.iter().map(|r| map(*r)).collect()),
-        NodePayload::Array(elems) => NodePayload::Array(elems.iter().map(|r| map(*r)).collect()),
+        NodePayload::Tuple(elems) => NodePayload::Tuple(
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
+        NodePayload::Array(elems) => NodePayload::Array(
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
         NodePayload::TupleIndex { tuple, index } => NodePayload::TupleIndex {
-            tuple: map(*tuple),
+            tuple: map((0, *tuple)),
             index: *index,
         },
-        NodePayload::Binop(op, a, b) => NodePayload::Binop(*op, map(*a), map(*b)),
-        NodePayload::Unop(op, a) => NodePayload::Unop(*op, map(*a)),
+        NodePayload::Binop(op, a, b) => NodePayload::Binop(*op, map((0, *a)), map((1, *b))),
+        NodePayload::Unop(op, a) => NodePayload::Unop(*op, map((0, *a))),
         NodePayload::Literal(v) => NodePayload::Literal(v.clone()),
         NodePayload::SignExt { arg, new_bit_count } => NodePayload::SignExt {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             new_bit_count: *new_bit_count,
         },
         NodePayload::ZeroExt { arg, new_bit_count } => NodePayload::ZeroExt {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             new_bit_count: *new_bit_count,
         },
         NodePayload::ArrayUpdate {
@@ -262,9 +275,13 @@ where
             indices,
             assumed_in_bounds,
         } => NodePayload::ArrayUpdate {
-            array: map(*array),
-            value: map(*value),
-            indices: indices.iter().map(|r| map(*r)).collect(),
+            array: map((0, *array)),
+            value: map((1, *value)),
+            indices: indices
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 2, *r)))
+                .collect(),
             assumed_in_bounds: *assumed_in_bounds,
         },
         NodePayload::ArrayIndex {
@@ -272,8 +289,12 @@ where
             indices,
             assumed_in_bounds,
         } => NodePayload::ArrayIndex {
-            array: map(*array),
-            indices: indices.iter().map(|r| map(*r)).collect(),
+            array: map((0, *array)),
+            indices: indices
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
             assumed_in_bounds: *assumed_in_bounds,
         },
         NodePayload::ArraySlice {
@@ -281,17 +302,17 @@ where
             start,
             width,
         } => NodePayload::ArraySlice {
-            array: map(*array),
-            start: map(*start),
+            array: map((0, *array)),
+            start: map((1, *start)),
             width: *width,
         },
         NodePayload::DynamicBitSlice { arg, start, width } => NodePayload::DynamicBitSlice {
-            arg: map(*arg),
-            start: map(*start),
+            arg: map((0, *arg)),
+            start: map((1, *start)),
             width: *width,
         },
         NodePayload::BitSlice { arg, start, width } => NodePayload::BitSlice {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             start: *start,
             width: *width,
         },
@@ -300,9 +321,9 @@ where
             start,
             update_value,
         } => NodePayload::BitSliceUpdate {
-            arg: map(*arg),
-            start: map(*start),
-            update_value: map(*update_value),
+            arg: map((0, *arg)),
+            start: map((1, *start)),
+            update_value: map((2, *update_value)),
         },
         NodePayload::Assert {
             token,
@@ -310,8 +331,8 @@ where
             message,
             label,
         } => NodePayload::Assert {
-            token: map(*token),
-            activate: map(*activate),
+            token: map((0, *token)),
+            activate: map((1, *activate)),
             message: message.clone(),
             label: label.clone(),
         },
@@ -321,36 +342,61 @@ where
             format,
             operands,
         } => NodePayload::Trace {
-            token: map(*token),
-            activated: map(*activated),
+            token: map((0, *token)),
+            activated: map((1, *activated)),
             format: format.clone(),
-            operands: operands.iter().map(|r| map(*r)).collect(),
+            operands: operands
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 2, *r)))
+                .collect(),
         },
-        NodePayload::AfterAll(elems) => {
-            NodePayload::AfterAll(elems.iter().map(|r| map(*r)).collect())
-        }
-        NodePayload::Nary(op, elems) => {
-            NodePayload::Nary(*op, elems.iter().map(|r| map(*r)).collect())
-        }
+        NodePayload::AfterAll(elems) => NodePayload::AfterAll(
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
+        NodePayload::Nary(op, elems) => NodePayload::Nary(
+            *op,
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
         NodePayload::Invoke { to_apply, operands } => NodePayload::Invoke {
             to_apply: to_apply.clone(),
-            operands: operands.iter().map(|r| map(*r)).collect(),
+            operands: operands
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
         },
         NodePayload::PrioritySel {
             selector,
             cases,
             default,
         } => NodePayload::PrioritySel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
-            default: default.map(|d| map(d)),
+            selector: map((0, *selector)),
+            cases: cases
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
+            default: default.map(|d| map((cases.len() + 1, d))),
         },
         NodePayload::OneHotSel { selector, cases } => NodePayload::OneHotSel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
+            selector: map((0, *selector)),
+            cases: cases
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
         },
         NodePayload::OneHot { arg, lsb_prio } => NodePayload::OneHot {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             lsb_prio: *lsb_prio,
         },
         NodePayload::Sel {
@@ -358,19 +404,25 @@ where
             cases,
             default,
         } => NodePayload::Sel {
-            selector: map(*selector),
-            cases: cases.iter().map(|r| map(*r)).collect(),
-            default: default.map(|d| map(d)),
+            selector: map((0, *selector)),
+            cases: cases
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
+            default: default.map(|d| map((cases.len() + 1, d))),
         },
         NodePayload::Cover { predicate, label } => NodePayload::Cover {
-            predicate: map(*predicate),
+            predicate: map((0, *predicate)),
             label: label.clone(),
         },
         NodePayload::Decode { arg, width } => NodePayload::Decode {
-            arg: map(*arg),
+            arg: map((0, *arg)),
             width: *width,
         },
-        NodePayload::Encode { arg } => NodePayload::Encode { arg: map(*arg) },
+        NodePayload::Encode { arg } => NodePayload::Encode {
+            arg: map((0, *arg)),
+        },
         NodePayload::CountedFor {
             init,
             trip_count,
@@ -378,11 +430,15 @@ where
             body,
             invariant_args,
         } => NodePayload::CountedFor {
-            init: map(*init),
+            init: map((0, *init)),
             trip_count: *trip_count,
             stride: *stride,
             body: body.clone(),
-            invariant_args: invariant_args.iter().map(|r| map(*r)).collect(),
+            invariant_args: invariant_args
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i + 1, *r)))
+                .collect(),
         },
     }
 }
@@ -544,8 +600,8 @@ mod remap_tests {
     use super::*;
     use crate::ir::{NodePayload, NodeRef};
 
-    fn add(delta: usize) -> impl FnMut(NodeRef) -> NodeRef {
-        move |nr: NodeRef| NodeRef {
+    fn add(delta: usize) -> impl FnMut((usize, NodeRef)) -> NodeRef {
+        move |(_i, nr): (usize, NodeRef)| NodeRef {
             index: nr.index + delta,
         }
     }

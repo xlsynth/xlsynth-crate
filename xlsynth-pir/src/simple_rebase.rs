@@ -117,7 +117,7 @@ pub fn rebase_onto(
         // Otherwise, create a new node by remapping desired's payload operands
         // through the mapping we've built so far.
         let d_node = &desired.nodes[d_idx];
-        let mapper = |r: NodeRef| -> NodeRef {
+        let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
             if let Some(&ResultNodeRef(mapped)) = desired_to_result.get(&DesiredNodeRef(r)) {
                 mapped
             } else {
@@ -168,7 +168,7 @@ pub fn rebase_onto(
     let mut remapped_nodes: Vec<Node> = Vec::with_capacity(result_nodes.len());
     for nr in order.into_iter() {
         let old = &result_nodes[nr.0.index];
-        let mapper = |r: NodeRef| -> NodeRef {
+        let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
             NodeRef {
                 index: old_to_new[r.index],
             }

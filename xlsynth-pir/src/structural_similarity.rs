@@ -1028,7 +1028,7 @@ fn build_inner_with_union_user_slots(
             continue;
         }
         let old = f.get_node(nr);
-        let mapper = |r: NodeRef| -> NodeRef {
+        let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
             if region.contains(&r) {
                 *old_to_new.get(&r.index).expect("mapped internal ref")
             } else {

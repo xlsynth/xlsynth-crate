@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn test_simple_and_and_lookup() {
         let mut node_env = IrNodeEnv::new();
-        node_env.add(Some("ugt".to_string()), 92055, ir::NodeRef { index: 92055 });
+        let _ = node_env.add(Some("ugt".to_string()), 92055, ir::NodeRef { index: 92055 });
         let node_ref = node_env.name_id_to_ref(&NameOrId::Id(92055));
         assert!(node_ref.is_some());
         assert_eq!(node_ref.unwrap().index, 92055);

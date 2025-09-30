@@ -450,7 +450,7 @@ pub fn outline_with_ordering(
         let old = &outer.nodes[nr.index];
         // Map operands: internal operands map to already-cloned nodes; external
         // operands map to synthesized GetParam nodes (must exist).
-        let mapper = |r: NodeRef| -> NodeRef {
+        let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
             if to_outline_set.contains(&r.index) {
                 outlined_to_inner
                     .get(&r.index)
@@ -563,7 +563,7 @@ pub fn outline_with_ordering(
     let mut remapped_inner_nodes: Vec<Node> = Vec::with_capacity(inner_nodes.len());
     for nr in order_inner.iter() {
         let old = &inner_nodes[nr.index];
-        let mapper = |r: NodeRef| -> NodeRef {
+        let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
             NodeRef {
                 index: old_to_new_inner[r.index],
             }
@@ -696,7 +696,7 @@ pub fn outline_with_ordering(
         if to_outline_set.contains(&i) || i == invoke_node_index || protected.contains(&i) {
             continue;
         }
-        let mapper = |r: NodeRef| -> NodeRef {
+        let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
             if let Some(&nr) = replacement_map.get(&r.index) {
                 nr
             } else {
@@ -733,7 +733,7 @@ pub fn outline_with_ordering(
     let mut remapped_outer_nodes: Vec<Node> = Vec::with_capacity(outer_nodes.len());
     for nr in order_outer.iter() {
         let old = &outer_nodes[nr.index];
-        let mapper = |r: NodeRef| -> NodeRef {
+        let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
             NodeRef {
                 index: old_to_new_outer[r.index],
             }
@@ -913,7 +913,7 @@ mod tests {
         let after_pkg = pkg.to_string();
         println!("AFTER:\n{}", after_pkg);
         // Outer should invoke inner and return its result
-        let outer_s = res.outer.to_string();
+        let _outer_s = res.outer.to_string();
         // Expect exact package print before
         let expected_before = r#"package test
 
@@ -1152,7 +1152,7 @@ fn h_inner(a: bits[8] id=1, b: bits[8] id=2) -> (bits[8], bits[8]) {
   ret or.9: bits[8] = or(xor.7, and.8, id=9)
 }"#;
         let (mut pkg, f) = parse_single_fn(ir);
-        let before_pkg = pkg.to_string();
+        let _before_pkg = pkg.to_string();
         // Outline the add and umul producers together
         let mut to_sel: HashSet<NodeRef> = HashSet::new();
         for (i, n) in f.nodes.iter().enumerate() {

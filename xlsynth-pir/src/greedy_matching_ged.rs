@@ -36,7 +36,12 @@ pub struct GreedyMatchSelector {
 impl GreedyMatchSelector {
     /// Score scaling factor used for integer-based similarity.
     const SCORE_BASE: i32 = 1000;
-    const PERFECT_MATCH_SCORE: i32 = Self::SCORE_BASE * 100;
+    /// Score for a perfect forward match or reverse match. Bias towards reverse
+    /// matches because reverse matches are computed once globally, while
+    /// forward matches are computed as the algorithm progresses so "perfect"
+    /// forward matches may be due to imprecise heuristic matches done earlier.
+    const PERFECT_FORWARD_MATCH_SCORE: i32 = Self::SCORE_BASE * 100;
+    const PERFECT_REVERSE_MATCH_SCORE: i32 = Self::SCORE_BASE * 200;
 
     /// Returns the best score for any match which includes nodes a or b (which
     /// is not the match(a, b)) and for which the match is not yet ready. This
@@ -123,17 +128,18 @@ impl GreedyMatchSelector {
     fn match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
         let fwd = self.forward_match_score(*a, *b);
         let fwd = if fwd == Self::SCORE_BASE {
-            Self::PERFECT_MATCH_SCORE
+            Self::PERFECT_FORWARD_MATCH_SCORE
         } else {
             fwd
         };
         let rev = *self.reverse_scores.get(&(*a, *b)).unwrap_or(&0);
         let rev = if rev == Self::SCORE_BASE {
-            Self::PERFECT_MATCH_SCORE
+            Self::PERFECT_REVERSE_MATCH_SCORE
         } else {
             rev
         };
-        let is_perfect_match = fwd == Self::PERFECT_MATCH_SCORE || rev == Self::PERFECT_MATCH_SCORE;
+        let is_perfect_match =
+            fwd == Self::PERFECT_FORWARD_MATCH_SCORE || rev == Self::PERFECT_REVERSE_MATCH_SCORE;
         (is_perfect_match, fwd + rev)
     }
     fn net_match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
@@ -519,7 +525,7 @@ pub fn compute_reverse_match_scores(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{NodePayload, NodeRef};
+    use crate::ir::NodePayload;
     use crate::ir_parser::Parser;
     use crate::matching_ged::{
         IrEdit, MatchAction, NewNodeRef, NodeSide, OldNodeRef, ReadyNode, apply_function_edits,
@@ -894,7 +900,8 @@ mod tests {
 
         let mut sel = GreedyMatchSelector::new(old_fn, new_fn);
         let base = GreedyMatchSelector::SCORE_BASE;
-        let perfect_match_score = GreedyMatchSelector::PERFECT_MATCH_SCORE;
+        let perf_fwd = GreedyMatchSelector::PERFECT_FORWARD_MATCH_SCORE;
+        let perf_rev = GreedyMatchSelector::PERFECT_REVERSE_MATCH_SCORE;
 
         // Helper to get node indices by name.
         let find_named = |f: &crate::ir::Fn, name: &str| -> usize {
@@ -943,13 +950,10 @@ mod tests {
             let ni = find_named(new_fn, new_name);
             sel.match_score(&OldNodeRef(oi), &NewNodeRef(ni))
         };
-        assert_eq!(match_score("a", "a"), (true, 2 * perfect_match_score));
-        assert_eq!(
-            match_score("b", "b"),
-            (true, perfect_match_score + base / 2)
-        );
-        assert_eq!(match_score("c", "c"), (true, 2 * perfect_match_score));
-        assert_eq!(match_score("foo", "foo"), (true, perfect_match_score));
+        assert_eq!(match_score("a", "a"), (true, perf_fwd + perf_rev));
+        assert_eq!(match_score("b", "b"), (true, perf_rev + base / 2));
+        assert_eq!(match_score("c", "c"), (true, perf_fwd + perf_rev));
+        assert_eq!(match_score("foo", "foo"), (true, perf_rev));
 
         // Helper: opportunity cost via names (use None to omit a side).
         let best_unready = |a: Option<&str>, b: Option<&str>| -> i32 {
@@ -961,10 +965,7 @@ mod tests {
         assert_eq!(best_unready(Some("a"), Some("a")), 0);
         assert_eq!(best_unready(Some("c"), Some("c")), base / 2);
         assert_eq!(best_unready(Some("a"), Some("c")), 0);
-        assert_eq!(
-            best_unready(Some("b"), Some("a")),
-            perfect_match_score + base / 2
-        );
+        assert_eq!(best_unready(Some("b"), Some("a")), perf_rev + base / 2);
 
         // Helpers for name-based selector scores.
         let match_score = |old_name: &str, new_name: &str| -> (bool, i32) {
@@ -972,8 +973,8 @@ mod tests {
             let ni = NewNodeRef(find_named(new_fn, new_name));
             sel.match_score(&oi, &ni)
         };
-        assert_eq!(match_score("a", "a"), (true, 2 * perfect_match_score));
+        assert_eq!(match_score("a", "a"), (true, perf_fwd + perf_rev));
         assert_eq!(match_score("b", "c"), (false, base / 2));
-        assert_eq!(match_score("c", "c"), (true, 2 * perfect_match_score));
+        assert_eq!(match_score("c", "c"), (true, perf_fwd + perf_rev));
     }
 }
