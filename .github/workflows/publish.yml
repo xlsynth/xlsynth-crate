@@ -32,6 +32,18 @@ jobs:
           echo "VERSION_NO_V=$VERSION_NO_V"
           echo "::set-output name=version_no_v::$VERSION_NO_V"
 
+      - name: Extract DSO version tag
+        id: dso_ver
+        run: |
+          # Grep the xlsynth-sys build script for the DSO release tag
+          DSO_TAG=$(sed -n 's/^const RELEASE_LIB_VERSION_TAG:.*"\(v[0-9]\+\.[0-9]\+\.[0-9]\+\)".*/\1/p' xlsynth-sys/build.rs)
+          if [ -z "$DSO_TAG" ]; then
+            echo "Failed to extract DSO version tag from xlsynth-sys/build.rs"
+            exit 1
+          fi
+          echo "DSO_TAG=$DSO_TAG"
+          echo "dso_tag=$DSO_TAG" >> $GITHUB_OUTPUT
+
       - name: Validate version matches
         run: |
           python3 check_version_is.py "${{ steps.version_vars.outputs.version_no_v }}"
@@ -42,7 +54,7 @@ jobs:
         run: |
           python3 -V
           pip3 install --break-system-packages requests
-          python3 download_release.py -p arm64 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          python3 download_release.py -v "${{ steps.dso_ver.outputs.dso_tag }}" -p arm64 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
 
       - name: Install protobuf compiler
         run: |
