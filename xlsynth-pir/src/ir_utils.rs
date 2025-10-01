@@ -286,7 +286,7 @@ pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
     let mut new_nodes: Vec<Node> = Vec::with_capacity(kept_order.len());
     for nr in kept_order.iter().copied() {
         let src = f.get_node(nr).clone();
-        let remapped_payload = remap_payload_with(&src.payload, |dep: NodeRef| {
+        let remapped_payload = remap_payload_with(&src.payload, |(_, dep): (usize, NodeRef)| {
             match old_to_new.get(dep.index).and_then(|x| *x) {
                 Some(new_index) => NodeRef { index: new_index },
                 None => {
