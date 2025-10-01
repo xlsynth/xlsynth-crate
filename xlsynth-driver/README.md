@@ -395,11 +395,11 @@ xlsynth-driver ir-localized-eco old.opt.ir new.opt.ir \
 
 ### `dslx2pipeline-eco`
 
-Produces a patched Verilog file which has minimal changes against a baseline.  Accepts same arguments as `dslx2pipeline` as well as an input file `--baseline_unopt_ir` which contains the unoptimized baseline XLS IR before the source change was applied. The resulting Verilog is printed on **stdout**.
+Produces a patched Verilog file which has minimal changes against a baseline. Accepts same arguments as `dslx2pipeline` as well as an input file `--baseline_unopt_ir` which contains the unoptimized baseline XLS IR before the source change was applied. The resulting Verilog is printed on **stdout**.
 
 Additional outputs:
 
-  - `--edits_debug_out <PATH>` – write the debug string (`{:#?}`) of the IrEdits to a file (optional).
+- `--edits_debug_out <PATH>` – write the debug string (`{:#?}`) of the IrEdits to a file (optional).
 
 ### `ir2gates`: IR to GateFn statistics
 
@@ -1093,12 +1093,12 @@ If you request this flag without `--toolchain`, the driver will print an error a
 
 ### Supported Subcommands
 
-| Subcommand | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
-|--------------------|:-------------------------------:|:-------------------------------:|:---------------------------------:|
-| `dslx2pipeline` | Yes | Yes | Yes |
-| `dslx2ir` | Yes | Yes | Yes |
-| `dslx-g8r-stats` | Yes | Yes | Yes |
-| `dslx2sv-types` | No | N/A | Yes |
+| Subcommand       | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
+| ---------------- | :-----------------------------: | :------------------------------: | :-------------------------------: |
+| `dslx2pipeline`  |               Yes               |               Yes                |                Yes                |
+| `dslx2ir`        |               Yes               |               Yes                |                Yes                |
+| `dslx-g8r-stats` |               Yes               |               Yes                |                Yes                |
+| `dslx2sv-types`  |               No                |               N/A                |                Yes                |
 
 ### Migration and Use
 
