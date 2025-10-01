@@ -253,6 +253,7 @@ pub fn param_type_by_name(f: &Fn, param_name: &str) -> Option<Type> {
         .iter()
         .find(|param| param.name == param_name)
         .map(|param| param.ty.clone())
+}
 
 /// Compacts and reorders the nodes of a function in place.
 ///
@@ -721,7 +722,7 @@ mod tests {
             name: "test".to_string(),
             file_table: FileTable::new(),
             members: vec![PackageMember::Function(f.clone())],
-            top_name: None,
+            top: None,
         };
         let max_id = f
             .nodes
@@ -747,7 +748,7 @@ mod tests {
             name: "test".to_string(),
             file_table: FileTable::new(),
             members: vec![PackageMember::Function(f)],
-            top_name: None,
+            top: None,
         };
         assert_eq!(next_text_id(&pkg), 1);
     }
