@@ -65,10 +65,22 @@ fn validate_local_version_gt_released(
     crate_name: &str,
     workspace_path: &std::path::PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let latest_version = fetch_latest_version(crate_name)?;
     let local_version = fetch_local_version(workspace_path)?;
-
     let local_semver = semver::Version::parse(&local_version)?;
+
+    // If we're a patch release, we do not need to check that we are the latest
+    // released overall (e.g., allowing a maintenance release on an older minor
+    // to be less than a newer minor).
+    if local_semver.patch > 0 {
+        log::info!(
+            "crate: {} local_version: {} — skipping latest-version check for maintenance patch",
+            crate_name,
+            local_version
+        );
+        return Ok(());
+    }
+
+    let latest_version = fetch_latest_version(crate_name)?;
     let latest_semver = semver::Version::parse(&latest_version)?;
 
     log::info!(
