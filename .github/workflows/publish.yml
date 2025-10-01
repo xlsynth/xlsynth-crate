@@ -35,8 +35,7 @@ jobs:
       - name: Extract DSO version tag
         id: dso_ver
         run: |
-          # Extract the DSO release tag from xlsynth-sys/build.rs in a macOS/BSD-portable way
-          DSO_TAG=$(awk -F '"' '/RELEASE_LIB_VERSION_TAG/ {print $2}' xlsynth-sys/build.rs)
+          DSO_TAG=$(python3 extract_dso_tag.py)
           if [ -z "$DSO_TAG" ]; then
             echo "Failed to extract DSO version tag from xlsynth-sys/build.rs"
             exit 1
