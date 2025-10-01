@@ -68,6 +68,7 @@ fn dslx2ir(
                 additional_search_paths,
                 enable_warnings,
                 disable_warnings,
+                force_implicit_token_calling_convention: false,
             },
         )
         .expect("successful conversion");

@@ -5363,6 +5363,152 @@ fn test_prove_quickcheck_json_array_mixed() {
     assert_eq!(name_success.get("qc_failure"), Some(&false));
 }
 
+fn prove_enum_in_bound_success_for_solver(solver: &str) {
+    let dslx = r#"
+        enum MyE : u2 { A = 0, B = 1 }
+
+        fn target(e: MyE) -> u32 {
+            match e {
+                MyE::A => u32:0,
+                MyE::B => u32:1,
+            }
+        }
+
+        pub fn good_top(sel: u1) -> u32 {
+            let choice = if sel == u1:0 { MyE::A } else { MyE::B };
+            target(choice)
+        }
+    "#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("enum_good.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let json_path = temp_dir.path().join("out.json");
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("prove-enum-in-bound")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("good_top")
+        .arg("--target")
+        .arg("target")
+        .arg("--solver")
+        .arg(solver)
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "prove-enum-in-bound should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json_str = std::fs::read_to_string(json_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    assert!(json["success"].as_bool().unwrap());
+    assert!(json["counterexample"].is_null());
+    assert_eq!(json["assert_label_prefix"], "enum-in-bound");
+}
+
+fn prove_enum_in_bound_failure_for_solver(solver: &str) {
+    let dslx = r#"
+        enum MyE : u2 { A = 0, B = 1 }
+
+        fn target(e: MyE) -> u32 {
+            match e {
+                MyE::A => u32:0,
+                MyE::B => u32:1,
+            }
+        }
+
+        pub fn bad_top(raw: u2) -> u32 {
+            let coerced = raw as MyE;
+            target(coerced)
+        }
+    "#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("enum_bad.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let json_path = temp_dir.path().join("out_bad.json");
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("prove-enum-in-bound")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("bad_top")
+        .arg("--target")
+        .arg("target")
+        .arg("--solver")
+        .arg(solver)
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "prove-enum-in-bound should fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Failure: Found counterexample"));
+
+    let json_str = std::fs::read_to_string(json_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    assert!(!json["success"].as_bool().unwrap());
+    let counterexample = json["counterexample"].as_object().unwrap();
+    assert_eq!(json["assert_label_prefix"], "enum-in-bound");
+    assert!(counterexample["inputs"].as_array().unwrap().len() > 0);
+    assert!(counterexample["output"]["assertion_label"]
+        .as_str()
+        .unwrap()
+        .starts_with("enum-in-bound::"));
+}
+
+macro_rules! test_prove_enum_in_bound_solver {
+    ($solver:ident, $feature:expr, $choice:expr) => {
+        paste::paste! {
+            #[cfg(feature = $feature)]
+            #[test]
+            fn [<test_prove_enum_in_bound_success_ $solver>]() {
+                let _ = env_logger::builder().is_test(true).try_init();
+                prove_enum_in_bound_success_for_solver($choice);
+            }
+
+            #[cfg(feature = $feature)]
+            #[test]
+            fn [<test_prove_enum_in_bound_failure_ $solver>]() {
+                let _ = env_logger::builder().is_test(true).try_init();
+                prove_enum_in_bound_failure_for_solver($choice);
+            }
+        }
+    };
+}
+
+test_prove_enum_in_bound_solver!(boolector, "has-boolector", "boolector");
+test_prove_enum_in_bound_solver!(bitwuzla, "has-bitwuzla", "bitwuzla");
+test_prove_enum_in_bound_solver!(
+    boolector_binary,
+    "with-boolector-binary-test",
+    "boolector-binary"
+);
+test_prove_enum_in_bound_solver!(z3_binary, "with-z3-binary-test", "z3-binary");
+test_prove_enum_in_bound_solver!(
+    bitwuzla_binary,
+    "with-bitwuzla-binary-test",
+    "bitwuzla-binary"
+);
+
 #[test]
 fn test_prover_all_two_equiv_tasks_succeeds() {
     let _ = env_logger::builder().is_test(true).try_init();

@@ -713,6 +713,18 @@ UF semantics:
 - Functions mapped to the same uf_name are treated as the same uninterpreted symbol and are assumed equivalent at call sites.
 - Assertions inside uninterpreted functions are ignored during proving.
 
+### `prove-enum-in-bound`
+
+Proves that the enumerated parameters of selected target functions are always passed in-bound when the specified DSLX top function is invoked.
+
+- Inputs: `--dslx_input_file <FILE>` and `--dslx_top <FUNC>` select the DSLX module and entry point.
+- Targets: Repeat `--target <FUNC>` for each function whose enum parameters should be instrumented.
+- Backend: `--solver <...>` selects the SMT backend (toolchain mode is currently unsupported and will error).
+- Output: `--output_json <PATH>` writes `{ "success": <bool>, "counterexample": <object|null>, "assert_label_prefix": "enum-in-bound" }`.
+- Labels: Instrumented assertions use the prefix `enum-in-bound::<target>::<param>` so they can be filtered or recognized in downstream tooling.
+
+The command converts the DSLX module to unoptimized IR, injects Boolean guards for the enumerated parameters of each target function, and proves that these assertions hold for every possible input of the specified top function. Any counterexample includes concrete inputs and the violated assertion label in both stdout and JSON output.
+
 ### `prover`
 
 Runs a prover plan described by a JSON file with a process-based scheduler.

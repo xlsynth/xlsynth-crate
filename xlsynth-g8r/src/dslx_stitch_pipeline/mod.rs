@@ -345,6 +345,7 @@ pub fn stitch_pipeline<'a>(
         additional_search_paths: search_paths.to_vec(),
         enable_warnings: None,
         disable_warnings: None,
+        force_implicit_token_calling_convention: false,
     };
     let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
     let ir = conv.ir;

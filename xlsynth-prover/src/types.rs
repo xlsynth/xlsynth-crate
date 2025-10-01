@@ -52,7 +52,7 @@ impl<'a> IrFn<'a> {
 
 #[derive(Debug, Clone)]
 pub struct FnInputs<'a, R> {
-    pub ir_fn: &'a IrFn<'a>,
+    pub ir_fn: IrFn<'a>,
     pub inputs: HashMap<String, IrTypedBitVec<'a, R>>,
 }
 
@@ -111,6 +111,7 @@ impl<'a, R> FnInputs<'a, R> {
     }
 }
 
+#[derive(Clone)]
 pub struct Assertion<'a, R> {
     pub active: BitVec<R>,
     pub message: &'a str,
@@ -332,6 +333,9 @@ pub enum BoolPropertyResult {
     /// external tools (e.g. `check_ir_equivalence_main`) do not provide a
     /// machine-readable counterexample for QuickCheck-style properties.
     ToolchainDisproved(String),
+    /// Internal error encountered before invoking the prover (e.g. package
+    /// instrumentation issues). Carries a human-readable explanation.
+    Error(String),
 }
 
 #[derive(Debug, Clone)]

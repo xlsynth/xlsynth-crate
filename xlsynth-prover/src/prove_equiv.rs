@@ -128,11 +128,11 @@ pub fn align_fn_inputs<'a, S: Solver>(
 
     AlignedFnInputs {
         lhs: FnInputs {
-            ir_fn: lhs_inputs.ir_fn,
+            ir_fn: lhs_inputs.ir_fn.clone(),
             inputs: lhs_params,
         },
         rhs: FnInputs {
-            ir_fn: rhs_inputs.ir_fn,
+            ir_fn: rhs_inputs.ir_fn.clone(),
             inputs: rhs_params,
         },
         flattened,
@@ -295,8 +295,8 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     uf_signatures: &HashMap<String, UfSignature>,
 ) -> EquivResult {
     let mut solver = S::new(solver_config).unwrap();
-    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.ir_fn, Some("lhs"));
-    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.ir_fn, Some("rhs"));
+    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.ir_fn.clone(), Some("lhs"));
+    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.ir_fn.clone(), Some("rhs"));
 
     let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: &Option<ParamDomains>| {
         if let Some(dom) = domains {
@@ -531,8 +531,8 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     for bit_val in 0..=1u64 {
         let mut solver = S::new(solver_config).unwrap();
         // Build aligned SMT representations first so we can assert the bit-constraint.
-        let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs, Some("lhs"));
-        let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs, Some("rhs"));
+        let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
+        let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"));
         let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = UfRegistry {
@@ -1214,7 +1214,7 @@ pub mod test_utils {
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
+        let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
     }
@@ -1230,7 +1230,7 @@ pub mod test_utils {
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
+        let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
     }
@@ -1244,7 +1244,7 @@ pub mod test_utils {
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
+        let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),
@@ -1549,7 +1549,7 @@ pub mod test_utils {
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, &ir_fn, None);
+        let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),
@@ -1961,7 +1961,7 @@ pub mod test_utils {
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
+        let inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
         // This call should not panic
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
@@ -2156,7 +2156,7 @@ pub mod test_utils {
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
+        let inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
         // Should panic during conversion due to missing default
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
@@ -2178,7 +2178,7 @@ pub mod test_utils {
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let ir_fn = IrFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, &ir_fn, None);
+        let inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),

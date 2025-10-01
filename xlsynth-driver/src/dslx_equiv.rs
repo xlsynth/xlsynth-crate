@@ -90,6 +90,7 @@ fn build_ir_for_dslx(
                 additional_search_paths: additional_search_paths.clone(),
                 enable_warnings,
                 disable_warnings,
+                force_implicit_token_calling_convention: false,
             },
         )
         .expect("successful DSLX->IR conversion");
@@ -118,7 +119,10 @@ fn build_ir_for_dslx(
             )
             .expect("parse_and_typecheck success");
 
-            let domains = get_function_enum_param_domains(&tcm, dslx_top);
+            let domains = get_function_enum_param_domains(&tcm, dslx_top).unwrap_or_else(|err| {
+                eprintln!("[{}] {}", SUBCOMMAND, err);
+                std::process::exit(1);
+            });
             Some(domains)
         } else {
             None

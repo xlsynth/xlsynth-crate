@@ -70,6 +70,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
                 additional_search_paths: additional_paths,
                 enable_warnings,
                 disable_warnings,
+                force_implicit_token_calling_convention: false,
             },
         )
         .expect("successful conversion");
