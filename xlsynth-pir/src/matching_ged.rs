@@ -633,7 +633,6 @@ pub fn convert_match_set_to_edit_set(
             next_text_id = std::cmp::max(next_text_id, port.1 + 1);
         }
     }
-    eprint!("==========> next_text_id: {}\n", next_text_id);
     for action in m.matches.iter() {
         match action {
             MatchAction::AddNode {
