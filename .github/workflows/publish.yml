@@ -23,6 +23,18 @@ jobs:
       - name: Check version numbers
         run: python bump_version_numbers.py check
 
+      - name: Check if tag commit is on main
+        id: branch_check
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          if git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
+            echo "on_main=true" >> $GITHUB_OUTPUT
+            echo "Tag commit is on main"
+          else
+            echo "on_main=false" >> $GITHUB_OUTPUT
+            echo "Tag commit is NOT on main"
+          fi
+
       - name: Set up version variables
         id: version_vars
         run: |
@@ -148,14 +160,14 @@ jobs:
       # No wait needed after the last crate published in the sequence
 
       - name: Bump version numbers
-        if: success()
+        if: ${{ success() && steps.branch_check.outputs.on_main == 'true' }}
         run: |
           cargo clean
           python bump_version_numbers.py bump
           cargo generate-lockfile
 
       - name: Commit bumped version numbers
-        if: success()
+        if: ${{ success() && steps.branch_check.outputs.on_main == 'true' }}
         run: |
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"
@@ -164,12 +176,12 @@ jobs:
           git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
 
       - name: Update version compatibility docs
-        if: success()
+        if: ${{ success() && steps.branch_check.outputs.on_main == 'true' }}
         run: |
           python3 gen_version_compat.py
 
       - name: Commit version metadata update
-        if: success()
+        if: ${{ success() && steps.branch_check.outputs.on_main == 'true' }}
         run: |
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"
