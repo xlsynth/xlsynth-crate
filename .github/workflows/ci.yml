@@ -900,7 +900,7 @@ jobs:
           XLS_DSO_PATH: /usr/lib/libxls-rocky8.so
           DSLX_STDLIB_PATH: /tmp/xlsynth_tools_smoke/xls/dslx/stdlib
         run: |
-          python3 run_all_fuzz_tests.py --fuzz-run-args=--features=with-z3-binary-test,with-boolector-system,with-bitwuzla-system,with-z3-system --fuzz-bin-args=-max_total_time=5
+          python3 run_all_fuzz_tests.py --fuzz-bin-args=-max_total_time=5
 
   # -----------------------------------------------------------
   # X) Benches compile-only job

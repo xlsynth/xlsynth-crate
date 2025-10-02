@@ -18,13 +18,13 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     // Build two XLS IR functions via the C++ bindings
     let mut pkg1 = IrPackage::new("first").expect("IrPackage::new infra error");
-    let func1 = match generate_ir_fn(pair.first.ops.clone(), &mut pkg1, None) {
+    let _func1 = match generate_ir_fn(pair.first.ops.clone(), &mut pkg1, None) {
         Ok(f) => f,
         Err(_) => return, // unsupported generator outputs are skipped
     };
 
     let mut pkg2 = IrPackage::new("second").expect("IrPackage::new infra error");
-    let func2 = match generate_ir_fn(pair.second.ops.clone(), &mut pkg2, None) {
+    let _func2 = match generate_ir_fn(pair.second.ops.clone(), &mut pkg2, None) {
         Ok(f) => f,
         Err(_) => return,
     };

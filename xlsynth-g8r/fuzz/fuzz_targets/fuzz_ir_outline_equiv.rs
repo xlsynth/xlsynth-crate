@@ -14,7 +14,7 @@ use xlsynth_prover::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
 use xlsynth_prover::prove_equiv::prove_ir_fn_equiv;
 use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn as EqIrFn};
 
-use xlsynth_pir::ir::{Fn as IrFn, NodePayload, NodeRef, PackageMember};
+use xlsynth_pir::ir::{Fn as IrFn, NodeRef, PackageMember};
 use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_outline::{OutlineOrdering, compute_default_ordering, outline_with_ordering};
 use xlsynth_pir::ir_parser::Parser;

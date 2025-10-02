@@ -7,12 +7,12 @@ use rand::thread_rng;
 
 use xlsynth_g8r::prove_gate_fn_equiv_common::EquivResult;
 use xlsynth_g8r::prove_gate_fn_equiv_varisat::{
-    prove_gate_fn_equiv as prove_sat, Ctx as VarisatCtx,
+    Ctx as VarisatCtx, prove_gate_fn_equiv as prove_sat,
 };
 #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-use xlsynth_g8r::prove_gate_fn_equiv_z3::{prove_gate_fn_equiv as prove_z3, Ctx as Z3Ctx};
+use xlsynth_g8r::prove_gate_fn_equiv_z3::{Ctx as Z3Ctx, prove_gate_fn_equiv as prove_z3};
 use xlsynth_g8r::transforms::{self, transform_trait::TransformDirection};
-use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
+use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
 
 const NUM_STEPS: usize = 32;
 

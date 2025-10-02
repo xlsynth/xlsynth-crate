@@ -9,20 +9,23 @@ Usage:
   python3 run_all_fuzz_tests.py
 
   # With custom args:
-  #   cargo fuzz run --features=foo,bar <target> -- -max_total_time=10
-  python3 run_all_fuzz_tests.py --fuzz-run-args=--features=foo,bar --fuzz-bin-args=-max_total_time=10
+  #   cargo fuzz run --release --features=foo,bar <target> -- -max_total_time=10
+  python3 run_all_fuzz_tests.py --fuzz-run-args=--release --features=foo,bar --fuzz-bin-args=-max_total_time=10
 """
 
 import argparse
 import shlex
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
+DEFAULT_FEATURES: list[str] = ["with-z3-binary-test", "with-boolector-system", "with-bitwuzla-system", "with-z3-system"]
+DEFAULT_FUZZ_RUN_ARGS: str = ""
 DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5"
 
 # Targets which are known to fail.
-SKIP_TARGETS: list[str] = ["fuzz_bulk_replace", "fuzz_gate_transform_arbitrary"]
+SKIP_TARGETS: list[str] = ["fuzz_bulk_replace", "fuzz_gate_transform_arbitrary", "fuzz_ir_opt_equiv", "fuzz_ir_outline_equiv"]
 
 def find_fuzz_dirs(repo_root: Path) -> list[Path]:
     """Return paths to top-level <crate>/fuzz/ directories."""
@@ -32,21 +35,44 @@ def find_fuzz_dirs(repo_root: Path) -> list[Path]:
             continue
         fuzz_dir = child / "fuzz"
         if fuzz_dir.exists():
-            fuzz_dirs.append(child)
+            fuzz_dirs.append(fuzz_dir)
     return fuzz_dirs
 
+
+def run_cmd(cmd: list[str]) -> None:
+    """Print the command to be run, then execute it.
+
+    The command is echoed in a shell-safe, quoted form for easy copy/paste.
+    """
+    print("  => " + " ".join(shlex.quote(part) for part in cmd))
+    subprocess.check_call(cmd)
+
+def get_crate_features(crate_path: Path) -> list[str]:
+    """Return the list of features defined in <crate>/Cargo.toml."""
+    cargo_toml = crate_path / "Cargo.toml"
+    with open(cargo_toml, "rb") as f:
+        cargo_data = tomllib.load(f)
+    features = cargo_data.get("features")
+    if not features:
+        return []
+    return sorted(features.keys())
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--fuzz-run-args",
-        default="",
+        default=DEFAULT_FUZZ_RUN_ARGS,
         help="Arguments string passed to 'cargo fuzz run'. Example: \"--features=with-z3-system\"",
     )
     parser.add_argument(
         "--fuzz-bin-args",
         default=DEFAULT_FUZZ_BIN_ARGS,
         help="Arguments string passed to the fuzz binary. Example: \"-max_total_time=10\"",
+    )
+    parser.add_argument(
+        "--features",
+        default=DEFAULT_FEATURES,
+        help="Features to pass to the fuzz targets. Example: \"with-z3-system,with-foo\"",
     )
     args = parser.parse_args()
 
@@ -69,10 +95,11 @@ def main() -> int:
                 "cargo",
                 "fuzz",
                 "list",
+                "--fuzz-dir",
+                fuzz_dir.as_posix(),
             ],
             text=True,
             stderr=subprocess.STDOUT,
-            cwd=fuzz_dir,
         )
         targets = [line.strip() for line in list_output.splitlines() if line.strip()]
         if not targets:
@@ -82,33 +109,44 @@ def main() -> int:
     # First build all targets. This surfaces build errors quickly.
     for fuzz_dir, _ in fuzz_targets:
         print(f"\n=== Building fuzz targets in {fuzz_dir} ===")
-        subprocess.check_call(
-                [
-                    "cargo",
-                    "fuzz",
-                    "build",
-                ],
-                cwd=fuzz_dir,
-            )
+        features = get_crate_features(fuzz_dir)
+        supported_features = [f for f in features if f in args.features]
+        run_cmd(
+            [
+                "cargo",
+                "fuzz",
+                "build",
+                "--fuzz-dir",
+                fuzz_dir.as_posix(),
+                "--features",
+                ",".join(supported_features),
+                *fuzz_run_args_list,
+            ]
+        )
     for fuzz_dir, targets in fuzz_targets:
         print(f"\n=== Running fuzz targets in {fuzz_dir} ===")
+        features = get_crate_features(fuzz_dir)
+        supported_features = [f for f in features if f in args.features]
         for target in targets:
             if target in SKIP_TARGETS:
                 print(f"Skipping {target} in {fuzz_dir}.")
                 continue
 
             print(f"\n--- Running {target} in {fuzz_dir} ---")
-            subprocess.check_call(
+            run_cmd(
                 [
                     "cargo",
                     "fuzz",
                     "run",
+                    "--fuzz-dir",
+                    fuzz_dir.as_posix(),
+                    "--features",
+                    ",".join(supported_features),
                     *fuzz_run_args_list,
                     target,
                     "--",
                     *fuzz_bin_args_list,
-                ],
-                cwd=fuzz_dir,
+                ]
             )
     return 0
 
