@@ -326,7 +326,7 @@ jobs:
         run: |
           TAG='${{ steps.resolve-xls-tag-2004.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG}
 
       - name: Install protobuf compiler
         run: |
@@ -441,7 +441,7 @@ jobs:
           pip3 install --break-system-packages -r requirements.txt
           TAG='${{ steps.resolve-xls-tag-macos.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 download_release.py -p arm64 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          python3 download_release.py -p arm64 -o xlsynth_tools -v ${TAG}
 
       - name: Download Bitwuzla shared library (macOS arm64)
         run: |
@@ -560,7 +560,7 @@ jobs:
           pip3 install -r requirements.txt
           TAG=$(python3 get_required_xls_release_tag.py)
           echo "Resolved XLS release tag: ${TAG}"
-          python3 download_release.py -p rocky8 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          python3 download_release.py -p rocky8 -o xlsynth_tools -v ${TAG}
 
       - name: Install protobuf compiler
         run: |
@@ -737,7 +737,7 @@ jobs:
           pip3 install -r requirements.txt
           TAG='${{ steps.resolve-xls-tag-valgrind.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          python3 download_release.py -p ubuntu2004 -o xlsynth_tools -v ${TAG}
 
       - name: Download Slang
         run: |
@@ -802,7 +802,7 @@ jobs:
           # requirements.
           TAG='${{ steps.resolve-xls-tag-predownload.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 download_release.py -p rocky8 -o pre_download -d -v ${TAG} --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          python3 download_release.py -p rocky8 -o pre_download -d -v ${TAG}
 
       - name: Run cargo tests using pre-downloaded artifacts
         env:
