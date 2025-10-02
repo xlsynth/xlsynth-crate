@@ -255,6 +255,73 @@ pub fn param_type_by_name(f: &Fn, param_name: &str) -> Option<Type> {
         .map(|param| param.ty.clone())
 }
 
+/// Compacts and reorders the nodes of a function in place.
+///
+/// - Removes any nodes whose payload is `Nil`.
+/// - Reorders remaining nodes into a topological order (dependencies before
+///   users).
+/// - Remaps all operand indices and the function's `ret_node_ref` to the new
+///   indices.
+///
+/// Returns `Err` if remapping encounters a reference to a removed (Nil) node.
+pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
+    // Determine a topological order over the current node set.
+    let topo_all: Vec<NodeRef> = get_topological(f);
+
+    // Filter out Nil nodes (these will be removed).
+    let mut kept_order: Vec<NodeRef> = Vec::with_capacity(topo_all.len());
+    for nr in topo_all.into_iter() {
+        if !matches!(f.get_node(nr).payload, NodePayload::Nil) {
+            kept_order.push(nr);
+        }
+    }
+
+    // Build old->new index mapping for remapping payloads.
+    let old_len = f.nodes.len();
+    let mut old_to_new: Vec<Option<usize>> = vec![None; old_len];
+    for (new_idx, nr) in kept_order.iter().enumerate() {
+        old_to_new[nr.index] = Some(new_idx);
+    }
+
+    // Construct new node vector with remapped payloads.
+    let mut new_nodes: Vec<Node> = Vec::with_capacity(kept_order.len());
+    for nr in kept_order.iter().copied() {
+        let src = f.get_node(nr).clone();
+        let remapped_payload = remap_payload_with(&src.payload, |(_, dep): (usize, NodeRef)| {
+            match old_to_new.get(dep.index).and_then(|x| *x) {
+                Some(new_index) => NodeRef { index: new_index },
+                None => {
+                    // Encountered a dependency that was removed (Nil). This indicates the
+                    // function still references a deleted node; surface an error.
+                    panic!(
+                        "compact_and_toposort_in_place: dependency {} was removed (Nil)",
+                        dep.index
+                    );
+                }
+            }
+        });
+        new_nodes.push(Node {
+            payload: remapped_payload,
+            ..src
+        });
+    }
+
+    // Remap return node ref, if present.
+    if let Some(old_ret) = f.ret_node_ref {
+        let mapped = old_to_new[old_ret.index].ok_or_else(|| {
+            format!(
+                "compact_and_toposort_in_place: return node {} was removed (Nil)",
+                old_ret.index
+            )
+        })?;
+        f.ret_node_ref = Some(NodeRef { index: mapped });
+    }
+
+    // Install new nodes.
+    f.nodes = new_nodes;
+    Ok(())
+}
+
 /// Computes the immediate users of each node in the function.
 ///
 /// Returns a mapping from each `NodeRef` to the set of `NodeRef`s that

@@ -9,7 +9,7 @@ use xlsynth_pir::dce::remove_dead_nodes;
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_pir::matching_ged::{
-    IrMatchSet, MatchAction, apply_function_edits, compute_function_edit, compute_function_match,
+    IrMatchSet, MatchAction, apply_fn_edits, compute_fn_edit, compute_fn_match,
     convert_match_set_to_edit_set, format_ir_edits, format_match_actions,
 };
 use xlsynth_pir::{ir_parser, node_hashing::functions_structurally_equivalent};
@@ -103,15 +103,27 @@ fn assert_equivalent_nodes_are_matched(
     if has_multiple_forward_equivalents {
         return;
     }
-    // Build lookup sets of nodes that participate in a perfect forward match;
-    // used to relax reverse-only checks for those nodes below.
+
+    // Compute uniquely equivalent pairs (reverse) and ensure matches exist.
+    let rev_pairs = unique_reverse_equivalent_pairs(old_fn, new_fn);
+
+    // Build lookup sets of nodes that participate in a perfect forward/reverse
+    // match.
     let fwd_old_nodes: std::collections::HashSet<usize> =
         fwd_pairs.iter().map(|(oi, _)| *oi).collect();
     let fwd_new_nodes: std::collections::HashSet<usize> =
         fwd_pairs.iter().map(|(_, ni)| *ni).collect();
+    let rev_old_nodes: std::collections::HashSet<usize> =
+        rev_pairs.iter().map(|(oi, _)| *oi).collect();
+    let rev_new_nodes: std::collections::HashSet<usize> =
+        rev_pairs.iter().map(|(_, ni)| *ni).collect();
 
     for (oi, ni) in fwd_pairs.iter().copied() {
         if !matched_pairs.contains(&(oi, ni)) {
+            // Node also participates in a perfect reverse-equivalent pair.
+            if rev_old_nodes.contains(&oi) || rev_new_nodes.contains(&ni) {
+                continue;
+            }
             panic!(
                 "missing MatchNodes for uniquely forward-equivalent pair: {} <-> {}",
                 xlsynth_pir::ir::node_textual_id(old_fn, xlsynth_pir::ir::NodeRef { index: oi }),
@@ -119,12 +131,10 @@ fn assert_equivalent_nodes_are_matched(
             );
         }
     }
-    // Compute uniquely equivalent pairs (reverse) and ensure matches exist.
-    let rev_pairs = unique_reverse_equivalent_pairs(old_fn, new_fn);
+
     for (oi, ni) in rev_pairs.into_iter() {
         if !matched_pairs.contains(&(oi, ni)) {
-            // If either node participates in a perfect forward-equivalent pair,
-            // skip this reverse-only panic.
+            // Node also participates in a perfect forward-equivalent pair.
             if fwd_old_nodes.contains(&oi) || fwd_new_nodes.contains(&ni) {
                 continue;
             }
@@ -197,11 +207,9 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     );
 
     let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-    let edits =
-        compute_function_edit(old_fn, new_fn, &mut selector).expect("compute_function_edit Err");
+    let edits = compute_fn_edit(old_fn, new_fn, &mut selector).expect("compute_fn_edit Err");
 
-    let patched =
-        apply_function_edits(old_fn, &edits).expect("apply_function_edits returned Err (greedy)");
+    let patched = apply_fn_edits(old_fn, &edits).expect("apply_fn_edits returned Err (greedy)");
     debug!("PATCHED IR TEXT:\n{}", patched);
     debug!(
         "IR EDITS ({}):\n{}",
@@ -219,8 +227,8 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     // Compute matches on DCE'd functions with greedy selector.
     let mut sel_dce = GreedyMatchSelector::new(&old_dce, &new_dce);
-    let matches = compute_function_match(&old_dce, &new_dce, &mut sel_dce)
-        .expect("compute_function_match Err (AFTER DCE)");
+    let matches = compute_fn_match(&old_dce, &new_dce, &mut sel_dce)
+        .expect("compute_fn_match Err (AFTER DCE)");
     debug!(
         "MATCHES (AFTER DCE) ({}):\n{}",
         matches.matches.len(),
@@ -229,8 +237,8 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     assert_equivalent_nodes_are_matched(&old_dce, &new_dce, &matches);
 
     // Convert matches to edits and verify isomorphism on editted graph.
-    let edits_dce = convert_match_set_to_edit_set(&old_dce, &new_dce, &matches);
-    let patched_dce = apply_function_edits(&old_dce, &edits_dce)
+    let edits_dce = convert_match_set_to_edit_set(&old_dce, &new_dce, &matches, None);
+    let patched_dce = apply_fn_edits(&old_dce, &edits_dce)
         .expect("apply_function_edits returned Err (AFTER DCE)");
     debug!("PATCHED IR (AFTER DCE):\n{}", patched_dce);
     assert!(functions_structurally_equivalent(&patched_dce, &new_dce));

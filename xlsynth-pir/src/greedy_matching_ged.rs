@@ -528,8 +528,8 @@ mod tests {
     use crate::ir::NodePayload;
     use crate::ir_parser::Parser;
     use crate::matching_ged::{
-        IrEdit, MatchAction, NewNodeRef, NodeSide, OldNodeRef, ReadyNode, apply_function_edits,
-        compute_function_edit,
+        IrEdit, MatchAction, NewNodeRef, NodeSide, OldNodeRef, ReadyNode, apply_fn_edits,
+        compute_fn_edit,
     };
 
     fn parse_ir_from_string(s: &str) -> crate::ir::Package {
@@ -559,9 +559,9 @@ mod tests {
 
         // Use GreedyMatchSelector-based matcher
         let mut selector = GreedyMatchSelector::new(lhs, rhs);
-        let edits = compute_function_edit(lhs, rhs, &mut selector).unwrap();
+        let edits = compute_fn_edit(lhs, rhs, &mut selector).unwrap();
         assert!(edits.edits.is_empty());
-        let patched = apply_function_edits(lhs, &edits).unwrap();
+        let patched = apply_fn_edits(lhs, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, rhs
         ));
@@ -588,7 +588,7 @@ mod tests {
         let rhs = pkg2.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(lhs, rhs);
-        let result = compute_function_edit(lhs, rhs, &mut selector);
+        let result = compute_fn_edit(lhs, rhs, &mut selector);
         assert!(result.is_err());
     }
 
@@ -613,8 +613,8 @@ mod tests {
         let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -642,8 +642,8 @@ mod tests {
         let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -673,8 +673,8 @@ mod tests {
         let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -703,8 +703,8 @@ mod tests {
         let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -731,7 +731,7 @@ mod tests {
         let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
 
         assert_eq!(
             edits.edits.len(),
@@ -751,7 +751,7 @@ mod tests {
                 other
             ),
         }
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -778,7 +778,7 @@ mod tests {
         let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
 
         // Expect exactly three operand substitutions, and patched result is isomorphic.
         assert_eq!(
@@ -796,7 +796,7 @@ mod tests {
             edits.edits
         );
 
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
