@@ -5,7 +5,7 @@
 use libfuzzer_sys::fuzz_target;
 use xlsynth::IrPackage;
 use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
-use xlsynth_pir::matching_ged::apply_function_edits;
+use xlsynth_pir::matching_ged::apply_fn_edits;
 use xlsynth_pir::{ir_parser, node_hashing::functions_structurally_equivalent};
 
 fuzz_target!(|pair: FuzzSampleSameTypedPair| {
@@ -52,8 +52,8 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
 
     // Compute edit distance, apply to old, and verify isomorphism.
     let mut selector = xlsynth_pir::matching_ged::NaiveMatchSelector::new(old_fn, new_fn);
-    let edits = xlsynth_pir::matching_ged::compute_function_edit(old_fn, new_fn, &mut selector)
+    let edits = xlsynth_pir::matching_ged::compute_fn_edit(old_fn, new_fn, &mut selector)
         .expect("compute_function_edit returned Err");
-    let patched = apply_function_edits(old_fn, &edits).expect("apply_function_edits returned Err");
+    let patched = apply_fn_edits(old_fn, &edits).expect("apply_fn_edits returned Err");
     assert!(functions_structurally_equivalent(&patched, new_fn));
 });
