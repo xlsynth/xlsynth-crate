@@ -20,12 +20,23 @@ import sys
 import tomllib
 from pathlib import Path
 
-DEFAULT_FEATURES: list[str] = ["with-z3-binary-test", "with-boolector-system", "with-bitwuzla-system", "with-z3-system"]
+DEFAULT_FEATURES: list[str] = [
+    "with-z3-binary-test",
+    "with-boolector-system",
+    "with-bitwuzla-system",
+    "with-z3-system",
+]
 DEFAULT_FUZZ_RUN_ARGS: str = ""
 DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5"
 
 # Targets which are known to fail.
-SKIP_TARGETS: list[str] = ["fuzz_bulk_replace", "fuzz_gate_transform_arbitrary", "fuzz_ir_opt_equiv", "fuzz_ir_outline_equiv"]
+SKIP_TARGETS: list[str] = [
+    "fuzz_bulk_replace",
+    "fuzz_gate_transform_arbitrary",
+    "fuzz_ir_opt_equiv",
+    "fuzz_ir_outline_equiv",
+]
+
 
 def find_fuzz_dirs(repo_root: Path) -> list[Path]:
     """Return paths to top-level <crate>/fuzz/ directories."""
@@ -47,6 +58,7 @@ def run_cmd(cmd: list[str]) -> None:
     print("  => " + " ".join(shlex.quote(part) for part in cmd))
     subprocess.check_call(cmd)
 
+
 def get_crate_features(crate_path: Path) -> list[str]:
     """Return the list of features defined in <crate>/Cargo.toml."""
     cargo_toml = crate_path / "Cargo.toml"
@@ -56,6 +68,7 @@ def get_crate_features(crate_path: Path) -> list[str]:
     if not features:
         return []
     return sorted(features.keys())
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -67,12 +80,12 @@ def main() -> int:
     parser.add_argument(
         "--fuzz-bin-args",
         default=DEFAULT_FUZZ_BIN_ARGS,
-        help="Arguments string passed to the fuzz binary. Example: \"-max_total_time=10\"",
+        help='Arguments string passed to the fuzz binary. Example: "-max_total_time=10"',
     )
     parser.add_argument(
         "--features",
         default=DEFAULT_FEATURES,
-        help="Features to pass to the fuzz targets. Example: \"with-z3-system,with-foo\"",
+        help='Features to pass to the fuzz targets. Example: "with-z3-system,with-foo"',
     )
     args = parser.parse_args()
 
@@ -83,9 +96,12 @@ def main() -> int:
         print("No fuzz projects found.", file=sys.stderr)
         sys.exit(1)
 
-
-    fuzz_run_args_list: list[str] = shlex.split(args.fuzz_run_args) if args.fuzz_run_args else []
-    fuzz_bin_args_list: list[str] = shlex.split(args.fuzz_bin_args) if args.fuzz_bin_args else []
+    fuzz_run_args_list: list[str] = (
+        shlex.split(args.fuzz_run_args) if args.fuzz_run_args else []
+    )
+    fuzz_bin_args_list: list[str] = (
+        shlex.split(args.fuzz_bin_args) if args.fuzz_bin_args else []
+    )
 
     # Find the list of fuzz targets in each fuzz directory.
     fuzz_targets: list[tuple[str, list[str]]] = []
@@ -153,5 +169,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
