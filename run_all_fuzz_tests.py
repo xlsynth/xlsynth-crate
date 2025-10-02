@@ -55,7 +55,7 @@ def run_cmd(cmd: list[str]) -> None:
 
     The command is echoed in a shell-safe, quoted form for easy copy/paste.
     """
-    print("  => " + " ".join(shlex.quote(part) for part in cmd))
+    print("  => " + " ".join(shlex.quote(part) for part in cmd), file=sys.stderr)
     subprocess.check_call(cmd)
 
 
@@ -124,7 +124,7 @@ def main() -> int:
 
     # First build all targets. This surfaces build errors quickly.
     for fuzz_dir, _ in fuzz_targets:
-        print(f"\n=== Building fuzz targets in {fuzz_dir} ===")
+        print(f"\n=== Building fuzz targets in {fuzz_dir} ===", file=sys.stderr)
         features = get_crate_features(fuzz_dir)
         supported_features = [f for f in features if f in args.features]
         features_args = (
@@ -142,7 +142,7 @@ def main() -> int:
             ]
         )
     for fuzz_dir, targets in fuzz_targets:
-        print(f"\n=== Running fuzz targets in {fuzz_dir} ===")
+        print(f"\n=== Running fuzz targets in {fuzz_dir} ===", file=sys.stderr)
         features = get_crate_features(fuzz_dir)
         supported_features = [f for f in features if f in args.features]
         features_args = (
@@ -150,10 +150,10 @@ def main() -> int:
         )
         for target in targets:
             if target in SKIP_TARGETS:
-                print(f"Skipping {target} in {fuzz_dir}.")
+                print(f"Skipping {target} in {fuzz_dir}.", file=sys.stderr)
                 continue
 
-            print(f"\n--- Running {target} in {fuzz_dir} ---")
+            print(f"\n--- Running {target} in {fuzz_dir} ---", file=sys.stderr)
             run_cmd(
                 [
                     "cargo",
