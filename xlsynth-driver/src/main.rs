@@ -37,6 +37,7 @@
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
+mod dslx2pipeline_eco;
 mod dslx2sv_types;
 mod dslx_equiv;
 mod dslx_g8r_stats;
@@ -45,7 +46,6 @@ mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod g8r2v;
 mod g8r_equiv;
-mod greedy_eco;
 mod gv2ir;
 mod gv_read_stats;
 mod ir2combo;
@@ -245,6 +245,24 @@ impl AppExt for clap::Command {
                     .long("output_verilog_line_map_path")
                     .value_name("OUTPUT_VERILOG_LINE_MAP_PATH")
                     .help("Write Verilog line map textproto to this path"),
+            )
+            .arg(
+                Arg::new("output_block_ir_path")
+                    .long("output_block_ir_path")
+                    .value_name("OUTPUT_BLOCK_IR_PATH")
+                    .help("Write block IR text to this path"),
+            )
+            .arg(
+                Arg::new("output_residual_data_path")
+                    .long("output_residual_data_path")
+                    .value_name("OUTPUT_RESIDUAL_DATA_PATH")
+                    .help("Write residual data to this path"),
+            )
+            .arg(
+                Arg::new("reference_residual_data_path")
+                    .long("reference_residual_data_path")
+                    .value_name("REFERENCE_RESIDUAL_DATA_PATH")
+                    .help("Path to reference residual data for comparison"),
             )
     }
 
@@ -975,41 +993,47 @@ fn main() {
                 )
         )
         .subcommand(
-            clap::Command::new("greedy-eco")
-                .about("Computes an ECO based on a greedy graph-edit-distance heurisitic")
+            clap::Command::new("dslx2pipeline-eco")
+                .about("Produces Verilog with minimal edits from baseline_unopt_ir to current DSLX, using greedy GED edits; accepts dslx2pipeline args + --baseline_unopt_ir")
                 .arg(
-                    Arg::new("old_ir_file")
-                        .help("The old/original IR file (package)")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    Arg::new("new_ir_file")
-                        .help("The new/target IR file (package)")
-                        .required(true)
-                        .index(2),
-                )
-                .arg(
-                    Arg::new("old_ir_top")
-                        .long("old_ir_top")
-                        .help("Top-level entry point for the old IR package"),
-                )
-                .arg(
-                    Arg::new("new_ir_top")
-                        .long("new_ir_top")
-                        .help("Top-level entry point for the new IR package"),
-                )
-                .arg(
-                    Arg::new("patched_out")
-                        .long("patched_out")
+                    clap::Arg::new("output_unopt_ir")
+                        .long("output_unopt_ir")
                         .value_name("PATH")
-                        .help("Write the patched IR package to PATH; if omitted, prints to stdout"),
+                        .help("Path to write the unoptimized IR (package) output")
+                        .required(false)
+                        .action(ArgAction::Set),
                 )
                 .arg(
-                    Arg::new("edits_debug_out")
+                    clap::Arg::new("output_opt_ir")
+                        .long("output_opt_ir")
+                        .value_name("PATH")
+                        .help("Path to write the optimized IR (package) output")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("baseline_unopt_ir")
+                        .long("baseline_unopt_ir")
+                        .value_name("PATH")
+                        .help("Path to the baseline unoptimized IR (package) before the source change")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .add_delay_model_arg()
+                .add_dslx_input_args(true)
+                .add_pipeline_args()
+                .add_codegen_args()
+                .add_bool_arg("keep_temps", "Keep temporary files")
+                .add_bool_arg(
+                    "type_inference_v2",
+                    "Enable the experimental type-inference v2 algorithm",
+                )
+                .arg(
+                    clap::Arg::new("edits_debug_out")
                         .long("edits_debug_out")
                         .value_name("PATH")
-                        .help("Write the debug string of IrEdits to PATH (optional)"),
+                        .help("Write the debug string of IrEdits to PATH (optional)")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -1590,8 +1614,8 @@ fn main() {
         ir2gates::handle_ir2gates(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2g8r") {
         ir2gates::handle_ir2g8r(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("greedy-eco") {
-        greedy_eco::handle_greedy_eco(matches);
+    } else if let Some(matches) = matches.subcommand_matches("dslx2pipeline-eco") {
+        dslx2pipeline_eco::handle_dslx2pipeline_eco(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("lib2proto") {
         lib2proto::handle_lib2proto(matches);
     } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
