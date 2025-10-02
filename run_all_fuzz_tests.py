@@ -37,7 +37,6 @@ SKIP_TARGETS: list[str] = [
     "fuzz_ir_outline_equiv",
 ]
 
-
 def find_fuzz_dirs(repo_root: Path) -> list[Path]:
     """Return paths to top-level <crate>/fuzz/ directories."""
     fuzz_dirs: list[Path] = []
