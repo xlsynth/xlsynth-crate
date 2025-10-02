@@ -886,7 +886,7 @@ jobs:
           pip3 install -r requirements.txt
           TAG='${{ steps.resolve-xls-tag-smoke.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 download_release.py -p rocky8 -v ${TAG} --binaries check_ir_equivalence_main -d -o /tmp/xlsynth_tools_smoke
+          python3 download_release.py -p rocky8 -v ${TAG} -d -o /tmp/xlsynth_tools_smoke
           sudo mv /tmp/xlsynth_tools_smoke/libxls-rocky8.so /usr/lib/libxls-rocky8.so
           sudo ldconfig
 

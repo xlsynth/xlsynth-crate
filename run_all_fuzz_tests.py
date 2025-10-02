@@ -35,7 +35,6 @@ SKIP_TARGETS: list[str] = [
     "fuzz_gate_transform_arbitrary",
     "fuzz_ir_opt_equiv",
     "fuzz_ir_outline_equiv",
-    "fuzz_block_roundtrip",  # Only fails on github CI.
 ]
 
 
