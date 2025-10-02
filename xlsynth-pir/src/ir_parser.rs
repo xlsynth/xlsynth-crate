@@ -3,7 +3,7 @@
 //! Parser for XLS IR (just functions for the time being).
 
 use crate::ir::{
-    self, ArrayTypeData, BlockPortInfo, FileTable, PackageMember, operator_to_nary_op,
+    self, ArrayTypeData, BlockPortInfo, FileTable, MemberType, PackageMember, operator_to_nary_op,
 };
 use crate::ir_node_env::{IrNodeEnv, NameOrId};
 use crate::ir_validate;
@@ -1663,6 +1663,7 @@ impl Parser {
     ) -> Result<(ir::Fn, BlockPortInfo), ParseError> {
         self.drop_or_error("block")?;
         let block_name = self.pop_identifier_or_error("block name")?;
+        let mut clock_port_name: Option<String> = None;
 
         // Parse port list from the block header: `name: type, ...` (no ids).
         let mut header_ports: Vec<(String, ir::Type)> = Vec::new();
@@ -1673,8 +1674,15 @@ impl Parser {
             }
             let pname = self.pop_identifier_or_error("block port name")?;
             self.drop_or_error(":")?;
-            let pty = self.parse_type()?;
-            header_ports.push((pname, pty));
+            if self.try_drop("clock") {
+                if !header_ports.is_empty() {
+                    return Err(ParseError::new("clock must be first port".to_string()));
+                }
+                clock_port_name = Some(pname);
+            } else {
+                let pty = self.parse_type()?;
+                header_ports.push((pname, pty));
+            }
             if !self.try_drop(",") {
                 self.drop_or_error(")")?;
                 break;
@@ -1921,6 +1929,7 @@ impl Parser {
                     inner_attrs,
                 },
                 BlockPortInfo {
+                    clock_port_name,
                     input_port_ids: input_params
                         .iter()
                         .map(|(n, _t, id)| (n.clone(), *id))
@@ -1961,6 +1970,7 @@ impl Parser {
                 inner_attrs,
             },
             BlockPortInfo {
+                clock_port_name,
                 input_port_ids: input_params
                     .iter()
                     .map(|(n, _t, id)| (n.clone(), *id))
@@ -1979,7 +1989,7 @@ impl Parser {
     pub fn parse_package(&mut self) -> Result<ir::Package, ParseError> {
         log::debug!("parse_package");
         let mut members: Vec<PackageMember> = Vec::new();
-        let mut top_name: Option<String> = None;
+        let mut top: Option<(String, MemberType)> = None;
 
         self.drop_keyword_or_error("package", "package header")?;
         let package_name = self.pop_identifier_or_error("package name")?;
@@ -2013,14 +2023,14 @@ impl Parser {
                 self.drop_whitespace_and_comments();
                 if self.peek_keyword_is("fn") {
                     let f = self.parse_fn_with_outer(pending_outer_attrs.drain(..).collect())?;
-                    top_name = Some(f.name.clone());
+                    top = Some((f.name.clone(), MemberType::Function));
                     members.push(PackageMember::Function(f));
                 } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
                     let (f, port_info) = self.parse_block_to_fn_with_ports_outer(
                         pending_outer_attrs.drain(..).collect(),
                     )?;
-                    top_name = Some(f.name.clone());
+                    top = Some((f.name.clone(), MemberType::Block));
                     members.push(PackageMember::Block { func: f, port_info });
                 } else {
                     return Err(ParseError::new(format!(
@@ -2059,7 +2069,7 @@ impl Parser {
             name: package_name,
             file_table,
             members,
-            top_name,
+            top,
         })
     }
 }
@@ -2073,6 +2083,7 @@ pub fn emit_fn_as_block(
     f: &ir::Fn,
     output_names: Option<&[String]>,
     port_ids: Option<&BlockPortInfo>,
+    is_top: bool,
 ) -> String {
     // Helper to get reference name for a node as used in operand positions.
     let get_ref_name = |nr: ir::NodeRef| -> String {
@@ -2167,8 +2178,13 @@ pub fn emit_fn_as_block(
         (0..ret_nodes.len()).map(|i| format!("out{}", i)).collect()
     };
 
-    // Construct header: inputs first, then outputs.
+    // Construct header: optional clock, then inputs, then outputs.
     let mut header_parts: Vec<String> = Vec::new();
+    if let Some(pi) = port_ids {
+        if let Some(clk_name) = &pi.clock_port_name {
+            header_parts.push(format!("{}: clock", clk_name));
+        }
+    }
     for p in f.params.iter() {
         header_parts.push(format!("{}: {}", p.name, p.ty));
     }
@@ -2246,6 +2262,9 @@ pub fn emit_fn_as_block(
     for attr in &f.outer_attrs {
         out.push_str(attr);
         out.push('\n');
+    }
+    if is_top {
+        out.push_str("top ");
     }
     out.push_str(&format!(
         "block {}({}) {{\n{}\n}}",
@@ -3008,7 +3027,7 @@ top fn main() -> bits[32] {
 "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let main_fn = pkg.get_top().unwrap();
+        let main_fn = pkg.get_top_fn().unwrap();
         let data = main_fn.nodes[1].pos.as_ref().unwrap();
         assert_eq!(data.len(), 2);
         assert_eq!(
@@ -3026,7 +3045,7 @@ top fn main() -> bits[32] {
         let ir = "package nopos\n\nfn main() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1, pos=[(0,0,0)])\n}\n";
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let main_fn = pkg.get_top().unwrap();
+        let main_fn = pkg.get_top_fn().unwrap();
         assert!(main_fn.nodes[1].pos.is_some());
     }
 
@@ -3088,7 +3107,7 @@ fn id(x: bits[1] id=1) -> bits[1] {
         // When parsing from block, preserve original port ids via BlockPortInfo.
         let mut parser2 = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
         let (_f2, port_info) = parser2.parse_block_to_fn_with_ports().unwrap();
-        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&port_info));
+        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&port_info), false);
         assert_eq!(emitted, BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
     }
 
@@ -3101,6 +3120,7 @@ fn id(x: bits[1] id=1) -> bits[1] {
             &f,
             Some(&["a_out".to_string(), "b_out".to_string()]),
             Some(&port_info),
+            false,
         );
         assert_eq!(emitted, BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
     }

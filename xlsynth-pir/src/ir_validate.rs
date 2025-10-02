@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use super::ir::{Fn, NaryOp, NodePayload, Package, PackageMember, Type};
+use super::ir::{Fn, MemberType, NaryOp, NodePayload, Package, PackageMember, Type};
 use super::ir_deduce::deduce_result_type_with;
 use super::ir_utils::operands;
 
@@ -14,7 +14,7 @@ pub enum ValidationError {
     /// Two package members share the same name.
     DuplicateMemberName(String),
     /// The `top` attribute references a missing function.
-    MissingTopFunction(String),
+    MissingTop(String),
     /// A node references an undefined operand (index out of bounds).
     OperandOutOfBounds {
         func: String,
@@ -100,8 +100,8 @@ impl std::fmt::Display for ValidationError {
             ValidationError::DuplicateMemberName(name) => {
                 write!(f, "duplicate member name '{}'", name)
             }
-            ValidationError::MissingTopFunction(name) => {
-                write!(f, "top function '{}' not found", name)
+            ValidationError::MissingTop(name) => {
+                write!(f, "top member '{}' not found", name)
             }
             ValidationError::OperandOutOfBounds {
                 func,
@@ -249,11 +249,6 @@ impl std::error::Error for ValidationError {}
 /// Validates an entire package, ensuring all member names are unique, the top
 /// function (if set) exists, and all contained functions are valid.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    enum MemberType {
-        Function,
-        Block,
-    }
     let mut names = HashSet::<(String, MemberType)>::new();
     for member in &p.members {
         let (name, member_type) = match member {
@@ -265,11 +260,9 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
         }
     }
 
-    if let Some(top) = &p.top_name {
-        if names.get(&(top.clone(), MemberType::Function)).is_none()
-            && names.get(&(top.clone(), MemberType::Block)).is_none()
-        {
-            return Err(ValidationError::MissingTopFunction(top.clone()));
+    if let Some(top) = &p.top {
+        if !names.contains(top) {
+            return Err(ValidationError::MissingTop(top.0.clone()));
         }
     }
 
@@ -662,7 +655,7 @@ mod tests {
         "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
+        let f = pkg.get_top_fn().unwrap();
         assert!(matches!(
             validate_fn(f, &pkg),
             Err(ValidationError::DuplicateTextId { .. })
@@ -694,7 +687,7 @@ mod tests {
             name: "test".to_string(),
             file_table: ir::FileTable::new(),
             members: Vec::new(),
-            top_name: Some("f".to_string()),
+            top: Some(("f".to_string(), ir::MemberType::Function)),
         };
         let lit_node = ir::Node {
             text_id: 2,
@@ -722,7 +715,7 @@ mod tests {
             inner_attrs: Vec::new(),
         };
         pkg.members.push(ir::PackageMember::Function(f.clone()));
-        let fref = pkg.get_top().unwrap();
+        let fref = pkg.get_top_fn().unwrap();
         assert!(matches!(
             super::validate_fn(fref, &pkg),
             Err(ValidationError::NodeNameOpMismatch { .. })
@@ -759,7 +752,7 @@ mod tests {
         "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
+        let f = pkg.get_top_fn().unwrap();
         assert!(matches!(
             validate_fn(f, &pkg),
             Err(ValidationError::UnknownCallee { .. })
@@ -778,7 +771,7 @@ mod tests {
         let mut parser = Parser::new(ir);
         let mut pkg = parser.parse_package().unwrap();
         {
-            let f = pkg.get_top_mut().unwrap();
+            let f = pkg.get_top_fn_mut().unwrap();
             // Manually insert a duplicate GetParam node with the same id as 'x'.
             let pid = f.params[0].id;
             let dup = ir::Node {
@@ -790,7 +783,7 @@ mod tests {
             };
             f.nodes.push(dup);
         }
-        let f_ro = pkg.get_top().unwrap();
+        let f_ro = pkg.get_top_fn().unwrap();
         assert!(matches!(
             validate_fn(f_ro, &pkg),
             Err(ValidationError::DuplicateTextId { .. })
@@ -809,7 +802,7 @@ mod tests {
         let mut parser = Parser::new(ir);
         let mut pkg = parser.parse_package().unwrap();
         {
-            let f = pkg.get_top_mut().unwrap();
+            let f = pkg.get_top_fn_mut().unwrap();
             // Remove the GetParam node for 'x'. It should be at index 1.
             let idx = f
                 .nodes
@@ -818,7 +811,7 @@ mod tests {
                 .unwrap();
             f.nodes.remove(idx);
         }
-        let f_ro = pkg.get_top().unwrap();
+        let f_ro = pkg.get_top_fn().unwrap();
         let err = validate_fn(f_ro, &pkg).unwrap_err();
         assert!(matches!(
             err,
@@ -837,7 +830,7 @@ mod tests {
         "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
-        let f = pkg.get_top().unwrap();
+        let f = pkg.get_top_fn().unwrap();
         assert!(matches!(
             validate_fn(f, &pkg),
             Err(ValidationError::DuplicateParamName { .. })

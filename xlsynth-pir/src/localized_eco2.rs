@@ -49,7 +49,7 @@ mod tests {
         let pkg_text = format!("package test\n\n{}\n", ir_body);
         let mut p = Parser::new(&pkg_text);
         let pkg = p.parse_and_validate_package().unwrap();
-        pkg.get_top().unwrap().clone()
+        pkg.get_top_fn().unwrap().clone()
     }
 
     #[test]

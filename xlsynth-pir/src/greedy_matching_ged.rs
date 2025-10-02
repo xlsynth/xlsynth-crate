@@ -546,7 +546,7 @@ mod tests {
             }
             "#,
         );
-        let lhs = pkg.get_top().unwrap();
+        let lhs = pkg.get_top_fn().unwrap();
 
         let pkg2 = parse_ir_from_string(
             r#"package p2
@@ -555,7 +555,7 @@ mod tests {
             }
             "#,
         );
-        let rhs = pkg2.get_top().unwrap();
+        let rhs = pkg2.get_top_fn().unwrap();
 
         // Use GreedyMatchSelector-based matcher
         let mut selector = GreedyMatchSelector::new(lhs, rhs);
@@ -576,7 +576,7 @@ mod tests {
             }
             "#,
         );
-        let lhs = pkg.get_top().unwrap();
+        let lhs = pkg.get_top_fn().unwrap();
 
         let pkg2 = parse_ir_from_string(
             r#"package p2
@@ -585,7 +585,7 @@ mod tests {
             }
             "#,
         );
-        let rhs = pkg2.get_top().unwrap();
+        let rhs = pkg2.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(lhs, rhs);
         let result = compute_function_edit(lhs, rhs, &mut selector);
@@ -601,7 +601,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -610,7 +610,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -629,7 +629,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -639,7 +639,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -659,7 +659,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         // Same nodes, but return points to a different node (the literal).
         let pkg_new = parse_ir_from_string(
@@ -670,7 +670,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -689,7 +689,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         // Different structure: wrap the add in an identity, keep params identical.
         let pkg_new = parse_ir_from_string(
@@ -700,7 +700,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -719,7 +719,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -728,7 +728,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -766,7 +766,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -775,7 +775,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
         let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
@@ -816,7 +816,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         // New: or(or(A'(w,x), C'(y,z)), B'(x,y)) — A stays in inner slot0; B,C swap
         // levels.
@@ -831,7 +831,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         // Build dependency graphs and compute reverse matches.
         let old_graph = crate::matching_ged::build_dependency_graph::<OldNodeRef>(old_fn);
@@ -883,7 +883,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p2
@@ -896,7 +896,7 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut sel = GreedyMatchSelector::new(old_fn, new_fn);
         let base = GreedyMatchSelector::SCORE_BASE;

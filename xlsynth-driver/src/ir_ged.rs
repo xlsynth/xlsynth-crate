@@ -20,12 +20,12 @@ fn ir_ged(
 
     let lhs_fn = match lhs_ir_top {
         Some(top) => lhs_pkg.get_fn(top).unwrap(),
-        None => lhs_pkg.get_top().unwrap(),
+        None => lhs_pkg.get_top_fn().unwrap(),
     };
 
     let rhs_fn = match rhs_ir_top {
         Some(top) => rhs_pkg.get_fn(top).unwrap(),
-        None => rhs_pkg.get_top().unwrap(),
+        None => rhs_pkg.get_top_fn().unwrap(),
     };
 
     let distance = edit_distance::compute_edit_distance(lhs_fn, rhs_fn);

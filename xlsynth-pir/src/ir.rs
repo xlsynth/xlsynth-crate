@@ -1123,69 +1123,82 @@ impl Fn {
 
 impl std::fmt::Display for Fn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Emit outer attributes (verbatim lines) before the signature.
-        for attr in &self.outer_attrs {
-            writeln!(f, "{}", attr)?;
-        }
-        let params_str = self
-            .params
-            .iter()
-            .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.get_wrapped_id()))
-            .collect::<Vec<String>>()
-            .join(", ");
-        let return_type_str = self.ret_ty.to_string();
-        write!(
-            f,
-            "fn {}({}) -> {} {{\n",
-            self.name, params_str, return_type_str
-        )?;
+        write!(f, "{}", emit_fn(self, /* is_top= */ false))
+    }
+}
 
-        // Emit inner attributes immediately after the signature.
-        for attr in &self.inner_attrs {
-            writeln!(f, "  {}", attr)?;
-        }
+/// Emits a function as text, including outer/inner attributes and body.
+pub fn emit_fn(func: &Fn, is_top: bool) -> String {
+    let mut out = String::new();
+    // Outer attributes first
+    for attr in &func.outer_attrs {
+        out.push_str(attr);
+        out.push('\n');
+    }
 
-        // Now that we've emitted the signature, emit the nodes in the function body.
-        for (i, node) in self.nodes.iter().enumerate() {
-            let node_ref = NodeRef { index: i };
-            let ret_prefix = if let Some(ret_node_ref) = self.ret_node_ref
-                && ret_node_ref == node_ref
-            {
-                "ret "
-            } else {
-                ""
-            };
+    // Signature line
+    let params_str = func
+        .params
+        .iter()
+        .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.get_wrapped_id()))
+        .collect::<Vec<String>>()
+        .join(", ");
+    let return_type_str = func.ret_ty.to_string();
+    if is_top {
+        out.push_str("top ");
+    }
+    out.push_str(&format!(
+        "fn {}({}) -> {} {{\n",
+        func.name, params_str, return_type_str
+    ));
 
-            // Note: some nodes don't need anything to be emitted, e.g. get param nodes.
-            // Exception: if the return node is a GetParam, we still emit a param(...) line.
-            match &node.payload {
-                NodePayload::GetParam(pid) if ret_prefix == "ret " => {
-                    let name = node
-                        .name
-                        .as_ref()
-                        .map(|s| s.as_str())
-                        .unwrap_or("<unnamed>");
-                    write!(
-                        f,
-                        "  {}{}: {} = param(name={}, id={})\n",
-                        ret_prefix,
-                        name,
-                        node.ty,
-                        name,
-                        pid.get_wrapped_id()
-                    )?;
-                }
-                _ => {
-                    if let Some(node_str) = node.to_string(self) {
-                        write!(f, "  {}{}\n", ret_prefix, node_str)?;
-                    }
+    // Inner attributes after signature
+    for attr in &func.inner_attrs {
+        out.push_str("  ");
+        out.push_str(attr);
+        out.push('\n');
+    }
+
+    // Body nodes
+    for (i, node) in func.nodes.iter().enumerate() {
+        let node_ref = NodeRef { index: i };
+        let ret_prefix = if let Some(ret_node_ref) = func.ret_node_ref
+            && ret_node_ref == node_ref
+        {
+            "ret "
+        } else {
+            ""
+        };
+        match &node.payload {
+            NodePayload::GetParam(pid) if ret_prefix == "ret " => {
+                let name = node
+                    .name
+                    .as_ref()
+                    .map(|s| s.as_str())
+                    .unwrap_or("<unnamed>");
+                out.push_str("  ");
+                out.push_str(ret_prefix);
+                out.push_str(&format!(
+                    "{}: {} = param(name={}, id={})\n",
+                    name,
+                    node.ty,
+                    name,
+                    pid.get_wrapped_id()
+                ));
+            }
+            _ => {
+                if let Some(node_str) = node.to_string(func) {
+                    out.push_str("  ");
+                    out.push_str(ret_prefix);
+                    out.push_str(&node_str);
+                    out.push('\n');
                 }
             }
         }
-
-        // Now we're done with the function.
-        write!(f, "}}")
     }
+
+    out.push('}');
+    out
 }
 
 /// Emits a function as text, allowing an optional end-of-line comment per node.
@@ -1309,12 +1322,18 @@ impl Pos {
 
 pub type PosData = Vec<Pos>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MemberType {
+    Function,
+    Block,
+}
+
 #[derive(Debug, Clone)]
 pub struct Package {
     pub name: String,
     pub file_table: FileTable,
     pub members: Vec<PackageMember>,
-    pub top_name: Option<String>,
+    pub top: Option<(String, MemberType)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1325,15 +1344,45 @@ pub enum PackageMember {
 
 #[derive(Debug, Clone)]
 pub struct BlockPortInfo {
+    pub clock_port_name: Option<String>,
     pub input_port_ids: std::collections::HashMap<String, usize>,
     pub output_port_ids: std::collections::HashMap<String, usize>,
     pub output_names: Vec<String>,
 }
 
 impl Package {
-    pub fn get_top(&self) -> Option<&Fn> {
-        match &self.top_name {
-            Some(name) => self
+    /// Sets the package top to the given function name, if it exists.
+    pub fn set_top_fn(&mut self, name: &str) -> Result<(), String> {
+        let exists = self.members.iter().any(|m| match m {
+            PackageMember::Function(f) => f.name == name,
+            _ => false,
+        });
+        if exists {
+            self.top = Some((name.to_string(), MemberType::Function));
+            Ok(())
+        } else {
+            Err(format!("set_top_fn: function '{}' not found", name))
+        }
+    }
+
+    /// Sets the package top to the given block name, if it exists.
+    pub fn set_top_block(&mut self, name: &str) -> Result<(), String> {
+        let exists = self.members.iter().any(|m| match m {
+            PackageMember::Block { func, .. } => func.name == name,
+            _ => false,
+        });
+        if exists {
+            self.top = Some((name.to_string(), MemberType::Block));
+            Ok(())
+        } else {
+            Err(format!("set_top_block: block '{}' not found", name))
+        }
+    }
+
+    pub fn get_top_fn(&self) -> Option<&Fn> {
+        match &self.top {
+            Some((_, MemberType::Block)) => None,
+            Some((name, MemberType::Function)) => self
                 .members
                 .iter()
                 .filter_map(|m| match m {
@@ -1352,9 +1401,10 @@ impl Package {
         }
     }
 
-    pub fn get_top_mut(&mut self) -> Option<&mut Fn> {
-        match &mut self.top_name {
-            Some(name) => self
+    pub fn get_top_fn_mut(&mut self) -> Option<&mut Fn> {
+        match &mut self.top {
+            Some((_, MemberType::Block)) => None,
+            Some((name, MemberType::Function)) => self
                 .members
                 .iter_mut()
                 .filter_map(|m| match m {
@@ -1373,6 +1423,61 @@ impl Package {
         }
     }
 
+    pub fn get_top_block(&self) -> Option<&PackageMember> {
+        match &self.top {
+            Some((_, MemberType::Function)) => None,
+            Some((name, MemberType::Block)) => self
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => None,
+                    PackageMember::Block { func, .. } => {
+                        if func.name == *name {
+                            Some(m)
+                        } else {
+                            None
+                        }
+                    }
+                })
+                .next(),
+            None => self
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => None,
+                    PackageMember::Block { func, .. } => Some(m),
+                })
+                .next(),
+        }
+    }
+
+    pub fn get_top_block_mut(&mut self) -> Option<&mut PackageMember> {
+        match &mut self.top {
+            Some((_, MemberType::Function)) => None,
+            Some((name, MemberType::Block)) => self
+                .members
+                .iter_mut()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => None,
+                    PackageMember::Block { func, .. } => {
+                        if func.name == *name {
+                            Some(m)
+                        } else {
+                            None
+                        }
+                    }
+                })
+                .next(),
+            None => self
+                .members
+                .iter_mut()
+                .filter_map(|m| match m {
+                    PackageMember::Function(f) => None,
+                    PackageMember::Block { func, .. } => Some(m),
+                })
+                .next(),
+        }
+    }
     pub fn get_fn(&self, name: &str) -> Option<&Fn> {
         self.members.iter().find_map(|m| match m {
             PackageMember::Function(f) if f.name == name => Some(f),
@@ -1385,6 +1490,23 @@ impl Package {
         self.members.iter_mut().find_map(|m| match m {
             PackageMember::Function(f) if f.name == name => Some(f),
             PackageMember::Block { .. } => None,
+            _ => None,
+        })
+    }
+
+    /// Returns the block member (as a `PackageMember::Block`) whose internal
+    /// function name equals `name`.
+    pub fn get_block(&self, name: &str) -> Option<&PackageMember> {
+        self.members.iter().find_map(|m| match m {
+            PackageMember::Block { func, .. } if func.name == name => Some(m),
+            _ => None,
+        })
+    }
+
+    /// Mutable variant of `get_block`.
+    pub fn get_block_mut(&mut self, name: &str) -> Option<&mut PackageMember> {
+        self.members.iter_mut().find_map(|m| match m {
+            PackageMember::Block { func, .. } if func.name == name => Some(m),
             _ => None,
         })
     }
@@ -1402,6 +1524,25 @@ impl Package {
     /// function named `name`, if present in the package.
     pub fn get_fn_type(&self, name: &str) -> Option<FunctionType> {
         self.get_fn(name).map(|f| f.get_type())
+    }
+
+    /// Replaces a `PackageMember::Block` whose internal function name equals
+    /// `name` with `new_block`. Returns an error if no such block exists, or if
+    /// `new_block` is not a block.
+    pub fn replace_block(&mut self, name: &str, new_block: PackageMember) -> Result<(), String> {
+        match &new_block {
+            PackageMember::Block { .. } => {}
+            _ => return Err("replace_block requires a Block package member".to_string()),
+        }
+        if let Some((idx, _)) = self.members.iter().enumerate().find(|(_, m)| match m {
+            PackageMember::Block { func, .. } => func.name == name,
+            _ => false,
+        }) {
+            self.members[idx] = new_block;
+            Ok(())
+        } else {
+            Err(format!("replace_block: block '{}' not found", name))
+        }
     }
 }
 
@@ -1422,17 +1563,21 @@ impl std::fmt::Display for Package {
         for (i, member) in self.members.iter().enumerate() {
             match member {
                 PackageMember::Function(func) => {
-                    if let Some(top_name) = &self.top_name
-                        && func.name == top_name.as_str()
-                    {
-                        write!(f, "top {}", func)?;
-                    } else {
-                        write!(f, "{}", func)?;
-                    }
+                    let is_top = match &self.top {
+                        Some((top_name, MemberType::Function)) => func.name == top_name.as_str(),
+                        _ => false,
+                    };
+                    let func_text = emit_fn(func, is_top);
+                    write!(f, "{}", func_text)?;
                 }
                 PackageMember::Block { func, port_info } => {
+                    let is_top = match &self.top {
+                        Some((top_name, MemberType::Block)) => func.name == top_name.as_str(),
+                        _ => false,
+                    };
                     // Emit as a block using helper from the parser module.
-                    let block_text = ir_parser::emit_fn_as_block(func, None, Some(port_info));
+                    let block_text =
+                        ir_parser::emit_fn_as_block(func, None, Some(port_info), is_top);
                     write!(f, "{}", block_text)?;
                 }
             }

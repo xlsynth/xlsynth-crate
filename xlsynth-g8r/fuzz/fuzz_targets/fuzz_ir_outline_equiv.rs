@@ -170,7 +170,7 @@ fuzz_target!(|sample: FuzzSample| {
         Err(_e) => panic!("Rust IR parser failed on C++-emitted package text (clone)"),
     };
 
-    let orig_fn = orig_pkg.get_top().expect("missing top function").clone();
+    let orig_fn = orig_pkg.get_top_fn().expect("missing top function").clone();
     let n = orig_fn.nodes.len();
     if n < 2 {
         // Early-return: not enough nodes to outline a nontrivial region
@@ -202,7 +202,7 @@ fuzz_target!(|sample: FuzzSample| {
 
     // Perform outlining on a mutable clone of the package using the original
     // function
-    let work_fn = work_pkg.get_top().unwrap().clone();
+    let work_fn = work_pkg.get_top_fn().unwrap().clone();
     // Choose parameter and return ordering modes from hash bits for reproducibility
     let param_mode = if (h & 1) == 0 {
         ParamOrderMode::Default
@@ -256,7 +256,7 @@ fuzz_target!(|sample: FuzzSample| {
         } = r
         {
             // Provide context in logs on failure
-            if let Some(f) = orig_pkg.get_top() {
+            if let Some(f) = orig_pkg.get_top_fn() {
                 log::info!("Original IR fn:\n{}", f);
             }
             if let Some(PackageMember::Function(f)) = work_pkg
@@ -289,7 +289,7 @@ fuzz_target!(|sample: FuzzSample| {
             ..
         } = r
         {
-            if let Some(f) = orig_pkg.get_top() {
+            if let Some(f) = orig_pkg.get_top_fn() {
                 log::info!("Original IR fn:\n{}", f);
             }
             if let Some(PackageMember::Function(f)) = work_pkg

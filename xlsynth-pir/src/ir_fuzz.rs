@@ -1754,7 +1754,7 @@ mod tests {
                 let mut p = ir_parser::Parser::new(&txt);
                 if let Ok(mut pir_pkg) = p.parse_and_validate_package() {
                     let _ = crate::ir_validate::validate_package(&pir_pkg);
-                    if let Some(top_fn) = pir_pkg.get_top_mut() {
+                    if let Some(top_fn) = pir_pkg.get_top_fn_mut() {
                         let dce_f = remove_dead_nodes(&*top_fn);
                         let mut live_param_set = HashSet::<NodeRef>::new();
                         for (index, node) in dce_f.nodes.iter().enumerate() {

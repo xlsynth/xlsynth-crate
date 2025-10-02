@@ -37,7 +37,7 @@ fuzz_target!(|sample: FuzzSample| {
                 return;
             }
         };
-    let parsed_fn = parsed_package.get_top().unwrap();
+    let parsed_fn = parsed_package.get_top_fn().unwrap();
 
     // Convert to gates with folding disabled to make less machinery under test.
     let _gate_fn_no_fold = gatify(

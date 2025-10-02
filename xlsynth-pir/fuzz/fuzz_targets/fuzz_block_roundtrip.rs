@@ -44,8 +44,8 @@ fn run_codegen_block_ir_to_string(
 
 fuzz_target!(|sample: FuzzSample| {
     // Toolchain path must be provided via environment for this fuzz target.
-    let tool_path = std::env::var("XLS_TOOLCHAIN_PATH")
-        .expect("XLS_TOOLCHAIN_PATH must be set for fuzz_block_roundtrip");
+    let tool_path =
+        std::env::var("XLSYNTH_TOOLS").expect("XLSYNTH_TOOLS must be set for fuzz_block_roundtrip");
 
     // 1) Build IR package with a single function from the sample.
     let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").expect("IrPackage::new should succeed");

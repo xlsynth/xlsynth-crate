@@ -68,7 +68,7 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
     let parsed_pkg = ir_parser::Parser::new(&pkg_text)
         .parse_and_validate_package()
         .expect("parse_and_validate_package should not fail");
-    let parsed_top = match parsed_pkg.get_top() {
+    let parsed_top = match parsed_pkg.get_top_fn() {
         Some(f) => f.clone(),
         None => return,
     };

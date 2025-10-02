@@ -54,8 +54,8 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     let desired_pkg = ir_parser::Parser::new(&pkg_desired.to_string())
         .parse_and_validate_package()
         .unwrap();
-    let orig = orig_pkg.get_top().unwrap();
-    let desired = desired_pkg.get_top().unwrap().clone();
+    let orig = orig_pkg.get_top_fn().unwrap();
+    let desired = desired_pkg.get_top_fn().unwrap().clone();
 
     // 4) Precondition: signatures must match; guaranteed by FuzzSampleSameTypedPair
     assert_eq!(
@@ -78,7 +78,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
         name: "rebased_pkg".to_string(),
         file_table: ir::FileTable::new(),
         members: vec![ir::PackageMember::Function(rebased.clone())],
-        top_name: Some("rebased".to_string()),
+        top: Some(("rebased".to_string(), ir::MemberType::Function)),
     };
     if let Err(e) = validate_fn(&rebased, &pkg) {
         panic!("rebased IR failed composite validation: {}", e);
