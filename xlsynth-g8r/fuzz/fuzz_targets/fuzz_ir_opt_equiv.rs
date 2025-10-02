@@ -94,8 +94,8 @@ fuzz_target!(|sample: FuzzSample| {
         .parse_and_validate_package()
         .unwrap();
 
-    let orig_fn = orig_pkg.get_top().unwrap();
-    let opt_fn = opt_pkg.get_top().unwrap();
+    let orig_fn = orig_pkg.get_top_fn().unwrap();
+    let opt_fn = opt_pkg.get_top_fn().unwrap();
 
     // Check equivalence using the external tool first, specifying the top function
     let orig_ir = pkg.to_string();

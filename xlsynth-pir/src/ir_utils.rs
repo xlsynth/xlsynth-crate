@@ -655,7 +655,7 @@ mod tests {
             name: "test".to_string(),
             file_table: FileTable::new(),
             members: vec![PackageMember::Function(f.clone())],
-            top_name: None,
+            top: None,
         };
         let max_id = f
             .nodes
@@ -681,7 +681,7 @@ mod tests {
             name: "test".to_string(),
             file_table: FileTable::new(),
             members: vec![PackageMember::Function(f)],
-            top_name: None,
+            top: None,
         };
         assert_eq!(next_text_id(&pkg), 1);
     }

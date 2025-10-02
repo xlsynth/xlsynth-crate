@@ -37,7 +37,7 @@ fuzz_target!(|sample: FuzzSample| {
 
     // 3) Verify and obtain the top function
     let parsed_top = parsed_pkg
-        .get_top()
+        .get_top_fn()
         .expect("generator should set a top function");
 
     // 4) Emit the function text via Display and parse the function alone, too
@@ -52,7 +52,7 @@ fuzz_target!(|sample: FuzzSample| {
         .parse_and_validate_package()
         .expect("Package pretty-printer emitted IR that failed to reparse/validate");
     let reparsed_pkg_top = reparsed_pkg
-        .get_top()
+        .get_top_fn()
         .expect("package pretty-printer should preserve top function");
 
     // 6) Structural equivalence checks between original parsed top and both

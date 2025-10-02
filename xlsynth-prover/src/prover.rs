@@ -215,13 +215,13 @@ impl<S: SolverConfig> Prover for S {
             Some(name) => lhs_pkg
                 .get_fn(name)
                 .expect("Top function not found in LHS package"),
-            None => lhs_pkg.get_top().expect("No functions in LHS package"),
+            None => lhs_pkg.get_top_fn().expect("No functions in LHS package"),
         };
         let rhs_top = match top {
             Some(name) => rhs_pkg
                 .get_fn(name)
                 .expect("Top function not found in RHS package"),
-            None => rhs_pkg.get_top().expect("No functions in RHS package"),
+            None => rhs_pkg.get_top_fn().expect("No functions in RHS package"),
         };
 
         let lhs = ProverFn {

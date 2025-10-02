@@ -33,13 +33,17 @@ pub fn handle_greedy_eco(matches: &ArgMatches) {
         Some(name) => old_pkg
             .get_fn(name)
             .unwrap_or_else(|| panic!("old package missing function '{}'", name)),
-        None => old_pkg.get_top().expect("old package missing top function"),
+        None => old_pkg
+            .get_top_fn()
+            .expect("old package missing top function"),
     };
     let new_fn = match new_top_flag {
         Some(name) => new_pkg
             .get_fn(name)
             .unwrap_or_else(|| panic!("new package missing function '{}'", name)),
-        None => new_pkg.get_top().expect("new package missing top function"),
+        None => new_pkg
+            .get_top_fn()
+            .expect("new package missing top function"),
     };
 
     // Compute edits using the greedy selector.
@@ -65,7 +69,7 @@ pub fn handle_greedy_eco(matches: &ArgMatches) {
     } else {
         // Replace top function.
         let slot = old_pkg
-            .get_top_mut()
+            .get_top_fn_mut()
             .expect("old package missing top function (mut)");
         *slot = patched_fn;
     }

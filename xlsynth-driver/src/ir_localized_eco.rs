@@ -14,7 +14,7 @@ use rand::SeedableRng;
 use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_pir::ir::Type;
-use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, PackageMember};
+use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, MemberType, PackageMember};
 use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
 use xlsynth_prover::types::AssertionSemantics;
 
@@ -132,7 +132,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
                 vec![("name", top)],
             ),
         },
-        None => match old_pkg.get_top() {
+        None => match old_pkg.get_top_fn() {
             Some(f) => f,
             None => {
                 let msg = format!(
@@ -152,7 +152,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
                 vec![("name", top)],
             ),
         },
-        None => match new_pkg.get_top() {
+        None => match new_pkg.get_top_fn() {
             Some(f) => f,
             None => {
                 let msg = format!(
@@ -428,7 +428,7 @@ fn select_block_from_package<'a>(
         }
         return None;
     }
-    if let Some(top_name) = &pkg.top_name {
+    if let Some((top_name, MemberType::Block)) = &pkg.top {
         for m in pkg.members.iter() {
             if let PackageMember::Block { func, port_info } = m {
                 if &func.name == top_name {
@@ -491,7 +491,7 @@ fn handle_ir_localized_eco_blocks_in_packages(
         report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![]);
     }
     println!("  Emitting patched block text...");
-    let patched_block_text = emit_fn_as_block(&applied, None, Some(old_ports));
+    let patched_block_text = emit_fn_as_block(&applied, None, Some(old_ports), false);
     let patched_ir_path = out_dir.join("patched_old.block.ir");
     std::fs::write(&patched_ir_path, patched_block_text.as_bytes()).unwrap();
     println!("  Patched IR written to: {}", patched_ir_path.display());
@@ -499,8 +499,8 @@ fn handle_ir_localized_eco_blocks_in_packages(
     // Copy old/new for convenience: write ONLY the selected blocks.
     let old_copy_path = out_dir.join("old.ir");
     let new_copy_path = out_dir.join("new.ir");
-    let old_block_text = emit_fn_as_block(old_fn, None, Some(old_ports));
-    let new_block_text = emit_fn_as_block(new_fn, None, Some(new_ports));
+    let old_block_text = emit_fn_as_block(old_fn, None, Some(old_ports), false);
+    let new_block_text = emit_fn_as_block(new_fn, None, Some(new_ports), false);
     std::fs::write(&old_copy_path, old_block_text.as_bytes()).unwrap();
     std::fs::write(&new_copy_path, new_block_text.as_bytes()).unwrap();
     println!("  Old IR copied to: {}", old_copy_path.display());

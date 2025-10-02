@@ -169,7 +169,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
         Ok(p) => p,
         Err(_) => return,
     };
-    let old_fn = match parsed1.get_top() {
+    let old_fn = match parsed1.get_top_fn() {
         Some(f) => f,
         None => return,
     };
@@ -179,7 +179,7 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
         Ok(p) => p,
         Err(_) => return,
     };
-    let new_fn = match parsed2.get_top() {
+    let new_fn = match parsed2.get_top_fn() {
         Some(f) => f,
         None => return,
     };
