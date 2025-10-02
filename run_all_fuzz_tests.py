@@ -127,6 +127,9 @@ def main() -> int:
         print(f"\n=== Building fuzz targets in {fuzz_dir} ===")
         features = get_crate_features(fuzz_dir)
         supported_features = [f for f in features if f in args.features]
+        features_args = (
+            ["--features", ",".join(supported_features)] if supported_features else []
+        )
         run_cmd(
             [
                 "cargo",
@@ -134,8 +137,7 @@ def main() -> int:
                 "build",
                 "--fuzz-dir",
                 fuzz_dir.as_posix(),
-                "--features",
-                ",".join(supported_features),
+                *features_args,
                 *fuzz_run_args_list,
             ]
         )
@@ -143,6 +145,9 @@ def main() -> int:
         print(f"\n=== Running fuzz targets in {fuzz_dir} ===")
         features = get_crate_features(fuzz_dir)
         supported_features = [f for f in features if f in args.features]
+        features_args = (
+            ["--features", ",".join(supported_features)] if supported_features else []
+        )
         for target in targets:
             if target in SKIP_TARGETS:
                 print(f"Skipping {target} in {fuzz_dir}.")
@@ -156,8 +161,7 @@ def main() -> int:
                     "run",
                     "--fuzz-dir",
                     fuzz_dir.as_posix(),
-                    "--features",
-                    ",".join(supported_features),
+                    *features_args,
                     *fuzz_run_args_list,
                     target,
                     "--",
