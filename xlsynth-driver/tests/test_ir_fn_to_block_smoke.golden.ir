@@ -5,7 +5,7 @@ top fn my_main(x: bits[8] id=4) -> bits[8] {
   ret add.2: bits[8] = add(x, one, id=2)
 }
 
-#[signature("""module_name: "my_main" data_ports { direction: PORT_DIRECTION_INPUT name: "x" width: 8 type { type_enum: BITS bit_count: 8 } } data_ports { direction: PORT_DIRECTION_OUTPUT name: "out" width: 8 type { type_enum: BITS bit_count: 8 } } combinational { } """)]
+#[signature("""module_name: "my_main" data_ports { direction: PORT_DIRECTION_INPUT name: "x" width: 8 type { type_enum: BITS bit_count: 8 } } data_ports { direction: PORT_DIRECTION_OUTPUT name: "out" width: 8 type { type_enum: BITS bit_count: 8 } } combinational { } """]
 block my_main(x: bits[8], out: bits[8]) {
   #![provenance(name="my_main", kind="function")]
   x: bits[8] = input_port(name=x, id=5)
