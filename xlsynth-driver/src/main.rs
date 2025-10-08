@@ -41,6 +41,7 @@ mod dslx2sv_types;
 mod dslx_equiv;
 mod dslx_g8r_stats;
 mod dslx_show;
+mod dslx_specialize;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod g8r2v;
@@ -487,6 +488,11 @@ fn main() {
                         .index(1)
                         .action(ArgAction::Set),
                 ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-specialize")
+                .about("Specialize parametric DSLX functions reachable from a top function within the current module")
+                .add_dslx_input_args(true),
         )
         .subcommand(
             clap::Command::new("dslx2sv-types")
@@ -1566,6 +1572,8 @@ fn main() {
         dslx2sv_types::handle_dslx2sv_types(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx-show") {
         dslx_show::handle_dslx_show(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("dslx-specialize") {
+        dslx_specialize::handle_dslx_specialize(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx-g8r-stats") {
         dslx_g8r_stats::handle_dslx_g8r_stats(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("ir2delayinfo") {

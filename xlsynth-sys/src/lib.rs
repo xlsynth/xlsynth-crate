@@ -264,6 +264,26 @@ pub struct CDslxQuickcheck {
 }
 
 #[repr(C)]
+pub struct CDslxInvocation {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxInvocationCalleeData {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxInvocationCalleeDataArray {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxInvocationData {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CScheduleAndCodegenResult {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -305,6 +325,13 @@ pub const XLS_CALLING_CONVENTION_PROC_NEXT: XlsCallingConvention = 2;
 pub struct XlsDslxParametricEnvItem {
     pub identifier: *const std::os::raw::c_char,
     pub value: *const CDslxInterpValue,
+}
+
+#[repr(C)]
+pub struct XlsDslxFunctionSpecializationRequest {
+    pub function_name: *const std::os::raw::c_char,
+    pub specialized_name: *const std::os::raw::c_char,
+    pub env: *mut CDslxParametricEnv,
 }
 
 #[repr(C)]
@@ -884,12 +911,32 @@ extern "C" {
         typechecked_module_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
+    pub fn xls_dslx_typechecked_module_clone_ignore_functions(
+        tm: *mut CDslxTypecheckedModule,
+        functions: *mut *mut CDslxFunction,
+        function_count: libc::size_t,
+        install_subject: *const std::os::raw::c_char,
+        import_data: *mut CDslxImportData,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxTypecheckedModule,
+    ) -> bool;
+
     pub fn xls_dslx_replace_invocations_in_module(
         tm: *mut CDslxTypecheckedModule,
         callers: *const *mut CDslxFunction,
         callers_count: libc::size_t,
         rules: *const CDslxInvocationRewriteRule,
         rules_count: libc::size_t,
+        import_data: *mut CDslxImportData,
+        install_subject: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxTypecheckedModule,
+    ) -> bool;
+
+    pub fn xls_dslx_typechecked_module_insert_function_specializations(
+        typechecked_module: *mut CDslxTypecheckedModule,
+        requests: *const XlsDslxFunctionSpecializationRequest,
+        request_count: libc::size_t,
         import_data: *mut CDslxImportData,
         install_subject: *const std::os::raw::c_char,
         error_out: *mut *mut std::os::raw::c_char,
@@ -933,6 +980,7 @@ extern "C" {
 
     pub fn xls_dslx_module_get_member(module: *const CDslxModule, i: i64)
         -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_to_string(module: *mut CDslxModule) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_module_get_type_definition_kind(
         module: *const CDslxModule,
@@ -1128,7 +1176,30 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         env_out: *mut *mut CDslxParametricEnv,
     ) -> bool;
+    pub fn xls_dslx_parametric_env_clone(env: *const CDslxParametricEnv)
+        -> *mut CDslxParametricEnv;
+    pub fn xls_dslx_parametric_env_equals(
+        lhs: *const CDslxParametricEnv,
+        rhs: *const CDslxParametricEnv,
+    ) -> bool;
+    pub fn xls_dslx_parametric_env_less_than(
+        lhs: *const CDslxParametricEnv,
+        rhs: *const CDslxParametricEnv,
+    ) -> bool;
+    pub fn xls_dslx_parametric_env_hash(env: *const CDslxParametricEnv) -> u64;
+    pub fn xls_dslx_parametric_env_to_string(
+        env: *const CDslxParametricEnv,
+    ) -> *mut std::os::raw::c_char;
     pub fn xls_dslx_parametric_env_free(env: *mut CDslxParametricEnv);
+    pub fn xls_dslx_parametric_env_get_binding_count(env: *const CDslxParametricEnv) -> i64;
+    pub fn xls_dslx_parametric_env_get_binding_identifier(
+        env: *const CDslxParametricEnv,
+        index: i64,
+    ) -> *const std::os::raw::c_char;
+    pub fn xls_dslx_parametric_env_get_binding_value(
+        env: *const CDslxParametricEnv,
+        index: i64,
+    ) -> *mut CDslxInterpValue;
 
     pub fn xls_dslx_interp_value_make_ubits(bit_count: i64, value: u64) -> *mut CDslxInterpValue;
     pub fn xls_dslx_interp_value_make_sbits(bit_count: i64, value: i64) -> *mut CDslxInterpValue;
@@ -1151,6 +1222,7 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CDslxInterpValue,
     ) -> bool;
+    pub fn xls_dslx_interp_value_clone(value: *const CDslxInterpValue) -> *mut CDslxInterpValue;
 
     pub fn xls_dslx_interp_value_from_string(
         text: *const std::os::raw::c_char,
@@ -1160,7 +1232,7 @@ extern "C" {
     ) -> bool;
 
     pub fn xls_dslx_interp_value_convert_to_ir(
-        value: *mut CDslxInterpValue,
+        value: *const CDslxInterpValue,
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CIrValue,
     ) -> bool;
@@ -1192,6 +1264,52 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CDslxInterpValue,
     ) -> bool;
+
+    pub fn xls_dslx_type_info_get_unique_invocation_callee_data(
+        type_info: *mut CDslxTypeInfo,
+        function: *mut CDslxFunction,
+    ) -> *mut CDslxInvocationCalleeDataArray;
+    pub fn xls_dslx_type_info_get_all_invocation_callee_data(
+        type_info: *mut CDslxTypeInfo,
+        function: *mut CDslxFunction,
+    ) -> *mut CDslxInvocationCalleeDataArray;
+    pub fn xls_dslx_type_info_get_root_invocation_data(
+        type_info: *mut CDslxTypeInfo,
+        invocation: *mut CDslxInvocation,
+    ) -> *mut CDslxInvocationData;
+    pub fn xls_dslx_invocation_callee_data_array_free(array: *mut CDslxInvocationCalleeDataArray);
+    pub fn xls_dslx_invocation_callee_data_array_get_count(
+        array: *mut CDslxInvocationCalleeDataArray,
+    ) -> i64;
+    pub fn xls_dslx_invocation_callee_data_array_get(
+        array: *mut CDslxInvocationCalleeDataArray,
+        index: i64,
+    ) -> *mut CDslxInvocationCalleeData;
+    pub fn xls_dslx_invocation_callee_data_clone(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxInvocationCalleeData;
+    pub fn xls_dslx_invocation_callee_data_free(data: *mut CDslxInvocationCalleeData);
+    pub fn xls_dslx_invocation_callee_data_get_callee_bindings(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *const CDslxParametricEnv;
+    pub fn xls_dslx_invocation_callee_data_get_caller_bindings(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *const CDslxParametricEnv;
+    pub fn xls_dslx_invocation_callee_data_get_derived_type_info(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxTypeInfo;
+    pub fn xls_dslx_invocation_callee_data_get_invocation(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxInvocation;
+    pub fn xls_dslx_invocation_data_get_invocation(
+        data: *mut CDslxInvocationData,
+    ) -> *mut CDslxInvocation;
+    pub fn xls_dslx_invocation_data_get_callee(
+        data: *mut CDslxInvocationData,
+    ) -> *mut CDslxFunction;
+    pub fn xls_dslx_invocation_data_get_caller(
+        data: *mut CDslxInvocationData,
+    ) -> *mut CDslxFunction;
 
     pub fn xls_dslx_type_get_total_bit_count(
         type_: *const CDslxType,
