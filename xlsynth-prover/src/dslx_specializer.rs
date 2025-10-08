@@ -5,14 +5,12 @@ use std::path::{Path, PathBuf};
 
 use log::{debug, info};
 use xlsynth::dslx::{
-    Function, FunctionSpecializationRequest, ImportData, InvocationRewriteRule,
+    Function, FunctionCallGraph, FunctionSpecializationRequest, ImportData, InvocationRewriteRule,
     MatchableModuleMember, Module, ParametricEnv, TypeInfo, TypecheckedModule, parse_and_typecheck,
 };
 use xlsynth::{
     DslxCallingConvention, XlsynthError, dslx_path_to_module_name, mangle_dslx_name_with_env,
 };
-
-type CallGraph = HashMap<String, Vec<String>>;
 
 pub fn specialize_dslx_module(
     dslx_source: &str,
@@ -45,6 +43,15 @@ fn specialize_typechecked_module(
     module_name: &str,
     top_function: &str,
 ) -> Result<TypecheckedModule, XlsynthError> {
+    info!("Initial pruning of unreachable functions");
+    let tm = prune_unreachable_functions(
+        tm,
+        import_data,
+        &(module_name.to_string() + ".initial_prune"),
+        top_function,
+        &HashSet::new(),
+    )?;
+
     info!(
         "Building call graph for module '{}', top '{}'.",
         module_name, top_function
@@ -85,8 +92,6 @@ fn accumulate_specializations(
 ) -> Result<(TypecheckedModule, HashMap<(String, ParametricEnv), String>), XlsynthError> {
     let mut spec_name_map: HashMap<(String, ParametricEnv), String> = HashMap::new();
     let mut iteration: u32 = 0;
-    let mut reachable_union: HashSet<String> = HashSet::new();
-
     loop {
         iteration += 1;
         debug!("Iteration {} starting", iteration);
@@ -101,13 +106,12 @@ fn accumulate_specializations(
         }
 
         let type_info = tm_current.get_type_info();
-        let call_graph = build_function_call_graph(&type_info)?;
-        let reachable = reachable_functions(top_function, &call_graph);
+        let call_graph = type_info.build_function_call_graph()?;
+        let reachable = reachable_functions(top_function, &call_graph)?;
         debug!(
             "Iteration {} reachable functions: {:?}",
             iteration, reachable
         );
-        reachable_union.extend(reachable.iter().cloned());
 
         let mut specializations = collect_specializations(&type_info, &reachable, &functions);
         specializations.retain(|function_name, envs| {
@@ -122,8 +126,10 @@ fn accumulate_specializations(
             break;
         }
 
+        debug!("Building specialization plan");
         let spec_plan = build_specialization_plan(module_name, &specializations)?;
         let install_subject = format!("{}.specialize.{}", module_name, iteration);
+        debug!("Applying specializations");
         let (new_tm, new_names) =
             apply_specializations(&tm_current, import_data, &spec_plan, &install_subject)?;
         debug!(
@@ -295,41 +301,46 @@ fn collect_callers_matching_env(
     callers
 }
 
-fn build_function_call_graph(type_info: &TypeInfo) -> Result<CallGraph, XlsynthError> {
-    let graph_handle = type_info.build_function_call_graph()?;
-    let mut graph: CallGraph = HashMap::new();
-    for idx in 0..graph_handle.function_count() {
-        let Some(function) = graph_handle.get_function(idx) else {
-            continue;
-        };
-        let caller_name = function.get_identifier();
-        let callee_count = graph_handle.callee_count(&function);
-        let mut callees = Vec::with_capacity(callee_count);
-        for callee_idx in 0..callee_count {
-            if let Some(callee) = graph_handle.get_callee(&function, callee_idx) {
-                callees.push(callee.get_identifier());
-            }
-        }
-        graph.insert(caller_name, callees);
-    }
-    Ok(graph)
-}
-
-fn reachable_functions(top: &str, graph: &CallGraph) -> HashSet<String> {
+fn reachable_functions(
+    top: &str,
+    graph: &FunctionCallGraph,
+) -> Result<HashSet<String>, XlsynthError> {
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
+
+    let mut top_function_handle: Option<Function> = None;
+    for idx in 0..graph.function_count() {
+        if let Some(function) = graph.get_function(idx) {
+            if function.get_identifier() == top {
+                top_function_handle = Some(function);
+                break;
+            }
+        }
+    }
+
+    let Some(start_fn) = top_function_handle else {
+        return Err(XlsynthError(format!(
+            "Top function '{}' not present in call graph.",
+            top
+        )));
+    };
+
     visited.insert(top.to_string());
-    queue.push_back(top.to_string());
+    queue.push_back(start_fn);
+
     while let Some(current) = queue.pop_front() {
-        if let Some(edges) = graph.get(&current) {
-            for callee in edges {
-                if visited.insert(callee.clone()) {
-                    queue.push_back(callee.clone());
+        let callee_count = graph.callee_count(&current);
+        for idx in 0..callee_count {
+            if let Some(callee) = graph.get_callee(&current, idx) {
+                let callee_name = callee.get_identifier();
+                if visited.insert(callee_name.clone()) {
+                    queue.push_back(callee);
                 }
             }
         }
     }
-    visited
+
+    Ok(visited)
 }
 
 fn collect_specializations(
@@ -511,17 +522,34 @@ fn prune_unreachable_functions(
 ) -> Result<TypecheckedModule, XlsynthError> {
     let module = tm.get_module();
     let functions = collect_functions(&module);
+    let type_info = tm.get_type_info();
+    let call_graph = type_info.build_function_call_graph()?;
+
+    let mut reachable = reachable_functions(top_function, &call_graph)?;
+
+    for keep in extra_keep {
+        match reachable_functions(keep, &call_graph) {
+            Ok(extra_reachable) => {
+                reachable.extend(extra_reachable.into_iter());
+            }
+            Err(err) => {
+                debug!(
+                    "Skipping reachability expansion for '{}' due to: {}",
+                    keep, err
+                );
+            }
+        }
+        reachable.insert(keep.clone());
+    }
+
+    debug!("Prune reachability set: {:?}", reachable);
+
     let mut to_remove = Vec::new();
     for (name, function) in &functions {
-        if name == top_function {
+        if reachable.contains(name) {
             continue;
         }
-        if extra_keep.contains(name) {
-            continue;
-        }
-        if function.is_parametric() {
-            to_remove.push(function.clone());
-        }
+        to_remove.push(function.clone());
     }
     if to_remove.is_empty() {
         return Ok(tm);
@@ -737,6 +765,31 @@ pub fn top() -> bits[8] {
         assert!(specialized.contains("widen_8("));
         assert!(specialized.contains("intermediate_8("));
         assert!(!specialized.contains("fn widen<N: u32>"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn prune_removes_unreachable_functions() -> Result<(), XlsynthError> {
+        let source = r#"
+fn helper<N: u32>(x: uN[N]) -> uN[N] {
+    x
+}
+
+fn unused(x: u32) -> u32 {
+    helper(x)
+}
+
+pub fn top() -> u32 {
+    helper(u32:42)
+}
+"#;
+
+        let specialized =
+            specialize_dslx_module(source, Path::new("prune_unused.x"), "top", None, &[])?;
+
+        assert!(specialized.contains("fn helper_"));
+        assert!(!specialized.contains("fn unused"));
 
         Ok(())
     }
