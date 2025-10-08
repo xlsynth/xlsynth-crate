@@ -253,6 +253,29 @@ xlsynth-driver dslx-show \
 
 The definition is printed to stdout; errors are written to stderr and a non-zero status is returned if the symbol cannot be resolved.
 
+### `dslx-specialize`: Specialize parametric DSLX functions
+
+Creates a new DSLX module in which every parametric function reachable from a given top function (within the same source file) is specialized for the concrete instantiations observed in the type information. Imported functions are never specialized; invocations targeting them are left untouched.
+
+- Required flags:
+  - `--dslx_input_file <FILE>` – DSLX source containing the top.
+  - `--dslx_top <NAME>` – entry function used as the root for reachability.
+- Optional flags:
+  - `--dslx_path <P1;P2;...>` – semicolon-separated list of additional search directories.
+  - `--dslx_stdlib_path <PATH>` – override the XLS DSLX standard library root.
+
+The specialized module is printed to **stdout**. Diagnostics (parse/type errors, unsupported module members) are written to **stderr**.
+
+Example:
+
+```shell
+xlsynth-driver dslx-specialize \
+  --dslx_input_file sample-usage/src/parametric.x \
+  --dslx_top call
+```
+
+The output contains only the reachable functions from `call`, with every parametric callee replaced by specialized clones and unused definitions removed.
+
 ### `dslx-g8r-stats`: DSLX GateFn statistics
 
 Converts a DSLX entry point all the way to a gate-level representation and
