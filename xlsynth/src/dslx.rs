@@ -1491,6 +1491,55 @@ pub struct TypeInfo {
     ptr: *mut sys::CDslxTypeInfo,
 }
 
+pub struct FunctionCallGraph {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxCallGraph,
+}
+
+impl Drop for FunctionCallGraph {
+    fn drop(&mut self) {
+        unsafe {
+            sys::xls_dslx_call_graph_free(self.ptr);
+        }
+    }
+}
+
+impl FunctionCallGraph {
+    pub fn function_count(&self) -> usize {
+        unsafe { sys::xls_dslx_call_graph_get_function_count(self.ptr) as usize }
+    }
+
+    pub fn get_function(&self, index: usize) -> Option<Function> {
+        let ptr = unsafe { sys::xls_dslx_call_graph_get_function(self.ptr, index as i64) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Function {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
+    pub fn callee_count(&self, caller: &Function) -> usize {
+        unsafe { sys::xls_dslx_call_graph_get_callee_count(self.ptr, caller.ptr) as usize }
+    }
+
+    pub fn get_callee(&self, caller: &Function, index: usize) -> Option<Function> {
+        let ptr = unsafe {
+            sys::xls_dslx_call_graph_get_callee_function(self.ptr, caller.ptr, index as i64)
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Function {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+}
+
 pub struct InvocationCalleeDataArray {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxInvocationCalleeDataArray,
@@ -1731,6 +1780,29 @@ impl TypeInfo {
                 parent: self.parent.clone(),
                 ptr,
             })
+        }
+    }
+
+    pub fn build_function_call_graph(&self) -> Result<FunctionCallGraph, XlsynthError> {
+        let mut error_out = std::ptr::null_mut();
+        let mut result_out = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_dslx_type_info_build_function_call_graph(
+                self.ptr,
+                &mut error_out,
+                &mut result_out,
+            )
+        };
+        if success {
+            assert!(error_out.is_null());
+            assert!(!result_out.is_null());
+            Ok(FunctionCallGraph {
+                parent: self.parent.clone(),
+                ptr: result_out,
+            })
+        } else {
+            assert!(!error_out.is_null());
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
         }
     }
 

@@ -284,6 +284,11 @@ pub struct CDslxInvocationData {
 }
 
 #[repr(C)]
+pub struct CDslxCallGraph {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CScheduleAndCodegenResult {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -1277,6 +1282,26 @@ extern "C" {
         type_info: *mut CDslxTypeInfo,
         invocation: *mut CDslxInvocation,
     ) -> *mut CDslxInvocationData;
+    pub fn xls_dslx_type_info_build_function_call_graph(
+        type_info: *mut CDslxTypeInfo,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxCallGraph,
+    ) -> bool;
+    pub fn xls_dslx_call_graph_free(call_graph: *mut CDslxCallGraph);
+    pub fn xls_dslx_call_graph_get_function_count(call_graph: *mut CDslxCallGraph) -> i64;
+    pub fn xls_dslx_call_graph_get_function(
+        call_graph: *mut CDslxCallGraph,
+        index: i64,
+    ) -> *mut CDslxFunction;
+    pub fn xls_dslx_call_graph_get_callee_count(
+        call_graph: *mut CDslxCallGraph,
+        caller: *mut CDslxFunction,
+    ) -> i64;
+    pub fn xls_dslx_call_graph_get_callee_function(
+        call_graph: *mut CDslxCallGraph,
+        caller: *mut CDslxFunction,
+        callee_index: i64,
+    ) -> *mut CDslxFunction;
     pub fn xls_dslx_invocation_callee_data_array_free(array: *mut CDslxInvocationCalleeDataArray);
     pub fn xls_dslx_invocation_callee_data_array_get_count(
         array: *mut CDslxInvocationCalleeDataArray,

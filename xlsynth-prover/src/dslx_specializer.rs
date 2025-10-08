@@ -101,20 +101,15 @@ fn accumulate_specializations(
         }
 
         let type_info = tm_current.get_type_info();
-        let parametric_call_graph = build_parametric_call_graph(&type_info, &functions)?;
-        let reachable = reachable_functions(top_function, &parametric_call_graph);
-        let mut reachable_ext = reachable.clone();
-        reachable_ext.extend(parametric_call_graph.keys().cloned());
-        for callees in parametric_call_graph.values() {
-            reachable_ext.extend(callees.iter().cloned());
-        }
+        let call_graph = build_function_call_graph(&type_info)?;
+        let reachable = reachable_functions(top_function, &call_graph);
         debug!(
             "Iteration {} reachable functions: {:?}",
-            iteration, reachable_ext
+            iteration, reachable
         );
-        reachable_union.extend(reachable_ext.iter().cloned());
+        reachable_union.extend(reachable.iter().cloned());
 
-        let mut specializations = collect_specializations(&type_info, &reachable_ext, &functions);
+        let mut specializations = collect_specializations(&type_info, &reachable, &functions);
         specializations.retain(|function_name, envs| {
             envs.retain(|env| !spec_name_map.contains_key(&(function_name.clone(), env.clone())));
             !envs.is_empty()
@@ -300,39 +295,22 @@ fn collect_callers_matching_env(
     callers
 }
 
-fn build_parametric_call_graph(
-    type_info: &TypeInfo,
-    functions: &HashMap<String, Function>,
-) -> Result<CallGraph, XlsynthError> {
+fn build_function_call_graph(type_info: &TypeInfo) -> Result<CallGraph, XlsynthError> {
+    let graph_handle = type_info.build_function_call_graph()?;
     let mut graph: CallGraph = HashMap::new();
-    for (callee_name, callee_fn) in functions {
-        if let Some(data_array) = type_info.get_all_invocation_callee_data(callee_fn) {
-            for idx in 0..data_array.len() {
-                if let Some(data) = data_array.get(idx) {
-                    let Some(invocation) = data.invocation() else {
-                        continue;
-                    };
-                    let Some(invocation_data) = type_info.get_root_invocation_data(&invocation)
-                    else {
-                        continue;
-                    };
-                    let Some(caller_fn) = invocation_data.caller() else {
-                        continue;
-                    };
-                    let caller_name = caller_fn.get_identifier();
-                    if !functions.contains_key(&caller_name) {
-                        continue;
-                    }
-                    if !functions.contains_key(callee_name) {
-                        continue;
-                    }
-                    graph
-                        .entry(caller_name)
-                        .or_default()
-                        .push(callee_name.clone());
-                }
+    for idx in 0..graph_handle.function_count() {
+        let Some(function) = graph_handle.get_function(idx) else {
+            continue;
+        };
+        let caller_name = function.get_identifier();
+        let callee_count = graph_handle.callee_count(&function);
+        let mut callees = Vec::with_capacity(callee_count);
+        for callee_idx in 0..callee_count {
+            if let Some(callee) = graph_handle.get_callee(&function, callee_idx) {
+                callees.push(callee.get_identifier());
             }
         }
+        graph.insert(caller_name, callees);
     }
     Ok(graph)
 }
