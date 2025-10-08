@@ -400,6 +400,7 @@ Produces a patched Verilog file which has minimal changes against a baseline. Ac
 Additional outputs:
 
 - `--edits_debug_out <PATH>` – write the debug string (`{:#?}`) of the IrEdits to a file (optional).
+- `--output_baseline_verilog_path <PATH>` – if set, also write the baseline (pre‑ECO) Verilog/SystemVerilog to `PATH`.
 
 ### `ir2gates`: IR to GateFn statistics
 

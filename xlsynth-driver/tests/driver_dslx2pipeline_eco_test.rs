@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use pretty_assertions::assert_eq;
 use std::process::Command;
 
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
@@ -92,6 +93,7 @@ fn test_dslx2pipeline_eco_basic() {
 
     // 2) Run dslx2pipeline-eco using the baseline unoptimized IR and the modified
     //    DSLX.
+    let baseline_sv_from_eco_path = temp_dir.path().join("baseline_from_eco.sv");
     let out_eco = Command::new(driver)
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
@@ -108,6 +110,8 @@ fn test_dslx2pipeline_eco_basic() {
         .arg("main")
         .arg("--baseline_unopt_ir")
         .arg(baseline_unopt_ir.to_str().unwrap())
+        .arg("--output_baseline_verilog_path")
+        .arg(baseline_sv_from_eco_path.to_str().unwrap())
         .arg(format!(
             "--keep_temps={}",
             if keep_temps { "true" } else { "false" }
@@ -123,8 +127,21 @@ fn test_dslx2pipeline_eco_basic() {
         String::from_utf8_lossy(&out_eco.stderr)
     );
 
-    assert!(differ_in_one_line(
-        &String::from_utf8_lossy(&out_eco.stdout),
-        &String::from_utf8_lossy(&out_baseline.stdout)
-    ));
+    // Expect exactly one-line difference between ECO stdout and baseline stdout.
+    let eco_stdout = String::from_utf8_lossy(&out_eco.stdout).into_owned();
+    let baseline_stdout = String::from_utf8_lossy(&out_baseline.stdout).into_owned();
+    if !differ_in_one_line(&eco_stdout, &baseline_stdout) {
+        // Fall back to a pretty diff to aid debugging.
+        assert_eq!(
+            eco_stdout, baseline_stdout,
+            "expected exactly one-line difference"
+        );
+    }
+
+    let baseline_from_eco =
+        std::fs::read_to_string(&baseline_sv_from_eco_path).expect("read baseline_from_eco.sv");
+    assert_eq!(
+        baseline_from_eco, baseline_stdout,
+        "baseline Verilog from eco does not match baseline stdout"
+    );
 }
