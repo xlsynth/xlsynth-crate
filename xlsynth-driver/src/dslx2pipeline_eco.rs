@@ -10,9 +10,24 @@ use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{
     run_block_to_verilog, run_codegen_pipeline, run_ir_converter_main, run_opt_main,
 };
+use regex::Regex;
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
 use xlsynth_pir::ir::PackageMember;
 use xlsynth_pir::matching_ged::{apply_block_edits, compute_block_edit};
+
+// Searchs the given IR file for registers and exits the process with an error
+// if found.
+fn verify_no_registers(path: &std::path::Path) {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let re = Regex::new(r"^\s*reg\s").unwrap();
+        for line in text.lines() {
+            if re.is_match(line) {
+                eprintln!("error: ECOs not supported on designs with registers.");
+                std::process::exit(1);
+            }
+        }
+    }
+}
 
 fn dslx2pipeline_eco(
     input_file: &std::path::Path,
@@ -142,12 +157,21 @@ fn dslx2pipeline_eco(
     let sv_path = temp_dir.path().join("output.sv");
     std::fs::write(&sv_path, &sv).unwrap();
 
+    // Before parsing, verify no registers are present in the block IRs. ECO
+    // currently only supports combinational blocks without registers.
+    verify_no_registers(&baseline_block_ir_path);
+    verify_no_registers(&new_block_ir_path);
+
     // Parse the baseline and new block IRs
     let mut baseline_block_ir =
         xlsynth_pir::ir_parser::parse_path_to_package(&baseline_block_ir_path).unwrap();
-    let baseline_block = baseline_block_ir.get_block(ir_top.as_str()).unwrap();
+    let verilog_module_name = codegen_flags
+        .module_name
+        .as_deref()
+        .unwrap_or(ir_top.as_str());
+    let baseline_block = baseline_block_ir.get_block(verilog_module_name).unwrap();
     let new_block_ir = xlsynth_pir::ir_parser::parse_path_to_package(&new_block_ir_path).unwrap();
-    let new_block = new_block_ir.get_block(ir_top.as_str()).unwrap();
+    let new_block = new_block_ir.get_block(verilog_module_name).unwrap();
 
     // Compute the edit.
     let (old_name, old_fn, new_fn) = match (baseline_block, new_block) {
