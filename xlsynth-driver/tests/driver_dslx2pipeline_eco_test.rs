@@ -29,8 +29,28 @@ fn differ_in_one_line(a: &str, b: &str) -> bool {
     diffs == 1
 }
 
-#[test]
-fn test_dslx2pipeline_eco_basic() {
+#[derive(Debug)]
+struct EcoDriverOutputs {
+    baseline_verilog: String,
+    baseline_from_eco_verilog: String,
+    eco_verilog: String,
+}
+
+/// Runs the baseline `dslx2pipeline` and the `dslx2pipeline-eco` flow for
+/// tests.
+///
+/// - `baseline_dslx`: DSLX program for the baseline build.
+/// - `changed_dslx`: DSLX program with changes for the ECO flow.
+/// - `driver_args`: additional CLI args to pass to both driver invocations
+///   (e.g. pipeline/delay flags, `--dslx_top=...`, `--module_name ...`).
+///
+/// Returns the baseline Verilog (stdout from baseline), the baseline Verilog
+/// written by the ECO run, and the ECO Verilog (stdout from ECO run).
+fn run_dslx2pipeline_and_eco(
+    baseline_dslx: &str,
+    changed_dslx: &str,
+    driver_args: &[&str],
+) -> Result<EcoDriverOutputs, String> {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let keep_temps = std::env::var("KEEP_TEMPS").as_deref() == Ok("1");
@@ -49,65 +69,53 @@ fn test_dslx2pipeline_eco_basic() {
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
 
-    // Baseline DSLX: add1 (written to temp_dir/baseline/source.x)
-    let baseline_dslx = "fn main(x: u32) -> u32 { x + u32:1 }\n";
+    // Baseline DSLX: written to temp_dir/baseline_source/source.x
     let baseline_subdir = temp_dir.path().join("baseline_source");
     std::fs::create_dir_all(&baseline_subdir).unwrap();
     let baseline_path = baseline_subdir.join("source.x");
     std::fs::write(&baseline_path, baseline_dslx).unwrap();
 
-    // Modified DSLX: add2 (slightly different), written to temp_dir/source.x
-    let modified_dslx = "fn main(x: u32) -> u32 { !x + u32:1 }\n";
+    // Modified DSLX: written to temp_dir/source.x
     let modified_path = temp_dir.path().join("source.x");
-    std::fs::write(&modified_path, modified_dslx).unwrap();
+    std::fs::write(&modified_path, changed_dslx).unwrap();
 
-    // 1) Run dslx2pipeline on the baseline to capture unoptimized IR.
-    let baseline_unopt_ir = temp_dir.path().join("baseline.unopt.ir");
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
-    let out_baseline = Command::new(driver)
+    let baseline_unopt_ir = temp_dir.path().join("baseline.unopt.ir");
+
+    // Run baseline: `dslx2pipeline` to capture unoptimized IR and baseline Verilog
+    // on stdout.
+    let mut baseline_cmd = Command::new(driver);
+    baseline_cmd
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
         .arg("dslx2pipeline")
-        .arg("--pipeline_stages=1")
-        .arg("--delay_model=asap7")
-        .arg("--flop_inputs=false")
-        .arg("--flop_outputs=false")
         .arg("--dslx_input_file")
         .arg(baseline_path.to_str().unwrap())
-        .arg("--dslx_top=main")
         .arg("--output_unopt_ir")
         .arg(baseline_unopt_ir.to_str().unwrap())
         .arg(format!(
             "--keep_temps={}",
             if keep_temps { "true" } else { "false" }
-        ))
-        .output()
-        .unwrap();
-    assert!(
-        out_baseline.status.success(),
-        "dslx2pipeline (baseline) failed (status={}):\nstdout:{}\nstderr:{}",
-        out_baseline.status,
-        String::from_utf8_lossy(&out_baseline.stdout),
-        String::from_utf8_lossy(&out_baseline.stderr)
-    );
+        ));
+    for a in driver_args {
+        baseline_cmd.arg(a);
+    }
+    let out_baseline = baseline_cmd.output().unwrap();
+    if !out_baseline.status.success() {
+        return Err(String::from_utf8_lossy(&out_baseline.stderr).into_owned());
+    }
+    let baseline_verilog = String::from_utf8_lossy(&out_baseline.stdout).into_owned();
 
-    // 2) Run dslx2pipeline-eco using the baseline unoptimized IR and the modified
-    //    DSLX.
+    // Run ECO: `dslx2pipeline-eco` using the baseline unoptimized IR and the
+    // modified DSLX.
     let baseline_sv_from_eco_path = temp_dir.path().join("baseline_from_eco.sv");
-    let out_eco = Command::new(driver)
+    let mut eco_cmd = Command::new(driver);
+    eco_cmd
         .arg("--toolchain")
         .arg(toolchain_toml.to_str().unwrap())
         .arg("dslx2pipeline-eco")
-        .arg("--pipeline_stages")
-        .arg("1")
-        .arg("--delay_model")
-        .arg("asap7")
-        .arg("--flop_inputs=false")
-        .arg("--flop_outputs=false")
         .arg("--dslx_input_file")
         .arg(modified_path.to_str().unwrap())
-        .arg("--dslx_top")
-        .arg("main")
         .arg("--baseline_unopt_ir")
         .arg(baseline_unopt_ir.to_str().unwrap())
         .arg("--output_baseline_verilog_path")
@@ -115,21 +123,43 @@ fn test_dslx2pipeline_eco_basic() {
         .arg(format!(
             "--keep_temps={}",
             if keep_temps { "true" } else { "false" }
-        ))
-        .output()
-        .unwrap();
+        ));
+    for a in driver_args {
+        eco_cmd.arg(a);
+    }
+    let out_eco = eco_cmd.output().unwrap();
+    if !out_eco.status.success() {
+        return Err(String::from_utf8_lossy(&out_eco.stderr).into_owned());
+    }
+    let eco_verilog = String::from_utf8_lossy(&out_eco.stdout).into_owned();
 
-    assert!(
-        out_eco.status.success(),
-        "dslx2pipeline-eco failed (status={}):\nstdout:{}\nstderr:{}",
-        out_eco.status,
-        String::from_utf8_lossy(&out_eco.stdout),
-        String::from_utf8_lossy(&out_eco.stderr)
-    );
+    let baseline_from_eco_verilog =
+        std::fs::read_to_string(&baseline_sv_from_eco_path).expect("read baseline_from_eco.sv");
+
+    Ok(EcoDriverOutputs {
+        baseline_verilog,
+        baseline_from_eco_verilog,
+        eco_verilog,
+    })
+}
+
+#[test]
+fn test_dslx2pipeline_eco_basic() {
+    let baseline_dslx = "fn main(x: u32) -> u32 { x + u32:1 }\n";
+    let modified_dslx = "fn main(x: u32) -> u32 { !x + u32:1 }\n";
+    let args = vec![
+        "--pipeline_stages=1",
+        "--delay_model=asap7",
+        "--flop_inputs=false",
+        "--flop_outputs=false",
+        "--dslx_top=main",
+    ];
+    let outputs = run_dslx2pipeline_and_eco(baseline_dslx, modified_dslx, &args)
+        .expect("dslx2pipeline and eco should succeed");
 
     // Expect exactly one-line difference between ECO stdout and baseline stdout.
-    let eco_stdout = String::from_utf8_lossy(&out_eco.stdout).into_owned();
-    let baseline_stdout = String::from_utf8_lossy(&out_baseline.stdout).into_owned();
+    let eco_stdout = outputs.eco_verilog.clone();
+    let baseline_stdout = outputs.baseline_verilog.clone();
     if !differ_in_one_line(&eco_stdout, &baseline_stdout) {
         // Fall back to a pretty diff to aid debugging.
         assert_eq!(
@@ -137,11 +167,68 @@ fn test_dslx2pipeline_eco_basic() {
             "expected exactly one-line difference"
         );
     }
-
-    let baseline_from_eco =
-        std::fs::read_to_string(&baseline_sv_from_eco_path).expect("read baseline_from_eco.sv");
     assert_eq!(
-        baseline_from_eco, baseline_stdout,
-        "baseline Verilog from eco does not match baseline stdout"
+        outputs.baseline_from_eco_verilog, baseline_stdout,
+        "baseline Verilog from eco does not match non-ECO baseline Verilog"
     );
+}
+
+#[test]
+fn test_dslx2pipeline_eco_module_name() {
+    let baseline_dslx = "fn main(x: u32) -> u32 { x + u32:1 }\n";
+    let modified_dslx = "fn main(x: u32) -> u32 { !x + u32:1 }\n";
+    let args = vec![
+        "--pipeline_stages=1",
+        "--delay_model=asap7",
+        "--flop_inputs=false",
+        "--flop_outputs=false",
+        "--dslx_top=main",
+        "--module_name",
+        "my_module",
+    ];
+    let outputs = run_dslx2pipeline_and_eco(baseline_dslx, modified_dslx, &args)
+        .expect("dslx2pipeline and eco should succeed");
+
+    // Expect exactly one-line difference between ECO stdout and baseline stdout.
+    let eco_stdout = outputs.eco_verilog.clone();
+    let baseline_stdout = outputs.baseline_verilog.clone();
+    if !differ_in_one_line(&eco_stdout, &baseline_stdout) {
+        // Fall back to a pretty diff to aid debugging.
+        assert_eq!(
+            eco_stdout, baseline_stdout,
+            "expected exactly one-line difference"
+        );
+    }
+    assert_eq!(
+        outputs.baseline_from_eco_verilog, baseline_stdout,
+        "baseline Verilog from eco does not match non-ECO baseline Verilog"
+    );
+    assert!(
+        outputs
+            .baseline_from_eco_verilog
+            .contains("module my_module("),
+        "baseline Verilog from eco should use module name: {}",
+        outputs.baseline_from_eco_verilog
+    );
+}
+
+#[test]
+fn test_dslx2pipeline_eco_with_registers() {
+    let baseline_dslx = "fn main(x: u32) -> u32 { x + u32:1 }\n";
+    let modified_dslx = "fn main(x: u32) -> u32 { !x + u32:1 }\n";
+    let args = vec![
+        "--pipeline_stages=1",
+        "--delay_model=asap7",
+        "--flop_inputs=true",
+        "--flop_outputs=false",
+        "--dslx_top=main",
+    ];
+    match run_dslx2pipeline_and_eco(baseline_dslx, modified_dslx, &args) {
+        Ok(_) => panic!("expected ECO run to fail due to registers"),
+        Err(e) => assert!(
+            e.contains("ECOs not supported on designs with registers"),
+            "unexpected error: {}",
+            e
+        ),
+    }
 }
