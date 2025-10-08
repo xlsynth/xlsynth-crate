@@ -6,7 +6,6 @@
 //!
 //! This is done for all released crates in the workspace.
 
-use curl::easy::Easy;
 use std::collections::BTreeMap;
 
 const USER_AGENT: &str = "xlsynth_crate_unit_test";
