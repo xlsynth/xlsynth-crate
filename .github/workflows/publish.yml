@@ -198,12 +198,12 @@ jobs:
           git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
 
       - name: Update version compatibility docs
-        if: success()
+        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
         run: |
           python3 gen_version_compat.py
 
       - name: Commit version metadata update
-        if: success()
+        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
         run: |
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"
