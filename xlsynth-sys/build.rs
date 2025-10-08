@@ -628,10 +628,12 @@ fn main() {
         let dso_dest = PathBuf::from(&out_dir).join(&dso_filename);
 
         // Symlink to the artifact in the workspace.
-        assert!(
-            cfg!(unix),
-            "DEV_XLS_DSO_WORKSPACE env var only supported in UNIX-like environments"
-        );
+        const {
+            assert!(
+                cfg!(unix),
+                "DEV_XLS_DSO_WORKSPACE env var only supported in UNIX-like environments"
+            )
+        };
         std::fs::remove_file(&dso_dest).ok();
 
         println!(
