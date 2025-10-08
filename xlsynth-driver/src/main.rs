@@ -1019,6 +1019,14 @@ fn main() {
                         .required(true)
                         .action(ArgAction::Set),
                 )
+                .arg(
+                    clap::Arg::new("output_baseline_verilog_path")
+                        .long("output_baseline_verilog_path")
+                        .value_name("PATH")
+                        .help("If set, write the baseline (pre-ECO) Verilog/SystemVerilog to PATH")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
                 .add_delay_model_arg()
                 .add_dslx_input_args(true)
                 .add_pipeline_args()
