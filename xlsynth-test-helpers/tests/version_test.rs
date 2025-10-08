@@ -6,7 +6,7 @@
 //!
 //! This is done for all released crates in the workspace.
 
-use curl::easy::Easy;
+use std::collections::BTreeMap;
 
 const USER_AGENT: &str = "xlsynth_crate_unit_test";
 
@@ -16,31 +16,6 @@ fn get_workspace_root() -> std::path::PathBuf {
         .unwrap()
         .workspace_root;
     workspace_dir.into()
-}
-
-/// Fetches the latest version of a crate named `crate_name` from crates.io.
-fn fetch_latest_version(crate_name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let url = format!("https://crates.io/api/v1/crates/{crate_name}");
-    let mut data = Vec::new();
-    let mut easy = Easy::new();
-    easy.url(&url)?;
-    easy.useragent(USER_AGENT)?;
-    {
-        let mut transfer = easy.transfer();
-        transfer.write_function(|new_data| {
-            data.extend_from_slice(new_data);
-            Ok(new_data.len())
-        })?;
-        transfer.perform()?;
-    }
-
-    let response: serde_json::Value = serde_json::from_slice(&data)?;
-    log::debug!("Response: {response:?}");
-    let newest_version = response["crate"]["newest_version"].as_str();
-    let latest_version = newest_version
-        .ok_or_else(|| format!("Failed to parse latest version: {newest_version:?}"))?
-        .to_string();
-    Ok(latest_version)
 }
 
 /// Fetches the local version of a package given the path to a `Cargo.toml`
@@ -60,27 +35,80 @@ fn fetch_local_version(dirpath: &std::path::Path) -> Result<String, Box<dyn std:
     Ok(version)
 }
 
-fn validate_local_version_gt_released(
+/// Builds a map from (major, minor) -> latest released patch for that pair.
+///
+/// Yanked versions are ignored.
+fn get_latest_patch_versions(
+    crate_name: &str,
+) -> Result<BTreeMap<(u64, u64), u64>, Box<dyn std::error::Error>> {
+    let url = format!("https://crates.io/api/v1/crates/{crate_name}");
+    let mut data = Vec::new();
+    let mut easy = curl::easy::Easy::new();
+    easy.url(&url)?;
+    easy.useragent(USER_AGENT)?;
+    {
+        let mut transfer = easy.transfer();
+        transfer.write_function(|new_data| {
+            data.extend_from_slice(new_data);
+            Ok(new_data.len())
+        })?;
+        transfer.perform()?;
+    }
+    let response: serde_json::Value = serde_json::from_slice(&data)?;
+    log::trace!("Response: {response:?}");
+    let versions = response["versions"].as_array().ok_or_else(|| {
+        std::io::Error::other("Failed to parse versions array from crates.io response")
+    })?;
+
+    let mut mm_to_patch: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+    for v in versions {
+        let is_yanked = v["yanked"].as_bool().unwrap_or(false);
+        if is_yanked {
+            continue;
+        }
+        let num = match v["num"].as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let parsed = match semver::Version::parse(num) {
+            Ok(ver) => ver,
+            Err(_) => continue,
+        };
+        let key = (parsed.major, parsed.minor);
+        let patch = parsed.patch;
+        mm_to_patch
+            .entry(key)
+            .and_modify(|p| *p = (*p).max(patch))
+            .or_insert(patch);
+    }
+    log::debug!("Latest patch versions: {mm_to_patch:?}");
+    Ok(mm_to_patch)
+}
+
+fn validate_local_version_is_latest_patch_version(
     crate_name: &str,
     workspace_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let latest_version = fetch_latest_version(crate_name)?;
+    // Fetch the newest version for logging continuity with previous behavior.
     let local_version = fetch_local_version(workspace_path)?;
-
     let local_semver = semver::Version::parse(&local_version)?;
-    let latest_semver = semver::Version::parse(&latest_version)?;
 
-    log::info!(
-        "crate: {crate_name} local_version: {local_version} released_version: {latest_version}"
-    );
+    log::info!("crate: {crate_name} local_version: {local_version}");
+    let latest_patches = get_latest_patch_versions(crate_name)?;
 
-    if local_semver <= latest_semver {
-        // Technically we're abusing io::Error a bit here just to avoid creating a whole
-        // new error type.
-        Err(Box::new(std::io::Error::other(format!(
-            "Local version {local_version} is not greater than the latest version {latest_version}"
-        ))))
+    if let Some(max_patch) = latest_patches.get(&(local_semver.major, local_semver.minor)) {
+        if local_semver.patch > *max_patch {
+            Ok(())
+        } else {
+            Err(Box::new(std::io::Error::other(format!(
+                "Local version {local_version} must have a patch greater than any released {major}.{minor}.x (max released patch is {max_patch})",
+                major = local_semver.major,
+                minor = local_semver.minor,
+                max_patch = max_patch
+            ))))
+        }
     } else {
+        // No released versions for this major.minor; vacuously the latest patch.
         Ok(())
     }
 }
@@ -94,7 +122,7 @@ fn test_xlsynth_crate_version() {
     }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth");
-    validate_local_version_gt_released("xlsynth", workspace_path.as_path()).unwrap();
+    validate_local_version_is_latest_patch_version("xlsynth", workspace_path.as_path()).unwrap();
 }
 
 #[test]
@@ -106,7 +134,8 @@ fn test_xlsynth_sys_crate_version() {
     }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth-sys");
-    validate_local_version_gt_released("xlsynth-sys", workspace_path.as_path()).unwrap();
+    validate_local_version_is_latest_patch_version("xlsynth-sys", workspace_path.as_path())
+        .unwrap();
 }
 
 #[test]
@@ -118,7 +147,8 @@ fn test_xlsynth_driver_crate_version() {
     }
     let workspace_root = get_workspace_root();
     let workspace_path = workspace_root.join("xlsynth-driver");
-    validate_local_version_gt_released("xlsynth-driver", workspace_path.as_path()).unwrap();
+    validate_local_version_is_latest_patch_version("xlsynth-driver", workspace_path.as_path())
+        .unwrap();
 }
 
 #[test]
