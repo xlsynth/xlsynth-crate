@@ -27,6 +27,7 @@ fn dslx2pipeline_eco(
     config: &Option<ToolchainConfig>,
     baseline_unopt_ir_path: &std::path::Path,
     edits_debug_out: &Option<&std::path::Path>,
+    output_baseline_verilog_path: &Option<&std::path::Path>,
 ) {
     log::info!("dslx2pipeline_eco; config: {:?}", config);
     let module_name = xlsynth::dslx_path_to_module_name(input_file).unwrap();
@@ -104,6 +105,12 @@ fn dslx2pipeline_eco(
     );
     let baseline_sv_path = temp_dir.path().join("baseline_sv.sv");
     std::fs::write(&baseline_sv_path, &baseline_sv).unwrap();
+    if let Some(path) = output_baseline_verilog_path {
+        // Add a newline to the end of the file to match the output of dslx2pipeline
+        // which uses println.
+        std::fs::write(path, format!("{}\n", baseline_sv))
+            .expect("write output_baseline_verilog_path");
+    }
 
     // Run the new unopt IR through the optimizer
     let opt_ir = run_opt_main(&unopt_ir_path, Some(&ir_top), tool_path);
@@ -219,6 +226,9 @@ pub fn handle_dslx2pipeline_eco(matches: &ArgMatches, config: &Option<ToolchainC
     let output_opt_ir: Option<std::path::PathBuf> = matches
         .get_one::<String>("output_opt_ir")
         .map(|s| std::path::PathBuf::from(s));
+    let output_baseline_verilog_path: Option<std::path::PathBuf> = matches
+        .get_one::<String>("output_baseline_verilog_path")
+        .map(|s| std::path::PathBuf::from(s));
 
     let type_inference_v2 = resolve_type_inference_v2(matches, config);
 
@@ -235,5 +245,6 @@ pub fn handle_dslx2pipeline_eco(matches: &ArgMatches, config: &Option<ToolchainC
         config,
         baseline_unopt_ir_path,
         &edits_debug_out.as_deref().map(|s| std::path::Path::new(s)),
+        &output_baseline_verilog_path.as_deref(),
     );
 }
