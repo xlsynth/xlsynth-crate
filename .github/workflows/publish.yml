@@ -45,7 +45,9 @@ jobs:
         run: |
           python3 -V
           pip3 install --break-system-packages requests
-          python3 download_release.py -p arm64 -o xlsynth_tools
+          REQUIRED_TAG=$(python3 get_required_xls_release_tag.py)
+          echo "Required XLS release tag: $REQUIRED_TAG"
+          python3 download_release.py -p arm64 -o xlsynth_tools -v "$REQUIRED_TAG"
 
       - name: Install protobuf compiler
         run: |
