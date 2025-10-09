@@ -23,7 +23,12 @@ bitvec = "1.0.1"
 [dev-dependencies]
 maplit = "1.0.2"
 pretty_assertions = "1.4.1"
+criterion = "0.3"
 
 [lib]
 name = "xlsynth_pir"
 path = "src/lib.rs"
+
+[[bench]]
+name = "eco"
+harness = false

@@ -66,18 +66,21 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
         }
         ir::NodePayload::Unop(unop, ref operand) => {
             let operand_value: &IrValue = env.get(operand).unwrap();
-            let operand_bits = operand_value.to_bits().unwrap();
             match unop {
                 ir::Unop::Neg => {
+                    let operand_bits = operand_value.to_bits().unwrap();
+
                     let r = operand_bits.negate();
                     IrValue::from_bits(&r)
                 }
                 ir::Unop::Not => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let r = operand_bits.not();
                     IrValue::from_bits(&r)
                 }
                 ir::Unop::Identity => operand_value.clone(),
                 ir::Unop::OrReduce => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let mut result = false;
                     for i in 0..operand_bits.get_bit_count() {
                         if operand_bits.get_bit(i).unwrap() {
@@ -88,6 +91,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     IrValue::bool(result)
                 }
                 ir::Unop::AndReduce => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let mut result = true;
                     for i in 0..operand_bits.get_bit_count() {
                         if !operand_bits.get_bit(i).unwrap() {
@@ -98,6 +102,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     IrValue::bool(result)
                 }
                 ir::Unop::XorReduce => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let mut result = false;
                     for i in 0..operand_bits.get_bit_count() {
                         if operand_bits.get_bit(i).unwrap() {
@@ -107,6 +112,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     IrValue::bool(result)
                 }
                 ir::Unop::Reverse => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let w = operand_bits.get_bit_count();
                     let mut outs: Vec<bool> = Vec::with_capacity(w);
                     for i in 0..w {
@@ -152,6 +158,40 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 out_elems.push(v);
             }
             IrValue::make_array(&out_elems).unwrap()
+        }
+        ir::NodePayload::ArrayUpdate {
+            array,
+            value,
+            ref indices,
+            assumed_in_bounds: _,
+        } => {
+            // Recursively updates the array `base` at the multi-index `idxs`
+            // with `new_value`, returning a freshly constructed value.
+            fn update_at_indices(base: &IrValue, idxs: &[usize], new_value: &IrValue) -> IrValue {
+                if idxs.is_empty() {
+                    return new_value.clone();
+                }
+                let idx = idxs[0];
+                let count = base.get_element_count().unwrap();
+                let mut elems: Vec<IrValue> = Vec::with_capacity(count);
+                for i in 0..count {
+                    let elem_i = base.get_element(i).unwrap();
+                    if i == idx {
+                        elems.push(update_at_indices(&elem_i, &idxs[1..], new_value));
+                    } else {
+                        elems.push(elem_i);
+                    }
+                }
+                IrValue::make_array(&elems).unwrap()
+            }
+
+            let base = env.get(&array).unwrap().clone();
+            let new_value = env.get(&value).unwrap().clone();
+            let idxs: Vec<usize> = indices
+                .iter()
+                .map(|r| env.get(r).unwrap().to_u64().unwrap() as usize)
+                .collect();
+            update_at_indices(&base, &idxs, &new_value)
         }
         ir::NodePayload::ArrayIndex {
             array,
@@ -1372,5 +1412,125 @@ fn f(x: bits[3] id=1) -> bits[1] {
             }
             other => panic!("unexpected result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_eval_pure_array_update_no_indices_replaces_entire_array() {
+        // Base array: [0,1,2], new array: [9,9,9], indices=[] => result=new array
+        let base = IrValue::make_array(&[
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+        ])
+        .unwrap();
+        let new_arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 9).unwrap(),
+            IrValue::make_ubits(8, 9).unwrap(),
+            IrValue::make_ubits(8, 9).unwrap(),
+        ])
+        .unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => base,
+            ir::NodeRef { index: 2 } => new_arr.clone(),
+        );
+        let n = ir::Node {
+            text_id: 100,
+            name: None,
+            ty: ir::Type::new_array(ir::Type::Bits(8), 3),
+            payload: ir::NodePayload::ArrayUpdate {
+                array: ir::NodeRef { index: 1 },
+                value: ir::NodeRef { index: 2 },
+                indices: vec![],
+                assumed_in_bounds: true,
+            },
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, new_arr);
+    }
+
+    #[test]
+    fn test_eval_pure_array_update_one_index() {
+        // Base array: [0,1,2], update index 1 with 99 => [0,99,2]
+        let base = IrValue::make_array(&[
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+        ])
+        .unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => base,
+            ir::NodeRef { index: 2 } => IrValue::make_ubits(8, 99).unwrap(),
+            ir::NodeRef { index: 3 } => IrValue::make_ubits(32, 1).unwrap(),
+        );
+        let n = ir::Node {
+            text_id: 101,
+            name: None,
+            ty: ir::Type::new_array(ir::Type::Bits(8), 3),
+            payload: ir::NodePayload::ArrayUpdate {
+                array: ir::NodeRef { index: 1 },
+                value: ir::NodeRef { index: 2 },
+                indices: vec![ir::NodeRef { index: 3 }],
+                assumed_in_bounds: true,
+            },
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        let expected = IrValue::make_array(&[
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 99).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(v, expected);
+    }
+
+    #[test]
+    fn test_eval_pure_array_update_two_indices() {
+        // Base 2D: [[0,1],[2,3]], update [1][0] with 55 => [[0,1],[55,3]]
+        let row0 = IrValue::make_array(&[
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),
+        ])
+        .unwrap();
+        let row1 = IrValue::make_array(&[
+            IrValue::make_ubits(8, 2).unwrap(),
+            IrValue::make_ubits(8, 3).unwrap(),
+        ])
+        .unwrap();
+        let base2d = IrValue::make_array(&[row0, row1]).unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => base2d,
+            ir::NodeRef { index: 2 } => IrValue::make_ubits(8, 55).unwrap(),
+            ir::NodeRef { index: 3 } => IrValue::make_ubits(32, 1).unwrap(),
+            ir::NodeRef { index: 4 } => IrValue::make_ubits(32, 0).unwrap(),
+        );
+        let n = ir::Node {
+            text_id: 102,
+            name: None,
+            ty: ir::Type::new_array(ir::Type::new_array(ir::Type::Bits(8), 2), 2),
+            payload: ir::NodePayload::ArrayUpdate {
+                array: ir::NodeRef { index: 1 },
+                value: ir::NodeRef { index: 2 },
+                indices: vec![ir::NodeRef { index: 3 }, ir::NodeRef { index: 4 }],
+                assumed_in_bounds: true,
+            },
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        let expected = IrValue::make_array(&[
+            IrValue::make_array(&[
+                IrValue::make_ubits(8, 0).unwrap(),
+                IrValue::make_ubits(8, 1).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(8, 55).unwrap(),
+                IrValue::make_ubits(8, 3).unwrap(),
+            ])
+            .unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(v, expected);
     }
 }
