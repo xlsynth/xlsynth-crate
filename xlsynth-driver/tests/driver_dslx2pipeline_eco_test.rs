@@ -34,6 +34,7 @@ struct EcoDriverOutputs {
     baseline_verilog: String,
     baseline_from_eco_verilog: String,
     eco_verilog: String,
+    edits: String,
 }
 
 /// Runs the baseline `dslx2pipeline` and the `dslx2pipeline-eco` flow for
@@ -109,6 +110,8 @@ fn run_dslx2pipeline_and_eco(
     // Run ECO: `dslx2pipeline-eco` using the baseline unoptimized IR and the
     // modified DSLX.
     let baseline_sv_from_eco_path = temp_dir.path().join("baseline_from_eco.sv");
+    let edits_debug_out_path = temp_dir.path().join("edits.txt");
+
     let mut eco_cmd = Command::new(driver);
     eco_cmd
         .arg("--toolchain")
@@ -120,6 +123,8 @@ fn run_dslx2pipeline_and_eco(
         .arg(baseline_unopt_ir.to_str().unwrap())
         .arg("--output_baseline_verilog_path")
         .arg(baseline_sv_from_eco_path.to_str().unwrap())
+        .arg("--edits_debug_out")
+        .arg(edits_debug_out_path.to_str().unwrap())
         .arg(format!(
             "--keep_temps={}",
             if keep_temps { "true" } else { "false" }
@@ -136,10 +141,13 @@ fn run_dslx2pipeline_and_eco(
     let baseline_from_eco_verilog =
         std::fs::read_to_string(&baseline_sv_from_eco_path).expect("read baseline_from_eco.sv");
 
+    let edits = std::fs::read_to_string(&edits_debug_out_path).expect("read edits.txt");
+
     Ok(EcoDriverOutputs {
         baseline_verilog,
         baseline_from_eco_verilog,
         eco_verilog,
+        edits,
     })
 }
 
@@ -170,6 +178,16 @@ fn test_dslx2pipeline_eco_basic() {
     assert_eq!(
         outputs.baseline_from_eco_verilog, baseline_stdout,
         "baseline Verilog from eco does not match non-ECO baseline Verilog"
+    );
+    assert!(
+        outputs.edits.contains("AddNode: not"),
+        "edits should contain AddNode: {}",
+        outputs.edits
+    );
+    assert!(
+        outputs.edits.contains("SubstituteOperand: add"),
+        "edits should contain SubstituteOperand: {}",
+        outputs.edits
     );
 }
 
