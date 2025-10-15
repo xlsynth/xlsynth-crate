@@ -335,18 +335,19 @@ impl FnBuilder {
         &mut self,
         array: &BValue,
         update_value: &BValue,
-        index: &BValue,
+        indices: &[&BValue],
         name: Option<&str>,
     ) -> BValue {
         let fn_builder_guard = self.fn_builder.write().unwrap();
         let array_guard: RwLockReadGuard<BValuePtr> = array.ptr.read().unwrap();
         let update_value_guard: RwLockReadGuard<BValuePtr> = update_value.ptr.read().unwrap();
-        let index_guard: RwLockReadGuard<BValuePtr> = index.ptr.read().unwrap();
+        let indices_guards: Vec<RwLockReadGuard<BValuePtr>> =
+            indices.iter().map(|v| v.ptr.read().unwrap()).collect();
         let bvalue_ptr = lib_support::xls_function_builder_add_array_update(
             fn_builder_guard,
             array_guard,
             update_value_guard,
-            &[index_guard],
+            &indices_guards,
             false,
             name,
         );
@@ -1105,7 +1106,7 @@ fn make_array_and_index(x: bits[2] id=1, y: bits[2] id=2, i: bits[1] id=3) -> bi
         let array = fb.param("array", &package.get_array_type(&u4, 2));
         let index = fb.param("index", &package.get_bits_type(1));
         let update_value = fb.param("update_value", &u4);
-        let updated = fb.array_update(&array, &update_value, &index, None);
+        let updated = fb.array_update(&array, &update_value, &[&index], None);
         let f = fb.build_with_return_value(&updated).unwrap();
 
         let array_value = IrValue::make_array(&[

@@ -106,6 +106,16 @@ impl Type {
             )),
         }
     }
+
+    pub fn get_array_element_type(&self) -> &Type {
+        match self {
+            Type::Array(ArrayTypeData { element_type, .. }) => element_type,
+            _ => panic!(
+                "Attempted to get array element type for non-array type: {:?}",
+                self
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for Type {
@@ -624,7 +634,7 @@ impl NodePayload {
                     .join(", ");
                 if *assumed_in_bounds {
                     format!(
-                        "array_update({}, {}, {}, assumed_in_bounds=true, id={})",
+                        "array_update({}, {}, indices=[{}], assumed_in_bounds=true, id={})",
                         get_name(*array),
                         get_name(*value),
                         idx_str,
@@ -632,7 +642,7 @@ impl NodePayload {
                     )
                 } else {
                     format!(
-                        "array_update({}, {}, {}, id={})",
+                        "array_update({}, {}, indices=[{}], id={})",
                         get_name(*array),
                         get_name(*value),
                         idx_str,
