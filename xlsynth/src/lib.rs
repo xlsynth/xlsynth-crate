@@ -169,6 +169,11 @@ pub fn convert_dslx_to_ir_text(
             &mut ir_out,
         );
 
+        // Some integrity checks for the API contract.
+        assert!((warnings_out_count == 0) == warnings_out.is_null());
+        assert!(error_out.is_null() == success);
+        assert!(success != ir_out.is_null());
+
         let mut warnings = Vec::new();
         if warnings_out_count > 0 {
             for i in 0..warnings_out_count {
@@ -176,11 +181,20 @@ pub fn convert_dslx_to_ir_text(
                 warnings.push(c_str_to_rust_no_dealloc(warning));
             }
         }
+
         xlsynth_sys::xls_c_strs_free(warnings_out, warnings_out_count);
 
         if success {
+            let ir_text = c_str_to_rust(ir_out);
+            if ir_text.trim().is_empty() {
+                return Err(XlsynthError(format!(
+                    "INTERNAL: DSLX to IR conversion returned empty IR text for module '{module}' ({path}).",
+                    module = module_name,
+                    path = path_str,
+                )));
+            }
             Ok(DslxToIrTextResult {
-                ir: c_str_to_rust(ir_out),
+                ir: ir_text,
                 warnings,
             })
         } else {
