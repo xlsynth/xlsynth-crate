@@ -737,10 +737,32 @@ impl VastFile {
         }
     }
 
+    pub fn make_slice_expr(&mut self, indexable: &IndexableExpr, hi: &Expr, lo: &Expr) -> Slice {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_slice(locked.0, indexable.inner, hi.inner, lo.inner)
+        };
+        Slice {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
     pub fn make_index(&mut self, indexable: &IndexableExpr, index: i64) -> Index {
         let locked = self.ptr.lock().unwrap();
         let inner =
             unsafe { sys::xls_vast_verilog_file_make_index_i64(locked.0, indexable.inner, index) };
+        Index {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_index_expr(&mut self, indexable: &IndexableExpr, index: &Expr) -> Index {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_index(locked.0, indexable.inner, index.inner)
+        };
         Index {
             inner,
             parent: self.ptr.clone(),

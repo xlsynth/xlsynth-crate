@@ -166,6 +166,36 @@ mod tests {
     }
 
     #[test]
+    fn test_slice_and_index_with_expressions() {
+        let mut file = VastFile::new(VastFileType::Verilog);
+        let mut module = file.add_module("my_module");
+        let element_type = file.make_bit_vector_type(8, false);
+        let arr = module.add_wire("arr", &element_type);
+        let hi = module.add_wire("hi", &file.make_bit_vector_type(4, false));
+        let lo = module.add_wire("lo", &file.make_bit_vector_type(4, false));
+        let idx = module.add_wire("idx", &file.make_bit_vector_type(3, false));
+        let slice_out = module.add_wire("slice_out", &element_type);
+        let index_out = module.add_wire("index_out", &file.make_scalar_type());
+
+        let arr_indexable = arr.to_indexable_expr();
+        let hi_expr = hi.to_expr();
+        let lo_expr = lo.to_expr();
+        let idx_expr = idx.to_expr();
+
+        let slice = file.make_slice_expr(&arr_indexable, &hi_expr, &lo_expr);
+        let index = file.make_index_expr(&arr_indexable, &idx_expr);
+
+        let slice_assign = file.make_continuous_assignment(&slice_out.to_expr(), &slice.to_expr());
+        module.add_member_continuous_assignment(slice_assign);
+        let index_assign = file.make_continuous_assignment(&index_out.to_expr(), &index.to_expr());
+        module.add_member_continuous_assignment(index_assign);
+
+        let verilog = file.emit();
+        let want = "module my_module;\n  wire [7:0] arr;\n  wire [3:0] hi;\n  wire [3:0] lo;\n  wire [2:0] idx;\n  wire [7:0] slice_out;\n  wire index_out;\n  assign slice_out = arr[hi:lo];\n  assign index_out = arr[idx];\nendmodule\n";
+        assert_eq!(verilog, want);
+    }
+
+    #[test]
     fn test_concat_various_expressions() {
         let mut file = VastFile::new(VastFileType::Verilog);
         let mut module = file.add_module("my_module");
