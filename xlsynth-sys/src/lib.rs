@@ -92,6 +92,16 @@ pub struct CVastComment {
 }
 
 #[repr(C)]
+pub struct CVastBlankLine {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastInlineVerilogStatement {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CVastLogicRef {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -133,6 +143,11 @@ pub struct CVastStatementBlock {
 
 #[repr(C)]
 pub struct CVastStatement {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastParameterRef {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
@@ -292,6 +307,16 @@ pub type XlsCallingConvention = i32;
 pub type VastFileType = i32;
 
 pub type VastOperatorKind = i32;
+
+// Data kind for VAST Defs.
+pub type VastDataKind = i32;
+pub const XLS_VAST_DATA_KIND_REG: VastDataKind = 0;
+pub const XLS_VAST_DATA_KIND_WIRE: VastDataKind = 1;
+pub const XLS_VAST_DATA_KIND_LOGIC: VastDataKind = 2;
+pub const XLS_VAST_DATA_KIND_INTEGER: VastDataKind = 3;
+pub const XLS_VAST_DATA_KIND_USER: VastDataKind = 4;
+pub const XLS_VAST_DATA_KIND_UNTYPED_ENUM: VastDataKind = 5;
+pub const XLS_VAST_DATA_KIND_GENVAR: VastDataKind = 6;
 
 pub type DslxTypeDefinitionKind = i32;
 
@@ -702,6 +727,10 @@ extern "C" {
         bit_count: i64,
         is_signed: bool,
     ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_integer_type(
+        f: *mut CVastFile,
+        is_signed: bool,
+    ) -> *mut CVastDataType;
     pub fn xls_vast_verilog_file_make_extern_package_type(
         f: *mut CVastFile,
         package_name: *const std::os::raw::c_char,
@@ -743,6 +772,20 @@ extern "C" {
         expressions: *mut *mut CVastExpression,
         expression_count: libc::size_t,
     ) -> *mut CVastExpression;
+
+    pub fn xls_vast_verilog_file_make_replicated_concat(
+        f: *mut CVastFile,
+        replication: *mut CVastExpression,
+        elements: *mut *mut CVastExpression,
+        element_count: libc::size_t,
+    ) -> *mut CVastConcat;
+
+    pub fn xls_vast_verilog_file_make_replicated_concat_i64(
+        f: *mut CVastFile,
+        replication_count: i64,
+        elements: *mut *mut CVastExpression,
+        element_count: libc::size_t,
+    ) -> *mut CVastConcat;
 
     pub fn xls_vast_verilog_file_make_slice_i64(
         f: *mut CVastFile,
@@ -803,6 +846,11 @@ extern "C" {
         f: *mut CVastFile,
         text: *const std::os::raw::c_char,
     ) -> *mut CVastComment;
+    pub fn xls_vast_verilog_file_make_blank_line(f: *mut CVastFile) -> *mut CVastBlankLine;
+    pub fn xls_vast_verilog_file_make_inline_verilog_statement(
+        f: *mut CVastFile,
+        text: *const std::os::raw::c_char,
+    ) -> *mut CVastInlineVerilogStatement;
     pub fn xls_vast_verilog_file_make_literal(
         f: *mut CVastFile,
         bits: *const CIrBits,
@@ -844,6 +892,33 @@ extern "C" {
         m: *mut CVastModule,
         comment: *mut CVastComment,
     );
+    pub fn xls_vast_verilog_module_add_member_blank_line(
+        m: *mut CVastModule,
+        blank: *mut CVastBlankLine,
+    );
+    pub fn xls_vast_verilog_module_add_member_inline_statement(
+        m: *mut CVastModule,
+        stmt: *mut CVastInlineVerilogStatement,
+    );
+
+    pub fn xls_vast_verilog_module_add_parameter(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastParameterRef;
+
+    pub fn xls_vast_verilog_file_make_def(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+        kind: VastDataKind,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastDef;
+
+    pub fn xls_vast_verilog_module_add_parameter_with_def(
+        m: *mut CVastModule,
+        def: *mut CVastDef,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastParameterRef;
 
     pub fn xls_vast_verilog_module_get_name(m: *mut CVastModule) -> *mut std::os::raw::c_char;
 
@@ -860,6 +935,7 @@ extern "C" {
     pub fn xls_vast_logic_ref_as_expression(v: *mut CVastLogicRef) -> *mut CVastExpression;
     pub fn xls_vast_slice_as_expression(v: *mut CVastSlice) -> *mut CVastExpression;
     pub fn xls_vast_index_as_expression(v: *mut CVastIndex) -> *mut CVastExpression;
+    pub fn xls_vast_parameter_ref_as_expression(v: *mut CVastParameterRef) -> *mut CVastExpression;
 
     pub fn xls_vast_logic_ref_get_name(v: *mut CVastLogicRef) -> *mut std::os::raw::c_char;
 
@@ -1690,6 +1766,20 @@ extern "C" {
         block: *mut CVastStatementBlock,
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
+
+    pub fn xls_vast_statement_block_add_comment_text(
+        block: *mut CVastStatementBlock,
+        text: *const std::os::raw::c_char,
+    ) -> *mut CVastStatement;
+
+    pub fn xls_vast_statement_block_add_blank_line(
+        block: *mut CVastStatementBlock,
+    ) -> *mut CVastStatement;
+
+    pub fn xls_vast_statement_block_add_inline_text(
+        block: *mut CVastStatementBlock,
+        text: *const std::os::raw::c_char,
     ) -> *mut CVastStatement;
 
     pub fn xls_function_type_get_param_count(fty: *mut CIrFunctionType) -> i64;
