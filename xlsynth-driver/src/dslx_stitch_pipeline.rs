@@ -93,11 +93,16 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .get_one::<String>("flop_outputs")
         .map(|s| s == "true")
         .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_OUTPUTS);
-    // Determine wrapper name and discovery top.
-    let discovery_top = dslx_top.as_deref();
+    // Determine:
+    //  * stage-discovery prefix: only used for implicit discovery of
+    //    `<prefix>_cycleN` when `--stages` is not provided (from `--dslx_top`).
+    //  * wrapper module name: the emitted outer module name (from
+    //    `--output_module_name`, or defaults to `--dslx_top` when using implicit
+    //    discovery).
+    let stage_discovery_prefix_opt = dslx_top.as_deref();
     let wrapper_name = output_module_name_opt
         .as_deref()
-        .or(discovery_top)
+        .or(stage_discovery_prefix_opt)
         .expect("validated combinations above");
 
     let options = xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineOptions {
@@ -113,10 +118,13 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         reset_active_low,
         add_invariant_assertions,
         array_index_bounds_checking,
-        output_module_name: Some(wrapper_name),
+        output_module_name: wrapper_name,
     };
 
-    let top_for_library = discovery_top.unwrap_or(wrapper_name);
+    // Library `top` parameter is the implicit stage-discovery prefix; when stages
+    // are provided explicitly, this value is unused by discovery but we pass
+    // the wrapper name.
+    let top_for_library = stage_discovery_prefix_opt.unwrap_or(wrapper_name);
     let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
         &dslx,
         std::path::Path::new(input),

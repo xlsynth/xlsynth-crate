@@ -35,27 +35,7 @@ pub struct StitchPipelineOptions<'a> {
     pub reset_active_low: bool,
     pub add_invariant_assertions: bool,
     pub array_index_bounds_checking: bool,
-    pub output_module_name: Option<&'a str>,
-}
-
-impl<'a> Default for StitchPipelineOptions<'a> {
-    fn default() -> Self {
-        Self {
-            verilog_version: VerilogVersion::SystemVerilog,
-            explicit_stages: None,
-            stdlib_path: None,
-            search_paths: Vec::new(),
-            flop_inputs: true,
-            flop_outputs: true,
-            input_valid_signal: None,
-            output_valid_signal: None,
-            reset_signal: None,
-            reset_active_low: false,
-            add_invariant_assertions: true,
-            array_index_bounds_checking: true,
-            output_module_name: None,
-        }
-    }
+    pub output_module_name: &'a str,
 }
 
 /// Creates a VAST "stub" module from the given `StageInfo`.
@@ -320,7 +300,9 @@ fn check_for_parametric_stages(
 /// in `dslx` and stitches them together into a wrapper module.
 ///
 /// The resulting SystemVerilog contains the stage modules followed by a wrapper
-/// module named `<top>_pipeline` that instantiates each stage.
+/// module whose name is `opts.output_module_name` when set, otherwise `top`.
+/// The `top` parameter is used as a prefix only for implicit stage discovery
+/// when `opts.explicit_stages` is `None`.
 pub fn stitch_pipeline<'a>(
     dslx: &str,
     path: &Path,
@@ -408,7 +390,7 @@ pub fn stitch_pipeline<'a>(
         VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
     });
     let pipeline_cfg = BuildPipelineConfig {
-        top_module_name: opts.output_module_name.unwrap_or(top).to_string(),
+        top_module_name: opts.output_module_name.to_string(),
         clk_port_name: "clk".to_string(),
         stage_modules: stage_module_refs,
         flop_inputs,
@@ -509,7 +491,21 @@ mod tests {
             dslx,
             Path::new("test.x"),
             "mul_add",
-            &StitchPipelineOptions::default(),
+            &StitchPipelineOptions {
+                verilog_version: VerilogVersion::SystemVerilog,
+                explicit_stages: None,
+                stdlib_path: None,
+                search_paths: Vec::new(),
+                flop_inputs: true,
+                flop_outputs: true,
+                input_valid_signal: None,
+                output_valid_signal: None,
+                reset_signal: None,
+                reset_active_low: false,
+                add_invariant_assertions: true,
+                array_index_bounds_checking: true,
+                output_module_name: "mul_add",
+            },
         )
         .unwrap();
         // Validate generated SV.
@@ -529,7 +525,21 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             dslx,
             Path::new("test.x"),
             "foo",
-            &StitchPipelineOptions::default(),
+            &StitchPipelineOptions {
+                verilog_version: VerilogVersion::SystemVerilog,
+                explicit_stages: None,
+                stdlib_path: None,
+                search_paths: Vec::new(),
+                flop_inputs: true,
+                flop_outputs: true,
+                input_valid_signal: None,
+                output_valid_signal: None,
+                reset_signal: None,
+                reset_active_low: false,
+                add_invariant_assertions: true,
+                array_index_bounds_checking: true,
+                output_module_name: "foo",
+            },
         )
         .unwrap();
 
@@ -543,7 +553,21 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             dslx,
             Path::new("test.x"),
             "one",
-            &StitchPipelineOptions::default(),
+            &StitchPipelineOptions {
+                verilog_version: VerilogVersion::SystemVerilog,
+                explicit_stages: None,
+                stdlib_path: None,
+                search_paths: Vec::new(),
+                flop_inputs: true,
+                flop_outputs: true,
+                input_valid_signal: None,
+                output_valid_signal: None,
+                reset_signal: None,
+                reset_active_low: false,
+                add_invariant_assertions: true,
+                array_index_bounds_checking: true,
+                output_module_name: "one",
+            },
         )
         .unwrap();
         compare_golden_sv(&result, "tests/goldens/one.golden.sv");
@@ -571,7 +595,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
                 reset_active_low: true,
                 add_invariant_assertions: false,
                 array_index_bounds_checking: true,
-                output_module_name: None,
+                output_module_name: "foo",
             },
         )
         .unwrap()
@@ -620,7 +644,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
                 reset_active_low: false,
                 add_invariant_assertions: false,
                 array_index_bounds_checking: true,
-                output_module_name: None,
+                output_module_name: "foo",
             },
         )
         .unwrap();
@@ -639,7 +663,21 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
             dslx,
             Path::new("test.x"),
             "foo",
-            &StitchPipelineOptions::default(),
+            &StitchPipelineOptions {
+                verilog_version: VerilogVersion::SystemVerilog,
+                explicit_stages: None,
+                stdlib_path: None,
+                search_paths: Vec::new(),
+                flop_inputs: true,
+                flop_outputs: true,
+                input_valid_signal: None,
+                output_valid_signal: None,
+                reset_signal: None,
+                reset_active_low: false,
+                add_invariant_assertions: true,
+                array_index_bounds_checking: true,
+                output_module_name: "foo",
+            },
         );
         assert!(result.is_err());
         let err = result.unwrap_err().0;
