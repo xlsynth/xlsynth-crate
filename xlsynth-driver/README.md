@@ -929,33 +929,39 @@ Notes
 Takes a collection of `*_cycleN` pipeline‐stage functions in a DSLX file (e.g. `foo_cycle0`, `foo_cycle1`, …) and:
 
 1. Generates Verilog/SystemVerilog for **each** stage function.
-1. Emits a wrapper module named `<top>_pipeline` that instantiates the stages and wires them together to form the complete pipeline.
+1. Emits a wrapper module named exactly `<output_module_name>` (or `<dslx_top>` when `--stages` is not used) that instantiates the stages and wires them together to form the complete pipeline.
 
 The generated text is written to **stdout**; diagnostic messages appear on **stderr**.
 
 Supported flags:
 
 - `--use_system_verilog=<BOOL>` – emit SystemVerilog when `true` *(default)* or plain Verilog when `false`.
-- `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<top>_cycleN` functions).
+- `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<dslx_top>_cycleN` functions).
+- `--output_module_name=<NAME>` – wrapper module name. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
 
-The usual DSLX-related options (`--dslx_input_file`, `--dslx_top`, `--dslx_path`, `--dslx_stdlib_path`, `--warnings_as_errors`) are also accepted.
+The usual DSLX-related options (`--dslx_input_file`, `--dslx_path`, `--dslx_stdlib_path`, `--warnings_as_errors`) are accepted. Entry-point selection is via either `--dslx_top` (implicit discovery) or `--stages` (explicit list) — these are mutually exclusive.
 
 Additional semantics:
 
-- `--dslx_top=<NAME>` specifies the *logical* pipeline prefix. Stage
+- `--dslx_top=<NAME>` specifies the *logical* pipeline prefix for implicit stage discovery. Stage
   functions are expected to be named `<NAME>_cycle0`, `<NAME>_cycle1`, … (or
   be provided explicitly via `--stages`). A DSLX function named exactly
   `<NAME>` is **ignored** by this command – only the `_cycleN` stage functions
-  participate in stitching. When `--stages` is supplied the prefix is only
-  used for the wrapper module name and **not** for stage discovery.
+  participate in stitching. When `--stages` is supplied, `--dslx_top` must not be present; use `--output_module_name` to set the wrapper name.
 
-Example:
+Examples:
 
 ```shell
+# Implicit discovery (wrapper name defaults to dslx_top)
 xlsynth-driver dslx-stitch-pipeline \
   --dslx_input_file my_design.x \
-  --dslx_top foo \
-  --stages=foo_cycle0,foo_cycle1,foo_cycle2 > foo_pipeline.sv
+  --dslx_top foo > foo.sv
+
+# Explicit stages (wrapper name required)
+xlsynth-driver dslx-stitch-pipeline \
+  --dslx_input_file my_design.x \
+  --stages=foo_cycle0,foo_cycle1,foo_cycle2 \
+  --output_module_name=foo > foo.sv
 ```
 
 ### `run-verilog-pipeline` *(experimental)*
