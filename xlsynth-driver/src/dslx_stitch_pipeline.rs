@@ -12,7 +12,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     let path_refs = paths.search_path_views();
 
     let input = matches.get_one::<String>("dslx_input_file").unwrap();
-    let top = matches.get_one::<String>("dslx_top").unwrap();
+    let dslx_top = matches.get_one::<String>("dslx_top");
     let dslx = std::fs::read_to_string(input).unwrap_or_else(|e| {
         report_cli_error_and_exit("could not read DSLX input", Some(&e.to_string()), vec![]);
     });
@@ -29,6 +29,30 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     let stage_list: Option<Vec<String>> = matches
         .get_one::<String>("stages")
         .map(|csv| csv.split(',').map(|s| s.trim().to_string()).collect());
+    let output_module_name_opt = matches.get_one::<String>("output_module_name");
+
+    // Enforce mutual exclusion and required combinations.
+    if stage_list.is_some() && dslx_top.is_some() {
+        report_cli_error_and_exit(
+            "--dslx_top is mutually exclusive with --stages",
+            None,
+            vec![],
+        );
+    }
+    if stage_list.is_some() && output_module_name_opt.is_none() {
+        report_cli_error_and_exit(
+            "--output_module_name is required when --stages is provided",
+            None,
+            vec![],
+        );
+    }
+    if stage_list.is_none() && dslx_top.is_none() {
+        report_cli_error_and_exit(
+            "one of --dslx_top or --stages must be provided",
+            None,
+            vec![],
+        );
+    }
     let input_valid_signal_opt = matches
         .get_one::<String>("input_valid_signal")
         .map(|s| s.as_str());
@@ -69,6 +93,13 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .get_one::<String>("flop_outputs")
         .map(|s| s == "true")
         .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_OUTPUTS);
+    // Determine wrapper name and discovery top.
+    let discovery_top = dslx_top.as_deref();
+    let wrapper_name = output_module_name_opt
+        .as_deref()
+        .or(discovery_top)
+        .expect("validated combinations above");
+
     let options = xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineOptions {
         verilog_version,
         explicit_stages: stage_list,
@@ -82,12 +113,14 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         reset_active_low,
         add_invariant_assertions,
         array_index_bounds_checking,
+        output_module_name: Some(wrapper_name),
     };
 
+    let top_for_library = discovery_top.unwrap_or(wrapper_name);
     let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
         &dslx,
         std::path::Path::new(input),
-        top,
+        top_for_library,
         &options,
     );
     match result {

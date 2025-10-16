@@ -395,7 +395,15 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx-stitch-pipeline")
                 .about("Stitches DSLX pipeline stages")
-                .add_dslx_input_args(true)
+                .add_dslx_input_args(false)
+                .arg(
+                    Arg::new("dslx_top")
+                        .long("dslx_top")
+                        .value_name("DSLX_TOP")
+                        .help("Top-level pipeline prefix for implicit <top>_cycleN discovery; ignored when --stages is used")
+                        .conflicts_with("stages")
+                        .required_unless_present("stages"),
+                )
                 .add_bool_arg(
                     "use_system_verilog",
                     "Whether to emit SystemVerilog (default true; set to false for plain Verilog)",
@@ -428,6 +436,12 @@ fn main() {
                         .value_name("CSV")
                         .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("output_module_name")
+                        .long("output_module_name")
+                        .value_name("NAME")
+                        .help("Wrapper module name; required with --stages. Defaults to --dslx_top when using implicit discovery."),
                 )
                 .add_bool_arg(
                     "flop_inputs",

@@ -35,6 +35,7 @@ pub struct StitchPipelineOptions<'a> {
     pub reset_active_low: bool,
     pub add_invariant_assertions: bool,
     pub array_index_bounds_checking: bool,
+    pub output_module_name: Option<&'a str>,
 }
 
 impl<'a> Default for StitchPipelineOptions<'a> {
@@ -52,6 +53,7 @@ impl<'a> Default for StitchPipelineOptions<'a> {
             reset_active_low: false,
             add_invariant_assertions: true,
             array_index_bounds_checking: true,
+            output_module_name: None,
         }
     }
 }
@@ -406,7 +408,7 @@ pub fn stitch_pipeline<'a>(
         VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
     });
     let pipeline_cfg = BuildPipelineConfig {
-        top_module_name: top.to_string(),
+        top_module_name: opts.output_module_name.unwrap_or(top).to_string(),
         clk_port_name: "clk".to_string(),
         stage_modules: stage_module_refs,
         flop_inputs,
@@ -569,6 +571,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
                 reset_active_low: true,
                 add_invariant_assertions: false,
                 array_index_bounds_checking: true,
+                output_module_name: None,
             },
         )
         .unwrap()
@@ -617,6 +620,7 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
                 reset_active_low: false,
                 add_invariant_assertions: false,
                 array_index_bounds_checking: true,
+                output_module_name: None,
             },
         )
         .unwrap();
