@@ -85,6 +85,12 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             if path_str.contains("/fuzz/corpus/") || path_str.contains("/fuzz/artifacts/") {
                 continue;
             }
+
+            // Exclude benchmark input data.
+            if path_str.contains("/benchdata/") {
+                continue;
+            }
+
             let filename = path.file_name().unwrap().to_str().unwrap();
             if path_str.ends_with(".golden.sv")
                 || path_str.ends_with(".golden.v")

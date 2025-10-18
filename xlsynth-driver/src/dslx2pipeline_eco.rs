@@ -13,7 +13,7 @@ use crate::tools::{
 use regex::Regex;
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
 use xlsynth_pir::ir::PackageMember;
-use xlsynth_pir::matching_ged::{apply_block_edits, compute_block_edit};
+use xlsynth_pir::matching_ged::{apply_block_edits, compute_block_edit, format_ir_edits};
 
 // Searchs the given IR file for registers and exits the process with an error
 // if found.
@@ -185,9 +185,10 @@ fn dslx2pipeline_eco(
     let patched_block = apply_block_edits(baseline_block, &edits).unwrap();
 
     let edits_path = temp_dir.path().join("edits.txt");
-    std::fs::write(&edits_path, format!("{:#?}\n", edits)).unwrap();
+    let edits_str = format_ir_edits(old_fn, &edits);
+    std::fs::write(&edits_path, edits_str.to_string()).unwrap();
     if let Some(path) = edits_debug_out {
-        std::fs::write(path, format!("{:#?}\n", edits)).unwrap();
+        std::fs::write(path, edits_str.to_string()).unwrap();
     }
 
     // Set the patched block to top, and write out the patched block IR.
