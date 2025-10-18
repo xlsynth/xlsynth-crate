@@ -178,6 +178,8 @@ mod tests {
     }
 
     #[test]
+    // Not supported under TIv2 (DSLX use_syntax)
+    #[ignore]
     fn test_validate_use() {
         let _ = env_logger::try_init();
         validate_use().expect("validation should succeed");
