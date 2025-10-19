@@ -147,6 +147,16 @@ pub struct CVastStatement {
 }
 
 #[repr(C)]
+pub struct CVastConditional {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastCaseStatement {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CVastParameterRef {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -1791,6 +1801,11 @@ extern "C" {
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
+    pub fn xls_vast_verilog_file_make_blocking_assignment(
+        f: *mut CVastFile,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
     pub fn xls_vast_always_base_get_statement_block(
         always_base: *mut CVastAlwaysBase,
     ) -> *mut CVastStatementBlock;
@@ -1813,6 +1828,40 @@ extern "C" {
         block: *mut CVastStatementBlock,
         text: *const std::os::raw::c_char,
     ) -> *mut CVastStatement;
+
+    // Blocking assignment in a statement block
+    pub fn xls_vast_statement_block_add_blocking_assignment(
+        block: *mut CVastStatementBlock,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
+
+    // Conditional (if / else-if / else)
+    pub fn xls_vast_statement_block_add_conditional(
+        block: *mut CVastStatementBlock,
+        cond: *mut CVastExpression,
+    ) -> *mut CVastConditional;
+    pub fn xls_vast_conditional_get_then_block(
+        cond: *mut CVastConditional,
+    ) -> *mut CVastStatementBlock;
+    pub fn xls_vast_conditional_add_else_if(
+        cond: *mut CVastConditional,
+        expr_cond: *mut CVastExpression,
+    ) -> *mut CVastStatementBlock;
+    pub fn xls_vast_conditional_add_else(cond: *mut CVastConditional) -> *mut CVastStatementBlock;
+
+    // Case statement builders
+    pub fn xls_vast_statement_block_add_case(
+        block: *mut CVastStatementBlock,
+        selector: *mut CVastExpression,
+    ) -> *mut CVastCaseStatement;
+    pub fn xls_vast_case_statement_add_item(
+        case_stmt: *mut CVastCaseStatement,
+        match_expr: *mut CVastExpression,
+    ) -> *mut CVastStatementBlock;
+    pub fn xls_vast_case_statement_add_default(
+        case_stmt: *mut CVastCaseStatement,
+    ) -> *mut CVastStatementBlock;
 
     pub fn xls_function_type_get_param_count(fty: *mut CIrFunctionType) -> i64;
 

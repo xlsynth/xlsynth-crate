@@ -652,3 +652,229 @@ fn test_sequential_logic_system_verilog() {
 fn test_sequential_logic_verilog() {
     run_sequential_logic_test(false);
 }
+
+fn run_blocking_assignment_test(use_system_verilog: bool) {
+    use xlsynth::vast::*;
+    let mut file = VastFile::new(if use_system_verilog {
+        VastFileType::SystemVerilog
+    } else {
+        VastFileType::Verilog
+    });
+    let mut module = file.add_module("test_module");
+    let scalar_type = file.make_scalar_type();
+    let clk = module.add_input("clk", &scalar_type);
+    let x = module.add_input("x", &scalar_type);
+    let r = module.add_reg("r", &scalar_type).unwrap();
+
+    let posedge_clk = file.make_pos_edge(&clk.to_expr());
+    let always_block = if use_system_verilog {
+        module.add_always_ff(&[&posedge_clk]).unwrap()
+    } else {
+        module.add_always_at(&[&posedge_clk]).unwrap()
+    };
+    let mut sb = always_block.get_statement_block();
+    sb.add_blocking_assignment(&r.to_expr(), &x.to_expr());
+
+    let verilog = file.emit();
+    let want = if use_system_verilog {
+        r#"module test_module(
+  input wire clk,
+  input wire x
+);
+  reg r;
+  always_ff @ (posedge clk) begin
+    r = x;
+  end
+endmodule
+"#
+    } else {
+        r#"module test_module(
+  input wire clk,
+  input wire x
+);
+  reg r;
+  always @ (posedge clk) begin
+    r = x;
+  end
+endmodule
+"#
+    };
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_blocking_assignment_system_verilog() {
+    run_blocking_assignment_test(true);
+}
+
+#[test]
+fn test_blocking_assignment_verilog() {
+    run_blocking_assignment_test(false);
+}
+
+fn run_conditional_test(use_system_verilog: bool) {
+    use xlsynth::vast::*;
+    let mut file = VastFile::new(if use_system_verilog {
+        VastFileType::SystemVerilog
+    } else {
+        VastFileType::Verilog
+    });
+    let mut module = file.add_module("M");
+    let bit = file.make_scalar_type();
+    let clk = module.add_input("clk", &bit);
+    let a = module.add_input("a", &bit);
+    let b = module.add_input("b", &bit);
+    let r = module.add_reg("r", &bit).unwrap();
+    let posedge_clk = file.make_pos_edge(&clk.to_expr());
+    let always = if use_system_verilog {
+        module.add_always_ff(&[&posedge_clk]).unwrap()
+    } else {
+        module.add_always_at(&[&posedge_clk]).unwrap()
+    };
+    let mut sb = always.get_statement_block();
+    let cond = sb.add_if(&a.to_expr());
+    let mut then_block = cond.then_block();
+    then_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
+    let mut else_if_block = cond.add_else_if(&b.to_expr());
+    else_if_block.add_nonblocking_assignment(&r.to_expr(), &b.to_expr());
+    let mut else_block = cond.add_else();
+    else_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
+    let verilog = file.emit();
+    let want = if use_system_verilog {
+        r#"module M(
+  input wire clk,
+  input wire a,
+  input wire b
+);
+  reg r;
+  always_ff @ (posedge clk) begin
+    if (a) begin
+      r <= a;
+    end else if (b) begin
+      r <= b;
+    end else begin
+      r <= a;
+    end
+  end
+endmodule
+"#
+    } else {
+        r#"module M(
+  input wire clk,
+  input wire a,
+  input wire b
+);
+  reg r;
+  always @ (posedge clk) begin
+    if (a) begin
+      r <= a;
+    end else if (b) begin
+      r <= b;
+    end else begin
+      r <= a;
+    end
+  end
+endmodule
+"#
+    };
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_conditional_system_verilog() {
+    run_conditional_test(true);
+}
+
+#[test]
+fn test_conditional_verilog() {
+    run_conditional_test(false);
+}
+
+fn run_case_test(use_system_verilog: bool) {
+    use xlsynth::vast::*;
+    let mut file = VastFile::new(if use_system_verilog {
+        VastFileType::SystemVerilog
+    } else {
+        VastFileType::Verilog
+    });
+    let mut module = file.add_module("C");
+    let bit = file.make_scalar_type();
+    let clk = module.add_input("clk", &bit);
+    let sel = module.add_input("sel", &bit);
+    let a = module.add_input("a", &bit);
+    let b = module.add_input("b", &bit);
+    let r = module.add_reg("r", &bit).unwrap();
+    let posedge_clk = file.make_pos_edge(&clk.to_expr());
+    let always = if use_system_verilog {
+        module.add_always_ff(&[&posedge_clk]).unwrap()
+    } else {
+        module.add_always_at(&[&posedge_clk]).unwrap()
+    };
+    let mut sb = always.get_statement_block();
+    let case_stmt = sb.add_case(&sel.to_expr());
+    let mut item_a = case_stmt.add_item(&a.to_expr());
+    item_a.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
+    let mut item_b = case_stmt.add_item(&b.to_expr());
+    item_b.add_nonblocking_assignment(&r.to_expr(), &b.to_expr());
+    let mut default_block = case_stmt.add_default();
+    default_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
+    let verilog = file.emit();
+    let want = if use_system_verilog {
+        r#"module C(
+  input wire clk,
+  input wire sel,
+  input wire a,
+  input wire b
+);
+  reg r;
+  always_ff @ (posedge clk) begin
+    case (sel)
+      a: begin
+        r <= a;
+      end
+      b: begin
+        r <= b;
+      end
+      default: begin
+        r <= a;
+      end
+    endcase
+  end
+endmodule
+"#
+    } else {
+        r#"module C(
+  input wire clk,
+  input wire sel,
+  input wire a,
+  input wire b
+);
+  reg r;
+  always @ (posedge clk) begin
+    case (sel)
+      a: begin
+        r <= a;
+      end
+      b: begin
+        r <= b;
+      end
+      default: begin
+        r <= a;
+      end
+    endcase
+  end
+endmodule
+"#
+    };
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_case_system_verilog() {
+    run_case_test(true);
+}
+
+#[test]
+fn test_case_verilog() {
+    run_case_test(false);
+}

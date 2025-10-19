@@ -336,6 +336,16 @@ pub struct VastStatement {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+pub struct Conditional {
+    inner: *mut sys::CVastConditional,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct CaseStatement {
+    inner: *mut sys::CVastCaseStatement,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
 pub struct ParameterRef {
     inner: *mut sys::CVastParameterRef,
     parent: Arc<Mutex<VastFilePtr>>,
@@ -567,6 +577,17 @@ impl VastAlwaysBase {
 }
 
 impl VastStatementBlock {
+    pub fn add_blocking_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_statement_block_add_blocking_assignment(self.inner, lhs.inner, rhs.inner)
+        };
+        VastStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
     pub fn add_nonblocking_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
         let _locked = self.parent.lock().unwrap();
         let inner = unsafe {
@@ -606,6 +627,74 @@ impl VastStatementBlock {
         let inner =
             unsafe { sys::xls_vast_statement_block_add_inline_text(self.inner, c_text.as_ptr()) };
         VastStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_if(&mut self, cond: &Expr) -> Conditional {
+        let _locked = self.parent.lock().unwrap();
+        let inner =
+            unsafe { sys::xls_vast_statement_block_add_conditional(self.inner, cond.inner) };
+        Conditional {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_case(&mut self, selector: &Expr) -> CaseStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_statement_block_add_case(self.inner, selector.inner) };
+        CaseStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
+impl Conditional {
+    pub fn then_block(&self) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_conditional_get_then_block(self.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_else_if(&self, cond: &Expr) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_conditional_add_else_if(self.inner, cond.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_else(&self) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_conditional_add_else(self.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
+impl CaseStatement {
+    pub fn add_item(&self, match_expr: &Expr) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_case_statement_add_item(self.inner, match_expr.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_default(&self) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_case_statement_add_default(self.inner) };
+        VastStatementBlock {
             inner,
             parent: self.parent.clone(),
         }
@@ -1137,6 +1226,17 @@ impl VastFile {
         let locked = self.ptr.lock().unwrap();
         let inner = unsafe {
             sys::xls_vast_verilog_file_make_nonblocking_assignment(locked.0, lhs.inner, rhs.inner)
+        };
+        VastStatement {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_blocking_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_blocking_assignment(locked.0, lhs.inner, rhs.inner)
         };
         VastStatement {
             inner,
