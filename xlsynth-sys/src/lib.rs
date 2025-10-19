@@ -742,6 +742,11 @@ extern "C" {
         bit_count: i64,
         is_signed: bool,
     ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_bit_vector_type_expr(
+        f: *mut CVastFile,
+        width_expr: *mut CVastExpression,
+        is_signed: bool,
+    ) -> *mut CVastDataType;
     pub fn xls_vast_verilog_file_make_integer_type(
         f: *mut CVastFile,
         is_signed: bool,
