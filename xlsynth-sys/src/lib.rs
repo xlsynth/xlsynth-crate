@@ -319,7 +319,7 @@ pub type XlsValueKind = i32;
 // Calling convention used for DSLX mangling APIs.
 pub type XlsCallingConvention = i32;
 
-pub type VastFileType = i32;
+pub type CVastFileType = i32;
 
 pub type VastOperatorKind = i32;
 
@@ -728,7 +728,7 @@ extern "C" {
 
     // -- VAST APIs
 
-    pub fn xls_vast_make_verilog_file(file_type: VastFileType) -> *mut CVastFile;
+    pub fn xls_vast_make_verilog_file(file_type: CVastFileType) -> *mut CVastFile;
     pub fn xls_vast_verilog_file_free(f: *mut CVastFile);
     pub fn xls_vast_verilog_file_add_module(
         f: *mut CVastFile,
