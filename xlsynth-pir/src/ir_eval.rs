@@ -783,6 +783,72 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                 let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
             }
+            P::ArrayUpdate {
+                array,
+                value,
+                indices,
+                assumed_in_bounds,
+            } => {
+                // XLS semantics: if any index is out of bounds, the result is identical to the
+                // input array, unless `assumed_in_bounds` is true, in which case OOB is an
+                // error.
+                let arr = env.get(array).expect("array must be evaluated").clone();
+                let val = env.get(value).expect("value must be evaluated").clone();
+                // Gather concrete indices as usize.
+                let mut idxs: Vec<usize> = Vec::with_capacity(indices.len());
+                for r in indices.iter() {
+                    let u = env
+                        .get(r)
+                        .expect("index must be evaluated")
+                        .to_bits()
+                        .unwrap()
+                        .to_u64()
+                        .unwrap() as usize;
+                    idxs.push(u);
+                }
+
+                // Recursively update nested arrays; returns None on OOB.
+                fn set_at_path(
+                    cur: &IrValue,
+                    path: &[usize],
+                    new_val: &IrValue,
+                ) -> Option<IrValue> {
+                    if path.is_empty() {
+                        return Some(new_val.clone());
+                    }
+                    let count = cur.get_element_count().ok()?;
+                    let idx = path[0];
+                    if idx >= count {
+                        return None;
+                    }
+                    let mut elems: Vec<IrValue> = Vec::with_capacity(count);
+                    for i in 0..count {
+                        let child = cur.get_element(i).ok()?;
+                        if i == idx {
+                            let updated = set_at_path(&child, &path[1..], new_val)?;
+                            elems.push(updated);
+                        } else {
+                            elems.push(child);
+                        }
+                    }
+                    IrValue::make_array(&elems).ok()
+                }
+
+                match set_at_path(&arr, &idxs, &val) {
+                    Some(updated) => updated,
+                    None => {
+                        if *assumed_in_bounds {
+                            return FnEvalResult::Failure(FnEvalFailure {
+                                assertion_failures,
+                                trace_messages,
+                            });
+                        } else {
+                            // OOB but not assumed in-bounds: return the original array unchanged.
+                            arr
+                        }
+                    }
+                }
+            }
             _ => eval_pure(node, &env),
         };
         // Coerce only for specific nodes where a wider internal computation is
@@ -1369,6 +1435,167 @@ fn f(x: bits[3] id=1) -> bits[1] {
             FnEvalResult::Failure(fail) => {
                 // No assertion failures expected; this is an early-return guard.
                 assert!(fail.assertion_failures.is_empty());
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_update_in_bounds() {
+        let ir_text = r#"package test
+
+fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
+  ret array_update.4: bits[5][4] = array_update(a, v, indices=[i], id=4)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        // a = [1,2,3,4], v = 9, i = 2 (in-bounds)
+        let a = IrValue::make_array(&[
+            IrValue::make_ubits(5, 1).unwrap(),
+            IrValue::make_ubits(5, 2).unwrap(),
+            IrValue::make_ubits(5, 3).unwrap(),
+            IrValue::make_ubits(5, 4).unwrap(),
+        ])
+        .unwrap();
+        let v = IrValue::make_ubits(5, 9).unwrap();
+        let i = IrValue::make_ubits(32, 2).unwrap();
+
+        match eval_fn(&f, &[a.clone(), v.clone(), i]) {
+            FnEvalResult::Success(s) => {
+                let got = s.value;
+                let expected = IrValue::make_array(&[
+                    IrValue::make_ubits(5, 1).unwrap(),
+                    IrValue::make_ubits(5, 2).unwrap(),
+                    v,
+                    IrValue::make_ubits(5, 4).unwrap(),
+                ])
+                .unwrap();
+                assert_eq!(got, expected);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_update_oob_returns_original_when_not_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
+  ret array_update.4: bits[5][4] = array_update(a, v, indices=[i], id=4)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        // a = [1,2,3,4], v = 9, i = 5 (OOB) => unchanged when not assumed_in_bounds
+        let a = IrValue::make_array(&[
+            IrValue::make_ubits(5, 1).unwrap(),
+            IrValue::make_ubits(5, 2).unwrap(),
+            IrValue::make_ubits(5, 3).unwrap(),
+            IrValue::make_ubits(5, 4).unwrap(),
+        ])
+        .unwrap();
+        let v = IrValue::make_ubits(5, 9).unwrap();
+        let i = IrValue::make_ubits(32, 5).unwrap();
+
+        match eval_fn(&f, &[a.clone(), v, i]) {
+            FnEvalResult::Success(s) => {
+                assert_eq!(s.value, a);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_update_oob_failure_when_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
+  ret array_update.4: bits[5][4] = array_update(a, v, indices=[i], assumed_in_bounds=true, id=4)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        // OOB index with assumed_in_bounds=true => Failure
+        let a = IrValue::make_array(&[
+            IrValue::make_ubits(5, 1).unwrap(),
+            IrValue::make_ubits(5, 2).unwrap(),
+            IrValue::make_ubits(5, 3).unwrap(),
+            IrValue::make_ubits(5, 4).unwrap(),
+        ])
+        .unwrap();
+        let v = IrValue::make_ubits(5, 9).unwrap();
+        let i = IrValue::make_ubits(32, 7).unwrap();
+
+        match eval_fn(&f, &[a, v, i]) {
+            FnEvalResult::Failure(_fail) => {
+                // Early failure as expected
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_update_nested_indices() {
+        let ir_text = r#"package test
+
+fn f(a: bits[3][2][2] id=1, v: bits[3] id=2, i: bits[32] id=3, j: bits[32] id=4) -> bits[3][2][2] {
+  ret array_update.5: bits[3][2][2] = array_update(a, v, indices=[i, j], id=5)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        // a = [[1,2],[3,4]] (bits[3]); update a[1][0] = 7
+        let row0 = IrValue::make_array(&[
+            IrValue::make_ubits(3, 1).unwrap(),
+            IrValue::make_ubits(3, 2).unwrap(),
+        ])
+        .unwrap();
+        let row1 = IrValue::make_array(&[
+            IrValue::make_ubits(3, 3).unwrap(),
+            IrValue::make_ubits(3, 4).unwrap(),
+        ])
+        .unwrap();
+        let a = IrValue::make_array(&[row0, row1]).unwrap();
+        let v = IrValue::make_ubits(3, 7).unwrap();
+        let i = IrValue::make_ubits(32, 1).unwrap();
+        let j = IrValue::make_ubits(32, 0).unwrap();
+
+        match eval_fn(&f, &[a, v, i, j]) {
+            FnEvalResult::Success(s) => {
+                let got = s.value;
+                let exp_row0 = IrValue::make_array(&[
+                    IrValue::make_ubits(3, 1).unwrap(),
+                    IrValue::make_ubits(3, 2).unwrap(),
+                ])
+                .unwrap();
+                let exp_row1 = IrValue::make_array(&[
+                    IrValue::make_ubits(3, 7).unwrap(),
+                    IrValue::make_ubits(3, 4).unwrap(),
+                ])
+                .unwrap();
+                let expected = IrValue::make_array(&[exp_row0, exp_row1]).unwrap();
+                assert_eq!(got, expected);
             }
             other => panic!("unexpected result: {:?}", other),
         }
