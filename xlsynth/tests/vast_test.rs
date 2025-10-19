@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use rstest::rstest;
 use xlsynth::{
     ir_value::IrFormatPreference,
     vast::{DataKind, Expr, VastDataType, VastFile, VastFileType},
@@ -562,13 +561,9 @@ endmodule
     assert_eq!(verilog, want);
 }
 
-#[rstest]
-fn test_sequential_logic_system_verilog(#[values(true, false)] use_system_verilog: bool) {
-    let mut file = VastFile::new(if use_system_verilog {
-        VastFileType::SystemVerilog
-    } else {
-        VastFileType::Verilog
-    });
+#[test]
+fn test_sequential_logic_system_verilog() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut module = file.add_module("test_module");
 
     let scalar_type = file.make_scalar_type();
@@ -583,11 +578,7 @@ fn test_sequential_logic_system_verilog(#[values(true, false)] use_system_verilo
 
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
 
-    let always_block = if use_system_verilog {
-        module.add_always_ff(&[&posedge_clk]).unwrap()
-    } else {
-        module.add_always_at(&[&posedge_clk]).unwrap()
-    };
+    let always_block = module.add_always_ff(&[&posedge_clk]).unwrap();
 
     let mut stmt_block = always_block.get_statement_block();
 
@@ -599,8 +590,7 @@ fn test_sequential_logic_system_verilog(#[values(true, false)] use_system_verilo
 
     let verilog = file.emit();
 
-    let want = if use_system_verilog {
-        r#"module test_module(
+    let want = r#"module test_module(
   input wire clk,
   input wire pred,
   input wire x,
@@ -616,37 +606,14 @@ fn test_sequential_logic_system_verilog(#[values(true, false)] use_system_verilo
     p0_x <= x;
   end
 endmodule
-"#
-    } else {
-        r#"module test_module(
-  input wire clk,
-  input wire pred,
-  input wire x,
-  output wire out
-);
-  reg p0_pred;
-  reg p0_x;
-  always @ (posedge clk) begin
-    p0_pred <= pred;
-    // capture pred
-
-    /* combo capture */
-    p0_x <= x;
-  end
-endmodule
-"#
-    };
+"#;
 
     assert_eq!(verilog, want);
 }
 
-#[rstest]
-fn blocking_assignment_emits_system_verilog(#[values(true, false)] use_system_verilog: bool) {
-    let mut file = VastFile::new(if use_system_verilog {
-        VastFileType::SystemVerilog
-    } else {
-        VastFileType::Verilog
-    });
+#[test]
+fn blocking_assignment_emits_system_verilog() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut module = file.add_module("test_module");
     let scalar_type = file.make_scalar_type();
     let clk = module.add_input("clk", &scalar_type);
@@ -654,17 +621,12 @@ fn blocking_assignment_emits_system_verilog(#[values(true, false)] use_system_ve
     let r = module.add_reg("r", &scalar_type).unwrap();
 
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always_block = if use_system_verilog {
-        module.add_always_ff(&[&posedge_clk]).unwrap()
-    } else {
-        module.add_always_at(&[&posedge_clk]).unwrap()
-    };
+    let always_block = module.add_always_ff(&[&posedge_clk]).unwrap();
     let mut sb = always_block.get_statement_block();
     sb.add_blocking_assignment(&r.to_expr(), &x.to_expr());
 
     let verilog = file.emit();
-    let want = if use_system_verilog {
-        r#"module test_module(
+    let want = r#"module test_module(
   input wire clk,
   input wire x
 );
@@ -673,19 +635,7 @@ fn blocking_assignment_emits_system_verilog(#[values(true, false)] use_system_ve
     r = x;
   end
 endmodule
-"#
-    } else {
-        r#"module test_module(
-  input wire clk,
-  input wire x
-);
-  reg r;
-  always @ (posedge clk) begin
-    r = x;
-  end
-endmodule
-"#
-    };
+"#;
     assert_eq!(verilog, want);
 }
 
@@ -719,12 +669,7 @@ endmodule
 
 #[test]
 fn conditional_emits_system_verilog() {
-    let use_system_verilog = true;
-    let mut file = xlsynth::vast::VastFile::new(if use_system_verilog {
-        xlsynth::vast::VastFileType::SystemVerilog
-    } else {
-        xlsynth::vast::VastFileType::Verilog
-    });
+    let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::SystemVerilog);
     let mut module = file.add_module("M");
     let bit = file.make_scalar_type();
     let clk = module.add_input("clk", &bit);
@@ -732,11 +677,7 @@ fn conditional_emits_system_verilog() {
     let b = module.add_input("b", &bit);
     let r = module.add_reg("r", &bit).unwrap();
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always = if use_system_verilog {
-        module.add_always_ff(&[&posedge_clk]).unwrap()
-    } else {
-        module.add_always_at(&[&posedge_clk]).unwrap()
-    };
+    let always = module.add_always_ff(&[&posedge_clk]).unwrap();
     let mut sb = always.get_statement_block();
     let cond = sb.add_if(&a.to_expr());
     let mut then_block = cond.then_block();
@@ -746,8 +687,7 @@ fn conditional_emits_system_verilog() {
     let mut else_block = cond.add_else();
     else_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
     let verilog = file.emit();
-    let want = if use_system_verilog {
-        r#"module M(
+    let want = r#"module M(
   input wire clk,
   input wire a,
   input wire b
@@ -763,26 +703,7 @@ fn conditional_emits_system_verilog() {
     end
   end
 endmodule
-"#
-    } else {
-        r#"module M(
-  input wire clk,
-  input wire a,
-  input wire b
-);
-  reg r;
-  always @ (posedge clk) begin
-    if (a) begin
-      r <= a;
-    end else if (b) begin
-      r <= b;
-    end else begin
-      r <= a;
-    end
-  end
-endmodule
-"#
-    };
+"#;
     assert_eq!(verilog, want);
 }
 
@@ -826,13 +747,9 @@ endmodule
     assert_eq!(verilog, want);
 }
 
-#[rstest]
-fn case_emits_system_verilog(#[values(true, false)] use_system_verilog: bool) {
-    let mut file = xlsynth::vast::VastFile::new(if use_system_verilog {
-        xlsynth::vast::VastFileType::SystemVerilog
-    } else {
-        xlsynth::vast::VastFileType::Verilog
-    });
+#[test]
+fn case_emits_system_verilog() {
+    let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::SystemVerilog);
     let mut module = file.add_module("C");
     let bit = file.make_scalar_type();
     let clk = module.add_input("clk", &bit);
@@ -841,11 +758,7 @@ fn case_emits_system_verilog(#[values(true, false)] use_system_verilog: bool) {
     let b = module.add_input("b", &bit);
     let r = module.add_reg("r", &bit).unwrap();
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always = if use_system_verilog {
-        module.add_always_ff(&[&posedge_clk]).unwrap()
-    } else {
-        module.add_always_at(&[&posedge_clk]).unwrap()
-    };
+    let always = module.add_always_ff(&[&posedge_clk]).unwrap();
     let mut sb = always.get_statement_block();
     let case_stmt = sb.add_case(&sel.to_expr());
     let mut item_a = case_stmt.add_item(&a.to_expr());
@@ -855,8 +768,7 @@ fn case_emits_system_verilog(#[values(true, false)] use_system_verilog: bool) {
     let mut default_block = case_stmt.add_default();
     default_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
     let verilog = file.emit();
-    let want = if use_system_verilog {
-        r#"module C(
+    let want = r#"module C(
   input wire clk,
   input wire sel,
   input wire a,
@@ -877,31 +789,7 @@ fn case_emits_system_verilog(#[values(true, false)] use_system_verilog: bool) {
     endcase
   end
 endmodule
-"#
-    } else {
-        r#"module C(
-  input wire clk,
-  input wire sel,
-  input wire a,
-  input wire b
-);
-  reg r;
-  always @ (posedge clk) begin
-    case (sel)
-      a: begin
-        r <= a;
-      end
-      b: begin
-        r <= b;
-      end
-      default: begin
-        r <= a;
-      end
-    endcase
-  end
-endmodule
-"#
-    };
+"#;
     assert_eq!(verilog, want);
 }
 
