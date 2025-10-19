@@ -632,7 +632,7 @@ impl VastStatementBlock {
         }
     }
 
-    pub fn add_if(&mut self, cond: &Expr) -> Conditional {
+    pub fn add_cond(&mut self, cond: &Expr) -> Conditional {
         let _locked = self.parent.lock().unwrap();
         let inner =
             unsafe { sys::xls_vast_statement_block_add_conditional(self.inner, cond.inner) };

@@ -679,7 +679,7 @@ fn conditional_emits_system_verilog() {
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
     let always = module.add_always_ff(&[&posedge_clk]).unwrap();
     let mut sb = always.get_statement_block();
-    let cond = sb.add_if(&a.to_expr());
+    let cond = sb.add_cond(&a.to_expr());
     let mut then_block = cond.then_block();
     then_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
     let mut else_if_block = cond.add_else_if(&b.to_expr());
@@ -719,7 +719,7 @@ fn conditional_emits_verilog() {
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
     let always = module.add_always_at(&[&posedge_clk]).unwrap();
     let mut sb = always.get_statement_block();
-    let cond = sb.add_if(&a.to_expr());
+    let cond = sb.add_cond(&a.to_expr());
     let mut then_block = cond.then_block();
     then_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
     let mut else_if_block = cond.add_else_if(&b.to_expr());
