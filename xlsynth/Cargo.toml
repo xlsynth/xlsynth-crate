@@ -24,7 +24,6 @@ pretty_assertions = "1.4.1"
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
 lazy_static = "1.4"
 criterion = "0.3"
-rstest = "0.26.1"
 
 [[bench]]
 name = "call_dslx"
