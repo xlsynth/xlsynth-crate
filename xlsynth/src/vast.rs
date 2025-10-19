@@ -884,6 +884,27 @@ impl VastFile {
         }
     }
 
+    /// Creates a bit-vector type with an expression-based width.
+    /// The emitted range will be [width_expr-1:0].
+    pub fn make_bit_vector_type_expr(
+        &mut self,
+        width_expr: &Expr,
+        is_signed: bool,
+    ) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let data_type = unsafe {
+            sys::xls_vast_verilog_file_make_bit_vector_type_expr(
+                locked.0,
+                width_expr.inner,
+                is_signed,
+            )
+        };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
     pub fn make_extern_package_type(
         &mut self,
         package_name: &str,

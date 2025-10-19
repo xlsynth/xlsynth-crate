@@ -838,3 +838,40 @@ endmodule
 "#;
     assert_eq!(verilog, want);
 }
+
+#[test]
+fn bit_vector_type_expr_with_parameter_port() {
+    let mut file = VastFile::new(VastFileType::Verilog);
+    let mut module = file.add_module("P");
+    let lit = file
+        .make_literal("bits[32]:4", &IrFormatPreference::UnsignedDecimal)
+        .unwrap();
+    let n = module.add_parameter("N", &lit);
+    let dt = file.make_bit_vector_type_expr(&n.to_expr(), false);
+    module.add_output("o", &dt);
+    let verilog = file.emit();
+    let want = r#"module P(
+  output wire [N - 1:0] o
+);
+  parameter N = 32'd4;
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn bit_vector_type_expr_with_literal() {
+    let mut file = VastFile::new(VastFileType::Verilog);
+    let mut module = file.add_module("M");
+    let lit = file
+        .make_literal("bits[32]:5", &IrFormatPreference::UnsignedDecimal)
+        .unwrap();
+    let dt = file.make_bit_vector_type_expr(&lit, false);
+    module.add_wire("w", &dt);
+    let verilog = file.emit();
+    let want = r#"module M;
+  wire [4:0] w;
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
