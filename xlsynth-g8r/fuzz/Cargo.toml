@@ -93,12 +93,6 @@ path = "fuzz_targets/fuzz_ir_outline_equiv.rs"
 test = false
 doc = false
 
-[[bin]]
-name = "fuzz_ir_eval_interp_equiv"
-path = "fuzz_targets/fuzz_ir_eval_interp_equiv.rs"
-test = false
-doc = false
-
 [features]
 # No default optional features; required solver integrations are always enabled via dependency specification above.
 default = []
