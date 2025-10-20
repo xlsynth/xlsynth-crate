@@ -48,5 +48,5 @@ criterion_group! {
        .sample_size(10);
     targets = bench_greedy_matching_ged
 }
-//criterion_group!(eco, bench_greedy_matching_ged);
+
 criterion_main!(eco);

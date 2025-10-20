@@ -27,7 +27,9 @@ const PERFECT_REVERSE_MATCH_SCORE: i32 = SCORE_BASE * 200;
 
 /// Generic vector indexed by node reference types (e.g. OldNodeRef/NewNodeRef).
 /// Because these node ref types are (close to) dense, NodeVector can be used as
-/// a fast map/set.
+/// a fast map/set. Generic parameters:
+/// - I: The index type (e.g. OldNodeRef/NewNodeRef)
+/// - D: The data type (e.g. bool/i32)
 #[derive(Clone)]
 struct NodeVector<I, D> {
     data: Vec<D>,

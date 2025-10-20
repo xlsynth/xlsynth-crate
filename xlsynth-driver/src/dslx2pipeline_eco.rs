@@ -188,7 +188,7 @@ fn dslx2pipeline_eco(
     let edits_str = format_ir_edits(old_fn, &edits);
     std::fs::write(&edits_path, edits_str.to_string()).unwrap();
     if let Some(path) = edits_debug_out {
-        std::fs::write(path, edits_str.to_string()).unwrap();
+        std::fs::write(path, edits_str.as_str()).unwrap();
     }
 
     // Set the patched block to top, and write out the patched block IR.
