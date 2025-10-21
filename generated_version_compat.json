@@ -19,6 +19,10 @@
     "xlsynth_release_version": "0.7.0",
     "crate_release_datetime": "2025-10-07 11:10:19 PDT"
   },
+  "0.6.4": {
+    "xlsynth_release_version": "0.1.9",
+    "crate_release_datetime": "2025-10-20 12:53:11 PDT"
+  },
   "0.6.3": {
     "xlsynth_release_version": "0.1.9",
     "crate_release_datetime": "2025-10-08 12:36:27 PDT"
