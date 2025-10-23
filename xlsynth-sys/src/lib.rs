@@ -885,12 +885,33 @@ extern "C" {
     ) -> *mut CVastLiteral;
 
     // - Module additions
+    pub fn xls_vast_verilog_module_add_parameter_port(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_typed_parameter_port(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLogicRef;
     pub fn xls_vast_verilog_module_add_input(
         m: *mut CVastModule,
         name: *const std::os::raw::c_char,
         type_: *mut CVastDataType,
     ) -> *mut CVastLogicRef;
     pub fn xls_vast_verilog_module_add_output(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_logic_input(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_logic_output(
         m: *mut CVastModule,
         name: *const std::os::raw::c_char,
         type_: *mut CVastDataType,
@@ -1790,12 +1811,24 @@ extern "C" {
         out_always_at: *mut *mut CVastAlwaysBase,
         error_out: *mut *mut ::std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_vast_verilog_module_add_always_comb(
+        m: *mut CVastModule,
+        out_always_comb: *mut *mut CVastAlwaysBase,
+        error_out: *mut *mut ::std::os::raw::c_char,
+    ) -> bool;
     pub fn xls_vast_verilog_module_add_reg(
         m: *mut CVastModule,
         name: *const ::std::os::raw::c_char,
         type_: *mut CVastDataType,
         out_reg_ref: *mut *mut CVastLogicRef,
         error_out: *mut *mut ::std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_verilog_module_add_logic(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+        out_logic_ref: *mut *mut CVastLogicRef,
+        error_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
     pub fn xls_vast_verilog_file_make_pos_edge(
         f: *mut CVastFile,
@@ -1811,10 +1844,17 @@ extern "C" {
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
+
     pub fn xls_vast_always_base_get_statement_block(
         always_base: *mut CVastAlwaysBase,
     ) -> *mut CVastStatementBlock;
+
     pub fn xls_vast_statement_block_add_nonblocking_assignment(
+        block: *mut CVastStatementBlock,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
+    pub fn xls_vast_statement_block_add_blocking_assignment(
         block: *mut CVastStatementBlock,
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
@@ -1832,13 +1872,6 @@ extern "C" {
     pub fn xls_vast_statement_block_add_inline_text(
         block: *mut CVastStatementBlock,
         text: *const std::os::raw::c_char,
-    ) -> *mut CVastStatement;
-
-    // Blocking assignment in a statement block
-    pub fn xls_vast_statement_block_add_blocking_assignment(
-        block: *mut CVastStatementBlock,
-        lhs: *mut CVastExpression,
-        rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
 
     // Conditional (if / else-if / else)

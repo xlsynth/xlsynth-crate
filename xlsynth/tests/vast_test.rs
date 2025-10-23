@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use pretty_assertions::assert_eq;
 use xlsynth::{
     ir_value::IrFormatPreference,
     vast::{DataKind, Expr, VastDataType, VastFile, VastFileType},
@@ -620,8 +621,7 @@ fn blocking_assignment_emits_system_verilog() {
     let x = module.add_input("x", &scalar_type);
     let r = module.add_reg("r", &scalar_type).unwrap();
 
-    let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always_block = module.add_always_ff(&[&posedge_clk]).unwrap();
+    let always_block = module.add_always_comb().unwrap();
     let mut sb = always_block.get_statement_block();
     sb.add_blocking_assignment(&r.to_expr(), &x.to_expr());
 
@@ -631,7 +631,7 @@ fn blocking_assignment_emits_system_verilog() {
   input wire x
 );
   reg r;
-  always_ff @ (posedge clk) begin
+  always_comb begin
     r = x;
   end
 endmodule
@@ -752,11 +752,11 @@ fn case_emits_system_verilog() {
     let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::SystemVerilog);
     let mut module = file.add_module("C");
     let bit = file.make_scalar_type();
-    let clk = module.add_input("clk", &bit);
-    let sel = module.add_input("sel", &bit);
-    let a = module.add_input("a", &bit);
-    let b = module.add_input("b", &bit);
-    let r = module.add_reg("r", &bit).unwrap();
+    let clk = module.add_logic_input("clk", &bit);
+    let sel = module.add_logic_input("sel", &bit);
+    let a = module.add_logic_input("a", &bit);
+    let b = module.add_logic_input("b", &bit);
+    let r = module.add_logic("r", &bit).unwrap();
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
     let always = module.add_always_ff(&[&posedge_clk]).unwrap();
     let mut sb = always.get_statement_block();
@@ -769,12 +769,12 @@ fn case_emits_system_verilog() {
     default_block.add_nonblocking_assignment(&r.to_expr(), &a.to_expr());
     let verilog = file.emit();
     let want = r#"module C(
-  input wire clk,
-  input wire sel,
-  input wire a,
-  input wire b
+  input logic clk,
+  input logic sel,
+  input logic a,
+  input logic b
 );
-  reg r;
+  logic r;
   always_ff @ (posedge clk) begin
     case (sel)
       a: begin
@@ -804,7 +804,7 @@ fn case_emits_verilog() {
     let b = module.add_input("b", &bit);
     let r = module.add_reg("r", &bit).unwrap();
     let posedge_clk = file.make_pos_edge(&clk.to_expr());
-    let always = module.add_always_at(&[&posedge_clk]).unwrap();
+    let always = module.add_always_ff(&[&posedge_clk]).unwrap();
     let mut sb = always.get_statement_block();
     let case_stmt = sb.add_case(&sel.to_expr());
     let mut item_a = case_stmt.add_item(&a.to_expr());
@@ -821,7 +821,7 @@ fn case_emits_verilog() {
   input wire b
 );
   reg r;
-  always @ (posedge clk) begin
+  always_ff @ (posedge clk) begin
     case (sel)
       a: begin
         r <= a;
@@ -871,6 +871,38 @@ fn bit_vector_type_expr_with_literal() {
     let verilog = file.emit();
     let want = r#"module M;
   wire [4:0] w;
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn module_with_parameters() {
+    let mut file = xlsynth::vast::VastFile::new(xlsynth::vast::VastFileType::SystemVerilog);
+    let mut module = file.add_module("C");
+    let bit = file.make_scalar_type();
+    let n = module.add_parameter_port(
+        "N",
+        &file.make_plain_literal(42, &IrFormatPreference::UnsignedDecimal),
+    );
+    module.add_typed_parameter_port(
+        "Foo",
+        &file.make_bit_vector_type(16, false),
+        &file
+            .make_literal("bits[16]:5", &IrFormatPreference::UnsignedDecimal)
+            .unwrap(),
+    );
+    module.add_logic_input("clk", &bit);
+    module.add_logic_input("a", &file.make_bit_vector_type_expr(&n.to_expr(), false));
+    let verilog = file.emit();
+    let want = r#"module C #(
+  parameter N = 42,
+  parameter logic [15:0] Foo = 16'd5
+) (
+  input logic clk,
+  input logic [N - 1:0] a
+);
+
 endmodule
 "#;
     assert_eq!(verilog, want);

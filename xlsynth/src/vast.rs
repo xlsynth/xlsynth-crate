@@ -381,11 +381,55 @@ impl DataKind {
     }
 }
 
+pub enum AlwaysKind {
+    AlwaysFF,
+    AlwaysAt,
+    AlwaysComb,
+}
+
 impl VastModule {
     pub fn name(&self) -> String {
         let locked = self.parent.lock().unwrap();
         let inner = unsafe { sys::xls_vast_verilog_module_get_name(self.inner) };
         unsafe { c_str_to_rust(inner) }
+    }
+
+    pub fn add_parameter_port(&mut self, name: &str, value: &Expr) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_parameter_port(
+                self.inner,
+                c_name.as_ptr(),
+                value.inner,
+            )
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_typed_parameter_port(
+        &mut self,
+        name: &str,
+        data_type: &VastDataType,
+        value: &Expr,
+    ) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_typed_parameter_port(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+                value.inner,
+            )
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
     }
 
     pub fn add_input(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
@@ -405,6 +449,38 @@ impl VastModule {
         let _locked = self.parent.lock().unwrap();
         let c_logic_ref = unsafe {
             sys::xls_vast_verilog_module_add_output(self.inner, c_name.as_ptr(), data_type.inner)
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_logic_input(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_logic_input(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+            )
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_logic_output(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_logic_output(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+            )
         };
         LogicRef {
             inner: c_logic_ref,
@@ -487,10 +563,38 @@ impl VastModule {
         }
     }
 
+    pub fn add_logic(
+        &mut self,
+        name: &str,
+        data_type: &VastDataType,
+    ) -> Result<LogicRef, XlsynthError> {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let mut reg_ref_out: *mut sys::CVastLogicRef = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_verilog_module_add_logic(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+                &mut reg_ref_out,
+                &mut error_out,
+            )
+        };
+        if success {
+            Ok(LogicRef {
+                inner: reg_ref_out,
+                parent: self.parent.clone(),
+            })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
     fn add_always_block(
         &mut self,
         sensitivity_list: &[&Expr],
-        is_ff: bool,
+        always_kind: AlwaysKind,
     ) -> Result<VastAlwaysBase, XlsynthError> {
         let _locked = self.parent.lock().unwrap();
         let mut expr_ptrs: Vec<*mut sys::CVastExpression> =
@@ -498,22 +602,26 @@ impl VastModule {
         let mut always_base_out: *mut sys::CVastAlwaysBase = std::ptr::null_mut();
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = unsafe {
-            if is_ff {
-                sys::xls_vast_verilog_module_add_always_ff(
+            match always_kind {
+                AlwaysKind::AlwaysFF => sys::xls_vast_verilog_module_add_always_ff(
                     self.inner,
                     expr_ptrs.as_mut_ptr(),
                     expr_ptrs.len(),
                     &mut always_base_out,
                     &mut error_out,
-                )
-            } else {
-                sys::xls_vast_verilog_module_add_always_at(
+                ),
+                AlwaysKind::AlwaysAt => sys::xls_vast_verilog_module_add_always_at(
                     self.inner,
                     expr_ptrs.as_mut_ptr(),
                     expr_ptrs.len(),
                     &mut always_base_out,
                     &mut error_out,
-                )
+                ),
+                AlwaysKind::AlwaysComb => sys::xls_vast_verilog_module_add_always_comb(
+                    self.inner,
+                    &mut always_base_out,
+                    &mut error_out,
+                ),
             }
         };
         if success {
@@ -531,14 +639,18 @@ impl VastModule {
         &mut self,
         sensitivity_list: &[&Expr],
     ) -> Result<VastAlwaysBase, XlsynthError> {
-        self.add_always_block(sensitivity_list, true)
+        self.add_always_block(sensitivity_list, AlwaysKind::AlwaysFF)
     }
 
     pub fn add_always_at(
         &mut self,
         sensitivity_list: &[&Expr],
     ) -> Result<VastAlwaysBase, XlsynthError> {
-        self.add_always_block(sensitivity_list, false)
+        self.add_always_block(sensitivity_list, AlwaysKind::AlwaysAt)
+    }
+
+    pub fn add_always_comb(&mut self) -> Result<VastAlwaysBase, XlsynthError> {
+        self.add_always_block(&[], AlwaysKind::AlwaysComb)
     }
 
     pub fn add_parameter(&mut self, name: &str, rhs: &Expr) -> ParameterRef {
@@ -861,6 +973,17 @@ impl VastFile {
             } else {
                 Err(XlsynthError(c_str_to_rust(error_out)))
             }
+        }
+    }
+    pub fn make_plain_literal(&mut self, value: i32, fmt: &IrFormatPreference) -> Expr {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut literal_out: *mut sys::CVastLiteral = std::ptr::null_mut();
+        let literal = unsafe {
+            sys::xls_vast_verilog_file_make_plain_literal(self.ptr.lock().unwrap().0, value)
+        };
+        Expr {
+            inner: unsafe { sys::xls_vast_literal_as_expression(literal) },
+            parent: self.ptr.clone(),
         }
     }
 
