@@ -118,6 +118,93 @@ fn unpack_return_value(
     v
 }
 
+enum DslxFnEvaluator {
+    Interp,
+    Jit {
+        jit: xlsynth::IrFunctionJit,
+    },
+    PirInterp {
+        pir_pkg: xlsynth_pir::ir::Package,
+        fn_name: String,
+    },
+}
+
+impl DslxFnEvaluator {
+    fn new(
+        mode: EvalMode,
+        pkg: &xlsynth::IrPackage,
+        func: &xlsynth::IrFunction,
+    ) -> anyhow::Result<Self> {
+        Ok(match mode {
+            EvalMode::Interp => DslxFnEvaluator::Interp,
+            EvalMode::Jit => {
+                let jit = xlsynth::IrFunctionJit::new(func)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                DslxFnEvaluator::Jit { jit }
+            }
+            EvalMode::PirInterp => {
+                let ir_text = pkg.to_string();
+                let mut parser = xlsynth_pir::ir_parser::Parser::new(&ir_text);
+                let pir_pkg = parser
+                    .parse_and_validate_package()
+                    .map_err(|e| anyhow::anyhow!(format!("PIR parse: {}", e)))?;
+                let fn_name = func.get_name();
+                DslxFnEvaluator::PirInterp { pir_pkg, fn_name }
+            }
+        })
+    }
+
+    fn run(
+        &self,
+        args: &[xlsynth::IrValue],
+        pkg: &xlsynth::IrPackage,
+        func: &xlsynth::IrFunction,
+    ) -> anyhow::Result<xlsynth::IrValue> {
+        match self {
+            DslxFnEvaluator::Interp => {
+                let v = func
+                    .interpret(args)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                Ok(unpack_return_value(pkg, func, v))
+            }
+            DslxFnEvaluator::Jit { jit } => {
+                let rr = jit.run(args).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                if !rr.assert_messages.is_empty() {
+                    return Err(anyhow::anyhow!(format!(
+                        "assertion failure(s): {}",
+                        rr.assert_messages.join("; ")
+                    )));
+                }
+                Ok(unpack_return_value(pkg, func, rr.value.clone()))
+            }
+            DslxFnEvaluator::PirInterp { pir_pkg, fn_name } => {
+                let pir_fn = pir_pkg
+                    .get_fn(fn_name)
+                    .ok_or_else(|| anyhow::anyhow!("PIR function lookup failed"))?;
+                match std::panic::catch_unwind(|| xlsynth_pir::ir_eval::eval_fn(&pir_fn, args)) {
+                    Ok(result) => match result {
+                        xlsynth_pir::ir_eval::FnEvalResult::Success(s) => Ok(s.value),
+                        xlsynth_pir::ir_eval::FnEvalResult::Failure(f) => {
+                            let labels: Vec<String> = f
+                                .assertion_failures
+                                .iter()
+                                .map(|a| format!("{}: {}", a.label, a.message))
+                                .collect();
+                            Err(anyhow::anyhow!(format!(
+                                "assertion failure(s): {}",
+                                labels.join("; ")
+                            )))
+                        }
+                    },
+                    Err(_payload) => Err(anyhow::anyhow!(
+                        "assertion failure(s): pir-interp panic while evaluating function"
+                    )),
+                }
+            }
+        }
+    }
+}
+
 fn build_args_for_call(
     pkg: &xlsynth::IrPackage,
     f: &xlsynth::IrFunction,
@@ -237,6 +324,9 @@ pub fn evaluate_dslx_function_over_ir_values(
     let requires_itok =
         requires_implicit_token_via_dslx(&dslx_src, dslx_file, module_name, top_function, opts)?;
 
+    // Build an evaluator instance that encapsulates backend state.
+    let evaluator = DslxFnEvaluator::new(mode, &pkg, &func)?;
+
     // Parse each line as a tuple value; evaluate; stringify result.
     let mut outputs: Vec<String> = Vec::with_capacity(input_values_ir_text.len());
     for (lineno, line) in input_values_ir_text.iter().enumerate() {
@@ -260,63 +350,7 @@ pub fn evaluate_dslx_function_over_ir_values(
 
         let args = build_args_for_call(&pkg, &func, &tuple_val, requires_itok)?;
 
-        let out_val = match mode {
-            EvalMode::Interp => {
-                let v = func
-                    .interpret(&args)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                unpack_return_value(&pkg, &func, v)
-            }
-            EvalMode::Jit => {
-                let jit = xlsynth::IrFunctionJit::new(&func)
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                let rr = jit.run(&args).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                if !rr.assert_messages.is_empty() {
-                    return Err(anyhow::anyhow!(format!(
-                        "assertion failure(s): {}",
-                        rr.assert_messages.join("; ")
-                    )));
-                }
-                unpack_return_value(&pkg, &func, rr.value)
-            }
-            EvalMode::PirInterp => {
-                // Parse IR text to PIR and evaluate there (captures asserts/traces).
-                let ir_text = pkg.to_string();
-                let mut parser = xlsynth_pir::ir_parser::Parser::new(&ir_text);
-                let pir_pkg = parser
-                    .parse_and_validate_package()
-                    .map_err(|e| anyhow::anyhow!(format!("PIR parse: {}", e)))?;
-                let name = func.get_name();
-                let pir_fn = pir_pkg
-                    .get_fn(&name)
-                    .ok_or_else(|| anyhow::anyhow!(format!("PIR function '{}' not found", name)))?;
-
-                // Drop itok synthesized args when present for logical mapping? The PIR
-                // evaluator expects exact param arity; our args include itok when present
-                // in IR, so pass as-is.
-                match std::panic::catch_unwind(|| xlsynth_pir::ir_eval::eval_fn(&pir_fn, &args)) {
-                    Ok(result) => match result {
-                        xlsynth_pir::ir_eval::FnEvalResult::Success(s) => s.value,
-                        xlsynth_pir::ir_eval::FnEvalResult::Failure(f) => {
-                            let labels: Vec<String> = f
-                                .assertion_failures
-                                .iter()
-                                .map(|a| format!("{}: {}", a.label, a.message))
-                                .collect();
-                            return Err(anyhow::anyhow!(format!(
-                                "assertion failure(s): {}",
-                                labels.join("; ")
-                            )));
-                        }
-                    },
-                    Err(_payload) => {
-                        return Err(anyhow::anyhow!(
-                            "assertion failure(s): pir-interp panic while evaluating function"
-                        ));
-                    }
-                }
-            }
-        };
+        let out_val = evaluator.run(&args, &pkg, &func)?;
 
         outputs.push(out_val.to_string());
     }
