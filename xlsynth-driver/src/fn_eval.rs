@@ -72,7 +72,7 @@ fn unpack_return_value(
 ) -> xlsynth::IrValue {
     // If return type is (token, X), extract X; otherwise return v as-is.
     let fty = f.get_type().expect("get function type");
-    let ret_ty = fty.return_type();
+    let _ret_ty = fty.return_type();
     // Check tuple of size >= 2 with first being token.
     // We don't have a direct tuple-introspection on IrType; check via value shape.
     if let Ok(count) = v.get_element_count() {
@@ -83,13 +83,6 @@ fn unpack_return_value(
             if pkg.types_eq(&tok_ty, &token_ty).expect("types_eq") {
                 return v.get_element(1).expect("tuple el1");
             }
-        }
-    }
-    // Fallback: if return type text starts with "(token," also attempt extraction.
-    let ret_ty_str = ret_ty.to_string();
-    if ret_ty_str.starts_with("(token,") {
-        if let Ok(val1) = v.get_element(1) {
-            return val1;
         }
     }
     v
