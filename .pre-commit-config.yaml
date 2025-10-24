@@ -68,6 +68,13 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: get-required-xls-release-tag
+        name: get_required_xls_release_tag.py runs successfully
+        description: Ensure the scripts/get_required_xls_release_tag.py script exits with code 0
+        entry: python3 scripts/get_required_xls_release_tag.py
+        language: system
+        pass_filenames: false
+
   - repo: https://github.com/executablebooks/mdformat
     rev: 0.7.17 # Use a version that supports Python 3.8
     hooks:
