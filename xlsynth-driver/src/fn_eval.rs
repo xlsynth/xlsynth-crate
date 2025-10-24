@@ -46,29 +46,46 @@ fn mangle_candidates(module_name: &str, top_function: &str) -> Vec<String> {
     v
 }
 
-/// Returns (is_itok, has_activation)
-fn detect_itok_signature(pkg: &xlsynth::IrPackage, f: &xlsynth::IrFunction) -> (bool, bool) {
-    let fty = f.get_type().expect("get function type");
-    let param_count = fty.param_count();
-    if param_count == 0 {
-        return (false, false);
+/// Returns whether the DSLX function requires the implicit-token calling
+/// convention.
+fn requires_implicit_token_via_dslx(
+    dslx_src: &str,
+    dslx_file: &Path,
+    module_name: &str,
+    top_function: &str,
+    opts: &DslxFnEvalOptions,
+) -> anyhow::Result<bool> {
+    let dslx_path_str = dslx_file
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-utf8 dslx_file path"))?;
+    let mut import_data =
+        xlsynth::dslx::ImportData::new(opts.dslx_stdlib_path, &opts.additional_search_paths);
+    let tcm =
+        xlsynth::dslx::parse_and_typecheck(dslx_src, dslx_path_str, module_name, &mut import_data)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let module = tcm.get_module();
+    let mut target_fn: Option<xlsynth::dslx::Function> = None;
+    for i in 0..module.get_member_count() {
+        if let Some(xlsynth::dslx::MatchableModuleMember::Function(f)) =
+            module.get_member(i).to_matchable()
+        {
+            if f.get_identifier() == top_function {
+                target_fn = Some(f);
+                break;
+            }
+        }
     }
-    let token_ty = pkg.get_token_type();
-    let p0_ty = fty.param_type(0).expect("param 0 type");
-    let is_p0_token = pkg.types_eq(&token_ty, &p0_ty).expect("types_eq");
-    if !is_p0_token {
-        return (false, false);
-    }
-    // Optional activation at index 1: bits[1].
-    if param_count >= 2 {
-        let p1_ty = fty.param_type(1).expect("param 1 type");
-        // Construct bits[1] type by making a 1-bit value and asking for its type.
-        let one = xlsynth::IrValue::make_ubits(1, 1).expect("make u1");
-        let bits1_ty = pkg.get_type_for_value(&one).expect("type for u1");
-        let is_p1_bits1 = pkg.types_eq(&bits1_ty, &p1_ty).expect("types_eq");
-        return (true, is_p1_bits1);
-    }
-    (true, false)
+    let func = target_fn.ok_or_else(|| {
+        anyhow::anyhow!(format!(
+            "DSLX function '{}' not found in module {}",
+            top_function, module_name
+        ))
+    })?;
+    let type_info = tcm.get_type_info();
+    let requires = type_info
+        .requires_implicit_token(&func)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(requires)
 }
 
 fn unpack_return_value(
@@ -105,6 +122,7 @@ fn build_args_for_call(
     pkg: &xlsynth::IrPackage,
     f: &xlsynth::IrFunction,
     logical_tuple: &xlsynth::IrValue,
+    is_itok: bool,
 ) -> anyhow::Result<Vec<xlsynth::IrValue>> {
     let fty = f.get_type().map_err(|e| anyhow::anyhow!(e.to_string()))?;
     // Require input as tuple for uniformity.
@@ -112,7 +130,18 @@ fn build_args_for_call(
         .get_elements()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    let (is_itok, has_activation) = detect_itok_signature(pkg, f);
+    // Activation (u1) immediately follows token when present in the IR signature.
+    let has_activation = if is_itok && fty.param_count() >= 2 {
+        let p1_ty = fty
+            .param_type(1)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let one = xlsynth::IrValue::make_ubits(1, 1).expect("make u1");
+        let bits1_ty = pkg.get_type_for_value(&one).expect("type for u1");
+        pkg.types_eq(&bits1_ty, &p1_ty)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    } else {
+        false
+    };
     let logical_param_start = if is_itok {
         if has_activation {
             2
@@ -204,6 +233,10 @@ pub fn evaluate_dslx_function_over_ir_values(
         ))
     })?;
 
+    // Determine if the DSLX top requires implicit-token calling convention.
+    let requires_itok =
+        requires_implicit_token_via_dslx(&dslx_src, dslx_file, module_name, top_function, opts)?;
+
     // Parse each line as a tuple value; evaluate; stringify result.
     let mut outputs: Vec<String> = Vec::with_capacity(input_values_ir_text.len());
     for (lineno, line) in input_values_ir_text.iter().enumerate() {
@@ -225,7 +258,7 @@ pub fn evaluate_dslx_function_over_ir_values(
             ))
         })?;
 
-        let args = build_args_for_call(&pkg, &func, &tuple_val)?;
+        let args = build_args_for_call(&pkg, &func, &tuple_val, requires_itok)?;
 
         let out_val = match mode {
             EvalMode::Interp => {
