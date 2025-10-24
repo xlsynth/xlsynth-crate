@@ -5,7 +5,7 @@ import sys
 import os
 
 if len(sys.argv) < 2:
-    print("Usage: check_version_is.py <version>")
+    print("Usage: python3 scripts/check_version_is.py <version>")
     sys.exit(1)
 
 # The argument might be e.g. "v0.0.57" or "0.0.57"

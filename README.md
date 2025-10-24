@@ -117,6 +117,15 @@ pre-commit run --all-files
 
 This `pre-commit` step is also run as part of continuous integration.
 
+### Repository scripts
+
+Python helper scripts now live under `scripts/` at the repo root. Invoke them from the workspace root, e.g.:
+
+```shell
+python3 scripts/update_golden_files.py
+python3 scripts/run_all_fuzz_tests.py --fuzz-bin-args=-max_total_time=5
+```
+
 ### Developer note: xlsynth DSO/dylib release versioning
 
 The following versioning convention applies to the underlying DSO/dylib artifacts (e.g., `libxls.so`, `libxls.dylib`) released by the [xlsynth/xlsynth](https://github.com/xlsynth/xlsynth) repository, not to the versioning of this Rust crate itself. Occasionally, we need to create a successor to a patch release without bumping the minor or major version. In these cases, we use a dash-suffixed version tag (e.g., `v0.0.219-1`, `v0.0.219-2`). The plain form (e.g., `v0.0.219`) is implicitly equivalent to `v0.0.219-0`. This allows us to cherry-pick fixes onto a patch release when necessary.

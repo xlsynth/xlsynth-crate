@@ -348,7 +348,7 @@ def set_package_version(
 def main():
     def usage() -> str:
         return (
-            "Usage: bump_version_numbers.py <command> [args]\n\n"
+            "Usage: python3 scripts/bump_version_numbers.py <command> [args]\n\n"
             "Commands:\n"
             "  check                                  Validate current Cargo.toml versions are consistent (no write)\n"
             "  bump                                    Alias for bump-patch\n"
@@ -359,10 +359,10 @@ def main():
             "  transition-patch <old> <new>            Validate patch shape, then apply old->new\n"
             "  transition-arbitrary <old> <new>        Validate forward-only semver, then apply old->new\n\n"
             "Examples:\n"
-            "  python3 bump_version_numbers.py check\n"
-            "  python3 bump_version_numbers.py bump-minor\n"
-            "  python3 bump_version_numbers.py transition 0.3.0 0.4.0\n"
-            "  python3 bump_version_numbers.py transition-arbitrary 0.3.1 0.4.0\n"
+            "  python3 scripts/bump_version_numbers.py check\n"
+            "  python3 scripts/bump_version_numbers.py bump-minor\n"
+            "  python3 scripts/bump_version_numbers.py transition 0.3.0 0.4.0\n"
+            "  python3 scripts/bump_version_numbers.py transition-arbitrary 0.3.1 0.4.0\n"
         )
 
     if len(sys.argv) < 2:

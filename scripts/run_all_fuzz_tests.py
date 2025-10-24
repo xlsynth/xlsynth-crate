@@ -6,11 +6,11 @@
 Builds all fuzz targets and runs each for a short period of time.
 
 Usage:
-  python3 run_all_fuzz_tests.py
+  python3 scripts/run_all_fuzz_tests.py
 
   # With custom args:
   #   cargo fuzz run --release --features=foo,bar <target> -- -max_total_time=10
-  python3 run_all_fuzz_tests.py --fuzz-run-args=--release --features=foo,bar --fuzz-bin-args=-max_total_time=10
+  python3 scripts/run_all_fuzz_tests.py --fuzz-run-args=--release --features=foo,bar --fuzz-bin-args=-max_total_time=10
 """
 
 import argparse

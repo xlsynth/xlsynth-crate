@@ -41,7 +41,7 @@ repos:
       - id: mypy
         name: mypy
         description: Run mypy type checking on Python scripts
-        entry: mypy gen_version_compat.py run_valgrind_on_tests.py
+        entry: mypy scripts/gen_version_compat.py scripts/run_valgrind_on_tests.py
         language: python
         additional_dependencies: ["mypy", "types-termcolor"]
         pass_filenames: false
@@ -49,14 +49,14 @@ repos:
       - id: bump_version_check
         name: bump version check
         description: Verify that version bump in Cargo.toml files is consistent (simulation mode).
-        entry: python3 bump_version_numbers.py check
+        entry: python3 scripts/bump_version_numbers.py check
         language: system
         pass_filenames: false
 
       - id: pytest-bump-version-script
         name: pytest (bump_version_numbers.py)
         description: Run pytest on inline tests in bump_version_numbers.py
-        entry: pytest -q bump_version_numbers.py
+        entry: pytest -q scripts/bump_version_numbers.py
         language: python
         additional_dependencies: ["pytest"]
         pass_filenames: false
