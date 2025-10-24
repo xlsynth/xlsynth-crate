@@ -192,26 +192,22 @@ fn build_args_for_call(
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     // Activation (u1) immediately follows token when present in the IR signature.
-    let has_activation = if is_itok && fty.param_count() >= 2 {
+    if is_itok {
+        assert!(
+            fty.param_count() >= 2,
+            "implicit-token calling convention requires exactly (token, activation, ...) parameters"
+        );
         let p1_ty = fty
             .param_type(1)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let one = xlsynth::IrValue::make_ubits(1, 1).expect("make u1");
         let bits1_ty = pkg.get_type_for_value(&one).expect("type for u1");
-        pkg.types_eq(&bits1_ty, &p1_ty)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?
-    } else {
-        false
-    };
-    let logical_param_start = if is_itok {
-        if has_activation {
-            2
-        } else {
-            1
-        }
-    } else {
-        0
-    };
+        let is_u1 = pkg
+            .types_eq(&bits1_ty, &p1_ty)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        assert!(is_u1, "activation parameter must be bits[1]");
+    }
+    let logical_param_start = if is_itok { 2 } else { 0 };
     let logical_param_count = fty.param_count() - logical_param_start;
     if logical_elems.len() != logical_param_count {
         return Err(anyhow::anyhow!(format!(
@@ -242,11 +238,9 @@ fn build_args_for_call(
 
     let mut args: Vec<xlsynth::IrValue> = Vec::new();
     if is_itok {
-        // Prepend token and optional activation=1.
+        // Prepend token and activation=1.
         args.push(xlsynth::IrValue::make_token());
-        if has_activation {
-            args.push(xlsynth::IrValue::make_ubits(1, 1).expect("u1:1"));
-        }
+        args.push(xlsynth::IrValue::make_ubits(1, 1).expect("u1:1"));
     }
     args.extend(logical_elems);
     Ok(args)
