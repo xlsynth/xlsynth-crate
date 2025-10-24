@@ -40,6 +40,7 @@ mod dslx2pipeline;
 mod dslx2pipeline_eco;
 mod dslx2sv_types;
 mod dslx_equiv;
+mod dslx_fn_eval;
 mod dslx_g8r_stats;
 mod dslx_show;
 mod dslx_stitch_pipeline;
@@ -454,6 +455,26 @@ fn main() {
                 .add_bool_arg(
                     "array_index_bounds_checking",
                     "Whether to emit array index bounds checking",
+                ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-fn-eval")
+                .about("Evaluates a DSLX function for each tuple in an .irvals file; prints one output per line")
+                .add_dslx_input_args(true)
+                .arg(
+                    clap::Arg::new("input_ir_path")
+                        .long("input_ir_path")
+                        .value_name("PATH")
+                        .help("Path to an .irvals file with one typed IR tuple value per line")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("eval_mode")
+                        .long("eval_mode")
+                        .value_name("MODE")
+                        .help("Evaluation backend: interp|jit|pir-interp (default interp)")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -1610,6 +1631,8 @@ fn main() {
         ir2pipeline::handle_ir2pipeline(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
         dslx2sv_types::handle_dslx2sv_types(matches, &config);
+    } else if let Some(matches) = matches.subcommand_matches("dslx-fn-eval") {
+        dslx_fn_eval::handle_dslx_fn_eval(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx-show") {
         dslx_show::handle_dslx_show(matches, &config);
     } else if let Some(matches) = matches.subcommand_matches("dslx-g8r-stats") {

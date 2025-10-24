@@ -435,6 +435,29 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `dslx-fn-eval`
+
+Evaluates a DSLX function for each input tuple in a `.irvals` file and prints one output per line (XLS IR typed values).
+
+- Inputs:
+  - `--dslx_input_file <FILE>` – the DSLX source file.
+  - `--dslx_top <NAME>` – the entry function to evaluate.
+- `--input_ir_path <PATH>` – path to a file with one typed IR tuple per line. Unary functions require a 1‑tuple like `(bits[32]:42)`.
+  - `--eval_mode <interp|jit|pir-interp>` – backend mode (default `interp`).
+- Search paths (optional): `--dslx_path <P1;P2;...>` and `--dslx_stdlib_path <PATH>`.
+
+Example:
+
+```shell
+xlsynth-driver dslx-fn-eval \
+  --dslx_input_file foo.x \
+  --dslx_top add \
+  --input_ir_path inputs.irvals
+# inputs.irvals lines, e.g.:
+# (bits[32]:0x1, bits[32]:0x2)
+# (bits[32]:0x3, bits[32]:0x4)
+```
+
 ### `ir-strip-pos-data`
 
 Reads an `.ir` file and emits the same IR with all position data removed. This drops:

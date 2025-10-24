@@ -617,7 +617,7 @@ fn blocking_assignment_emits_system_verilog() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut module = file.add_module("test_module");
     let scalar_type = file.make_scalar_type();
-    let clk = module.add_input("clk", &scalar_type);
+    let _clk = module.add_input("clk", &scalar_type);
     let x = module.add_input("x", &scalar_type);
     let r = module.add_reg("r", &scalar_type).unwrap();
 
