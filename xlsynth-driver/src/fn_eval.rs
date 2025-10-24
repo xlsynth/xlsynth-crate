@@ -67,25 +67,28 @@ fn requires_implicit_token_via_dslx(
 
 fn unpack_return_value(
     pkg: &xlsynth::IrPackage,
-    f: &xlsynth::IrFunction,
     v: xlsynth::IrValue,
+    is_itok: bool,
 ) -> xlsynth::IrValue {
-    // If return type is (token, X), extract X; otherwise return v as-is.
-    let fty = f.get_type().expect("get function type");
-    let _ret_ty = fty.return_type();
-    // Check tuple of size >= 2 with first being token.
-    // We don't have a direct tuple-introspection on IrType; check via value shape.
-    if let Ok(count) = v.get_element_count() {
-        if count >= 2 {
-            let first = v.get_element(0).expect("tuple el0");
-            let tok_ty = pkg.get_type_for_value(&first).expect("type for el0");
-            let token_ty = pkg.get_token_type();
-            if pkg.types_eq(&tok_ty, &token_ty).expect("types_eq") {
-                return v.get_element(1).expect("tuple el1");
-            }
-        }
+    if !is_itok {
+        return v;
     }
-    v
+    let count = v
+        .get_element_count()
+        .expect("implicit-token return should be a tuple");
+    assert!(
+        count >= 2,
+        "implicit-token return tuple must have at least 2 elements"
+    );
+    let first = v.get_element(0).expect("tuple el0 present");
+    let tok_ty = pkg.get_type_for_value(&first).expect("type for el0");
+    let token_ty = pkg.get_token_type();
+    let is_token = pkg.types_eq(&tok_ty, &token_ty).expect("types_eq");
+    assert!(
+        is_token,
+        "first tuple element must be token for itok return"
+    );
+    v.get_element(1).expect("tuple el1 present")
 }
 
 enum DslxFnEvaluator {
@@ -129,13 +132,14 @@ impl DslxFnEvaluator {
         args: &[xlsynth::IrValue],
         pkg: &xlsynth::IrPackage,
         func: &xlsynth::IrFunction,
+        is_itok: bool,
     ) -> anyhow::Result<xlsynth::IrValue> {
         match self {
             DslxFnEvaluator::Interp => {
                 let v = func
                     .interpret(args)
                     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-                Ok(unpack_return_value(pkg, func, v))
+                Ok(unpack_return_value(pkg, v, is_itok))
             }
             DslxFnEvaluator::Jit { jit } => {
                 let rr = jit.run(args).map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -145,7 +149,7 @@ impl DslxFnEvaluator {
                         rr.assert_messages.join("; ")
                     )));
                 }
-                Ok(unpack_return_value(pkg, func, rr.value.clone()))
+                Ok(unpack_return_value(pkg, rr.value.clone(), is_itok))
             }
             DslxFnEvaluator::PirInterp { pir_pkg, fn_name } => {
                 let pir_fn = pir_pkg
@@ -317,7 +321,7 @@ pub fn evaluate_dslx_function_over_ir_values(
 
         let args = build_args_for_call(&pkg, &func, &tuple_val, requires_itok)?;
 
-        let out_val = evaluator.run(&args, &pkg, &func)?;
+        let out_val = evaluator.run(&args, &pkg, &func, requires_itok)?;
 
         outputs.push(out_val.to_string());
     }
