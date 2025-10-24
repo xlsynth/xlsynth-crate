@@ -27,9 +27,9 @@ pub fn handle_dslx_fn_eval(matches: &clap::ArgMatches, _config: &Option<Toolchai
     let lines: Vec<String> = irvals_text.lines().map(|s| s.to_string()).collect();
 
     let mode = match eval_mode {
-        Some("jit") => xlsynth_g8r::dslx::fn_eval::EvalMode::Jit,
-        Some("pir-interp") => xlsynth_g8r::dslx::fn_eval::EvalMode::PirInterp,
-        Some("interp") | None => xlsynth_g8r::dslx::fn_eval::EvalMode::Interp,
+        Some("jit") => crate::fn_eval::EvalMode::Jit,
+        Some("pir-interp") => crate::fn_eval::EvalMode::PirInterp,
+        Some("interp") | None => crate::fn_eval::EvalMode::Interp,
         Some(other) => {
             eprintln!(
                 "Unknown --eval_mode: {} (expected interp|jit|pir-interp)",
@@ -39,14 +39,14 @@ pub fn handle_dslx_fn_eval(matches: &clap::ArgMatches, _config: &Option<Toolchai
         }
     };
 
-    let opts = xlsynth_g8r::dslx::fn_eval::DslxFnEvalOptions {
+    let opts = crate::fn_eval::DslxFnEvalOptions {
         dslx_stdlib_path: dslx_paths.stdlib_path.as_deref(),
         additional_search_paths: dslx_paths.search_path_views(),
         force_implicit_token_calling_convention: false,
     };
 
     let dslx_file = std::path::Path::new(dslx_path);
-    match xlsynth_g8r::dslx::fn_eval::evaluate_dslx_function_over_ir_values(
+    match crate::fn_eval::evaluate_dslx_function_over_ir_values(
         dslx_file, top_fn, &lines, mode, &opts,
     ) {
         Ok(outputs) => {

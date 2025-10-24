@@ -2,8 +2,8 @@
 
 //! Evaluate a DSLX function over a list of XLS IR value tuples.
 //!
-//! Core logic lives in this library; the CLI subcommand in `xlsynth-driver`
-//! should be a thin shim over this API.
+//! Core logic lives here; the CLI subcommand should be a thin shim over this
+//! API.
 
 use std::path::Path;
 
@@ -114,7 +114,11 @@ fn build_args_for_call(
 
     let (is_itok, has_activation) = detect_itok_signature(pkg, f);
     let logical_param_start = if is_itok {
-        if has_activation { 2 } else { 1 }
+        if has_activation {
+            2
+        } else {
+            1
+        }
     } else {
         0
     };

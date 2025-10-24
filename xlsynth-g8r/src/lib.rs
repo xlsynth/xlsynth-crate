@@ -10,7 +10,6 @@ pub mod bulk_replace;
 pub mod check_equivalence;
 pub mod count_toggles;
 pub mod dce;
-pub mod dslx;
 pub mod dslx_stitch_pipeline;
 pub mod emit_netlist;
 pub mod emitted_netlist_parser;

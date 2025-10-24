@@ -45,6 +45,7 @@ mod dslx_g8r_stats;
 mod dslx_show;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
+mod fn_eval;
 mod g8r2v;
 mod g8r_equiv;
 mod gv2ir;
