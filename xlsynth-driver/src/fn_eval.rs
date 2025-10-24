@@ -23,29 +23,6 @@ pub struct DslxFnEvalOptions<'a> {
     pub force_implicit_token_calling_convention: bool,
 }
 
-fn mangle_candidates(module_name: &str, top_function: &str) -> Vec<String> {
-    let mut v = Vec::new();
-    // Typical convention
-    v.push(
-        xlsynth::mangle_dslx_name_with_calling_convention(
-            module_name,
-            top_function,
-            xlsynth::DslxCallingConvention::Typical,
-        )
-        .expect("mangle typical"),
-    );
-    // Implicit token convention
-    v.push(
-        xlsynth::mangle_dslx_name_with_calling_convention(
-            module_name,
-            top_function,
-            xlsynth::DslxCallingConvention::ImplicitToken,
-        )
-        .expect("mangle itok"),
-    );
-    v
-}
-
 /// Returns whether the DSLX function requires the implicit-token calling
 /// convention.
 fn requires_implicit_token_via_dslx(
@@ -300,29 +277,26 @@ pub fn evaluate_dslx_function_over_ir_values(
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let pkg = conv.ir;
 
-    // Resolve mangled function name candidates.
+    // Determine module name and whether the DSLX top requires implicit-token.
     let module_name =
         xlsynth::dslx_path_to_module_name(dslx_file).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let candidates = mangle_candidates(module_name, top_function);
-
-    // Find the function by trying candidates.
-    let mut func_opt: Option<xlsynth::IrFunction> = None;
-    for name in &candidates {
-        if let Ok(f) = pkg.get_function(name) {
-            func_opt = Some(f);
-            break;
-        }
-    }
-    let func = func_opt.ok_or_else(|| {
-        anyhow::anyhow!(format!(
-            "Function not found: tried [{}]",
-            candidates.join(", ")
-        ))
-    })?;
-
-    // Determine if the DSLX top requires implicit-token calling convention.
     let requires_itok =
         requires_implicit_token_via_dslx(&dslx_src, dslx_file, module_name, top_function, opts)?;
+
+    // Mangle with the precise calling convention and look up function.
+    let mangled = xlsynth::mangle_dslx_name_with_calling_convention(
+        module_name,
+        top_function,
+        if requires_itok {
+            xlsynth::DslxCallingConvention::ImplicitToken
+        } else {
+            xlsynth::DslxCallingConvention::Typical
+        },
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let func = pkg
+        .get_function(&mangled)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     // Build an evaluator instance that encapsulates backend state.
     let evaluator = DslxFnEvaluator::new(mode, &pkg, &func)?;
