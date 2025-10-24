@@ -435,6 +435,53 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `dslx-fn-eval`
+
+Evaluates a DSLX function for each input tuple in a `.irvals` file and prints one output per line (XLS IR typed values).
+
+- Inputs:
+  - `--dslx_input_file <FILE>` – the DSLX source file.
+  - `--dslx_top <NAME>` – the entry function to evaluate.
+- `--input_ir_path <PATH>` – path to a file with one typed IR tuple per line. Unary functions require a 1‑tuple like `(bits[32]:42)`.
+  - `--eval_mode <interp|jit|pir-interp>` – backend mode (default `interp`).
+- Search paths (optional): `--dslx_path <P1;P2;...>` and `--dslx_stdlib_path <PATH>`.
+
+Example:
+
+```shell
+xlsynth-driver dslx-fn-eval \
+  --dslx_input_file foo.x \
+  --dslx_top add \
+  --input_ir_path inputs.irvals
+# inputs.irvals lines, e.g.:
+# (bits[32]:0x1, bits[32]:0x2)
+# (bits[32]:0x3, bits[32]:0x4)
+```
+
+Float32 struct example (uses DSLX stdlib `float32::F32` as a tuple `(u1, u8, u23)`):
+
+```shell
+# Unary: add2(f) = f + f; input is a 1-tuple whose sole element is the F32 tuple
+cat > inputs.irvals <<EOF
+((bits[1]:0, bits[8]:127, bits[23]:0))
+EOF
+xlsynth-driver dslx-fn-eval \
+  --dslx_input_file f32_add2.x \
+  --dslx_top add2 \
+  --input_ir_path inputs.irvals
+# Prints (2.0f): (bits[1]:0, bits[8]:128, bits[23]:0)
+
+# Ternary: muladd(a,b,c) = a*b + c
+cat > inputs.irvals <<EOF
+((bits[1]:0, bits[8]:127, bits[23]:0), (bits[1]:0, bits[8]:128, bits[23]:0), (bits[1]:0, bits[8]:0, bits[23]:0))
+EOF
+xlsynth-driver dslx-fn-eval \
+  --dslx_input_file f32_muladd.x \
+  --dslx_top muladd \
+  --input_ir_path inputs.irvals
+# Prints (2.0f): (bits[1]:0, bits[8]:128, bits[23]:0)
+```
+
 ### `ir-strip-pos-data`
 
 Reads an `.ir` file and emits the same IR with all position data removed. This drops:
