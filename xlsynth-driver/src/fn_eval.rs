@@ -318,18 +318,7 @@ pub fn evaluate_dslx_function_over_ir_values(
             }
         };
 
-        // Output formatting policy:
-        // - If the input line contains a hex literal ("0x"), emit hex output.
-        // - Otherwise, use default formatting (decimal) to mirror common CLI behavior.
-        let prefer_hex = trimmed.contains("0x") || trimmed.contains("0X");
-        if prefer_hex {
-            let s = out_val
-                .to_string_fmt(xlsynth::ir_value::IrFormatPreference::Hex)
-                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            outputs.push(s);
-        } else {
-            outputs.push(out_val.to_string());
-        }
+        outputs.push(out_val.to_string());
     }
 
     Ok(outputs)

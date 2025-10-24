@@ -38,7 +38,7 @@ fn test_dslx_fn_eval_add() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let want = "bits[32]:0x3\nbits[32]:0x7\n";
+    let want = "bits[32]:3\nbits[32]:7\n";
     assert_eq!(stdout, want);
 }
 
