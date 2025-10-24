@@ -5,8 +5,9 @@ import subprocess
 import os
 import sys
 
-# Path to the xlsynth-driver executable (relative to workspace root)
-XLSYNTH_DRIVER_EXE = os.path.join("target", "debug", "xlsynth-driver")
+# Path to the xlsynth-driver executable (anchored at repo root)
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+XLSYNTH_DRIVER_EXE = os.path.join(REPO_ROOT, "target", "debug", "xlsynth-driver")
 
 # Environment variable to trigger golden file updates in Rust tests
 UPDATE_ENV_VAR = "XLSYNTH_UPDATE_GOLDEN"

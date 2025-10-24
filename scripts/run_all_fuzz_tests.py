@@ -89,7 +89,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    repo_root = Path(__file__).resolve().parent
+    # scripts/ is one level below the repo root.
+    repo_root = Path(__file__).resolve().parent.parent
     fuzz_dirs = find_fuzz_dirs(repo_root)
 
     if not fuzz_dirs:
