@@ -5,7 +5,7 @@ Emits the XLS release tag required by this repo, as defined in
 `xlsynth-sys/build.rs` (RELEASE_LIB_VERSION_TAG).
 
 Usage:
-  python3 get_required_xls_release_tag.py
+  python3 scripts/get_required_xls_release_tag.py
 
 Prints the tag string (e.g., "v0.0.224") to stdout.
 """
@@ -24,7 +24,8 @@ def extract_release_tag_from_build_rs(text: str) -> Optional[str]:
 
 
 def main() -> None:
-    repo_root = os.path.dirname(os.path.abspath(__file__))
+    # When invoked from scripts/, step up one directory to reach the repo root.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     build_rs_path = os.path.join(repo_root, "xlsynth-sys", "build.rs")
     try:
         with open(build_rs_path, "r", encoding="utf-8") as f:
