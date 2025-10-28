@@ -358,6 +358,16 @@ pub struct LocalparamRef {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+impl LocalparamRef {
+    pub fn to_expr(&self) -> Expr {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_localparam_ref_as_expression(self.inner) };
+        Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
 pub struct Def {
     inner: *mut sys::CVastDef,
     parent: Arc<Mutex<VastFilePtr>>,

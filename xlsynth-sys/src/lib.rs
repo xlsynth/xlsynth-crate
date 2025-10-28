@@ -1009,6 +1009,8 @@ extern "C" {
     pub fn xls_vast_slice_as_expression(v: *mut CVastSlice) -> *mut CVastExpression;
     pub fn xls_vast_index_as_expression(v: *mut CVastIndex) -> *mut CVastExpression;
     pub fn xls_vast_parameter_ref_as_expression(v: *mut CVastParameterRef) -> *mut CVastExpression;
+    pub fn xls_vast_localparam_ref_as_expression(v: *mut CVastLocalparamRef)
+        -> *mut CVastExpression;
     pub fn xls_vast_verilog_file_make_unsized_one_literal(f: *mut CVastFile)
         -> *mut CVastExpression;
     pub fn xls_vast_verilog_file_make_unsized_zero_literal(f: *mut CVastFile)
