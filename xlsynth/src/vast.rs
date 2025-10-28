@@ -722,7 +722,8 @@ impl VastModule {
     pub fn add_int_localparam(&mut self, name: &str, rhs: &Expr) -> LocalparamRef {
         let c_name = CString::new(name).unwrap();
         let locked = self.parent.lock().unwrap();
-        let int_def = unsafe { sys::xls_vast_verilog_file_make_int_def(locked.0, c_name.as_ptr(), true) };
+        let int_def =
+            unsafe { sys::xls_vast_verilog_file_make_int_def(locked.0, c_name.as_ptr(), true) };
         let inner = unsafe {
             sys::xls_vast_verilog_module_add_localparam_with_def(self.inner, int_def, rhs.inner)
         };

@@ -559,7 +559,9 @@ fn test_module_localparams_various_types() {
     module.add_localparam("Bar", &one_hundred);
 
     // localparam Qux = 'h10000;
-    let qux = file.make_literal("bits[32]:0x10000", &IrFormatPreference::PlainHex).unwrap();
+    let qux = file
+        .make_literal("bits[32]:0x10000", &IrFormatPreference::PlainHex)
+        .unwrap();
     module.add_localparam("Bar", &qux);
 
     // localparam logic [7:0] Baz = 8'h44;
