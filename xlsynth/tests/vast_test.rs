@@ -546,6 +546,56 @@ endmodule
 }
 
 #[test]
+fn test_module_localparams_various_types() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("LM");
+
+    // localparam int Foo = 42;
+    let forty_two = file.make_plain_literal(42, &IrFormatPreference::UnsignedDecimal);
+    module.add_int_localparam("Foo", &forty_two);
+
+    // localparam Bar = 100;
+    let one_hundred = file.make_plain_literal(100, &IrFormatPreference::UnsignedDecimal);
+    module.add_localparam("Bar", &one_hundred);
+
+    // localparam Qux = 'h10000;
+    let qux = file
+        .make_literal("bits[32]:0x10000", &IrFormatPreference::PlainHex)
+        .unwrap();
+    module.add_localparam("Bar", &qux);
+
+    // localparam logic [7:0] Baz = 8'h44;
+    let logic8 = file.make_bit_vector_type(8, false);
+    let baz_def = file.make_def("Baz", DataKind::Logic, &logic8);
+    let hex_44 = file
+        .make_literal("bits[8]:0x44", &IrFormatPreference::Hex)
+        .unwrap();
+    module.add_typed_localparam(&baz_def, &hex_44);
+
+    // localparam logic [7:0] Zero = '0;
+    let zero_def = file.make_def("Zero", DataKind::Logic, &logic8);
+    let unsized_zero = file.make_unsized_zero_literal();
+    module.add_typed_localparam(&zero_def, &unsized_zero);
+
+    // localparam logic [7:0] Ones = '1;
+    let ones_def = file.make_def("Ones", DataKind::Logic, &logic8);
+    let unsized_one = file.make_unsized_one_literal();
+    module.add_typed_localparam(&ones_def, &unsized_one);
+
+    let verilog = file.emit();
+    let want = r#"module LM;
+  localparam int Foo = 42;
+  localparam Bar = 100;
+  localparam Bar = 'h1_0000;
+  localparam logic [7:0] Baz = 8'h44;
+  localparam logic [7:0] Zero = '0;
+  localparam logic [7:0] Ones = '1;
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
 fn test_inline_and_blank_members() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let mut module = file.add_module("M");

@@ -161,6 +161,11 @@ pub struct CVastParameterRef {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+#[repr(C)]
+pub struct CVastLocalparamRef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 // -- DSLX
 
 #[repr(C)]
@@ -329,9 +334,10 @@ pub const XLS_VAST_DATA_KIND_REG: VastDataKind = 0;
 pub const XLS_VAST_DATA_KIND_WIRE: VastDataKind = 1;
 pub const XLS_VAST_DATA_KIND_LOGIC: VastDataKind = 2;
 pub const XLS_VAST_DATA_KIND_INTEGER: VastDataKind = 3;
-pub const XLS_VAST_DATA_KIND_USER: VastDataKind = 4;
-pub const XLS_VAST_DATA_KIND_UNTYPED_ENUM: VastDataKind = 5;
-pub const XLS_VAST_DATA_KIND_GENVAR: VastDataKind = 6;
+pub const XLS_VAST_DATA_KIND_INT: VastDataKind = 4;
+pub const XLS_VAST_DATA_KIND_USER: VastDataKind = 5;
+pub const XLS_VAST_DATA_KIND_UNTYPED_ENUM: VastDataKind = 6;
+pub const XLS_VAST_DATA_KIND_GENVAR: VastDataKind = 7;
 
 pub type DslxTypeDefinitionKind = i32;
 
@@ -751,6 +757,20 @@ extern "C" {
         f: *mut CVastFile,
         is_signed: bool,
     ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_int_type(
+        f: *mut CVastFile,
+        is_signed: bool,
+    ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_integer_def(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+        is_signed: bool,
+    ) -> *mut CVastDef;
+    pub fn xls_vast_verilog_file_make_int_def(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+        is_signed: bool,
+    ) -> *mut CVastDef;
     pub fn xls_vast_verilog_file_make_extern_package_type(
         f: *mut CVastFile,
         package_name: *const std::os::raw::c_char,
@@ -948,6 +968,12 @@ extern "C" {
         rhs: *mut CVastExpression,
     ) -> *mut CVastParameterRef;
 
+    pub fn xls_vast_verilog_module_add_localparam(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLocalparamRef;
+
     pub fn xls_vast_verilog_file_make_def(
         f: *mut CVastFile,
         name: *const std::os::raw::c_char,
@@ -960,6 +986,12 @@ extern "C" {
         def: *mut CVastDef,
         rhs: *mut CVastExpression,
     ) -> *mut CVastParameterRef;
+
+    pub fn xls_vast_verilog_module_add_localparam_with_def(
+        m: *mut CVastModule,
+        def: *mut CVastDef,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLocalparamRef;
 
     pub fn xls_vast_verilog_module_get_name(m: *mut CVastModule) -> *mut std::os::raw::c_char;
 
@@ -977,6 +1009,16 @@ extern "C" {
     pub fn xls_vast_slice_as_expression(v: *mut CVastSlice) -> *mut CVastExpression;
     pub fn xls_vast_index_as_expression(v: *mut CVastIndex) -> *mut CVastExpression;
     pub fn xls_vast_parameter_ref_as_expression(v: *mut CVastParameterRef) -> *mut CVastExpression;
+    pub fn xls_vast_localparam_ref_as_expression(
+        v: *mut CVastLocalparamRef,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_verilog_file_make_unsized_one_literal(
+        f: *mut CVastFile,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_verilog_file_make_unsized_zero_literal(
+        f: *mut CVastFile,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_verilog_file_make_unsized_x_literal(f: *mut CVastFile) -> *mut CVastExpression;
 
     pub fn xls_vast_logic_ref_get_name(v: *mut CVastLogicRef) -> *mut std::os::raw::c_char;
 

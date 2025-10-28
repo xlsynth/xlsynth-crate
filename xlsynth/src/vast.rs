@@ -245,11 +245,13 @@ impl LogicRef {
     }
 }
 
+#[derive(Clone)]
 pub struct Expr {
     inner: *mut sys::CVastExpression,
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+#[derive(Clone)]
 pub struct IndexableExpr {
     inner: *mut sys::CVastIndexableExpression,
     parent: Arc<Mutex<VastFilePtr>>,
@@ -351,6 +353,21 @@ pub struct ParameterRef {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+pub struct LocalparamRef {
+    inner: *mut sys::CVastLocalparamRef,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+impl LocalparamRef {
+    pub fn to_expr(&self) -> Expr {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_localparam_ref_as_expression(self.inner) };
+        Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
 pub struct Def {
     inner: *mut sys::CVastDef,
     parent: Arc<Mutex<VastFilePtr>>,
@@ -362,6 +379,7 @@ pub enum DataKind {
     Wire,
     Logic,
     Integer,
+    Int,
     User,
     UntypedEnum,
     Genvar,
@@ -374,6 +392,7 @@ impl DataKind {
             DataKind::Wire => sys::XLS_VAST_DATA_KIND_WIRE,
             DataKind::Logic => sys::XLS_VAST_DATA_KIND_LOGIC,
             DataKind::Integer => sys::XLS_VAST_DATA_KIND_INTEGER,
+            DataKind::Int => sys::XLS_VAST_DATA_KIND_INT,
             DataKind::User => sys::XLS_VAST_DATA_KIND_USER,
             DataKind::UntypedEnum => sys::XLS_VAST_DATA_KIND_UNTYPED_ENUM,
             DataKind::Genvar => sys::XLS_VAST_DATA_KIND_GENVAR,
@@ -671,6 +690,44 @@ impl VastModule {
             sys::xls_vast_verilog_module_add_parameter_with_def(self.inner, def.inner, rhs.inner)
         };
         ParameterRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_localparam(&mut self, name: &str, rhs: &Expr) -> LocalparamRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_localparam(self.inner, c_name.as_ptr(), rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_typed_localparam(&mut self, def: &Def, rhs: &Expr) -> LocalparamRef {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_localparam_with_def(self.inner, def.inner, rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    /// Adds a localparam with SystemVerilog `int` type.
+    pub fn add_int_localparam(&mut self, name: &str, rhs: &Expr) -> LocalparamRef {
+        let c_name = CString::new(name).unwrap();
+        let locked = self.parent.lock().unwrap();
+        let int_def =
+            unsafe { sys::xls_vast_verilog_file_make_int_def(locked.0, c_name.as_ptr(), true) };
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_localparam_with_def(self.inner, int_def, rhs.inner)
+        };
+        LocalparamRef {
             inner,
             parent: self.parent.clone(),
         }
@@ -1059,6 +1116,15 @@ impl VastFile {
         }
     }
 
+    pub fn make_int_type(&mut self, is_signed: bool) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let data_type = unsafe { sys::xls_vast_verilog_file_make_int_type(locked.0, is_signed) };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
     pub fn make_packed_array_type(
         &mut self,
         element_type: VastDataType,
@@ -1404,6 +1470,26 @@ impl VastFile {
             sys::xls_vast_verilog_file_make_inline_verilog_statement(locked.0, c_text.as_ptr())
         };
         InlineVerilogStatement {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    // Make a '1 literal.
+    pub fn make_unsized_one_literal(&mut self) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_file_make_unsized_one_literal(locked.0) };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    // Make a '0 literal.
+    pub fn make_unsized_zero_literal(&mut self) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_file_make_unsized_zero_literal(locked.0) };
+        Expr {
             inner,
             parent: self.ptr.clone(),
         }
