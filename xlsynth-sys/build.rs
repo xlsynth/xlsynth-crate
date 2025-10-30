@@ -60,6 +60,48 @@ impl DsoInfo {
     }
 }
 
+/// Resolves `path` to an absolute location suitable for use as a Mach-O install
+/// name.
+///
+/// We prefer `std::fs::canonicalize` for stability; if that fails (e.g. the
+/// destination is missing or behind a broken symlink), we fall back to joining
+/// the current working directory for relative paths or returning the original
+/// absolute path verbatim.
+fn resolve_absolute_dso_id(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .expect("current directory should be readable")
+                    .join(path)
+            }
+        }
+    }
+}
+
+/// Runs `install_name_tool -id` with the absolute dylib path so downstream
+/// binaries link directly to the on-disk location instead of relying on
+/// `@rpath` resolution at runtime.
+fn set_macos_install_name(dso_path: &Path) {
+    let install_name_path = resolve_absolute_dso_id(dso_path);
+    println!(
+        "cargo:info=Fixing DSO id: to {}",
+        install_name_path.display()
+    );
+    let status = Command::new("install_name_tool")
+        .arg("-id")
+        .arg(&install_name_path)
+        .arg(dso_path)
+        .status()
+        .expect("fixing DSO id should succeed");
+    if !status.success() {
+        panic!("Fixing DSO id failed with status: {:?}", status);
+    }
+}
+
 /// Performs a "high integrity" download of a file from a URL by doing the
 /// following:
 /// - Downloading a checksum file first.
@@ -437,19 +479,7 @@ fn download_dso_if_dne(url_base: &str, out_dir: &str) -> DsoInfo {
     .expect("download of DSO should succeed");
 
     if cfg!(target_os = "macos") {
-        let dso_filename = dso_info.get_dso_filename();
-        println!("cargo:info=Fixing DSO id: to {dso_filename}");
-        // Fix the DSO id so it can be found via the rpath.
-        let status = Command::new("install_name_tool")
-            .arg("-id")
-            .arg(format!("@rpath/{}", &dso_filename))
-            .arg(&dso_path)
-            .status()
-            .expect("fixing DSO id should succeed");
-
-        if !status.success() {
-            panic!("Fixing DSO id failed with status: {:?}", status);
-        }
+        set_macos_install_name(&dso_path);
     }
 
     dso_info
@@ -647,16 +677,7 @@ fn main() {
 
         // Fix the DSO id so it can be found via the rpath (macOS only).
         if cfg!(target_os = "macos") {
-            let dso_filename = dso_info.get_dso_filename();
-            let status = Command::new("install_name_tool")
-                .arg("-id")
-                .arg(format!("@rpath/{}", &dso_filename))
-                .arg(&dso_dest)
-                .status()
-                .expect("fixing DSO id should succeed");
-            if !status.success() {
-                panic!("Fixing DSO id failed with status: {:?}", status);
-            }
+            set_macos_install_name(&dso_dest);
         }
 
         println!(
