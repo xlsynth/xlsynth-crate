@@ -420,6 +420,71 @@ endmodule
 }
 
 #[test]
+fn test_nested_generate_loops_with_assignment() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("gen_nested");
+    let scalar = file.make_scalar_type();
+
+    let a = module.add_input("a", &scalar);
+    let b = module.add_output("b", &scalar);
+
+    // for (genvar i = 0; i < 2; ++i) begin: outer
+    let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
+    let two = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
+    let outer = module.add_generate_loop("i", &zero, &two, Some("outer"));
+    let mut outer_body = outer.get_statement_block();
+
+    //   for (genvar j = 1; j < 3; ++j) begin: inner
+    let one = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
+    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
+    let inner = outer_body.add_generate_loop("j", &one, &three, Some("inner"));
+    let mut inner_body = inner.get_statement_block();
+
+    //     assign b = a;
+    inner_body.add_continuous_assignment(&b.to_expr(), &a.to_expr());
+
+    let verilog = file.emit();
+    let want = r#"module gen_nested(
+  input wire a,
+  output wire b
+);
+  for (genvar i = 0; i < 2; i = i + 1) begin : outer
+    for (genvar j = 1; j < 3; j = j + 1) begin : inner
+      assign b = a;
+    end
+  end
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_width_cast_basic() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("width_cast");
+    let u16 = file.make_bit_vector_type(16, false);
+    let u8 = file.make_bit_vector_type(8, false);
+
+    let x = module.add_input("x", &u16);
+    let y = module.add_output("y", &u8);
+
+    let width8 = file.make_plain_literal(8, &IrFormatPreference::UnsignedDecimal);
+    let cast = file.make_width_cast(&width8, &x.to_expr());
+    let assign = file.make_continuous_assignment(&y.to_expr(), &cast);
+    module.add_member_continuous_assignment(assign);
+
+    let verilog = file.emit();
+    let want = r#"module width_cast(
+  input wire [15:0] x,
+  output wire [7:0] y
+);
+  assign y = 8'(x);
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
 fn test_ternary() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let mut module = file.add_module("my_module");
