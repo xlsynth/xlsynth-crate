@@ -22,10 +22,9 @@ module __my_module__main(
   wire [31:0] p1_literal_12_comb;
   wire [32:0] p1_array_update_16_comb[4];
   assign p1_literal_12_comb = 32'h0000_0001;
-  assign p1_array_update_16_comb[0] = p1_literal_12_comb == 32'h0000_0000 ? literal_11 : p0_x[0];
-  assign p1_array_update_16_comb[1] = p1_literal_12_comb == 32'h0000_0001 ? literal_11 : p0_x[1];
-  assign p1_array_update_16_comb[2] = p1_literal_12_comb == 32'h0000_0002 ? literal_11 : p0_x[2];
-  assign p1_array_update_16_comb[3] = p1_literal_12_comb == 32'h0000_0003 ? literal_11 : p0_x[3];
   assign out = {p1_array_update_16_comb[3], p1_array_update_16_comb[2], p1_array_update_16_comb[1], p1_array_update_16_comb[0]};
+  for (genvar __i0 = 0; __i0 < 4; __i0 = __i0 + 1) begin : gen__array_update_16_0
+    assign p1_array_update_16_comb[__i0] = p1_literal_12_comb == __i0 ? literal_11 : p0_x[__i0];
+  end
 endmodule
 

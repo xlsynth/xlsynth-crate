@@ -166,6 +166,11 @@ pub struct CVastLocalparamRef {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+#[repr(C)]
+pub struct CVastGenerateLoop {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 // -- DSLX
 
 #[repr(C)]
@@ -296,6 +301,26 @@ pub struct CDslxCallGraph {
 #[repr(C)]
 pub struct CDslxQuickcheck {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxInvocationCalleeDataArray {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct CDslxInvocationCalleeData {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct CDslxInvocationData {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct CDslxInvocation {
+    _private: [u8; 0],
 }
 
 #[repr(C)]
@@ -871,6 +896,12 @@ extern "C" {
         else_expr: *mut CVastExpression,
     ) -> *mut CVastExpression;
 
+    pub fn xls_vast_verilog_file_make_width_cast(
+        f: *mut CVastFile,
+        width: *mut CVastExpression,
+        value: *mut CVastExpression,
+    ) -> *mut CVastExpression;
+
     pub fn xls_vast_verilog_file_make_instantiation(
         f: *mut CVastFile,
         module_name: *const std::os::raw::c_char,
@@ -941,6 +972,13 @@ extern "C" {
         name: *const std::os::raw::c_char,
         type_: *mut CVastDataType,
     ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_generate_loop(
+        m: *mut CVastModule,
+        genvar_name: *const std::os::raw::c_char,
+        init: *mut CVastExpression,
+        limit: *mut CVastExpression,
+        label: *const std::os::raw::c_char,
+    ) -> *mut CVastGenerateLoop;
     pub fn xls_vast_verilog_module_add_member_instantiation(
         m: *mut CVastModule,
         inst: *mut CVastInstantiation,
@@ -1043,6 +1081,16 @@ extern "C" {
         typechecked_module_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
+    pub fn xls_dslx_typechecked_module_clone_removing_functions(
+        tm: *mut CDslxTypecheckedModule,
+        functions: *mut *mut CDslxFunction,
+        function_count: libc::size_t,
+        install_subject: *const std::os::raw::c_char,
+        import_data: *mut CDslxImportData,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxTypecheckedModule,
+    ) -> bool;
+
     pub fn xls_dslx_replace_invocations_in_module(
         tm: *mut CDslxTypecheckedModule,
         callers: *const *mut CDslxFunction,
@@ -1083,6 +1131,8 @@ extern "C" {
     pub fn xls_dslx_typechecked_module_get_type_info(
         module: *mut CDslxTypecheckedModule,
     ) -> *mut CDslxTypeInfo;
+
+    pub fn xls_dslx_module_to_string(module: *mut CDslxModule) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_module_get_name(module: *const CDslxModule) -> *mut std::os::raw::c_char;
 
@@ -1164,6 +1214,19 @@ extern "C" {
         module: *mut CDslxModule,
     ) -> *mut CDslxTypeInfo;
 
+    pub fn xls_dslx_type_info_get_unique_invocation_callee_data(
+        type_info: *mut CDslxTypeInfo,
+        function: *mut CDslxFunction,
+    ) -> *mut CDslxInvocationCalleeDataArray;
+    pub fn xls_dslx_type_info_get_all_invocation_callee_data(
+        type_info: *mut CDslxTypeInfo,
+        function: *mut CDslxFunction,
+    ) -> *mut CDslxInvocationCalleeDataArray;
+    pub fn xls_dslx_type_info_get_root_invocation_data(
+        type_info: *mut CDslxTypeInfo,
+        invocation: *mut CDslxInvocation,
+    ) -> *mut CDslxInvocationData;
+
     // -- call_graph
     pub fn xls_dslx_type_info_build_function_call_graph(
         type_info: *mut CDslxTypeInfo,
@@ -1189,6 +1252,42 @@ extern "C" {
         call_graph: *mut CDslxCallGraph,
         caller: *mut CDslxFunction,
         callee_index: i64,
+    ) -> *mut CDslxFunction;
+
+    pub fn xls_dslx_invocation_callee_data_array_free(array: *mut CDslxInvocationCalleeDataArray);
+    pub fn xls_dslx_invocation_callee_data_array_get_count(
+        array: *mut CDslxInvocationCalleeDataArray,
+    ) -> i64;
+    pub fn xls_dslx_invocation_callee_data_array_get(
+        array: *mut CDslxInvocationCalleeDataArray,
+        index: i64,
+    ) -> *mut CDslxInvocationCalleeData;
+
+    pub fn xls_dslx_invocation_callee_data_clone(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxInvocationCalleeData;
+    pub fn xls_dslx_invocation_callee_data_free(data: *mut CDslxInvocationCalleeData);
+    pub fn xls_dslx_invocation_callee_data_get_callee_bindings(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *const CDslxParametricEnv;
+    pub fn xls_dslx_invocation_callee_data_get_caller_bindings(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *const CDslxParametricEnv;
+    pub fn xls_dslx_invocation_callee_data_get_derived_type_info(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxTypeInfo;
+    pub fn xls_dslx_invocation_callee_data_get_invocation(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxInvocation;
+
+    pub fn xls_dslx_invocation_data_get_invocation(
+        data: *mut CDslxInvocationData,
+    ) -> *mut CDslxInvocation;
+    pub fn xls_dslx_invocation_data_get_callee(
+        data: *mut CDslxInvocationData,
+    ) -> *mut CDslxFunction;
+    pub fn xls_dslx_invocation_data_get_caller(
+        data: *mut CDslxInvocationData,
     ) -> *mut CDslxFunction;
 
     // -- ConstantDef
@@ -1307,6 +1406,8 @@ extern "C" {
         value: *mut CDslxInterpValue,
     ) -> *mut std::os::raw::c_char;
 
+    pub fn xls_dslx_interp_value_clone(value: *const CDslxInterpValue) -> *mut CDslxInterpValue;
+
     // Parametric env construction and InterpValue helpers
     pub fn xls_dslx_parametric_env_create(
         items: *const XlsDslxParametricEnvItem,
@@ -1315,6 +1416,30 @@ extern "C" {
         env_out: *mut *mut CDslxParametricEnv,
     ) -> bool;
     pub fn xls_dslx_parametric_env_free(env: *mut CDslxParametricEnv);
+
+    pub fn xls_dslx_parametric_env_clone(env: *const CDslxParametricEnv)
+        -> *mut CDslxParametricEnv;
+    pub fn xls_dslx_parametric_env_equals(
+        lhs: *const CDslxParametricEnv,
+        rhs: *const CDslxParametricEnv,
+    ) -> bool;
+    pub fn xls_dslx_parametric_env_less_than(
+        lhs: *const CDslxParametricEnv,
+        rhs: *const CDslxParametricEnv,
+    ) -> bool;
+    pub fn xls_dslx_parametric_env_hash(env: *const CDslxParametricEnv) -> u64;
+    pub fn xls_dslx_parametric_env_to_string(
+        env: *const CDslxParametricEnv,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_parametric_env_get_binding_count(env: *const CDslxParametricEnv) -> i64;
+    pub fn xls_dslx_parametric_env_get_binding_identifier(
+        env: *const CDslxParametricEnv,
+        index: i64,
+    ) -> *const std::os::raw::c_char;
+    pub fn xls_dslx_parametric_env_get_binding_value(
+        env: *const CDslxParametricEnv,
+        index: i64,
+    ) -> *mut CDslxInterpValue;
 
     pub fn xls_dslx_interp_value_make_ubits(bit_count: i64, value: u64) -> *mut CDslxInterpValue;
     pub fn xls_dslx_interp_value_make_sbits(bit_count: i64, value: i64) -> *mut CDslxInterpValue;
@@ -1915,6 +2040,19 @@ extern "C" {
         block: *mut CVastStatementBlock,
         text: *const std::os::raw::c_char,
     ) -> *mut CVastStatement;
+    pub fn xls_vast_statement_block_add_generate_loop(
+        block: *mut CVastStatementBlock,
+        genvar_name: *const std::os::raw::c_char,
+        init: *mut CVastExpression,
+        limit: *mut CVastExpression,
+        label: *const std::os::raw::c_char,
+    ) -> *mut CVastGenerateLoop;
+
+    pub fn xls_vast_statement_block_add_continuous_assignment(
+        block: *mut CVastStatementBlock,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
 
     // Conditional (if / else-if / else)
     pub fn xls_vast_statement_block_add_conditional(
@@ -1941,6 +2079,11 @@ extern "C" {
     ) -> *mut CVastStatementBlock;
     pub fn xls_vast_case_statement_add_default(
         case_stmt: *mut CVastCaseStatement,
+    ) -> *mut CVastStatementBlock;
+
+    pub fn xls_vast_generate_loop_get_genvar(loop_: *mut CVastGenerateLoop) -> *mut CVastLogicRef;
+    pub fn xls_vast_generate_loop_get_body(
+        loop_: *mut CVastGenerateLoop,
     ) -> *mut CVastStatementBlock;
 
     pub fn xls_function_type_get_param_count(fty: *mut CIrFunctionType) -> i64;
