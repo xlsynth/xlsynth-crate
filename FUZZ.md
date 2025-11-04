@@ -119,6 +119,16 @@ Primarily tests:
 - Outlining transformation preserves semantics for random connected regions
 - Stability of parser/pretty-printer across transformation boundaries
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_netlist_scanner.rs
+
+Materializes a randomized sequence of token-like payloads, emits a textual netlist fragment for those payloads, scans the text with `TokenScanner`, and checks that the resulting token payloads round-trip (shape and values) for the supported subset. Early-return is used for uninteresting or degenerate samples where whitespace coalescing or intentionally unsupported constructs would otherwise cause spurious mismatches; this target focuses on exercising tokenizer behavior rather than full parser structure.
+
+Primarily tests:
+
+- Tokenization stability for identifiers, keywords, punctuation, comments
+- Verilog-style integer literal tokenization (with/without width)
+- Top-level annotation tokenization with string-valued fields
+
 ______________________________________________________________________
 
 Notes:

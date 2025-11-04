@@ -63,7 +63,7 @@ fn line_lookup(path: &Path) -> Box<dyn Fn(u32) -> Option<String>> {
 
 /// Reads and parses the netlist at `path`, returning summary statistics.
 pub fn read_netlist_stats(path: &Path) -> Result<NetlistStats> {
-    log::trace!("read_netlist_stats: begin path='{}'", path.display());
+    log::info!("read_netlist_stats: begin path='{}'", path.display());
     let reader = open_reader(path)?;
     let lookup = line_lookup(path);
     let scanner = TokenScanner::with_line_lookup(reader, lookup);
@@ -87,7 +87,7 @@ pub fn read_netlist_stats(path: &Path) -> Result<NetlistStats> {
         }
     };
     let parse_duration = start.elapsed();
-    log::trace!(
+    log::info!(
         "read_netlist_stats: parse done; modules={}, nets={}, duration_ms={}",
         modules.len(),
         parser.nets.len(),

@@ -100,21 +100,34 @@ pub fn check_module(
                 .and_then(|m| m.get(port_str))
                 .copied()
                 .unwrap_or(PinDirection::Invalid as i32);
-            let net_sym = match netref {
-                NetRef::Simple(idx) | NetRef::BitSelect(idx, _) | NetRef::PartSelect(idx, _, _) => {
-                    nets[idx.0].name
+            // For concatenations, conservatively mark each element; otherwise classify
+            // single net.
+            let mut mark = |sym: SymbolU32| {
+                if dir == PinDirection::Output as i32 {
+                    driven.insert(sym);
+                } else if dir == PinDirection::Input as i32 {
+                    used_as_input.insert(sym);
+                } else {
+                    driven.insert(sym);
+                    used_as_input.insert(sym);
                 }
-                NetRef::Literal(_) => continue,
-                NetRef::Unconnected => continue,
             };
-            if dir == PinDirection::Output as i32 {
-                driven.insert(net_sym);
-            } else if dir == PinDirection::Input as i32 {
-                used_as_input.insert(net_sym);
-            } else {
-                // Unknown or inout pin - treat as both directions.
-                driven.insert(net_sym);
-                used_as_input.insert(net_sym);
+            match netref {
+                NetRef::Simple(idx) | NetRef::BitSelect(idx, _) | NetRef::PartSelect(idx, _, _) => {
+                    mark(nets[idx.0].name);
+                }
+                NetRef::Concat(elems) => {
+                    for e in elems {
+                        match e {
+                            NetRef::Simple(idx)
+                            | NetRef::BitSelect(idx, _)
+                            | NetRef::PartSelect(idx, _, _) => mark(nets[idx.0].name),
+                            NetRef::Literal(_) | NetRef::Unconnected | NetRef::Concat(_) => {}
+                        }
+                    }
+                }
+                NetRef::Literal(_) => {}
+                NetRef::Unconnected => {}
             }
         }
     }
