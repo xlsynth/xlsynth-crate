@@ -105,6 +105,7 @@ pub fn check_module(
                     nets[idx.0].name
                 }
                 NetRef::Literal(_) => continue,
+                NetRef::Unconnected => continue,
             };
             if dir == PinDirection::Output as i32 {
                 driven.insert(net_sym);
