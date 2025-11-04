@@ -538,6 +538,47 @@ impl<R: Read + 'static> TokenScanner<R> {
             Some(c) => c,
             None => return Ok(None),
         };
+        // Handle Verilog preprocessor-style directive lines we want to ignore.
+        // Currently, we skip lines that begin with `` `timescale`` anywhere in
+        // the file. This consumes through the end of the line and resumes
+        // scanning as if the directive were not present.
+        if c == '`' {
+            let directive_start = start;
+            // consume backtick
+            self.popc();
+            // read directive word (letters/underscores)
+            let mut word = String::new();
+            while let Some(ch) = self.peekc() {
+                if ch.is_ascii_alphabetic() || ch == '_' {
+                    word.push(self.popc().unwrap());
+                } else {
+                    break;
+                }
+            }
+            if word == "timescale" {
+                // consume until end-of-line (including the newline if present)
+                while let Some(ch) = self.popc() {
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+                log::trace!("TokenScanner: skipped `timescale directive line");
+                // continue scanning next token
+                return match self.next_token()? {
+                    Some(tok) => Ok(Some(tok)),
+                    None => Ok(None),
+                };
+            } else {
+                // Not a supported directive: report unexpected backtick at its position
+                return Err(self.error_with_context(
+                    "Unexpected character '`'",
+                    Span {
+                        start: directive_start,
+                        limit: directive_start,
+                    },
+                ));
+            }
+        }
         // Handle annotation: use only peekc/popc, no direct char_buf access
         if c == '(' {
             // Temporarily pop '(', peek next char, and restore if not annotation
@@ -2012,6 +2053,38 @@ endmodule
             _ => panic!("Expected annotation token"),
         }
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_skip_timescale_at_top() {
+        let src = "`timescale 10ps/10ps\nmodule m(); endmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_skip_timescale_with_leading_spaces() {
+        let src = "   `timescale 1ns/1ps\nmodule m(); endmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_skip_timescale_after_comment() {
+        let src = "// comment\n`timescale 1ns/1ps\nmodule m(); endmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_skip_timescale_inside_module() {
+        let src = "module m();\n`timescale 1ns/1ps\nendmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
     }
 
     #[test]
