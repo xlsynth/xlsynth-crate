@@ -41,6 +41,7 @@ pub enum NetRef {
     BitSelect(NetIndex, u32),       // b[5]
     PartSelect(NetIndex, u32, u32), // b[msb:lsb]
     Literal(IrBits),
+    Unconnected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1559,43 +1560,62 @@ impl<R: Read + 'static> Parser<R> {
                     span: oparen2.span,
                 });
             }
-            // Net name or net reference expression
-            let net_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                message: "expected net name".to_string(),
-                span: Span {
-                    start: self.scanner.pos,
-                    limit: self.scanner.pos,
-                },
-            })?;
-            let net_ref = match net_tok.payload {
-                TokenPayload::Identifier(s) => {
-                    let net_sym = self.interner.get_or_intern(s);
-                    let net_idx = self
-                        .nets
-                        .iter()
-                        .position(|n| n.name == net_sym)
-                        .map(NetIndex)
-                        .ok_or_else(|| ScanError {
-                            message: format!(
-                                "net '{}' not declared as wire",
-                                self.interner.resolve(net_sym).unwrap()
-                            ),
-                            span: net_tok.span,
-                        })?;
-                    // Check for bit-select or part-select
-                    if let Some(next) = self.scanner.peekt()? {
-                        match &next.payload {
-                            TokenPayload::OBrack => {
-                                self.scanner.popt()?; // consume '['
-                                let msb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                                    message: "expected msb or index in net reference".to_string(),
-                                    span: Span {
-                                        start: self.scanner.pos,
-                                        limit: self.scanner.pos,
-                                    },
-                                })?;
-                                let msb =
-                                    match msb_tok.payload {
+            // Net name or net reference expression (or unconnected)
+            // Skip any inline comments/annotations inside the parentheses
+            loop {
+                let peek = self.scanner.peekt()?;
+                match peek {
+                    Some(tok) => match &tok.payload {
+                        TokenPayload::Comment(_) | TokenPayload::Annotation { .. } => {
+                            self.scanner.popt()?;
+                        }
+                        _ => break,
+                    },
+                    None => break,
+                }
+            }
+            // Allow immediate ')' to denote an unconnected port
+            let is_unconnected = matches!(self.scanner.peekt()?, Some(tok) if matches!(tok.payload, TokenPayload::CParen));
+            let net_ref = if is_unconnected {
+                NetRef::Unconnected
+            } else {
+                let net_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: "expected net name".to_string(),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                match net_tok.payload {
+                    TokenPayload::Identifier(s) => {
+                        let net_sym = self.interner.get_or_intern(s);
+                        let net_idx = self
+                            .nets
+                            .iter()
+                            .position(|n| n.name == net_sym)
+                            .map(NetIndex)
+                            .ok_or_else(|| ScanError {
+                                message: format!(
+                                    "net '{}' not declared as wire",
+                                    self.interner.resolve(net_sym).unwrap()
+                                ),
+                                span: net_tok.span,
+                            })?;
+                        // Check for bit-select or part-select
+                        if let Some(next) = self.scanner.peekt()? {
+                            match &next.payload {
+                                TokenPayload::OBrack => {
+                                    self.scanner.popt()?; // consume '['
+                                    let msb_tok =
+                                        self.scanner.popt()?.ok_or_else(|| ScanError {
+                                            message: "expected msb or index in net reference"
+                                                .to_string(),
+                                            span: Span {
+                                                start: self.scanner.pos,
+                                                limit: self.scanner.pos,
+                                            },
+                                        })?;
+                                    let msb = match msb_tok.payload {
                                         TokenPayload::VerilogInt { value, .. } => {
                                             xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
                                         }
@@ -1606,28 +1626,27 @@ impl<R: Read + 'static> Parser<R> {
                                             span: msb_tok.span,
                                         }),
                                     };
-                                // Check for ':' (part-select) or ']' (bit-select)
-                                let next2 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                                    message: "expected ':' or ']' in net reference".to_string(),
-                                    span: Span {
-                                        start: self.scanner.pos,
-                                        limit: self.scanner.pos,
-                                    },
-                                })?;
-                                match next2.payload {
-                                    TokenPayload::Colon => {
-                                        // part-select: [msb:lsb]
-                                        let lsb_tok =
-                                            self.scanner.popt()?.ok_or_else(|| ScanError {
-                                                message: "expected lsb in net reference"
-                                                    .to_string(),
-                                                span: Span {
-                                                    start: self.scanner.pos,
-                                                    limit: self.scanner.pos,
-                                                },
-                                            })?;
-                                        let lsb =
-                                            match lsb_tok.payload {
+                                    // Check for ':' (part-select) or ']' (bit-select)
+                                    let next2 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                                        message: "expected ':' or ']' in net reference".to_string(),
+                                        span: Span {
+                                            start: self.scanner.pos,
+                                            limit: self.scanner.pos,
+                                        },
+                                    })?;
+                                    match next2.payload {
+                                        TokenPayload::Colon => {
+                                            // part-select: [msb:lsb]
+                                            let lsb_tok =
+                                                self.scanner.popt()?.ok_or_else(|| ScanError {
+                                                    message: "expected lsb in net reference"
+                                                        .to_string(),
+                                                    span: Span {
+                                                        start: self.scanner.pos,
+                                                        limit: self.scanner.pos,
+                                                    },
+                                                })?;
+                                            let lsb = match lsb_tok.payload {
                                                 TokenPayload::VerilogInt { value, .. } => {
                                                     xlsynth::IrValue::from_bits(&value)
                                                         .to_u32()
@@ -1640,49 +1659,50 @@ impl<R: Read + 'static> Parser<R> {
                                                     span: lsb_tok.span,
                                                 }),
                                             };
-                                        let cbrack_tok =
-                                            self.scanner.popt()?.ok_or_else(|| ScanError {
-                                                message: "expected ']' after part-select"
-                                                    .to_string(),
-                                                span: Span {
-                                                    start: self.scanner.pos,
-                                                    limit: self.scanner.pos,
-                                                },
-                                            })?;
-                                        if !matches!(cbrack_tok.payload, TokenPayload::CBrack) {
+                                            let cbrack_tok =
+                                                self.scanner.popt()?.ok_or_else(|| ScanError {
+                                                    message: "expected ']' after part-select"
+                                                        .to_string(),
+                                                    span: Span {
+                                                        start: self.scanner.pos,
+                                                        limit: self.scanner.pos,
+                                                    },
+                                                })?;
+                                            if !matches!(cbrack_tok.payload, TokenPayload::CBrack) {
+                                                return Err(ScanError {
+                                                    message: "expected ']' after part-select"
+                                                        .to_string(),
+                                                    span: cbrack_tok.span,
+                                                });
+                                            }
+                                            NetRef::PartSelect(net_idx, msb, lsb)
+                                        }
+                                        TokenPayload::CBrack => {
+                                            // bit-select: [index]
+                                            NetRef::BitSelect(net_idx, msb)
+                                        }
+                                        _ => {
                                             return Err(ScanError {
-                                                message: "expected ']' after part-select"
+                                                message: "expected ':' or ']' in net reference"
                                                     .to_string(),
-                                                span: cbrack_tok.span,
+                                                span: next2.span,
                                             });
                                         }
-                                        NetRef::PartSelect(net_idx, msb, lsb)
-                                    }
-                                    TokenPayload::CBrack => {
-                                        // bit-select: [index]
-                                        NetRef::BitSelect(net_idx, msb)
-                                    }
-                                    _ => {
-                                        return Err(ScanError {
-                                            message: "expected ':' or ']' in net reference"
-                                                .to_string(),
-                                            span: next2.span,
-                                        });
                                     }
                                 }
+                                _ => NetRef::Simple(net_idx),
                             }
-                            _ => NetRef::Simple(net_idx),
+                        } else {
+                            NetRef::Simple(net_idx)
                         }
-                    } else {
-                        NetRef::Simple(net_idx)
                     }
-                }
-                TokenPayload::VerilogInt { value, width: _ } => NetRef::Literal(value),
-                _ => {
-                    return Err(ScanError {
-                        message: "expected identifier for net name".to_string(),
-                        span: net_tok.span,
-                    });
+                    TokenPayload::VerilogInt { value, width: _ } => NetRef::Literal(value),
+                    _ => {
+                        return Err(ScanError {
+                            message: "expected identifier for net name".to_string(),
+                            span: net_tok.span,
+                        });
+                    }
                 }
             };
             // Expect ')'
@@ -2325,5 +2345,54 @@ wire [255:0] a;"#;
             _ => panic!("Expected VerilogInt for 16'd42"),
         }
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_parse_instance_unconnected_output() {
+        let src = r#"
+module m(a, y);
+  input a;
+  output y;
+  wire a, y;
+  INVX1 u1 (.A(a), .Y());
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let insts = &modules[0].instances;
+        assert_eq!(insts.len(), 1);
+        let conn = &insts[0].connections[1].1;
+        match conn {
+            NetRef::Unconnected => {}
+            _ => panic!("expected Unconnected for .Y()"),
+        }
+    }
+
+    #[test]
+    fn test_parse_instance_unconnected_input_and_comments() {
+        let src = r#"
+module m(y);
+  output y;
+  wire y;
+  AND2 u1 (.A(/*c*/ ), .B( // c
+ ), .Y(y));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let insts = &modules[0].instances;
+        assert_eq!(insts.len(), 1);
+        // .A() should be Unconnected
+        match &insts[0].connections[0].1 {
+            NetRef::Unconnected => {}
+            other => panic!("expected Unconnected for .A(), got {:?}", other),
+        }
+        // .B() should be Unconnected
+        match &insts[0].connections[1].1 {
+            NetRef::Unconnected => {}
+            other => panic!("expected Unconnected for .B(), got {:?}", other),
+        }
     }
 }
