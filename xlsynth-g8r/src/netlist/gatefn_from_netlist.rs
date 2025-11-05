@@ -414,6 +414,7 @@ fn build_instance_input_map(
             ),
             crate::netlist::parse::NetRef::Literal(bits) => format!("{}", bits),
             crate::netlist::parse::NetRef::Unconnected => "<unconnected>".to_string(),
+            crate::netlist::parse::NetRef::Concat(_) => "<concat>".to_string(),
         };
         port_map.insert(port_name.to_string(), net_name_str);
         if pin_dir == 2 {
@@ -457,6 +458,7 @@ fn build_instance_input_map(
                         ));
                     }
                 }
+                crate::netlist::parse::NetRef::PartSelect(_, _, _) => {}
                 crate::netlist::parse::NetRef::Literal(bits) => {
                     let bit_count = bits.get_bit_count();
                     assert_eq!(bit_count, 1);
@@ -472,7 +474,10 @@ fn build_instance_input_map(
                     // Treat as a hard missing input and surface clearly.
                     missing_inputs.push(format!("{} (<unconnected>)", port_name));
                 }
-                _ => {}
+                crate::netlist::parse::NetRef::Concat(_) => {
+                    // Currently unsupported for cell inputs; surface clearly.
+                    missing_inputs.push(format!("{} (<concat-unsupported>)", port_name));
+                }
             }
         }
     }
@@ -523,6 +528,7 @@ fn build_d_bv(
         }
         crate::netlist::parse::NetRef::Literal(_) => None,
         crate::netlist::parse::NetRef::Unconnected => None,
+        crate::netlist::parse::NetRef::Concat(_) => None,
     }
 }
 
@@ -606,6 +612,9 @@ fn write_bv_to_port_destination(
             }
             crate::netlist::parse::NetRef::Unconnected => {
                 // Nothing to write.
+            }
+            crate::netlist::parse::NetRef::Concat(_) => {
+                assert!(false, "concat destination not supported in DFF override");
             }
         }
     }
