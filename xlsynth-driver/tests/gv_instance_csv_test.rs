@@ -16,13 +16,6 @@ fn read_gzipped_csv(path: &std::path::Path) -> String {
     s
 }
 
-/// Writes the provided content into a fresh temp file and returns its path.
-fn write_tempfile(contents: &str) -> std::path::PathBuf {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(tmp.path(), contents).unwrap();
-    tmp.into_temp_path().to_path_buf()
-}
-
 #[test]
 fn test_gv_instance_csv_minimal_netlist() {
     let netlist = r#"
@@ -31,19 +24,20 @@ module test (input a, output y);
   NOR2X1 inst2 (.A(a), .B(y), .Y(y));
 endmodule
 "#;
-    let in_path = write_tempfile(netlist);
-    let out_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+    let in_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(in_file.path(), netlist).unwrap();
+    let out_file = tempfile::NamedTempFile::new().unwrap();
     let exe = env!("CARGO_BIN_EXE_xlsynth-driver");
     let status = Command::new(exe)
         .arg("gv-instance-csv")
         .arg("--input")
-        .arg(in_path.as_os_str())
+        .arg(in_file.path())
         .arg("--output")
-        .arg(out_path.as_os_str())
+        .arg(out_file.path())
         .status()
         .expect("run driver");
     assert!(status.success(), "process failed: {status}");
-    let s = read_gzipped_csv(&out_path);
+    let s = read_gzipped_csv(out_file.path());
     // No header, just rows: instance_name,cell_type\n
     let lines: Vec<_> = s.lines().collect();
     assert_eq!(lines.len(), 2, "should be 2 instances found");
