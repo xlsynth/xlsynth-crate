@@ -1734,6 +1734,9 @@ fn main() {
         Some(("ir-strip-pos-data", subm)) => {
             ir_strip_pos_data::handle_ir_strip_pos_data(subm, &config);
         }
+        Some(("ir-fn-eval", subm)) => {
+            ir_fn_eval::handle_ir_fn_eval(subm, &config);
+        }
         Some(("prove-quickcheck", subm)) => {
             prove_quickcheck::handle_prove_quickcheck(subm, &config);
         }

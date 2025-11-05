@@ -19,9 +19,11 @@ fn read_gzipped_csv(path: &std::path::Path) -> String {
 #[test]
 fn test_gv_instance_csv_minimal_netlist() {
     let netlist = r#"
-module test (input a, output y);
-  NAND2X1 inst1 (.A(a), .B(a), .Y(y));
-  NOR2X1 inst2 (.A(a), .B(y), .Y(y));
+module test (a, y);
+    input a;
+    output y;
+    NAND2X1 inst1 (.A(a), .B(a), .Y(y));
+    NOR2X1 inst2 (.A(a), .B(y), .Y(y));
 endmodule
 "#;
     let in_file = tempfile::NamedTempFile::new().unwrap();
