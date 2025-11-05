@@ -180,7 +180,7 @@ endmodule
 #[test]
 fn test_slice_on_both_sides_of_assignment() {
     let want = r#"module my_module;
-  wire [1:0][2:0][4:0] a;
+  wire [2:0][4:0][1:0] a;
   wire [1:0] b;
   wire [2:0] c;
   assign a[1][2][3:4] = b[1:0];
@@ -217,6 +217,39 @@ endmodule
     }
 
     let verilog = file.emit();
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_index_then_add_constant_uses_indexable_to_expr() {
+    let mut file = VastFile::new(VastFileType::Verilog);
+    let mut module = file.add_module("idx_add");
+
+    // Create a 3-bit wire `x` and a 1-bit wire `y`.
+    let x = module.add_wire("x", &file.make_bit_vector_type(3, false));
+    let y = module.add_wire("y", &file.make_scalar_type());
+
+    // Build (x[2]) using index -> indexable -> expr to exercise the new API.
+    let idx = file.make_index(&x.to_indexable_expr(), 2);
+    let idx_expr = idx.to_indexable_expr().to_expr();
+
+    // Add a 1-bit constant to the indexed bit.
+    let one = file
+        .make_literal("bits[1]:1", &IrFormatPreference::UnsignedDecimal)
+        .unwrap();
+    let sum = file.make_add(&idx_expr, &one);
+
+    // Emit as a continuous assignment so it appears in the module body.
+    let assign = file.make_continuous_assignment(&y.to_expr(), &sum);
+    module.add_member_continuous_assignment(assign);
+
+    let verilog = file.emit();
+    let want = r#"module idx_add;
+  wire [2:0] x;
+  wire y;
+  assign y = x[2] + 1'd1;
+endmodule
+"#;
     assert_eq!(verilog, want);
 }
 
@@ -431,17 +464,15 @@ fn test_nested_generate_loops_with_assignment() {
     // for (genvar i = 0; i < 2; ++i) begin: outer
     let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
     let two = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
-    let outer = module.add_generate_loop("i", &zero, &two, Some("outer"));
-    let mut outer_body = outer.get_statement_block();
+    let mut outer = module.add_generate_loop("i", &zero, &two, Some("outer"));
 
     //   for (genvar j = 1; j < 3; ++j) begin: inner
     let one = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
     let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
-    let inner = outer_body.add_generate_loop("j", &one, &three, Some("inner"));
-    let mut inner_body = inner.get_statement_block();
+    let mut inner = outer.add_generate_loop("j", &one, &three, Some("inner"));
 
     //     assign b = a;
-    inner_body.add_continuous_assignment(&b.to_expr(), &a.to_expr());
+    inner.add_continuous_assignment(&b.to_expr(), &a.to_expr());
 
     let verilog = file.emit();
     let want = r#"module gen_nested(
@@ -479,6 +510,73 @@ fn test_width_cast_basic() {
   output wire [7:0] y
 );
   assign y = 8'(x);
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_generate_loop_with_localparam_and_empty_always_blocks() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("gen_empty_blocks");
+
+    let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
+    let two = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
+    let mut gen = module.add_generate_loop("i", &zero, &two, Some("G"));
+
+    let five = file.make_plain_literal(5, &IrFormatPreference::UnsignedDecimal);
+    gen.add_localparam("LP", &five);
+
+    gen.add_always_comb().unwrap();
+    gen.add_always_ff(&[]).unwrap();
+
+    let verilog = file.emit();
+    let want = r#"module gen_empty_blocks;
+  for (genvar i = 0; i < 2; i = i + 1) begin : G
+    localparam LP = 5;
+    always_comb begin end
+    always_ff @ () begin end
+  end
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_type_cast_basic() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("type_cast");
+    let u8 = file.make_bit_vector_type(8, false);
+    let x = module.add_input("x", &u8);
+    let y = module.add_output("y", &u8);
+
+    let user_t = file.make_extern_package_type("", "my_type_t");
+    let cast = file.make_type_cast(&user_t, &x.to_expr());
+    let assign = file.make_continuous_assignment(&y.to_expr(), &cast);
+    module.add_member_continuous_assignment(assign);
+
+    let verilog = file.emit();
+    let want = r#"module type_cast(
+  input wire [7:0] x,
+  output wire [7:0] y
+);
+  assign y = ::my_type_t'(x);
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_add_inout_port() {
+    let mut file = VastFile::new(VastFileType::Verilog);
+    let mut module = file.add_module("with_inout");
+    let scalar = file.make_scalar_type();
+    module.add_inout("io", &scalar);
+    let verilog = file.emit();
+    let want = r#"module with_inout(
+  inout wire io
+);
+
 endmodule
 "#;
     assert_eq!(verilog, want);

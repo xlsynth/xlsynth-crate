@@ -3184,7 +3184,7 @@ fn test_ir_fn_eval() {
 fn test_tiv1_slice_oob_allows_compilation(use_tool_path: bool) {
     let _ = env_logger::builder().is_test(true).try_init();
     // DSLX attempting to slice starting at bit 32 of a 32-bit value.
-    let dslx = "fn f(x: u32) -> u32 { x[32 +: u32] }";
+    let dslx = "#![feature(type_inference_v1)]\nfn f(x: u32) -> u32 { x[32 +: u32] }";
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("f.x");
     std::fs::write(&dslx_path, dslx).unwrap();

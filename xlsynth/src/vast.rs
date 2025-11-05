@@ -257,6 +257,17 @@ pub struct IndexableExpr {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+impl IndexableExpr {
+    pub fn to_expr(&self) -> Expr {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_indexable_expression_as_expression(self.inner) };
+        Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
 pub struct VastModule {
     inner: *mut sys::CVastModule,
     parent: Arc<Mutex<VastFilePtr>>,
@@ -473,6 +484,18 @@ impl VastModule {
         let _locked = self.parent.lock().unwrap();
         let c_logic_ref = unsafe {
             sys::xls_vast_verilog_module_add_output(self.inner, c_name.as_ptr(), data_type.inner)
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_inout(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_inout(self.inner, c_name.as_ptr(), data_type.inner)
         };
         LogicRef {
             inner: c_logic_ref,
@@ -949,10 +972,114 @@ impl GenerateLoop {
         }
     }
 
-    pub fn get_statement_block(&self) -> VastStatementBlock {
+    pub fn add_statement(&mut self, stmt: VastStatement) {
         let _locked = self.parent.lock().unwrap();
-        let inner = unsafe { sys::xls_vast_generate_loop_get_body(self.inner) };
-        VastStatementBlock {
+        unsafe { sys::xls_vast_generate_loop_add_statement(self.inner, stmt.inner) }
+    }
+
+    pub fn add_generate_loop(
+        &mut self,
+        genvar_name: &str,
+        init: &Expr,
+        limit: &Expr,
+        label: Option<&str>,
+    ) -> GenerateLoop {
+        let c_name = CString::new(genvar_name).unwrap();
+        let c_label = CString::new(label.unwrap_or("")).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_generate_loop_add_generate_loop(
+                self.inner,
+                c_name.as_ptr(),
+                init.inner,
+                limit.inner,
+                c_label.as_ptr(),
+            )
+        };
+        GenerateLoop {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_always_comb(&mut self) -> Result<VastAlwaysBase, XlsynthError> {
+        let _locked = self.parent.lock().unwrap();
+        let mut always_base_out: *mut sys::CVastAlwaysBase = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_generate_loop_add_always_comb(
+                self.inner,
+                &mut always_base_out,
+                &mut error_out,
+            )
+        };
+        if success {
+            Ok(VastAlwaysBase {
+                inner: always_base_out,
+                parent: self.parent.clone(),
+            })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    pub fn add_always_ff(
+        &mut self,
+        sensitivity_list: &[&Expr],
+    ) -> Result<VastAlwaysBase, XlsynthError> {
+        let _locked = self.parent.lock().unwrap();
+        let mut expr_ptrs: Vec<*mut sys::CVastExpression> =
+            sensitivity_list.iter().map(|e| e.inner).collect();
+        let mut always_base_out: *mut sys::CVastAlwaysBase = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_generate_loop_add_always_ff(
+                self.inner,
+                expr_ptrs.as_mut_ptr(),
+                expr_ptrs.len(),
+                &mut always_base_out,
+                &mut error_out,
+            )
+        };
+        if success {
+            Ok(VastAlwaysBase {
+                inner: always_base_out,
+                parent: self.parent.clone(),
+            })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    pub fn add_localparam(&mut self, name: &str, rhs: &Expr) -> LocalparamRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_generate_loop_add_localparam(self.inner, c_name.as_ptr(), rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_typed_localparam(&mut self, def: &Def, rhs: &Expr) -> LocalparamRef {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_generate_loop_add_localparam_with_def(self.inner, def.inner, rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_continuous_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_generate_loop_add_continuous_assignment(self.inner, lhs.inner, rhs.inner)
+        };
+        VastStatement {
             inner,
             parent: self.parent.clone(),
         }
@@ -1503,6 +1630,17 @@ impl VastFile {
         let locked = self.ptr.lock().unwrap();
         let inner = unsafe {
             sys::xls_vast_verilog_file_make_width_cast(locked.0, width.inner, value.inner)
+        };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_type_cast(&mut self, data_type: &VastDataType, value: &Expr) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_type_cast(locked.0, data_type.inner, value.inner)
         };
         Expr {
             inner,
