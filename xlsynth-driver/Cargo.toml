@@ -38,6 +38,7 @@ libc = "0.2"
 signal-hook = "0.3"
 flate2 = "1.0"
 comfy-table = "7.2"
+csv = "1"
 
 [dev-dependencies]
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }

@@ -1092,6 +1092,23 @@ On success the command prints one line per data output:
 
 making it easy to splice into shell pipelines or test scripts.
 
+### `gv-instance-csv`: instance/cell pairs (.csv.gz)
+
+Emits a gzipped CSV with all instance_name,cell_type pairs in a gate-level netlist.
+
+Key flags:
+
+- --input <PATH> (gate-level netlist)
+- --output <PATH> (output .csv.gz)
+
+Example usage:
+
+```shell
+xlsynth-driver gv-instance-csv \
+  --input my_module.gv \
+  --output my_module.instances.csv.gz
+```
+
 ## Toolchain configuration (`xlsynth-toolchain.toml`)
 
 Several subcommands accept a `--toolchain` option that points at a
