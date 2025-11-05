@@ -5,11 +5,9 @@
 //! logic.
 
 use std::ffi::OsStr;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::Command;
-
-#[cfg(target_family = "unix")]
-use std::os::unix::fs::MetadataExt;
 
 /// Resolve the concrete `.dylib` path on macOS by inspecting `XLS_DSO_PATH`.
 ///
