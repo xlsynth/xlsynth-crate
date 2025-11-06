@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-driver-fuzz"
-version = "0.17.0"
+version = "0.18.0"
 publish = false
 edition = "2021"
 
@@ -12,7 +12,7 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
-xlsynth-driver = { path = "..", features = ["enable-fake-task"], version = "0.17.0" }
+xlsynth-driver = { path = "..", features = ["enable-fake-task"], version = "0.18.0" }
 
 [lib]
 name = "xlsynth_driver_fuzz"
