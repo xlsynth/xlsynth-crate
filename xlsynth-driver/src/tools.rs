@@ -129,8 +129,11 @@ pub fn run_ir_converter_main(
     }
 
     // Pass through the experimental type inference flag if requested.
-    if let Some(true) = type_inference_v2 {
-        command.arg("--type_inference_v2");
+    if let Some(value) = type_inference_v2 {
+        command.arg(format!(
+            "--type_inference_v2={}",
+            if value { "true" } else { "false" }
+        ));
     }
 
     log::info!("command: {:?}", command);

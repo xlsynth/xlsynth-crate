@@ -902,6 +902,13 @@ extern "C" {
         value: *mut CVastExpression,
     ) -> *mut CVastExpression;
 
+    // Cast a value to a specific type.
+    pub fn xls_vast_verilog_file_make_type_cast(
+        f: *mut CVastFile,
+        type_: *mut CVastDataType,
+        value: *mut CVastExpression,
+    ) -> *mut CVastExpression;
+
     pub fn xls_vast_verilog_file_make_instantiation(
         f: *mut CVastFile,
         module_name: *const std::os::raw::c_char,
@@ -953,6 +960,11 @@ extern "C" {
         type_: *mut CVastDataType,
     ) -> *mut CVastLogicRef;
     pub fn xls_vast_verilog_module_add_output(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_inout(
         m: *mut CVastModule,
         name: *const std::os::raw::c_char,
         type_: *mut CVastDataType,
@@ -1049,6 +1061,9 @@ extern "C" {
     pub fn xls_vast_parameter_ref_as_expression(v: *mut CVastParameterRef) -> *mut CVastExpression;
     pub fn xls_vast_localparam_ref_as_expression(
         v: *mut CVastLocalparamRef,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_indexable_expression_as_expression(
+        v: *mut CVastIndexableExpression,
     ) -> *mut CVastExpression;
     pub fn xls_vast_verilog_file_make_unsized_one_literal(
         f: *mut CVastFile,
@@ -2082,9 +2097,45 @@ extern "C" {
     ) -> *mut CVastStatementBlock;
 
     pub fn xls_vast_generate_loop_get_genvar(loop_: *mut CVastGenerateLoop) -> *mut CVastLogicRef;
-    pub fn xls_vast_generate_loop_get_body(
+
+    pub fn xls_vast_generate_loop_add_statement(
         loop_: *mut CVastGenerateLoop,
-    ) -> *mut CVastStatementBlock;
+        statement: *mut CVastStatement,
+    );
+    pub fn xls_vast_generate_loop_add_generate_loop(
+        loop_: *mut CVastGenerateLoop,
+        genvar_name: *const std::os::raw::c_char,
+        init: *mut CVastExpression,
+        limit: *mut CVastExpression,
+        label: *const std::os::raw::c_char,
+    ) -> *mut CVastGenerateLoop;
+    pub fn xls_vast_generate_loop_add_always_comb(
+        loop_: *mut CVastGenerateLoop,
+        out_always_comb: *mut *mut CVastAlwaysBase,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_generate_loop_add_always_ff(
+        loop_: *mut CVastGenerateLoop,
+        sensitivity_list_elements: *mut *mut CVastExpression,
+        sensitivity_list_count: usize,
+        out_always_ff: *mut *mut CVastAlwaysBase,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_generate_loop_add_localparam(
+        loop_: *mut CVastGenerateLoop,
+        name: *const std::os::raw::c_char,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLocalparamRef;
+    pub fn xls_vast_generate_loop_add_localparam_with_def(
+        loop_: *mut CVastGenerateLoop,
+        def: *mut CVastDef,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLocalparamRef;
+    pub fn xls_vast_generate_loop_add_continuous_assignment(
+        loop_: *mut CVastGenerateLoop,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
 
     pub fn xls_function_type_get_param_count(fty: *mut CIrFunctionType) -> i64;
 
