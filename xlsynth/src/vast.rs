@@ -329,6 +329,21 @@ pub struct InlineVerilogStatement {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+pub struct Comment {
+    inner: *mut sys::CVastComment,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct MacroRef {
+    inner: *mut sys::CVastMacroRef,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct MacroStatement {
+    inner: *mut sys::CVastMacroStatement,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
 pub struct ContinuousAssignment {
     inner: *mut sys::CVastContinuousAssignment,
     parent: Arc<Mutex<VastFilePtr>>,
@@ -608,6 +623,11 @@ impl VastModule {
         unsafe { sys::xls_vast_verilog_module_add_member_inline_statement(self.inner, stmt.inner) }
     }
 
+    pub fn add_member_macro_statement(&mut self, stmt: MacroStatement) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_verilog_module_add_member_macro_statement(self.inner, stmt.inner) }
+    }
+
     pub fn add_reg(
         &mut self,
         name: &str,
@@ -855,19 +875,6 @@ impl VastStatementBlock {
         }
     }
 
-    pub fn add_continuous_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
-        let _locked = self.parent.lock().unwrap();
-        let inner = unsafe {
-            sys::xls_vast_statement_block_add_continuous_assignment(
-                self.inner, lhs.inner, rhs.inner,
-            )
-        };
-        VastStatement {
-            inner,
-            parent: self.parent.clone(),
-        }
-    }
-
     pub fn add_cond(&mut self, cond: &Expr) -> Conditional {
         let _locked = self.parent.lock().unwrap();
         let inner =
@@ -882,31 +889,6 @@ impl VastStatementBlock {
         let _locked = self.parent.lock().unwrap();
         let inner = unsafe { sys::xls_vast_statement_block_add_case(self.inner, selector.inner) };
         CaseStatement {
-            inner,
-            parent: self.parent.clone(),
-        }
-    }
-
-    pub fn add_generate_loop(
-        &mut self,
-        genvar_name: &str,
-        init: &Expr,
-        limit: &Expr,
-        label: Option<&str>,
-    ) -> GenerateLoop {
-        let c_name = CString::new(genvar_name).unwrap();
-        let c_label = CString::new(label.unwrap_or("")).unwrap();
-        let _locked = self.parent.lock().unwrap();
-        let inner = unsafe {
-            sys::xls_vast_statement_block_add_generate_loop(
-                self.inner,
-                c_name.as_ptr(),
-                init.inner,
-                limit.inner,
-                c_label.as_ptr(),
-            )
-        };
-        GenerateLoop {
             inner,
             parent: self.parent.clone(),
         }
@@ -1084,6 +1066,31 @@ impl GenerateLoop {
             parent: self.parent.clone(),
         }
     }
+
+    pub fn add_blank_line(&mut self) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_generate_loop_add_blank_line(self.inner) }
+    }
+
+    pub fn add_comment(&mut self, comment: &Comment) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_generate_loop_add_comment(self.inner, comment.inner) }
+    }
+
+    pub fn add_instantiation(&mut self, inst: &Instantiation) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_generate_loop_add_instantiation(self.inner, inst.inner) }
+    }
+
+    pub fn add_inline_statement(&mut self, stmt: &InlineVerilogStatement) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_generate_loop_add_inline_verilog_statement(self.inner, stmt.inner) }
+    }
+
+    pub fn add_macro_statement(&mut self, macro_ref: &MacroRef) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_generate_loop_add_macro_statement(self.inner, macro_ref.inner) }
+    }
 }
 
 pub enum VastFileType {
@@ -1260,6 +1267,16 @@ impl VastFile {
         }
     }
 
+    pub fn make_comment(&mut self, text: &str) -> Comment {
+        let locked = self.ptr.lock().unwrap();
+        let c_text = CString::new(text).unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_file_make_comment(locked.0, c_text.as_ptr()) };
+        Comment {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
     pub fn make_scalar_type(&mut self) -> VastDataType {
         let locked = self.ptr.lock().unwrap();
         let data_type = unsafe { sys::xls_vast_verilog_file_make_scalar_type(locked.0) };
@@ -1294,6 +1311,18 @@ impl VastFile {
                 width_expr.inner,
                 is_signed,
             )
+        };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_extern_type(&mut self, entity_name: &str) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let c_entity_name = CString::new(entity_name).unwrap();
+        let data_type = unsafe {
+            sys::xls_vast_verilog_file_make_extern_type(locked.0, c_entity_name.as_ptr())
         };
         VastDataType {
             inner: data_type,
@@ -1453,6 +1482,44 @@ impl VastFile {
         };
         let inner = unsafe { sys::xls_vast_concat_as_expression(concat_ptr) };
         Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_macro_ref(&mut self, name: &str) -> MacroRef {
+        let locked = self.ptr.lock().unwrap();
+        let c_name = CString::new(name).unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_file_make_macro_ref(locked.0, c_name.as_ptr()) };
+        MacroRef {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_macro_ref_with_args(&mut self, name: &str, args: &[&Expr]) -> MacroRef {
+        let locked = self.ptr.lock().unwrap();
+        let c_name = CString::new(name).unwrap();
+        let mut arg_ptrs: Vec<*mut sys::CVastExpression> = args.iter().map(|e| e.inner).collect();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_macro_ref_with_args(
+                locked.0,
+                c_name.as_ptr(),
+                arg_ptrs.as_mut_ptr(),
+                arg_ptrs.len(),
+            )
+        };
+        MacroRef {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_macro_statement(&mut self, macro_ref: &MacroRef) -> MacroStatement {
+        let locked = self.ptr.lock().unwrap();
+        let inner =
+            unsafe { sys::xls_vast_verilog_file_make_macro_statement(locked.0, macro_ref.inner) };
+        MacroStatement {
             inner,
             parent: self.ptr.clone(),
         }
@@ -1756,6 +1823,17 @@ impl ParameterRef {
     pub fn to_expr(&self) -> Expr {
         let _locked = self.parent.lock().unwrap();
         let inner = unsafe { sys::xls_vast_parameter_ref_as_expression(self.inner) };
+        Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
+impl MacroRef {
+    pub fn to_expr(&self) -> Expr {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_macro_ref_as_expression(self.inner) };
         Expr {
             inner,
             parent: self.parent.clone(),
