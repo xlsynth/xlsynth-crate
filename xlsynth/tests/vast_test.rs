@@ -1120,3 +1120,80 @@ endmodule
 "#;
     assert_eq!(verilog, want);
 }
+
+#[test]
+fn test_type_cast_to_unqualified_user_type() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("type_cast2");
+    let u8 = file.make_bit_vector_type(8, false);
+    let x = module.add_input("x", &u8);
+    let y = module.add_output("y", &u8);
+
+    // Use an unqualified user type via extern_type.
+    let user_t = file.make_extern_type("my_type_t");
+    let cast = file.make_type_cast(&user_t, &x.to_expr());
+    let assign = file.make_continuous_assignment(&y.to_expr(), &cast);
+    module.add_member_continuous_assignment(assign);
+
+    let verilog = file.emit();
+    let want = r#"module type_cast2(
+  input wire [7:0] x,
+  output wire [7:0] y
+);
+  assign y = my_type_t'(x);
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_module_macro_statement_simple() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("macro_mod");
+
+    // Add a simple macro statement: `MY_MACRO;
+    let mref = file.make_macro_ref("MY_MACRO");
+    let mstmt = file.make_macro_statement(&mref);
+    module.add_member_macro_statement(mstmt);
+
+    let verilog = file.emit();
+    let want = r#"module macro_mod;
+  `MY_MACRO;
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_generate_loop_with_inline_and_macro() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("gen_with_macros");
+
+    // for (genvar i = 0; i < 1; ++i) begin : G
+    let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
+    let one = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
+    let mut gen = module.add_generate_loop("i", &zero, &one, Some("G"));
+
+    // Comment, blank line, and macro statements inside the loop.
+    let comment = file.make_comment("inside");
+    gen.add_comment(&comment);
+    gen.add_blank_line();
+    let mref = file.make_macro_ref("DO_SOMETHING");
+    gen.add_macro_statement(&mref);
+    // Macro with arguments.
+    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
+    let mref_args = file.make_macro_ref_with_args("DO_THING", &[&three]);
+    gen.add_macro_statement(&mref_args);
+
+    let verilog = file.emit();
+    let want = r#"module gen_with_macros;
+  for (genvar i = 0; i < 1; i = i + 1) begin : G
+    // inside
+
+    `DO_SOMETHING;
+    `DO_THING(3);
+  end
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}

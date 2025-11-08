@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.18.0";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.19.0";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
 
 fn xlsynth_release_tuple_from_tag(tag: &str) -> (u32, u32, u32, u32) {

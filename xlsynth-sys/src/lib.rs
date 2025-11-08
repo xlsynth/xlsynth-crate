@@ -87,6 +87,16 @@ pub struct CVastConcat {
 }
 
 #[repr(C)]
+pub struct CVastMacroRef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastMacroStatement {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CVastComment {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -808,6 +818,10 @@ extern "C" {
         package_name: *const std::os::raw::c_char,
         type_name: *const std::os::raw::c_char,
     ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_extern_type(
+        f: *mut CVastFile,
+        entity_name: *const std::os::raw::c_char,
+    ) -> *mut CVastDataType;
     pub fn xls_vast_verilog_file_make_packed_array_type(
         f: *mut CVastFile,
         element_type: *mut CVastDataType,
@@ -1018,6 +1032,10 @@ extern "C" {
         m: *mut CVastModule,
         stmt: *mut CVastInlineVerilogStatement,
     );
+    pub fn xls_vast_verilog_module_add_member_macro_statement(
+        m: *mut CVastModule,
+        statement: *mut CVastMacroStatement,
+    );
 
     pub fn xls_vast_verilog_module_add_parameter(
         m: *mut CVastModule,
@@ -1072,6 +1090,7 @@ extern "C" {
     pub fn xls_vast_indexable_expression_as_expression(
         v: *mut CVastIndexableExpression,
     ) -> *mut CVastExpression;
+    pub fn xls_vast_macro_ref_as_expression(v: *mut CVastMacroRef) -> *mut CVastExpression;
     pub fn xls_vast_verilog_file_make_unsized_one_literal(
         f: *mut CVastFile,
     ) -> *mut CVastExpression;
@@ -1079,6 +1098,20 @@ extern "C" {
         f: *mut CVastFile,
     ) -> *mut CVastExpression;
     pub fn xls_vast_verilog_file_make_unsized_x_literal(f: *mut CVastFile) -> *mut CVastExpression;
+    pub fn xls_vast_verilog_file_make_macro_ref(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+    ) -> *mut CVastMacroRef;
+    pub fn xls_vast_verilog_file_make_macro_ref_with_args(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+        args: *mut *mut CVastExpression,
+        arg_count: libc::size_t,
+    ) -> *mut CVastMacroRef;
+    pub fn xls_vast_verilog_file_make_macro_statement(
+        f: *mut CVastFile,
+        r#ref: *mut CVastMacroRef,
+    ) -> *mut CVastMacroStatement;
 
     pub fn xls_vast_logic_ref_get_name(v: *mut CVastLogicRef) -> *mut std::os::raw::c_char;
 
@@ -2152,6 +2185,23 @@ extern "C" {
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
+    pub fn xls_vast_generate_loop_add_blank_line(loop_: *mut CVastGenerateLoop);
+    pub fn xls_vast_generate_loop_add_comment(
+        loop_: *mut CVastGenerateLoop,
+        comment: *mut CVastComment,
+    );
+    pub fn xls_vast_generate_loop_add_instantiation(
+        loop_: *mut CVastGenerateLoop,
+        instantiation: *mut CVastInstantiation,
+    );
+    pub fn xls_vast_generate_loop_add_inline_verilog_statement(
+        loop_: *mut CVastGenerateLoop,
+        stmt: *mut CVastInlineVerilogStatement,
+    );
+    pub fn xls_vast_generate_loop_add_macro_statement(
+        loop_: *mut CVastGenerateLoop,
+        macro_ref: *mut CVastMacroRef,
+    );
 
     pub fn xls_function_type_get_param_count(fty: *mut CIrFunctionType) -> i64;
 
