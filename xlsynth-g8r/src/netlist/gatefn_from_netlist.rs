@@ -191,6 +191,9 @@ pub fn project_gatefn_from_netlist_and_liberty(
                         used_as_input.insert(nets[net_idx.0].name);
                     }
                 }
+                crate::netlist::parse::NetRef::Unconnected => {
+                    // Do not count as driven/used.
+                }
                 _ => {}
             }
         }
@@ -326,9 +329,13 @@ pub fn project_gatefn_from_netlist_and_liberty(
                 .width
                 .map(|(msb, lsb)| (msb as usize) - (lsb as usize) + 1)
                 .unwrap_or(1);
-            let bv = net_to_bv
-                .get(&net_idx)
-                .ok_or_else(|| format!("No value for output net '{}'", net_name))?;
+            let bv = match net_to_bv.get(&net_idx) {
+                Some(bv) => bv.clone(),
+                None => {
+                    // Unconnected output: emit deterministic false vector of declared width.
+                    AigBitVector::from_lsb_is_index_0(&vec![gb.get_false(); width])
+                }
+            };
             assert_eq!(
                 bv.get_bit_count(),
                 width,
@@ -406,6 +413,8 @@ fn build_instance_input_map(
                 lsb
             ),
             crate::netlist::parse::NetRef::Literal(bits) => format!("{}", bits),
+            crate::netlist::parse::NetRef::Unconnected => "<unconnected>".to_string(),
+            crate::netlist::parse::NetRef::Concat(_) => "<concat>".to_string(),
         };
         port_map.insert(port_name.to_string(), net_name_str);
         if pin_dir == 2 {
@@ -449,6 +458,7 @@ fn build_instance_input_map(
                         ));
                     }
                 }
+                crate::netlist::parse::NetRef::PartSelect(_, _, _) => {}
                 crate::netlist::parse::NetRef::Literal(bits) => {
                     let bit_count = bits.get_bit_count();
                     assert_eq!(bit_count, 1);
@@ -460,7 +470,14 @@ fn build_instance_input_map(
                     };
                     input_map.insert(port_name.to_string(), val);
                 }
-                _ => {}
+                crate::netlist::parse::NetRef::Unconnected => {
+                    // Treat as a hard missing input and surface clearly.
+                    missing_inputs.push(format!("{} (<unconnected>)", port_name));
+                }
+                crate::netlist::parse::NetRef::Concat(_) => {
+                    // Currently unsupported for cell inputs; surface clearly.
+                    missing_inputs.push(format!("{} (<concat-unsupported>)", port_name));
+                }
             }
         }
     }
@@ -510,6 +527,8 @@ fn build_d_bv(
             })
         }
         crate::netlist::parse::NetRef::Literal(_) => None,
+        crate::netlist::parse::NetRef::Unconnected => None,
+        crate::netlist::parse::NetRef::Concat(_) => None,
     }
 }
 
@@ -590,6 +609,12 @@ fn write_bv_to_port_destination(
                     "DFF override: destination output as literal not supported for port '{}'",
                     pname
                 );
+            }
+            crate::netlist::parse::NetRef::Unconnected => {
+                // Nothing to write.
+            }
+            crate::netlist::parse::NetRef::Concat(_) => {
+                assert!(false, "concat destination not supported in DFF override");
             }
         }
     }
@@ -757,6 +782,154 @@ mod tests {
         .unwrap();
         let s = gate_fn.to_string();
         assert!(s.contains("not("), "GateFn output: {}", s);
+    }
+
+    #[test]
+    fn test_unconnected_output_is_ignored() {
+        // Cell with output Y unconnected should not error.
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let y = interner.get_or_intern("y");
+        let invx1 = interner.get_or_intern("INVX1");
+        let u1 = interner.get_or_intern("u1");
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
+        ];
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: y,
+            },
+        ];
+        let instances = vec![NetlistInstance {
+            type_name: invx1,
+            instance_name: u1,
+            connections: vec![
+                (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
+                (interner.get_or_intern("Y"), NetRef::Unconnected),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+        let module = NetlistModule {
+            name: interner.get_or_intern("top"),
+            ports,
+            wires: vec![],
+            instances,
+        };
+        let liberty_lib = crate::liberty_proto::Library {
+            cells: vec![crate::liberty_proto::Cell {
+                name: "INVX1".to_string(),
+                pins: vec![
+                    crate::liberty_proto::Pin {
+                        name: "A".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "Y".to_string(),
+                        direction: 1,
+                        function: "(!A)".to_string(),
+                    },
+                ],
+                area: 1.0,
+            }],
+        };
+        let res = project_gatefn_from_netlist_and_liberty(
+            &module,
+            &nets,
+            &interner,
+            &liberty_lib,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(
+            res.is_ok(),
+            "projection should tolerate unconnected output: {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn test_unconnected_input_errors_clearly() {
+        // Cell with input A unconnected should surface a clear error.
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let y = interner.get_or_intern("y");
+        let and2 = interner.get_or_intern("AND2");
+        let u1 = interner.get_or_intern("u1");
+        let nets = vec![Net {
+            name: y,
+            width: None,
+        }];
+        let ports = vec![NetlistPort {
+            direction: PortDirection::Output,
+            width: None,
+            name: y,
+        }];
+        let instances = vec![NetlistInstance {
+            type_name: and2,
+            instance_name: u1,
+            connections: vec![
+                (interner.get_or_intern("A"), NetRef::Unconnected),
+                (interner.get_or_intern("B"), NetRef::Unconnected),
+                (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(0))),
+            ],
+            inst_lineno: 10,
+            inst_colno: 5,
+        }];
+        let module = NetlistModule {
+            name: interner.get_or_intern("top"),
+            ports,
+            wires: vec![],
+            instances,
+        };
+        let liberty_lib = crate::liberty_proto::Library {
+            cells: vec![crate::liberty_proto::Cell {
+                name: "AND2".to_string(),
+                pins: vec![
+                    crate::liberty_proto::Pin {
+                        name: "A".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "B".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "Y".to_string(),
+                        direction: 1,
+                        function: "(A & B)".to_string(),
+                    },
+                ],
+                area: 1.0,
+            }],
+        };
+        let err = project_gatefn_from_netlist_and_liberty(
+            &module,
+            &nets,
+            &interner,
+            &liberty_lib,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect_err("should error on unconnected input");
+        assert!(err.contains("missing inputs"), "{}", err);
+        assert!(err.contains("<unconnected>"), "{}", err);
     }
 
     #[test]

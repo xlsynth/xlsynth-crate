@@ -5,3 +5,4 @@ pub mod gv2ir;
 pub mod integrity;
 pub mod parse;
 pub mod stats;
+pub mod utils;

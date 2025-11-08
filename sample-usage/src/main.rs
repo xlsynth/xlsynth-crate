@@ -178,6 +178,8 @@ mod tests {
     }
 
     #[test]
+    // TODO(meheff): Re-enable when https://github.com/google/xls/issues/2876 is fixed.
+    #[ignore]
     fn test_validate_use() {
         let _ = env_logger::try_init();
         validate_use().expect("validation should succeed");

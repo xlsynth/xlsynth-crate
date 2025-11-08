@@ -25,6 +25,35 @@ tool_path = \"{}\"",
     )
 }
 
+#[test]
+fn test_dslx_stitch_pipeline_cycle_numbering_must_start_at_zero() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Only defines `foo_cycle1` – numbering does not start at 0.
+    let dslx = "fn foo_cycle1(x: u32) -> u32 { x }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "command should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("numbering must start at 0"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
 #[cfg(feature = "with-z3-binary-test")]
 #[test]
 fn test_irequiv_subcommand_assert_label_filter() {
@@ -3155,7 +3184,7 @@ fn test_ir_fn_eval() {
 fn test_tiv1_slice_oob_allows_compilation(use_tool_path: bool) {
     let _ = env_logger::builder().is_test(true).try_init();
     // DSLX attempting to slice starting at bit 32 of a 32-bit value.
-    let dslx = "fn f(x: u32) -> u32 { x[32 +: u32] }";
+    let dslx = "#![feature(type_inference_v1)]\nfn f(x: u32) -> u32 { x[32 +: u32] }";
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("f.x");
     std::fs::write(&dslx_path, dslx).unwrap();

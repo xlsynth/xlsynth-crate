@@ -203,7 +203,7 @@ impl TypecheckedModule {
         unsafe {
             let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
             let mut result_out: *mut sys::CDslxTypecheckedModule = std::ptr::null_mut();
-            let success = sys::xls_dslx_typechecked_module_clone_ignore_functions(
+            let success = sys::xls_dslx_typechecked_module_clone_removing_functions(
                 self.ptr.ptr,
                 if function_ptrs.is_empty() {
                     std::ptr::null_mut()

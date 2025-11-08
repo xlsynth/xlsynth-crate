@@ -245,14 +245,27 @@ impl LogicRef {
     }
 }
 
+#[derive(Clone)]
 pub struct Expr {
     inner: *mut sys::CVastExpression,
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+#[derive(Clone)]
 pub struct IndexableExpr {
     inner: *mut sys::CVastIndexableExpression,
     parent: Arc<Mutex<VastFilePtr>>,
+}
+
+impl IndexableExpr {
+    pub fn to_expr(&self) -> Expr {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_indexable_expression_as_expression(self.inner) };
+        Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
 }
 
 pub struct VastModule {
@@ -306,6 +319,16 @@ pub struct Instantiation {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+pub struct BlankLine {
+    inner: *mut sys::CVastBlankLine,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct InlineVerilogStatement {
+    inner: *mut sys::CVastInlineVerilogStatement,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
 pub struct ContinuousAssignment {
     inner: *mut sys::CVastContinuousAssignment,
     parent: Arc<Mutex<VastFilePtr>>,
@@ -326,11 +349,122 @@ pub struct VastStatement {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+pub struct Conditional {
+    inner: *mut sys::CVastConditional,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct CaseStatement {
+    inner: *mut sys::CVastCaseStatement,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct GenerateLoop {
+    inner: *mut sys::CVastGenerateLoop,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct ParameterRef {
+    inner: *mut sys::CVastParameterRef,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+pub struct LocalparamRef {
+    inner: *mut sys::CVastLocalparamRef,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+impl LocalparamRef {
+    pub fn to_expr(&self) -> Expr {
+        let locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_localparam_ref_as_expression(self.inner) };
+        Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+pub struct Def {
+    inner: *mut sys::CVastDef,
+    parent: Arc<Mutex<VastFilePtr>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataKind {
+    Reg,
+    Wire,
+    Logic,
+    Integer,
+    Int,
+    User,
+    UntypedEnum,
+    Genvar,
+}
+
+impl DataKind {
+    fn to_sys(self) -> i32 {
+        match self {
+            DataKind::Reg => sys::XLS_VAST_DATA_KIND_REG,
+            DataKind::Wire => sys::XLS_VAST_DATA_KIND_WIRE,
+            DataKind::Logic => sys::XLS_VAST_DATA_KIND_LOGIC,
+            DataKind::Integer => sys::XLS_VAST_DATA_KIND_INTEGER,
+            DataKind::Int => sys::XLS_VAST_DATA_KIND_INT,
+            DataKind::User => sys::XLS_VAST_DATA_KIND_USER,
+            DataKind::UntypedEnum => sys::XLS_VAST_DATA_KIND_UNTYPED_ENUM,
+            DataKind::Genvar => sys::XLS_VAST_DATA_KIND_GENVAR,
+        }
+    }
+}
+
+pub enum AlwaysKind {
+    AlwaysFF,
+    AlwaysAt,
+    AlwaysComb,
+}
+
 impl VastModule {
     pub fn name(&self) -> String {
         let locked = self.parent.lock().unwrap();
         let inner = unsafe { sys::xls_vast_verilog_module_get_name(self.inner) };
         unsafe { c_str_to_rust(inner) }
+    }
+
+    pub fn add_parameter_port(&mut self, name: &str, value: &Expr) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_parameter_port(
+                self.inner,
+                c_name.as_ptr(),
+                value.inner,
+            )
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_typed_parameter_port(
+        &mut self,
+        name: &str,
+        data_type: &VastDataType,
+        value: &Expr,
+    ) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_typed_parameter_port(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+                value.inner,
+            )
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
     }
 
     pub fn add_input(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
@@ -357,6 +491,50 @@ impl VastModule {
         }
     }
 
+    pub fn add_inout(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_inout(self.inner, c_name.as_ptr(), data_type.inner)
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_logic_input(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_logic_input(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+            )
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_logic_output(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let c_logic_ref = unsafe {
+            sys::xls_vast_verilog_module_add_logic_output(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+            )
+        };
+        LogicRef {
+            inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
     pub fn add_wire(&mut self, name: &str, data_type: &VastDataType) -> LogicRef {
         let c_name = CString::new(name).unwrap();
         let _locked = self.parent.lock().unwrap();
@@ -365,6 +543,32 @@ impl VastModule {
         };
         LogicRef {
             inner: c_logic_ref,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_generate_loop(
+        &mut self,
+        genvar_name: &str,
+        init: &Expr,
+        limit: &Expr,
+        label: Option<&str>,
+    ) -> GenerateLoop {
+        let c_name = CString::new(genvar_name).unwrap();
+        let c_label =
+            CString::new(label.unwrap_or("")).expect("label should not contain NUL characters");
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_generate_loop(
+                self.inner,
+                c_name.as_ptr(),
+                init.inner,
+                limit.inner,
+                c_label.as_ptr(),
+            )
+        };
+        GenerateLoop {
+            inner,
             parent: self.parent.clone(),
         }
     }
@@ -392,6 +596,16 @@ impl VastModule {
                 assignment.inner,
             )
         }
+    }
+
+    pub fn add_member_blank_line(&mut self, blank: BlankLine) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_verilog_module_add_member_blank_line(self.inner, blank.inner) }
+    }
+
+    pub fn add_member_inline_statement(&mut self, stmt: InlineVerilogStatement) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_verilog_module_add_member_inline_statement(self.inner, stmt.inner) }
     }
 
     pub fn add_reg(
@@ -422,10 +636,38 @@ impl VastModule {
         }
     }
 
+    pub fn add_logic(
+        &mut self,
+        name: &str,
+        data_type: &VastDataType,
+    ) -> Result<LogicRef, XlsynthError> {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let mut reg_ref_out: *mut sys::CVastLogicRef = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_verilog_module_add_logic(
+                self.inner,
+                c_name.as_ptr(),
+                data_type.inner,
+                &mut reg_ref_out,
+                &mut error_out,
+            )
+        };
+        if success {
+            Ok(LogicRef {
+                inner: reg_ref_out,
+                parent: self.parent.clone(),
+            })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
     fn add_always_block(
         &mut self,
         sensitivity_list: &[&Expr],
-        is_ff: bool,
+        always_kind: AlwaysKind,
     ) -> Result<VastAlwaysBase, XlsynthError> {
         let _locked = self.parent.lock().unwrap();
         let mut expr_ptrs: Vec<*mut sys::CVastExpression> =
@@ -433,22 +675,26 @@ impl VastModule {
         let mut always_base_out: *mut sys::CVastAlwaysBase = std::ptr::null_mut();
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let success = unsafe {
-            if is_ff {
-                sys::xls_vast_verilog_module_add_always_ff(
+            match always_kind {
+                AlwaysKind::AlwaysFF => sys::xls_vast_verilog_module_add_always_ff(
                     self.inner,
                     expr_ptrs.as_mut_ptr(),
                     expr_ptrs.len(),
                     &mut always_base_out,
                     &mut error_out,
-                )
-            } else {
-                sys::xls_vast_verilog_module_add_always_at(
+                ),
+                AlwaysKind::AlwaysAt => sys::xls_vast_verilog_module_add_always_at(
                     self.inner,
                     expr_ptrs.as_mut_ptr(),
                     expr_ptrs.len(),
                     &mut always_base_out,
                     &mut error_out,
-                )
+                ),
+                AlwaysKind::AlwaysComb => sys::xls_vast_verilog_module_add_always_comb(
+                    self.inner,
+                    &mut always_base_out,
+                    &mut error_out,
+                ),
             }
         };
         if success {
@@ -466,14 +712,79 @@ impl VastModule {
         &mut self,
         sensitivity_list: &[&Expr],
     ) -> Result<VastAlwaysBase, XlsynthError> {
-        self.add_always_block(sensitivity_list, true)
+        self.add_always_block(sensitivity_list, AlwaysKind::AlwaysFF)
     }
 
     pub fn add_always_at(
         &mut self,
         sensitivity_list: &[&Expr],
     ) -> Result<VastAlwaysBase, XlsynthError> {
-        self.add_always_block(sensitivity_list, false)
+        self.add_always_block(sensitivity_list, AlwaysKind::AlwaysAt)
+    }
+
+    pub fn add_always_comb(&mut self) -> Result<VastAlwaysBase, XlsynthError> {
+        self.add_always_block(&[], AlwaysKind::AlwaysComb)
+    }
+
+    pub fn add_parameter(&mut self, name: &str, rhs: &Expr) -> ParameterRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_parameter(self.inner, c_name.as_ptr(), rhs.inner)
+        };
+        ParameterRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_parameter_with_def(&mut self, def: &Def, rhs: &Expr) -> ParameterRef {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_parameter_with_def(self.inner, def.inner, rhs.inner)
+        };
+        ParameterRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_localparam(&mut self, name: &str, rhs: &Expr) -> LocalparamRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_localparam(self.inner, c_name.as_ptr(), rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_typed_localparam(&mut self, def: &Def, rhs: &Expr) -> LocalparamRef {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_localparam_with_def(self.inner, def.inner, rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    /// Adds a localparam with SystemVerilog `int` type.
+    pub fn add_int_localparam(&mut self, name: &str, rhs: &Expr) -> LocalparamRef {
+        let c_name = CString::new(name).unwrap();
+        let locked = self.parent.lock().unwrap();
+        let int_def =
+            unsafe { sys::xls_vast_verilog_file_make_int_def(locked.0, c_name.as_ptr(), true) };
+        let inner = unsafe {
+            sys::xls_vast_verilog_module_add_localparam_with_def(self.inner, int_def, rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
     }
 }
 
@@ -489,12 +800,284 @@ impl VastAlwaysBase {
 }
 
 impl VastStatementBlock {
+    pub fn add_blocking_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_statement_block_add_blocking_assignment(self.inner, lhs.inner, rhs.inner)
+        };
+        VastStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
     pub fn add_nonblocking_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
         let _locked = self.parent.lock().unwrap();
         let inner = unsafe {
             sys::xls_vast_statement_block_add_nonblocking_assignment(
                 self.inner, lhs.inner, rhs.inner,
             )
+        };
+        VastStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_comment_text(&mut self, text: &str) -> VastStatement {
+        let c_text = CString::new(text).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner =
+            unsafe { sys::xls_vast_statement_block_add_comment_text(self.inner, c_text.as_ptr()) };
+        VastStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_blank_line(&mut self) -> VastStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_statement_block_add_blank_line(self.inner) };
+        VastStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_inline_text(&mut self, text: &str) -> VastStatement {
+        let c_text = CString::new(text).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner =
+            unsafe { sys::xls_vast_statement_block_add_inline_text(self.inner, c_text.as_ptr()) };
+        VastStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_continuous_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_statement_block_add_continuous_assignment(
+                self.inner, lhs.inner, rhs.inner,
+            )
+        };
+        VastStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_cond(&mut self, cond: &Expr) -> Conditional {
+        let _locked = self.parent.lock().unwrap();
+        let inner =
+            unsafe { sys::xls_vast_statement_block_add_conditional(self.inner, cond.inner) };
+        Conditional {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_case(&mut self, selector: &Expr) -> CaseStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_statement_block_add_case(self.inner, selector.inner) };
+        CaseStatement {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_generate_loop(
+        &mut self,
+        genvar_name: &str,
+        init: &Expr,
+        limit: &Expr,
+        label: Option<&str>,
+    ) -> GenerateLoop {
+        let c_name = CString::new(genvar_name).unwrap();
+        let c_label = CString::new(label.unwrap_or("")).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_statement_block_add_generate_loop(
+                self.inner,
+                c_name.as_ptr(),
+                init.inner,
+                limit.inner,
+                c_label.as_ptr(),
+            )
+        };
+        GenerateLoop {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
+impl Conditional {
+    pub fn then_block(&self) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_conditional_get_then_block(self.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_else_if(&self, cond: &Expr) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_conditional_add_else_if(self.inner, cond.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_else(&self) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_conditional_add_else(self.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
+impl CaseStatement {
+    pub fn add_item(&self, match_expr: &Expr) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_case_statement_add_item(self.inner, match_expr.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_default(&self) -> VastStatementBlock {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_case_statement_add_default(self.inner) };
+        VastStatementBlock {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+}
+
+impl GenerateLoop {
+    pub fn get_genvar(&self) -> LogicRef {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_generate_loop_get_genvar(self.inner) };
+        LogicRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_statement(&mut self, stmt: VastStatement) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_generate_loop_add_statement(self.inner, stmt.inner) }
+    }
+
+    pub fn add_generate_loop(
+        &mut self,
+        genvar_name: &str,
+        init: &Expr,
+        limit: &Expr,
+        label: Option<&str>,
+    ) -> GenerateLoop {
+        let c_name = CString::new(genvar_name).unwrap();
+        let c_label = CString::new(label.unwrap_or("")).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_generate_loop_add_generate_loop(
+                self.inner,
+                c_name.as_ptr(),
+                init.inner,
+                limit.inner,
+                c_label.as_ptr(),
+            )
+        };
+        GenerateLoop {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_always_comb(&mut self) -> Result<VastAlwaysBase, XlsynthError> {
+        let _locked = self.parent.lock().unwrap();
+        let mut always_base_out: *mut sys::CVastAlwaysBase = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_generate_loop_add_always_comb(
+                self.inner,
+                &mut always_base_out,
+                &mut error_out,
+            )
+        };
+        if success {
+            Ok(VastAlwaysBase {
+                inner: always_base_out,
+                parent: self.parent.clone(),
+            })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    pub fn add_always_ff(
+        &mut self,
+        sensitivity_list: &[&Expr],
+    ) -> Result<VastAlwaysBase, XlsynthError> {
+        let _locked = self.parent.lock().unwrap();
+        let mut expr_ptrs: Vec<*mut sys::CVastExpression> =
+            sensitivity_list.iter().map(|e| e.inner).collect();
+        let mut always_base_out: *mut sys::CVastAlwaysBase = std::ptr::null_mut();
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_vast_generate_loop_add_always_ff(
+                self.inner,
+                expr_ptrs.as_mut_ptr(),
+                expr_ptrs.len(),
+                &mut always_base_out,
+                &mut error_out,
+            )
+        };
+        if success {
+            Ok(VastAlwaysBase {
+                inner: always_base_out,
+                parent: self.parent.clone(),
+            })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    pub fn add_localparam(&mut self, name: &str, rhs: &Expr) -> LocalparamRef {
+        let c_name = CString::new(name).unwrap();
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_generate_loop_add_localparam(self.inner, c_name.as_ptr(), rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_typed_localparam(&mut self, def: &Def, rhs: &Expr) -> LocalparamRef {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_generate_loop_add_localparam_with_def(self.inner, def.inner, rhs.inner)
+        };
+        LocalparamRef {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn add_continuous_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_generate_loop_add_continuous_assignment(self.inner, lhs.inner, rhs.inner)
         };
         VastStatement {
             inner,
@@ -665,6 +1248,17 @@ impl VastFile {
             }
         }
     }
+    pub fn make_plain_literal(&mut self, value: i32, fmt: &IrFormatPreference) -> Expr {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut literal_out: *mut sys::CVastLiteral = std::ptr::null_mut();
+        let literal = unsafe {
+            sys::xls_vast_verilog_file_make_plain_literal(self.ptr.lock().unwrap().0, value)
+        };
+        Expr {
+            inner: unsafe { sys::xls_vast_literal_as_expression(literal) },
+            parent: self.ptr.clone(),
+        }
+    }
 
     pub fn make_scalar_type(&mut self) -> VastDataType {
         let locked = self.ptr.lock().unwrap();
@@ -679,6 +1273,27 @@ impl VastFile {
         let locked = self.ptr.lock().unwrap();
         let data_type = unsafe {
             sys::xls_vast_verilog_file_make_bit_vector_type(locked.0, bit_count, is_signed)
+        };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    /// Creates a bit-vector type with an expression-based width.
+    /// The emitted range will be [width_expr-1:0].
+    pub fn make_bit_vector_type_expr(
+        &mut self,
+        width_expr: &Expr,
+        is_signed: bool,
+    ) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let data_type = unsafe {
+            sys::xls_vast_verilog_file_make_bit_vector_type_expr(
+                locked.0,
+                width_expr.inner,
+                is_signed,
+            )
         };
         VastDataType {
             inner: data_type,
@@ -701,6 +1316,25 @@ impl VastFile {
                 c_type_name.as_ptr(),
             )
         };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_integer_type(&mut self, is_signed: bool) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let data_type =
+            unsafe { sys::xls_vast_verilog_file_make_integer_type(locked.0, is_signed) };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_int_type(&mut self, is_signed: bool) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let data_type = unsafe { sys::xls_vast_verilog_file_make_int_type(locked.0, is_signed) };
         VastDataType {
             inner: data_type,
             parent: self.ptr.clone(),
@@ -737,10 +1371,32 @@ impl VastFile {
         }
     }
 
+    pub fn make_slice_expr(&mut self, indexable: &IndexableExpr, hi: &Expr, lo: &Expr) -> Slice {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_slice(locked.0, indexable.inner, hi.inner, lo.inner)
+        };
+        Slice {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
     pub fn make_index(&mut self, indexable: &IndexableExpr, index: i64) -> Index {
         let locked = self.ptr.lock().unwrap();
         let inner =
             unsafe { sys::xls_vast_verilog_file_make_index_i64(locked.0, indexable.inner, index) };
+        Index {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_index_expr(&mut self, indexable: &IndexableExpr, index: &Expr) -> Index {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_index(locked.0, indexable.inner, index.inner)
+        };
         Index {
             inner,
             parent: self.ptr.clone(),
@@ -754,6 +1410,48 @@ impl VastFile {
         let inner = unsafe {
             sys::xls_vast_verilog_file_make_concat(locked.0, expr_ptrs.as_mut_ptr(), exprs.len())
         };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_replicated_concat(&mut self, replication: &Expr, elements: &[&Expr]) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let mut elem_ptrs: Vec<*mut sys::CVastExpression> =
+            elements.iter().map(|e| e.inner).collect();
+        let concat_ptr = unsafe {
+            sys::xls_vast_verilog_file_make_replicated_concat(
+                locked.0,
+                replication.inner,
+                elem_ptrs.as_mut_ptr(),
+                elem_ptrs.len(),
+            )
+        };
+        let inner = unsafe { sys::xls_vast_concat_as_expression(concat_ptr) };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_replicated_concat_i64(
+        &mut self,
+        replication_count: i64,
+        elements: &[&Expr],
+    ) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let mut elem_ptrs: Vec<*mut sys::CVastExpression> =
+            elements.iter().map(|e| e.inner).collect();
+        let concat_ptr = unsafe {
+            sys::xls_vast_verilog_file_make_replicated_concat_i64(
+                locked.0,
+                replication_count,
+                elem_ptrs.as_mut_ptr(),
+                elem_ptrs.len(),
+            )
+        };
+        let inner = unsafe { sys::xls_vast_concat_as_expression(concat_ptr) };
         Expr {
             inner,
             parent: self.ptr.clone(),
@@ -928,6 +1626,28 @@ impl VastFile {
         }
     }
 
+    pub fn make_width_cast(&mut self, width: &Expr, value: &Expr) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_width_cast(locked.0, width.inner, value.inner)
+        };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_type_cast(&mut self, data_type: &VastDataType, value: &Expr) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_type_cast(locked.0, data_type.inner, value.inner)
+        };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
     // Creates an `assign` statement that drives `lhs` with the `rhs` expression
     // given.
     pub fn make_continuous_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> ContinuousAssignment {
@@ -961,9 +1681,84 @@ impl VastFile {
         }
     }
 
+    pub fn make_blocking_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_blocking_assignment(locked.0, lhs.inner, rhs.inner)
+        };
+        VastStatement {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_blank_line(&mut self) -> BlankLine {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_file_make_blank_line(locked.0) };
+        BlankLine {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_inline_verilog_statement(&mut self, text: &str) -> InlineVerilogStatement {
+        let c_text = CString::new(text).unwrap();
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_inline_verilog_statement(locked.0, c_text.as_ptr())
+        };
+        InlineVerilogStatement {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    // Make a '1 literal.
+    pub fn make_unsized_one_literal(&mut self) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_file_make_unsized_one_literal(locked.0) };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    // Make a '0 literal.
+    pub fn make_unsized_zero_literal(&mut self) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_verilog_file_make_unsized_zero_literal(locked.0) };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_def(&mut self, name: &str, kind: DataKind, ty: &VastDataType) -> Def {
+        let c_name = CString::new(name).unwrap();
+        let locked = self.ptr.lock().unwrap();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_def(locked.0, c_name.as_ptr(), kind.to_sys(), ty.inner)
+        };
+        Def {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
     pub fn emit(&self) -> String {
         let locked = self.ptr.lock().unwrap();
         let c_str = unsafe { sys::xls_vast_verilog_file_emit(locked.0) };
         unsafe { c_str_to_rust(c_str) }
+    }
+}
+
+impl ParameterRef {
+    pub fn to_expr(&self) -> Expr {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_parameter_ref_as_expression(self.inner) };
+        Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
     }
 }

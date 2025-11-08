@@ -19,8 +19,8 @@ SUPPORTED_PLATFORMS = {
     "x64": ".so",
 }
 
-
 DEFAULT_BINARIES = [
+    "block_to_verilog_main",
     "dslx_interpreter_main",
     "ir_converter_main",
     "codegen_main",

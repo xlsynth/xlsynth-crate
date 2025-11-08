@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check version numbers
-        run: python bump_version_numbers.py check
+        run: python scripts/bump_version_numbers.py check
 
       - name: Set up version variables
         id: version_vars
@@ -37,7 +37,7 @@ jobs:
 
       - name: Validate version matches
         run: |
-          python3 check_version_is.py "${{ steps.version_vars.outputs.version_no_v }}"
+          python3 scripts/check_version_is.py "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Download xlsynth binaries
         env:
@@ -45,7 +45,9 @@ jobs:
         run: |
           python3 -V
           pip3 install --break-system-packages requests
-          python3 download_release.py -p arm64 -o xlsynth_tools --binaries=dslx_interpreter_main,ir_converter_main,codegen_main,opt_main,check_ir_equivalence_main,dslx_fmt,typecheck_main,prove_quickcheck_main
+          REQUIRED_TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          echo "Required XLS release tag: $REQUIRED_TAG"
+          python3 scripts/download_release.py -p arm64 -o xlsynth_tools -v "$REQUIRED_TAG"
 
       - name: Install protobuf compiler
         run: |
@@ -98,7 +100,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-sys on crates.io
-        run: python3 sleep_until_version_seen.py xlsynth-sys "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 scripts/sleep_until_version_seen.py xlsynth-sys "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth
         env:
@@ -108,7 +110,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth on crates.io
-        run: python3 sleep_until_version_seen.py xlsynth "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 scripts/sleep_until_version_seen.py xlsynth "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-test-helpers
         env:
@@ -118,7 +120,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-test-helpers on crates.io
-        run: python3 sleep_until_version_seen.py xlsynth-test-helpers "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 scripts/sleep_until_version_seen.py xlsynth-test-helpers "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-pir
         env:
@@ -128,7 +130,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-pir on crates.io
-        run: python3 sleep_until_version_seen.py xlsynth-pir "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 scripts/sleep_until_version_seen.py xlsynth-pir "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-g8r
         env:
@@ -138,7 +140,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-g8r on crates.io
-        run: python3 sleep_until_version_seen.py xlsynth-g8r "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 scripts/sleep_until_version_seen.py xlsynth-g8r "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-estimator
         env:
@@ -148,7 +150,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-estimator on crates.io
-        run: python3 sleep_until_version_seen.py xlsynth-estimator "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 scripts/sleep_until_version_seen.py xlsynth-estimator "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-prover
         env:
@@ -158,7 +160,7 @@ jobs:
           cargo publish --token $CARGO_REGISTRY_TOKEN
 
       - name: Wait for xlsynth-prover on crates.io
-        run: python3 sleep_until_version_seen.py xlsynth-prover "${{ steps.version_vars.outputs.version_no_v }}"
+        run: python3 scripts/sleep_until_version_seen.py xlsynth-prover "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Publish xlsynth-driver
         env:
@@ -173,7 +175,7 @@ jobs:
         if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
         run: |
           cargo clean
-          python bump_version_numbers.py bump-minor
+          python scripts/bump_version_numbers.py bump-minor
           cargo generate-lockfile
 
       - name: Validate post-bump version equals expected next minor
@@ -184,7 +186,7 @@ jobs:
           NEXT_MINOR=$((MINOR+1))
           EXPECTED_NEXT="${MAJOR}.${NEXT_MINOR}.0"
           echo "Expecting post-bump version: $EXPECTED_NEXT"
-          python3 check_version_is.py "$EXPECTED_NEXT"
+          python3 scripts/check_version_is.py "$EXPECTED_NEXT"
 
       - name: Commit bumped version numbers
         if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
@@ -196,12 +198,12 @@ jobs:
           git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
 
       - name: Update version compatibility docs
-        if: success()
+        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
         run: |
-          python3 gen_version_compat.py
+          python3 scripts/gen_version_compat.py
 
       - name: Commit version metadata update
-        if: success()
+        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
         run: |
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"

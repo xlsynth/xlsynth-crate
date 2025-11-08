@@ -66,18 +66,21 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
         }
         ir::NodePayload::Unop(unop, ref operand) => {
             let operand_value: &IrValue = env.get(operand).unwrap();
-            let operand_bits = operand_value.to_bits().unwrap();
             match unop {
                 ir::Unop::Neg => {
+                    let operand_bits = operand_value.to_bits().unwrap();
+
                     let r = operand_bits.negate();
                     IrValue::from_bits(&r)
                 }
                 ir::Unop::Not => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let r = operand_bits.not();
                     IrValue::from_bits(&r)
                 }
                 ir::Unop::Identity => operand_value.clone(),
                 ir::Unop::OrReduce => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let mut result = false;
                     for i in 0..operand_bits.get_bit_count() {
                         if operand_bits.get_bit(i).unwrap() {
@@ -88,6 +91,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     IrValue::bool(result)
                 }
                 ir::Unop::AndReduce => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let mut result = true;
                     for i in 0..operand_bits.get_bit_count() {
                         if !operand_bits.get_bit(i).unwrap() {
@@ -98,6 +102,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     IrValue::bool(result)
                 }
                 ir::Unop::XorReduce => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let mut result = false;
                     for i in 0..operand_bits.get_bit_count() {
                         if operand_bits.get_bit(i).unwrap() {
@@ -107,6 +112,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     IrValue::bool(result)
                 }
                 ir::Unop::Reverse => {
+                    let operand_bits = operand_value.to_bits().unwrap();
                     let w = operand_bits.get_bit_count();
                     let mut outs: Vec<bool> = Vec::with_capacity(w);
                     for i in 0..w {
@@ -152,6 +158,40 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 out_elems.push(v);
             }
             IrValue::make_array(&out_elems).unwrap()
+        }
+        ir::NodePayload::ArrayUpdate {
+            array,
+            value,
+            ref indices,
+            assumed_in_bounds: _,
+        } => {
+            // Recursively updates the array `base` at the multi-index `idxs`
+            // with `new_value`, returning a freshly constructed value.
+            fn update_at_indices(base: &IrValue, idxs: &[usize], new_value: &IrValue) -> IrValue {
+                if idxs.is_empty() {
+                    return new_value.clone();
+                }
+                let idx = idxs[0];
+                let count = base.get_element_count().unwrap();
+                let mut elems: Vec<IrValue> = Vec::with_capacity(count);
+                for i in 0..count {
+                    let elem_i = base.get_element(i).unwrap();
+                    if i == idx {
+                        elems.push(update_at_indices(&elem_i, &idxs[1..], new_value));
+                    } else {
+                        elems.push(elem_i);
+                    }
+                }
+                IrValue::make_array(&elems).unwrap()
+            }
+
+            let base = env.get(&array).unwrap().clone();
+            let new_value = env.get(&value).unwrap().clone();
+            let idxs: Vec<usize> = indices
+                .iter()
+                .map(|r| env.get(r).unwrap().to_u64().unwrap() as usize)
+                .collect();
+            update_at_indices(&base, &idxs, &new_value)
         }
         ir::NodePayload::ArrayIndex {
             array,
@@ -783,6 +823,72 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                 let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
             }
+            P::ArrayUpdate {
+                array,
+                value,
+                indices,
+                assumed_in_bounds,
+            } => {
+                // XLS semantics: if any index is out of bounds, the result is identical to the
+                // input array, unless `assumed_in_bounds` is true, in which case OOB is an
+                // error.
+                let arr = env.get(array).expect("array must be evaluated").clone();
+                let val = env.get(value).expect("value must be evaluated").clone();
+                // Gather concrete indices as usize.
+                let mut idxs: Vec<usize> = Vec::with_capacity(indices.len());
+                for r in indices.iter() {
+                    let u = env
+                        .get(r)
+                        .expect("index must be evaluated")
+                        .to_bits()
+                        .unwrap()
+                        .to_u64()
+                        .unwrap() as usize;
+                    idxs.push(u);
+                }
+
+                // Recursively update nested arrays; returns None on OOB.
+                fn set_at_path(
+                    cur: &IrValue,
+                    path: &[usize],
+                    new_val: &IrValue,
+                ) -> Option<IrValue> {
+                    if path.is_empty() {
+                        return Some(new_val.clone());
+                    }
+                    let count = cur.get_element_count().ok()?;
+                    let idx = path[0];
+                    if idx >= count {
+                        return None;
+                    }
+                    let mut elems: Vec<IrValue> = Vec::with_capacity(count);
+                    for i in 0..count {
+                        let child = cur.get_element(i).ok()?;
+                        if i == idx {
+                            let updated = set_at_path(&child, &path[1..], new_val)?;
+                            elems.push(updated);
+                        } else {
+                            elems.push(child);
+                        }
+                    }
+                    IrValue::make_array(&elems).ok()
+                }
+
+                match set_at_path(&arr, &idxs, &val) {
+                    Some(updated) => updated,
+                    None => {
+                        if *assumed_in_bounds {
+                            return FnEvalResult::Failure(FnEvalFailure {
+                                assertion_failures,
+                                trace_messages,
+                            });
+                        } else {
+                            // OOB but not assumed in-bounds: return the original array unchanged.
+                            arr
+                        }
+                    }
+                }
+            }
             _ => eval_pure(node, &env),
         };
         // Coerce only for specific nodes where a wider internal computation is
@@ -1369,6 +1475,287 @@ fn f(x: bits[3] id=1) -> bits[1] {
             FnEvalResult::Failure(fail) => {
                 // No assertion failures expected; this is an early-return guard.
                 assert!(fail.assertion_failures.is_empty());
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_pure_array_update_no_indices_replaces_entire_array() {
+        // Base array: [0,1,2], new array: [9,9,9], indices=[] => result=new array
+        let base = IrValue::make_array(&[
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+        ])
+        .unwrap();
+        let new_arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 9).unwrap(),
+            IrValue::make_ubits(8, 9).unwrap(),
+            IrValue::make_ubits(8, 9).unwrap(),
+        ])
+        .unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => base,
+            ir::NodeRef { index: 2 } => new_arr.clone(),
+        );
+        let n = ir::Node {
+            text_id: 100,
+            name: None,
+            ty: ir::Type::new_array(ir::Type::Bits(8), 3),
+            payload: ir::NodePayload::ArrayUpdate {
+                array: ir::NodeRef { index: 1 },
+                value: ir::NodeRef { index: 2 },
+                indices: vec![],
+                assumed_in_bounds: true,
+            },
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, new_arr);
+    }
+
+    #[test]
+    fn test_eval_pure_array_update_one_index() {
+        // Base array: [0,1,2], update index 1 with 99 => [0,99,2]
+        let base = IrValue::make_array(&[
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+        ])
+        .unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => base,
+            ir::NodeRef { index: 2 } => IrValue::make_ubits(8, 99).unwrap(),
+            ir::NodeRef { index: 3 } => IrValue::make_ubits(32, 1).unwrap(),
+        );
+        let n = ir::Node {
+            text_id: 101,
+            name: None,
+            ty: ir::Type::new_array(ir::Type::Bits(8), 3),
+            payload: ir::NodePayload::ArrayUpdate {
+                array: ir::NodeRef { index: 1 },
+                value: ir::NodeRef { index: 2 },
+                indices: vec![ir::NodeRef { index: 3 }],
+                assumed_in_bounds: true,
+            },
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        let expected = IrValue::make_array(&[
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 99).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(v, expected);
+    }
+
+    #[test]
+    fn test_eval_pure_array_update_two_indices() {
+        // Base 2D: [[0,1],[2,3]], update [1][0] with 55 => [[0,1],[55,3]]
+        let row0 = IrValue::make_array(&[
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),
+        ])
+        .unwrap();
+        let row1 = IrValue::make_array(&[
+            IrValue::make_ubits(8, 2).unwrap(),
+            IrValue::make_ubits(8, 3).unwrap(),
+        ])
+        .unwrap();
+        let base2d = IrValue::make_array(&[row0, row1]).unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => base2d,
+            ir::NodeRef { index: 2 } => IrValue::make_ubits(8, 55).unwrap(),
+            ir::NodeRef { index: 3 } => IrValue::make_ubits(32, 1).unwrap(),
+            ir::NodeRef { index: 4 } => IrValue::make_ubits(32, 0).unwrap(),
+        );
+        let n = ir::Node {
+            text_id: 102,
+            name: None,
+            ty: ir::Type::new_array(ir::Type::new_array(ir::Type::Bits(8), 2), 2),
+            payload: ir::NodePayload::ArrayUpdate {
+                array: ir::NodeRef { index: 1 },
+                value: ir::NodeRef { index: 2 },
+                indices: vec![ir::NodeRef { index: 3 }, ir::NodeRef { index: 4 }],
+                assumed_in_bounds: true,
+            },
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        let expected = IrValue::make_array(&[
+            IrValue::make_array(&[
+                IrValue::make_ubits(8, 0).unwrap(),
+                IrValue::make_ubits(8, 1).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(8, 55).unwrap(),
+                IrValue::make_ubits(8, 3).unwrap(),
+            ])
+            .unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(v, expected);
+    }
+
+    #[test]
+    fn test_eval_fn_array_update_in_bounds() {
+        let ir_text = r#"package test
+
+fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
+  ret array_update.4: bits[5][4] = array_update(a, v, indices=[i], id=4)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        // a = [1,2,3,4], v = 9, i = 2 (in-bounds)
+        let a = IrValue::make_array(&[
+            IrValue::make_ubits(5, 1).unwrap(),
+            IrValue::make_ubits(5, 2).unwrap(),
+            IrValue::make_ubits(5, 3).unwrap(),
+            IrValue::make_ubits(5, 4).unwrap(),
+        ])
+        .unwrap();
+        let v = IrValue::make_ubits(5, 9).unwrap();
+        let i = IrValue::make_ubits(32, 2).unwrap();
+
+        match eval_fn(&f, &[a.clone(), v.clone(), i]) {
+            FnEvalResult::Success(s) => {
+                let got = s.value;
+                let expected = IrValue::make_array(&[
+                    IrValue::make_ubits(5, 1).unwrap(),
+                    IrValue::make_ubits(5, 2).unwrap(),
+                    v,
+                    IrValue::make_ubits(5, 4).unwrap(),
+                ])
+                .unwrap();
+                assert_eq!(got, expected);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_update_oob_returns_original_when_not_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
+  ret array_update.4: bits[5][4] = array_update(a, v, indices=[i], id=4)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        // a = [1,2,3,4], v = 9, i = 5 (OOB) => unchanged when not assumed_in_bounds
+        let a = IrValue::make_array(&[
+            IrValue::make_ubits(5, 1).unwrap(),
+            IrValue::make_ubits(5, 2).unwrap(),
+            IrValue::make_ubits(5, 3).unwrap(),
+            IrValue::make_ubits(5, 4).unwrap(),
+        ])
+        .unwrap();
+        let v = IrValue::make_ubits(5, 9).unwrap();
+        let i = IrValue::make_ubits(32, 5).unwrap();
+
+        match eval_fn(&f, &[a.clone(), v, i]) {
+            FnEvalResult::Success(s) => {
+                assert_eq!(s.value, a);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_update_oob_failure_when_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
+  ret array_update.4: bits[5][4] = array_update(a, v, indices=[i], assumed_in_bounds=true, id=4)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        // OOB index with assumed_in_bounds=true => Failure
+        let a = IrValue::make_array(&[
+            IrValue::make_ubits(5, 1).unwrap(),
+            IrValue::make_ubits(5, 2).unwrap(),
+            IrValue::make_ubits(5, 3).unwrap(),
+            IrValue::make_ubits(5, 4).unwrap(),
+        ])
+        .unwrap();
+        let v = IrValue::make_ubits(5, 9).unwrap();
+        let i = IrValue::make_ubits(32, 7).unwrap();
+
+        match eval_fn(&f, &[a, v, i]) {
+            FnEvalResult::Failure(_fail) => {
+                // Early failure as expected
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_update_nested_indices() {
+        let ir_text = r#"package test
+
+fn f(a: bits[3][2][2] id=1, v: bits[3] id=2, i: bits[32] id=3, j: bits[32] id=4) -> bits[3][2][2] {
+  ret array_update.5: bits[3][2][2] = array_update(a, v, indices=[i, j], id=5)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        // a = [[1,2],[3,4]] (bits[3]); update a[1][0] = 7
+        let row0 = IrValue::make_array(&[
+            IrValue::make_ubits(3, 1).unwrap(),
+            IrValue::make_ubits(3, 2).unwrap(),
+        ])
+        .unwrap();
+        let row1 = IrValue::make_array(&[
+            IrValue::make_ubits(3, 3).unwrap(),
+            IrValue::make_ubits(3, 4).unwrap(),
+        ])
+        .unwrap();
+        let a = IrValue::make_array(&[row0, row1]).unwrap();
+        let v = IrValue::make_ubits(3, 7).unwrap();
+        let i = IrValue::make_ubits(32, 1).unwrap();
+        let j = IrValue::make_ubits(32, 0).unwrap();
+
+        match eval_fn(&f, &[a, v, i, j]) {
+            FnEvalResult::Success(s) => {
+                let got = s.value;
+                let exp_row0 = IrValue::make_array(&[
+                    IrValue::make_ubits(3, 1).unwrap(),
+                    IrValue::make_ubits(3, 2).unwrap(),
+                ])
+                .unwrap();
+                let exp_row1 = IrValue::make_array(&[
+                    IrValue::make_ubits(3, 7).unwrap(),
+                    IrValue::make_ubits(3, 4).unwrap(),
+                ])
+                .unwrap();
+                let expected = IrValue::make_array(&[exp_row0, exp_row1]).unwrap();
+                assert_eq!(got, expected);
             }
             other => panic!("unexpected result: {:?}", other),
         }

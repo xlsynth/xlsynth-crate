@@ -416,24 +416,14 @@ xlsynth-driver ir-localized-eco old.opt.ir new.opt.ir \
   --output_dir=eco_out --sanity-samples=10 --sanity-seed=0
 ```
 
-### `greedy-eco`
+### `dslx2pipeline-eco`
 
-Computes greedy graph edits to transform an old IR function into a new one, applies those edits to the old function, and emits the patched IR package.
+Produces a patched Verilog file which has minimal changes against a baseline. Accepts same arguments as `dslx2pipeline` as well as an input file `--baseline_unopt_ir` which contains the unoptimized baseline XLS IR before the source change was applied. The resulting Verilog is printed on **stdout**.
 
-- Positional arguments: `<old.ir> <new.ir>` (both must be package-form IR)
-- Entry-point selection (optional): `--old_ir_top <NAME>` and `--new_ir_top <NAME>`; if omitted, the package `top` or first function is used on each side.
-- Outputs:
-  - `--patched_out <PATH>` – write the patched package IR to this path. If omitted, the patched package IR is printed to stdout.
-  - `--edits_debug_out <PATH>` – write the debug string (`{:#?}`) of the IrEdits to a file (optional).
+Additional outputs:
 
-Example:
-
-```shell
-xlsynth-driver greedy-eco old.opt.ir new.opt.ir \
-  --old_ir_top=main --new_ir_top=main \
-  --patched_out=patched.opt.ir \
-  --edits_debug_out=edits.txt
-```
+- `--edits_debug_out <PATH>` – write the debug string (`{:#?}`) of the IrEdits to a file (optional).
+- `--output_baseline_verilog_path <PATH>` – if set, also write the baseline (pre‑ECO) Verilog/SystemVerilog to `PATH`.
 
 ### `ir2gates`: IR to GateFn statistics
 
@@ -466,6 +456,53 @@ result. Example:
 
 ```shell
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
+```
+
+### `dslx-fn-eval`
+
+Evaluates a DSLX function for each input tuple in a `.irvals` file and prints one output per line (XLS IR typed values).
+
+- Inputs:
+  - `--dslx_input_file <FILE>` – the DSLX source file.
+  - `--dslx_top <NAME>` – the entry function to evaluate.
+- `--input_ir_path <PATH>` – path to a file with one typed IR tuple per line. Unary functions require a 1‑tuple like `(bits[32]:42)`.
+  - `--eval_mode <interp|jit|pir-interp>` – backend mode (default `interp`).
+- Search paths (optional): `--dslx_path <P1;P2;...>` and `--dslx_stdlib_path <PATH>`.
+
+Example:
+
+```shell
+xlsynth-driver dslx-fn-eval \
+  --dslx_input_file foo.x \
+  --dslx_top add \
+  --input_ir_path inputs.irvals
+# inputs.irvals lines, e.g.:
+# (bits[32]:0x1, bits[32]:0x2)
+# (bits[32]:0x3, bits[32]:0x4)
+```
+
+Float32 struct example (uses DSLX stdlib `float32::F32` as a tuple `(u1, u8, u23)`):
+
+```shell
+# Unary: add2(f) = f + f; input is a 1-tuple whose sole element is the F32 tuple
+cat > inputs.irvals <<EOF
+((bits[1]:0, bits[8]:127, bits[23]:0))
+EOF
+xlsynth-driver dslx-fn-eval \
+  --dslx_input_file f32_add2.x \
+  --dslx_top add2 \
+  --input_ir_path inputs.irvals
+# Prints (2.0f): (bits[1]:0, bits[8]:128, bits[23]:0)
+
+# Ternary: muladd(a,b,c) = a*b + c
+cat > inputs.irvals <<EOF
+((bits[1]:0, bits[8]:127, bits[23]:0), (bits[1]:0, bits[8]:128, bits[23]:0), (bits[1]:0, bits[8]:0, bits[23]:0))
+EOF
+xlsynth-driver dslx-fn-eval \
+  --dslx_input_file f32_muladd.x \
+  --dslx_top muladd \
+  --input_ir_path inputs.irvals
+# Prints (2.0f): (bits[1]:0, bits[8]:128, bits[23]:0)
 ```
 
 ### `ir-strip-pos-data`
@@ -962,33 +999,39 @@ Notes
 Takes a collection of `*_cycleN` pipeline‐stage functions in a DSLX file (e.g. `foo_cycle0`, `foo_cycle1`, …) and:
 
 1. Generates Verilog/SystemVerilog for **each** stage function.
-1. Emits a wrapper module named `<top>_pipeline` that instantiates the stages and wires them together to form the complete pipeline.
+1. Emits a wrapper module named exactly `<output_module_name>` (or `<dslx_top>` when `--stages` is not used) that instantiates the stages and wires them together to form the complete pipeline.
 
 The generated text is written to **stdout**; diagnostic messages appear on **stderr**.
 
 Supported flags:
 
 - `--use_system_verilog=<BOOL>` – emit SystemVerilog when `true` *(default)* or plain Verilog when `false`.
-- `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<top>_cycleN` functions).
+- `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<dslx_top>_cycleN` functions).
+- `--output_module_name=<NAME>` – wrapper module name. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
 
-The usual DSLX-related options (`--dslx_input_file`, `--dslx_top`, `--dslx_path`, `--dslx_stdlib_path`, `--warnings_as_errors`) are also accepted.
+The usual DSLX-related options (`--dslx_input_file`, `--dslx_path`, `--dslx_stdlib_path`, `--warnings_as_errors`) are accepted. Entry-point selection is via either `--dslx_top` (implicit discovery) or `--stages` (explicit list) — these are mutually exclusive.
 
 Additional semantics:
 
-- `--dslx_top=<NAME>` specifies the *logical* pipeline prefix. Stage
+- `--dslx_top=<NAME>` specifies the *logical* pipeline prefix for implicit stage discovery. Stage
   functions are expected to be named `<NAME>_cycle0`, `<NAME>_cycle1`, … (or
   be provided explicitly via `--stages`). A DSLX function named exactly
   `<NAME>` is **ignored** by this command – only the `_cycleN` stage functions
-  participate in stitching. When `--stages` is supplied the prefix is only
-  used for the wrapper module name and **not** for stage discovery.
+  participate in stitching. When `--stages` is supplied, `--dslx_top` must not be present; use `--output_module_name` to set the wrapper name.
 
-Example:
+Examples:
 
 ```shell
+# Implicit discovery (wrapper name defaults to dslx_top)
 xlsynth-driver dslx-stitch-pipeline \
   --dslx_input_file my_design.x \
-  --dslx_top foo \
-  --stages=foo_cycle0,foo_cycle1,foo_cycle2 > foo_pipeline.sv
+  --dslx_top foo > foo.sv
+
+# Explicit stages (wrapper name required)
+xlsynth-driver dslx-stitch-pipeline \
+  --dslx_input_file my_design.x \
+  --stages=foo_cycle0,foo_cycle1,foo_cycle2 \
+  --output_module_name=foo > foo.sv
 ```
 
 ### `run-verilog-pipeline` *(experimental)*
@@ -1072,6 +1115,23 @@ On success the command prints one line per data output:
 
 making it easy to splice into shell pipelines or test scripts.
 
+### `gv-instance-csv`: instance/cell pairs (.csv.gz)
+
+Emits a gzipped CSV with all instance_name,cell_type pairs in a gate-level netlist.
+
+Key flags:
+
+- --input <PATH> (gate-level netlist)
+- --output <PATH> (output .csv.gz)
+
+Example usage:
+
+```shell
+xlsynth-driver gv-instance-csv \
+  --input my_module.gv \
+  --output my_module.instances.csv.gz
+```
+
 ## Toolchain configuration (`xlsynth-toolchain.toml`)
 
 Several subcommands accept a `--toolchain` option that points at a
@@ -1127,12 +1187,12 @@ If you request this flag without `--toolchain`, the driver will print an error a
 
 ### Supported Subcommands
 
-| Subcommand | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
-|--------------------|:-------------------------------:|:-------------------------------:|:---------------------------------:|
-| `dslx2pipeline` | Yes | Yes | Yes |
-| `dslx2ir` | Yes | Yes | Yes |
-| `dslx-g8r-stats` | Yes | Yes | Yes |
-| `dslx2sv-types` | No | N/A | Yes |
+| Subcommand       | Supports `--type_inference_v2`? | Requires `--toolchain` for TIv2? | Runtime API allowed without TIv2? |
+| ---------------- | :-----------------------------: | :------------------------------: | :-------------------------------: |
+| `dslx2pipeline`  |               Yes               |               Yes                |                Yes                |
+| `dslx2ir`        |               Yes               |               Yes                |                Yes                |
+| `dslx-g8r-stats` |               Yes               |               Yes                |                Yes                |
+| `dslx2sv-types`  |               No                |               N/A                |                Yes                |
 
 ### Migration and Use
 

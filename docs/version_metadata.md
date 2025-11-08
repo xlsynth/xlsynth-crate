@@ -1,9 +1,24 @@
 # Version Map
 
-Updated for tags as of: 2025-09-30 21:37:07 -0700
+Updated for tags as of: 2025-11-06 12:06:43 -0800
 
 | xlsynth crate version                               | xlsynth release version                                             | crate release datetime (Los_Angeles) |
 | --------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------ |
+| [0.17.0](https://crates.io/crates/xlsynth/0.17.0)   | [0.17.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.17.0)   | 2025-11-06 12:06:43 PST              |
+| [0.16.0](https://crates.io/crates/xlsynth/0.16.0)   | [0.17.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.17.0)   | 2025-11-06 11:21:05 PST              |
+| [0.15.0](https://crates.io/crates/xlsynth/0.15.0)   | [0.15.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.15.0)   | 2025-11-02 13:51:02 PST              |
+| [0.14.0](https://crates.io/crates/xlsynth/0.14.0)   | [0.14.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.14.0)   | 2025-10-28 16:14:31 PDT              |
+| [0.13.0](https://crates.io/crates/xlsynth/0.13.0)   | [0.13.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.13.0)   | 2025-10-24 17:04:04 PDT              |
+| [0.12.0](https://crates.io/crates/xlsynth/0.12.0)   | [0.13.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.13.0)   | 2025-10-23 16:29:37 PDT              |
+| [0.11.0](https://crates.io/crates/xlsynth/0.11.0)   | [0.12.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.12.0)   | 2025-10-19 10:00:05 PDT              |
+| [0.10.0](https://crates.io/crates/xlsynth/0.10.0)   | [0.11.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.11.0)   | 2025-10-18 22:58:11 PDT              |
+| [0.9.0](https://crates.io/crates/xlsynth/0.9.0)     | [0.9.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.9.0)     | 2025-10-16 15:44:24 PDT              |
+| [0.8.0](https://crates.io/crates/xlsynth/0.8.0)     | [0.7.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.7.0)     | 2025-10-15 21:54:11 PDT              |
+| [0.7.0](https://crates.io/crates/xlsynth/0.7.0)     | [0.7.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.7.0)     | 2025-10-07 11:10:19 PDT              |
+| [0.6.4](https://crates.io/crates/xlsynth/0.6.4)     | [0.1.9](https://github.com/xlsynth/xlsynth/releases/tag/v0.1.9)     | 2025-10-20 12:53:11 PDT              |
+| [0.6.3](https://crates.io/crates/xlsynth/0.6.3)     | [0.1.9](https://github.com/xlsynth/xlsynth/releases/tag/v0.1.9)     | 2025-10-08 12:36:27 PDT              |
+| [0.6.2](https://crates.io/crates/xlsynth/0.6.2)     | [0.1.9](https://github.com/xlsynth/xlsynth/releases/tag/v0.1.9)     | 2025-10-07 09:54:57 PDT              |
+| [0.6.0](https://crates.io/crates/xlsynth/0.6.0)     | [0.7.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.7.0)     | 2025-10-02 15:11:21 PDT              |
 | [0.5.0](https://crates.io/crates/xlsynth/0.5.0)     | [0.5.0](https://github.com/xlsynth/xlsynth/releases/tag/v0.5.0)     | 2025-09-25 10:56:38 PDT              |
 | [0.3.0](https://crates.io/crates/xlsynth/0.3.0)     | [0.0.230](https://github.com/xlsynth/xlsynth/releases/tag/v0.0.230) | 2025-09-24 21:15:37 PDT              |
 | [0.1.5](https://crates.io/crates/xlsynth/0.1.5)     | [0.1.7](https://github.com/xlsynth/xlsynth/releases/tag/v0.1.7)     | 2025-09-30 21:37:07 PDT              |

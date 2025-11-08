@@ -4,7 +4,7 @@ use clap::ArgMatches;
 use std::path::Path;
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir::matching_ged::{apply_function_edits, compute_function_edit};
+use xlsynth_pir::matching_ged::{apply_fn_edits, compute_fn_edit};
 
 /// Implements the "greedy-eco" subcommand:
 /// - Reads old/new IR package files
@@ -33,18 +33,22 @@ pub fn handle_greedy_eco(matches: &ArgMatches) {
         Some(name) => old_pkg
             .get_fn(name)
             .unwrap_or_else(|| panic!("old package missing function '{}'", name)),
-        None => old_pkg.get_top().expect("old package missing top function"),
+        None => old_pkg
+            .get_top_fn()
+            .expect("old package missing top function"),
     };
     let new_fn = match new_top_flag {
         Some(name) => new_pkg
             .get_fn(name)
             .unwrap_or_else(|| panic!("new package missing function '{}'", name)),
-        None => new_pkg.get_top().expect("new package missing top function"),
+        None => new_pkg
+            .get_top_fn()
+            .expect("new package missing top function"),
     };
 
     // Compute edits using the greedy selector.
     let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-    let edits = compute_function_edit(old_fn, new_fn, &mut selector)
+    let edits = compute_fn_edit(old_fn, new_fn, &mut selector)
         .expect("compute_function_edit (greedy) failed");
 
     // Optionally write the debug string of edits.
@@ -54,7 +58,7 @@ pub fn handle_greedy_eco(matches: &ArgMatches) {
     }
 
     // Apply to old function and splice back into the old package.
-    let patched_fn = apply_function_edits(old_fn, &edits).expect("apply_function_edits failed");
+    let patched_fn = apply_fn_edits(old_fn, &edits).expect("apply_fn_edits failed");
 
     if let Some(name) = old_top_flag {
         // Replace the named function in the old package.
@@ -65,7 +69,7 @@ pub fn handle_greedy_eco(matches: &ArgMatches) {
     } else {
         // Replace top function.
         let slot = old_pkg
-            .get_top_mut()
+            .get_top_fn_mut()
             .expect("old package missing top function (mut)");
         *slot = patched_fn;
     }

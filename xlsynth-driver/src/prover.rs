@@ -565,87 +565,107 @@ impl Scheduler {
     /// - Group resolution is bubbled to ancestors as needed.
     /// Note: For canceled tasks, result does not propagate.
     fn wait_for_one_child_and_handle(&mut self) -> io::Result<()> {
-        let mut status: libc::c_int = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status as *mut libc::c_int, libc::WNOHANG) };
-        if pid == 0 {
+        // Poll only our known children; never use waitpid(-1) to avoid reaping
+        // unrelated children of the enclosing test process.
+        let pids: Vec<i32> = self.pid_to_node.keys().copied().collect();
+        let mut handled_any = false;
+
+        for pid in pids {
+            let mut status: libc::c_int = 0;
+            let rc = unsafe { libc::waitpid(pid, &mut status as *mut libc::c_int, libc::WNOHANG) };
+            if rc == 0 {
+                continue; // still running
+            }
+            if rc < 0 {
+                let err = io::Error::last_os_error();
+                if let Some(raw) = err.raw_os_error() {
+                    if raw == libc::EINTR {
+                        continue;
+                    }
+                    if raw == libc::ECHILD {
+                        // Child already reaped elsewhere; clean up bookkeeping.
+                        if let Some(tid) = self.pid_to_node.remove(&pid) {
+                            self.remove_task_bookkeeping(tid);
+                            self.on_child_plan_finished(tid)?;
+                        }
+                        continue;
+                    }
+                }
+                return Err(io::Error::new(io::ErrorKind::Other, "waitpid failed"));
+            }
+
+            // rc > 0: child state available; complete bookkeeping for this pid.
+            let term_signal = if libc::WIFSIGNALED(status) {
+                Some(libc::WTERMSIG(status))
+            } else {
+                None
+            };
+
+            if let Some(tid) = self.pid_to_node.remove(&pid) {
+                // If the task was already indefinite, do not convert it to normal or bubble up.
+                let was_indefinite = self.is_task_indefinite(tid);
+                if was_indefinite {
+                    debug!("prover: reaped indefinite task pid={}", pid);
+                    handled_any = true;
+                    continue;
+                }
+
+                if let Some(sig) = term_signal {
+                    warn!(
+                        "prover: task terminated by signal {} pid={} cmdline=\"{}\"",
+                        sig,
+                        pid,
+                        self.cmdlines.get(&tid).unwrap()
+                    );
+                }
+
+                let success = self.read_success_from_json(tid);
+
+                // Read captured stdout/stderr for this task; store for final report printing.
+                let mut captured_stdout: Option<String> = None;
+                let mut captured_stderr: Option<String> = None;
+                if let Some((stdout_tmp, stderr_tmp, _cmdline)) = self.outputs.remove(&tid) {
+                    let read_lossy = |p: &std::path::Path| -> String {
+                        match std::fs::read(p) {
+                            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                            Err(_) => String::new(),
+                        }
+                    };
+                    captured_stdout = Some(read_lossy(stdout_tmp.path()));
+                    captured_stderr = Some(read_lossy(stderr_tmp.path()));
+                }
+
+                if let NodeInner::Task(t) = &mut self.nodes[tid.0].inner {
+                    t.state = TaskState::Completed {
+                        outcome: TaskOutcome::normal(success),
+                    };
+                    t.completed_stdout = captured_stdout;
+                    t.completed_stderr = captured_stderr;
+                    debug!(
+                        "prover: task completed, cmdline=\"{}\" pid={} success={}",
+                        self.cmdlines.get(&tid).unwrap(),
+                        pid,
+                        success
+                    );
+                } else {
+                    panic!("not a task node");
+                }
+                self.remove_task_bookkeeping(tid);
+                self.on_child_plan_finished(tid)?;
+                handled_any = true;
+                break; // handle one completion per call (preserve prior pacing)
+            }
+        }
+
+        if !handled_any {
+            // Back off briefly if no child changed state.
             let mut ts = libc::timespec {
                 tv_sec: 0,
                 tv_nsec: 100 * 1000000,
             };
             unsafe { libc::nanosleep(&ts, &mut ts) };
         }
-        if pid < 0 {
-            let err = io::Error::last_os_error();
-            if let Some(raw) = err.raw_os_error() {
-                if raw == libc::ECHILD {
-                    warn!("prover: waitpid returned ECHILD; no child processes remain");
-                    return Ok(());
-                }
-                if raw == libc::EINTR {
-                    // Interrupted by a signal; give the outer loop a chance to observe CANCEL.
-                    return Ok(());
-                }
-            }
-            return Err(io::Error::new(io::ErrorKind::Other, "waitpid failed"));
-        }
 
-        // New: extract terminating signal (if any) for diagnostics
-        let term_signal = if libc::WIFSIGNALED(status) {
-            Some(libc::WTERMSIG(status))
-        } else {
-            None
-        };
-        if let Some(tid) = self.pid_to_node.remove(&pid) {
-            // If the task was already indefinite, do not convert it to normal or bubble
-            // up.
-            let was_indefinite = self.is_task_indefinite(tid);
-            if was_indefinite {
-                debug!("prover: reaped indefinite task pid={}", pid);
-                return Ok(());
-            }
-            // If terminated by signal, log it with context
-            if let Some(sig) = term_signal {
-                warn!(
-                    "prover: task terminated by signal {} pid={} cmdline=\"{}\"",
-                    sig,
-                    pid,
-                    self.cmdlines.get(&tid).unwrap()
-                );
-            }
-            let success = self.read_success_from_json(tid);
-
-            // Read captured stdout/stderr for this task; store for final report printing.
-            let mut captured_stdout: Option<String> = None;
-            let mut captured_stderr: Option<String> = None;
-            if let Some((stdout_tmp, stderr_tmp, _cmdline)) = self.outputs.remove(&tid) {
-                let read_lossy = |p: &std::path::Path| -> String {
-                    match std::fs::read(p) {
-                        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                        Err(_) => String::new(),
-                    }
-                };
-                captured_stdout = Some(read_lossy(stdout_tmp.path()));
-                captured_stderr = Some(read_lossy(stderr_tmp.path()));
-            }
-
-            if let NodeInner::Task(t) = &mut self.nodes[tid.0].inner {
-                t.state = TaskState::Completed {
-                    outcome: TaskOutcome::normal(success),
-                };
-                t.completed_stdout = captured_stdout;
-                t.completed_stderr = captured_stderr;
-                debug!(
-                    "prover: task completed, cmdline=\"{}\" pid={} success={}",
-                    self.cmdlines.get(&tid).unwrap(),
-                    pid,
-                    success
-                );
-            } else {
-                panic!("not a task node");
-            }
-            self.remove_task_bookkeeping(tid);
-            self.on_child_plan_finished(tid)?;
-        }
         Ok(())
     }
 
@@ -1019,34 +1039,55 @@ impl Scheduler {
         self.cancel_flag.store(true, Ordering::Relaxed);
         info!("prover: cleanup starting (best-effort) ");
         let _ = self.cancel_subtree(self.root, IndefiniteReason::Cleanup);
+
+        // Reap only our tracked children until none remain.
         while !self.pid_to_node.is_empty() {
-            let mut status: libc::c_int = 0;
-            let pid = unsafe { libc::waitpid(-1, &mut status as *mut libc::c_int, 0) };
-            if pid > 0 {
-                // Remove from mapping if we tracked it.
-                self.pid_to_node.remove(&pid);
-                trace!("prover: reaped child pid={} during cleanup", pid);
-                continue;
-            }
-            if pid == 0 {
-                // Should not happen without WNOHANG; just continue.
-                continue;
-            }
-            // pid < 0: error
-            let err = io::Error::last_os_error();
-            if let Some(raw) = err.raw_os_error() {
-                if raw == libc::ECHILD {
-                    // No child processes remain; we're done.
-                    break;
-                }
-                if raw == libc::EINTR {
-                    // Interrupted by signal; retry.
+            let pids: Vec<i32> = self.pid_to_node.keys().copied().collect();
+            let mut reaped_any = false;
+
+            for pid in pids {
+                let mut status: libc::c_int = 0;
+                let rc =
+                    unsafe { libc::waitpid(pid, &mut status as *mut libc::c_int, libc::WNOHANG) };
+                if rc == 0 {
                     continue;
                 }
+                if rc < 0 {
+                    let err = io::Error::last_os_error();
+                    if let Some(raw) = err.raw_os_error() {
+                        if raw == libc::EINTR {
+                            continue;
+                        }
+                        if raw == libc::ECHILD {
+                            // Already reaped elsewhere; drop bookkeeping.
+                            self.pid_to_node.remove(&pid);
+                            reaped_any = true;
+                            continue;
+                        }
+                    }
+                    warn!("prover: waitpid during cleanup failed: {}", err);
+                    // Drop from bookkeeping to avoid getting stuck.
+                    self.pid_to_node.remove(&pid);
+                    reaped_any = true;
+                    continue;
+                }
+
+                // rc > 0
+                self.pid_to_node.remove(&pid);
+                trace!("prover: reaped child pid={} during cleanup", pid);
+                reaped_any = true;
             }
-            warn!("prover: waitpid during cleanup failed: {}", err);
-            break;
+
+            if !reaped_any {
+                // Brief sleep to avoid busy-wait; children were SIGKILLed in cancel_subtree.
+                let mut ts = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 100 * 1000000,
+                };
+                unsafe { libc::nanosleep(&ts, &mut ts) };
+            }
         }
+
         warn!("prover: cleanup complete");
         Ok(())
     }

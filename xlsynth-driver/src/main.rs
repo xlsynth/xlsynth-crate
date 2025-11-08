@@ -37,17 +37,20 @@
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
+mod dslx2pipeline_eco;
 mod dslx2sv_types;
 mod dslx_equiv;
+mod dslx_fn_eval;
 mod dslx_g8r_stats;
 mod dslx_show;
 mod dslx_specialize;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
+mod fn_eval;
 mod g8r2v;
 mod g8r_equiv;
-mod greedy_eco;
 mod gv2ir;
+mod gv_instance_csv;
 mod gv_read_stats;
 mod ir2combo;
 mod ir2delayinfo;
@@ -247,6 +250,24 @@ impl AppExt for clap::Command {
                     .value_name("OUTPUT_VERILOG_LINE_MAP_PATH")
                     .help("Write Verilog line map textproto to this path"),
             )
+            .arg(
+                Arg::new("output_block_ir_path")
+                    .long("output_block_ir_path")
+                    .value_name("OUTPUT_BLOCK_IR_PATH")
+                    .help("Write block IR text to this path"),
+            )
+            .arg(
+                Arg::new("output_residual_data_path")
+                    .long("output_residual_data_path")
+                    .value_name("OUTPUT_RESIDUAL_DATA_PATH")
+                    .help("Write residual data to this path"),
+            )
+            .arg(
+                Arg::new("reference_residual_data_path")
+                    .long("reference_residual_data_path")
+                    .value_name("REFERENCE_RESIDUAL_DATA_PATH")
+                    .help("Path to reference residual data for comparison"),
+            )
     }
 
     fn add_ir_top_arg(self, required: bool) -> Self {
@@ -378,7 +399,15 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx-stitch-pipeline")
                 .about("Stitches DSLX pipeline stages")
-                .add_dslx_input_args(true)
+                .add_dslx_input_args(false)
+                .arg(
+                    Arg::new("dslx_top")
+                        .long("dslx_top")
+                        .value_name("DSLX_TOP")
+                        .help("Top-level pipeline prefix for implicit <top>_cycleN discovery; ignored when --stages is used")
+                        .conflicts_with("stages")
+                        .required_unless_present("stages"),
+                )
                 .add_bool_arg(
                     "use_system_verilog",
                     "Whether to emit SystemVerilog (default true; set to false for plain Verilog)",
@@ -412,6 +441,12 @@ fn main() {
                         .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
                         .action(ArgAction::Set),
                 )
+                .arg(
+                    Arg::new("output_module_name")
+                        .long("output_module_name")
+                        .value_name("NAME")
+                        .help("Wrapper module name; required with --stages. Defaults to --dslx_top when using implicit discovery."),
+                )
                 .add_bool_arg(
                     "flop_inputs",
                     "Whether to insert input pipeline flops (default true)",
@@ -423,6 +458,26 @@ fn main() {
                 .add_bool_arg(
                     "array_index_bounds_checking",
                     "Whether to emit array index bounds checking",
+                ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-fn-eval")
+                .about("Evaluates a DSLX function for each tuple in an .irvals file; prints one output per line")
+                .add_dslx_input_args(true)
+                .arg(
+                    clap::Arg::new("input_ir_path")
+                        .long("input_ir_path")
+                        .value_name("PATH")
+                        .help("Path to an .irvals file with one typed IR tuple value per line")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("eval_mode")
+                        .long("eval_mode")
+                        .value_name("MODE")
+                        .help("Evaluation backend: interp|jit|pir-interp (default interp)")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -981,41 +1036,55 @@ fn main() {
                 )
         )
         .subcommand(
-            clap::Command::new("greedy-eco")
-                .about("Computes an ECO based on a greedy graph-edit-distance heurisitic")
+            clap::Command::new("dslx2pipeline-eco")
+                .about("Produces Verilog with minimal edits from baseline_unopt_ir to current DSLX, using greedy GED edits; accepts dslx2pipeline args + --baseline_unopt_ir")
                 .arg(
-                    Arg::new("old_ir_file")
-                        .help("The old/original IR file (package)")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    Arg::new("new_ir_file")
-                        .help("The new/target IR file (package)")
-                        .required(true)
-                        .index(2),
-                )
-                .arg(
-                    Arg::new("old_ir_top")
-                        .long("old_ir_top")
-                        .help("Top-level entry point for the old IR package"),
-                )
-                .arg(
-                    Arg::new("new_ir_top")
-                        .long("new_ir_top")
-                        .help("Top-level entry point for the new IR package"),
-                )
-                .arg(
-                    Arg::new("patched_out")
-                        .long("patched_out")
+                    clap::Arg::new("output_unopt_ir")
+                        .long("output_unopt_ir")
                         .value_name("PATH")
-                        .help("Write the patched IR package to PATH; if omitted, prints to stdout"),
+                        .help("Path to write the unoptimized IR (package) output")
+                        .required(false)
+                        .action(ArgAction::Set),
                 )
                 .arg(
-                    Arg::new("edits_debug_out")
+                    clap::Arg::new("output_opt_ir")
+                        .long("output_opt_ir")
+                        .value_name("PATH")
+                        .help("Path to write the optimized IR (package) output")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("baseline_unopt_ir")
+                        .long("baseline_unopt_ir")
+                        .value_name("PATH")
+                        .help("Path to the baseline unoptimized IR (package) before the source change")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_baseline_verilog_path")
+                        .long("output_baseline_verilog_path")
+                        .value_name("PATH")
+                        .help("If set, write the baseline (pre-ECO) Verilog/SystemVerilog to PATH")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .add_delay_model_arg()
+                .add_dslx_input_args(true)
+                .add_pipeline_args()
+                .add_codegen_args()
+                .add_bool_arg("keep_temps", "Keep temporary files")
+                .add_bool_arg(
+                    "type_inference_v2",
+                    "Enable the experimental type-inference v2 algorithm",
+                )
+                .arg(
+                    clap::Arg::new("edits_debug_out")
                         .long("edits_debug_out")
                         .value_name("PATH")
-                        .help("Write the debug string of IrEdits to PATH (optional)"),
+                        .help("Write the debug string of IrEdits to PATH (optional)")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -1511,6 +1580,26 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
         )
+        .subcommand(
+            clap::Command::new("gv-instance-csv")
+                .about("Emit a .csv.gz file listing all instance_name,cell_type pairs in a gate-level netlist.")
+                .arg(
+                    clap::Arg::new("input")
+                        .long("input")
+                        .value_name("INPUT_NETLIST")
+                        .help("Path to the input gate-level netlist (text)")
+                        .required(true)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output")
+                        .long("output")
+                        .value_name("OUTPUT_CSV_GZ")
+                        .help("Path to output .csv.gz file")
+                        .required(true)
+                        .action(clap::ArgAction::Set),
+                )
+        )
         .get_matches();
 
     let mut toml_path: Option<String> = matches
@@ -1558,77 +1647,122 @@ fn main() {
         toolchain_config.toolchain
     });
 
-    if let Some(matches) = matches.subcommand_matches("dslx2pipeline") {
-        dslx2pipeline::handle_dslx2pipeline(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("dslx-stitch-pipeline") {
-        dslx_stitch_pipeline::handle_dslx_stitch_pipeline(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("dslx2ir") {
-        dslx2ir::handle_dslx2ir(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir2opt") {
-        ir2opt::handle_ir2opt(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir2pipeline") {
-        ir2pipeline::handle_ir2pipeline(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("dslx2sv-types") {
-        dslx2sv_types::handle_dslx2sv_types(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("dslx-show") {
-        dslx_show::handle_dslx_show(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("dslx-specialize") {
-        dslx_specialize::handle_dslx_specialize(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("dslx-g8r-stats") {
-        dslx_g8r_stats::handle_dslx_g8r_stats(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir2delayinfo") {
-        ir2delayinfo::handle_ir2delayinfo(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir-equiv") {
-        ir_equiv::handle_ir_equiv(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir-equiv-blocks") {
-        ir_equiv_blocks::handle_ir_equiv_blocks(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("dslx-equiv") {
-        dslx_equiv::handle_dslx_equiv(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir-ged") {
-        ir_ged::handle_ir_ged(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir-fn-to-block") {
-        ir_fn_to_block::handle_ir_fn_to_block(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir-structural-similarity") {
-        ir_structural_similarity::handle_ir_structural_similarity(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir-localized-eco") {
-        ir_localized_eco::handle_ir_localized_eco(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir-round-trip") {
-        ir_round_trip::handle_ir_round_trip(matches);
-    } else if let Some(matches) = matches.subcommand_matches("ir2gates") {
-        ir2gates::handle_ir2gates(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir2g8r") {
-        ir2gates::handle_ir2g8r(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("greedy-eco") {
-        greedy_eco::handle_greedy_eco(matches);
-    } else if let Some(matches) = matches.subcommand_matches("lib2proto") {
-        lib2proto::handle_lib2proto(matches);
-    } else if let Some(matches) = matches.subcommand_matches("gv2ir") {
-        gv2ir::handle_gv2ir(matches);
-    } else if let Some(matches) = matches.subcommand_matches("gv-read-stats") {
-        gv_read_stats::handle_gv_read_stats(matches);
-    } else if let Some(matches) = matches.subcommand_matches("g8r2v") {
-        if let Err(e) = g8r2v::handle_g8r2v(matches) {
-            report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
+    match matches.subcommand() {
+        Some(("gv-instance-csv", subm)) => {
+            if let Err(e) = gv_instance_csv::do_gv_instance_csv(subm) {
+                eprintln!("error in gv-instance-csv: {e}");
+                std::process::exit(1);
+            }
         }
-    } else if let Some(matches) = matches.subcommand_matches("ir-fn-eval") {
-        ir_fn_eval::handle_ir_fn_eval(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("g8r-equiv") {
-        g8r_equiv::handle_g8r_equiv(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("run-verilog-pipeline") {
-        run_verilog_pipeline::handle_run_verilog_pipeline(matches);
-    } else if let Some(matches) = matches.subcommand_matches("ir-strip-pos-data") {
-        ir_strip_pos_data::handle_ir_strip_pos_data(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("prove-quickcheck") {
-        prove_quickcheck::handle_prove_quickcheck(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("prove-enum-in-bound") {
-        prove_enum_in_bound::handle_prove_enum_in_bound(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("prover") {
-        prover::handle_prover(matches, &config);
-    } else if let Some(matches) = matches.subcommand_matches("ir2combo") {
-        ir2combo::handle_ir2combo(matches, &config);
-    } else if let Some(_matches) = matches.subcommand_matches("version") {
-        println!("{}", env!("CARGO_PKG_VERSION"));
-    } else {
-        report_cli_error_and_exit("No valid subcommand provided.", None, vec![]);
+        Some(("dslx2pipeline", subm)) => {
+            dslx2pipeline::handle_dslx2pipeline(subm, &config);
+        }
+        Some(("dslx-stitch-pipeline", subm)) => {
+            dslx_stitch_pipeline::handle_dslx_stitch_pipeline(subm, &config);
+        }
+        Some(("dslx2ir", subm)) => {
+            dslx2ir::handle_dslx2ir(subm, &config);
+        }
+        Some(("dslx-specialize", subm)) => {
+            dslx_specialize::handle_dslx_specialize(subm, &config);
+        }
+        Some(("ir2opt", subm)) => {
+            ir2opt::handle_ir2opt(subm, &config);
+        }
+        Some(("ir2pipeline", subm)) => {
+            ir2pipeline::handle_ir2pipeline(subm, &config);
+        }
+        Some(("dslx2sv-types", subm)) => {
+            dslx2sv_types::handle_dslx2sv_types(subm, &config);
+        }
+        Some(("dslx-fn-eval", subm)) => {
+            dslx_fn_eval::handle_dslx_fn_eval(subm, &config);
+        }
+        Some(("dslx-show", subm)) => {
+            dslx_show::handle_dslx_show(subm, &config);
+        }
+        Some(("dslx-g8r-stats", subm)) => {
+            dslx_g8r_stats::handle_dslx_g8r_stats(subm, &config);
+        }
+        Some(("ir2delayinfo", subm)) => {
+            ir2delayinfo::handle_ir2delayinfo(subm, &config);
+        }
+        Some(("ir-equiv", subm)) => {
+            ir_equiv::handle_ir_equiv(subm, &config);
+        }
+        Some(("ir-equiv-blocks", subm)) => {
+            ir_equiv_blocks::handle_ir_equiv_blocks(subm, &config);
+        }
+        Some(("dslx-equiv", subm)) => {
+            dslx_equiv::handle_dslx_equiv(subm, &config);
+        }
+        Some(("ir-ged", subm)) => {
+            ir_ged::handle_ir_ged(subm, &config);
+        }
+        Some(("ir-fn-to-block", subm)) => {
+            ir_fn_to_block::handle_ir_fn_to_block(subm, &config);
+        }
+        Some(("ir-structural-similarity", subm)) => {
+            ir_structural_similarity::handle_ir_structural_similarity(subm, &config);
+        }
+        Some(("ir-localized-eco", subm)) => {
+            ir_localized_eco::handle_ir_localized_eco(subm, &config);
+        }
+        Some(("ir-round-trip", subm)) => {
+            ir_round_trip::handle_ir_round_trip(subm);
+        }
+        Some(("ir2gates", subm)) => {
+            ir2gates::handle_ir2gates(subm, &config);
+        }
+        Some(("ir2g8r", subm)) => {
+            ir2gates::handle_ir2g8r(subm, &config);
+        }
+        Some(("dslx2pipeline-eco", subm)) => {
+            dslx2pipeline_eco::handle_dslx2pipeline_eco(subm, &config);
+        }
+        Some(("lib2proto", subm)) => {
+            lib2proto::handle_lib2proto(subm);
+        }
+        Some(("gv2ir", subm)) => {
+            gv2ir::handle_gv2ir(subm);
+        }
+        Some(("gv-read-stats", subm)) => {
+            gv_read_stats::handle_gv_read_stats(subm);
+        }
+        Some(("g8r2v", subm)) => {
+            if let Err(e) = g8r2v::handle_g8r2v(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
+            }
+        }
+        Some(("g8r-equiv", subm)) => {
+            g8r_equiv::handle_g8r_equiv(subm, &config);
+        }
+        Some(("run-verilog-pipeline", subm)) => {
+            run_verilog_pipeline::handle_run_verilog_pipeline(subm);
+        }
+        Some(("ir-strip-pos-data", subm)) => {
+            ir_strip_pos_data::handle_ir_strip_pos_data(subm, &config);
+        }
+        Some(("ir-fn-eval", subm)) => {
+            ir_fn_eval::handle_ir_fn_eval(subm, &config);
+        }
+        Some(("prove-quickcheck", subm)) => {
+            prove_quickcheck::handle_prove_quickcheck(subm, &config);
+        }
+        Some(("prove-enum-in-bound", subm)) => {
+            prove_enum_in_bound::handle_prove_enum_in_bound(subm, &config);
+        }
+        Some(("prover", subm)) => {
+            prover::handle_prover(subm, &config);
+        }
+        Some(("ir2combo", subm)) => {
+            ir2combo::handle_ir2combo(subm, &config);
+        }
+        Some(("version", _)) => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+        }
+        _ => {
+            report_cli_error_and_exit("No valid subcommand provided.", None, vec![]);
+        }
     }
 }

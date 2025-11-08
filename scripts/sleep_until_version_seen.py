@@ -41,7 +41,7 @@ def check_crate_version(crate_name, version_wanted):
 def main():
     if len(sys.argv) != 3:
         print(
-            "Usage: python3 sleep_until_version_seen.py <crate-name> <version-wanted>"
+            "Usage: python3 scripts/sleep_until_version_seen.py <crate-name> <version-wanted>"
         )
         sys.exit(2)
 

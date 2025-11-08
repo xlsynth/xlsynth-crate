@@ -137,6 +137,11 @@ pub enum FuzzOp {
         array: FuzzOperand,
         index: FuzzOperand,
     },
+    ArrayUpdate {
+        array: FuzzOperand,
+        value: FuzzOperand,
+        index: FuzzOperand,
+    },
     Decode {
         arg: FuzzOperand,
         width: u64,
@@ -182,6 +187,7 @@ pub enum FuzzOpFlat {
     PrioritySel,
     ArrayIndex,
     Array,
+    ArrayUpdate,
     Decode,
     OneHotSel,
     UMul,
@@ -209,6 +215,7 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
         FuzzOp::PrioritySel { .. } => FuzzOpFlat::PrioritySel,
         FuzzOp::ArrayIndex { .. } => FuzzOpFlat::ArrayIndex,
         FuzzOp::Array { .. } => FuzzOpFlat::Array,
+        FuzzOp::ArrayUpdate { .. } => FuzzOpFlat::ArrayUpdate,
         FuzzOp::Decode { .. } => FuzzOpFlat::Decode,
         FuzzOp::OneHotSel { .. } => FuzzOpFlat::OneHotSel,
         FuzzOp::UMul { .. } => FuzzOpFlat::UMul,
@@ -544,6 +551,16 @@ pub fn generate_ir_fn(
                 let elements_refs = elements.iter().map(|e: &BValue| e).collect::<Vec<_>>();
                 fn_builder.array(element_type_ref, &elements_refs, None)
             }
+            FuzzOp::ArrayUpdate {
+                array,
+                value,
+                index,
+            } => {
+                let array = &available_nodes[array.index % available_nodes.len()];
+                let value = &available_nodes[value.index % available_nodes.len()];
+                let index = &available_nodes[index.index % available_nodes.len()];
+                fn_builder.array_update(array, value, &[index], None)
+            }
             FuzzOp::Tuple { elements } => {
                 let tuple_elems: Vec<BValue> = elements
                     .iter()
@@ -772,6 +789,23 @@ fn pick_same_bits_types(
     Ok((out, target_ty.clone()))
 }
 
+fn pick_specific_type(
+    u: &mut arbitrary::Unstructured,
+    types: &[InternalType],
+    type_to_pick: &InternalType,
+) -> arbitrary::Result<usize> {
+    let candidates: Vec<usize> = types
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| if t == type_to_pick { Some(i) } else { None })
+        .collect();
+    if candidates.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    let which = u.int_in_range(0..=((candidates.len() as u64) - 1))? as usize;
+    let idx = candidates[which];
+    Ok(idx)
+}
 fn generate_fuzz_op(
     u: &mut arbitrary::Unstructured,
     node_types: &[InternalType],
@@ -975,11 +1009,7 @@ fn generate_fuzz_op(
                 array: FuzzOperand { index },
                 index: FuzzOperand { index },
             };
-            let out_ty = match aty {
-                InternalType::Array(arr) => (*arr.element_type).clone(),
-                _ => InternalType::Bits(1),
-            };
-            (op, out_ty)
+            (op, aty.get_array_element_type().clone())
         }
         FuzzOpFlat::Array => {
             let num_elements = u.int_in_range(1..=MAX_ELEMENTS_PER_ARRAY)?;
@@ -1005,6 +1035,19 @@ fn generate_fuzz_op(
                     element_type: Box::new(shared_ty),
                     element_count: elements.len(),
                 }),
+            )
+        }
+        FuzzOpFlat::ArrayUpdate => {
+            let (array, array_type) = pick_array_type(u, node_types)?;
+            let (index, _) = pick_bits_type(u, node_types)?;
+            let value = pick_specific_type(u, node_types, array_type.get_array_element_type())?;
+            (
+                FuzzOp::ArrayUpdate {
+                    array: FuzzOperand { index: array },
+                    value: FuzzOperand { index: value },
+                    index: FuzzOperand { index: index },
+                },
+                array_type,
             )
         }
         FuzzOpFlat::Tuple => {
@@ -1578,9 +1621,13 @@ mod tests {
                 max_num_params = max_num_params.max(total_params);
             }
         }
-        // At least 50% of the samples should be successfully generated.
-        assert!(successful_samples > SAMPLE_COUNT / 2);
-
+        // At least 25% of the samples should be successfully generated.
+        assert!(
+            successful_samples > SAMPLE_COUNT / 4,
+            "Expected at least 25% of samples to be successfully generated: {}/{}",
+            successful_samples,
+            SAMPLE_COUNT
+        );
         assert!(
             max_num_ops <= MAX_OPS_PER_SAMPLE as usize,
             "Expected at most MAX_OPS_PER_SAMPLE ops"
@@ -1754,7 +1801,7 @@ mod tests {
                 let mut p = ir_parser::Parser::new(&txt);
                 if let Ok(mut pir_pkg) = p.parse_and_validate_package() {
                     let _ = crate::ir_validate::validate_package(&pir_pkg);
-                    if let Some(top_fn) = pir_pkg.get_top_mut() {
+                    if let Some(top_fn) = pir_pkg.get_top_fn_mut() {
                         let dce_f = remove_dead_nodes(&*top_fn);
                         let mut live_param_set = HashSet::<NodeRef>::new();
                         for (index, node) in dce_f.nodes.iter().enumerate() {
@@ -1793,7 +1840,7 @@ mod tests {
         use rand::RngCore;
         use rand_pcg::Pcg64Mcg;
 
-        const SAMPLE_COUNT: usize = 1000;
+        const SAMPLE_COUNT: usize = 10000;
         let mut stats = LivenessStats {
             min_live_nodes: usize::MAX,
             max_live_nodes: 0,

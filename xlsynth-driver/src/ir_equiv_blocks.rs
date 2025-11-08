@@ -4,7 +4,9 @@ use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
 use crate::parallelism::ParallelismStrategy;
 use crate::toolchain_config::ToolchainConfig;
 
-use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, FileTable, Package, PackageMember};
+use xlsynth_pir::ir::{
+    self as ir_mod, BlockPortInfo, FileTable, MemberType, Package, PackageMember,
+};
 use xlsynth_pir::ir_parser;
 use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::types::AssertionSemantics;
@@ -102,7 +104,7 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
             }
             return None;
         }
-        if let Some(top_name) = &pkg.top_name {
+        if let Some((top_name, MemberType::Block)) = &pkg.top {
             for m in pkg.members.iter() {
                 if let PackageMember::Block { func, port_info } = m {
                     if &func.name == top_name {
@@ -160,13 +162,13 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
         name: "lhs_pkg".to_string(),
         file_table: FileTable::new(),
         members: vec![PackageMember::Function(lhs_fn.clone())],
-        top_name: Some(lhs_fn.name.clone()),
+        top: Some((lhs_fn.name.clone(), MemberType::Block)),
     };
     let rhs_pkg = Package {
         name: "rhs_pkg".to_string(),
         file_table: FileTable::new(),
         members: vec![PackageMember::Function(rhs_fn.clone())],
-        top_name: Some(rhs_fn.name.clone()),
+        top: Some((rhs_fn.name.clone(), MemberType::Block)),
     };
     let lhs_pkg_text = lhs_pkg.to_string();
     let rhs_pkg_text = rhs_pkg.to_string();

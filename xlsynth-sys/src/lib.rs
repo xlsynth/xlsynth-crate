@@ -92,6 +92,16 @@ pub struct CVastComment {
 }
 
 #[repr(C)]
+pub struct CVastBlankLine {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastInlineVerilogStatement {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CVastLogicRef {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -133,6 +143,31 @@ pub struct CVastStatementBlock {
 
 #[repr(C)]
 pub struct CVastStatement {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastConditional {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastCaseStatement {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastParameterRef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastLocalparamRef {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CVastGenerateLoop {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
@@ -259,33 +294,33 @@ pub struct CDslxParam {
 }
 
 #[repr(C)]
+pub struct CDslxCallGraph {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CDslxQuickcheck {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
 #[repr(C)]
-pub struct CDslxInvocation {
-    _private: [u8; 0], // Ensures the struct cannot be instantiated
+pub struct CDslxInvocationCalleeDataArray {
+    _private: [u8; 0],
 }
 
 #[repr(C)]
 pub struct CDslxInvocationCalleeData {
-    _private: [u8; 0], // Ensures the struct cannot be instantiated
-}
-
-#[repr(C)]
-pub struct CDslxInvocationCalleeDataArray {
-    _private: [u8; 0], // Ensures the struct cannot be instantiated
+    _private: [u8; 0],
 }
 
 #[repr(C)]
 pub struct CDslxInvocationData {
-    _private: [u8; 0], // Ensures the struct cannot be instantiated
+    _private: [u8; 0],
 }
 
 #[repr(C)]
-pub struct CDslxCallGraph {
-    _private: [u8; 0], // Ensures the struct cannot be instantiated
+pub struct CDslxInvocation {
+    _private: [u8; 0],
 }
 
 #[repr(C)]
@@ -314,9 +349,20 @@ pub type XlsValueKind = i32;
 // Calling convention used for DSLX mangling APIs.
 pub type XlsCallingConvention = i32;
 
-pub type VastFileType = i32;
+pub type CVastFileType = i32;
 
 pub type VastOperatorKind = i32;
+
+// Data kind for VAST Defs.
+pub type VastDataKind = i32;
+pub const XLS_VAST_DATA_KIND_REG: VastDataKind = 0;
+pub const XLS_VAST_DATA_KIND_WIRE: VastDataKind = 1;
+pub const XLS_VAST_DATA_KIND_LOGIC: VastDataKind = 2;
+pub const XLS_VAST_DATA_KIND_INTEGER: VastDataKind = 3;
+pub const XLS_VAST_DATA_KIND_INT: VastDataKind = 4;
+pub const XLS_VAST_DATA_KIND_USER: VastDataKind = 5;
+pub const XLS_VAST_DATA_KIND_UNTYPED_ENUM: VastDataKind = 6;
+pub const XLS_VAST_DATA_KIND_GENVAR: VastDataKind = 7;
 
 pub type DslxTypeDefinitionKind = i32;
 
@@ -720,7 +766,7 @@ extern "C" {
 
     // -- VAST APIs
 
-    pub fn xls_vast_make_verilog_file(file_type: VastFileType) -> *mut CVastFile;
+    pub fn xls_vast_make_verilog_file(file_type: CVastFileType) -> *mut CVastFile;
     pub fn xls_vast_verilog_file_free(f: *mut CVastFile);
     pub fn xls_vast_verilog_file_add_module(
         f: *mut CVastFile,
@@ -734,6 +780,29 @@ extern "C" {
         bit_count: i64,
         is_signed: bool,
     ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_bit_vector_type_expr(
+        f: *mut CVastFile,
+        width_expr: *mut CVastExpression,
+        is_signed: bool,
+    ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_integer_type(
+        f: *mut CVastFile,
+        is_signed: bool,
+    ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_int_type(
+        f: *mut CVastFile,
+        is_signed: bool,
+    ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_integer_def(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+        is_signed: bool,
+    ) -> *mut CVastDef;
+    pub fn xls_vast_verilog_file_make_int_def(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+        is_signed: bool,
+    ) -> *mut CVastDef;
     pub fn xls_vast_verilog_file_make_extern_package_type(
         f: *mut CVastFile,
         package_name: *const std::os::raw::c_char,
@@ -775,6 +844,20 @@ extern "C" {
         expressions: *mut *mut CVastExpression,
         expression_count: libc::size_t,
     ) -> *mut CVastExpression;
+
+    pub fn xls_vast_verilog_file_make_replicated_concat(
+        f: *mut CVastFile,
+        replication: *mut CVastExpression,
+        elements: *mut *mut CVastExpression,
+        element_count: libc::size_t,
+    ) -> *mut CVastConcat;
+
+    pub fn xls_vast_verilog_file_make_replicated_concat_i64(
+        f: *mut CVastFile,
+        replication_count: i64,
+        elements: *mut *mut CVastExpression,
+        element_count: libc::size_t,
+    ) -> *mut CVastConcat;
 
     pub fn xls_vast_verilog_file_make_slice_i64(
         f: *mut CVastFile,
@@ -820,6 +903,19 @@ extern "C" {
         else_expr: *mut CVastExpression,
     ) -> *mut CVastExpression;
 
+    pub fn xls_vast_verilog_file_make_width_cast(
+        f: *mut CVastFile,
+        width: *mut CVastExpression,
+        value: *mut CVastExpression,
+    ) -> *mut CVastExpression;
+
+    // Cast a value to a specific type.
+    pub fn xls_vast_verilog_file_make_type_cast(
+        f: *mut CVastFile,
+        type_: *mut CVastDataType,
+        value: *mut CVastExpression,
+    ) -> *mut CVastExpression;
+
     pub fn xls_vast_verilog_file_make_instantiation(
         f: *mut CVastFile,
         module_name: *const std::os::raw::c_char,
@@ -835,6 +931,11 @@ extern "C" {
         f: *mut CVastFile,
         text: *const std::os::raw::c_char,
     ) -> *mut CVastComment;
+    pub fn xls_vast_verilog_file_make_blank_line(f: *mut CVastFile) -> *mut CVastBlankLine;
+    pub fn xls_vast_verilog_file_make_inline_verilog_statement(
+        f: *mut CVastFile,
+        text: *const std::os::raw::c_char,
+    ) -> *mut CVastInlineVerilogStatement;
     pub fn xls_vast_verilog_file_make_literal(
         f: *mut CVastFile,
         bits: *const CIrBits,
@@ -849,6 +950,17 @@ extern "C" {
     ) -> *mut CVastLiteral;
 
     // - Module additions
+    pub fn xls_vast_verilog_module_add_parameter_port(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_typed_parameter_port(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLogicRef;
     pub fn xls_vast_verilog_module_add_input(
         m: *mut CVastModule,
         name: *const std::os::raw::c_char,
@@ -859,11 +971,33 @@ extern "C" {
         name: *const std::os::raw::c_char,
         type_: *mut CVastDataType,
     ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_inout(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_logic_input(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_logic_output(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastLogicRef;
     pub fn xls_vast_verilog_module_add_wire(
         m: *mut CVastModule,
         name: *const std::os::raw::c_char,
         type_: *mut CVastDataType,
     ) -> *mut CVastLogicRef;
+    pub fn xls_vast_verilog_module_add_generate_loop(
+        m: *mut CVastModule,
+        genvar_name: *const std::os::raw::c_char,
+        init: *mut CVastExpression,
+        limit: *mut CVastExpression,
+        label: *const std::os::raw::c_char,
+    ) -> *mut CVastGenerateLoop;
     pub fn xls_vast_verilog_module_add_member_instantiation(
         m: *mut CVastModule,
         inst: *mut CVastInstantiation,
@@ -876,6 +1010,45 @@ extern "C" {
         m: *mut CVastModule,
         comment: *mut CVastComment,
     );
+    pub fn xls_vast_verilog_module_add_member_blank_line(
+        m: *mut CVastModule,
+        blank: *mut CVastBlankLine,
+    );
+    pub fn xls_vast_verilog_module_add_member_inline_statement(
+        m: *mut CVastModule,
+        stmt: *mut CVastInlineVerilogStatement,
+    );
+
+    pub fn xls_vast_verilog_module_add_parameter(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastParameterRef;
+
+    pub fn xls_vast_verilog_module_add_localparam(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLocalparamRef;
+
+    pub fn xls_vast_verilog_file_make_def(
+        f: *mut CVastFile,
+        name: *const std::os::raw::c_char,
+        kind: VastDataKind,
+        type_: *mut CVastDataType,
+    ) -> *mut CVastDef;
+
+    pub fn xls_vast_verilog_module_add_parameter_with_def(
+        m: *mut CVastModule,
+        def: *mut CVastDef,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastParameterRef;
+
+    pub fn xls_vast_verilog_module_add_localparam_with_def(
+        m: *mut CVastModule,
+        def: *mut CVastDef,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLocalparamRef;
 
     pub fn xls_vast_verilog_module_get_name(m: *mut CVastModule) -> *mut std::os::raw::c_char;
 
@@ -892,6 +1065,20 @@ extern "C" {
     pub fn xls_vast_logic_ref_as_expression(v: *mut CVastLogicRef) -> *mut CVastExpression;
     pub fn xls_vast_slice_as_expression(v: *mut CVastSlice) -> *mut CVastExpression;
     pub fn xls_vast_index_as_expression(v: *mut CVastIndex) -> *mut CVastExpression;
+    pub fn xls_vast_parameter_ref_as_expression(v: *mut CVastParameterRef) -> *mut CVastExpression;
+    pub fn xls_vast_localparam_ref_as_expression(
+        v: *mut CVastLocalparamRef,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_indexable_expression_as_expression(
+        v: *mut CVastIndexableExpression,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_verilog_file_make_unsized_one_literal(
+        f: *mut CVastFile,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_verilog_file_make_unsized_zero_literal(
+        f: *mut CVastFile,
+    ) -> *mut CVastExpression;
+    pub fn xls_vast_verilog_file_make_unsized_x_literal(f: *mut CVastFile) -> *mut CVastExpression;
 
     pub fn xls_vast_logic_ref_get_name(v: *mut CVastLogicRef) -> *mut std::os::raw::c_char;
 
@@ -916,7 +1103,7 @@ extern "C" {
         typechecked_module_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
-    pub fn xls_dslx_typechecked_module_clone_ignore_functions(
+    pub fn xls_dslx_typechecked_module_clone_removing_functions(
         tm: *mut CDslxTypecheckedModule,
         functions: *mut *mut CDslxFunction,
         function_count: libc::size_t,
@@ -977,6 +1164,8 @@ extern "C" {
         module: *mut CDslxTypecheckedModule,
     ) -> *mut CDslxTypeInfo;
 
+    pub fn xls_dslx_module_to_string(module: *mut CDslxModule) -> *mut std::os::raw::c_char;
+
     pub fn xls_dslx_module_get_name(module: *const CDslxModule) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_module_get_type_definition_count(module: *const CDslxModule) -> i64;
@@ -985,7 +1174,6 @@ extern "C" {
 
     pub fn xls_dslx_module_get_member(module: *const CDslxModule, i: i64)
         -> *mut CDslxModuleMember;
-    pub fn xls_dslx_module_to_string(module: *mut CDslxModule) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_module_get_type_definition_kind(
         module: *const CDslxModule,
@@ -1057,6 +1245,82 @@ extern "C" {
         type_info: *mut CDslxTypeInfo,
         module: *mut CDslxModule,
     ) -> *mut CDslxTypeInfo;
+
+    pub fn xls_dslx_type_info_get_unique_invocation_callee_data(
+        type_info: *mut CDslxTypeInfo,
+        function: *mut CDslxFunction,
+    ) -> *mut CDslxInvocationCalleeDataArray;
+    pub fn xls_dslx_type_info_get_all_invocation_callee_data(
+        type_info: *mut CDslxTypeInfo,
+        function: *mut CDslxFunction,
+    ) -> *mut CDslxInvocationCalleeDataArray;
+    pub fn xls_dslx_type_info_get_root_invocation_data(
+        type_info: *mut CDslxTypeInfo,
+        invocation: *mut CDslxInvocation,
+    ) -> *mut CDslxInvocationData;
+
+    // -- call_graph
+    pub fn xls_dslx_type_info_build_function_call_graph(
+        type_info: *mut CDslxTypeInfo,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxCallGraph,
+    ) -> bool;
+
+    pub fn xls_dslx_call_graph_free(call_graph: *mut CDslxCallGraph);
+
+    pub fn xls_dslx_call_graph_get_function_count(call_graph: *mut CDslxCallGraph) -> i64;
+
+    pub fn xls_dslx_call_graph_get_function(
+        call_graph: *mut CDslxCallGraph,
+        index: i64,
+    ) -> *mut CDslxFunction;
+
+    pub fn xls_dslx_call_graph_get_callee_count(
+        call_graph: *mut CDslxCallGraph,
+        caller: *mut CDslxFunction,
+    ) -> i64;
+
+    pub fn xls_dslx_call_graph_get_callee_function(
+        call_graph: *mut CDslxCallGraph,
+        caller: *mut CDslxFunction,
+        callee_index: i64,
+    ) -> *mut CDslxFunction;
+
+    pub fn xls_dslx_invocation_callee_data_array_free(array: *mut CDslxInvocationCalleeDataArray);
+    pub fn xls_dslx_invocation_callee_data_array_get_count(
+        array: *mut CDslxInvocationCalleeDataArray,
+    ) -> i64;
+    pub fn xls_dslx_invocation_callee_data_array_get(
+        array: *mut CDslxInvocationCalleeDataArray,
+        index: i64,
+    ) -> *mut CDslxInvocationCalleeData;
+
+    pub fn xls_dslx_invocation_callee_data_clone(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxInvocationCalleeData;
+    pub fn xls_dslx_invocation_callee_data_free(data: *mut CDslxInvocationCalleeData);
+    pub fn xls_dslx_invocation_callee_data_get_callee_bindings(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *const CDslxParametricEnv;
+    pub fn xls_dslx_invocation_callee_data_get_caller_bindings(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *const CDslxParametricEnv;
+    pub fn xls_dslx_invocation_callee_data_get_derived_type_info(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxTypeInfo;
+    pub fn xls_dslx_invocation_callee_data_get_invocation(
+        data: *mut CDslxInvocationCalleeData,
+    ) -> *mut CDslxInvocation;
+
+    pub fn xls_dslx_invocation_data_get_invocation(
+        data: *mut CDslxInvocationData,
+    ) -> *mut CDslxInvocation;
+    pub fn xls_dslx_invocation_data_get_callee(
+        data: *mut CDslxInvocationData,
+    ) -> *mut CDslxFunction;
+    pub fn xls_dslx_invocation_data_get_caller(
+        data: *mut CDslxInvocationData,
+    ) -> *mut CDslxFunction;
 
     // -- ConstantDef
 
@@ -1174,6 +1438,8 @@ extern "C" {
         value: *mut CDslxInterpValue,
     ) -> *mut std::os::raw::c_char;
 
+    pub fn xls_dslx_interp_value_clone(value: *const CDslxInterpValue) -> *mut CDslxInterpValue;
+
     // Parametric env construction and InterpValue helpers
     pub fn xls_dslx_parametric_env_create(
         items: *const XlsDslxParametricEnvItem,
@@ -1181,6 +1447,7 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         env_out: *mut *mut CDslxParametricEnv,
     ) -> bool;
+    pub fn xls_dslx_parametric_env_free(env: *mut CDslxParametricEnv);
     pub fn xls_dslx_parametric_env_clone(env: *const CDslxParametricEnv)
         -> *mut CDslxParametricEnv;
     pub fn xls_dslx_parametric_env_equals(
@@ -1195,7 +1462,6 @@ extern "C" {
     pub fn xls_dslx_parametric_env_to_string(
         env: *const CDslxParametricEnv,
     ) -> *mut std::os::raw::c_char;
-    pub fn xls_dslx_parametric_env_free(env: *mut CDslxParametricEnv);
     pub fn xls_dslx_parametric_env_get_binding_count(env: *const CDslxParametricEnv) -> i64;
     pub fn xls_dslx_parametric_env_get_binding_identifier(
         env: *const CDslxParametricEnv,
@@ -1227,7 +1493,6 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CDslxInterpValue,
     ) -> bool;
-    pub fn xls_dslx_interp_value_clone(value: *const CDslxInterpValue) -> *mut CDslxInterpValue;
 
     pub fn xls_dslx_interp_value_from_string(
         text: *const std::os::raw::c_char,
@@ -1269,72 +1534,6 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CDslxInterpValue,
     ) -> bool;
-
-    pub fn xls_dslx_type_info_get_unique_invocation_callee_data(
-        type_info: *mut CDslxTypeInfo,
-        function: *mut CDslxFunction,
-    ) -> *mut CDslxInvocationCalleeDataArray;
-    pub fn xls_dslx_type_info_get_all_invocation_callee_data(
-        type_info: *mut CDslxTypeInfo,
-        function: *mut CDslxFunction,
-    ) -> *mut CDslxInvocationCalleeDataArray;
-    pub fn xls_dslx_type_info_get_root_invocation_data(
-        type_info: *mut CDslxTypeInfo,
-        invocation: *mut CDslxInvocation,
-    ) -> *mut CDslxInvocationData;
-    pub fn xls_dslx_type_info_build_function_call_graph(
-        type_info: *mut CDslxTypeInfo,
-        error_out: *mut *mut std::os::raw::c_char,
-        result_out: *mut *mut CDslxCallGraph,
-    ) -> bool;
-    pub fn xls_dslx_call_graph_free(call_graph: *mut CDslxCallGraph);
-    pub fn xls_dslx_call_graph_get_function_count(call_graph: *mut CDslxCallGraph) -> i64;
-    pub fn xls_dslx_call_graph_get_function(
-        call_graph: *mut CDslxCallGraph,
-        index: i64,
-    ) -> *mut CDslxFunction;
-    pub fn xls_dslx_call_graph_get_callee_count(
-        call_graph: *mut CDslxCallGraph,
-        caller: *mut CDslxFunction,
-    ) -> i64;
-    pub fn xls_dslx_call_graph_get_callee_function(
-        call_graph: *mut CDslxCallGraph,
-        caller: *mut CDslxFunction,
-        callee_index: i64,
-    ) -> *mut CDslxFunction;
-    pub fn xls_dslx_invocation_callee_data_array_free(array: *mut CDslxInvocationCalleeDataArray);
-    pub fn xls_dslx_invocation_callee_data_array_get_count(
-        array: *mut CDslxInvocationCalleeDataArray,
-    ) -> i64;
-    pub fn xls_dslx_invocation_callee_data_array_get(
-        array: *mut CDslxInvocationCalleeDataArray,
-        index: i64,
-    ) -> *mut CDslxInvocationCalleeData;
-    pub fn xls_dslx_invocation_callee_data_clone(
-        data: *mut CDslxInvocationCalleeData,
-    ) -> *mut CDslxInvocationCalleeData;
-    pub fn xls_dslx_invocation_callee_data_free(data: *mut CDslxInvocationCalleeData);
-    pub fn xls_dslx_invocation_callee_data_get_callee_bindings(
-        data: *mut CDslxInvocationCalleeData,
-    ) -> *const CDslxParametricEnv;
-    pub fn xls_dslx_invocation_callee_data_get_caller_bindings(
-        data: *mut CDslxInvocationCalleeData,
-    ) -> *const CDslxParametricEnv;
-    pub fn xls_dslx_invocation_callee_data_get_derived_type_info(
-        data: *mut CDslxInvocationCalleeData,
-    ) -> *mut CDslxTypeInfo;
-    pub fn xls_dslx_invocation_callee_data_get_invocation(
-        data: *mut CDslxInvocationCalleeData,
-    ) -> *mut CDslxInvocation;
-    pub fn xls_dslx_invocation_data_get_invocation(
-        data: *mut CDslxInvocationData,
-    ) -> *mut CDslxInvocation;
-    pub fn xls_dslx_invocation_data_get_callee(
-        data: *mut CDslxInvocationData,
-    ) -> *mut CDslxFunction;
-    pub fn xls_dslx_invocation_data_get_caller(
-        data: *mut CDslxInvocationData,
-    ) -> *mut CDslxFunction;
 
     pub fn xls_dslx_type_get_total_bit_count(
         type_: *const CDslxType,
@@ -1810,12 +2009,24 @@ extern "C" {
         out_always_at: *mut *mut CVastAlwaysBase,
         error_out: *mut *mut ::std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_vast_verilog_module_add_always_comb(
+        m: *mut CVastModule,
+        out_always_comb: *mut *mut CVastAlwaysBase,
+        error_out: *mut *mut ::std::os::raw::c_char,
+    ) -> bool;
     pub fn xls_vast_verilog_module_add_reg(
         m: *mut CVastModule,
         name: *const ::std::os::raw::c_char,
         type_: *mut CVastDataType,
         out_reg_ref: *mut *mut CVastLogicRef,
         error_out: *mut *mut ::std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_verilog_module_add_logic(
+        m: *mut CVastModule,
+        name: *const std::os::raw::c_char,
+        type_: *mut CVastDataType,
+        out_logic_ref: *mut *mut CVastLogicRef,
+        error_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
     pub fn xls_vast_verilog_file_make_pos_edge(
         f: *mut CVastFile,
@@ -1826,11 +2037,118 @@ extern "C" {
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
+    pub fn xls_vast_verilog_file_make_blocking_assignment(
+        f: *mut CVastFile,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
+
     pub fn xls_vast_always_base_get_statement_block(
         always_base: *mut CVastAlwaysBase,
     ) -> *mut CVastStatementBlock;
+
     pub fn xls_vast_statement_block_add_nonblocking_assignment(
         block: *mut CVastStatementBlock,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
+    pub fn xls_vast_statement_block_add_blocking_assignment(
+        block: *mut CVastStatementBlock,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
+
+    pub fn xls_vast_statement_block_add_comment_text(
+        block: *mut CVastStatementBlock,
+        text: *const std::os::raw::c_char,
+    ) -> *mut CVastStatement;
+
+    pub fn xls_vast_statement_block_add_blank_line(
+        block: *mut CVastStatementBlock,
+    ) -> *mut CVastStatement;
+
+    pub fn xls_vast_statement_block_add_inline_text(
+        block: *mut CVastStatementBlock,
+        text: *const std::os::raw::c_char,
+    ) -> *mut CVastStatement;
+    pub fn xls_vast_statement_block_add_generate_loop(
+        block: *mut CVastStatementBlock,
+        genvar_name: *const std::os::raw::c_char,
+        init: *mut CVastExpression,
+        limit: *mut CVastExpression,
+        label: *const std::os::raw::c_char,
+    ) -> *mut CVastGenerateLoop;
+
+    pub fn xls_vast_statement_block_add_continuous_assignment(
+        block: *mut CVastStatementBlock,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
+
+    // Conditional (if / else-if / else)
+    pub fn xls_vast_statement_block_add_conditional(
+        block: *mut CVastStatementBlock,
+        cond: *mut CVastExpression,
+    ) -> *mut CVastConditional;
+    pub fn xls_vast_conditional_get_then_block(
+        cond: *mut CVastConditional,
+    ) -> *mut CVastStatementBlock;
+    pub fn xls_vast_conditional_add_else_if(
+        cond: *mut CVastConditional,
+        expr_cond: *mut CVastExpression,
+    ) -> *mut CVastStatementBlock;
+    pub fn xls_vast_conditional_add_else(cond: *mut CVastConditional) -> *mut CVastStatementBlock;
+
+    // Case statement builders
+    pub fn xls_vast_statement_block_add_case(
+        block: *mut CVastStatementBlock,
+        selector: *mut CVastExpression,
+    ) -> *mut CVastCaseStatement;
+    pub fn xls_vast_case_statement_add_item(
+        case_stmt: *mut CVastCaseStatement,
+        match_expr: *mut CVastExpression,
+    ) -> *mut CVastStatementBlock;
+    pub fn xls_vast_case_statement_add_default(
+        case_stmt: *mut CVastCaseStatement,
+    ) -> *mut CVastStatementBlock;
+
+    pub fn xls_vast_generate_loop_get_genvar(loop_: *mut CVastGenerateLoop) -> *mut CVastLogicRef;
+
+    pub fn xls_vast_generate_loop_add_statement(
+        loop_: *mut CVastGenerateLoop,
+        statement: *mut CVastStatement,
+    );
+    pub fn xls_vast_generate_loop_add_generate_loop(
+        loop_: *mut CVastGenerateLoop,
+        genvar_name: *const std::os::raw::c_char,
+        init: *mut CVastExpression,
+        limit: *mut CVastExpression,
+        label: *const std::os::raw::c_char,
+    ) -> *mut CVastGenerateLoop;
+    pub fn xls_vast_generate_loop_add_always_comb(
+        loop_: *mut CVastGenerateLoop,
+        out_always_comb: *mut *mut CVastAlwaysBase,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_generate_loop_add_always_ff(
+        loop_: *mut CVastGenerateLoop,
+        sensitivity_list_elements: *mut *mut CVastExpression,
+        sensitivity_list_count: usize,
+        out_always_ff: *mut *mut CVastAlwaysBase,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_vast_generate_loop_add_localparam(
+        loop_: *mut CVastGenerateLoop,
+        name: *const std::os::raw::c_char,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLocalparamRef;
+    pub fn xls_vast_generate_loop_add_localparam_with_def(
+        loop_: *mut CVastGenerateLoop,
+        def: *mut CVastDef,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastLocalparamRef;
+    pub fn xls_vast_generate_loop_add_continuous_assignment(
+        loop_: *mut CVastGenerateLoop,
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;

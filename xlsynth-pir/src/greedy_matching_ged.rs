@@ -10,39 +10,451 @@ use crate::matching_ged::{
 };
 use crate::node_hashing::FwdHash;
 use log::{Level, debug, log_enabled, trace};
-use std::collections::BTreeSet;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
+
+/// Base of the fixed-point score scale used by greedy matching.
+const SCORE_BASE: i32 = 1000;
+/// Score for a perfect forward match or reverse match. Bias towards reverse
+/// matches because reverse matches are computed once globally, while
+/// forward matches are computed as the algorithm progresses so "perfect"
+/// forward matches may be due to imprecise heuristic matches done earlier.
+const PERFECT_FORWARD_MATCH_SCORE: i32 = SCORE_BASE * 100;
+const PERFECT_REVERSE_MATCH_SCORE: i32 = SCORE_BASE * 200;
+
+/// Generic vector indexed by node reference types (e.g. OldNodeRef/NewNodeRef).
+/// Because these node ref types are (close to) dense, NodeVector can be used as
+/// a fast map/set. Generic parameters:
+/// - I: The index type (e.g. OldNodeRef/NewNodeRef)
+/// - D: The data type (e.g. bool/i32)
+#[derive(Clone)]
+struct NodeVector<I, D> {
+    data: Vec<D>,
+    _marker: PhantomData<I>,
+}
+
+impl<I, D: Clone> NodeVector<I, D> {
+    fn new(len: usize, value: D) -> Self {
+        Self {
+            data: vec![value; len],
+            _marker: PhantomData,
+        }
+    }
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+}
+
+impl<I, D> NodeVector<I, D>
+where
+    I: Into<usize> + Copy,
+{
+    fn get(&self, index: I) -> &D {
+        &self.data[index.into()]
+    }
+    fn get_mut(&mut self, index: I) -> &mut D {
+        &mut self.data[index.into()]
+    }
+    fn set(&mut self, index: I, value: D) {
+        self.data[index.into()] = value;
+    }
+}
+
+// A map from (OldNodeRef, NewNodeRef) pairs to values.
+struct NodePairMap<D> {
+    data: NodeVector<OldNodeRef, NodeVector<NewNodeRef, Option<D>>>,
+}
+
+impl<D: Clone> NodePairMap<D> {
+    fn new(old_len: usize, new_len: usize, default: Option<D>) -> Self {
+        let inner = NodeVector::new(new_len, default);
+        Self {
+            data: NodeVector::new(old_len, inner),
+        }
+    }
+    fn get(&self, old_index: OldNodeRef, new_index: NewNodeRef) -> Option<&D> {
+        self.data.get(old_index).get(new_index).as_ref()
+    }
+    fn set(&mut self, old_index: OldNodeRef, new_index: NewNodeRef, value: D) {
+        *self.data.get_mut(old_index).get_mut(new_index) = Some(value);
+    }
+}
+
+/// A data structure collecting nodes which are structurally equivalent.
+/// Specifically, it maps OldNodeRefs to equivalent NewNodeRefs and vice versa.
+struct EquivalentNodeSet {
+    // Equivalence class index for each Old/Node node. Indexed by OldNodeRef/NewNodeRef.index.
+    old_index_to_equiv_class: NodeVector<OldNodeRef, usize>,
+    new_index_to_equiv_class: NodeVector<NewNodeRef, usize>,
+    // Vectors of equivalent nodes, indexed by equivalence class index.
+    equivalent_new_nodes: Vec<Vec<NewNodeRef>>,
+    equivalent_old_nodes: Vec<Vec<OldNodeRef>>,
+}
+
+impl EquivalentNodeSet {
+    fn new(old_graph: &DepGraph<OldNodeRef>, new_graph: &DepGraph<NewNodeRef>) -> Self {
+        // Compute max indices to size class index vectors deterministically
+        let max_old_index = old_graph.nodes.len() - 1;
+        let max_new_index = new_graph.nodes.len() - 1;
+        let mut old_index_to_equiv_class = NodeVector::new(max_old_index + 1, 0usize);
+        let mut new_index_to_equiv_class = NodeVector::new(max_new_index + 1, 0usize);
+
+        let mut hash_set: HashSet<FwdHash> = HashSet::new();
+        for node in old_graph.nodes.iter() {
+            hash_set.insert(node.structural_hash);
+        }
+        for node in new_graph.nodes.iter() {
+            hash_set.insert(node.structural_hash);
+        }
+        let equivalent_class_count = hash_set.len();
+        let mut equivalent_old_nodes: Vec<Vec<OldNodeRef>> =
+            vec![Vec::new(); equivalent_class_count];
+        let mut equivalent_new_nodes: Vec<Vec<NewNodeRef>> =
+            vec![Vec::new(); equivalent_class_count];
+
+        let mut class_by_hash: HashMap<FwdHash, usize> = HashMap::new();
+        let mut get_or_create_class = |h: FwdHash| -> usize {
+            if let Some(&idx) = class_by_hash.get(&h) {
+                idx
+            } else {
+                let idx = class_by_hash.len();
+                class_by_hash.insert(h, idx);
+                idx
+            }
+        };
+        for (idx, node) in old_graph.nodes.iter().enumerate() {
+            let equiv_class = get_or_create_class(node.structural_hash);
+            old_index_to_equiv_class.set(OldNodeRef(idx), equiv_class);
+            equivalent_old_nodes[equiv_class].push(OldNodeRef(idx));
+        }
+        for (idx, node) in new_graph.nodes.iter().enumerate() {
+            let equiv_class = get_or_create_class(node.structural_hash);
+            new_index_to_equiv_class.set(NewNodeRef(idx), equiv_class);
+            equivalent_new_nodes[equiv_class].push(NewNodeRef(idx));
+        }
+        Self {
+            old_index_to_equiv_class,
+            new_index_to_equiv_class,
+            equivalent_new_nodes,
+            equivalent_old_nodes,
+        }
+    }
+    pub fn get_equivalent_old_nodes(&self, new_index: NewNodeRef) -> &Vec<OldNodeRef> {
+        let class = self.new_index_to_equiv_class.get(new_index);
+        &self.equivalent_old_nodes[*class]
+    }
+    pub fn get_equivalent_new_nodes(&self, old_index: OldNodeRef) -> &Vec<NewNodeRef> {
+        let equiv_class = self.old_index_to_equiv_class.get(old_index);
+        &self.equivalent_new_nodes[*equiv_class]
+    }
+    pub fn drop_old_node(&mut self, old_node: OldNodeRef) {
+        let equiv_class = self.old_index_to_equiv_class.get(old_node);
+        let members = &mut self.equivalent_old_nodes[*equiv_class];
+        let pos = members.iter().position(|x| *x == old_node).unwrap();
+        members.swap_remove(pos);
+    }
+    pub fn drop_new_node(&mut self, new_node: NewNodeRef) {
+        let equiv_class = self.new_index_to_equiv_class.get(new_node);
+        let members = &mut self.equivalent_new_nodes[*equiv_class];
+        let pos = members.iter().position(|x| *x == new_node).unwrap();
+        members.swap_remove(pos);
+    }
+}
+
+/// A cache of foward match scores for (OldNodeRef, NewNodeRef) pairs. The cache
+/// is intelligently updated after matches are made to minimize wasted
+/// computation.
+struct ForwardScoreCache {
+    scores: NodePairMap<i32>,
+}
+
+impl ForwardScoreCache {
+    fn new(old_graph: &DepGraph<OldNodeRef>, new_graph: &DepGraph<NewNodeRef>) -> Self {
+        Self {
+            scores: NodePairMap::new(old_graph.nodes.len(), new_graph.nodes.len(), None),
+        }
+    }
+    fn get(&self, old_index: OldNodeRef, new_index: NewNodeRef) -> i32 {
+        self.scores.get(old_index, new_index).copied().unwrap_or(0)
+    }
+
+    fn compute_score(
+        &self,
+        old_index: OldNodeRef,
+        new_index: NewNodeRef,
+        matched_nodes: &NodeVector<OldNodeRef, Option<NewNodeRef>>,
+        old_graph: &DepGraph<OldNodeRef>,
+        new_graph: &DepGraph<NewNodeRef>,
+    ) -> i32 {
+        let old_operands: &Vec<OldNodeRef> = &old_graph.get_node(old_index).operands;
+        let new_operands: &Vec<NewNodeRef> = &new_graph.get_node(new_index).operands;
+
+        assert!(
+            old_operands.len() == new_operands.len(),
+            "forward_match_score expects equal operand counts for shape-equal nodes"
+        );
+        if old_operands.is_empty() {
+            return SCORE_BASE;
+        };
+        let mut matches = 0usize;
+        for i in 0..old_operands.len() {
+            let op_old = old_operands[i];
+            let op_new = new_operands[i];
+            if *matched_nodes.get(op_old) == Some(op_new) {
+                matches += 1;
+            }
+        }
+        ((matches as i32) * SCORE_BASE) / (old_operands.len() as i32)
+    }
+    fn update_after_match(
+        &mut self,
+        old_index: OldNodeRef,
+        new_index: NewNodeRef,
+        equivalents: &EquivalentNodeSet,
+        matched_nodes: &NodeVector<OldNodeRef, Option<NewNodeRef>>,
+        old_graph: &DepGraph<OldNodeRef>,
+        new_graph: &DepGraph<NewNodeRef>,
+    ) {
+        for old_user in old_graph.get_node(old_index).users.iter() {
+            for new_node in equivalents.get_equivalent_new_nodes(old_user.0) {
+                let score =
+                    self.compute_score(old_user.0, *new_node, matched_nodes, old_graph, new_graph);
+                self.scores.set(old_user.0, *new_node, score);
+            }
+        }
+        for new_user in new_graph.get_node(new_index).users.iter() {
+            for old_node in equivalents.get_equivalent_old_nodes(new_user.0) {
+                let score =
+                    self.compute_score(*old_node, new_user.0, matched_nodes, old_graph, new_graph);
+                self.scores.set(*old_node, new_user.0, score);
+            }
+        }
+    }
+}
+
+/// A cache of unready match scores for (OldNodeRef, NewNodeRef) pairs. The
+/// unready match score for a node A is the best score for any node pair (A, B)
+/// where B is not ready.The cache is intelligently updated after matches are
+/// made to minimize wasted computation.
+struct UnreadyMatchScoreCache {
+    old_scores: RefCell<NodeVector<OldNodeRef, Option<i32>>>,
+    new_scores: RefCell<NodeVector<NewNodeRef, Option<i32>>>,
+}
+
+impl UnreadyMatchScoreCache {
+    fn new(old_graph: &DepGraph<OldNodeRef>, new_graph: &DepGraph<NewNodeRef>) -> Self {
+        Self {
+            old_scores: RefCell::new(NodeVector::new(old_graph.nodes.len(), None)),
+            new_scores: RefCell::new(NodeVector::new(new_graph.nodes.len(), None)),
+        }
+    }
+    fn get_old_score<IsUnreadyF, GetScoreF>(
+        &self,
+        old_index: OldNodeRef,
+        equivalents: &EquivalentNodeSet,
+        is_unready: IsUnreadyF,
+        get_match_score: GetScoreF,
+    ) -> i32
+    where
+        IsUnreadyF: Fn(NewNodeRef) -> bool,
+        GetScoreF: Fn(OldNodeRef, NewNodeRef) -> i32,
+    {
+        if let Some(score) = self.old_scores.borrow().get(old_index).clone() {
+            // let new_score =
+            //     self.compute_old_score(old_index, equivalents, is_unready,
+            // get_match_score); assert_eq!(score, new_score);
+            score
+        } else {
+            let new_score =
+                self.compute_old_score(old_index, equivalents, is_unready, get_match_score);
+            self.old_scores.borrow_mut().set(old_index, Some(new_score));
+            new_score
+        }
+    }
+    fn get_new_score<IsUnreadyF, GetScoreF>(
+        &self,
+        new_index: NewNodeRef,
+        equivalents: &EquivalentNodeSet,
+        is_unready: IsUnreadyF,
+        get_match_score: GetScoreF,
+    ) -> i32
+    where
+        IsUnreadyF: Fn(OldNodeRef) -> bool,
+        GetScoreF: Fn(OldNodeRef, NewNodeRef) -> i32,
+    {
+        if let Some(score) = self.new_scores.borrow().get(new_index).clone() {
+            // let new_score =
+            //     self.compute_new_score(new_index, equivalents, is_unready,
+            // get_match_score); assert_eq!(score, new_score);
+            score
+        } else {
+            let new_score =
+                self.compute_new_score(new_index, equivalents, is_unready, get_match_score);
+            self.new_scores.borrow_mut().set(new_index, Some(new_score));
+            new_score
+        }
+    }
+    fn compute_old_score<IsUnreadyF, GetScoreF>(
+        &self,
+        old_index: OldNodeRef,
+        equivalents: &EquivalentNodeSet,
+        is_unready: IsUnreadyF,
+        get_match_score: GetScoreF,
+    ) -> i32
+    where
+        IsUnreadyF: Fn(NewNodeRef) -> bool,
+        GetScoreF: Fn(OldNodeRef, NewNodeRef) -> i32,
+    {
+        // Compute the best score matching `old_index` with an equivalent not-ready new
+        // node.
+        let mut best = 0i32;
+        log::trace!("Computing old score for {:?}", old_index);
+        for &new_equiv in equivalents
+            .get_equivalent_new_nodes(old_index)
+            .iter()
+            .filter(|&x| is_unready(*x))
+        {
+            let score = get_match_score(old_index, new_equiv);
+            log::trace!(
+                "Considering new equivalent {:?}, score={}",
+                new_equiv,
+                score
+            );
+            if score > best {
+                log::trace!("New best score: {}", score);
+                best = score;
+            }
+        }
+        log::trace!("Best old score for {:?}: {}", old_index, best);
+        return best;
+    }
+    fn compute_new_score<IsUnreadyF, GetScoreF>(
+        &self,
+        new_index: NewNodeRef,
+        equivalents: &EquivalentNodeSet,
+        is_unready: IsUnreadyF,
+        get_match_score: GetScoreF,
+    ) -> i32
+    where
+        IsUnreadyF: Fn(OldNodeRef) -> bool,
+        GetScoreF: Fn(OldNodeRef, NewNodeRef) -> i32,
+    {
+        // Compute the best score matching `new_index` with an equivalent not-ready old
+        // node.
+        let mut best = 0i32;
+        log::trace!("Computing new score for {:?}", new_index);
+        for &old_equiv in equivalents
+            .get_equivalent_old_nodes(new_index)
+            .iter()
+            .filter(|&x| is_unready(*x))
+        {
+            let score = get_match_score(old_equiv, new_index);
+            log::trace!(
+                "Considering old equivalent {:?}, score={}",
+                old_equiv,
+                score
+            );
+            if score > best {
+                log::trace!("New best score: {}", score);
+                best = score;
+            }
+        }
+        log::trace!("Best new score for {:?}: {}", new_index, best);
+        return best;
+    }
+    fn update_after_match(
+        &mut self,
+        old_index: OldNodeRef,
+        new_index: NewNodeRef,
+        equivalents: &EquivalentNodeSet,
+        old_graph: &DepGraph<OldNodeRef>,
+        new_graph: &DepGraph<NewNodeRef>,
+    ) {
+        // Invalidate scores of all new (old) equivalent nodes of the users of
+        // `old_index` (`new_index`). These are the only nodes which might
+        // change by this matching.
+        for old_user in old_graph.get_node(old_index).users.iter() {
+            for new_equiv in equivalents.get_equivalent_new_nodes(old_user.0) {
+                self.new_scores.borrow_mut().set(*new_equiv, None);
+            }
+        }
+        for new_user in new_graph.get_node(new_index).users.iter() {
+            for old_equiv in equivalents.get_equivalent_old_nodes(new_user.0) {
+                self.old_scores.borrow_mut().set(*old_equiv, None);
+            }
+        }
+    }
+    fn update_after_adding_ready_old_node(
+        &mut self,
+        added_node: OldNodeRef,
+        equivalents: &EquivalentNodeSet,
+    ) {
+        // `added_node` is now ready and thus is no longer in the set of unready nodes.
+        // Invalidate all equivalent new nodes.
+        for new_equiv in equivalents.get_equivalent_new_nodes(added_node) {
+            self.new_scores.borrow_mut().set(*new_equiv, None);
+        }
+    }
+    fn update_after_adding_ready_new_node(
+        &mut self,
+        added_node: NewNodeRef,
+        equivalents: &EquivalentNodeSet,
+    ) {
+        // `added_node` is now ready and thus is no longer in the set of unready nodes.
+        // Invalidate all equivalent old nodes.
+        for old_equiv in equivalents.get_equivalent_old_nodes(added_node) {
+            self.old_scores.borrow_mut().set(*old_equiv, None);
+        }
+    }
+}
 
 /// Greedy match selector which tries to produce a minimal-sized graph edit.
 pub struct GreedyMatchSelector {
     old_graph: DepGraph<OldNodeRef>,
     new_graph: DepGraph<NewNodeRef>,
-    /// Per-node hash-correspondence indices.
-    old_to_new_by_hash: HashMap<OldNodeRef, Vec<NewNodeRef>>,
-    new_to_old_by_hash: HashMap<NewNodeRef, Vec<OldNodeRef>>,
+    /// Per-node equivalence sets derived from structural hashes.
+    equivalents: EquivalentNodeSet,
     /// Reverse-direction similarity scores for candidate node pairs.
-    reverse_scores: HashMap<(OldNodeRef, NewNodeRef), i32>,
-    ready_old: BTreeSet<OldNodeRef>,
-    ready_new: BTreeSet<NewNodeRef>,
+    reverse_scores: NodePairMap<i32>,
+    forward_score_cache: ForwardScoreCache,
+    unready_match_score_cache: UnreadyMatchScoreCache,
+
+    ready_old: NodeVector<OldNodeRef, bool>,
+    ready_new: NodeVector<NewNodeRef, bool>,
     /// Mapping from matched old node index to new node index.
-    matched_old_to_new: HashMap<OldNodeRef, NewNodeRef>,
+    matched_old_to_new: NodeVector<OldNodeRef, Option<NewNodeRef>>,
     /// Nodes that have been handled (matched or added/removed) in old/new.
-    handled_old: BTreeSet<OldNodeRef>,
-    handled_new: BTreeSet<NewNodeRef>,
+    handled_old: NodeVector<OldNodeRef, bool>,
+    handled_new: NodeVector<NewNodeRef, bool>,
 }
 
 impl GreedyMatchSelector {
-    /// Score scaling factor used for integer-based similarity.
-    const SCORE_BASE: i32 = 1000;
-    /// Score for a perfect forward match or reverse match. Bias towards reverse
-    /// matches because reverse matches are computed once globally, while
-    /// forward matches are computed as the algorithm progresses so "perfect"
-    /// forward matches may be due to imprecise heuristic matches done earlier.
-    const PERFECT_FORWARD_MATCH_SCORE: i32 = Self::SCORE_BASE * 100;
-    const PERFECT_REVERSE_MATCH_SCORE: i32 = Self::SCORE_BASE * 200;
-
+    pub fn new(old: &crate::ir::Fn, new: &crate::ir::Fn) -> Self {
+        let old_graph = build_dependency_graph::<OldNodeRef>(old);
+        let new_graph = build_dependency_graph::<NewNodeRef>(new);
+        let equivalents = EquivalentNodeSet::new(&old_graph, &new_graph);
+        let reverse_scores = compute_reverse_match_scores(&old_graph, &new_graph);
+        let old_len = old_graph.nodes.len();
+        let new_len = new_graph.nodes.len();
+        let forward_score_cache = ForwardScoreCache::new(&old_graph, &new_graph);
+        let unready_match_score_cache = UnreadyMatchScoreCache::new(&old_graph, &new_graph);
+        Self {
+            old_graph,
+            new_graph,
+            equivalents,
+            reverse_scores,
+            forward_score_cache,
+            unready_match_score_cache,
+            ready_old: NodeVector::new(old_len, false),
+            ready_new: NodeVector::new(new_len, false),
+            matched_old_to_new: NodeVector::new(old_len, None),
+            handled_old: NodeVector::new(old_len, false),
+            handled_new: NodeVector::new(new_len, false),
+        }
+    }
     /// Returns the best score for any match which includes nodes a or b (which
     /// is not the match(a, b)) and for which the match is not yet ready. This
     /// is some measure of the opportunity cost of matching a with b at the
@@ -51,103 +463,70 @@ impl GreedyMatchSelector {
     /// best_unready_match_score(a, None) and best_unready_match_score(None, b)
     /// are the opportunity costs of matching a (b) with any non ready node.
     fn best_unready_match_score(&self, a: Option<OldNodeRef>, b: Option<NewNodeRef>) -> i32 {
+        let is_new_unready = |x: NewNodeRef| !*self.ready_new.get(x) && !*self.handled_new.get(x);
+        let is_old_unready = |x: OldNodeRef| !*self.ready_old.get(x) && !*self.handled_old.get(x);
+        let match_score = |a: OldNodeRef, b: NewNodeRef| self.match_score(&a, &b);
         match (a, b) {
             (Some(a_idx), Some(b_idx)) => {
-                assert!(self.ready_old.contains(&a_idx));
-                assert!(self.ready_new.contains(&b_idx));
-                let mut best = 0i32;
-                if let Some(bs) = self.old_to_new_by_hash.get(&a_idx) {
-                    for &b2 in bs.iter() {
-                        if b2 == b_idx
-                            || self.ready_new.contains(&b2)
-                            || self.handled_new.contains(&b2)
-                        {
-                            continue;
-                        }
-                        let v = self.match_score(&a_idx, &b2).1;
-                        if v > best {
-                            best = v;
-                        }
-                    }
-                }
-                if let Some(as_) = self.new_to_old_by_hash.get(&b_idx) {
-                    for &a2 in as_.iter() {
-                        if a2 == a_idx
-                            || self.ready_old.contains(&a2)
-                            || self.handled_old.contains(&a2)
-                        {
-                            continue;
-                        }
-                        let v = self.match_score(&a2, &b_idx).1;
-                        if v > best {
-                            best = v;
-                        }
-                    }
-                }
-                best
+                assert!(*self.ready_old.get(a_idx));
+                assert!(*self.ready_new.get(b_idx));
+                let best_old_score = self.unready_match_score_cache.get_old_score(
+                    a_idx,
+                    &self.equivalents,
+                    is_new_unready,
+                    match_score,
+                );
+                let best_new_score = self.unready_match_score_cache.get_new_score(
+                    b_idx,
+                    &self.equivalents,
+                    is_old_unready,
+                    match_score,
+                );
+                std::cmp::max(best_old_score, best_new_score)
             }
             (Some(a_idx), None) => {
-                assert!(self.ready_old.contains(&a_idx));
-                let mut best = 0i32;
-                if let Some(bs) = self.old_to_new_by_hash.get(&a_idx) {
-                    for &b2 in bs.iter() {
-                        if self.ready_new.contains(&b2) || self.handled_new.contains(&b2) {
-                            continue;
-                        }
-                        let v = self.match_score(&a_idx, &b2).1;
-                        if v > best {
-                            best = v;
-                        }
-                    }
-                }
-                best
+                assert!(*self.ready_old.get(a_idx));
+                self.unready_match_score_cache.get_old_score(
+                    a_idx,
+                    &self.equivalents,
+                    is_new_unready,
+                    match_score,
+                )
             }
             (None, Some(b_idx)) => {
-                assert!(self.ready_new.contains(&b_idx));
-                let mut best = 0i32;
-                if let Some(as_) = self.new_to_old_by_hash.get(&b_idx) {
-                    for &a2 in as_.iter() {
-                        if self.ready_old.contains(&a2) || self.handled_old.contains(&a2) {
-                            continue;
-                        }
-                        let v = self.match_score(&a2, &b_idx).1;
-                        if v > best {
-                            best = v;
-                        }
-                    }
-                }
-                best
+                assert!(*self.ready_new.get(b_idx));
+                self.unready_match_score_cache.get_new_score(
+                    b_idx,
+                    &self.equivalents,
+                    is_old_unready,
+                    match_score,
+                )
             }
             (None, None) => unreachable!(
-                "opportunity cost called with (None, None); at least one side must be Some"
+                "best_unready_match_score called with (None, None); at least one side must be Some"
             ),
         }
     }
 
     /// Score for matching a ready old node `a` with a ready new node `b`.
-    fn match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
-        let fwd = self.forward_match_score(*a, *b);
-        let fwd = if fwd == Self::SCORE_BASE {
-            Self::PERFECT_FORWARD_MATCH_SCORE
+    fn match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> i32 {
+        let fwd = self.forward_score_cache.get(*a, *b);
+        let fwd = if fwd == SCORE_BASE {
+            PERFECT_FORWARD_MATCH_SCORE
         } else {
             fwd
         };
-        let rev = *self.reverse_scores.get(&(*a, *b)).unwrap_or(&0);
-        let rev = if rev == Self::SCORE_BASE {
-            Self::PERFECT_REVERSE_MATCH_SCORE
+        let rev = self.reverse_scores.get(*a, *b).copied().unwrap_or(0);
+        let rev = if rev == SCORE_BASE {
+            PERFECT_REVERSE_MATCH_SCORE
         } else {
             rev
         };
-        let is_perfect_match =
-            fwd == Self::PERFECT_FORWARD_MATCH_SCORE || rev == Self::PERFECT_REVERSE_MATCH_SCORE;
-        (is_perfect_match, fwd + rev)
+        fwd + rev
     }
-    fn net_match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> (bool, i32) {
-        let (is_perfect_match, score) = self.match_score(a, b);
-        (
-            is_perfect_match,
-            score - self.best_unready_match_score(Some(*a), Some(*b)),
-        )
+    fn net_match_score(&self, a: &OldNodeRef, b: &NewNodeRef) -> i32 {
+        let score = self.match_score(a, b);
+        score - self.best_unready_match_score(Some(*a), Some(*b))
     }
 
     fn delete_node_score(&self, _a: &OldNodeRef) -> i32 {
@@ -193,102 +572,15 @@ impl GreedyMatchSelector {
             is_return: *b == self.new_graph.return_value,
         }
     }
-    pub fn new(old: &crate::ir::Fn, new: &crate::ir::Fn) -> Self {
-        let old_graph = build_dependency_graph::<OldNodeRef>(old);
-        let new_graph = build_dependency_graph::<NewNodeRef>(new);
-        // Build hash->indices maps directly from the graphs, then per-node maps.
-        let mut hash_to_old: HashMap<FwdHash, Vec<OldNodeRef>> = HashMap::new();
-        for (idx, node) in old_graph.nodes.iter().enumerate() {
-            hash_to_old
-                .entry(node.structural_hash)
-                .or_default()
-                .push(OldNodeRef(idx));
-        }
-        let mut hash_to_new: HashMap<FwdHash, Vec<NewNodeRef>> = HashMap::new();
-        for (idx, node) in new_graph.nodes.iter().enumerate() {
-            hash_to_new
-                .entry(node.structural_hash)
-                .or_default()
-                .push(NewNodeRef(idx));
-        }
-        let mut old_to_new_by_hash: HashMap<OldNodeRef, Vec<NewNodeRef>> = HashMap::new();
-        for (oi_us, node) in old_graph.nodes.iter().enumerate() {
-            let oi = OldNodeRef(oi_us);
-            let list = hash_to_new
-                .get(&node.structural_hash)
-                .cloned()
-                .unwrap_or_default();
-            old_to_new_by_hash.insert(oi, list);
-        }
-        let mut new_to_old_by_hash: HashMap<NewNodeRef, Vec<OldNodeRef>> = HashMap::new();
-        for (ni_us, node) in new_graph.nodes.iter().enumerate() {
-            let ni = NewNodeRef(ni_us);
-            let list = hash_to_old
-                .get(&node.structural_hash)
-                .cloned()
-                .unwrap_or_default();
-            new_to_old_by_hash.insert(ni, list);
-        }
-        let reverse_scores = compute_reverse_match_scores(&old_graph, &new_graph);
-        Self {
-            old_graph,
-            new_graph,
-            old_to_new_by_hash,
-            new_to_old_by_hash,
-            reverse_scores,
-            ready_old: BTreeSet::new(),
-            ready_new: BTreeSet::new(),
-            matched_old_to_new: HashMap::new(),
-            handled_old: BTreeSet::new(),
-            handled_new: BTreeSet::new(),
-        }
-    }
-
-    /// Computes forward-direction similarity score based on operand matches.
-    /// Returns 0 unless the local shapes of (old_index, new_index) are equal.
-    /// When equal, returns a score which scales with the number of operands
-    /// which match.
-    pub fn forward_match_score(&self, old_index: OldNodeRef, new_index: NewNodeRef) -> i32 {
-        let old_ops: Vec<usize> = self
-            .old_graph
-            .get_node(old_index)
-            .operands
-            .iter()
-            .copied()
-            .map(|i| usize::from(i))
-            .collect();
-        let new_ops: Vec<usize> = self
-            .new_graph
-            .get_node(new_index)
-            .operands
-            .iter()
-            .copied()
-            .map(|i| usize::from(i))
-            .collect();
-
-        assert!(
-            old_ops.len() == new_ops.len(),
-            "forward_match_score expects equal operand counts for shape-equal nodes"
-        );
-        if old_ops.is_empty() {
-            return Self::SCORE_BASE;
-        }
-
-        let mut matches = 0usize;
-        for (op_old, op_new) in old_ops.iter().zip(new_ops.iter()) {
-            if self
-                .matched_old_to_new
-                .get(&OldNodeRef(*op_old))
-                .map_or(false, |&mapped| mapped == NewNodeRef(*op_new))
-            {
-                matches += 1;
-            }
-        }
-        ((matches as i32) * Self::SCORE_BASE) / (old_ops.len() as i32)
-    }
 
     fn select_best_action(&mut self) -> Option<(i32, MatchAction)> {
-        if self.ready_old.is_empty() && self.ready_new.is_empty() {
+        // TODO(meheff): There is probably an order of magnitude speedup to be had by
+        // keeping an ordered queue of match actions rather than iterating through all
+        // possible actions every time.
+
+        if !(0..self.ready_old.len()).any(|i| *self.ready_old.get(OldNodeRef(i)))
+            && !(0..self.ready_new.len()).any(|i| *self.ready_new.get(NewNodeRef(i)))
+        {
             return None;
         }
 
@@ -296,31 +588,37 @@ impl GreedyMatchSelector {
         let mut best_score: i32 = i32::MIN;
 
         // 1) Consider match actions for each ready old against compatible ready new.
-        for &a in self.ready_old.iter() {
-            if let Some(news) = self.old_to_new_by_hash.get(&a) {
-                for &b in news.iter() {
-                    if !self.ready_new.contains(&b) {
-                        continue;
-                    }
-                    let (is_perfect_match, score) = self.net_match_score(&a, &b);
-                    trace!(
-                        "Considering match action: {} <-> {}, score={}, is_perfect_match={}",
-                        self.old_graph.get_node(a).name,
-                        self.new_graph.get_node(b).name,
-                        score,
-                        is_perfect_match
-                    );
-                    if score > best_score {
-                        trace!("New best score: {}", score);
-                        best_score = score;
-                        best_action = Some(self.build_match_action(&a, &b));
-                    }
+        let ready_old_sorted: Vec<OldNodeRef> = (0..self.ready_old.len())
+            .filter(|&i| *self.ready_old.get(OldNodeRef(i)))
+            .map(OldNodeRef)
+            .collect();
+        for a in ready_old_sorted.into_iter() {
+            let news = self.equivalents.get_equivalent_new_nodes(a);
+            for &b in news.iter() {
+                if !*self.ready_new.get(b) {
+                    continue;
+                }
+                let score = self.net_match_score(&a, &b);
+                trace!(
+                    "Considering match action: {} <-> {}, score={}",
+                    self.old_graph.get_node(a).name,
+                    self.new_graph.get_node(b).name,
+                    score
+                );
+                if score > best_score {
+                    trace!("New best score: {}", score);
+                    best_score = score;
+                    best_action = Some(self.build_match_action(&a, &b));
                 }
             }
         }
 
         // 2) Consider deleting a node from the old graph.
-        for &a in self.ready_old.iter() {
+        let ready_old_sorted: Vec<OldNodeRef> = (0..self.ready_old.len())
+            .filter(|&i| *self.ready_old.get(OldNodeRef(i)))
+            .map(OldNodeRef)
+            .collect();
+        for a in ready_old_sorted.into_iter() {
             let score = self.net_delete_node_score(&a);
             trace!(
                 "Considering delete node action: {}, score={}",
@@ -335,7 +633,11 @@ impl GreedyMatchSelector {
         }
 
         // 3) Consider adding a node to the new graph.
-        for &b in self.ready_new.iter() {
+        let ready_new_sorted: Vec<NewNodeRef> = (0..self.ready_new.len())
+            .filter(|&i| *self.ready_new.get(NewNodeRef(i)))
+            .map(NewNodeRef)
+            .collect();
+        for b in ready_new_sorted.into_iter() {
             let score = self.net_add_node_score(&b);
             trace!(
                 "Considering add node action: {}, score={}",
@@ -364,10 +666,14 @@ impl MatchSelector for GreedyMatchSelector {
         );
         match node.side {
             NodeSide::Old => {
-                self.ready_old.insert(OldNodeRef(node.index));
+                self.ready_old.set(OldNodeRef(node.index), true);
+                self.unready_match_score_cache
+                    .update_after_adding_ready_old_node(OldNodeRef(node.index), &self.equivalents);
             }
             NodeSide::New => {
-                self.ready_new.insert(NewNodeRef(node.index));
+                self.ready_new.set(NewNodeRef(node.index), true);
+                self.unready_match_score_cache
+                    .update_after_adding_ready_new_node(NewNodeRef(node.index), &self.equivalents);
             }
         }
     }
@@ -375,22 +681,19 @@ impl MatchSelector for GreedyMatchSelector {
     fn select_next_match(&mut self) -> Option<MatchAction> {
         trace!("Selecting next match");
         if log_enabled!(Level::Debug) {
-            let ready_old_names: Vec<String> = self
-                .ready_old
-                .iter()
-                .map(|o| self.old_graph.get_node(*o).name.clone())
+            let ready_old_names: Vec<String> = (0..self.ready_old.len())
+                .filter(|&i| *self.ready_old.get(OldNodeRef(i)))
+                .map(|i| self.old_graph.get_node(OldNodeRef(i)).name.clone())
                 .collect();
-            let ready_new_names: Vec<String> = self
-                .ready_new
-                .iter()
-                .map(|n| self.new_graph.get_node(*n).name.clone())
+            let ready_new_names: Vec<String> = (0..self.ready_new.len())
+                .filter(|&i| *self.ready_new.get(NewNodeRef(i)))
+                .map(|i| self.new_graph.get_node(NewNodeRef(i)).name.clone())
                 .collect();
             trace!("Ready old: [{}]", ready_old_names.join(", "));
             trace!("Ready new: [{}]", ready_new_names.join(", "));
         }
         match self.select_best_action() {
             Some((score, action)) => {
-                //              println!("best_action (score={:.2}): {:?}", score, action);
                 debug!(
                     "best_action (score={}): {}",
                     score,
@@ -413,23 +716,42 @@ impl MatchSelector for GreedyMatchSelector {
     fn update_after_match(&mut self, edit: &MatchAction) {
         match edit {
             MatchAction::DeleteNode { old_index } => {
-                self.ready_old.remove(old_index);
-                self.handled_old.insert(*old_index);
+                self.ready_old.set(*old_index, false);
+                self.handled_old.set(*old_index, true);
+                self.equivalents.drop_old_node(*old_index);
             }
             MatchAction::AddNode { new_index, .. } => {
-                self.ready_new.remove(new_index);
-                self.handled_new.insert(*new_index);
+                self.ready_new.set(*new_index, false);
+                self.handled_new.set(*new_index, true);
+                self.equivalents.drop_new_node(*new_index);
             }
             MatchAction::MatchNodes {
                 old_index,
                 new_index,
                 ..
             } => {
-                self.ready_old.remove(old_index);
-                self.ready_new.remove(new_index);
-                self.matched_old_to_new.insert(*old_index, *new_index);
-                self.handled_old.insert(*old_index);
-                self.handled_new.insert(*new_index);
+                self.ready_old.set(*old_index, false);
+                self.ready_new.set(*new_index, false);
+                self.matched_old_to_new.set(*old_index, Some(*new_index));
+                self.handled_old.set(*old_index, true);
+                self.handled_new.set(*new_index, true);
+                self.forward_score_cache.update_after_match(
+                    *old_index,
+                    *new_index,
+                    &self.equivalents,
+                    &self.matched_old_to_new,
+                    &self.old_graph,
+                    &self.new_graph,
+                );
+                self.unready_match_score_cache.update_after_match(
+                    *old_index,
+                    *new_index,
+                    &self.equivalents,
+                    &self.old_graph,
+                    &self.new_graph,
+                );
+                self.equivalents.drop_old_node(*old_index);
+                self.equivalents.drop_new_node(*new_index);
             }
         }
     }
@@ -437,18 +759,18 @@ impl MatchSelector for GreedyMatchSelector {
 
 /// Computes reverse-direction similarity scores M(A,B) for compatible node
 /// pairs.
-pub fn compute_reverse_match_scores(
+fn compute_reverse_match_scores(
     old_graph: &DepGraph<OldNodeRef>,
     new_graph: &DepGraph<NewNodeRef>,
-) -> HashMap<(OldNodeRef, NewNodeRef), i32> {
+) -> NodePairMap<i32> {
     // Helper: local shape compatibility via stored structural hash.
     let shapes_equal = |oi: OldNodeRef, ni: NewNodeRef| {
         old_graph.get_node(oi).structural_hash == new_graph.get_node(ni).structural_hash
     };
 
-    // Scores map: best-known M(a,b) so far; initialize implicitly to 0.0 for all
-    // pairs.
-    let mut m_scores: HashMap<(OldNodeRef, NewNodeRef), i32> = HashMap::new();
+    // Scores map: best-known M(a,b) so far; None means 0 (unseen).
+    let mut m_scores: NodePairMap<i32> =
+        NodePairMap::new(old_graph.nodes.len(), new_graph.nodes.len(), None);
 
     // Worklist seeded with all compatible sink pairs (nodes with no users).
     let mut worklist: VecDeque<(OldNodeRef, NewNodeRef)> = VecDeque::new();
@@ -457,38 +779,37 @@ pub fn compute_reverse_match_scores(
     worklist.push_back((old_graph.return_value, new_graph.return_value));
     on_worklist.insert((old_graph.return_value, new_graph.return_value));
 
-    let recompute_score =
-        |a: OldNodeRef, b: NewNodeRef, m: &HashMap<(OldNodeRef, NewNodeRef), i32>| -> i32 {
-            if !shapes_equal(a, b) {
-                return 0;
-            }
-            let z = std::cmp::max(
-                old_graph.get_node(a).users.len(),
-                new_graph.get_node(b).users.len(),
-            );
-            if z == 0 {
-                return GreedyMatchSelector::SCORE_BASE;
-            }
-            let mut sum: i32 = 0;
-            for &(u_a, slot) in old_graph.get_node(a).users.iter() {
-                let mut best: i32 = 0;
-                for &(u_b, slot_b) in new_graph.get_node(b).users.iter() {
-                    if slot_b != slot {
-                        continue;
-                    }
-                    if !shapes_equal(u_a, u_b) {
-                        continue;
-                    }
-                    if let Some(&val) = m.get(&(u_a, u_b)) {
-                        if val > best {
-                            best = val;
-                        }
+    let recompute_score = |a: OldNodeRef, b: NewNodeRef, m: &NodePairMap<i32>| -> i32 {
+        if !shapes_equal(a, b) {
+            return 0;
+        }
+        let z = std::cmp::max(
+            old_graph.get_node(a).users.len(),
+            new_graph.get_node(b).users.len(),
+        );
+        if z == 0 {
+            return SCORE_BASE;
+        }
+        let mut sum: i32 = 0;
+        for &(u_a, slot) in old_graph.get_node(a).users.iter() {
+            let mut best: i32 = 0;
+            for &(u_b, slot_b) in new_graph.get_node(b).users.iter() {
+                if slot_b != slot {
+                    continue;
+                }
+                if !shapes_equal(u_a, u_b) {
+                    continue;
+                }
+                if let Some(&val) = m.get(u_a, u_b) {
+                    if val > best {
+                        best = val;
                     }
                 }
-                sum += best;
             }
-            sum / (z as i32)
-        };
+            sum += best;
+        }
+        sum / (z as i32)
+    };
 
     // Process worklist: on improvement, propagate to operand pairs.
     while let Some((a, b)) = worklist.pop_front() {
@@ -496,9 +817,9 @@ pub fn compute_reverse_match_scores(
         // improvements.
         on_worklist.remove(&(a, b));
         let new_score = recompute_score(a, b, &m_scores);
-        let old_score = *m_scores.get(&(a, b)).unwrap_or(&0);
+        let old_score = m_scores.get(a, b).copied().unwrap_or(0);
         if new_score > old_score {
-            m_scores.insert((a, b), new_score);
+            m_scores.set(a, b, new_score);
 
             // Walk operands in lockstep; if counts match, enqueue compatible pairs.
             let a_ops: Vec<OldNodeRef> = old_graph.get_node(a).operands.iter().copied().collect();
@@ -514,12 +835,7 @@ pub fn compute_reverse_match_scores(
         }
     }
 
-    // Convert to typed key map for external use.
-    let mut out: HashMap<(OldNodeRef, NewNodeRef), i32> = HashMap::new();
-    for (k, score) in m_scores.into_iter() {
-        out.insert(k, score);
-    }
-    out
+    m_scores
 }
 
 #[cfg(test)]
@@ -528,8 +844,8 @@ mod tests {
     use crate::ir::NodePayload;
     use crate::ir_parser::Parser;
     use crate::matching_ged::{
-        IrEdit, MatchAction, NewNodeRef, NodeSide, OldNodeRef, ReadyNode, apply_function_edits,
-        compute_function_edit,
+        IrEdit, MatchAction, NewNodeRef, NodeSide, OldNodeRef, ReadyNode, apply_fn_edits,
+        compute_fn_edit,
     };
 
     fn parse_ir_from_string(s: &str) -> crate::ir::Package {
@@ -546,7 +862,7 @@ mod tests {
             }
             "#,
         );
-        let lhs = pkg.get_top().unwrap();
+        let lhs = pkg.get_top_fn().unwrap();
 
         let pkg2 = parse_ir_from_string(
             r#"package p2
@@ -555,13 +871,13 @@ mod tests {
             }
             "#,
         );
-        let rhs = pkg2.get_top().unwrap();
+        let rhs = pkg2.get_top_fn().unwrap();
 
         // Use GreedyMatchSelector-based matcher
         let mut selector = GreedyMatchSelector::new(lhs, rhs);
-        let edits = compute_function_edit(lhs, rhs, &mut selector).unwrap();
+        let edits = compute_fn_edit(lhs, rhs, &mut selector).unwrap();
         assert!(edits.edits.is_empty());
-        let patched = apply_function_edits(lhs, &edits).unwrap();
+        let patched = apply_fn_edits(lhs, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, rhs
         ));
@@ -576,7 +892,7 @@ mod tests {
             }
             "#,
         );
-        let lhs = pkg.get_top().unwrap();
+        let lhs = pkg.get_top_fn().unwrap();
 
         let pkg2 = parse_ir_from_string(
             r#"package p2
@@ -585,10 +901,10 @@ mod tests {
             }
             "#,
         );
-        let rhs = pkg2.get_top().unwrap();
+        let rhs = pkg2.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(lhs, rhs);
-        let result = compute_function_edit(lhs, rhs, &mut selector);
+        let result = compute_fn_edit(lhs, rhs, &mut selector);
         assert!(result.is_err());
     }
 
@@ -601,7 +917,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -610,11 +926,11 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -629,7 +945,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -639,11 +955,11 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -659,7 +975,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         // Same nodes, but return points to a different node (the literal).
         let pkg_new = parse_ir_from_string(
@@ -670,11 +986,11 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -689,7 +1005,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         // Different structure: wrap the add in an identity, keep params identical.
         let pkg_new = parse_ir_from_string(
@@ -700,11 +1016,11 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -719,7 +1035,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -728,10 +1044,10 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
 
         assert_eq!(
             edits.edits.len(),
@@ -751,7 +1067,7 @@ mod tests {
                 other
             ),
         }
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -766,7 +1082,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p
@@ -775,10 +1091,10 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-        let edits = compute_function_edit(old_fn, new_fn, &mut selector).unwrap();
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
 
         // Expect exactly three operand substitutions, and patched result is isomorphic.
         assert_eq!(
@@ -796,7 +1112,7 @@ mod tests {
             edits.edits
         );
 
-        let patched = apply_function_edits(old_fn, &edits).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
         assert!(crate::node_hashing::functions_structurally_equivalent(
             &patched, new_fn
         ));
@@ -816,7 +1132,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         // New: or(or(A'(w,x), C'(y,z)), B'(x,y)) — A stays in inner slot0; B,C swap
         // levels.
@@ -831,13 +1147,13 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         // Build dependency graphs and compute reverse matches.
         let old_graph = crate::matching_ged::build_dependency_graph::<OldNodeRef>(old_fn);
         let new_graph = crate::matching_ged::build_dependency_graph::<NewNodeRef>(new_fn);
         let reverse = compute_reverse_match_scores(&old_graph, &new_graph);
-        let base = GreedyMatchSelector::SCORE_BASE;
+        let base = SCORE_BASE;
 
         // Helper to get node indices by name.
         let find_named = |f: &crate::ir::Fn, name: &str| -> usize {
@@ -853,7 +1169,7 @@ mod tests {
             let oi = find_named(old_fn, old_name);
             let ni = find_named(new_fn, new_name);
             reverse
-                .get(&(OldNodeRef(oi), NewNodeRef(ni)))
+                .get(OldNodeRef(oi), NewNodeRef(ni))
                 .copied()
                 .unwrap_or(0)
         };
@@ -883,7 +1199,7 @@ mod tests {
             }
             "#,
         );
-        let old_fn = pkg_old.get_top().unwrap();
+        let old_fn = pkg_old.get_top_fn().unwrap();
 
         let pkg_new = parse_ir_from_string(
             r#"package p2
@@ -896,12 +1212,12 @@ mod tests {
             }
             "#,
         );
-        let new_fn = pkg_new.get_top().unwrap();
+        let new_fn = pkg_new.get_top_fn().unwrap();
 
         let mut sel = GreedyMatchSelector::new(old_fn, new_fn);
-        let base = GreedyMatchSelector::SCORE_BASE;
-        let perf_fwd = GreedyMatchSelector::PERFECT_FORWARD_MATCH_SCORE;
-        let perf_rev = GreedyMatchSelector::PERFECT_REVERSE_MATCH_SCORE;
+        let base = SCORE_BASE;
+        let perf_fwd = PERFECT_FORWARD_MATCH_SCORE;
+        let perf_rev = PERFECT_REVERSE_MATCH_SCORE;
 
         // Helper to get node indices by name.
         let find_named = |f: &crate::ir::Fn, name: &str| -> usize {
@@ -945,15 +1261,15 @@ mod tests {
         }
 
         // Forward match scores on adds should be perfect under param mapping.
-        let match_score = |old_name: &str, new_name: &str| -> (bool, i32) {
+        let match_score = |old_name: &str, new_name: &str| -> i32 {
             let oi = find_named(old_fn, old_name);
             let ni = find_named(new_fn, new_name);
             sel.match_score(&OldNodeRef(oi), &NewNodeRef(ni))
         };
-        assert_eq!(match_score("a", "a"), (true, perf_fwd + perf_rev));
-        assert_eq!(match_score("b", "b"), (true, perf_rev + base / 2));
-        assert_eq!(match_score("c", "c"), (true, perf_fwd + perf_rev));
-        assert_eq!(match_score("foo", "foo"), (true, perf_rev));
+        assert_eq!(match_score("a", "a"), perf_fwd + perf_rev);
+        assert_eq!(match_score("b", "b"), perf_rev + base / 2);
+        assert_eq!(match_score("c", "c"), perf_fwd + perf_rev);
+        assert_eq!(match_score("foo", "foo"), perf_rev);
 
         // Helper: opportunity cost via names (use None to omit a side).
         let best_unready = |a: Option<&str>, b: Option<&str>| -> i32 {
@@ -968,13 +1284,13 @@ mod tests {
         assert_eq!(best_unready(Some("b"), Some("a")), perf_rev + base / 2);
 
         // Helpers for name-based selector scores.
-        let match_score = |old_name: &str, new_name: &str| -> (bool, i32) {
+        let match_score = |old_name: &str, new_name: &str| -> i32 {
             let oi = OldNodeRef(find_named(old_fn, old_name));
             let ni = NewNodeRef(find_named(new_fn, new_name));
             sel.match_score(&oi, &ni)
         };
-        assert_eq!(match_score("a", "a"), (true, perf_fwd + perf_rev));
-        assert_eq!(match_score("b", "c"), (false, base / 2));
-        assert_eq!(match_score("c", "c"), (true, perf_fwd + perf_rev));
+        assert_eq!(match_score("a", "a"), perf_fwd + perf_rev);
+        assert_eq!(match_score("b", "c"), base / 2);
+        assert_eq!(match_score("c", "c"), perf_fwd + perf_rev);
     }
 }

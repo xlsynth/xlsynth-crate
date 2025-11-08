@@ -2,7 +2,9 @@
 
 //! Token scanner and parser for gate-level netlists.
 
-use std::io::{BufReader, Read};
+use std::collections::HashMap;
+use std::fmt;
+use std::io::{BufRead, BufReader, Read};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 use xlsynth::IrBits;
@@ -41,6 +43,8 @@ pub enum NetRef {
     BitSelect(NetIndex, u32),       // b[5]
     PartSelect(NetIndex, u32, u32), // b[msb:lsb]
     Literal(IrBits),
+    Unconnected,
+    Concat(Vec<NetRef>), // { a, b[5], c[7:0], 1'b0 }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +88,8 @@ pub enum TokenPayload {
     CParen,
     OBrack,
     CBrack,
+    OBrace,
+    CBrace,
     Colon,
     Semi,
     Comma,
@@ -92,6 +98,78 @@ pub enum TokenPayload {
     Comment(String),
     Annotation { key: String, value: AnnotationValue },
     VerilogInt { width: Option<usize>, value: IrBits },
+}
+
+fn is_simple_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+impl fmt::Display for AnnotationValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AnnotationValue::I64(i) => write!(f, "{}", i),
+            AnnotationValue::String(s) => {
+                // Annotation strings cannot contain embedded '"' per scanner rules.
+                let s = s.replace('"', "");
+                write!(f, "\"{}\"", s)
+            }
+            AnnotationValue::VerilogInt { width, value } => {
+                let v = xlsynth::IrValue::from_bits(value).to_u32().unwrap();
+                match width {
+                    Some(w) => write!(f, "{}'d{}", w, v),
+                    None => write!(f, "{}", v),
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for TokenPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenPayload::Identifier(s) => {
+                if is_simple_identifier(s) {
+                    write!(f, "{}", s)
+                } else {
+                    // Escaped identifier: leading backslash, terminated by whitespace
+                    write!(f, "\\{} ", s)
+                }
+            }
+            TokenPayload::Keyword(Keyword::Module) => write!(f, "module"),
+            TokenPayload::Keyword(Keyword::Wire) => write!(f, "wire"),
+            TokenPayload::Keyword(Keyword::Endmodule) => write!(f, "endmodule"),
+            TokenPayload::Keyword(Keyword::Input) => write!(f, "input"),
+            TokenPayload::Keyword(Keyword::Output) => write!(f, "output"),
+            TokenPayload::Keyword(Keyword::Inout) => write!(f, "inout"),
+            TokenPayload::OParen => write!(f, "("),
+            TokenPayload::CParen => write!(f, ")"),
+            TokenPayload::OBrack => write!(f, "["),
+            TokenPayload::CBrack => write!(f, "]"),
+            TokenPayload::OBrace => write!(f, "{{"),
+            TokenPayload::CBrace => write!(f, "}}"),
+            TokenPayload::Colon => write!(f, ":"),
+            TokenPayload::Semi => write!(f, ";"),
+            TokenPayload::Comma => write!(f, ","),
+            TokenPayload::Dot => write!(f, "."),
+            TokenPayload::Equals => write!(f, "="),
+            TokenPayload::Comment(s) => write!(f, "//{}\n", s.replace('\n', " ")),
+            TokenPayload::Annotation { key, value } => {
+                write!(f, "(* {} = {} *)", key, value)
+            }
+            TokenPayload::VerilogInt { width, value } => {
+                let v = xlsynth::IrValue::from_bits(value).to_u32().unwrap();
+                match width {
+                    Some(w) => write!(f, "{}'d{}", w, v),
+                    None => write!(f, "{}", v),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +198,6 @@ pub struct ScanError {
 
 pub struct TokenScanner<R: Read + 'static> {
     reader: BufReader<R>,
-    char_buf: Vec<char>,
     pub pos: Pos,
     lookahead: Option<Token>,
     done: bool,
@@ -132,7 +209,6 @@ impl<R: Read + 'static> TokenScanner<R> {
     pub fn with_line_lookup(reader: R, line_lookup: Box<dyn Fn(u32) -> Option<String>>) -> Self {
         Self {
             reader: BufReader::new(reader),
-            char_buf: Vec::new(),
             pos: Pos {
                 lineno: 1,
                 colno: 1,
@@ -173,50 +249,45 @@ impl<'a> TokenScanner<std::io::Cursor<&'a [u8]>> {
 }
 
 impl<R: Read + 'static> TokenScanner<R> {
-    fn fill_char_buf(&mut self) {
-        if self.char_buf.is_empty() && !self.done {
-            let mut buf = [0u8; 1024];
-            match self.reader.read(&mut buf) {
-                Ok(0) => {
-                    log::trace!("TokenScanner.fill_char_buf: read=0 -> EOF");
-                    self.done = true
-                }
-                Ok(n) => {
-                    log::trace!("TokenScanner.fill_char_buf: read={} bytes", n);
-                    let s = String::from_utf8_lossy(&buf[..n]);
-                    log::trace!(
-                        "TokenScanner.fill_char_buf: decoded chunk len={} first='{}'",
-                        s.len(),
-                        s.chars().next().unwrap_or('\0')
-                    );
-                    self.char_buf.extend(s.chars());
-                }
-                Err(e) => {
-                    log::trace!("TokenScanner.fill_char_buf: read error: {}", e);
-                    self.done = true
-                }
+    pub fn peekc(&mut self) -> Option<char> {
+        if self.done {
+            return None;
+        }
+        match self.reader.fill_buf() {
+            Ok(buf) => buf.first().copied().map(|b| b as char),
+            Err(_) => {
+                self.done = true;
+                None
             }
         }
     }
 
-    pub fn peekc(&mut self) -> Option<char> {
-        self.fill_char_buf();
-        self.char_buf.first().copied()
-    }
-
     pub fn popc(&mut self) -> Option<char> {
-        self.fill_char_buf();
-        if let Some(c) = self.char_buf.first().copied() {
-            self.char_buf.remove(0);
-            if c == '\n' {
-                self.pos.lineno += 1;
-                self.pos.colno = 1;
-            } else {
-                self.pos.colno += 1;
+        if self.done {
+            return None;
+        }
+        match self.reader.fill_buf() {
+            Ok(buf) => {
+                if let Some(&b) = buf.first() {
+                    let c = b as char;
+                    if c == '\n' {
+                        self.pos.lineno += 1;
+                        self.pos.colno = 1;
+                    } else {
+                        self.pos.colno += 1;
+                    }
+                    // Consume exactly one byte
+                    self.reader.consume(1);
+                    Some(c)
+                } else {
+                    self.done = true;
+                    None
+                }
             }
-            Some(c)
-        } else {
-            None
+            Err(_) => {
+                self.done = true;
+                None
+            }
         }
     }
 
@@ -538,21 +609,53 @@ impl<R: Read + 'static> TokenScanner<R> {
             Some(c) => c,
             None => return Ok(None),
         };
-        // Handle annotation: use only peekc/popc, no direct char_buf access
-        if c == '(' {
-            // Temporarily pop '(', peek next char, and restore if not annotation
-            let saved_pos = self.pos;
-            let _c1 = self.popc();
-            let c2 = self.peekc();
-            if c2 == Some('*') {
-                // It's an annotation, restore '(' and call pop_annotation
-                self.pos = saved_pos;
-                self.char_buf.insert(0, '(');
-                return self.pop_annotation(start).map(Some);
+        // Handle Verilog preprocessor-style directive lines we want to ignore.
+        // Currently, we skip lines that begin with `` `timescale`` anywhere in
+        // the file. This consumes through the end of the line and resumes
+        // scanning as if the directive were not present.
+        if c == '`' {
+            let directive_start = start;
+            // consume backtick
+            self.popc();
+            // read directive word (letters/underscores)
+            let mut word = String::new();
+            while let Some(ch) = self.peekc() {
+                if ch.is_ascii_alphabetic() || ch == '_' {
+                    word.push(self.popc().unwrap());
+                } else {
+                    break;
+                }
+            }
+            if word == "timescale" {
+                // consume until end-of-line (including the newline if present)
+                while let Some(ch) = self.popc() {
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+                log::trace!("TokenScanner: skipped `timescale directive line");
+                // continue scanning next token
+                return match self.next_token()? {
+                    Some(tok) => Ok(Some(tok)),
+                    None => Ok(None),
+                };
             } else {
-                // Not an annotation, restore '(' and continue as OParen
-                self.pos = saved_pos;
-                self.char_buf.insert(0, '(');
+                // Not a supported directive: report unexpected backtick at its position
+                return Err(self.error_with_context(
+                    "Unexpected character '`'",
+                    Span {
+                        start: directive_start,
+                        limit: directive_start,
+                    },
+                ));
+            }
+        }
+        // Handle annotation: use non-consuming two-byte lookahead for "(*"
+        if c == '(' {
+            if let Ok(buf) = self.reader.fill_buf() {
+                if buf.len() >= 2 && buf[0] == b'(' && buf[1] == b'*' {
+                    return self.pop_annotation(start).map(Some);
+                }
             }
         }
         // Handle identifier/keyword
@@ -702,6 +805,14 @@ impl<R: Read + 'static> TokenScanner<R> {
                 self.popc();
                 TokenPayload::CBrack
             }
+            '{' => {
+                self.popc();
+                TokenPayload::OBrace
+            }
+            '}' => {
+                self.popc();
+                TokenPayload::CBrace
+            }
             ':' => {
                 self.popc();
                 TokenPayload::Colon
@@ -765,6 +876,7 @@ pub struct Parser<R: Read + 'static> {
     scanner: TokenScanner<R>,
     pub interner: StringInterner<StringBackend<SymbolU32>>,
     pub nets: Vec<Net>,
+    net_index_by_name: HashMap<NetId, NetIndex>,
 }
 
 impl<R: Read + 'static> Parser<R> {
@@ -773,6 +885,235 @@ impl<R: Read + 'static> Parser<R> {
             scanner,
             interner: StringInterner::new(),
             nets: Vec::new(),
+            net_index_by_name: HashMap::new(),
+        }
+    }
+
+    fn parse_netref_expr(&mut self) -> Result<NetRef, ScanError> {
+        // Optionally skip comments/annotations at start
+        loop {
+            let peek = self.scanner.peekt()?;
+            match peek {
+                Some(tok) => match &tok.payload {
+                    TokenPayload::Comment(_) | TokenPayload::Annotation { .. } => {
+                        self.scanner.popt()?;
+                    }
+                    _ => break,
+                },
+                None => break,
+            }
+        }
+        if let Some(tok) = self.scanner.peekt()? {
+            if matches!(tok.payload, TokenPayload::OBrace) {
+                // Parse concatenation: { expr (, expr)* }
+                self.scanner.popt()?; // consume '{'
+                let mut elems: Vec<NetRef> = Vec::new();
+                loop {
+                    // Skip comments/annotations between elements
+                    loop {
+                        let peek = self.scanner.peekt()?;
+                        match peek {
+                            Some(tok) => match &tok.payload {
+                                TokenPayload::Comment(_) | TokenPayload::Annotation { .. } => {
+                                    self.scanner.popt()?;
+                                }
+                                _ => break,
+                            },
+                            None => break,
+                        }
+                    }
+                    // If next is '}', end of concatenation
+                    if let Some(tok2) = self.scanner.peekt()? {
+                        if matches!(tok2.payload, TokenPayload::CBrace) {
+                            self.scanner.popt()?; // consume '}'
+                            break;
+                        }
+                    }
+                    // Parse one element (identifier with optional select, literal, or nested
+                    // concat)
+                    let elem = self.parse_netref_expr()?;
+                    elems.push(elem);
+                    // Optional comma
+                    if let Some(next) = self.scanner.peekt()? {
+                        if matches!(next.payload, TokenPayload::Comma) {
+                            self.scanner.popt()?; // consume ','
+                            continue;
+                        }
+                    }
+                    // Expect closing '}'
+                    let cbrace = self.scanner.popt()?.ok_or_else(|| ScanError {
+                        message: "expected '}' to close concatenation".to_string(),
+                        span: Span {
+                            start: self.scanner.pos,
+                            limit: self.scanner.pos,
+                        },
+                    })?;
+                    if !matches!(cbrace.payload, TokenPayload::CBrace) {
+                        return Err(ScanError {
+                            message: "expected '}' to close concatenation".to_string(),
+                            span: cbrace.span,
+                        });
+                    }
+                    break;
+                }
+                return Ok(NetRef::Concat(elems));
+            }
+        }
+        // Parse identifier or literal
+        let net_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected net name".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        match net_tok.payload {
+            TokenPayload::Identifier(s) => {
+                let net_sym = self.interner.get_or_intern(s);
+                // Lookup declared net
+                let net_idx = if let Some(&idx) = self.net_index_by_name.get(&net_sym) {
+                    idx
+                } else if let Some(pos) = self.nets.iter().position(|n| n.name == net_sym) {
+                    let idx = NetIndex(pos);
+                    self.net_index_by_name.insert(net_sym, idx);
+                    idx
+                } else {
+                    return Err(ScanError {
+                        message: format!(
+                            "net '{}' not declared as wire",
+                            self.interner.resolve(net_sym).unwrap()
+                        ),
+                        span: net_tok.span,
+                    });
+                };
+                // Optional bit/part select
+                if let Some(next) = self.scanner.peekt()? {
+                    match &next.payload {
+                        TokenPayload::OBrack => {
+                            self.scanner.popt()?; // consume '['
+                            let msb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
+                                message: "expected msb or index in net reference".to_string(),
+                                span: Span {
+                                    start: self.scanner.pos,
+                                    limit: self.scanner.pos,
+                                },
+                            })?;
+                            let msb = match msb_tok.payload {
+                                TokenPayload::VerilogInt { value, .. } => {
+                                    xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                                }
+                                _ => {
+                                    return Err(ScanError {
+                                        message: "expected integer for msb/index in net reference"
+                                            .to_string(),
+                                        span: msb_tok.span,
+                                    });
+                                }
+                            };
+                            let next2 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                                message: "expected ':' or ']' in net reference".to_string(),
+                                span: Span {
+                                    start: self.scanner.pos,
+                                    limit: self.scanner.pos,
+                                },
+                            })?;
+                            return match next2.payload {
+                                TokenPayload::Colon => {
+                                    let lsb_tok =
+                                        self.scanner.popt()?.ok_or_else(|| ScanError {
+                                            message: "expected lsb in net reference".to_string(),
+                                            span: Span {
+                                                start: self.scanner.pos,
+                                                limit: self.scanner.pos,
+                                            },
+                                        })?;
+                                    let lsb = match lsb_tok.payload {
+                                        TokenPayload::VerilogInt { value, .. } => {
+                                            xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                                        }
+                                        _ => {
+                                            return Err(ScanError {
+                                                message:
+                                                    "expected integer for lsb in net reference"
+                                                        .to_string(),
+                                                span: lsb_tok.span,
+                                            });
+                                        }
+                                    };
+                                    let cbrack_tok =
+                                        self.scanner.popt()?.ok_or_else(|| ScanError {
+                                            message: "expected ']' after part-select".to_string(),
+                                            span: Span {
+                                                start: self.scanner.pos,
+                                                limit: self.scanner.pos,
+                                            },
+                                        })?;
+                                    if !matches!(cbrack_tok.payload, TokenPayload::CBrack) {
+                                        return Err(ScanError {
+                                            message: "expected ']' after part-select".to_string(),
+                                            span: cbrack_tok.span,
+                                        });
+                                    }
+                                    Ok(NetRef::PartSelect(net_idx, msb, lsb))
+                                }
+                                TokenPayload::CBrack => Ok(NetRef::BitSelect(net_idx, msb)),
+                                _ => Err(ScanError {
+                                    message: "expected ':' or ']' in net reference".to_string(),
+                                    span: next2.span,
+                                }),
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(NetRef::Simple(net_idx))
+            }
+            TokenPayload::VerilogInt { value, width: _ } => Ok(NetRef::Literal(value)),
+            other => Err(ScanError {
+                message: format!("expected identifier for net name, got {:?}", other),
+                span: net_tok.span,
+            }),
+        }
+    }
+
+    /// Ensures there is a `Net` with the given `name` present in `self.nets`.
+    /// If it already exists, reconciles optional `width` information:
+    /// - (None, None) -> keep None
+    /// - (Some(w), None) or (None, Some(w)) -> set to Some(w)
+    /// - (Some(a), Some(b)) where a != b -> error
+    /// Returns the `NetIndex` for the ensured net.
+    fn ensure_net(
+        &mut self,
+        name: NetId,
+        width: Option<(u32, u32)>,
+        err_span: Span,
+    ) -> Result<NetIndex, ScanError> {
+        if let Some(&idx) = self.net_index_by_name.get(&name) {
+            let existing = &mut self.nets[idx.0];
+            match (existing.width, width) {
+                (None, None) => {}
+                (None, Some(w)) => existing.width = Some(w),
+                (Some(_), None) => {}
+                (Some(a), Some(b)) => {
+                    if a != b {
+                        return Err(ScanError {
+                            message: format!(
+                                "conflicting widths for net '{}': {:?} vs {:?}",
+                                self.interner.resolve(name).unwrap_or("<unknown>"),
+                                a,
+                                b
+                            ),
+                            span: err_span,
+                        });
+                    }
+                }
+            }
+            Ok(idx)
+        } else {
+            let idx = NetIndex(self.nets.len());
+            self.nets.push(Net { name, width });
+            self.net_index_by_name.insert(name, idx);
+            Ok(idx)
         }
     }
 
@@ -1218,6 +1559,10 @@ impl<R: Read + 'static> Parser<R> {
                     });
                 }
             };
+            // Ensure a corresponding net exists for this port (non-ANSI body decls imply
+            // nets). If a width is present here and not previously known,
+            // record it; if conflicting, error.
+            let _net_index = self.ensure_net(name, width, t.span)?;
             ports.push(NetlistPort {
                 direction: direction.clone(),
                 width,
@@ -1362,8 +1707,8 @@ impl<R: Read + 'static> Parser<R> {
                     });
                 }
             };
-            let net_idx = NetIndex(self.nets.len());
-            self.nets.push(Net { name, width });
+            // Ensure/dedupe nets for wires too; reconcile widths per rules above.
+            let net_idx = self.ensure_net(name, width, t.span)?;
             net_indices.push(net_idx);
             // If next is ',', continue
             if let Some(next) = self.scanner.peekt()? {
@@ -1472,6 +1817,45 @@ impl<R: Read + 'static> Parser<R> {
                 span: oparen.span,
             });
         }
+        // Allow empty port list: TypeName InstanceName ( );
+        // Skip comments/annotations immediately inside the parentheses
+        loop {
+            let peek = self.scanner.peekt()?;
+            match peek {
+                Some(tok) => match &tok.payload {
+                    TokenPayload::Comment(_) | TokenPayload::Annotation { .. } => {
+                        self.scanner.popt()?;
+                    }
+                    _ => break,
+                },
+                None => break,
+            }
+        }
+        if let Some(tok) = self.scanner.peekt()? {
+            if matches!(tok.payload, TokenPayload::CParen) {
+                self.scanner.popt()?; // consume ')'
+                let semi = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: "expected ';' after instance".to_string(),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                if !matches!(semi.payload, TokenPayload::Semi) {
+                    return Err(ScanError {
+                        message: "expected ';' after instance".to_string(),
+                        span: semi.span,
+                    });
+                }
+                return Ok(NetlistInstance {
+                    type_name,
+                    instance_name,
+                    connections: Vec::new(),
+                    inst_lineno: inst_tok.span.start.lineno,
+                    inst_colno: inst_tok.span.start.colno,
+                });
+            }
+        }
         let mut connections = Vec::new();
         loop {
             // Expect .Port
@@ -1518,131 +1902,26 @@ impl<R: Read + 'static> Parser<R> {
                     span: oparen2.span,
                 });
             }
-            // Net name or net reference expression
-            let net_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                message: "expected net name".to_string(),
-                span: Span {
-                    start: self.scanner.pos,
-                    limit: self.scanner.pos,
-                },
-            })?;
-            let net_ref = match net_tok.payload {
-                TokenPayload::Identifier(s) => {
-                    let net_sym = self.interner.get_or_intern(s);
-                    let net_idx = self
-                        .nets
-                        .iter()
-                        .position(|n| n.name == net_sym)
-                        .map(NetIndex)
-                        .ok_or_else(|| ScanError {
-                            message: format!(
-                                "net '{}' not declared as wire",
-                                self.interner.resolve(net_sym).unwrap()
-                            ),
-                            span: net_tok.span,
-                        })?;
-                    // Check for bit-select or part-select
-                    if let Some(next) = self.scanner.peekt()? {
-                        match &next.payload {
-                            TokenPayload::OBrack => {
-                                self.scanner.popt()?; // consume '['
-                                let msb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                                    message: "expected msb or index in net reference".to_string(),
-                                    span: Span {
-                                        start: self.scanner.pos,
-                                        limit: self.scanner.pos,
-                                    },
-                                })?;
-                                let msb =
-                                    match msb_tok.payload {
-                                        TokenPayload::VerilogInt { value, .. } => {
-                                            xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
-                                        }
-                                        _ => return Err(ScanError {
-                                            message:
-                                                "expected integer for msb/index in net reference"
-                                                    .to_string(),
-                                            span: msb_tok.span,
-                                        }),
-                                    };
-                                // Check for ':' (part-select) or ']' (bit-select)
-                                let next2 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                                    message: "expected ':' or ']' in net reference".to_string(),
-                                    span: Span {
-                                        start: self.scanner.pos,
-                                        limit: self.scanner.pos,
-                                    },
-                                })?;
-                                match next2.payload {
-                                    TokenPayload::Colon => {
-                                        // part-select: [msb:lsb]
-                                        let lsb_tok =
-                                            self.scanner.popt()?.ok_or_else(|| ScanError {
-                                                message: "expected lsb in net reference"
-                                                    .to_string(),
-                                                span: Span {
-                                                    start: self.scanner.pos,
-                                                    limit: self.scanner.pos,
-                                                },
-                                            })?;
-                                        let lsb =
-                                            match lsb_tok.payload {
-                                                TokenPayload::VerilogInt { value, .. } => {
-                                                    xlsynth::IrValue::from_bits(&value)
-                                                        .to_u32()
-                                                        .unwrap()
-                                                }
-                                                _ => return Err(ScanError {
-                                                    message:
-                                                        "expected integer for lsb in net reference"
-                                                            .to_string(),
-                                                    span: lsb_tok.span,
-                                                }),
-                                            };
-                                        let cbrack_tok =
-                                            self.scanner.popt()?.ok_or_else(|| ScanError {
-                                                message: "expected ']' after part-select"
-                                                    .to_string(),
-                                                span: Span {
-                                                    start: self.scanner.pos,
-                                                    limit: self.scanner.pos,
-                                                },
-                                            })?;
-                                        if !matches!(cbrack_tok.payload, TokenPayload::CBrack) {
-                                            return Err(ScanError {
-                                                message: "expected ']' after part-select"
-                                                    .to_string(),
-                                                span: cbrack_tok.span,
-                                            });
-                                        }
-                                        NetRef::PartSelect(net_idx, msb, lsb)
-                                    }
-                                    TokenPayload::CBrack => {
-                                        // bit-select: [index]
-                                        NetRef::BitSelect(net_idx, msb)
-                                    }
-                                    _ => {
-                                        return Err(ScanError {
-                                            message: "expected ':' or ']' in net reference"
-                                                .to_string(),
-                                            span: next2.span,
-                                        });
-                                    }
-                                }
-                            }
-                            _ => NetRef::Simple(net_idx),
+            // Net name or net reference expression (or unconnected)
+            // Skip any inline comments/annotations inside the parentheses
+            loop {
+                let peek = self.scanner.peekt()?;
+                match peek {
+                    Some(tok) => match &tok.payload {
+                        TokenPayload::Comment(_) | TokenPayload::Annotation { .. } => {
+                            self.scanner.popt()?;
                         }
-                    } else {
-                        NetRef::Simple(net_idx)
-                    }
+                        _ => break,
+                    },
+                    None => break,
                 }
-                TokenPayload::VerilogInt { value, width: _ } => NetRef::Literal(value),
-                _ => {
-                    return Err(ScanError {
-                        message: "expected identifier for net name".to_string(),
-                        span: net_tok.span,
-                    });
-                }
+            }
+            // Allow immediate ')' to denote an unconnected port
+            let is_unconnected = matches!(self.scanner.peekt()?, Some(tok) if matches!(tok.payload, TokenPayload::CParen));
+            let net_ref = if is_unconnected {
+                NetRef::Unconnected
+            } else {
+                self.parse_netref_expr()?
             };
             // Expect ')'
             let cparen2 = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -1801,6 +2080,52 @@ endmodule
         // 'INVX1' (5 chars) + one space => column 9.
         assert_eq!(inst.inst_lineno, 6);
         assert_eq!(inst.inst_colno, 9);
+    }
+
+    #[test]
+    fn test_parse_instance_with_empty_port_list() {
+        let src = r#"
+module top();
+  DUMMY_CELL u0 ();
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let m = &modules[0];
+        assert_eq!(m.instances.len(), 1);
+        assert!(m.instances[0].connections.is_empty());
+    }
+
+    #[test]
+    fn test_parse_instance_with_concat_expr() {
+        let src = r#"
+module top(a, b, c);
+  input a;
+  input b;
+  input c;
+  wire a, b, c;
+  TYPE u1 (.MY_PORT({a, b, c}));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let insts = &modules[0].instances;
+        assert_eq!(insts.len(), 1);
+        let (_p, netref) = &insts[0].connections[0];
+        match netref {
+            NetRef::Concat(v) => {
+                assert_eq!(v.len(), 3);
+                for r in v {
+                    match r {
+                        NetRef::Simple(_) => {}
+                        other => panic!("expected Simple, got {:?}", other),
+                    }
+                }
+            }
+            other => panic!("expected Concat, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2012,6 +2337,38 @@ endmodule
             _ => panic!("Expected annotation token"),
         }
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_skip_timescale_at_top() {
+        let src = "`timescale 10ps/10ps\nmodule m(); endmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_skip_timescale_with_leading_spaces() {
+        let src = "   `timescale 1ns/1ps\nmodule m(); endmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_skip_timescale_after_comment() {
+        let src = "// comment\n`timescale 1ns/1ps\nmodule m(); endmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_skip_timescale_inside_module() {
+        let src = "module m();\n`timescale 1ns/1ps\nendmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
     }
 
     #[test]
@@ -2252,5 +2609,142 @@ wire [255:0] a;"#;
             _ => panic!("Expected VerilogInt for 16'd42"),
         }
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_parse_instance_unconnected_output() {
+        let src = r#"
+module m(a, y);
+  input a;
+  output y;
+  wire a, y;
+  INVX1 u1 (.A(a), .Y());
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let insts = &modules[0].instances;
+        assert_eq!(insts.len(), 1);
+        let conn = &insts[0].connections[1].1;
+        match conn {
+            NetRef::Unconnected => {}
+            _ => panic!("expected Unconnected for .Y()"),
+        }
+    }
+
+    #[test]
+    fn test_parse_instance_unconnected_input_and_comments() {
+        let src = r#"
+module m(y);
+  output y;
+  wire y;
+  AND2 u1 (.A(/*c*/ ), .B( // c
+ ), .Y(y));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let insts = &modules[0].instances;
+        assert_eq!(insts.len(), 1);
+        // .A() should be Unconnected
+        match &insts[0].connections[0].1 {
+            NetRef::Unconnected => {}
+            other => panic!("expected Unconnected for .A(), got {:?}", other),
+        }
+        // .B() should be Unconnected
+        match &insts[0].connections[1].1 {
+            NetRef::Unconnected => {}
+            other => panic!("expected Unconnected for .B(), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_non_ansi_body_ports_create_nets() {
+        let src = r#"
+module m(a, y);
+  input a;
+  output y;
+  INVX1 u1 (.A(a), .Y(y));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        // Ensure nets for a and y exist with no widths
+        let a_net = parser
+            .nets
+            .iter()
+            .find(|n| parser.interner.resolve(n.name).unwrap() == "a")
+            .unwrap();
+        let y_net = parser
+            .nets
+            .iter()
+            .find(|n| parser.interner.resolve(n.name).unwrap() == "y")
+            .unwrap();
+        assert_eq!(a_net.width, None);
+        assert_eq!(y_net.width, None);
+    }
+
+    #[test]
+    fn test_non_ansi_vector_output_and_bitselect() {
+        let src = r#"
+module m(a, out);
+  input a;
+  output [7:0] out;
+  Type inst (.A(out[3]));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let out_net = parser
+            .nets
+            .iter()
+            .find(|n| parser.interner.resolve(n.name).unwrap() == "out")
+            .unwrap();
+        assert_eq!(out_net.width, Some((7, 0)));
+        // And the instance should have one connection with a BitSelect
+        let inst = &modules[0].instances[0];
+        match inst.connections[0].1 {
+            NetRef::BitSelect(_, idx) => assert_eq!(idx, 3),
+            ref other => panic!("expected BitSelect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_wire_after_port_decl_same_width_ok() {
+        let src = r#"
+module m(a);
+  input [3:0] a;
+  wire [3:0] a;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let a_nets: Vec<&Net> = parser
+            .nets
+            .iter()
+            .filter(|n| parser.interner.resolve(n.name).unwrap() == "a")
+            .collect();
+        assert_eq!(a_nets.len(), 1);
+        assert_eq!(a_nets[0].width, Some((3, 0)));
+    }
+
+    #[test]
+    fn test_conflicting_widths_error() {
+        let src = r#"
+module m(out);
+  output [7:0] out;
+  wire [3:0] out;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let err = parser
+            .parse_file()
+            .expect_err("should error on width conflict");
+        assert!(err.message.contains("conflicting widths for net 'out'"));
     }
 }
