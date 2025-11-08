@@ -758,7 +758,7 @@ pub(crate) fn xls_mangle_dslx_name_full(
         cc,
         free_keys_ptr,
         free_key_ptrs.len(),
-        param_env.map(|e| e.as_ptr()).unwrap_or(std::ptr::null()),
+        param_env.map(|e| e.ptr as *const _).unwrap_or(std::ptr::null()),
         scope_ptr;
         mangled_out
     )?;

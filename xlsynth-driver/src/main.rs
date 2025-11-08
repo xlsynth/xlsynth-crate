@@ -43,6 +43,7 @@ mod dslx_equiv;
 mod dslx_fn_eval;
 mod dslx_g8r_stats;
 mod dslx_show;
+mod dslx_specialize;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod fn_eval;
@@ -542,6 +543,11 @@ fn main() {
                         .index(1)
                         .action(ArgAction::Set),
                 ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-specialize")
+                .about("Specialize parametric DSLX functions reachable from a top function within the current module")
+                .add_dslx_input_args(true),
         )
         .subcommand(
             clap::Command::new("dslx2sv-types")
@@ -1656,6 +1662,9 @@ fn main() {
         }
         Some(("dslx2ir", subm)) => {
             dslx2ir::handle_dslx2ir(subm, &config);
+        }
+        Some(("dslx-specialize", subm)) => {
+            dslx_specialize::handle_dslx_specialize(subm, &config);
         }
         Some(("ir2opt", subm)) => {
             ir2opt::handle_ir2opt(subm, &config);

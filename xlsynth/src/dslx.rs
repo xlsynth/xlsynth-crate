@@ -4,11 +4,18 @@
 
 #![allow(unused)]
 
-use std::rc::Rc;
+use std::{
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    mem::ManuallyDrop,
+    rc::Rc,
+};
 
+use log::debug;
 use xlsynth_sys::{self as sys, CDslxImportData};
 
-use crate::{c_str_to_rust, IrValue, XlsynthError};
+use crate::{c_str_to_rust, c_str_to_rust_no_dealloc, IrValue, XlsynthError};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TypeDefinitionKind {
@@ -139,6 +146,27 @@ pub struct TypecheckedModule {
     ptr: Rc<TypecheckedModulePtr>,
 }
 
+impl Clone for TypecheckedModule {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr.clone(),
+        }
+    }
+}
+
+pub struct FunctionSpecializationRequest<'a> {
+    pub function_name: &'a str,
+    pub specialized_name: &'a str,
+    pub env: Option<ParametricEnv>,
+}
+
+pub struct InvocationRewriteRule<'a> {
+    pub from_callee: &'a Function,
+    pub to_callee: &'a Function,
+    pub match_callee_env: Option<ParametricEnv>,
+    pub to_callee_env: Option<ParametricEnv>,
+}
+
 impl TypecheckedModule {
     pub fn get_module(&self) -> Module {
         Module {
@@ -160,6 +188,180 @@ impl TypecheckedModule {
             Some(self_type_info)
         } else {
             self_type_info.get_imported_type_info(module)
+        }
+    }
+
+    pub fn clone_ignoring_functions(
+        &self,
+        import_data: &mut ImportData,
+        functions: &[&Function],
+        install_subject: &str,
+    ) -> Result<TypecheckedModule, XlsynthError> {
+        let mut function_ptrs: Vec<*mut sys::CDslxFunction> =
+            functions.iter().map(|f| f.ptr).collect();
+        let install_subject_cstr = std::ffi::CString::new(install_subject).unwrap();
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let mut result_out: *mut sys::CDslxTypecheckedModule = std::ptr::null_mut();
+            let success = sys::xls_dslx_typechecked_module_clone_removing_functions(
+                self.ptr.ptr,
+                if function_ptrs.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    function_ptrs.as_mut_ptr()
+                },
+                function_ptrs.len(),
+                install_subject_cstr.as_ptr(),
+                import_data.ptr.ptr,
+                &mut error_out,
+                &mut result_out,
+            );
+            if success {
+                assert!(error_out.is_null());
+                assert!(!result_out.is_null());
+                Ok(TypecheckedModule {
+                    ptr: Rc::new(TypecheckedModulePtr {
+                        parent: import_data.ptr.clone(),
+                        ptr: result_out,
+                    }),
+                })
+            } else {
+                assert!(!error_out.is_null());
+                Err(XlsynthError(c_str_to_rust(error_out)))
+            }
+        }
+    }
+
+    pub fn insert_function_specializations(
+        &self,
+        import_data: &mut ImportData,
+        requests: &[FunctionSpecializationRequest<'_>],
+        install_subject: &str,
+    ) -> Result<TypecheckedModule, XlsynthError> {
+        let install_subject_cstr = std::ffi::CString::new(install_subject).unwrap();
+        let mut function_name_cstrs: Vec<std::ffi::CString> = Vec::with_capacity(requests.len());
+        let mut specialized_name_cstrs: Vec<std::ffi::CString> = Vec::with_capacity(requests.len());
+        for request in requests {
+            function_name_cstrs.push(std::ffi::CString::new(request.function_name).unwrap());
+            specialized_name_cstrs.push(std::ffi::CString::new(request.specialized_name).unwrap());
+        }
+        let mut ffi_requests: Vec<sys::XlsDslxFunctionSpecializationRequest> =
+            Vec::with_capacity(requests.len());
+        for (i, request) in requests.iter().enumerate() {
+            ffi_requests.push(sys::XlsDslxFunctionSpecializationRequest {
+                function_name: function_name_cstrs[i].as_ptr(),
+                specialized_name: specialized_name_cstrs[i].as_ptr(),
+                env: request
+                    .env
+                    .as_ref()
+                    .map(|env| env.ptr)
+                    .unwrap_or(std::ptr::null_mut()),
+            });
+        }
+
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let mut result_out: *mut sys::CDslxTypecheckedModule = std::ptr::null_mut();
+            let success = sys::xls_dslx_typechecked_module_insert_function_specializations(
+                self.ptr.ptr,
+                if ffi_requests.is_empty() {
+                    std::ptr::null()
+                } else {
+                    ffi_requests.as_ptr()
+                },
+                ffi_requests.len(),
+                import_data.ptr.ptr,
+                install_subject_cstr.as_ptr(),
+                &mut error_out,
+                &mut result_out,
+            );
+            if success {
+                assert!(error_out.is_null());
+                assert!(!result_out.is_null());
+                Ok(TypecheckedModule {
+                    ptr: Rc::new(TypecheckedModulePtr {
+                        parent: import_data.ptr.clone(),
+                        ptr: result_out,
+                    }),
+                })
+            } else {
+                assert!(!error_out.is_null());
+                Err(XlsynthError(c_str_to_rust(error_out)))
+            }
+        }
+    }
+
+    pub fn replace_invocations_in_module(
+        &self,
+        import_data: &mut ImportData,
+        callers: &[&Function],
+        rules: &[InvocationRewriteRule<'_>],
+        install_subject: &str,
+    ) -> Result<TypecheckedModule, XlsynthError> {
+        let install_subject_cstr = std::ffi::CString::new(install_subject).unwrap();
+        let mut caller_ptrs: Vec<*mut sys::CDslxFunction> = callers.iter().map(|f| f.ptr).collect();
+        let mut rule_storage: Vec<sys::CDslxInvocationRewriteRule> =
+            Vec::with_capacity(rules.len());
+        for rule in rules {
+            debug!("Replace invocations in module: from_callee: {:?}, to_callee: {:?}, match_callee_env: {:?}, to_callee_env: {:?}", rule.from_callee.get_identifier(), rule.to_callee.get_identifier(), rule.match_callee_env.as_ref().map(|env| env.to_string()), rule.to_callee_env.as_ref().map(|env| env.to_string()));
+            rule_storage.push(sys::CDslxInvocationRewriteRule {
+                from_callee: rule.from_callee.ptr,
+                to_callee: rule.to_callee.ptr,
+                match_callee_env: rule
+                    .match_callee_env
+                    .as_ref()
+                    .map(|env| env.ptr as *const _)
+                    .unwrap_or(std::ptr::null()),
+                to_callee_env: rule
+                    .to_callee_env
+                    .as_ref()
+                    .map(|env| env.ptr as *const _)
+                    .unwrap_or(std::ptr::null()),
+            });
+        }
+
+        debug!(
+            "Replace invocations in module: {} callers, {} rules",
+            caller_ptrs.len(),
+            rule_storage.len()
+        );
+
+        unsafe {
+            let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+            let mut result_out: *mut sys::CDslxTypecheckedModule = std::ptr::null_mut();
+            let success = sys::xls_dslx_replace_invocations_in_module(
+                self.ptr.ptr,
+                if caller_ptrs.is_empty() {
+                    std::ptr::null()
+                } else {
+                    caller_ptrs.as_mut_ptr()
+                },
+                caller_ptrs.len(),
+                if rule_storage.is_empty() {
+                    std::ptr::null()
+                } else {
+                    rule_storage.as_ptr()
+                },
+                rule_storage.len(),
+                import_data.ptr.ptr,
+                install_subject_cstr.as_ptr(),
+                &mut error_out,
+                &mut result_out,
+            );
+            debug!("Replace invocations in module success: {}", success);
+            if success {
+                assert!(error_out.is_null());
+                assert!(!result_out.is_null());
+                Ok(TypecheckedModule {
+                    ptr: Rc::new(TypecheckedModulePtr {
+                        parent: import_data.ptr.clone(),
+                        ptr: result_out,
+                    }),
+                })
+            } else {
+                assert!(!error_out.is_null());
+                Err(XlsynthError(c_str_to_rust(error_out)))
+            }
         }
     }
 }
@@ -347,6 +549,13 @@ impl Module {
         }
     }
 
+    pub fn to_text(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_module_to_string(self.ptr);
+            c_str_to_rust(c_str)
+        }
+    }
+
     pub fn get_type_definition_count(&self) -> usize {
         unsafe { sys::xls_dslx_module_get_type_definition_count(self.ptr) as usize }
     }
@@ -396,6 +605,18 @@ impl Module {
             parent: self.parent.clone(),
             ptr,
         })
+    }
+}
+
+impl fmt::Display for Module {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
+    }
+}
+
+impl fmt::Debug for Module {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
     }
 }
 
@@ -712,6 +933,15 @@ pub struct Function {
     ptr: *mut sys::CDslxFunction,
 }
 
+impl Clone for Function {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent.clone(),
+            ptr: self.ptr,
+        }
+    }
+}
+
 pub struct Param {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxParam,
@@ -767,39 +997,19 @@ impl std::fmt::Display for Function {
     }
 }
 
-struct InterpValuePtr {
-    ptr: *mut sys::CDslxInterpValue,
-}
-
-impl Drop for InterpValuePtr {
-    fn drop(&mut self) {
-        unsafe {
-            sys::xls_dslx_interp_value_free(self.ptr);
-        }
-    }
-}
-
 pub struct InterpValue {
-    ptr: Rc<InterpValuePtr>,
+    ptr: *mut sys::CDslxInterpValue,
 }
 
 impl InterpValue {
     pub fn make_ubits(bit_count: i64, value: u64) -> Self {
         let raw = unsafe { sys::xls_dslx_interp_value_make_ubits(bit_count, value) };
-        InterpValue {
-            ptr: Rc::new(InterpValuePtr { ptr: raw }),
-        }
+        Self::from_raw(raw)
     }
 
     pub fn make_sbits(bit_count: i64, value: i64) -> Self {
         let raw = unsafe { sys::xls_dslx_interp_value_make_sbits(bit_count, value) };
-        InterpValue {
-            ptr: Rc::new(InterpValuePtr { ptr: raw }),
-        }
-    }
-
-    pub(crate) fn raw_ptr(&self) -> *const sys::CDslxInterpValue {
-        self.ptr.ptr as *const sys::CDslxInterpValue
+        Self::from_raw(raw)
     }
 
     pub fn from_string(text: &str) -> Result<Self, crate::XlsynthError> {
@@ -815,28 +1025,33 @@ impl InterpValue {
                 &mut result_out,
             );
             if ok {
-                Ok(InterpValue {
-                    ptr: Rc::new(InterpValuePtr { ptr: result_out }),
-                })
+                Ok(Self::from_raw(result_out))
             } else {
                 Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
             }
         }
     }
     pub fn convert_to_ir(&self) -> Result<IrValue, XlsynthError> {
-        let mut error_out = std::ptr::null_mut();
-        let mut result_out = std::ptr::null_mut();
-        let success = unsafe {
-            sys::xls_dslx_interp_value_convert_to_ir(self.ptr.ptr, &mut error_out, &mut result_out)
-        };
-        if success {
-            assert!(error_out.is_null());
-            assert!(!result_out.is_null());
-            Ok(IrValue { ptr: result_out })
-        } else {
-            assert!(!error_out.is_null());
-            let error_out_str: String = unsafe { c_str_to_rust(error_out) };
-            Err(XlsynthError(error_out_str))
+        unsafe {
+            let mut error_out = std::ptr::null_mut();
+            let mut result_out = std::ptr::null_mut();
+            let success =
+                sys::xls_dslx_interp_value_convert_to_ir(self.ptr, &mut error_out, &mut result_out);
+            if success {
+                assert!(error_out.is_null());
+                assert!(!result_out.is_null());
+                Ok(IrValue { ptr: result_out })
+            } else {
+                assert!(!error_out.is_null());
+                Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+            }
+        }
+    }
+
+    pub fn to_text(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_interp_value_to_string(self.ptr);
+            c_str_to_rust(c_str)
         }
     }
 
@@ -856,9 +1071,7 @@ impl InterpValue {
                 &mut result_out,
             );
             if ok {
-                Ok(InterpValue {
-                    ptr: Rc::new(InterpValuePtr { ptr: result_out }),
-                })
+                Ok(Self::from_raw(result_out))
             } else {
                 Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
             }
@@ -866,8 +1079,7 @@ impl InterpValue {
     }
 
     pub fn make_tuple(elements: &[&InterpValue]) -> Result<Self, crate::XlsynthError> {
-        let mut ptrs: Vec<*mut sys::CDslxInterpValue> =
-            elements.iter().map(|v| v.ptr.ptr).collect();
+        let mut ptrs: Vec<*mut sys::CDslxInterpValue> = elements.iter().map(|v| v.ptr).collect();
         unsafe {
             let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
             let mut result_out: *mut sys::CDslxInterpValue = std::ptr::null_mut();
@@ -882,9 +1094,7 @@ impl InterpValue {
                 &mut result_out,
             );
             if ok {
-                Ok(InterpValue {
-                    ptr: Rc::new(InterpValuePtr { ptr: result_out }),
-                })
+                Ok(Self::from_raw(result_out))
             } else {
                 Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
             }
@@ -892,8 +1102,7 @@ impl InterpValue {
     }
 
     pub fn make_array(elements: &[&InterpValue]) -> Result<Self, crate::XlsynthError> {
-        let mut ptrs: Vec<*mut sys::CDslxInterpValue> =
-            elements.iter().map(|v| v.ptr.ptr).collect();
+        let mut ptrs: Vec<*mut sys::CDslxInterpValue> = elements.iter().map(|v| v.ptr).collect();
         unsafe {
             let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
             let mut result_out: *mut sys::CDslxInterpValue = std::ptr::null_mut();
@@ -908,26 +1117,59 @@ impl InterpValue {
                 &mut result_out,
             );
             if ok {
-                Ok(InterpValue {
-                    ptr: Rc::new(InterpValuePtr { ptr: result_out }),
-                })
+                Ok(Self::from_raw(result_out))
             } else {
                 Err(crate::XlsynthError(crate::c_str_to_rust(error_out)))
             }
         }
+    }
+
+    fn from_raw(ptr: *mut sys::CDslxInterpValue) -> Self {
+        assert!(
+            !ptr.is_null(),
+            "InterpValue::from_raw received null pointer"
+        );
+        InterpValue { ptr }
+    }
+}
+
+impl Clone for InterpValue {
+    fn clone(&self) -> Self {
+        unsafe {
+            let cloned = sys::xls_dslx_interp_value_clone(self.ptr);
+            assert!(
+                !cloned.is_null(),
+                "xls_dslx_interp_value_clone returned null pointer"
+            );
+            InterpValue { ptr: cloned }
+        }
+    }
+}
+
+impl Drop for InterpValue {
+    fn drop(&mut self) {
+        unsafe {
+            sys::xls_dslx_interp_value_free(self.ptr);
+        }
+    }
+}
+
+impl fmt::Display for InterpValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
+    }
+}
+
+impl fmt::Debug for InterpValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
     }
 }
 
 // -- ParametricEnv
 
 pub struct ParametricEnv {
-    ptr: *mut sys::CDslxParametricEnv,
-}
-
-impl Drop for ParametricEnv {
-    fn drop(&mut self) {
-        unsafe { sys::xls_dslx_parametric_env_free(self.ptr) };
-    }
+    pub(crate) ptr: *mut sys::CDslxParametricEnv,
 }
 
 impl ParametricEnv {
@@ -940,7 +1182,7 @@ impl ParametricEnv {
         for (i, (_id, val)) in items.iter().enumerate() {
             ffi_items.push(sys::XlsDslxParametricEnvItem {
                 identifier: id_cstrs[i].as_ptr(),
-                value: val.raw_ptr(),
+                value: val.ptr,
             });
         }
         unsafe {
@@ -968,8 +1210,137 @@ impl ParametricEnv {
         Self::new(&[])
     }
 
-    pub(crate) fn as_ptr(&self) -> *const sys::CDslxParametricEnv {
-        self.ptr as *const sys::CDslxParametricEnv
+    pub fn binding_count(&self) -> usize {
+        if self.ptr.is_null() {
+            0
+        } else {
+            unsafe { sys::xls_dslx_parametric_env_get_binding_count(self.ptr) as usize }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.binding_count() == 0
+    }
+
+    pub fn get_binding(&self, index: usize) -> Option<(String, InterpValue)> {
+        if self.ptr.is_null() {
+            return None;
+        }
+        if index >= self.binding_count() {
+            return None;
+        }
+        let identifier_ptr =
+            unsafe { sys::xls_dslx_parametric_env_get_binding_identifier(self.ptr, index as i64) };
+        if identifier_ptr.is_null() {
+            return None;
+        }
+        let identifier =
+            unsafe { c_str_to_rust_no_dealloc(identifier_ptr as *mut std::os::raw::c_char) };
+        let value_ptr =
+            unsafe { sys::xls_dslx_parametric_env_get_binding_value(self.ptr, index as i64) }
+                as *const sys::CDslxInterpValue;
+        if value_ptr.is_null() {
+            return None;
+        }
+        unsafe {
+            let temp = ManuallyDrop::new(InterpValue {
+                ptr: value_ptr as *mut sys::CDslxInterpValue,
+            });
+            Some((identifier, (*temp).clone()))
+        }
+    }
+
+    pub fn bindings(&self) -> Vec<(String, InterpValue)> {
+        (0..self.binding_count())
+            .filter_map(|index| self.get_binding(index))
+            .collect()
+    }
+
+    pub fn to_text(&self) -> String {
+        unsafe {
+            let c_str = sys::xls_dslx_parametric_env_to_string(self.ptr);
+            c_str_to_rust(c_str)
+        }
+    }
+}
+
+impl Clone for ParametricEnv {
+    fn clone(&self) -> Self {
+        unsafe {
+            let env_out = sys::xls_dslx_parametric_env_clone(self.ptr);
+            assert!(
+                !env_out.is_null(),
+                "xls_dslx_parametric_env_clone returned null"
+            );
+            ParametricEnv { ptr: env_out }
+        }
+    }
+}
+
+impl PartialEq for ParametricEnv {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe {
+            sys::xls_dslx_parametric_env_equals(
+                self.ptr as *const sys::CDslxParametricEnv,
+                other.ptr as *const sys::CDslxParametricEnv,
+            )
+        }
+    }
+}
+
+impl Eq for ParametricEnv {}
+
+impl Hash for ParametricEnv {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        unsafe {
+            let value =
+                sys::xls_dslx_parametric_env_hash(self.ptr as *const sys::CDslxParametricEnv);
+            state.write_u64(value);
+        }
+    }
+}
+
+impl PartialOrd for ParametricEnv {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ParametricEnv {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self == other {
+            Ordering::Equal
+        } else {
+            unsafe {
+                let result = sys::xls_dslx_parametric_env_less_than(
+                    self.ptr as *const sys::CDslxParametricEnv,
+                    other.ptr as *const sys::CDslxParametricEnv,
+                );
+                if result {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ParametricEnv {
+    fn drop(&mut self) {
+        unsafe { sys::xls_dslx_parametric_env_free(self.ptr) };
+    }
+}
+
+impl fmt::Debug for ParametricEnv {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
+    }
+}
+
+impl fmt::Display for ParametricEnv {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
     }
 }
 
@@ -1060,11 +1431,274 @@ mod param_env_and_interp_value_tests {
         .expect("mangle");
         assert_eq!(mangled, "__my_mod__Point__f");
     }
+
+    #[test]
+    fn test_insert_function_specializations() {
+        let dslx = r#"
+fn id<N: u32>(x: bits[N]) -> bits[N] { x }
+
+fn call() -> bits[32] {
+    id(bits[32]:0x0)
+}
+"#;
+        let mut import_data = ImportData::default();
+        let tm = parse_and_typecheck(
+            dslx,
+            "/memfile/specialize.x",
+            "specialize_module",
+            &mut import_data,
+        )
+        .expect("parse and typecheck");
+
+        // Prepare the specialization environment for N = 32.
+        let n_value = InterpValue::make_ubits(32, 32);
+        let env = ParametricEnv::new(&[("N", &n_value)]).expect("env");
+
+        let requests = [FunctionSpecializationRequest {
+            function_name: "id",
+            specialized_name: "id_N32",
+            env: Some(env.clone()),
+        }];
+
+        let specialized_tm = tm
+            .insert_function_specializations(
+                &mut import_data,
+                &requests,
+                "specialize_module.specializations",
+            )
+            .expect("specialization succeeds");
+
+        let specialized_module = specialized_tm.get_module();
+        assert_eq!(specialized_module.get_member_count(), 3);
+
+        let mut function_names = Vec::new();
+        for i in 0..specialized_module.get_member_count() {
+            if let Some(MatchableModuleMember::Function(f)) =
+                specialized_module.get_member(i).to_matchable()
+            {
+                function_names.push(f.get_identifier());
+            }
+        }
+
+        assert!(function_names.contains(&"id".to_string()));
+        assert!(function_names.contains(&"id_N32".to_string()));
+        assert!(function_names.contains(&"call".to_string()));
+    }
 }
 
 pub struct TypeInfo {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxTypeInfo,
+}
+
+pub struct FunctionCallGraph {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxCallGraph,
+}
+
+impl Drop for FunctionCallGraph {
+    fn drop(&mut self) {
+        unsafe {
+            sys::xls_dslx_call_graph_free(self.ptr);
+        }
+    }
+}
+
+impl FunctionCallGraph {
+    pub fn function_count(&self) -> usize {
+        unsafe { sys::xls_dslx_call_graph_get_function_count(self.ptr) as usize }
+    }
+
+    pub fn get_function(&self, index: usize) -> Option<Function> {
+        let ptr = unsafe { sys::xls_dslx_call_graph_get_function(self.ptr, index as i64) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Function {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
+    pub fn callee_count(&self, caller: &Function) -> usize {
+        unsafe { sys::xls_dslx_call_graph_get_callee_count(self.ptr, caller.ptr) as usize }
+    }
+
+    pub fn get_callee(&self, caller: &Function, index: usize) -> Option<Function> {
+        let ptr = unsafe {
+            sys::xls_dslx_call_graph_get_callee_function(self.ptr, caller.ptr, index as i64)
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Function {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+}
+
+pub struct InvocationCalleeDataArray {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxInvocationCalleeDataArray,
+}
+
+impl Drop for InvocationCalleeDataArray {
+    fn drop(&mut self) {
+        unsafe {
+            sys::xls_dslx_invocation_callee_data_array_free(self.ptr);
+        }
+    }
+}
+
+pub struct InvocationCalleeData {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxInvocationCalleeData,
+}
+
+impl Drop for InvocationCalleeData {
+    fn drop(&mut self) {
+        unsafe { sys::xls_dslx_invocation_callee_data_free(self.ptr) };
+    }
+}
+
+pub struct Invocation {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxInvocation,
+}
+
+pub struct InvocationData {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxInvocationData,
+}
+
+impl InvocationCalleeDataArray {
+    pub fn len(&self) -> usize {
+        unsafe { sys::xls_dslx_invocation_callee_data_array_get_count(self.ptr) as usize }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, index: usize) -> Option<InvocationCalleeData> {
+        if index >= self.len() {
+            return None;
+        }
+        let ptr = unsafe { sys::xls_dslx_invocation_callee_data_array_get(self.ptr, index as i64) };
+        if ptr.is_null() {
+            None
+        } else {
+            let cloned = unsafe { sys::xls_dslx_invocation_callee_data_clone(ptr) };
+            if cloned.is_null() {
+                return None;
+            }
+            Some(InvocationCalleeData {
+                parent: self.parent.clone(),
+                ptr: cloned,
+            })
+        }
+    }
+}
+
+impl InvocationCalleeData {
+    pub fn callee_bindings(&self) -> Option<ParametricEnv> {
+        let ptr = unsafe { sys::xls_dslx_invocation_callee_data_get_callee_bindings(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe {
+                let temp = ManuallyDrop::new(ParametricEnv {
+                    ptr: ptr as *mut sys::CDslxParametricEnv,
+                });
+                Some((*temp).clone())
+            }
+        }
+    }
+
+    pub fn caller_bindings(&self) -> Option<ParametricEnv> {
+        let ptr = unsafe { sys::xls_dslx_invocation_callee_data_get_caller_bindings(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe {
+                let temp = ManuallyDrop::new(ParametricEnv {
+                    ptr: ptr as *mut sys::CDslxParametricEnv,
+                });
+                Some((*temp).clone())
+            }
+        }
+    }
+
+    pub fn derived_type_info(&self) -> Option<TypeInfo> {
+        let ptr = unsafe { sys::xls_dslx_invocation_callee_data_get_derived_type_info(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(TypeInfo {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
+    pub fn invocation(&self) -> Option<Invocation> {
+        let ptr = unsafe { sys::xls_dslx_invocation_callee_data_get_invocation(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Invocation {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+}
+
+impl Invocation {
+    pub fn as_ptr(&self) -> *mut sys::CDslxInvocation {
+        self.ptr
+    }
+}
+
+impl InvocationData {
+    pub fn invocation(&self) -> Option<Invocation> {
+        let ptr = unsafe { sys::xls_dslx_invocation_data_get_invocation(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Invocation {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
+    pub fn callee(&self) -> Option<Function> {
+        let ptr = unsafe { sys::xls_dslx_invocation_data_get_callee(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Function {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
+    pub fn caller(&self) -> Option<Function> {
+        let ptr = unsafe { sys::xls_dslx_invocation_data_get_caller(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Function {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
 }
 
 impl TypeInfo {
@@ -1082,9 +1716,7 @@ impl TypeInfo {
         if success {
             assert!(error_out.is_null());
             assert!(!result_out.is_null());
-            Ok(InterpValue {
-                ptr: Rc::new(InterpValuePtr { ptr: result_out }),
-            })
+            Ok(InterpValue::from_raw(result_out))
         } else {
             assert!(!error_out.is_null());
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
@@ -1114,6 +1746,76 @@ impl TypeInfo {
             ptr: unsafe {
                 sys::xls_dslx_type_info_get_type_constant_def(self.ptr, constant_def.ptr)
             },
+        }
+    }
+
+    pub fn get_unique_invocation_callee_data(
+        &self,
+        function: &Function,
+    ) -> Option<InvocationCalleeDataArray> {
+        let ptr = unsafe {
+            sys::xls_dslx_type_info_get_unique_invocation_callee_data(self.ptr, function.ptr)
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(InvocationCalleeDataArray {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
+    pub fn get_all_invocation_callee_data(
+        &self,
+        function: &Function,
+    ) -> Option<InvocationCalleeDataArray> {
+        let ptr = unsafe {
+            sys::xls_dslx_type_info_get_all_invocation_callee_data(self.ptr, function.ptr)
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(InvocationCalleeDataArray {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
+    pub fn build_function_call_graph(&self) -> Result<FunctionCallGraph, XlsynthError> {
+        let mut error_out = std::ptr::null_mut();
+        let mut result_out = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_dslx_type_info_build_function_call_graph(
+                self.ptr,
+                &mut error_out,
+                &mut result_out,
+            )
+        };
+        if success {
+            assert!(error_out.is_null());
+            assert!(!result_out.is_null());
+            Ok(FunctionCallGraph {
+                parent: self.parent.clone(),
+                ptr: result_out,
+            })
+        } else {
+            assert!(!error_out.is_null());
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
+    pub fn get_root_invocation_data(&self, invocation: &Invocation) -> Option<InvocationData> {
+        let ptr =
+            unsafe { sys::xls_dslx_type_info_get_root_invocation_data(self.ptr, invocation.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(InvocationData {
+                parent: self.parent.clone(),
+                ptr,
+            })
         }
     }
 
@@ -1531,6 +2233,101 @@ fn without_assert(a: u32, b: u32) -> u32 {
         assert!(!type_info
             .requires_implicit_token(&without_assert_fn)
             .expect("requires_implicit_token success (without_assert)"));
+    }
+
+    #[test]
+    fn test_invocation_callee_data_introspection() {
+        let dslx = r#"
+fn id<N: u32>(x: bits[N]) -> bits[N] { x }
+
+fn caller<N: u32>(x: bits[N]) -> bits[N] {
+    id(x)
+}
+
+fn main() -> u32 {
+    caller(u32:42)
+}
+"#;
+        let mut import_data = ImportData::default();
+        let tcm = parse_and_typecheck(dslx, "/memfile/invoke.x", "invoke_mod", &mut import_data)
+            .expect("parse-and-typecheck success");
+        let module = tcm.get_module();
+        let type_info = tcm.get_type_info();
+
+        use crate::dslx::MatchableModuleMember;
+
+        let mut id_fn: Option<Function> = None;
+        let mut caller_fn: Option<Function> = None;
+        for i in 0..module.get_member_count() {
+            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
+                match f.get_identifier().as_str() {
+                    "id" => id_fn = Some(f),
+                    "caller" => caller_fn = Some(f),
+                    _ => {}
+                }
+            }
+        }
+
+        let id_fn = id_fn.expect("id function found");
+        let caller_fn = caller_fn.expect("caller function found");
+
+        let callee_data_array = type_info
+            .get_unique_invocation_callee_data(&id_fn)
+            .expect("callee data array returned");
+        assert_eq!(callee_data_array.len(), 1);
+        let callee_data = callee_data_array.get(0).expect("callee data entry present");
+
+        let all_callee_data_array = type_info
+            .get_all_invocation_callee_data(&id_fn)
+            .expect("all callee data array returned");
+        assert_eq!(all_callee_data_array.len(), 1);
+
+        let callee_env = callee_data
+            .callee_bindings()
+            .expect("callee bindings present");
+        assert_eq!(callee_env.binding_count(), 1);
+        let (callee_identifier, callee_value) =
+            callee_env.get_binding(0).expect("callee binding present");
+        assert_eq!(callee_identifier, "N");
+        assert_eq!(callee_value.to_string(), "u32:32");
+
+        let caller_env = callee_data
+            .caller_bindings()
+            .expect("caller bindings present");
+        let (caller_identifier, caller_value) =
+            caller_env.get_binding(0).expect("caller binding present");
+        assert_eq!(caller_identifier, "N");
+
+        let invocation = callee_data.invocation().expect("invocation pointer");
+        let invocation_data = type_info
+            .get_root_invocation_data(&invocation)
+            .expect("invocation data present");
+        assert_eq!(
+            invocation_data
+                .callee()
+                .expect("invocation callee present")
+                .get_identifier(),
+            "id"
+        );
+        assert_eq!(
+            invocation_data
+                .caller()
+                .expect("invocation caller present")
+                .get_identifier(),
+            "caller"
+        );
+
+        // Ensure the invocation returned by the invocation data matches the one we
+        // queried with.
+        let round_trip_invocation = invocation_data
+            .invocation()
+            .expect("round-trip invocation present");
+        assert_eq!(round_trip_invocation.as_ptr(), invocation.as_ptr());
+
+        // The caller binding value should match the callee binding value for this
+        // simple program.
+        let caller_value_str = caller_value.to_string();
+        assert_eq!(caller_value_str, callee_value.to_string());
     }
 
     #[test]

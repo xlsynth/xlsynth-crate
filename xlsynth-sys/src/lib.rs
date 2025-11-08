@@ -379,6 +379,13 @@ pub struct XlsDslxParametricEnvItem {
 }
 
 #[repr(C)]
+pub struct XlsDslxFunctionSpecializationRequest {
+    pub function_name: *const std::os::raw::c_char,
+    pub specialized_name: *const std::os::raw::c_char,
+    pub env: *mut CDslxParametricEnv,
+}
+
+#[repr(C)]
 pub struct CDslxInvocationRewriteRule {
     pub from_callee: *mut CDslxFunction,
     pub to_callee: *mut CDslxFunction,
@@ -1118,6 +1125,16 @@ extern "C" {
         result_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
+    pub fn xls_dslx_typechecked_module_insert_function_specializations(
+        typechecked_module: *mut CDslxTypecheckedModule,
+        requests: *const XlsDslxFunctionSpecializationRequest,
+        request_count: libc::size_t,
+        import_data: *mut CDslxImportData,
+        install_subject: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxTypecheckedModule,
+    ) -> bool;
+
     // bool xls_schedule_and_codegen_package(
     // struct xls_package* p, const char* scheduling_options_flags_proto,
     // const char* codegen_flags_proto, bool with_delay_model, char** error_out,
@@ -1431,7 +1448,6 @@ extern "C" {
         env_out: *mut *mut CDslxParametricEnv,
     ) -> bool;
     pub fn xls_dslx_parametric_env_free(env: *mut CDslxParametricEnv);
-
     pub fn xls_dslx_parametric_env_clone(env: *const CDslxParametricEnv)
         -> *mut CDslxParametricEnv;
     pub fn xls_dslx_parametric_env_equals(
@@ -1486,7 +1502,7 @@ extern "C" {
     ) -> bool;
 
     pub fn xls_dslx_interp_value_convert_to_ir(
-        value: *mut CDslxInterpValue,
+        value: *const CDslxInterpValue,
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CIrValue,
     ) -> bool;
