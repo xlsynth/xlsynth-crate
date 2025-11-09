@@ -25,10 +25,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
+use xlsynth_prover::prover::types::AssertionSemantics;
+use xlsynth_prover::prover::types::EquivParallelism;
+use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 use xlsynth_prover::prover::SolverChoice;
-use xlsynth_prover::types::AssertionSemantics;
-use xlsynth_prover::types::EquivParallelism;
-use xlsynth_prover::types::QuickCheckAssertionSemantics;
 
 fn add_flag(cmd: &mut Command, name: &str, value: &str) {
     cmd.arg(format!("--{}", name)).arg(value);

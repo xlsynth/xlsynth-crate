@@ -16,11 +16,11 @@ use xlsynth::dslx::{self, MatchableModuleMember, TypecheckedModule};
 use xlsynth::{DslxConvertOptions, IrPackage, mangle_dslx_name, optimize_ir};
 
 use crate::ir_utils;
-use crate::prover::{SolverChoice, prover_for_choice};
-use crate::toolchain;
-use crate::types::{
+use crate::prover::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
+use crate::prover::{SolverChoice, prover_for_choice};
+use crate::toolchain_shim;
 
 /// DSLX side description passed into [`run_dslx_equiv`].
 pub struct DslxModule<'a> {
@@ -318,7 +318,7 @@ fn prepare_side(
         let module_path = module.path.ok_or_else(|| {
             "--tool_path requires DSLX modules to carry a filesystem path".to_string()
         })?;
-        let mut ir_text = toolchain::run_ir_converter_main(
+        let mut ir_text = toolchain_shim::run_ir_converter_main(
             options.tool_path.unwrap(),
             module_path,
             Some(module.top),
@@ -330,8 +330,9 @@ fn prepare_side(
         )
         .map_err(|e| e)?;
         if options.optimize {
-            ir_text = toolchain::run_opt_main(options.tool_path.unwrap(), &ir_text, &mangled_top)
-                .map_err(|e| e)?;
+            ir_text =
+                toolchain_shim::run_opt_main(options.tool_path.unwrap(), &ir_text, &mangled_top)
+                    .map_err(|e| e)?;
         }
         ir_text
     } else {

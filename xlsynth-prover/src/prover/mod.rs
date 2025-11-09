@@ -1,18 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap,
-    fmt,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, fmt, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{
+pub mod assertion_filter;
+pub mod enum_in_bound;
+pub mod external_prover;
+pub mod ir_equiv;
+pub mod quickcheck;
+pub mod translate;
+pub mod types;
+pub mod uf;
+
+pub use external_prover::ExternalProver;
+
+use self::quickcheck::build_assert_label_regex;
+use self::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckRunResult,
 };
-use crate::{prove_quickcheck::build_assert_label_regex, solver::SolverConfig};
+use crate::solver::SolverConfig;
 use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -82,7 +90,6 @@ impl FromStr for SolverChoice {
     }
 }
 
-use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
 use xlsynth_pir::{ir, ir_parser};
 
 pub trait Prover {
@@ -167,7 +174,7 @@ impl<S: SolverConfig> Prover for S {
         let lhs = ProverFn::new(lhs_top, Some(&lhs_pkg));
         let rhs = ProverFn::new(rhs_top, Some(&rhs_pkg));
 
-        crate::prove_equiv::prove_ir_fn_equiv::<S::Solver>(
+        ir_equiv::prove_ir_fn_equiv::<S::Solver>(
             self,
             &lhs,
             &rhs,
@@ -195,7 +202,7 @@ impl<S: SolverConfig> Prover for S {
         }
         let assert_label_regex = build_assert_label_regex(assert_label_filter);
         match strategy {
-            EquivParallelism::SingleThreaded => crate::prove_equiv::prove_ir_fn_equiv::<S::Solver>(
+            EquivParallelism::SingleThreaded => ir_equiv::prove_ir_fn_equiv::<S::Solver>(
                 self,
                 lhs,
                 rhs,
@@ -211,7 +218,7 @@ impl<S: SolverConfig> Prover for S {
                         "Output-bits strategy does not support parameter domains".to_string(),
                     );
                 }
-                crate::prove_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
+                ir_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
                     self,
                     lhs,
                     rhs,
@@ -228,7 +235,7 @@ impl<S: SolverConfig> Prover for S {
                         "Input-bit-split strategy does not support parameter domains".to_string(),
                     );
                 }
-                crate::prove_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
+                ir_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
                     self,
                     lhs,
                     rhs,
@@ -249,7 +256,7 @@ impl<S: SolverConfig> Prover for S {
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
         let assert_label_regex = build_assert_label_regex(assert_label_filter);
-        crate::prove_quickcheck::prove_ir_quickcheck::<S::Solver>(
+        quickcheck::prove_ir_quickcheck::<S::Solver>(
             self,
             ir_fn,
             assertion_semantics,
@@ -267,208 +274,13 @@ impl<S: SolverConfig> Prover for S {
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
     ) -> Vec<QuickCheckRunResult> {
-        crate::prove_quickcheck::prove_dslx_quickcheck::<S>(
+        quickcheck::prove_dslx_quickcheck::<S>(
             self,
             entry_file,
             dslx_stdlib_path,
             additional_search_paths,
             test_filter,
             assertion_semantics,
-            assert_label_filter,
-            uf_map,
-        )
-    }
-}
-
-impl From<ToolchainEquivResult> for EquivResult {
-    fn from(result: ToolchainEquivResult) -> Self {
-        match result {
-            ToolchainEquivResult::Proved => EquivResult::Proved,
-            ToolchainEquivResult::Disproved(msg) => EquivResult::ToolchainDisproved(msg),
-            ToolchainEquivResult::Error(msg) => EquivResult::Error(msg),
-        }
-    }
-}
-
-pub enum ExternalProver {
-    ToolExe(PathBuf),
-    ToolDir(PathBuf),
-    Toolchain,
-}
-
-impl Prover for ExternalProver {
-    fn prove_ir_pkg_text_equiv(
-        self: &Self,
-        lhs_pkg_text: &str,
-        rhs_pkg_text: &str,
-        top: Option<&str>,
-    ) -> EquivResult {
-        match self {
-            ExternalProver::ToolExe(path) => {
-                prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_exe(
-                    lhs_pkg_text,
-                    rhs_pkg_text,
-                    top,
-                    path,
-                )
-                .into()
-            }
-            ExternalProver::ToolDir(path) => {
-                prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
-                    lhs_pkg_text,
-                    rhs_pkg_text,
-                    top,
-                    path,
-                )
-                .into()
-            }
-            ExternalProver::Toolchain => match std::env::var("XLSYNTH_TOOLS") {
-                Ok(dir) => ExternalProver::ToolDir(PathBuf::from(dir)).prove_ir_pkg_text_equiv(
-                    lhs_pkg_text,
-                    rhs_pkg_text,
-                    top,
-                ),
-                Err(_) => EquivResult::Error(
-                    "XLSYNTH_TOOLS is not set; cannot run toolchain equivalence".to_string(),
-                ),
-            },
-        }
-    }
-
-    fn prove_ir_equiv<'a>(
-        self: &Self,
-        lhs: &ProverFn<'a>,
-        rhs: &ProverFn<'a>,
-        strategy: EquivParallelism,
-        assertion_semantics: AssertionSemantics,
-        assert_label_filter: Option<&str>,
-        allow_flatten: bool,
-    ) -> EquivResult {
-        if !lhs.uf_map.is_empty() || !rhs.uf_map.is_empty() {
-            return EquivResult::Error("External provers do not support UFs".to_string());
-        }
-        match strategy {
-            EquivParallelism::SingleThreaded => {
-                if lhs.fixed_implicit_activation || rhs.fixed_implicit_activation {
-                    return EquivResult::Error(
-                        "External provers do not support fixed implicit activation".to_string(),
-                    );
-                }
-                if (lhs.domains.is_some() && lhs.domains.as_ref().unwrap().len() != 0)
-                    || (rhs.domains.is_some() && rhs.domains.as_ref().unwrap().len() != 0)
-                {
-                    println!(
-                        "Warning: External provers do not support domains for arguments. Enums will be treated as possibly out of bounds."
-                    );
-                }
-                if assertion_semantics != AssertionSemantics::Same {
-                    return EquivResult::Error(
-                        "External provers do not support assertion semantics".to_string(),
-                    );
-                }
-                if assert_label_filter.is_some() {
-                    return EquivResult::Error(
-                        "External provers do not support assertion label filters".to_string(),
-                    );
-                }
-                if allow_flatten {
-                    return EquivResult::Error(
-                        "External provers do not support flattening".to_string(),
-                    );
-                }
-                let lhs_pkg = match lhs.pkg_ref {
-                    Some(pkg) => pkg.to_string(),
-                    None => format!("package lhs\n\ntop {}\n", lhs.fn_ref.to_string()),
-                };
-                let rhs_pkg = match rhs.pkg_ref {
-                    Some(pkg) => pkg.to_string(),
-                    None => format!("package rhs\n\ntop {}\n", rhs.fn_ref.to_string()),
-                };
-                fn unify_toolchain_tops<'a>(
-                    lhs_ir: &'a str,
-                    rhs_ir: &'a str,
-                    lhs_top: &str,
-                    rhs_top: &str,
-                ) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>, String)
-                {
-                    if lhs_top == rhs_top {
-                        return (
-                            std::borrow::Cow::Borrowed(lhs_ir),
-                            std::borrow::Cow::Borrowed(rhs_ir),
-                            lhs_top.to_string(),
-                        );
-                    }
-                    let unified = lhs_top.to_string();
-                    let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
-                    (
-                        std::borrow::Cow::Borrowed(lhs_ir),
-                        std::borrow::Cow::Owned(rhs_rewritten),
-                        unified,
-                    )
-                }
-
-                let (lhs_unified, rhs_unified, unified_top) =
-                    unify_toolchain_tops(&lhs_pkg, &rhs_pkg, &lhs.fn_ref.name, &rhs.fn_ref.name);
-
-                self.prove_ir_pkg_text_equiv(&lhs_unified, &rhs_unified, Some(&unified_top))
-            }
-            EquivParallelism::OutputBits => {
-                if assert_label_filter.is_some() {
-                    return EquivResult::Error(
-                        "External provers do not support assertion label filters".to_string(),
-                    );
-                }
-                EquivResult::Error(
-                    "External provers do not support output-bits parallel strategy".to_string(),
-                )
-            }
-            EquivParallelism::InputBitSplit => {
-                if assert_label_filter.is_some() {
-                    return EquivResult::Error(
-                        "External provers do not support assertion label filters".to_string(),
-                    );
-                }
-                EquivResult::Error(
-                    "External provers do not support input-bit split strategy".to_string(),
-                )
-            }
-        }
-    }
-
-    fn prove_ir_quickcheck<'a>(
-        self: &Self,
-        _ir_fn: &ProverFn<'a>,
-        _assertion_semantics: QuickCheckAssertionSemantics,
-        assert_label_filter: Option<&str>,
-    ) -> BoolPropertyResult {
-        if assert_label_filter.is_some() {
-            return BoolPropertyResult::ToolchainDisproved(
-                "External provers do not support assertion label filters".to_string(),
-            );
-        }
-        BoolPropertyResult::ToolchainDisproved(
-            "External provers do not support IR-level quickcheck; use prove_dslx_quickcheck"
-                .to_string(),
-        )
-    }
-
-    fn prove_dslx_quickcheck(
-        &self,
-        entry_file: &std::path::Path,
-        dslx_stdlib_path: Option<&std::path::Path>,
-        additional_search_paths: &[&std::path::Path],
-        test_filter: Option<&str>,
-        _assertion_semantics: QuickCheckAssertionSemantics,
-        assert_label_filter: Option<&str>,
-        uf_map: &HashMap<String, String>,
-    ) -> Vec<QuickCheckRunResult> {
-        crate::toolchain::prove_dslx_quickcheck_full_via_toolchain(
-            self,
-            entry_file,
-            dslx_stdlib_path,
-            additional_search_paths,
-            test_filter,
-            _assertion_semantics,
             assert_label_filter,
             uf_map,
         )

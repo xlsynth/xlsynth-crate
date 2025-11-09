@@ -511,7 +511,7 @@ pub fn execute_command_with_context(
 // DSLX helpers shared across subcommands
 // -----------------------------------------------------------------------------
 
-use xlsynth_prover::types::ParamDomains;
+use xlsynth_prover::prover::types::ParamDomains;
 
 pub fn get_enum_domain(
     tcm: &xlsynth::dslx::TypecheckedModule,

@@ -4,10 +4,8 @@ use std::collections::HashMap;
 
 use xlsynth::IrValue;
 
-use crate::{
-    solver::{BitVec, Solver},
-    types::{Assertion, FnInputs, IrTypedBitVec, ProverFn, SmtFn, UfRegistry},
-};
+use super::types::{Assertion, FnInputs, IrTypedBitVec, ProverFn, SmtFn, UfRegistry};
+use crate::solver::{BitVec, Solver};
 use xlsynth_pir::{
     ir::{self, NaryOp, NodePayload, NodeRef, Unop},
     ir_utils::get_topological,

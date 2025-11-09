@@ -2,14 +2,14 @@
 
 use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
 use crate::toolchain_config::ToolchainConfig;
-use xlsynth_prover::types::EquivParallelism;
+use xlsynth_prover::prover::types::EquivParallelism;
 
 use xlsynth_pir::ir::{
     self as ir_mod, BlockPortInfo, FileTable, MemberType, Package, PackageMember,
 };
 use xlsynth_pir::ir_parser;
+use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::SolverChoice;
-use xlsynth_prover::types::AssertionSemantics;
 
 use std::path::Path;
 

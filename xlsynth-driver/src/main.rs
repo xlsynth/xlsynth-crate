@@ -83,8 +83,8 @@ use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
-use xlsynth_prover::types::AssertionSemantics;
-use xlsynth_prover::types::QuickCheckAssertionSemantics;
+use xlsynth_prover::prover::types::AssertionSemantics;
+use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 
 static DEFAULT_ADDER_MAPPING: Lazy<String> =
     Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());

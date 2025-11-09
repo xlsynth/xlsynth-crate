@@ -12,8 +12,8 @@ use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConf
 
 use serde::Serialize;
 use std::path::PathBuf;
+use xlsynth_prover::prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
 use xlsynth_prover::prover::{Prover, SolverChoice};
-use xlsynth_prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckTestOutcome {

@@ -3,10 +3,10 @@
 //! Library helpers for IR equivalence flows shared by multiple driver commands.
 
 use crate::ir_utils;
-use crate::prover::{SolverChoice, prover_for_choice};
-use crate::types::{
+use crate::prover::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
+use crate::prover::{SolverChoice, prover_for_choice};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;

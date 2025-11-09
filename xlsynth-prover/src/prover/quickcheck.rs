@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    solver::{BitVec, Response, Solver, SolverConfig},
+use super::types::{
+    AssertionViolation, BoolPropertyResult, FnInput, FnOutput, ProverFn,
+    QuickCheckAssertionSemantics, QuickCheckRunResult, UfRegistry,
+};
+use super::{
+    assertion_filter,
     translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
-    types::{
-        AssertionViolation, BoolPropertyResult, FnInput, FnOutput, ProverFn,
-        QuickCheckAssertionSemantics, QuickCheckRunResult, UfRegistry,
-    },
     uf::infer_uf_signatures,
 };
+use crate::solver::{BitVec, Response, Solver, SolverConfig};
 
 use regex::Regex;
 use std::collections::HashMap;
@@ -111,7 +112,7 @@ where
 
     // Optionally filter assertions by label before applying semantics.
     let filtered_assertions =
-        crate::assertion_filter::filter_assertions(&smt_fn.assertions, assert_label_include);
+        assertion_filter::filter_assertions(&smt_fn.assertions, assert_label_include);
 
     // Build a 1-bit flag that is `1` iff *all* selected in-function assertions
     // pass.
@@ -355,7 +356,7 @@ where
 #[cfg(test)]
 mod test_utils {
     use super::*;
-    use crate::types::{ParamDomains, ProverFn};
+    use crate::prover::types::{ParamDomains, ProverFn};
     use xlsynth::IrValue;
     use xlsynth_pir::ir_parser::Parser;
 
@@ -657,7 +658,7 @@ macro_rules! quickcheck_test_with_solver {
         #[cfg(test)]
         mod $mod_ident {
             use super::*;
-            use crate::prove_quickcheck::test_utils;
+            use crate::prover::quickcheck::test_utils;
 
             #[test]
             fn always_true_proved_ignore() {

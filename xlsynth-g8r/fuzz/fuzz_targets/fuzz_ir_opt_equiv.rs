@@ -11,8 +11,8 @@ use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
-use xlsynth_prover::prove_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
-use xlsynth_prover::types::{AssertionSemantics, EquivResult, ProverFn};
+use xlsynth_prover::prover::ir_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
 
 // Insert helper that checks consistency among the external tool, a primary
 // solver result, and an optional per-bit parallel solver result.

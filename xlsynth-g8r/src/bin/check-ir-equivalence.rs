@@ -36,9 +36,9 @@ fn parse_package(path: &str) -> Package {
 
 #[cfg(feature = "has-bitwuzla")]
 fn main_has_bitwuzla(args: Args) {
-    use xlsynth_prover::prove_equiv::prove_ir_fn_equiv;
+    use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
+    use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
     use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
-    use xlsynth_prover::types::{AssertionSemantics, EquivResult, ProverFn};
 
     let pkg1 = parse_package(&args.ir1);
     let pkg2 = parse_package(&args.ir2);

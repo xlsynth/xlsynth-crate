@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::types::UfSignature;
+use super::types::UfSignature;
 
 /// Infers UF signatures for the provided package and map from functions to UF
 /// names.

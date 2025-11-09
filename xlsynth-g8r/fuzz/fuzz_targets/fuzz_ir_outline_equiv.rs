@@ -11,8 +11,8 @@ use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
-use xlsynth_prover::prove_equiv::prove_ir_fn_equiv;
-use xlsynth_prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
+use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
 
 use xlsynth_pir::ir::{Fn as IrFn, NodeRef, PackageMember};
 use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};

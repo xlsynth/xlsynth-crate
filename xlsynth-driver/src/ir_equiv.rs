@@ -5,9 +5,9 @@ use serde::Serialize;
 use std::path::Path;
 use xlsynth_prover::ir_equiv::run_ir_equiv as prover_run_ir_equiv;
 pub use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule};
+use xlsynth_prover::prover::types::EquivParallelism;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivReport};
 use xlsynth_prover::prover::SolverChoice;
-use xlsynth_prover::types::EquivParallelism;
-use xlsynth_prover::types::{AssertionSemantics, EquivReport};
 
 const SUBCOMMAND: &str = "ir-equiv";
 

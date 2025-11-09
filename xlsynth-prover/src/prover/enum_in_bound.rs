@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::types::{BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAssertionSemantics};
 use crate::prover::Prover;
-use crate::types::{BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAssertionSemantics};
 
 use std::collections::HashMap;
 use xlsynth::IrValue;

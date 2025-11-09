@@ -2,7 +2,7 @@
 
 use regex::Regex;
 
-use crate::types::Assertion;
+use super::types::Assertion;
 
 pub fn filter_assertions<'a, R>(
     assertions: &'a [Assertion<'a, R>],

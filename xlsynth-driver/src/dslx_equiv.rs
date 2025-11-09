@@ -10,8 +10,8 @@ use crate::proofs::script::{
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 use std::path::Path;
 use xlsynth_prover::dslx_equiv::{run_dslx_equiv, DslxEquivRequest, DslxModule};
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism};
 use xlsynth_prover::prover::SolverChoice;
-use xlsynth_prover::types::{AssertionSemantics, EquivParallelism};
 
 const SUBCOMMAND: &str = "dslx-equiv";
 
