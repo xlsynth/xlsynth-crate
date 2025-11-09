@@ -7,7 +7,6 @@ use crate::prover::{SolverChoice, prover_for_choice};
 use crate::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, IrFn, ParamDomains, ProverFn,
 };
-use crate::uf::{infer_uf_signatures, merge_uf_signatures};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
@@ -168,13 +167,6 @@ pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String>
 
     let assert_label_filter = request.assert_label_filter;
 
-    let mut uf_signatures = HashMap::new();
-    if matches!(request.parallelism, EquivParallelism::SingleThreaded) {
-        let lhs_uf_sigs = infer_uf_signatures(&lhs_pkg, request.lhs.uf_map.as_ref())?;
-        let rhs_uf_sigs = infer_uf_signatures(&rhs_pkg, request.rhs.uf_map.as_ref())?;
-        uf_signatures = merge_uf_signatures(lhs_uf_sigs, &rhs_uf_sigs)?;
-    }
-
     let lhs_side = ProverFn {
         ir_fn: &lhs_ir_fn,
         domains: request.lhs.param_domains.map(|d| d.clone()),
@@ -194,7 +186,6 @@ pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String>
         request.assertion_semantics,
         assert_label_filter,
         request.flatten_aggregates,
-        &uf_signatures,
     );
     let duration = start_time.elapsed();
 

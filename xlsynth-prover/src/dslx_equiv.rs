@@ -21,7 +21,6 @@ use crate::toolchain;
 use crate::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, IrFn, ParamDomains, ProverFn,
 };
-use crate::uf::{infer_uf_signatures, merge_uf_signatures};
 
 /// DSLX side description passed into [`run_dslx_equiv`].
 pub struct DslxModule<'a> {
@@ -278,13 +277,6 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
     );
     let assert_label_filter = request.assert_label_filter;
 
-    let mut uf_signatures = HashMap::new();
-    if matches!(request.parallelism, EquivParallelism::SingleThreaded) {
-        let lhs_uf = infer_uf_signatures(&lhs_pkg, request.lhs.uf_map.as_ref())?;
-        let rhs_uf = infer_uf_signatures(&rhs_pkg, request.rhs.uf_map.as_ref())?;
-        uf_signatures = merge_uf_signatures(lhs_uf, &rhs_uf)?;
-    }
-
     let lhs_side = ProverFn {
         ir_fn: &lhs_ir_fn,
         domains: lhs_ir.param_domains.clone(),
@@ -303,7 +295,6 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
         request.assertion_semantics,
         assert_label_filter,
         request.flatten_aggregates,
-        &uf_signatures,
     );
 
     let duration = start.elapsed();

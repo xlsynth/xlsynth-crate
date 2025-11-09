@@ -79,3 +79,16 @@ pub fn merge_uf_signatures(
     }
     Ok(lhs)
 }
+
+/// Convenience helper that infers UF signatures for both sides of an
+/// equivalence proof and merges them, ensuring there are no conflicts.
+pub fn infer_merged_uf_signatures(
+    lhs_pkg: &xlsynth_pir::ir::Package,
+    lhs_map: &HashMap<String, String>,
+    rhs_pkg: &xlsynth_pir::ir::Package,
+    rhs_map: &HashMap<String, String>,
+) -> Result<HashMap<String, UfSignature>, String> {
+    let lhs = infer_uf_signatures(lhs_pkg, lhs_map)?;
+    let rhs = infer_uf_signatures(rhs_pkg, rhs_map)?;
+    merge_uf_signatures(lhs, &rhs)
+}

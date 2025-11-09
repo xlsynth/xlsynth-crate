@@ -5,8 +5,9 @@ use crate::{
     translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
     types::{
         AssertionViolation, BoolPropertyResult, FnInput, FnOutput, IrFn, ProverFn,
-        QuickCheckAssertionSemantics, QuickCheckRunResult, UfRegistry, UfSignature,
+        QuickCheckAssertionSemantics, QuickCheckRunResult, UfRegistry,
     },
+    uf::infer_uf_signatures,
 };
 
 use regex::Regex;
@@ -43,13 +44,11 @@ where
         domains: None,
         uf_map: HashMap::new(),
     };
-    let empty_signatures: HashMap<String, UfSignature> = HashMap::new();
     prove_ir_quickcheck::<S>(
         solver_config,
         &prover_fn,
         assertion_semantics,
         assert_label_include,
-        &empty_signatures,
     )
 }
 
@@ -59,7 +58,6 @@ pub fn prove_ir_quickcheck<'a, S>(
     prover_fn: &ProverFn<'a>,
     assertion_semantics: QuickCheckAssertionSemantics,
     assert_label_include: Option<&Regex>,
-    uf_signatures: &HashMap<String, UfSignature>,
 ) -> BoolPropertyResult
 where
     S: Solver,
@@ -100,7 +98,22 @@ where
         }
     }
 
-    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, uf_signatures);
+    let uf_signatures = if prover_fn.uf_map.is_empty() {
+        HashMap::new()
+    } else {
+        match prover_fn.ir_fn.pkg_ref {
+            Some(pkg) => match infer_uf_signatures(pkg, &prover_fn.uf_map) {
+                Ok(sigs) => sigs,
+                Err(e) => return BoolPropertyResult::Error(e),
+            },
+            None => {
+                return BoolPropertyResult::Error(
+                    "UF mapping provided but package reference missing for quickcheck".to_string(),
+                );
+            }
+        }
+    };
+    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, &uf_signatures);
     let smt_fn = ir_to_smt(&mut solver, &fn_inputs, &prover_fn.uf_map, &uf_registry);
 
     // Optionally filter assertions by label before applying semantics.
@@ -244,59 +257,6 @@ pub(crate) fn load_quickcheck_context(
     (dslx_contents, quickchecks)
 }
 
-pub(crate) fn infer_uf_signatures_from_map(
-    pkg: &ir::Package,
-    uf_map: &HashMap<String, String>,
-) -> HashMap<String, UfSignature> {
-    let mut uf_sigs = HashMap::new();
-    for (fn_name, uf_sym) in uf_map {
-        let (ir_fn, skip_implicit) = match pkg.get_fn(fn_name) {
-            Some(f) => (f, false),
-            None => {
-                let itok_name = format!("__itok{}", fn_name);
-                match pkg.get_fn(&itok_name) {
-                    Some(f) => (f, true),
-                    None => {
-                        panic!(
-                            "Unknown function '{}' when inferring UF signature for symbol '{}'",
-                            fn_name, uf_sym
-                        );
-                    }
-                }
-            }
-        };
-
-        let arg_widths: Vec<usize> = if skip_implicit {
-            ir_fn
-                .params
-                .iter()
-                .skip(2)
-                .map(|p| p.ty.bit_count())
-                .collect()
-        } else {
-            ir_fn.params.iter().map(|p| p.ty.bit_count()).collect()
-        };
-        let ret_width = ir_fn.ret_ty.bit_count();
-        let sig = UfSignature {
-            arg_widths,
-            ret_width,
-        };
-
-        if let Some(prev) = uf_sigs.get(uf_sym) {
-            if prev != &sig {
-                panic!(
-                    "Conflicting UF signature for symbol '{}': {:?} vs {:?}",
-                    uf_sym, prev, sig
-                );
-            }
-        } else {
-            uf_sigs.insert(uf_sym.clone(), sig);
-        }
-    }
-
-    uf_sigs
-}
-
 pub(crate) fn prove_dslx_quickcheck<SConfig>(
     solver_config: &SConfig,
     entry_file: &Path,
@@ -339,8 +299,6 @@ where
         .file_stem()
         .and_then(|s| s.to_str())
         .expect("valid module name");
-
-    let uf_signatures = infer_uf_signatures_from_map(&pkg, uf_map);
 
     let mut results = Vec::with_capacity(quickchecks.len());
     for (quickcheck_name, requires_itok) in quickchecks {
@@ -397,7 +355,6 @@ where
             &prover_fn,
             assertion_semantics,
             assert_label_regex.as_ref(),
-            &uf_signatures,
         );
 
         results.push(QuickCheckRunResult {
@@ -625,14 +582,6 @@ mod test_utils {
         let mut uf_map: HashMap<String, String> = HashMap::new();
         uf_map.insert("g".to_string(), "F".to_string());
         uf_map.insert("h".to_string(), "F".to_string());
-        let mut uf_sigs: HashMap<String, crate::types::UfSignature> = HashMap::new();
-        uf_sigs.insert(
-            "F".to_string(),
-            crate::types::UfSignature {
-                arg_widths: vec![8],
-                ret_width: 8,
-            },
-        );
 
         let prover_fn = ProverFn {
             ir_fn: &ir_fn,
@@ -645,7 +594,6 @@ mod test_utils {
             &prover_fn,
             QuickCheckAssertionSemantics::Assume,
             None,
-            &uf_sigs,
         );
         assert!(matches!(res, super::BoolPropertyResult::Proved));
     }
@@ -677,15 +625,12 @@ mod test_utils {
             domains: None,
             uf_map: std::collections::HashMap::new(),
         };
-        let empty_signatures =
-            std::collections::HashMap::<String, crate::types::UfSignature>::new();
 
         let res_no_filter = super::prove_ir_quickcheck::<S>(
             solver_config,
             &prover_fn,
             QuickCheckAssertionSemantics::Never,
             None,
-            &empty_signatures,
         );
         assert!(matches!(
             res_no_filter,
@@ -699,7 +644,6 @@ mod test_utils {
             &prover_fn,
             QuickCheckAssertionSemantics::Never,
             Some(&include),
-            &empty_signatures,
         );
         assert!(matches!(res_filtered, super::BoolPropertyResult::Proved));
     }
@@ -746,14 +690,12 @@ mod test_utils {
             domains: Some(domains),
             uf_map: HashMap::new(),
         };
-        let empty_signatures: HashMap<String, crate::types::UfSignature> = HashMap::new();
 
         let res_with_domains = super::prove_ir_quickcheck::<S>(
             solver_config,
             &prover_fn,
             QuickCheckAssertionSemantics::Ignore,
             None,
-            &empty_signatures,
         );
         assert!(matches!(
             res_with_domains,

@@ -12,6 +12,7 @@ use crate::types::{
     Assertion, AssertionSemantics, AssertionViolation, EquivResult, FnInput, FnInputs, FnOutput,
     IrFn, IrTypedBitVec, ParamDomains, ProverFn, SmtFn, UfRegistry, UfSignature,
 };
+use crate::uf::infer_merged_uf_signatures;
 use regex::Regex;
 use xlsynth_pir::ir;
 pub struct AlignedFnInputs<'a, R> {
@@ -292,8 +293,32 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     assertion_semantics: AssertionSemantics,
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
-    uf_signatures: &HashMap<String, UfSignature>,
 ) -> EquivResult {
+    let uf_signatures: HashMap<String, UfSignature> =
+        if lhs.uf_map.is_empty() && rhs.uf_map.is_empty() {
+            HashMap::new()
+        } else {
+            let lhs_pkg = match lhs.ir_fn.pkg_ref {
+                Some(pkg) => pkg,
+                None => {
+                    return EquivResult::Error(
+                        "UF map provided for LHS but no package reference available".to_string(),
+                    );
+                }
+            };
+            let rhs_pkg = match rhs.ir_fn.pkg_ref {
+                Some(pkg) => pkg,
+                None => {
+                    return EquivResult::Error(
+                        "UF map provided for RHS but no package reference available".to_string(),
+                    );
+                }
+            };
+            match infer_merged_uf_signatures(lhs_pkg, &lhs.uf_map, rhs_pkg, &rhs.uf_map) {
+                Ok(sigs) => sigs,
+                Err(e) => return EquivResult::Error(e),
+            }
+        };
     let mut solver = S::new(solver_config).unwrap();
     let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.ir_fn.clone(), Some("lhs"));
     let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.ir_fn.clone(), Some("rhs"));
@@ -324,7 +349,7 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     assert_domains(&fn_inputs_lhs, &lhs.domains);
     assert_domains(&fn_inputs_rhs, &rhs.domains);
 
-    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, uf_signatures);
+    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, &uf_signatures);
 
     let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
     let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &uf_registry);
@@ -361,7 +386,6 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
         assertion_semantics,
         assert_label_include,
         allow_flatten,
-        &HashMap::new(),
     )
 }
 
@@ -685,15 +709,6 @@ pub mod test_utils {
         lhs_uf_map.insert("g".to_string(), "F".to_string());
         let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
         rhs_uf_map.insert("h".to_string(), "F".to_string());
-        let mut uf_sigs: HashMap<String, super::UfSignature> = HashMap::new();
-        uf_sigs.insert(
-            "F".to_string(),
-            super::UfSignature {
-                arg_widths: vec![8],
-                ret_width: 8,
-            },
-        );
-
         let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
             &super::ProverFn {
@@ -717,7 +732,6 @@ pub mod test_utils {
             super::AssertionSemantics::Same,
             None,
             false,
-            &uf_sigs,
         );
         assert!(matches!(res_uf, super::EquivResult::Proved));
     }
@@ -764,15 +778,6 @@ pub mod test_utils {
         lhs_uf_map.insert("inner_g".to_string(), "F".to_string());
         let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
         rhs_uf_map.insert("inner_h".to_string(), "F".to_string());
-        let mut uf_sigs: HashMap<String, super::UfSignature> = HashMap::new();
-        uf_sigs.insert(
-            "F".to_string(),
-            super::UfSignature {
-                arg_widths: vec![4],
-                ret_width: 4,
-            },
-        );
-
         let res = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
             &super::ProverFn {
@@ -796,7 +801,6 @@ pub mod test_utils {
             super::AssertionSemantics::Same,
             None,
             false,
-            &uf_sigs,
         );
         assert!(matches!(res, super::EquivResult::Proved));
     }
@@ -855,15 +859,6 @@ pub mod test_utils {
         let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
         rhs_uf_map.insert("h".to_string(), "F".to_string());
         // Two 4-bit data args, 8-bit result.
-        let mut uf_sigs: HashMap<String, super::UfSignature> = HashMap::new();
-        uf_sigs.insert(
-            "F".to_string(),
-            super::UfSignature {
-                arg_widths: vec![4, 4],
-                ret_width: 8,
-            },
-        );
-
         let res_uf = super::prove_ir_fn_equiv_full::<S>(
             solver_config,
             &super::ProverFn {
@@ -887,7 +882,6 @@ pub mod test_utils {
             super::AssertionSemantics::Same,
             None,
             false,
-            &uf_sigs,
         );
         assert!(matches!(res_uf, super::EquivResult::Proved));
     }
@@ -963,7 +957,6 @@ pub mod test_utils {
             super::AssertionSemantics::Same,
             Some(&include),
             false,
-            &std::collections::HashMap::new(),
         );
         assert!(matches!(res_filtered, super::EquivResult::Proved));
     }
@@ -2647,7 +2640,6 @@ pub mod test_utils {
             AssertionSemantics::Same,
             None,
             false,
-            &HashMap::new(),
         );
         assert!(matches!(res2, super::EquivResult::Proved));
     }

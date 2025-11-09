@@ -397,7 +397,6 @@ pub fn prove_enum_in_bound(
         &prover_fn,
         QuickCheckAssertionSemantics::Never,
         Some(label_regex.as_str()),
-        &HashMap::new(),
     )
 }
 
