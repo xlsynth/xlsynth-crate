@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use xlsynth::IrValue;
 
 use crate::{
-    solver_interface::{BitVec, Solver},
+    solver::{BitVec, Solver},
     types::{Assertion, FnInputs, IrTypedBitVec, ProverFn, SmtFn, UfRegistry},
 };
 use xlsynth_pir::{

@@ -49,7 +49,7 @@ use bitwuzla_sys::{
 };
 use xlsynth::IrBits;
 
-use crate::solver_interface::{BitVec, Response, Solver, SolverConfig, Uf};
+use super::{BitVec, Response, Solver, SolverConfig, Uf};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_value_utils::ir_value_from_bits_with_type;
 

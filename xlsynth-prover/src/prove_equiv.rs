@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use xlsynth::IrValue;
 
-use crate::solver_interface::{BitVec, Response, Solver};
+use crate::solver::{BitVec, Response, Solver};
 use crate::translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv};
 use crate::types::{
     Assertion, AssertionSemantics, AssertionViolation, EquivResult, FnInput, FnInputs, FnOutput,
@@ -576,7 +576,7 @@ pub mod test_utils {
             AssertionSemantics, EquivResult, FnInputs, ParamDomains, align_fn_inputs,
             get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
         },
-        solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
+        solver::{BitVec, Solver, test_utils::assert_solver_eq},
         types::ProverFn,
     };
     use xlsynth_pir::{ir, ir_parser};
@@ -1117,11 +1117,7 @@ pub mod test_utils {
         let bv = ir_value_to_bv(&mut solver, &ir_value, &ir_type);
         assert_eq!(bv.ir_type, ir_type);
         let expected_value = expected(&mut solver);
-        crate::solver_interface::test_utils::assert_solver_eq(
-            &mut solver,
-            &bv.bitvec,
-            &expected_value,
-        );
+        crate::solver::test_utils::assert_solver_eq(&mut solver, &bv.bitvec, &expected_value);
     }
 
     fn assert_ir_fn_equiv_base_with_implicit_token_policy<S: Solver>(
@@ -1405,11 +1401,7 @@ pub mod test_utils {
         let x = fn_inputs.inputs.get("x").unwrap().bitvec.clone();
         let y = fn_inputs.inputs.get("y").unwrap().bitvec.clone();
         let expected = binop(&mut solver, &x, &y);
-        crate::solver_interface::test_utils::assert_solver_eq(
-            &mut solver,
-            &smt_fn.output.bitvec,
-            &expected,
-        );
+        crate::solver::test_utils::assert_solver_eq(&mut solver, &smt_fn.output.bitvec, &expected);
     }
 
     pub fn test_binop_8_bit<S: Solver>(
@@ -3136,30 +3128,30 @@ macro_rules! test_with_solver {
 #[cfg(feature = "with-bitwuzla-binary-test")]
 test_with_solver!(
     bitwuzla_tests,
-    crate::easy_smt_backend::EasySmtSolver,
-    &crate::easy_smt_backend::EasySmtConfig::bitwuzla()
+    crate::solver::easy_smt::EasySmtSolver,
+    &crate::solver::easy_smt::EasySmtConfig::bitwuzla()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-boolector-binary-test")]
 test_with_solver!(
     boolector_tests,
-    crate::easy_smt_backend::EasySmtSolver,
-    &crate::easy_smt_backend::EasySmtConfig::boolector()
+    crate::solver::easy_smt::EasySmtSolver,
+    &crate::solver::easy_smt::EasySmtConfig::boolector()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-z3-binary-test")]
 test_with_solver!(
     z3_tests,
-    crate::easy_smt_backend::EasySmtSolver,
-    &crate::easy_smt_backend::EasySmtConfig::z3()
+    crate::solver::easy_smt::EasySmtSolver,
+    &crate::solver::easy_smt::EasySmtConfig::z3()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-bitwuzla-built")]
 test_with_solver!(
     bitwuzla_built_tests,
-    crate::bitwuzla_backend::Bitwuzla,
-    &crate::bitwuzla_backend::BitwuzlaOptions::new()
+    crate::solver::bitwuzla::Bitwuzla,
+    &crate::solver::bitwuzla::BitwuzlaOptions::new()
 );

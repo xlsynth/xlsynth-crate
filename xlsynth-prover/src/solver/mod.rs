@@ -6,6 +6,13 @@ use xlsynth::IrValue;
 
 use xlsynth_pir::ir;
 
+#[cfg(feature = "has-bitwuzla")]
+pub mod bitwuzla;
+#[cfg(feature = "has-boolector")]
+pub mod boolector;
+#[cfg(feature = "has-easy-smt")]
+pub mod easy_smt;
+
 #[derive(Debug, PartialEq)]
 pub enum Response {
     Sat,
@@ -864,11 +871,7 @@ pub mod test_utils {
                 let actual = solver.$op(&operand);
                 let expected = solver.numerical($out_w, $out_val);
                 // Assert (via the common helper already in the file)
-                crate::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &actual,
-                    &expected,
-                );
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
             }
         };
     }
@@ -906,11 +909,7 @@ pub mod test_utils {
                 let expected = solver.numerical($out_w, $out_val);
 
                 // Assert (via the common helper already in the file)
-                crate::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &actual,
-                    &expected,
-                );
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
             }
         };
     }
@@ -948,11 +947,7 @@ pub mod test_utils {
                 let operand = solver.numerical($in_w, $in_val);
                 let actual = solver.$op(&operand, $ext_arg);
                 let expected = solver.numerical($out_w, $out_val);
-                crate::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &actual,
-                    &expected,
-                );
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
             }
         };
     }
@@ -973,11 +968,7 @@ pub mod test_utils {
                 let else_val = solver.numerical(8, $else_val);
                 let actual = solver.ite(&cond, &then_val, &else_val);
                 let expected = solver.numerical(8, $expected_val);
-                crate::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &actual,
-                    &expected,
-                );
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
             }
         };
     }
@@ -998,11 +989,7 @@ pub mod test_utils {
                 let rhs = solver.numerical($w, $rhs);
                 let actual = solver.$op(&lhs, &rhs);
                 let expected = solver.numerical(1, $expected);
-                crate::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &actual,
-                    &expected,
-                );
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
             }
         };
     }
@@ -1020,11 +1007,7 @@ pub mod test_utils {
                 let rhs = solver.zero_width();
                 let actual = solver.$op(&lhs, &rhs);
                 let expected = $expected(&mut solver);
-                crate::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &actual,
-                    &expected,
-                );
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
             }
         };
     }
@@ -1049,11 +1032,7 @@ pub mod test_utils {
                 let expected = solver.numerical($out_w, $out_val);
 
                 // Assert (via the common helper already in the file)
-                crate::solver_interface::test_utils::assert_solver_eq(
-                    &mut solver,
-                    &actual,
-                    &expected,
-                );
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
             }
         };
     }
@@ -1077,7 +1056,7 @@ pub mod test_utils {
             let vec_refs: Vec<_> = vec_vals.iter().map(|bv| bv).collect();
             let actual = solver.$method(vec_refs);
             let expected = solver.numerical($wr, $expected);
-            crate::solver_interface::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
+            crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
         }
     };
 }
@@ -1089,8 +1068,8 @@ macro_rules! test_solver {
     ($mod_ident:ident, $solver:expr) => {
         #[cfg(test)]
         mod $mod_ident {
-            use crate::solver_interface::Solver;
-            use crate::solver_interface::test_utils;
+            use crate::solver::Solver;
+            use crate::solver::test_utils;
 
             #[test]
             fn test_bitvec_equiv_basic() {
@@ -1184,10 +1163,7 @@ macro_rules! test_solver {
                 solver.push().unwrap();
                 let ne = solver.ne(&f1, &f2);
                 solver.assert(&ne).unwrap();
-                assert_eq!(
-                    solver.check().unwrap(),
-                    crate::solver_interface::Response::Sat
-                );
+                assert_eq!(solver.check().unwrap(), crate::solver::Response::Sat);
                 solver.pop().unwrap();
             }
 
@@ -1199,10 +1175,7 @@ macro_rules! test_solver {
                 solver.push().unwrap();
                 let ne = solver.ne(&d, &f);
                 solver.assert(&ne).unwrap();
-                assert_eq!(
-                    solver.check().unwrap(),
-                    crate::solver_interface::Response::Sat
-                );
+                assert_eq!(solver.check().unwrap(), crate::solver::Response::Sat);
                 solver.pop().unwrap();
             }
 
@@ -2157,7 +2130,7 @@ macro_rules! test_solver {
                 let app1 = solver.apply_uf(&uf, &[&a, &b]);
                 let app2 = solver.apply_uf(&uf, &[&a, &b]);
                 // Zero-width results compare equal
-                crate::solver_interface::test_utils::assert_solver_eq(&mut solver, &app1, &app2);
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &app1, &app2);
             }
 
             #[test]
@@ -2172,7 +2145,7 @@ macro_rules! test_solver {
                 let app1 = solver.apply_uf(&uf, &[&a8, &zw1, &a4]);
                 let app2 = solver.apply_uf(&uf, &[&a8, &zw2, &a4]);
                 // Different zero-width operands must not affect the application
-                crate::solver_interface::test_utils::assert_solver_eq(&mut solver, &app1, &app2);
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &app1, &app2);
                 // Result width should be exactly 3
                 let three = solver.numerical(3, 0b101);
                 let _ = solver.eq(&app1, &three); // Type-checking side-effect
@@ -2186,7 +2159,7 @@ macro_rules! test_solver {
                 let y = solver.declare("y", 8).unwrap();
                 let app1 = solver.apply_uf(&uf, &[&x, &y]);
                 let app2 = solver.apply_uf(&uf, &[&x, &y]);
-                crate::solver_interface::test_utils::assert_solver_eq(&mut solver, &app1, &app2);
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &app1, &app2);
             }
 
             #[test]
@@ -2216,7 +2189,7 @@ macro_rules! test_solver {
                 let zw2 = solver.zero_width();
                 let app1 = solver.apply_uf(&uf, &[&zw1, &zw2]);
                 let app2 = solver.apply_uf(&uf, &[&zw1, &zw2]);
-                crate::solver_interface::test_utils::assert_solver_eq(&mut solver, &app1, &app2);
+                crate::solver::test_utils::assert_solver_eq(&mut solver, &app1, &app2);
                 // Ensure type width matches
                 let _ = solver.zero_extend_to(&app1, 5);
             }
@@ -2234,10 +2207,7 @@ macro_rules! test_solver {
                 let fa_ne_fb = solver.ne(&fa, &fb);
                 solver.assert(&a_ne_b).unwrap();
                 solver.assert(&fa_ne_fb).unwrap();
-                assert_eq!(
-                    solver.check().unwrap(),
-                    crate::solver_interface::Response::Sat
-                );
+                assert_eq!(solver.check().unwrap(), crate::solver::Response::Sat);
                 solver.pop().unwrap();
             }
 
@@ -2256,10 +2226,7 @@ macro_rules! test_solver {
                 let fa_ne_fb = solver.ne(&fa, &fb);
                 solver.assert(&a_eq_b).unwrap();
                 solver.assert(&fa_ne_fb).unwrap();
-                assert_eq!(
-                    solver.check().unwrap(),
-                    crate::solver_interface::Response::Unsat
-                );
+                assert_eq!(solver.check().unwrap(), crate::solver::Response::Unsat);
                 solver.pop().unwrap();
             }
 
@@ -2308,7 +2275,7 @@ macro_rules! test_solver_decode {
             let operand = solver.numerical($in_w, $in_val);
             let actual = solver.xls_decode(&operand, $out_w);
             let expected = solver.numerical($out_w, $out_val);
-            crate::solver_interface::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
+            crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
         }
     };
 }
@@ -2325,7 +2292,7 @@ macro_rules! test_solver_encode {
             let operand = solver.numerical($in_w, $in_val);
             let actual = solver.xls_encode(&operand);
             let expected = solver.numerical($out_w, $out_val);
-            crate::solver_interface::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
+            crate::solver::test_utils::assert_solver_eq(&mut solver, &actual, &expected);
         }
     };
 }

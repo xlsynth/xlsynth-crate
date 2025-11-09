@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::solver_interface::Uf;
+use crate::solver::Uf;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
 use xlsynth::IrValue;
@@ -36,7 +36,7 @@ impl FromStr for EquivParallelism {
     }
 }
 
-use crate::solver_interface::{BitVec, Solver};
+use crate::solver::{BitVec, Solver};
 use xlsynth_pir::ir;
 
 #[derive(Clone)]

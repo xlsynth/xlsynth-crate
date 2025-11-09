@@ -12,7 +12,7 @@ use crate::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckRunResult,
 };
-use crate::{prove_quickcheck::build_assert_label_regex, solver_interface::SolverConfig};
+use crate::{prove_quickcheck::build_assert_label_regex, solver::SolverConfig};
 use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -478,12 +478,12 @@ impl Prover for ExternalProver {
 pub fn auto_selected_prover() -> Box<dyn Prover> {
     #[cfg(feature = "has-bitwuzla")]
     {
-        use crate::bitwuzla_backend::BitwuzlaOptions;
+        use crate::solver::bitwuzla::BitwuzlaOptions;
         return Box::new(BitwuzlaOptions::new());
     }
     #[cfg(all(feature = "has-boolector", not(feature = "has-bitwuzla")))]
     {
-        use crate::boolector_backend::BoolectorConfig;
+        use crate::solver::boolector::BoolectorConfig;
         return Box::new(BoolectorConfig::new());
     }
     #[cfg(all(
@@ -492,8 +492,10 @@ pub fn auto_selected_prover() -> Box<dyn Prover> {
         not(feature = "has-boolector")
     ))]
     {
-        use crate::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
-        use crate::solver_interface::{Response, Solver};
+        use crate::solver::{
+            Response, Solver,
+            easy_smt::{EasySmtConfig, EasySmtSolver},
+        };
 
         fn is_usable(config: &EasySmtConfig) -> bool {
             match EasySmtSolver::new(config) {
@@ -599,18 +601,18 @@ pub fn prover_for_choice(choice: SolverChoice, tool_path: Option<&Path>) -> Box<
     match choice {
         SolverChoice::Auto => auto_selected_prover(),
         #[cfg(feature = "has-bitwuzla")]
-        SolverChoice::Bitwuzla => Box::new(crate::bitwuzla_backend::BitwuzlaOptions::new()),
+        SolverChoice::Bitwuzla => Box::new(crate::solver::bitwuzla::BitwuzlaOptions::new()),
         #[cfg(feature = "has-boolector")]
-        SolverChoice::Boolector => Box::new(crate::boolector_backend::BoolectorConfig::new()),
+        SolverChoice::Boolector => Box::new(crate::solver::boolector::BoolectorConfig::new()),
         #[cfg(feature = "has-easy-smt")]
-        SolverChoice::Z3Binary => Box::new(crate::easy_smt_backend::EasySmtConfig::z3()),
+        SolverChoice::Z3Binary => Box::new(crate::solver::easy_smt::EasySmtConfig::z3()),
         #[cfg(feature = "has-easy-smt")]
         SolverChoice::BitwuzlaBinary => {
-            Box::new(crate::easy_smt_backend::EasySmtConfig::bitwuzla())
+            Box::new(crate::solver::easy_smt::EasySmtConfig::bitwuzla())
         }
         #[cfg(feature = "has-easy-smt")]
         SolverChoice::BoolectorBinary => {
-            Box::new(crate::easy_smt_backend::EasySmtConfig::boolector())
+            Box::new(crate::solver::easy_smt::EasySmtConfig::boolector())
         }
         SolverChoice::Toolchain => match tool_path {
             Some(path) => {

@@ -719,35 +719,35 @@ fn __itok__top(
     #[cfg(feature = "with-bitwuzla-built")]
     #[test]
     fn nested_targets_prove_success_bitwuzla_built() {
-        let prover = crate::bitwuzla_backend::BitwuzlaOptions::new();
+        let prover = crate::solver::bitwuzla::BitwuzlaOptions::new();
         check_nested_targets(&prover);
     }
 
     #[cfg(feature = "with-boolector-built")]
     #[test]
     fn nested_targets_prove_success_boolector_built() {
-        let prover = crate::boolector_backend::BoolectorConfig::new();
+        let prover = crate::solver::boolector::BoolectorConfig::new();
         check_nested_targets(&prover);
     }
 
     #[cfg(feature = "with-bitwuzla-binary-test")]
     #[test]
     fn nested_targets_prove_success_bitwuzla_binary() {
-        let prover = crate::easy_smt_backend::EasySmtConfig::bitwuzla();
+        let prover = crate::solver::easy_smt::EasySmtConfig::bitwuzla();
         check_nested_targets(&prover);
     }
 
     #[cfg(feature = "with-boolector-binary-test")]
     #[test]
     fn nested_targets_prove_success_boolector_binary() {
-        let prover = crate::easy_smt_backend::EasySmtConfig::boolector();
+        let prover = crate::solver::easy_smt::EasySmtConfig::boolector();
         check_nested_targets(&prover);
     }
 
     #[cfg(feature = "with-z3-binary-test")]
     #[test]
     fn nested_targets_prove_success_z3_binary() {
-        let prover = crate::easy_smt_backend::EasySmtConfig::z3();
+        let prover = crate::solver::easy_smt::EasySmtConfig::z3();
         check_nested_targets(&prover);
     }
 }

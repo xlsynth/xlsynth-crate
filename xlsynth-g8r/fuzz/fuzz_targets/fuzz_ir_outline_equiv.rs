@@ -6,11 +6,11 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
+use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
 #[cfg(feature = "has-boolector")]
-use xlsynth_prover::boolector_backend::{Boolector, BoolectorConfig};
+use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
-use xlsynth_prover::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
+use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
 use xlsynth_prover::prove_equiv::prove_ir_fn_equiv;
 use xlsynth_prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
 

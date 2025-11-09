@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    solver_interface::{BitVec, Response, Solver, SolverConfig},
+    solver::{BitVec, Response, Solver, SolverConfig},
     translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
     types::{
         AssertionViolation, BoolPropertyResult, FnInput, FnOutput, ProverFn,
@@ -808,30 +808,30 @@ macro_rules! quickcheck_test_with_solver {
 #[cfg(feature = "with-bitwuzla-binary-test")]
 quickcheck_test_with_solver!(
     bitwuzla_qc_tests,
-    crate::easy_smt_backend::EasySmtSolver,
-    &crate::easy_smt_backend::EasySmtConfig::bitwuzla()
+    crate::solver::easy_smt::EasySmtSolver,
+    &crate::solver::easy_smt::EasySmtConfig::bitwuzla()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-boolector-binary-test")]
 quickcheck_test_with_solver!(
     boolector_qc_tests,
-    crate::easy_smt_backend::EasySmtSolver,
-    &crate::easy_smt_backend::EasySmtConfig::boolector()
+    crate::solver::easy_smt::EasySmtSolver,
+    &crate::solver::easy_smt::EasySmtConfig::boolector()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-z3-binary-test")]
 quickcheck_test_with_solver!(
     z3_qc_tests,
-    crate::easy_smt_backend::EasySmtSolver,
-    &crate::easy_smt_backend::EasySmtConfig::z3()
+    crate::solver::easy_smt::EasySmtSolver,
+    &crate::solver::easy_smt::EasySmtConfig::z3()
 );
 
 #[cfg(test)]
 #[cfg(feature = "with-bitwuzla-built")]
 quickcheck_test_with_solver!(
     bitwuzla_built_qc_tests,
-    crate::bitwuzla_backend::Bitwuzla,
-    &crate::bitwuzla_backend::BitwuzlaOptions::new()
+    crate::solver::bitwuzla::Bitwuzla,
+    &crate::solver::bitwuzla::BitwuzlaOptions::new()
 );
