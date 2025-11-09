@@ -12,7 +12,7 @@ use xlsynth_prover::boolector_backend::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
 use xlsynth_prover::prove_equiv::prove_ir_fn_equiv;
-use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn as EqIrFn};
+use xlsynth_prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
 
 use xlsynth_pir::ir::{Fn as IrFn, NodeRef, PackageMember};
 use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
@@ -236,8 +236,8 @@ fuzz_target!(|sample: FuzzSample| {
     log::info!("work_pkg_text:\n{}", work_pkg.to_string());
 
     // Prove equivalence: original function == outlined outer function
-    let lhs = EqIrFn::new(&orig_fn, None);
-    let rhs = EqIrFn::new(&res.outer, None);
+    let lhs = EqProverFn::new(&orig_fn, None);
+    let rhs = EqProverFn::new(&res.outer, None);
 
     #[cfg(feature = "has-bitwuzla")]
     {

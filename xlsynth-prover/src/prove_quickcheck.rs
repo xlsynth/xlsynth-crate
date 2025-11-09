@@ -4,7 +4,7 @@ use crate::{
     solver_interface::{BitVec, Response, Solver, SolverConfig},
     translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
     types::{
-        AssertionViolation, BoolPropertyResult, FnInput, FnOutput, IrFn, ProverFn,
+        AssertionViolation, BoolPropertyResult, FnInput, FnOutput, ProverFn,
         QuickCheckAssertionSemantics, QuickCheckRunResult, UfRegistry,
     },
     uf::infer_uf_signatures,
@@ -18,8 +18,8 @@ use xlsynth::dslx::{ImportData, MatchableModuleMember};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
 
-/// Prove via quickcheck that a given `IrFn` always returns boolean `true`
-/// (`bits[1] == 1`) for all possible inputs.
+/// Prove via quickcheck that a given IR function (wrapped in a `ProverFn`)
+/// always returns boolean `true` (`bits[1] == 1`) for all possible inputs.
 ///
 /// * `solver_config` – backend-specific solver configuration.
 /// * `ir_fn`          – function to analyse – must return `bits[1]`.
@@ -31,7 +31,7 @@ use xlsynth_pir::ir_parser::Parser;
 /// Returns [`BoolPropertyResult`] describing the outcome.
 pub fn prove_ir_fn_quickcheck<'a, S>(
     solver_config: &S::Config,
-    ir_fn: &IrFn<'a>,
+    ir_fn: &ProverFn<'a>,
     assertion_semantics: QuickCheckAssertionSemantics,
     assert_label_include: Option<&Regex>,
 ) -> BoolPropertyResult
@@ -39,14 +39,9 @@ where
     S: Solver,
     S::Term: 'a,
 {
-    let prover_fn = ProverFn {
-        ir_fn,
-        domains: None,
-        uf_map: HashMap::new(),
-    };
     prove_ir_quickcheck::<S>(
         solver_config,
-        &prover_fn,
+        ir_fn,
         assertion_semantics,
         assert_label_include,
     )
@@ -63,11 +58,9 @@ where
     S: Solver,
     S::Term: 'a,
 {
-    let ir_fn = prover_fn.ir_fn;
-
     // Ensure the function indeed returns a single-bit value.
     assert_eq!(
-        ir_fn.fn_ref.ret_ty.bit_count(),
+        prover_fn.fn_ref.ret_ty.bit_count(),
         1,
         "Function must return a single-bit value"
     );
@@ -75,7 +68,7 @@ where
     let mut solver = S::new(solver_config).unwrap();
 
     // Generate SMT representation with UF mapping/registry.
-    let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
+    let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
 
     if let Some(domains) = &prover_fn.domains {
         for param in fn_inputs.params().iter() {
@@ -101,7 +94,7 @@ where
     let uf_signatures = if prover_fn.uf_map.is_empty() {
         HashMap::new()
     } else {
-        match prover_fn.ir_fn.pkg_ref {
+        match prover_fn.pkg_ref {
             Some(pkg) => match infer_uf_signatures(pkg, &prover_fn.uf_map) {
                 Ok(sigs) => sigs,
                 Err(e) => return BoolPropertyResult::Error(e),
@@ -338,17 +331,9 @@ where
             );
         };
 
-        let ir_fn = IrFn {
-            fn_ref,
-            pkg_ref: Some(&pkg),
-            fixed_implicit_activation,
-        };
-
-        let prover_fn = ProverFn {
-            ir_fn: &ir_fn,
-            domains: None,
-            uf_map: uf_map.clone(),
-        };
+        let prover_fn = ProverFn::new(fn_ref, Some(&pkg))
+            .with_fixed_implicit_activation(fixed_implicit_activation)
+            .with_uf_map(uf_map.clone());
 
         let result = prove_ir_quickcheck::<SConfig::Solver>(
             solver_config,
@@ -370,7 +355,7 @@ where
 #[cfg(test)]
 mod test_utils {
     use super::*;
-    use crate::types::{IrFn, ParamDomains, ProverFn};
+    use crate::types::{ParamDomains, ProverFn};
     use xlsynth::IrValue;
     use xlsynth_pir::ir_parser::Parser;
 
@@ -391,12 +376,9 @@ mod test_utils {
     ) {
         let mut parser = Parser::new(ir_text);
         let f = parser.parse_fn().expect("Failed to parse IR function");
-        let ir_fn = IrFn {
-            fn_ref: &f,
-            pkg_ref: None,
-            fixed_implicit_activation,
-        };
-        let res = super::prove_ir_fn_quickcheck::<S>(solver_config, &ir_fn, sem, None);
+        let prover_fn =
+            ProverFn::new(&f, None).with_fixed_implicit_activation(fixed_implicit_activation);
+        let res = super::prove_ir_fn_quickcheck::<S>(solver_config, &prover_fn, sem, None);
         assert!(matches!(res, BoolPropertyResult::Proved));
     }
 
@@ -425,12 +407,9 @@ mod test_utils {
     ) {
         let mut parser = Parser::new(ir_text);
         let f = parser.parse_fn().expect("Failed to parse IR function");
-        let ir_fn = IrFn {
-            fn_ref: &f,
-            pkg_ref: None,
-            fixed_implicit_activation,
-        };
-        let res = super::prove_ir_fn_quickcheck::<S>(solver_config, &ir_fn, sem, None);
+        let prover_fn =
+            ProverFn::new(&f, None).with_fixed_implicit_activation(fixed_implicit_activation);
+        let res = super::prove_ir_fn_quickcheck::<S>(solver_config, &prover_fn, sem, None);
         match res {
             BoolPropertyResult::Disproved { output, .. } => match (expect_violation, output) {
                 (
@@ -513,15 +492,11 @@ mod test_utils {
 
         let mut parser = Parser::new(ir_text);
         let f = parser.parse_fn().expect("Failed to parse IR function");
-        let ir_fn = IrFn {
-            fn_ref: &f,
-            pkg_ref: None,
-            fixed_implicit_activation: false,
-        };
+        let prover_fn = ProverFn::new(&f, None);
 
         let res = super::prove_ir_fn_quickcheck::<S>(
             solver_config,
-            &ir_fn,
+            &prover_fn,
             QuickCheckAssertionSemantics::Ignore,
             None,
         );
@@ -573,21 +548,12 @@ mod test_utils {
             .parse_and_validate_package()
             .expect("parse package");
         let f = pkg.get_fn("f").expect("f not found");
-        let ir_fn = IrFn {
-            fn_ref: f,
-            pkg_ref: Some(&pkg),
-            fixed_implicit_activation: false,
-        };
 
         let mut uf_map: HashMap<String, String> = HashMap::new();
         uf_map.insert("g".to_string(), "F".to_string());
         uf_map.insert("h".to_string(), "F".to_string());
 
-        let prover_fn = ProverFn {
-            ir_fn: &ir_fn,
-            domains: None,
-            uf_map: uf_map.clone(),
-        };
+        let prover_fn = ProverFn::new(f, Some(&pkg)).with_uf_map(uf_map.clone());
 
         let res = super::prove_ir_quickcheck::<S>(
             solver_config,
@@ -613,18 +579,7 @@ mod test_utils {
 
         let mut parser = Parser::new(ir_text);
         let f = parser.parse_fn().expect("Failed to parse IR function");
-        let ir_fn = IrFn {
-            fn_ref: &f,
-            pkg_ref: None,
-            fixed_implicit_activation: false,
-        };
-
-        // No filter: 'Never' should be disproved (red may fail for a=0)
-        let prover_fn = ProverFn {
-            ir_fn: &ir_fn,
-            domains: None,
-            uf_map: std::collections::HashMap::new(),
-        };
+        let prover_fn = ProverFn::new(&f, None);
 
         let res_no_filter = super::prove_ir_quickcheck::<S>(
             solver_config,
@@ -660,16 +615,12 @@ mod test_utils {
 
         let mut parser = Parser::new(ir_text);
         let f = parser.parse_fn().expect("Failed to parse IR function");
-        let ir_fn = IrFn {
-            fn_ref: &f,
-            pkg_ref: None,
-            fixed_implicit_activation: false,
-        };
+        let base_fn = ProverFn::new(&f, None);
 
         // Without domains, the property is disproved (e.g. x = 0).
         let res_no_domains = super::prove_ir_fn_quickcheck::<S>(
             solver_config,
-            &ir_fn,
+            &base_fn,
             QuickCheckAssertionSemantics::Ignore,
             None,
         );
@@ -685,15 +636,11 @@ mod test_utils {
             vec![IrValue::make_ubits(2, 1).expect("make ubits")],
         );
 
-        let prover_fn = ProverFn {
-            ir_fn: &ir_fn,
-            domains: Some(domains),
-            uf_map: HashMap::new(),
-        };
+        let with_domains = base_fn.clone().with_domains(Some(domains));
 
         let res_with_domains = super::prove_ir_quickcheck::<S>(
             solver_config,
-            &prover_fn,
+            &with_domains,
             QuickCheckAssertionSemantics::Ignore,
             None,
         );

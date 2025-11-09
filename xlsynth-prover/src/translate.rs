@@ -6,7 +6,7 @@ use xlsynth::IrValue;
 
 use crate::{
     solver_interface::{BitVec, Solver},
-    types::{Assertion, FnInputs, IrFn, IrTypedBitVec, SmtFn, UfRegistry},
+    types::{Assertion, FnInputs, IrTypedBitVec, ProverFn, SmtFn, UfRegistry},
 };
 use xlsynth_pir::{
     ir::{self, NaryOp, NodePayload, NodeRef, Unop},
@@ -73,16 +73,16 @@ const fn min_bits_u128(n: u128) -> usize {
 
 pub fn get_fn_inputs<'a, S: Solver>(
     solver: &mut S,
-    ir_fn: IrFn<'a>,
+    prover_fn: ProverFn<'a>,
     name_prefix: Option<&str>,
 ) -> FnInputs<'a, S::Term> {
-    let mut params_iter = ir_fn.fn_ref.params.iter();
+    let mut params_iter = prover_fn.fn_ref.params.iter();
     let mut inputs = HashMap::new();
     let prefix_name = |name: &str| match name_prefix {
         Some(prefix) => format!("_{}__{}", prefix, name),
         None => name.to_string(),
     };
-    if ir_fn.fixed_implicit_activation {
+    if prover_fn.fixed_implicit_activation {
         let itok = params_iter.next().unwrap();
         assert_eq!(itok.ty, ir::Type::Token);
         inputs.insert(
@@ -115,7 +115,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
             },
         );
     }
-    FnInputs { ir_fn, inputs }
+    FnInputs { prover_fn, inputs }
 }
 
 pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
@@ -124,11 +124,11 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
     uf_map: &HashMap<String, String>,
     uf_registry: &UfRegistry<S>,
 ) -> SmtFn<'ir, S::Term> {
-    let topo = get_topological(inputs.ir_fn.fn_ref);
+    let topo = get_topological(inputs.prover_fn.fn_ref);
     let mut env: HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>> = HashMap::new();
     let mut assertions = Vec::new();
     for nr in topo {
-        let node = &inputs.ir_fn.fn_ref.nodes[nr.index];
+        let node = &inputs.prover_fn.fn_ref.nodes[nr.index];
         fn get_num_indexable_elements<'a, S: Solver>(
             index: &IrTypedBitVec<'a, S::Term>,
             num_elements: usize,
@@ -221,11 +221,8 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
                 );
 
                 // Prepare callee wrapper and induction-constant builder.
-                let callee_ir_fn = IrFn {
-                    fn_ref: callee,
-                    pkg_ref: inputs.ir_fn.pkg_ref,
-                    fixed_implicit_activation: false,
-                };
+                let callee_prover_fn = ProverFn::new(callee, inputs.prover_fn.pkg_ref)
+                    .with_fixed_implicit_activation(false);
                 let mk_ind_var_bv = |solver: &mut S, k: usize| -> BitVec<S::Term> {
                     let val = (k as u128) * (*stride as u128);
                     solver.numerical_u128(ind_width, val)
@@ -266,7 +263,7 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
                         ));
 
                     let callee_inputs = FnInputs {
-                        ir_fn: callee_ir_fn.clone(),
+                        prover_fn: callee_prover_fn.clone(),
                         inputs: callee_input_map,
                     };
                     let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
@@ -283,7 +280,7 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
             }
             NodePayload::TupleIndex { tuple, index } => {
                 let tuple_bv = env.get(tuple).expect("Tuple operand must be present");
-                let tuple_ty = inputs.ir_fn.fn_ref.get_node_ty(*tuple);
+                let tuple_ty = inputs.prover_fn.fn_ref.get_node_ty(*tuple);
                 let slice = tuple_ty
                     .tuple_get_flat_bit_slice_for_index(*index)
                     .expect("TupleIndex: not a tuple type");
@@ -789,11 +786,8 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
                 } else {
                     // Otherwise inline the callee recursively.
                     let callee_inputs = FnInputs {
-                        ir_fn: IrFn {
-                            fn_ref: callee,
-                            pkg_ref: inputs.ir_fn.pkg_ref,
-                            fixed_implicit_activation: false,
-                        },
+                        prover_fn: ProverFn::new(callee, inputs.prover_fn.pkg_ref)
+                            .with_fixed_implicit_activation(false),
                         inputs: callee_input_map,
                     };
                     let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
@@ -947,7 +941,7 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
         };
         env.insert(nr, exp);
     }
-    let ret = inputs.ir_fn.fn_ref.ret_node_ref.unwrap();
+    let ret = inputs.prover_fn.fn_ref.ret_node_ref.unwrap();
     // Collect inputs in the same order as they are declared in the IR function
     let mut ordered_inputs: Vec<IrTypedBitVec<'ir, S::Term>> = Vec::new();
     for param in inputs.params() {
@@ -959,7 +953,7 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
     }
 
     SmtFn {
-        fn_ref: inputs.ir_fn.fn_ref,
+        fn_ref: inputs.prover_fn.fn_ref,
         inputs: ordered_inputs,
         output: env.remove(&ret).unwrap(),
         assertions,

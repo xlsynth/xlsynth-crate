@@ -10,7 +10,7 @@ use crate::solver_interface::{BitVec, Response, Solver};
 use crate::translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv};
 use crate::types::{
     Assertion, AssertionSemantics, AssertionViolation, EquivResult, FnInput, FnInputs, FnOutput,
-    IrFn, IrTypedBitVec, ParamDomains, ProverFn, SmtFn, UfRegistry, UfSignature,
+    IrTypedBitVec, ParamDomains, ProverFn, SmtFn, UfRegistry, UfSignature,
 };
 use crate::uf::infer_merged_uf_signatures;
 use regex::Regex;
@@ -129,11 +129,11 @@ pub fn align_fn_inputs<'a, S: Solver>(
 
     AlignedFnInputs {
         lhs: FnInputs {
-            ir_fn: lhs_inputs.ir_fn.clone(),
+            prover_fn: lhs_inputs.prover_fn.clone(),
             inputs: lhs_params,
         },
         rhs: FnInputs {
-            ir_fn: rhs_inputs.ir_fn.clone(),
+            prover_fn: rhs_inputs.prover_fn.clone(),
             inputs: rhs_params,
         },
         flattened,
@@ -284,9 +284,9 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     }
 }
 
-/// Prove equivalence like `prove_ir_fn_equiv` but constraining parameters that
-/// are enums to lie within their defined value sets.
-pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
+/// Prove equivalence between two IR functions, applying any provided domain
+/// restrictions and UF mappings before delegating to the solver.
+pub fn prove_ir_fn_equiv<'a, S: Solver>(
     solver_config: &S::Config,
     lhs: &ProverFn<'a>,
     rhs: &ProverFn<'a>,
@@ -298,7 +298,7 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
         if lhs.uf_map.is_empty() && rhs.uf_map.is_empty() {
             HashMap::new()
         } else {
-            let lhs_pkg = match lhs.ir_fn.pkg_ref {
+            let lhs_pkg = match lhs.pkg_ref {
                 Some(pkg) => pkg,
                 None => {
                     return EquivResult::Error(
@@ -306,7 +306,7 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
                     );
                 }
             };
-            let rhs_pkg = match rhs.ir_fn.pkg_ref {
+            let rhs_pkg = match rhs.pkg_ref {
                 Some(pkg) => pkg,
                 None => {
                     return EquivResult::Error(
@@ -320,8 +320,8 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
             }
         };
     let mut solver = S::new(solver_config).unwrap();
-    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.ir_fn.clone(), Some("lhs"));
-    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.ir_fn.clone(), Some("rhs"));
+    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
+    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"));
 
     let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: &Option<ParamDomains>| {
         if let Some(dom) = domains {
@@ -363,32 +363,6 @@ pub fn prove_ir_fn_equiv_full<'a, S: Solver>(
     )
 }
 
-pub fn prove_ir_fn_equiv<'a, S: Solver>(
-    solver_config: &S::Config,
-    lhs: &IrFn<'a>,
-    rhs: &IrFn<'a>,
-    assertion_semantics: AssertionSemantics,
-    assert_label_include: Option<&Regex>,
-    allow_flatten: bool,
-) -> EquivResult {
-    prove_ir_fn_equiv_full::<S>(
-        solver_config,
-        &ProverFn {
-            ir_fn: lhs,
-            domains: None,
-            uf_map: HashMap::new(),
-        },
-        &ProverFn {
-            ir_fn: rhs,
-            domains: None,
-            uf_map: HashMap::new(),
-        },
-        assertion_semantics,
-        assert_label_include,
-        allow_flatten,
-    )
-}
-
 // Add parallel equivalence-checking strategies that were previously only
 // implemented in the Boolector-specific backend.  These generic versions work
 // with any `Solver` implementation by accepting a factory closure that can
@@ -425,8 +399,8 @@ fn make_bit_fn(f: &ir::Fn, bit: usize) -> ir::Fn {
 /// each spawned thread.
 pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &IrFn<'a>,
-    rhs: &IrFn<'a>,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
     assertion_semantics: AssertionSemantics,
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
@@ -474,16 +448,14 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
                         break;
                     }
 
-                    let lf = make_bit_fn(&lhs_cl.fn_ref, idx);
-                    let rf = make_bit_fn(&rhs_cl.fn_ref, idx);
-                    let lf = IrFn {
-                        fn_ref: &lf,
-                        ..lhs_cl
-                    };
-                    let rf = IrFn {
-                        fn_ref: &rf,
-                        ..rhs_cl
-                    };
+                    let lf_ir = make_bit_fn(&lhs_cl.fn_ref, idx);
+                    let rf_ir = make_bit_fn(&rhs_cl.fn_ref, idx);
+                    let lf = ProverFn::new(&lf_ir, None)
+                        .with_fixed_implicit_activation(lhs_cl.fixed_implicit_activation)
+                        .with_domains(lhs_cl.domains.clone());
+                    let rf = ProverFn::new(&rf_ir, None)
+                        .with_fixed_implicit_activation(rhs_cl.fixed_implicit_activation)
+                        .with_domains(rhs_cl.domains.clone());
                     let res = prove_ir_fn_equiv::<S>(
                         solver_config,
                         &lf,
@@ -519,8 +491,8 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
 /// `split_input_bit_index` selects the bit inside that parameter.
 pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     solver_config: &S::Config,
-    lhs: &IrFn<'a>,
-    rhs: &IrFn<'a>,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
     split_input_index: usize,
     split_input_bit_index: usize,
     assertion_semantics: AssertionSemantics,
@@ -601,10 +573,11 @@ pub mod test_utils {
 
     use crate::{
         prove_equiv::{
-            AssertionSemantics, EquivResult, FnInputs, IrFn, ParamDomains, align_fn_inputs,
-            get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv, prove_ir_fn_equiv_full,
+            AssertionSemantics, EquivResult, FnInputs, ParamDomains, align_fn_inputs,
+            get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv,
         },
         solver_interface::{BitVec, Solver, test_utils::assert_solver_eq},
+        types::ProverFn,
     };
     use xlsynth_pir::{ir, ir_parser};
 
@@ -633,18 +606,12 @@ pub mod test_utils {
         let call_fn = pkg.get_fn("call").expect("call not found");
         let inline_fn = pkg.get_fn("inline").expect("inline not found");
 
+        let call_pf = ProverFn::new(call_fn, Some(&pkg));
+        let inline_pf = ProverFn::new(inline_fn, Some(&pkg));
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn {
-                fn_ref: call_fn,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &IrFn {
-                fn_ref: inline_fn,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &call_pf,
+            &inline_pf,
             AssertionSemantics::Same,
             None,
             false,
@@ -686,18 +653,13 @@ pub mod test_utils {
         let call_h = pkg.get_fn("call_h").expect("call_h not found");
 
         // 1) Without UF mapping: should be inequivalent (add(x,x) vs 0)
+        let lhs_pf = ProverFn::new(call_g, Some(&pkg));
+        let rhs_pf = ProverFn::new(call_h, Some(&pkg));
+
         let res_no_uf = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: call_g,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &super::IrFn {
-                fn_ref: call_h,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &lhs_pf,
+            &rhs_pf,
             super::AssertionSemantics::Same,
             None,
             false,
@@ -709,26 +671,10 @@ pub mod test_utils {
         lhs_uf_map.insert("g".to_string(), "F".to_string());
         let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
         rhs_uf_map.insert("h".to_string(), "F".to_string());
-        let res_uf = super::prove_ir_fn_equiv_full::<S>(
+        let res_uf = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &super::ProverFn {
-                ir_fn: &super::IrFn {
-                    fn_ref: call_g,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: lhs_uf_map,
-            },
-            &super::ProverFn {
-                ir_fn: &super::IrFn {
-                    fn_ref: call_h,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: rhs_uf_map,
-            },
+            &ProverFn::new(call_g, Some(&pkg)).with_uf_map(lhs_uf_map),
+            &ProverFn::new(call_h, Some(&pkg)).with_uf_map(rhs_uf_map),
             super::AssertionSemantics::Same,
             None,
             false,
@@ -778,26 +724,12 @@ pub mod test_utils {
         lhs_uf_map.insert("inner_g".to_string(), "F".to_string());
         let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
         rhs_uf_map.insert("inner_h".to_string(), "F".to_string());
-        let res = super::prove_ir_fn_equiv_full::<S>(
+        let lhs_pf = ProverFn::new(top_g, Some(&pkg)).with_uf_map(lhs_uf_map);
+        let rhs_pf = ProverFn::new(top_h, Some(&pkg)).with_uf_map(rhs_uf_map);
+        let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &super::ProverFn {
-                ir_fn: &super::IrFn {
-                    fn_ref: top_g,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: lhs_uf_map,
-            },
-            &super::ProverFn {
-                ir_fn: &super::IrFn {
-                    fn_ref: top_h,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: rhs_uf_map,
-            },
+            &lhs_pf,
+            &rhs_pf,
             super::AssertionSemantics::Same,
             None,
             false,
@@ -836,18 +768,12 @@ pub mod test_utils {
         let call_g = pkg.get_fn("call_g").expect("call_g not found");
         let call_h = pkg.get_fn("call_h").expect("call_h not found");
 
+        let call_g_pf = ProverFn::new(call_g, Some(&pkg));
+        let call_h_pf = ProverFn::new(call_h, Some(&pkg));
         let res_no_uf = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: call_g,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &super::IrFn {
-                fn_ref: call_h,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &call_g_pf,
+            &call_h_pf,
             super::AssertionSemantics::Same,
             None,
             false,
@@ -859,26 +785,12 @@ pub mod test_utils {
         let mut rhs_uf_map: HashMap<String, String> = HashMap::new();
         rhs_uf_map.insert("h".to_string(), "F".to_string());
         // Two 4-bit data args, 8-bit result.
-        let res_uf = super::prove_ir_fn_equiv_full::<S>(
+        let call_g_pf_with_uf = ProverFn::new(call_g, Some(&pkg)).with_uf_map(lhs_uf_map);
+        let call_h_pf_with_uf = ProverFn::new(call_h, Some(&pkg)).with_uf_map(rhs_uf_map);
+        let res_uf = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &super::ProverFn {
-                ir_fn: &super::IrFn {
-                    fn_ref: call_g,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: lhs_uf_map,
-            },
-            &super::ProverFn {
-                ir_fn: &super::IrFn {
-                    fn_ref: call_h,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: rhs_uf_map,
-            },
+            &call_g_pf_with_uf,
+            &call_h_pf_with_uf,
             super::AssertionSemantics::Same,
             None,
             false,
@@ -912,18 +824,12 @@ pub mod test_utils {
         let lhs = pkg.get_fn("lhs").expect("lhs not found");
         let rhs = pkg.get_fn("rhs").expect("rhs not found");
 
+        let lhs_pf = ProverFn::new(lhs, Some(&pkg));
+        let rhs_pf = ProverFn::new(rhs, Some(&pkg));
         let res_no_filter = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &super::IrFn {
-                fn_ref: lhs,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &super::IrFn {
-                fn_ref: rhs,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &lhs_pf,
+            &rhs_pf,
             super::AssertionSemantics::Same,
             None,
             false,
@@ -934,26 +840,10 @@ pub mod test_utils {
         ));
 
         let include = regex::Regex::new(r"^(?:blue)$").unwrap();
-        let res_filtered = super::prove_ir_fn_equiv_full::<S>(
+        let res_filtered = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &super::ProverFn {
-                ir_fn: &super::IrFn {
-                    fn_ref: lhs,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: std::collections::HashMap::new(),
-            },
-            &super::ProverFn {
-                ir_fn: &super::IrFn {
-                    fn_ref: rhs,
-                    pkg_ref: Some(&pkg),
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: std::collections::HashMap::new(),
-            },
+            &lhs_pf,
+            &rhs_pf,
             super::AssertionSemantics::Same,
             Some(&include),
             false,
@@ -985,18 +875,12 @@ pub mod test_utils {
         let call_fn = pkg.get_fn("call").expect("call not found");
         let inline_fn = pkg.get_fn("inline").expect("inline not found");
 
+        let call_pf = ProverFn::new(call_fn, Some(&pkg));
+        let inline_pf = ProverFn::new(inline_fn, Some(&pkg));
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn {
-                fn_ref: call_fn,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &IrFn {
-                fn_ref: inline_fn,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &call_pf,
+            &inline_pf,
             AssertionSemantics::Same,
             None,
             false,
@@ -1034,18 +918,12 @@ pub mod test_utils {
         let looped = pkg.get_fn("looped").expect("looped not found");
         let inline = pkg.get_fn("inline").expect("inline not found");
 
+        let looped_pf = ProverFn::new(looped, Some(&pkg));
+        let inline_pf = ProverFn::new(inline, Some(&pkg));
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn {
-                fn_ref: looped,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &IrFn {
-                fn_ref: inline,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &looped_pf,
+            &inline_pf,
             AssertionSemantics::Same,
             None,
             false,
@@ -1082,18 +960,12 @@ pub mod test_utils {
         let looped = pkg.get_fn("looped").expect("looped not found");
         let inline = pkg.get_fn("inline").expect("inline not found");
 
+        let looped_pf = ProverFn::new(looped, Some(&pkg));
+        let inline_pf = ProverFn::new(inline, Some(&pkg));
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn {
-                fn_ref: looped,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &IrFn {
-                fn_ref: inline,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &looped_pf,
+            &inline_pf,
             AssertionSemantics::Same,
             None,
             false,
@@ -1125,18 +997,12 @@ pub mod test_utils {
         let looped = pkg.get_fn("looped").expect("looped not found");
         let inline = pkg.get_fn("inline").expect("inline not found");
 
+        let looped_pf = ProverFn::new(looped, Some(&pkg));
+        let inline_pf = ProverFn::new(inline, Some(&pkg));
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn {
-                fn_ref: looped,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &IrFn {
-                fn_ref: inline,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &looped_pf,
+            &inline_pf,
             AssertionSemantics::Same,
             None,
             false,
@@ -1178,18 +1044,12 @@ pub mod test_utils {
         let looped = pkg.get_fn("looped").expect("looped not found");
         let inline = pkg.get_fn("inline").expect("inline not found");
 
+        let looped_pf = ProverFn::new(looped, Some(&pkg));
+        let inline_pf = ProverFn::new(inline, Some(&pkg));
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn {
-                fn_ref: looped,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
-            &IrFn {
-                fn_ref: inline,
-                pkg_ref: Some(&pkg),
-                fixed_implicit_activation: false,
-            },
+            &looped_pf,
+            &inline_pf,
             AssertionSemantics::Same,
             None,
             false,
@@ -1206,8 +1066,8 @@ pub mod test_utils {
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
+        let prover_fn = ProverFn::new(&f, None);
+        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
     }
@@ -1222,8 +1082,8 @@ pub mod test_utils {
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
+        let prover_fn = ProverFn::new(&f, None);
+        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         // Must not panic.
         let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
     }
@@ -1236,8 +1096,8 @@ pub mod test_utils {
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
+        let prover_fn = ProverFn::new(&f, None);
+        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),
@@ -1280,16 +1140,10 @@ pub mod test_utils {
         let rhs_ir_fn = parser.parse_fn().unwrap();
         let actual = prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn {
-                fn_ref: &lhs_ir_fn,
-                pkg_ref: None,
-                fixed_implicit_activation: lhs_fixed_implicit_activation,
-            },
-            &IrFn {
-                fn_ref: &rhs_ir_fn,
-                pkg_ref: None,
-                fixed_implicit_activation: rhs_fixed_implicit_activation,
-            },
+            &ProverFn::new(&lhs_ir_fn, None)
+                .with_fixed_implicit_activation(lhs_fixed_implicit_activation),
+            &ProverFn::new(&rhs_ir_fn, None)
+                .with_fixed_implicit_activation(rhs_fixed_implicit_activation),
             assertion_semantics,
             None,
             allow_flatten,
@@ -1541,8 +1395,8 @@ pub mod test_utils {
         let mut parser = ir_parser::Parser::new(&ir_text);
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
+        let prover_fn = ProverFn::new(&f, None);
+        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),
@@ -1953,8 +1807,8 @@ pub mod test_utils {
                 }"#;
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
+        let prover_fn = ProverFn::new(&f, None);
+        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         // This call should not panic
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
@@ -2148,8 +2002,8 @@ pub mod test_utils {
                 }"#;
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
+        let prover_fn = ProverFn::new(&f, None);
+        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         // Should panic during conversion due to missing default
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
@@ -2170,8 +2024,8 @@ pub mod test_utils {
                 }"#;
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
-        let ir_fn = IrFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, ir_fn.clone(), None);
+        let prover_fn = ProverFn::new(&f, None);
+        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),
@@ -2341,11 +2195,13 @@ pub mod test_utils {
         let lhs_ir_fn = parser.parse_fn().unwrap();
         let mut parser = ir_parser::Parser::new(&rhs);
         let rhs_ir_fn = parser.parse_fn().unwrap();
+        let lhs_pf = ProverFn::new(&lhs_ir_fn, None);
+        let rhs_pf = ProverFn::new(&rhs_ir_fn, None);
 
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn::new(&lhs_ir_fn, None),
-            &IrFn::new(&rhs_ir_fn, None),
+            &lhs_pf,
+            &rhs_pf,
             AssertionSemantics::Ignore,
             None,
             false,
@@ -2545,12 +2401,14 @@ pub mod test_utils {
         let lhs_fn_ir = parser.parse_fn().unwrap();
         let mut parser = ir_parser::Parser::new(rhs_ir);
         let rhs_fn_ir = parser.parse_fn().unwrap();
+        let lhs_pf = ProverFn::new(&lhs_fn_ir, None);
+        let rhs_pf = ProverFn::new(&rhs_fn_ir, None);
 
         // Run equivalence prover – expect a counter-example (Disproved).
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &IrFn::new(&lhs_fn_ir, None),
-            &IrFn::new(&rhs_fn_ir, None),
+            &lhs_pf,
+            &rhs_pf,
             AssertionSemantics::Same,
             None,
             false,
@@ -2585,7 +2443,7 @@ pub mod test_utils {
         }
     }
 
-    // New: shared test that exercises prove_ir_fn_equiv_full.
+    // New: shared test that exercises prove_ir_fn_equiv.
     pub fn test_param_domains_equiv<S: Solver>(solver_config: &S::Config) {
         let lhs_ir = r#"
             fn f(x: bits[2]) -> bits[2] {
@@ -2603,13 +2461,13 @@ pub mod test_utils {
         let mut parser = ir_parser::Parser::new(rhs_ir);
         let rhs_fn_ir = parser.parse_fn().unwrap();
 
-        let lhs_ir_fn = IrFn::new(&lhs_fn_ir, None);
-        let rhs_ir_fn = IrFn::new(&rhs_fn_ir, None);
+        let lhs_pf = ProverFn::new(&lhs_fn_ir, None);
+        let rhs_pf = ProverFn::new(&rhs_fn_ir, None);
 
         let res = super::prove_ir_fn_equiv::<S>(
             solver_config,
-            &lhs_ir_fn,
-            &rhs_ir_fn,
+            &lhs_pf,
+            &rhs_pf,
             AssertionSemantics::Same,
             None,
             false,
@@ -2625,18 +2483,10 @@ pub mod test_utils {
             ],
         );
 
-        let res2 = prove_ir_fn_equiv_full::<S>(
+        let res2 = prove_ir_fn_equiv::<S>(
             solver_config,
-            &super::ProverFn {
-                ir_fn: &lhs_ir_fn,
-                domains: Some(doms.clone()),
-                uf_map: HashMap::new(),
-            },
-            &super::ProverFn {
-                ir_fn: &rhs_ir_fn,
-                domains: Some(doms),
-                uf_map: HashMap::new(),
-            },
+            &lhs_pf.clone().with_domains(Some(doms.clone())),
+            &rhs_pf.clone().with_domains(Some(doms)),
             AssertionSemantics::Same,
             None,
             false,

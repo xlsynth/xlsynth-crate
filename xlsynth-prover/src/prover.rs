@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, IrFn, ProverFn,
+    AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckRunResult,
 };
 use crate::{prove_quickcheck::build_assert_label_regex, solver_interface::SolverConfig};
@@ -87,25 +87,11 @@ use xlsynth_pir::{ir, ir_parser};
 
 pub trait Prover {
     fn prove_ir_fn_equiv(self: &Self, lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
+        let lhs_fn = ProverFn::new(lhs, None);
+        let rhs_fn = ProverFn::new(rhs, None);
         self.prove_ir_equiv(
-            &ProverFn {
-                ir_fn: &IrFn {
-                    fn_ref: lhs,
-                    pkg_ref: None,
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: HashMap::new(),
-            },
-            &ProverFn {
-                ir_fn: &IrFn {
-                    fn_ref: rhs,
-                    pkg_ref: None,
-                    fixed_implicit_activation: false,
-                },
-                domains: None,
-                uf_map: HashMap::new(),
-            },
+            &lhs_fn,
+            &rhs_fn,
             EquivParallelism::SingleThreaded,
             AssertionSemantics::Same,
             None,
@@ -128,13 +114,8 @@ pub trait Prover {
         allow_flatten: bool,
     ) -> EquivResult;
 
-    fn prove_ir_fn_quickcheck<'a>(self: &Self, ir_fn: &IrFn<'a>) -> BoolPropertyResult {
-        let prover_fn = ProverFn {
-            ir_fn,
-            domains: None,
-            uf_map: HashMap::new(),
-        };
-        self.prove_ir_quickcheck(&prover_fn, QuickCheckAssertionSemantics::Never, None)
+    fn prove_ir_fn_quickcheck<'a>(self: &Self, ir_fn: &ProverFn<'a>) -> BoolPropertyResult {
+        self.prove_ir_quickcheck(ir_fn, QuickCheckAssertionSemantics::Never, None)
     }
 
     fn prove_ir_quickcheck<'a>(
@@ -183,26 +164,10 @@ impl<S: SolverConfig> Prover for S {
             None => rhs_pkg.get_top_fn().expect("No functions in RHS package"),
         };
 
-        let lhs = ProverFn {
-            ir_fn: &IrFn {
-                fn_ref: lhs_top,
-                pkg_ref: Some(&lhs_pkg),
-                fixed_implicit_activation: false,
-            },
-            domains: None,
-            uf_map: HashMap::new(),
-        };
-        let rhs = ProverFn {
-            ir_fn: &IrFn {
-                fn_ref: rhs_top,
-                pkg_ref: Some(&rhs_pkg),
-                fixed_implicit_activation: false,
-            },
-            domains: None,
-            uf_map: HashMap::new(),
-        };
+        let lhs = ProverFn::new(lhs_top, Some(&lhs_pkg));
+        let rhs = ProverFn::new(rhs_top, Some(&rhs_pkg));
 
-        crate::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
+        crate::prove_equiv::prove_ir_fn_equiv::<S::Solver>(
             self,
             &lhs,
             &rhs,
@@ -230,16 +195,14 @@ impl<S: SolverConfig> Prover for S {
         }
         let assert_label_regex = build_assert_label_regex(assert_label_filter);
         match strategy {
-            EquivParallelism::SingleThreaded => {
-                crate::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
-                    self,
-                    lhs,
-                    rhs,
-                    assertion_semantics,
-                    assert_label_regex.as_ref(),
-                    allow_flatten,
-                )
-            }
+            EquivParallelism::SingleThreaded => crate::prove_equiv::prove_ir_fn_equiv::<S::Solver>(
+                self,
+                lhs,
+                rhs,
+                assertion_semantics,
+                assert_label_regex.as_ref(),
+                allow_flatten,
+            ),
             EquivParallelism::OutputBits => {
                 if lhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
                     || rhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
@@ -250,8 +213,8 @@ impl<S: SolverConfig> Prover for S {
                 }
                 crate::prove_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
                     self,
-                    lhs.ir_fn,
-                    rhs.ir_fn,
+                    lhs,
+                    rhs,
                     assertion_semantics,
                     assert_label_regex.as_ref(),
                     allow_flatten,
@@ -267,8 +230,8 @@ impl<S: SolverConfig> Prover for S {
                 }
                 crate::prove_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
                     self,
-                    lhs.ir_fn,
-                    rhs.ir_fn,
+                    lhs,
+                    rhs,
                     0,
                     0,
                     assertion_semantics,
@@ -386,7 +349,7 @@ impl Prover for ExternalProver {
         }
         match strategy {
             EquivParallelism::SingleThreaded => {
-                if lhs.ir_fn.fixed_implicit_activation || rhs.ir_fn.fixed_implicit_activation {
+                if lhs.fixed_implicit_activation || rhs.fixed_implicit_activation {
                     return EquivResult::Error(
                         "External provers do not support fixed implicit activation".to_string(),
                     );
@@ -413,13 +376,13 @@ impl Prover for ExternalProver {
                         "External provers do not support flattening".to_string(),
                     );
                 }
-                let lhs_pkg = match lhs.ir_fn.pkg_ref {
+                let lhs_pkg = match lhs.pkg_ref {
                     Some(pkg) => pkg.to_string(),
-                    None => format!("package lhs\n\ntop {}\n", lhs.ir_fn.fn_ref.to_string()),
+                    None => format!("package lhs\n\ntop {}\n", lhs.fn_ref.to_string()),
                 };
-                let rhs_pkg = match rhs.ir_fn.pkg_ref {
+                let rhs_pkg = match rhs.pkg_ref {
                     Some(pkg) => pkg.to_string(),
-                    None => format!("package rhs\n\ntop {}\n", rhs.ir_fn.fn_ref.to_string()),
+                    None => format!("package rhs\n\ntop {}\n", rhs.fn_ref.to_string()),
                 };
                 fn unify_toolchain_tops<'a>(
                     lhs_ir: &'a str,
@@ -444,12 +407,8 @@ impl Prover for ExternalProver {
                     )
                 }
 
-                let (lhs_unified, rhs_unified, unified_top) = unify_toolchain_tops(
-                    &lhs_pkg,
-                    &rhs_pkg,
-                    &lhs.ir_fn.fn_ref.name,
-                    &rhs.ir_fn.fn_ref.name,
-                );
+                let (lhs_unified, rhs_unified, unified_top) =
+                    unify_toolchain_tops(&lhs_pkg, &rhs_pkg, &lhs.fn_ref.name, &rhs.fn_ref.name);
 
                 self.prove_ir_pkg_text_equiv(&lhs_unified, &rhs_unified, Some(&unified_top))
             }
@@ -604,7 +563,7 @@ pub fn prove_ir_equiv<'a>(
     )
 }
 
-pub fn prove_ir_fn_quickcheck(ir_fn: &IrFn<'_>) -> BoolPropertyResult {
+pub fn prove_ir_fn_quickcheck(ir_fn: &ProverFn<'_>) -> BoolPropertyResult {
     auto_selected_prover().prove_ir_fn_quickcheck(ir_fn)
 }
 

@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::prover::Prover;
-use crate::types::{
-    BoolPropertyResult, IrFn, ParamDomains, ProverFn, QuickCheckAssertionSemantics,
-};
+use crate::types::{BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAssertionSemantics};
 
 use std::collections::HashMap;
 use xlsynth::IrValue;
@@ -381,16 +379,9 @@ pub fn prove_enum_in_bound(
             return BoolPropertyResult::Error(format!("IR function '{}' not found", property_name));
         }
     };
-    let ir_fn = IrFn {
-        fn_ref: property_fn,
-        pkg_ref: Some(&instrumented_pkg),
-        fixed_implicit_activation: true,
-    };
-    let prover_fn = ProverFn {
-        ir_fn: &ir_fn,
-        domains: top_domains.cloned(),
-        uf_map: HashMap::new(),
-    };
+    let prover_fn = ProverFn::new(property_fn, Some(&instrumented_pkg))
+        .with_fixed_implicit_activation(true)
+        .with_domains(top_domains.cloned());
 
     let label_regex = format!("^{}::", ASSERT_LABEL_PREFIX);
     prover.prove_ir_quickcheck(

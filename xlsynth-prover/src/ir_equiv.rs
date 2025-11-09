@@ -5,7 +5,7 @@
 use crate::ir_utils;
 use crate::prover::{SolverChoice, prover_for_choice};
 use crate::types::{
-    AssertionSemantics, EquivParallelism, EquivReport, EquivResult, IrFn, ParamDomains, ProverFn,
+    AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -154,29 +154,16 @@ pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String>
         request.drop_params,
     )?;
 
-    let lhs_ir_fn = IrFn {
-        fn_ref: &lhs_fn_dropped,
-        pkg_ref: Some(&lhs_pkg),
-        fixed_implicit_activation: request.lhs.fixed_implicit_activation,
-    };
-    let rhs_ir_fn = IrFn {
-        fn_ref: &rhs_fn_dropped,
-        pkg_ref: Some(&rhs_pkg),
-        fixed_implicit_activation: request.rhs.fixed_implicit_activation,
-    };
-
     let assert_label_filter = request.assert_label_filter;
 
-    let lhs_side = ProverFn {
-        ir_fn: &lhs_ir_fn,
-        domains: request.lhs.param_domains.map(|d| d.clone()),
-        uf_map: request.lhs.uf_map.clone().into_owned(),
-    };
-    let rhs_side = ProverFn {
-        ir_fn: &rhs_ir_fn,
-        domains: request.rhs.param_domains.map(|d| d.clone()),
-        uf_map: request.rhs.uf_map.clone().into_owned(),
-    };
+    let lhs_side = ProverFn::new(&lhs_fn_dropped, Some(&lhs_pkg))
+        .with_fixed_implicit_activation(request.lhs.fixed_implicit_activation)
+        .with_domains(request.lhs.param_domains.map(|d| d.clone()))
+        .with_uf_map(request.lhs.uf_map.clone().into_owned());
+    let rhs_side = ProverFn::new(&rhs_fn_dropped, Some(&rhs_pkg))
+        .with_fixed_implicit_activation(request.rhs.fixed_implicit_activation)
+        .with_domains(request.rhs.param_domains.map(|d| d.clone()))
+        .with_uf_map(request.rhs.uf_map.clone().into_owned());
 
     let start_time = Instant::now();
     let result = prover.prove_ir_equiv(

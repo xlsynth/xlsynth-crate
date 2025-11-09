@@ -19,7 +19,7 @@ use crate::ir_utils;
 use crate::prover::{SolverChoice, prover_for_choice};
 use crate::toolchain;
 use crate::types::{
-    AssertionSemantics, EquivParallelism, EquivReport, EquivResult, IrFn, ParamDomains, ProverFn,
+    AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
 
 /// DSLX side description passed into [`run_dslx_equiv`].
@@ -260,33 +260,20 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
     )
     .map_err(|err| map_prepare_error(err, request.rhs.path))?;
 
-    let lhs_ir_fn = IrFn {
-        fn_ref: &lhs_fn,
-        pkg_ref: Some(&lhs_pkg),
-        fixed_implicit_activation: request.lhs.fixed_implicit_activation,
-    };
-    let rhs_ir_fn = IrFn {
-        fn_ref: &rhs_fn,
-        pkg_ref: Some(&rhs_pkg),
-        fixed_implicit_activation: request.rhs.fixed_implicit_activation,
-    };
-
     let prover = prover_for_choice(
         request.solver.unwrap_or(SolverChoice::Auto),
         request.options.tool_path,
     );
     let assert_label_filter = request.assert_label_filter;
 
-    let lhs_side = ProverFn {
-        ir_fn: &lhs_ir_fn,
-        domains: lhs_ir.param_domains.clone(),
-        uf_map: request.lhs.uf_map.clone().into_owned(),
-    };
-    let rhs_side = ProverFn {
-        ir_fn: &rhs_ir_fn,
-        domains: rhs_ir.param_domains.clone(),
-        uf_map: request.rhs.uf_map.clone().into_owned(),
-    };
+    let lhs_side = ProverFn::new(&lhs_fn, Some(&lhs_pkg))
+        .with_fixed_implicit_activation(request.lhs.fixed_implicit_activation)
+        .with_domains(lhs_ir.param_domains.clone())
+        .with_uf_map(request.lhs.uf_map.clone().into_owned());
+    let rhs_side = ProverFn::new(&rhs_fn, Some(&rhs_pkg))
+        .with_fixed_implicit_activation(request.rhs.fixed_implicit_activation)
+        .with_domains(rhs_ir.param_domains.clone())
+        .with_uf_map(request.rhs.uf_map.clone().into_owned());
 
     let result = prover.prove_ir_equiv(
         &lhs_side,
