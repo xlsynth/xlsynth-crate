@@ -5217,8 +5217,13 @@ fn test_irequiv_subcommand_json_non_equivalent() {
         v
     );
     assert!(
-        v.get("counterexample").is_some(),
-        "missing counterexample in JSON: {}",
+        v.get("error_str").is_some(),
+        "missing error_str in JSON: {}",
+        v
+    );
+    assert!(
+        v["error_str"].is_string(),
+        "expected error_str string in JSON: {}",
         v
     );
 }
@@ -5271,6 +5276,16 @@ fn test_dslx_equiv_subcommand_json_equivalent() {
         v["success"].as_bool(),
         Some(true),
         "unexpected success in JSON: {}",
+        v
+    );
+    assert!(
+        v.get("error_str").is_some(),
+        "missing error_str in JSON: {}",
+        v
+    );
+    assert!(
+        v["error_str"].is_null(),
+        "expected null error_str in JSON: {}",
         v
     );
 }
@@ -5327,8 +5342,13 @@ fn test_dslx_equiv_subcommand_json_non_equivalent() {
         v
     );
     assert!(
-        v.get("counterexample").is_some(),
-        "missing counterexample in JSON: {}",
+        v.get("error_str").is_some(),
+        "missing error_str in JSON: {}",
+        v
+    );
+    assert!(
+        v["error_str"].is_string(),
+        "expected error_str string in JSON: {}",
         v
     );
 }

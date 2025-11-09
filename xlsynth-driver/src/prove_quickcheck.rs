@@ -87,7 +87,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         additional_search_paths: &[&std::path::Path],
         test_filter: Option<&str>,
     ) -> Vec<QuickCheckTestOutcome> {
-        let runs = prover.prove_dslx_quickcheck_full(
+        let runs = prover.prove_dslx_quickcheck(
             entry_file,
             dslx_stdlib_path,
             additional_search_paths,

@@ -780,10 +780,10 @@ Proves that the enumerated parameters of selected target functions are always pa
 - Inputs: `--dslx_input_file <FILE>` and `--dslx_top <FUNC>` select the DSLX module and entry point.
 - Targets: Repeat `--target <FUNC>` for each function whose enum parameters should be instrumented.
 - Backend: `--solver <...>` selects the SMT backend (toolchain mode is currently unsupported and will error).
-- Output: `--output_json <PATH>` writes `{ "success": <bool>, "counterexample": <object|null>, "assert_label_prefix": "enum-in-bound" }`.
+- Output: `--output_json <PATH>` writes `{ "success": <bool>, "error_str": <string|null>, "assert_label_prefix": "enum-in-bound" }`.
 - Labels: Instrumented assertions use the prefix `enum-in-bound::<target>::<param>` so they can be filtered or recognized in downstream tooling.
 
-The command converts the DSLX module to unoptimized IR, injects Boolean guards for the enumerated parameters of each target function, and proves that these assertions hold for every possible input of the specified top function. Any counterexample includes concrete inputs and the violated assertion label in both stdout and JSON output.
+The command converts the DSLX module to unoptimized IR, injects Boolean guards for the enumerated parameters of each target function, and proves that these assertions hold for every possible input of the specified top function. Any error string includes concrete inputs and the violated assertion label in both stdout and JSON output.
 
 ### `prover`
 

@@ -2,8 +2,39 @@
 
 use crate::solver_interface::Uf;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
 use xlsynth::IrValue;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EquivParallelism {
+    SingleThreaded,
+    OutputBits,
+    InputBitSplit,
+}
+
+impl fmt::Display for EquivParallelism {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let as_str = match self {
+            EquivParallelism::SingleThreaded => "single-threaded",
+            EquivParallelism::OutputBits => "output-bits",
+            EquivParallelism::InputBitSplit => "input-bit-split",
+        };
+        f.write_str(as_str)
+    }
+}
+
+impl FromStr for EquivParallelism {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "single-threaded" => Ok(EquivParallelism::SingleThreaded),
+            "output-bits" => Ok(EquivParallelism::OutputBits),
+            "input-bit-split" => Ok(EquivParallelism::InputBitSplit),
+            _ => Err(format!("unknown equivalence parallelism: {s}")),
+        }
+    }
+}
 
 use crate::solver_interface::{BitVec, Solver};
 use xlsynth_pir::ir;
@@ -286,6 +317,35 @@ pub enum EquivResult {
     },
     ToolchainDisproved(String),
     Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct EquivReport {
+    pub duration: Duration,
+    pub result: EquivResult,
+}
+
+impl EquivReport {
+    pub fn is_success(&self) -> bool {
+        matches!(self.result, EquivResult::Proved)
+    }
+
+    pub fn error_str(&self) -> Option<String> {
+        match &self.result {
+            EquivResult::Proved => None,
+            EquivResult::Disproved {
+                lhs_inputs,
+                rhs_inputs,
+                lhs_output,
+                rhs_output,
+            } => Some(format!(
+                "lhs_inputs: {:?}, rhs_inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
+                lhs_inputs, rhs_inputs, lhs_output, rhs_output
+            )),
+            EquivResult::ToolchainDisproved(msg) => Some(msg.clone()),
+            EquivResult::Error(msg) => Some(msg.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]

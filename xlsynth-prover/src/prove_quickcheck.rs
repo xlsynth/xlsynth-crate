@@ -17,8 +17,8 @@ use xlsynth::dslx::{ImportData, MatchableModuleMember};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
 
-/// Prove that a given `IrFn` always returns boolean `true` (`bits[1] == 1`) for
-/// all possible inputs.
+/// Prove via quickcheck that a given `IrFn` always returns boolean `true`
+/// (`bits[1] == 1`) for all possible inputs.
 ///
 /// * `solver_config` – backend-specific solver configuration.
 /// * `ir_fn`          – function to analyse – must return `bits[1]`.
@@ -28,7 +28,7 @@ use xlsynth_pir::ir_parser::Parser;
 ///   required to hold when the function itself does **not** raise an assertion.
 ///
 /// Returns [`BoolPropertyResult`] describing the outcome.
-pub fn prove_ir_fn_always_true<'a, S>(
+pub fn prove_ir_fn_quickcheck<'a, S>(
     solver_config: &S::Config,
     ir_fn: &IrFn<'a>,
     assertion_semantics: QuickCheckAssertionSemantics,
@@ -44,7 +44,7 @@ where
         uf_map: HashMap::new(),
     };
     let empty_signatures: HashMap<String, UfSignature> = HashMap::new();
-    prove_ir_fn_always_true_full::<S>(
+    prove_ir_quickcheck::<S>(
         solver_config,
         &prover_fn,
         assertion_semantics,
@@ -53,8 +53,8 @@ where
     )
 }
 
-/// UF-enabled variant of `prove_ir_fn_always_true`.
-pub fn prove_ir_fn_always_true_full<'a, S>(
+/// UF-enabled variant of `prove_ir_fn_quickcheck`.
+pub fn prove_ir_quickcheck<'a, S>(
     solver_config: &S::Config,
     prover_fn: &ProverFn<'a>,
     assertion_semantics: QuickCheckAssertionSemantics,
@@ -297,7 +297,7 @@ pub(crate) fn infer_uf_signatures_from_map(
     uf_sigs
 }
 
-pub(crate) fn prove_dslx_quickcheck_full<SConfig>(
+pub(crate) fn prove_dslx_quickcheck<SConfig>(
     solver_config: &SConfig,
     entry_file: &Path,
     dslx_stdlib_path: Option<&Path>,
@@ -392,7 +392,7 @@ where
             uf_map: uf_map.clone(),
         };
 
-        let result = prove_ir_fn_always_true_full::<SConfig::Solver>(
+        let result = prove_ir_quickcheck::<SConfig::Solver>(
             solver_config,
             &prover_fn,
             assertion_semantics,
@@ -417,7 +417,7 @@ mod test_utils {
     use xlsynth::IrValue;
     use xlsynth_pir::ir_parser::Parser;
 
-    /// Assert that `prove_ir_fn_always_true` returns `Proved`.
+    /// Assert that `prove_ir_fn_quickcheck` returns `Proved`.
     pub fn assert_proved<S: Solver>(
         solver_config: &S::Config,
         ir_text: &str,
@@ -439,11 +439,11 @@ mod test_utils {
             pkg_ref: None,
             fixed_implicit_activation,
         };
-        let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem, None);
+        let res = super::prove_ir_fn_quickcheck::<S>(solver_config, &ir_fn, sem, None);
         assert!(matches!(res, BoolPropertyResult::Proved));
     }
 
-    /// Assert that `prove_ir_fn_always_true` returns `Disproved`.
+    /// Assert that `prove_ir_fn_quickcheck` returns `Disproved`.
     pub fn assert_disproved<S: Solver>(
         solver_config: &S::Config,
         ir_text: &str,
@@ -473,7 +473,7 @@ mod test_utils {
             pkg_ref: None,
             fixed_implicit_activation,
         };
-        let res = super::prove_ir_fn_always_true::<S>(solver_config, &ir_fn, sem, None);
+        let res = super::prove_ir_fn_quickcheck::<S>(solver_config, &ir_fn, sem, None);
         match res {
             BoolPropertyResult::Disproved { output, .. } => match (expect_violation, output) {
                 (
@@ -562,7 +562,7 @@ mod test_utils {
             fixed_implicit_activation: false,
         };
 
-        let res = super::prove_ir_fn_always_true::<S>(
+        let res = super::prove_ir_fn_quickcheck::<S>(
             solver_config,
             &ir_fn,
             QuickCheckAssertionSemantics::Ignore,
@@ -640,7 +640,7 @@ mod test_utils {
             uf_map: uf_map.clone(),
         };
 
-        let res = super::prove_ir_fn_always_true_full::<S>(
+        let res = super::prove_ir_quickcheck::<S>(
             solver_config,
             &prover_fn,
             QuickCheckAssertionSemantics::Assume,
@@ -680,7 +680,7 @@ mod test_utils {
         let empty_signatures =
             std::collections::HashMap::<String, crate::types::UfSignature>::new();
 
-        let res_no_filter = super::prove_ir_fn_always_true_full::<S>(
+        let res_no_filter = super::prove_ir_quickcheck::<S>(
             solver_config,
             &prover_fn,
             QuickCheckAssertionSemantics::Never,
@@ -694,7 +694,7 @@ mod test_utils {
 
         // Filter include only 'blue': all included asserts hold -> Proved
         let include = Regex::new(r"^(?:blue)$").unwrap();
-        let res_filtered = super::prove_ir_fn_always_true_full::<S>(
+        let res_filtered = super::prove_ir_quickcheck::<S>(
             solver_config,
             &prover_fn,
             QuickCheckAssertionSemantics::Never,
@@ -723,7 +723,7 @@ mod test_utils {
         };
 
         // Without domains, the property is disproved (e.g. x = 0).
-        let res_no_domains = super::prove_ir_fn_always_true::<S>(
+        let res_no_domains = super::prove_ir_fn_quickcheck::<S>(
             solver_config,
             &ir_fn,
             QuickCheckAssertionSemantics::Ignore,
@@ -748,7 +748,7 @@ mod test_utils {
         };
         let empty_signatures: HashMap<String, crate::types::UfSignature> = HashMap::new();
 
-        let res_with_domains = super::prove_ir_fn_always_true_full::<S>(
+        let res_with_domains = super::prove_ir_quickcheck::<S>(
             solver_config,
             &prover_fn,
             QuickCheckAssertionSemantics::Ignore,

@@ -41,6 +41,7 @@ pub enum NodeStatus {
 pub enum NodeKind {
     Leaf(LecObligation),
     Internal {
+        #[allow(dead_code)]
         tactic: Tactic,
         children: Vec<OblNode>,
         original: LecObligation,
@@ -49,6 +50,7 @@ pub enum NodeKind {
 
 #[derive(Debug)]
 pub struct OblNode {
+    #[allow(dead_code)]
     pub segment: String,
     pub selector: Selector,
     pub kind: NodeKind,

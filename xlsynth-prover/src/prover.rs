@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    AssertionSemantics, BoolPropertyResult, EquivResult, IrFn, ProverFn,
+    AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, IrFn, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckRunResult, UfSignature,
 };
 use crate::{prove_quickcheck::build_assert_label_regex, solver_interface::SolverConfig};
@@ -87,7 +87,7 @@ use xlsynth_pir::{ir, ir_parser};
 
 pub trait Prover {
     fn prove_ir_fn_equiv(self: &Self, lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
-        self.prove_ir_fn_equiv_full(
+        self.prove_ir_equiv(
             &ProverFn {
                 ir_fn: &IrFn {
                     fn_ref: lhs,
@@ -106,6 +106,7 @@ pub trait Prover {
                 domains: None,
                 uf_map: HashMap::new(),
             },
+            EquivParallelism::SingleThreaded,
             AssertionSemantics::Same,
             None,
             false,
@@ -118,41 +119,24 @@ pub trait Prover {
         rhs_pkg_text: &str,
         top: Option<&str>,
     ) -> EquivResult;
-    fn prove_ir_fn_equiv_full<'a>(
+    fn prove_ir_equiv<'a>(
         self: &Self,
         lhs: &ProverFn<'a>,
         rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
         assertion_semantics: AssertionSemantics,
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> EquivResult;
-    fn prove_ir_fn_equiv_output_bits_parallel(
-        self: &Self,
-        lhs: &IrFn,
-        rhs: &IrFn,
-        assertion_semantics: AssertionSemantics,
-        assert_label_filter: Option<&str>,
-        allow_flatten: bool,
-    ) -> EquivResult;
-    fn prove_ir_fn_equiv_split_input_bit(
-        self: &Self,
-        lhs: &IrFn,
-        rhs: &IrFn,
-        start_input: usize,
-        start_bit: usize,
-        assertion_semantics: AssertionSemantics,
-        assert_label_filter: Option<&str>,
-        allow_flatten: bool,
-    ) -> EquivResult;
 
-    fn prove_ir_fn_always_true<'a>(self: &Self, ir_fn: &IrFn<'a>) -> BoolPropertyResult {
+    fn prove_ir_fn_quickcheck<'a>(self: &Self, ir_fn: &IrFn<'a>) -> BoolPropertyResult {
         let prover_fn = ProverFn {
             ir_fn,
             domains: None,
             uf_map: HashMap::new(),
         };
-        self.prove_ir_fn_always_true_full(
+        self.prove_ir_quickcheck(
             &prover_fn,
             QuickCheckAssertionSemantics::Never,
             None,
@@ -160,7 +144,7 @@ pub trait Prover {
         )
     }
 
-    fn prove_ir_fn_always_true_full<'a>(
+    fn prove_ir_quickcheck<'a>(
         self: &Self,
         prover_fn: &ProverFn<'a>,
         assertion_semantics: QuickCheckAssertionSemantics,
@@ -168,24 +152,7 @@ pub trait Prover {
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult;
 
-    fn prove_dslx_quickcheck<'a>(
-        self: &Self,
-        entry_file: &std::path::Path,
-        dslx_stdlib_path: Option<&std::path::Path>,
-        additional_search_paths: &[&std::path::Path],
-    ) -> Vec<QuickCheckRunResult> {
-        self.prove_dslx_quickcheck_full(
-            entry_file,
-            dslx_stdlib_path,
-            additional_search_paths,
-            None,
-            QuickCheckAssertionSemantics::Never,
-            None,
-            &HashMap::new(),
-        )
-    }
-
-    fn prove_dslx_quickcheck_full(
+    fn prove_dslx_quickcheck(
         &self,
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
@@ -254,70 +221,79 @@ impl<S: SolverConfig> Prover for S {
         )
     }
 
-    fn prove_ir_fn_equiv_full<'a>(
+    fn prove_ir_equiv<'a>(
         self: &Self,
         lhs: &ProverFn<'a>,
         rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
         assertion_semantics: AssertionSemantics,
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> EquivResult {
         let assert_label_regex = build_assert_label_regex(assert_label_filter);
-        crate::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
-            self,
-            lhs,
-            rhs,
-            assertion_semantics,
-            assert_label_regex.as_ref(),
-            allow_flatten,
-            uf_signatures,
-        )
+        match strategy {
+            EquivParallelism::SingleThreaded => {
+                crate::prove_equiv::prove_ir_fn_equiv_full::<S::Solver>(
+                    self,
+                    lhs,
+                    rhs,
+                    assertion_semantics,
+                    assert_label_regex.as_ref(),
+                    allow_flatten,
+                    uf_signatures,
+                )
+            }
+            EquivParallelism::OutputBits => {
+                if !uf_signatures.is_empty() {
+                    return EquivResult::Error(
+                        "Output-bits strategy does not support UF signatures".to_string(),
+                    );
+                }
+                if lhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
+                    || rhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
+                {
+                    return EquivResult::Error(
+                        "Output-bits strategy does not support parameter domains".to_string(),
+                    );
+                }
+                crate::prove_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
+                    self,
+                    lhs.ir_fn,
+                    rhs.ir_fn,
+                    assertion_semantics,
+                    assert_label_regex.as_ref(),
+                    allow_flatten,
+                )
+            }
+            EquivParallelism::InputBitSplit => {
+                if !uf_signatures.is_empty() {
+                    return EquivResult::Error(
+                        "Input-bit-split strategy does not support UF signatures".to_string(),
+                    );
+                }
+                if lhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
+                    || rhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
+                {
+                    return EquivResult::Error(
+                        "Input-bit-split strategy does not support parameter domains".to_string(),
+                    );
+                }
+                crate::prove_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
+                    self,
+                    lhs.ir_fn,
+                    rhs.ir_fn,
+                    0,
+                    0,
+                    assertion_semantics,
+                    assert_label_regex.as_ref(),
+                    allow_flatten,
+                )
+            }
+        }
     }
 
-    fn prove_ir_fn_equiv_output_bits_parallel(
-        self: &Self,
-        lhs: &IrFn,
-        rhs: &IrFn,
-        assertion_semantics: AssertionSemantics,
-        assert_label_filter: Option<&str>,
-        allow_flatten: bool,
-    ) -> EquivResult {
-        let assert_label_regex = build_assert_label_regex(assert_label_filter);
-        crate::prove_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
-            self,
-            lhs,
-            rhs,
-            assertion_semantics,
-            assert_label_regex.as_ref(),
-            allow_flatten,
-        )
-    }
-
-    fn prove_ir_fn_equiv_split_input_bit(
-        self: &Self,
-        lhs: &IrFn,
-        rhs: &IrFn,
-        start_input: usize,
-        start_bit: usize,
-        assertion_semantics: AssertionSemantics,
-        assert_label_filter: Option<&str>,
-        allow_flatten: bool,
-    ) -> EquivResult {
-        let assert_label_regex = build_assert_label_regex(assert_label_filter);
-        crate::prove_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
-            self,
-            lhs,
-            rhs,
-            start_input,
-            start_bit,
-            assertion_semantics,
-            assert_label_regex.as_ref(),
-            allow_flatten,
-        )
-    }
-
-    fn prove_ir_fn_always_true_full<'a>(
+    fn prove_ir_quickcheck<'a>(
         self: &Self,
         ir_fn: &ProverFn<'a>,
         assertion_semantics: QuickCheckAssertionSemantics,
@@ -325,7 +301,7 @@ impl<S: SolverConfig> Prover for S {
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> BoolPropertyResult {
         let assert_label_regex = build_assert_label_regex(assert_label_filter);
-        crate::prove_quickcheck::prove_ir_fn_always_true_full::<S::Solver>(
+        crate::prove_quickcheck::prove_ir_quickcheck::<S::Solver>(
             self,
             ir_fn,
             assertion_semantics,
@@ -334,7 +310,7 @@ impl<S: SolverConfig> Prover for S {
         )
     }
 
-    fn prove_dslx_quickcheck_full(
+    fn prove_dslx_quickcheck(
         &self,
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
@@ -344,7 +320,7 @@ impl<S: SolverConfig> Prover for S {
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
     ) -> Vec<QuickCheckRunResult> {
-        crate::prove_quickcheck::prove_dslx_quickcheck_full::<S>(
+        crate::prove_quickcheck::prove_dslx_quickcheck::<S>(
             self,
             entry_file,
             dslx_stdlib_path,
@@ -412,123 +388,115 @@ impl Prover for ExternalProver {
         }
     }
 
-    fn prove_ir_fn_equiv_full<'a>(
+    fn prove_ir_equiv<'a>(
         self: &Self,
         lhs: &ProverFn<'a>,
         rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
         assertion_semantics: AssertionSemantics,
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
         uf_signatures: &HashMap<String, UfSignature>,
     ) -> EquivResult {
-        if lhs.ir_fn.fixed_implicit_activation || rhs.ir_fn.fixed_implicit_activation {
-            return EquivResult::Error(
-                "External provers do not support fixed implicit activation".to_string(),
-            );
-        }
-        if (lhs.domains.is_some() && lhs.domains.as_ref().unwrap().len() != 0)
-            || (rhs.domains.is_some() && rhs.domains.as_ref().unwrap().len() != 0)
-        {
-            println!(
-                "Warning: External provers do not support domains for arguments. Enums will be treated as possibly out of bounds."
-            );
-        }
-        if lhs.uf_map.len() != 0 || rhs.uf_map.len() != 0 {
-            return EquivResult::Error("External provers do not support UFs".to_string());
-        }
-        if assertion_semantics != AssertionSemantics::Same {
-            return EquivResult::Error(
-                "External provers do not support assertion semantics".to_string(),
-            );
-        }
-        if assert_label_filter.is_some() {
-            return EquivResult::Error(
-                "External provers do not support assertion label filters".to_string(),
-            );
-        }
-        if allow_flatten {
-            return EquivResult::Error("External provers do not support flattening".to_string());
-        }
-        if !uf_signatures.is_empty() {
-            return EquivResult::Error("External provers do not support UFs".to_string());
-        }
-        let lhs_pkg = match lhs.ir_fn.pkg_ref {
-            Some(pkg) => pkg.to_string(),
-            None => format!("package lhs\n\ntop {}\n", lhs.ir_fn.fn_ref.to_string()),
-        };
-        let rhs_pkg = match rhs.ir_fn.pkg_ref {
-            Some(pkg) => pkg.to_string(),
-            None => format!("package rhs\n\ntop {}\n", rhs.ir_fn.fn_ref.to_string()),
-        };
-        fn unify_toolchain_tops<'a>(
-            lhs_ir: &'a str,
-            rhs_ir: &'a str,
-            lhs_top: &str,
-            rhs_top: &str,
-        ) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>, String) {
-            if lhs_top == rhs_top {
-                return (
-                    std::borrow::Cow::Borrowed(lhs_ir),
-                    std::borrow::Cow::Borrowed(rhs_ir),
-                    lhs_top.to_string(),
+        match strategy {
+            EquivParallelism::SingleThreaded => {
+                if lhs.ir_fn.fixed_implicit_activation || rhs.ir_fn.fixed_implicit_activation {
+                    return EquivResult::Error(
+                        "External provers do not support fixed implicit activation".to_string(),
+                    );
+                }
+                if (lhs.domains.is_some() && lhs.domains.as_ref().unwrap().len() != 0)
+                    || (rhs.domains.is_some() && rhs.domains.as_ref().unwrap().len() != 0)
+                {
+                    println!(
+                        "Warning: External provers do not support domains for arguments. Enums will be treated as possibly out of bounds."
+                    );
+                }
+                if lhs.uf_map.len() != 0 || rhs.uf_map.len() != 0 {
+                    return EquivResult::Error("External provers do not support UFs".to_string());
+                }
+                if assertion_semantics != AssertionSemantics::Same {
+                    return EquivResult::Error(
+                        "External provers do not support assertion semantics".to_string(),
+                    );
+                }
+                if assert_label_filter.is_some() {
+                    return EquivResult::Error(
+                        "External provers do not support assertion label filters".to_string(),
+                    );
+                }
+                if allow_flatten {
+                    return EquivResult::Error(
+                        "External provers do not support flattening".to_string(),
+                    );
+                }
+                if !uf_signatures.is_empty() {
+                    return EquivResult::Error("External provers do not support UFs".to_string());
+                }
+                let lhs_pkg = match lhs.ir_fn.pkg_ref {
+                    Some(pkg) => pkg.to_string(),
+                    None => format!("package lhs\n\ntop {}\n", lhs.ir_fn.fn_ref.to_string()),
+                };
+                let rhs_pkg = match rhs.ir_fn.pkg_ref {
+                    Some(pkg) => pkg.to_string(),
+                    None => format!("package rhs\n\ntop {}\n", rhs.ir_fn.fn_ref.to_string()),
+                };
+                fn unify_toolchain_tops<'a>(
+                    lhs_ir: &'a str,
+                    rhs_ir: &'a str,
+                    lhs_top: &str,
+                    rhs_top: &str,
+                ) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>, String)
+                {
+                    if lhs_top == rhs_top {
+                        return (
+                            std::borrow::Cow::Borrowed(lhs_ir),
+                            std::borrow::Cow::Borrowed(rhs_ir),
+                            lhs_top.to_string(),
+                        );
+                    }
+                    let unified = lhs_top.to_string();
+                    let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
+                    (
+                        std::borrow::Cow::Borrowed(lhs_ir),
+                        std::borrow::Cow::Owned(rhs_rewritten),
+                        unified,
+                    )
+                }
+
+                let (lhs_unified, rhs_unified, unified_top) = unify_toolchain_tops(
+                    &lhs_pkg,
+                    &rhs_pkg,
+                    &lhs.ir_fn.fn_ref.name,
+                    &rhs.ir_fn.fn_ref.name,
                 );
+
+                self.prove_ir_pkg_text_equiv(&lhs_unified, &rhs_unified, Some(&unified_top))
             }
-            let unified = lhs_top.to_string();
-            let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
-            (
-                std::borrow::Cow::Borrowed(lhs_ir),
-                std::borrow::Cow::Owned(rhs_rewritten),
-                unified,
-            )
+            EquivParallelism::OutputBits => {
+                if assert_label_filter.is_some() {
+                    return EquivResult::Error(
+                        "External provers do not support assertion label filters".to_string(),
+                    );
+                }
+                EquivResult::Error(
+                    "External provers do not support output-bits parallel strategy".to_string(),
+                )
+            }
+            EquivParallelism::InputBitSplit => {
+                if assert_label_filter.is_some() {
+                    return EquivResult::Error(
+                        "External provers do not support assertion label filters".to_string(),
+                    );
+                }
+                EquivResult::Error(
+                    "External provers do not support input-bit split strategy".to_string(),
+                )
+            }
         }
-
-        let (lhs_unified, rhs_unified, unified_top) = unify_toolchain_tops(
-            &lhs_pkg,
-            &rhs_pkg,
-            &lhs.ir_fn.fn_ref.name,
-            &rhs.ir_fn.fn_ref.name,
-        );
-
-        self.prove_ir_pkg_text_equiv(&lhs_unified, &rhs_unified, Some(&unified_top))
     }
 
-    fn prove_ir_fn_equiv_output_bits_parallel(
-        self: &Self,
-        _lhs: &IrFn,
-        _rhs: &IrFn,
-        _assertion_semantics: AssertionSemantics,
-        assert_label_filter: Option<&str>,
-        _allow_flatten: bool,
-    ) -> EquivResult {
-        if assert_label_filter.is_some() {
-            return EquivResult::Error(
-                "External provers do not support assertion label filters".to_string(),
-            );
-        }
-        EquivResult::Error(
-            "External provers do not support output-bits parallel strategy".to_string(),
-        )
-    }
-
-    fn prove_ir_fn_equiv_split_input_bit(
-        self: &Self,
-        _lhs: &IrFn,
-        _rhs: &IrFn,
-        _start_input: usize,
-        _start_bit: usize,
-        _assertion_semantics: AssertionSemantics,
-        assert_label_filter: Option<&str>,
-        _allow_flatten: bool,
-    ) -> EquivResult {
-        if assert_label_filter.is_some() {
-            return EquivResult::Error(
-                "External provers do not support assertion label filters".to_string(),
-            );
-        }
-        EquivResult::Error("External provers do not support input-bit split strategy".to_string())
-    }
-
-    fn prove_ir_fn_always_true_full<'a>(
+    fn prove_ir_quickcheck<'a>(
         self: &Self,
         _ir_fn: &ProverFn<'a>,
         _assertion_semantics: QuickCheckAssertionSemantics,
@@ -546,7 +514,7 @@ impl Prover for ExternalProver {
         )
     }
 
-    fn prove_dslx_quickcheck_full(
+    fn prove_dslx_quickcheck(
         &self,
         entry_file: &std::path::Path,
         dslx_stdlib_path: Option<&std::path::Path>,
@@ -556,7 +524,7 @@ impl Prover for ExternalProver {
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
     ) -> Vec<QuickCheckRunResult> {
-        crate::prove_quickcheck_via_toolchain::prove_dslx_quickcheck_full_via_toolchain(
+        crate::toolchain::prove_dslx_quickcheck_full_via_toolchain(
             self,
             entry_file,
             dslx_stdlib_path,
@@ -627,6 +595,76 @@ pub fn auto_selected_prover() -> Box<dyn Prover> {
     Box::new(ExternalProver::Toolchain)
 }
 
+pub fn prove_ir_fn_equiv(lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
+    auto_selected_prover().prove_ir_fn_equiv(lhs, rhs)
+}
+
+pub fn prove_ir_pkg_text_equiv(
+    lhs_pkg_text: &str,
+    rhs_pkg_text: &str,
+    top: Option<&str>,
+) -> EquivResult {
+    auto_selected_prover().prove_ir_pkg_text_equiv(lhs_pkg_text, rhs_pkg_text, top)
+}
+
+pub fn prove_ir_equiv<'a>(
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    strategy: EquivParallelism,
+    assertion_semantics: AssertionSemantics,
+    assert_label_filter: Option<&str>,
+    allow_flatten: bool,
+    uf_signatures: &HashMap<String, UfSignature>,
+) -> EquivResult {
+    auto_selected_prover().prove_ir_equiv(
+        lhs,
+        rhs,
+        strategy,
+        assertion_semantics,
+        assert_label_filter,
+        allow_flatten,
+        uf_signatures,
+    )
+}
+
+pub fn prove_ir_fn_quickcheck(ir_fn: &IrFn<'_>) -> BoolPropertyResult {
+    auto_selected_prover().prove_ir_fn_quickcheck(ir_fn)
+}
+
+pub fn prove_ir_quickcheck(
+    prover_fn: &ProverFn<'_>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_filter: Option<&str>,
+    uf_signatures: &HashMap<String, UfSignature>,
+) -> BoolPropertyResult {
+    auto_selected_prover().prove_ir_quickcheck(
+        prover_fn,
+        assertion_semantics,
+        assert_label_filter,
+        uf_signatures,
+    )
+}
+
+pub fn prove_dslx_quickcheck(
+    entry_file: &std::path::Path,
+    dslx_stdlib_path: Option<&std::path::Path>,
+    additional_search_paths: &[&std::path::Path],
+    test_filter: Option<&str>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_filter: Option<&str>,
+    uf_map: &HashMap<String, String>,
+) -> Vec<QuickCheckRunResult> {
+    auto_selected_prover().prove_dslx_quickcheck(
+        entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
+        test_filter,
+        assertion_semantics,
+        assert_label_filter,
+        uf_map,
+    )
+}
+
 pub fn prover_for_choice(choice: SolverChoice, tool_path: Option<&Path>) -> Box<dyn Prover> {
     match choice {
         SolverChoice::Auto => auto_selected_prover(),
@@ -656,83 +694,4 @@ pub fn prover_for_choice(choice: SolverChoice, tool_path: Option<&Path>) -> Box<
             None => Box::new(ExternalProver::Toolchain),
         },
     }
-}
-
-pub fn prove_ir_fn_equiv(lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
-    auto_selected_prover().prove_ir_fn_equiv(lhs, rhs)
-}
-
-pub fn prove_ir_fn_equiv_full(
-    lhs: &ProverFn<'_>,
-    rhs: &ProverFn<'_>,
-    assertion_semantics: AssertionSemantics,
-    allow_flatten: bool,
-    uf_signatures: &HashMap<String, UfSignature>,
-) -> EquivResult {
-    auto_selected_prover().prove_ir_fn_equiv_full(
-        lhs,
-        rhs,
-        assertion_semantics,
-        None,
-        allow_flatten,
-        uf_signatures,
-    )
-}
-
-pub fn prove_ir_pkg_text_equiv(
-    lhs_pkg_text: &str,
-    rhs_pkg_text: &str,
-    top: Option<&str>,
-) -> EquivResult {
-    auto_selected_prover().prove_ir_pkg_text_equiv(lhs_pkg_text, rhs_pkg_text, top)
-}
-
-pub fn prove_ir_fn_always_true(ir_fn: &IrFn<'_>) -> BoolPropertyResult {
-    auto_selected_prover().prove_ir_fn_always_true(ir_fn)
-}
-
-pub fn prove_ir_fn_always_true_full(
-    prover_fn: &ProverFn<'_>,
-    assertion_semantics: QuickCheckAssertionSemantics,
-    assert_label_filter: Option<&str>,
-    uf_signatures: &HashMap<String, UfSignature>,
-) -> BoolPropertyResult {
-    auto_selected_prover().prove_ir_fn_always_true_full(
-        &prover_fn,
-        assertion_semantics,
-        assert_label_filter,
-        uf_signatures,
-    )
-}
-
-pub fn prove_dslx_quickcheck(
-    entry_file: &std::path::Path,
-    dslx_stdlib_path: Option<&std::path::Path>,
-    additional_search_paths: &[&std::path::Path],
-) -> Vec<QuickCheckRunResult> {
-    auto_selected_prover().prove_dslx_quickcheck(
-        entry_file,
-        dslx_stdlib_path,
-        additional_search_paths,
-    )
-}
-
-pub fn prove_dslx_quickcheck_full(
-    entry_file: &std::path::Path,
-    dslx_stdlib_path: Option<&std::path::Path>,
-    additional_search_paths: &[&std::path::Path],
-    test_filter: Option<&str>,
-    assertion_semantics: QuickCheckAssertionSemantics,
-    assert_label_filter: Option<&str>,
-    uf_map: &HashMap<String, String>,
-) -> Vec<QuickCheckRunResult> {
-    auto_selected_prover().prove_dslx_quickcheck_full(
-        entry_file,
-        dslx_stdlib_path,
-        additional_search_paths,
-        test_filter,
-        assertion_semantics,
-        assert_label_filter,
-        uf_map,
-    )
 }

@@ -24,10 +24,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::parallelism::ParallelismStrategy;
 use serde::{Deserialize, Serialize};
 use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::types::AssertionSemantics;
+use xlsynth_prover::types::EquivParallelism;
 use xlsynth_prover::types::QuickCheckAssertionSemantics;
 
 fn add_flag(cmd: &mut Command, name: &str, value: &str) {
@@ -68,7 +68,7 @@ pub struct IrEquivConfig {
     pub solver: Option<SolverChoice>,
     pub flatten_aggregates: Option<bool>,
     pub drop_params: Option<Vec<String>>, // comma joined
-    pub parallelism_strategy: Option<ParallelismStrategy>,
+    pub parallelism_strategy: Option<EquivParallelism>,
     pub assertion_semantics: Option<AssertionSemantics>,
     pub lhs_fixed_implicit_activation: Option<bool>,
     pub rhs_fixed_implicit_activation: Option<bool>,
@@ -96,7 +96,7 @@ pub struct DslxEquivConfig {
     pub solver: Option<SolverChoice>,
     pub flatten_aggregates: Option<bool>,
     pub drop_params: Option<Vec<String>>, // comma joined
-    pub parallelism_strategy: Option<ParallelismStrategy>,
+    pub parallelism_strategy: Option<EquivParallelism>,
     pub assertion_semantics: Option<AssertionSemantics>,
     pub lhs_fixed_implicit_activation: Option<bool>,
     pub rhs_fixed_implicit_activation: Option<bool>,
@@ -466,7 +466,7 @@ mod tests {
             rhs_ir_file: "rhs.ir".into(),
             top: Some("main".to_string()),
             solver: Some(SolverChoice::Toolchain),
-            parallelism_strategy: Some(ParallelismStrategy::OutputBits),
+            parallelism_strategy: Some(EquivParallelism::OutputBits),
             assertion_semantics: Some(AssertionSemantics::Same),
             flatten_aggregates: Some(true),
             drop_params: Some(vec!["p0".into(), "p1".into()]),
@@ -508,7 +508,7 @@ mod tests {
             dslx_stdlib_path: Some("stdlib".into()),
             solver: Some(SolverChoice::Toolchain),
             assertion_semantics: Some(AssertionSemantics::Assume),
-            parallelism_strategy: Some(ParallelismStrategy::SingleThreaded),
+            parallelism_strategy: Some(EquivParallelism::SingleThreaded),
             flatten_aggregates: Some(false),
             lhs_fixed_implicit_activation: Some(true),
             rhs_fixed_implicit_activation: Some(false),
@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(cfg.solver, Some(SolverChoice::Toolchain));
         assert_eq!(
             cfg.parallelism_strategy,
-            Some(ParallelismStrategy::InputBitSplit)
+            Some(EquivParallelism::InputBitSplit)
         );
         assert_eq!(cfg.assertion_semantics, Some(AssertionSemantics::Never));
         assert_eq!(cfg.json, Some(true));

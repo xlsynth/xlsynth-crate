@@ -6,7 +6,7 @@ pub mod utils;
 
 use self::cosliced::CoslicedTactic;
 use self::focus::FocusTactic;
-use crate::proofs::obligations::LecObligation;
+use crate::dslx_tactics::obligations::LecObligation;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 

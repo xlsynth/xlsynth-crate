@@ -393,7 +393,7 @@ pub fn prove_enum_in_bound(
     };
 
     let label_regex = format!("^{}::", ASSERT_LABEL_PREFIX);
-    prover.prove_ir_fn_always_true_full(
+    prover.prove_ir_quickcheck(
         &prover_fn,
         QuickCheckAssertionSemantics::Never,
         Some(label_regex.as_str()),

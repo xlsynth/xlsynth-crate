@@ -5,9 +5,9 @@
 //! This mirrors the Python variant's obligation construction logic without any
 //! model- or bus-related functionality.
 
-use crate::proofs::obligations::{Edit, LecObligation, Side, SourceFile};
-use crate::proofs::tactics::utils::is_valid_ident;
-use crate::proofs::tactics::IsTactic;
+use crate::dslx_tactics::obligations::{Edit, LecObligation, Side, SourceFile};
+use crate::dslx_tactics::tactics::IsTactic;
+use crate::dslx_tactics::tactics::utils::is_valid_ident;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -202,8 +202,8 @@ fn validate_and_collect(s1: &Vec<NamedSlice>, s2: &Vec<NamedSlice>) -> Result<us
 #[cfg(test)]
 mod tests {
     use super::{CoslicedTactic, NamedSlice};
-    use crate::proofs::obligations::{FileWithHistory, LecObligation, LecSide, SourceFile};
-    use crate::proofs::tactics::IsTactic;
+    use crate::dslx_tactics::obligations::{FileWithHistory, LecObligation, LecSide, SourceFile};
+    use crate::dslx_tactics::tactics::IsTactic;
 
     fn base_obligation_with(sel: Option<&str>) -> LecObligation {
         let lhs = LecSide {

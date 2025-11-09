@@ -67,7 +67,6 @@ mod ir_round_trip;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
 mod lib2proto;
-mod parallelism;
 mod proofs;
 mod prove_enum_in_bound;
 mod prove_quickcheck;
