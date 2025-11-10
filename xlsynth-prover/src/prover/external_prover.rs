@@ -104,9 +104,9 @@ impl Prover for ExternalProver {
                         "External provers do not support parameter domains".to_string(),
                     );
                 }
-                if assertion_semantics != AssertionSemantics::Same {
+                if assertion_semantics != AssertionSemantics::Ignore {
                     return EquivResult::Error(
-                        "External provers do not support assertion semantics".to_string(),
+                        "External provers require assertion_semantics=ignore".to_string(),
                     );
                 }
                 if assert_label_filter.is_some() {
@@ -194,7 +194,7 @@ impl Prover for ExternalProver {
 
         if assertion_semantics != QuickCheckAssertionSemantics::Never {
             let err = BoolPropertyResult::Error(
-                "External quickcheck only supports assertion_semantics=never".to_string(),
+                "External quickcheck requires assertion_semantics=never".to_string(),
             );
             return quickchecks
                 .into_iter()

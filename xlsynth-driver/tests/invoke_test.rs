@@ -85,6 +85,8 @@ fn test_irequiv_subcommand_assert_label_filter() {
         .arg(rhs_path.to_str().unwrap())
         .arg("--top")
         .arg("my_main")
+        .arg("--assertion-semantics")
+        .arg("same")
         .output()
         .unwrap();
     assert!(
@@ -105,6 +107,8 @@ fn test_irequiv_subcommand_assert_label_filter() {
         .arg("my_main")
         .arg("--assert-label-filter")
         .arg("blue")
+        .arg("--assertion-semantics")
+        .arg("same")
         .output()
         .unwrap();
     let stdout2 = String::from_utf8_lossy(&out2.stdout);
@@ -4334,6 +4338,181 @@ fn test_dslx_equiv_solver_param(solver: &str, should_succeed: bool) {
             stderr
         );
     }
+}
+
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla"; "dslx_equiv_default_semantics_bitwuzla"))]
+#[test_case("toolchain"; "dslx_equiv_default_semantics_toolchain")]
+fn test_dslx_equiv_default_semantics_matches_toolchain(solver: &str) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let lhs_dslx = r#"
+fn main(x: u32) -> u32 {
+  assert!(false, "lhs failure");
+  x
+}
+"#;
+    let rhs_dslx = r#"
+fn main(x: u32) -> u32 {
+  x
+}
+"#;
+
+    let lhs_path = temp_dir.path().join("lhs.x");
+    let rhs_path = temp_dir.path().join("rhs.x");
+    std::fs::write(&lhs_path, lhs_dslx.trim_start()).unwrap();
+    std::fs::write(&rhs_path, rhs_dslx.trim_start()).unwrap();
+
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .expect("dslx-equiv invocation should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "dslx-equiv with assertion ignore should succeed for solver {}.\nstdout: {}\nstderr: {}",
+        solver,
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("success"),
+        "expected success marker in stdout: {}",
+        stdout
+    );
+}
+
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla"; "prove_quickcheck_default_semantics_bitwuzla"))]
+#[test_case("toolchain"; "prove_quickcheck_default_semantics_toolchain")]
+fn test_prove_quickcheck_default_semantics_matches_toolchain(solver: &str) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let dslx_source = r#"
+fn always_fail() -> bool {
+  assert!(false, "lhs failure");
+  true
+}
+
+#[quickcheck]
+fn qc_always_fails() -> bool {
+  always_fail()
+}
+"#;
+
+    let dslx_path = temp_dir.path().join("qc.x");
+    std::fs::write(&dslx_path, dslx_source.trim_start()).unwrap();
+
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("prove-quickcheck")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .expect("prove-quickcheck invocation should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "prove-quickcheck with default semantics should fail for solver {} when assertions fire.\nstdout: {}\nstderr: {}",
+        solver,
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("Failure: Some QuickChecks disproved"),
+        "expected failure messaging in stdout: {}",
+        stdout
+    );
+}
+
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla"; "ir_equiv_default_semantics_bitwuzla"))]
+#[test_case("toolchain"; "ir_equiv_default_semantics_toolchain")]
+fn test_ir_equiv_default_semantics_matches_toolchain(solver: &str) {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let lhs_ir = r#"
+package lhs
+
+fn main(x: bits[8] id=1) -> bits[8] {
+  after_all.2: token = after_all(id=2)
+  literal.3: bits[1] = literal(value=0, id=3)
+  assert.4: token = assert(after_all.2, literal.3, message="lhs failure", label="lhs", id=4)
+  ret x: bits[8] = param(name=x, id=1)
+}
+"#;
+
+    let rhs_ir = r#"
+package rhs
+
+fn main(x: bits[8] id=1) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=1)
+}
+"#;
+
+    let lhs_path = temp_dir.path().join("lhs.ir");
+    let rhs_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&lhs_path, lhs_ir.trim_start()).unwrap();
+    std::fs::write(&rhs_path, rhs_ir.trim_start()).unwrap();
+
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--solver")
+        .arg(solver)
+        .output()
+        .expect("ir-equiv invocation should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "ir-equiv with default semantics should succeed for solver {} when only lhs asserts.\nstdout: {}\nstderr: {}",
+        solver,
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("success"),
+        "expected success marker in stdout: {}",
+        stdout
+    );
 }
 
 #[cfg_attr(feature="has-boolector", test_case("boolector", true; "dslx_equiv_diff_tops_boolector_equiv"))]

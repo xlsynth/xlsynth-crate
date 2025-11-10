@@ -717,7 +717,7 @@ fn main() {
                         .value_name("SEMANTICS")
                         .help("Assertion semantics")
                         .value_parser(clap::value_parser!(AssertionSemantics))
-                        .default_value("same")
+                        .default_value("ignore")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -820,7 +820,7 @@ fn main() {
                         .value_name("SEMANTICS")
                         .help("Assertion semantics")
                         .value_parser(clap::value_parser!(AssertionSemantics))
-                        .default_value("same")
+                        .default_value("ignore")
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -1493,6 +1493,7 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking")
                         .value_parser([
+                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
@@ -1507,7 +1508,7 @@ fn main() {
                             "boolector-legacy",
                             "toolchain",
                         ])
-                        .default_value("toolchain")
+                        .default_value("auto")
                         .action(clap::ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -1535,7 +1536,7 @@ fn main() {
                         .value_name("SEMANTICS")
                         .help("Assertion semantics")
                         .value_parser(["ignore", "never", "same", "assume", "implies"])
-                        .default_value("same")
+                        .default_value("ignore")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
