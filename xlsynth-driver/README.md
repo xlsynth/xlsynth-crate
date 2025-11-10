@@ -763,7 +763,7 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 - Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
 - Backend: `--solver <...>` selects the solver/toolchain (`auto` defers to the library's feature-based default).
-- Semantics: `--assertion-semantics <ignore|never|assume>`.
+- Semantics: `--assertion-semantics <ignore|never|assume>` (defaults to `never`; external toolchain supports only `never`).
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
 - UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
 - Output: `--output_json <PATH>` to write results as JSON.

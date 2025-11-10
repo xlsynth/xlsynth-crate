@@ -1330,7 +1330,7 @@ fn main() {
                         .value_name("SEM")
                         .help("Assertion semantics")
                         .value_parser(clap::value_parser!(QuickCheckAssertionSemantics))
-                        .default_value("ignore")
+                        .default_value("never")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(

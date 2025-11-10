@@ -95,6 +95,13 @@ impl<'a> ProverFn<'a> {
         self
     }
 
+    pub fn has_domains(&self) -> bool {
+        self.domains
+            .as_ref()
+            .map(|d| !d.is_empty())
+            .unwrap_or(false)
+    }
+
     pub fn with_uf_map(mut self, uf_map: HashMap<String, String>) -> Self {
         self.uf_map = uf_map;
         self

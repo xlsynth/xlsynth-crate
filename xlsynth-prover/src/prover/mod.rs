@@ -200,6 +200,12 @@ impl<S: SolverConfig> Prover for S {
                 "UF mappings are only supported with single-threaded equivalence".to_string(),
             );
         }
+        if strategy != EquivParallelism::SingleThreaded && (lhs.has_domains() || rhs.has_domains())
+        {
+            return EquivResult::Error(format!(
+                "Only single-threaded equivalence supports parameter domains",
+            ));
+        }
         let assert_label_regex = build_assert_label_regex(assert_label_filter);
         match strategy {
             EquivParallelism::SingleThreaded => ir_equiv::prove_ir_fn_equiv::<S::Solver>(
@@ -211,13 +217,6 @@ impl<S: SolverConfig> Prover for S {
                 allow_flatten,
             ),
             EquivParallelism::OutputBits => {
-                if lhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
-                    || rhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
-                {
-                    return EquivResult::Error(
-                        "Output-bits strategy does not support parameter domains".to_string(),
-                    );
-                }
                 ir_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
                     self,
                     lhs,
@@ -228,13 +227,6 @@ impl<S: SolverConfig> Prover for S {
                 )
             }
             EquivParallelism::InputBitSplit => {
-                if lhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
-                    || rhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
-                {
-                    return EquivResult::Error(
-                        "Input-bit-split strategy does not support parameter domains".to_string(),
-                    );
-                }
                 ir_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
                     self,
                     lhs,

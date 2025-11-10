@@ -22,6 +22,25 @@ pub enum ExternalProver {
     Toolchain,
 }
 
+fn resolve_tool_path(prover: &ExternalProver, exe_name: &str) -> Result<PathBuf, String> {
+    let (candidate, label) = match prover {
+        ExternalProver::ToolExe(path) => (path.clone(), "tool executable".to_string()),
+        ExternalProver::ToolDir(dir) => (dir.join(exe_name), exe_name.to_string()),
+        ExternalProver::Toolchain => match std::env::var("XLSYNTH_TOOLS") {
+            Ok(dir) => (PathBuf::from(dir).join(exe_name), exe_name.to_string()),
+            Err(_) => {
+                return Err("XLSYNTH_TOOLS is not set; cannot locate external tool".to_string());
+            }
+        },
+    };
+
+    if candidate.exists() {
+        Ok(candidate)
+    } else {
+        Err(format!("{label} not found at {}", candidate.display()))
+    }
+}
+
 impl Prover for ExternalProver {
     fn prove_ir_pkg_text_equiv(
         self: &Self,
@@ -175,13 +194,26 @@ impl Prover for ExternalProver {
             return Vec::new();
         }
 
+        if assertion_semantics != QuickCheckAssertionSemantics::Never {
+            let err = BoolPropertyResult::Error(
+                "External quickcheck only supports assertion_semantics=never".to_string(),
+            );
+            return quickchecks
+                .into_iter()
+                .map(|(name, _)| QuickCheckRunResult {
+                    name,
+                    duration: std::time::Duration::default(),
+                    result: err.clone(),
+                })
+                .collect();
+        }
         if assert_label_filter.is_some() {
             return quickchecks
                 .into_iter()
                 .map(|(name, _)| QuickCheckRunResult {
                     name,
                     duration: std::time::Duration::default(),
-                    result: BoolPropertyResult::ToolchainDisproved(
+                    result: BoolPropertyResult::Error(
                         "External quickcheck does not support assertion label filters".to_string(),
                     ),
                 })
@@ -193,7 +225,7 @@ impl Prover for ExternalProver {
                 .map(|(name, _)| QuickCheckRunResult {
                     name,
                     duration: std::time::Duration::default(),
-                    result: BoolPropertyResult::ToolchainDisproved(
+                    result: BoolPropertyResult::Error(
                         "External quickcheck does not support uninterpreted functions".to_string(),
                     ),
                 })
@@ -201,12 +233,27 @@ impl Prover for ExternalProver {
         }
 
         let mut results = Vec::with_capacity(quickchecks.len());
+        let exe = match resolve_tool_path(self, "prove_quickcheck_main") {
+            Ok(path) => path,
+            Err(msg) => {
+                let err = BoolPropertyResult::Error(msg);
+                return quickchecks
+                    .into_iter()
+                    .map(|(name, _)| QuickCheckRunResult {
+                        name,
+                        duration: std::time::Duration::default(),
+                        result: err.clone(),
+                    })
+                    .collect();
+            }
+        };
+
+        let limit = |msg: &str| msg.chars().take(MAX_TOOLCHAIN_MESSAGE).collect::<String>();
         for (quickcheck_name, _) in quickchecks {
             let start_time = std::time::Instant::now();
             let filter = format!("^{}$", escape(quickcheck_name.as_str()));
-            let limit = |msg: &str| msg.chars().take(MAX_TOOLCHAIN_MESSAGE).collect::<String>();
-            let run_with_exe = |exe: &Path| match run_prove_quickcheck_main(
-                exe,
+            let result = match run_prove_quickcheck_main(
+                &exe,
                 entry_file,
                 dslx_stdlib_path,
                 additional_search_paths,
@@ -214,38 +261,6 @@ impl Prover for ExternalProver {
             ) {
                 Ok(_) => BoolPropertyResult::Proved,
                 Err(msg) => BoolPropertyResult::ToolchainDisproved(limit(&msg)),
-            };
-
-            let result = match self {
-                ExternalProver::ToolExe(path) => run_with_exe(path),
-                ExternalProver::ToolDir(dir) => {
-                    let exe = dir.join("prove_quickcheck_main");
-                    if !exe.exists() {
-                        BoolPropertyResult::ToolchainDisproved(format!(
-                            "prove_quickcheck_main not found in {}",
-                            dir.display()
-                        ))
-                    } else {
-                        run_with_exe(&exe)
-                    }
-                }
-                ExternalProver::Toolchain => match std::env::var("XLSYNTH_TOOLS") {
-                    Ok(dir) => {
-                        let dir = PathBuf::from(dir);
-                        let exe = dir.join("prove_quickcheck_main");
-                        if !exe.exists() {
-                            BoolPropertyResult::ToolchainDisproved(format!(
-                                "prove_quickcheck_main not found in {}",
-                                dir.display()
-                            ))
-                        } else {
-                            run_with_exe(&exe)
-                        }
-                    }
-                    Err(_) => BoolPropertyResult::ToolchainDisproved(
-                        "XLSYNTH_TOOLS is not set; cannot run toolchain quickcheck".to_string(),
-                    ),
-                },
             };
 
             results.push(QuickCheckRunResult {
