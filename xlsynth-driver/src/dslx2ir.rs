@@ -71,7 +71,7 @@ fn dslx2ir(
                 force_implicit_token_calling_convention: false,
             },
         )
-        .expect("successful conversion");
+        .expect("DSLX to IR conversion failed");
         for warning in result.warnings {
             log::warn!(
                 "DSLX warning for {}: {}",

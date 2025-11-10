@@ -139,7 +139,7 @@ fn dslx2pipeline(
         };
         let convert_result: xlsynth::DslxToIrPackageResult =
             xlsynth::convert_dslx_to_ir(&dslx, input_file, &convert_options)
-                .expect("successful conversion");
+                .expect("DSLX to IR conversion failed");
         if warnings_as_errors && !convert_result.warnings.is_empty() {
             for warning in convert_result.warnings {
                 eprintln!(
