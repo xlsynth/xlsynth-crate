@@ -73,7 +73,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
                 force_implicit_token_calling_convention: false,
             },
         )
-        .expect("successful conversion");
+        .expect("DSLX to IR conversion failed");
         for warning in convert_result.warnings {
             log::warn!("DSLX warning for {}: {}", input_file, warning);
         }
