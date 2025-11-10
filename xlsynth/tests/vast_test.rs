@@ -1197,3 +1197,11 @@ endmodule
 "#;
     assert_eq!(verilog, want);
 }
+
+#[test]
+fn test_expression_emit_plain_literal() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
+    let s = three.emit();
+    assert_eq!(s, "3");
+}

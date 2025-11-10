@@ -251,6 +251,14 @@ pub struct Expr {
     parent: Arc<Mutex<VastFilePtr>>,
 }
 
+impl Expr {
+    pub fn emit(&self) -> String {
+        let _locked = self.parent.lock().unwrap();
+        let c_str = unsafe { sys::xls_vast_expression_emit(self.inner) };
+        unsafe { c_str_to_rust(c_str) }
+    }
+}
+
 #[derive(Clone)]
 pub struct IndexableExpr {
     inner: *mut sys::CVastIndexableExpression,
