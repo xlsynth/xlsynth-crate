@@ -24,7 +24,7 @@ use boolector_sys::{
 };
 use xlsynth::{IrBits, IrValue};
 
-use crate::solver_interface::{BitVec, Response, Solver, SolverConfig, Uf};
+use super::{BitVec, Response, Solver, SolverConfig, Uf};
 use xlsynth_pir::{ir, ir_value_utils::ir_value_from_bits_with_type};
 
 // Low-level wrapper for the Boolector solver context.

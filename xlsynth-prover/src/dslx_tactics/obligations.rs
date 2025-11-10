@@ -1,19 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Proof obligation abstraction and plan builder.
-//!
-//! - `ProofObligation` captures a single DSLX equivalence obligation with
-//!   per-side file edits (currently append-only) and uninterpreted-function
-//!   mappings.
-//! - `build_plan_from_obligations` materializes temp DSLX files for each
-//!   obligation and converts them to a ProverPlan suitable for the scheduler.
+//! Proof obligation abstraction.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub use crate::proofs::source::{Edit, FileWithHistory, SourceFile};
-
-// Types moved to proofs/source.rs and re-exported above.
+pub use crate::dslx_tactics::source::{Edit, FileWithHistory, SourceFile};
 
 #[derive(Clone, Debug)]
 pub struct LecSide {

@@ -763,7 +763,7 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 - Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
 - Backend: `--solver <...>` selects the solver/toolchain (`auto` defers to the library's feature-based default).
-- Semantics: `--assertion-semantics <ignore|never|assume>`.
+- Semantics: `--assertion-semantics <ignore|never|assume>` (defaults to `never`; external toolchain supports only `never`).
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
 - UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
 - Output: `--output_json <PATH>` to write results as JSON.
@@ -780,10 +780,10 @@ Proves that the enumerated parameters of selected target functions are always pa
 - Inputs: `--dslx_input_file <FILE>` and `--dslx_top <FUNC>` select the DSLX module and entry point.
 - Targets: Repeat `--target <FUNC>` for each function whose enum parameters should be instrumented.
 - Backend: `--solver <...>` selects the SMT backend (toolchain mode is currently unsupported and will error).
-- Output: `--output_json <PATH>` writes `{ "success": <bool>, "counterexample": <object|null>, "assert_label_prefix": "enum-in-bound" }`.
+- Output: `--output_json <PATH>` writes `{ "success": <bool>, "error_str": <string|null>, "assert_label_prefix": "enum-in-bound" }`.
 - Labels: Instrumented assertions use the prefix `enum-in-bound::<target>::<param>` so they can be filtered or recognized in downstream tooling.
 
-The command converts the DSLX module to unoptimized IR, injects Boolean guards for the enumerated parameters of each target function, and proves that these assertions hold for every possible input of the specified top function. Any counterexample includes concrete inputs and the violated assertion label in both stdout and JSON output.
+The command converts the DSLX module to unoptimized IR, injects Boolean guards for the enumerated parameters of each target function, and proves that these assertions hold for every possible input of the specified top function. Any error string includes concrete inputs and the violated assertion label in both stdout and JSON output.
 
 ### `prover`
 
@@ -804,7 +804,7 @@ Runs a prover plan described by a JSON file with a process-based scheduler.
 
 - assume-enum-in-bound: When `true`, constrains enum-typed parameters to their declared enumerators (domain restriction) during proofs. This is usually desirable because the underlying bit-width can represent more values than the defined enum members. Default is `true` for supported solvers. Supported by native SMT backends (e.g., z3-binary, bitwuzla, boolector) and not by the toolchain or legacy boolector paths; requesting it where unsupported results in an error.
 
-- assertion-semantics: How to treat `assert` statements when proving equivalence. Let r_l/r_r be results and s_l/s_r indicate that no assertion failed on the left/right.
+- assertion-semantics (default: `ignore`): How to treat `assert` statements when proving equivalence. Let r_l/r_r be results and s_l/s_r indicate that no assertion failed on the left/right.
 
   - ignore: Ignore assertions.
   - never: Both sides must never fail; results must match.

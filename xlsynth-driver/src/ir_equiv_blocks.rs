@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
-use crate::parallelism::ParallelismStrategy;
+use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
 use crate::toolchain_config::ToolchainConfig;
+use xlsynth_prover::prover::types::EquivParallelism;
 
 use xlsynth_pir::ir::{
     self as ir_mod, BlockPortInfo, FileTable, MemberType, Package, PackageMember,
 };
 use xlsynth_pir::ir_parser;
+use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::SolverChoice;
-use xlsynth_prover::types::AssertionSemantics;
 
-use std::collections::HashMap;
+use std::path::Path;
 
 const SUBCOMMAND: &str = "ir-equiv-blocks";
 
@@ -54,7 +54,7 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
     let strategy = matches
         .get_one::<String>("parallelism_strategy")
         .map(|s| s.parse().unwrap())
-        .unwrap_or(ParallelismStrategy::SingleThreaded);
+        .unwrap_or(EquivParallelism::SingleThreaded);
     let lhs_fixed_implicit_activation = matches
         .get_one::<String>("lhs_fixed_implicit_activation")
         .map(|s| s.parse().unwrap())
@@ -177,28 +177,24 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
     let lhs_top_owned = lhs_top.unwrap().to_string();
     let rhs_top_owned = rhs_top.unwrap().to_string();
 
-    let inputs = EquivInputs {
-        lhs_ir_text: &lhs_pkg_text,
-        rhs_ir_text: &rhs_pkg_text,
-        lhs_top: Some(&lhs_top_owned),
-        rhs_top: Some(&rhs_top_owned),
-        flatten_aggregates,
-        drop_params: &drop_params,
-        strategy,
-        assertion_semantics: *assertion_semantics,
-        lhs_fixed_implicit_activation,
-        rhs_fixed_implicit_activation,
-        subcommand: SUBCOMMAND,
-        lhs_origin: lhs_path,
-        rhs_origin: rhs_path,
-        lhs_param_domains: None,
-        rhs_param_domains: None,
-        lhs_uf_map: HashMap::new(),
-        rhs_uf_map: HashMap::new(),
-        assert_label_filter: None,
-    };
+    let tool_path_ref = tool_path.map(Path::new);
 
-    let outcome = dispatch_ir_equiv(solver, tool_path, &inputs);
+    let request = IrEquivRequest::new(
+        IrModule::new(&lhs_pkg_text)
+            .with_top(Some(lhs_top_owned.as_str()))
+            .with_fixed_implicit_activation(lhs_fixed_implicit_activation),
+        IrModule::new(&rhs_pkg_text)
+            .with_top(Some(rhs_top_owned.as_str()))
+            .with_fixed_implicit_activation(rhs_fixed_implicit_activation),
+    )
+    .with_drop_params(&drop_params)
+    .with_flatten_aggregates(flatten_aggregates)
+    .with_parallelism(strategy)
+    .with_assertion_semantics(*assertion_semantics)
+    .with_solver(solver)
+    .with_tool_path(tool_path_ref);
+
+    let outcome = dispatch_ir_equiv(&request, SUBCOMMAND);
     if let Some(path) = output_json {
         std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
     }
@@ -209,8 +205,8 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
         std::process::exit(0);
     } else {
         eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-        if let Some(cex) = outcome.counterexample {
-            eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
+        if let Some(err) = outcome.error_str.as_ref() {
+            eprintln!("[{}] failure: {}", SUBCOMMAND, err);
         } else {
             eprintln!("[{}] failure", SUBCOMMAND);
         }

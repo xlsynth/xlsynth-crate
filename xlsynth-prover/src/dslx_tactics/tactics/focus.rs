@@ -3,9 +3,9 @@
 //! Focus tactic: prove a set of function pairs equivalent and a skeleton
 //! equivalence with those functions abstracted as shared UFs.
 
-use crate::proofs::obligations::{LecObligation, Side};
-use crate::proofs::tactics::utils::is_valid_ident;
-use crate::proofs::tactics::IsTactic;
+use crate::dslx_tactics::obligations::{LecObligation, Side};
+use crate::dslx_tactics::tactics::IsTactic;
+use crate::dslx_tactics::tactics::utils::is_valid_ident;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ impl IsTactic for FocusTactic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proofs::obligations::{FileWithHistory, LecSide, SourceFile};
+    use crate::dslx_tactics::obligations::{FileWithHistory, LecSide, SourceFile};
 
     fn base_obligation_with(sel: &str) -> LecObligation {
         let lhs = LecSide {

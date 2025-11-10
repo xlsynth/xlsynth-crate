@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use super::Prover;
+use super::quickcheck::load_quickcheck_context;
+use super::types::{
+    AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
+    QuickCheckAssertionSemantics, QuickCheckRunResult,
+};
+use crate::toolchain_shim::run_prove_quickcheck_main;
+use regex::escape;
+use xlsynth_pir::prove_equiv_via_toolchain::{self, ToolchainEquivResult};
+
+const MAX_TOOLCHAIN_MESSAGE: usize = 512;
+
+pub enum ExternalProver {
+    ToolExe(PathBuf),
+    ToolDir(PathBuf),
+    Toolchain,
+}
+
+fn resolve_tool_path(prover: &ExternalProver, exe_name: &str) -> Result<PathBuf, String> {
+    let (candidate, label) = match prover {
+        ExternalProver::ToolExe(path) => (path.clone(), "tool executable".to_string()),
+        ExternalProver::ToolDir(dir) => (dir.join(exe_name), exe_name.to_string()),
+        ExternalProver::Toolchain => match std::env::var("XLSYNTH_TOOLS") {
+            Ok(dir) => (PathBuf::from(dir).join(exe_name), exe_name.to_string()),
+            Err(_) => {
+                return Err("XLSYNTH_TOOLS is not set; cannot locate external tool".to_string());
+            }
+        },
+    };
+
+    if candidate.exists() {
+        Ok(candidate)
+    } else {
+        Err(format!("{label} not found at {}", candidate.display()))
+    }
+}
+
+impl Prover for ExternalProver {
+    fn prove_ir_pkg_text_equiv(
+        self: &Self,
+        lhs_pkg_text: &str,
+        rhs_pkg_text: &str,
+        top: Option<&str>,
+    ) -> EquivResult {
+        match self {
+            ExternalProver::ToolExe(path) => {
+                prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_exe(
+                    lhs_pkg_text,
+                    rhs_pkg_text,
+                    top,
+                    path,
+                )
+                .into()
+            }
+            ExternalProver::ToolDir(path) => {
+                prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
+                    lhs_pkg_text,
+                    rhs_pkg_text,
+                    top,
+                    path,
+                )
+                .into()
+            }
+            ExternalProver::Toolchain => match std::env::var("XLSYNTH_TOOLS") {
+                Ok(dir) => ExternalProver::ToolDir(PathBuf::from(dir)).prove_ir_pkg_text_equiv(
+                    lhs_pkg_text,
+                    rhs_pkg_text,
+                    top,
+                ),
+                Err(_) => EquivResult::Error(
+                    "XLSYNTH_TOOLS is not set; cannot run toolchain equivalence".to_string(),
+                ),
+            },
+        }
+    }
+
+    fn prove_ir_equiv<'a>(
+        self: &Self,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
+        assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
+        allow_flatten: bool,
+    ) -> EquivResult {
+        if !lhs.uf_map.is_empty() || !rhs.uf_map.is_empty() {
+            return EquivResult::Error("External provers do not support UFs".to_string());
+        }
+        match strategy {
+            EquivParallelism::SingleThreaded => {
+                if lhs.fixed_implicit_activation || rhs.fixed_implicit_activation {
+                    return EquivResult::Error(
+                        "External provers do not support fixed implicit activation".to_string(),
+                    );
+                }
+                if lhs.has_domains() || rhs.has_domains() {
+                    return EquivResult::Error(
+                        "External provers do not support parameter domains".to_string(),
+                    );
+                }
+                if assertion_semantics != AssertionSemantics::Ignore {
+                    return EquivResult::Error(
+                        "External provers require assertion_semantics=ignore".to_string(),
+                    );
+                }
+                if assert_label_filter.is_some() {
+                    return EquivResult::Error(
+                        "External provers do not support assertion label filters".to_string(),
+                    );
+                }
+                if allow_flatten {
+                    return EquivResult::Error(
+                        "External provers do not support flattening".to_string(),
+                    );
+                }
+                let lhs_pkg = match lhs.pkg_ref {
+                    Some(pkg) => pkg.to_string(),
+                    None => format!("package lhs\n\ntop {}\n", lhs.fn_ref.to_string()),
+                };
+                let rhs_pkg = match rhs.pkg_ref {
+                    Some(pkg) => pkg.to_string(),
+                    None => format!("package rhs\n\ntop {}\n", rhs.fn_ref.to_string()),
+                };
+                let (lhs_unified, rhs_unified, unified_top) =
+                    unify_toolchain_tops(&lhs_pkg, &rhs_pkg, &lhs.fn_ref.name, &rhs.fn_ref.name);
+
+                self.prove_ir_pkg_text_equiv(&lhs_unified, &rhs_unified, Some(&unified_top))
+            }
+            EquivParallelism::OutputBits => {
+                if assert_label_filter.is_some() {
+                    return EquivResult::Error(
+                        "External provers do not support assertion label filters".to_string(),
+                    );
+                }
+                EquivResult::Error(
+                    "External provers do not support output-bits parallel strategy".to_string(),
+                )
+            }
+            EquivParallelism::InputBitSplit => {
+                if assert_label_filter.is_some() {
+                    return EquivResult::Error(
+                        "External provers do not support assertion label filters".to_string(),
+                    );
+                }
+                EquivResult::Error(
+                    "External provers do not support input-bit split strategy".to_string(),
+                )
+            }
+        }
+    }
+
+    fn prove_ir_quickcheck<'a>(
+        self: &Self,
+        _ir_fn: &ProverFn<'a>,
+        _assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
+    ) -> BoolPropertyResult {
+        if assert_label_filter.is_some() {
+            return BoolPropertyResult::ToolchainDisproved(
+                "External provers do not support assertion label filters".to_string(),
+            );
+        }
+        BoolPropertyResult::ToolchainDisproved(
+            "External provers do not support IR-level quickcheck; use prove_dslx_quickcheck"
+                .to_string(),
+        )
+    }
+
+    fn prove_dslx_quickcheck(
+        &self,
+        entry_file: &Path,
+        dslx_stdlib_path: Option<&Path>,
+        additional_search_paths: &[&Path],
+        test_filter: Option<&str>,
+        assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
+        uf_map: &HashMap<String, String>,
+    ) -> Vec<QuickCheckRunResult> {
+        let (_, quickchecks) = load_quickcheck_context(
+            entry_file,
+            dslx_stdlib_path,
+            additional_search_paths,
+            test_filter,
+        );
+        if quickchecks.is_empty() {
+            return Vec::new();
+        }
+
+        if assertion_semantics != QuickCheckAssertionSemantics::Never {
+            let err = BoolPropertyResult::Error(
+                "External quickcheck requires assertion_semantics=never".to_string(),
+            );
+            return quickchecks
+                .into_iter()
+                .map(|(name, _)| QuickCheckRunResult {
+                    name,
+                    duration: std::time::Duration::default(),
+                    result: err.clone(),
+                })
+                .collect();
+        }
+        if assert_label_filter.is_some() {
+            return quickchecks
+                .into_iter()
+                .map(|(name, _)| QuickCheckRunResult {
+                    name,
+                    duration: std::time::Duration::default(),
+                    result: BoolPropertyResult::Error(
+                        "External quickcheck does not support assertion label filters".to_string(),
+                    ),
+                })
+                .collect();
+        }
+        if !uf_map.is_empty() {
+            return quickchecks
+                .into_iter()
+                .map(|(name, _)| QuickCheckRunResult {
+                    name,
+                    duration: std::time::Duration::default(),
+                    result: BoolPropertyResult::Error(
+                        "External quickcheck does not support uninterpreted functions".to_string(),
+                    ),
+                })
+                .collect();
+        }
+
+        let mut results = Vec::with_capacity(quickchecks.len());
+        let exe = match resolve_tool_path(self, "prove_quickcheck_main") {
+            Ok(path) => path,
+            Err(msg) => {
+                let err = BoolPropertyResult::Error(msg);
+                return quickchecks
+                    .into_iter()
+                    .map(|(name, _)| QuickCheckRunResult {
+                        name,
+                        duration: std::time::Duration::default(),
+                        result: err.clone(),
+                    })
+                    .collect();
+            }
+        };
+
+        let limit = |msg: &str| msg.chars().take(MAX_TOOLCHAIN_MESSAGE).collect::<String>();
+        for (quickcheck_name, _) in quickchecks {
+            let start_time = std::time::Instant::now();
+            let filter = format!("^{}$", escape(quickcheck_name.as_str()));
+            let result = match run_prove_quickcheck_main(
+                &exe,
+                entry_file,
+                dslx_stdlib_path,
+                additional_search_paths,
+                filter.as_str(),
+            ) {
+                Ok(_) => BoolPropertyResult::Proved,
+                Err(msg) => BoolPropertyResult::ToolchainDisproved(limit(&msg)),
+            };
+
+            results.push(QuickCheckRunResult {
+                name: quickcheck_name,
+                duration: start_time.elapsed(),
+                result,
+            });
+        }
+
+        let _ = assertion_semantics;
+
+        results
+    }
+}
+
+impl From<ToolchainEquivResult> for EquivResult {
+    fn from(result: ToolchainEquivResult) -> Self {
+        match result {
+            ToolchainEquivResult::Proved => EquivResult::Proved,
+            ToolchainEquivResult::Disproved(msg) => EquivResult::ToolchainDisproved(msg),
+            ToolchainEquivResult::Error(msg) => EquivResult::Error(msg),
+        }
+    }
+}
+
+fn unify_toolchain_tops<'a>(
+    lhs_ir: &'a str,
+    rhs_ir: &'a str,
+    lhs_top: &str,
+    rhs_top: &str,
+) -> (Cow<'a, str>, Cow<'a, str>, String) {
+    if lhs_top == rhs_top {
+        return (
+            Cow::Borrowed(lhs_ir),
+            Cow::Borrowed(rhs_ir),
+            lhs_top.to_string(),
+        );
+    }
+    let unified = lhs_top.to_string();
+    let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
+    (Cow::Borrowed(lhs_ir), Cow::Owned(rhs_rewritten), unified)
+}

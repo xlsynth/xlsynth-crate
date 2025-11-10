@@ -11,7 +11,7 @@ use std::{
 
 use easy_smt::{Context, ContextBuilder, SExpr};
 
-use crate::solver_interface::{BitVec, Solver, SolverConfig, Uf};
+use super::{BitVec, Response, Solver, SolverConfig, Uf};
 use xlsynth::IrBits;
 use xlsynth_pir::{ir, ir_value_utils::ir_value_from_bits_with_type};
 
@@ -759,13 +759,13 @@ impl Solver for EasySmtSolver {
         (self.solver_fn.pop_fn)(&mut context)
     }
 
-    fn check(&mut self) -> io::Result<super::solver_interface::Response> {
+    fn check(&mut self) -> io::Result<Response> {
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         match (self.solver_fn.check_fn)(&mut context) {
-            Ok(easy_smt::Response::Sat) => Ok(super::solver_interface::Response::Sat),
-            Ok(easy_smt::Response::Unsat) => Ok(super::solver_interface::Response::Unsat),
-            Ok(easy_smt::Response::Unknown) => Ok(super::solver_interface::Response::Unknown),
+            Ok(easy_smt::Response::Sat) => Ok(Response::Sat),
+            Ok(easy_smt::Response::Unsat) => Ok(Response::Unsat),
+            Ok(easy_smt::Response::Unknown) => Ok(Response::Unknown),
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
         }
     }

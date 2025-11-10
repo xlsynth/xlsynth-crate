@@ -5,18 +5,17 @@ use xlsynth_pir::ir;
 use xlsynth_pir::ir_verify;
 use xlsynth_pir::localized_eco2;
 
-use crate::ir_equiv::{dispatch_ir_equiv, EquivInputs};
-use crate::parallelism::ParallelismStrategy;
+use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use rand::Rng;
 use rand::SeedableRng;
+use std::path::Path;
 use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, MemberType, PackageMember};
 use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
-use xlsynth_prover::types::AssertionSemantics;
 
 #[derive(serde::Serialize)]
 struct AddedOpsSummaryItem {
@@ -332,37 +331,27 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
             new_path.display(),
             rhs_top.unwrap_or("")
         );
-        let inputs = EquivInputs {
-            lhs_ir_text: &patched_ir_text,
-            rhs_ir_text: &new_ir_text,
-            lhs_top,
-            rhs_top,
-            flatten_aggregates: false,
-            drop_params: &[],
-            strategy: ParallelismStrategy::SingleThreaded,
-            assertion_semantics: AssertionSemantics::Same,
-            lhs_fixed_implicit_activation: false,
-            rhs_fixed_implicit_activation: false,
-            subcommand: "ir-localized-eco",
-            lhs_origin: old_path.to_str().unwrap_or(""),
-            rhs_origin: new_path.to_str().unwrap_or(""),
-            lhs_param_domains: None,
-            rhs_param_domains: None,
-            lhs_uf_map: std::collections::HashMap::new(),
-            rhs_uf_map: std::collections::HashMap::new(),
-            assert_label_filter: None,
-        };
-        let outcome = dispatch_ir_equiv(None, Some(tool_path), &inputs);
+        let request = IrEquivRequest::new(
+            IrModule::new(&patched_ir_text)
+                .with_path(Some(patched_ir_path.as_path()))
+                .with_top(lhs_top),
+            IrModule::new(&new_ir_text)
+                .with_path(Some(new_path))
+                .with_top(rhs_top),
+        )
+        .with_tool_path(Some(Path::new(tool_path)));
+
+        let outcome = dispatch_ir_equiv(&request, "ir-localized-eco");
         let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
         if outcome.success {
             println!("  Equivalence: proved (patched(old) ≡ new) in {:?}", dur);
         } else {
             println!("  Equivalence: FAILED (patched(old) vs new) in {:?}", dur);
-            if let Some(cex) = outcome.counterexample {
-                println!("    counterexample: {}", cex);
+            if let Some(err) = outcome.error_str.as_ref() {
+                println!("    error: {}", err);
                 // Attempt to replay the counterexample via interpreter.
-                if let Some(input_idx) = cex.find("input:") {
-                    let arg_text = cex[input_idx + "input:".len()..].trim();
+                if let Some(input_idx) = err.find("input:") {
+                    let arg_text = err[input_idx + "input:".len()..].trim();
                     match try_interpret_cex(&new_ir_text, new_fn, &patched_ir_path, arg_text) {
                         Ok(()) => {}
                         Err(e) => println!("    interpreter replay: skipped ({})", e),

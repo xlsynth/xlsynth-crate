@@ -67,7 +67,6 @@ mod ir_round_trip;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
 mod lib2proto;
-mod parallelism;
 mod proofs;
 mod prove_enum_in_bound;
 mod prove_quickcheck;
@@ -84,8 +83,8 @@ use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
-use xlsynth_prover::types::AssertionSemantics;
-use xlsynth_prover::types::QuickCheckAssertionSemantics;
+use xlsynth_prover::prover::types::AssertionSemantics;
+use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 
 static DEFAULT_ADDER_MAPPING: Lazy<String> =
     Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
@@ -718,7 +717,7 @@ fn main() {
                         .value_name("SEMANTICS")
                         .help("Assertion semantics")
                         .value_parser(clap::value_parser!(AssertionSemantics))
-                        .default_value("same")
+                        .default_value("ignore")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -821,7 +820,7 @@ fn main() {
                         .value_name("SEMANTICS")
                         .help("Assertion semantics")
                         .value_parser(clap::value_parser!(AssertionSemantics))
-                        .default_value("same")
+                        .default_value("ignore")
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -1331,7 +1330,7 @@ fn main() {
                         .value_name("SEM")
                         .help("Assertion semantics")
                         .value_parser(clap::value_parser!(QuickCheckAssertionSemantics))
-                        .default_value("ignore")
+                        .default_value("never")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
@@ -1494,6 +1493,7 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking")
                         .value_parser([
+                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
@@ -1508,7 +1508,7 @@ fn main() {
                             "boolector-legacy",
                             "toolchain",
                         ])
-                        .default_value("toolchain")
+                        .default_value("auto")
                         .action(clap::ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -1536,7 +1536,7 @@ fn main() {
                         .value_name("SEMANTICS")
                         .help("Assertion semantics")
                         .value_parser(["ignore", "never", "same", "assume", "implies"])
-                        .default_value("same")
+                        .default_value("ignore")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(

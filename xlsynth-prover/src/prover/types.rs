@@ -1,11 +1,42 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::solver_interface::Uf;
+use crate::solver::Uf;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
 use xlsynth::IrValue;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EquivParallelism {
+    SingleThreaded,
+    OutputBits,
+    InputBitSplit,
+}
 
-use crate::solver_interface::{BitVec, Solver};
+impl fmt::Display for EquivParallelism {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let as_str = match self {
+            EquivParallelism::SingleThreaded => "single-threaded",
+            EquivParallelism::OutputBits => "output-bits",
+            EquivParallelism::InputBitSplit => "input-bit-split",
+        };
+        f.write_str(as_str)
+    }
+}
+
+impl FromStr for EquivParallelism {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "single-threaded" => Ok(EquivParallelism::SingleThreaded),
+            "output-bits" => Ok(EquivParallelism::OutputBits),
+            "input-bit-split" => Ok(EquivParallelism::InputBitSplit),
+            _ => Err(format!("unknown equivalence parallelism: {s}")),
+        }
+    }
+}
+
+use crate::solver::{BitVec, Solver};
 use xlsynth_pir::ir;
 
 #[derive(Clone)]
@@ -24,20 +55,25 @@ impl<'a, R: std::fmt::Debug> std::fmt::Debug for IrTypedBitVec<'a, R> {
     }
 }
 
+pub type ParamDomains = HashMap<String, Vec<IrValue>>;
+
 #[derive(Debug, Clone)]
-pub struct IrFn<'a> {
+pub struct ProverFn<'a> {
     pub fn_ref: &'a ir::Fn,
-    // This is allowed to be None for IRs without invoke.
     pub pkg_ref: Option<&'a ir::Package>,
     pub fixed_implicit_activation: bool,
+    pub domains: Option<ParamDomains>,
+    pub uf_map: HashMap<String, String>,
 }
 
-impl<'a> IrFn<'a> {
+impl<'a> ProverFn<'a> {
     pub fn new(fn_ref: &'a ir::Fn, pkg_ref: Option<&'a ir::Package>) -> Self {
         Self {
             fn_ref,
-            pkg_ref: pkg_ref,
+            pkg_ref,
             fixed_implicit_activation: false,
+            domains: None,
+            uf_map: HashMap::new(),
         }
     }
 
@@ -48,11 +84,33 @@ impl<'a> IrFn<'a> {
     pub fn params(&self) -> &'a [ir::Param] {
         &self.fn_ref.params
     }
+
+    pub fn with_fixed_implicit_activation(mut self, fixed: bool) -> Self {
+        self.fixed_implicit_activation = fixed;
+        self
+    }
+
+    pub fn with_domains(mut self, domains: Option<ParamDomains>) -> Self {
+        self.domains = domains;
+        self
+    }
+
+    pub fn has_domains(&self) -> bool {
+        self.domains
+            .as_ref()
+            .map(|d| !d.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn with_uf_map(mut self, uf_map: HashMap<String, String>) -> Self {
+        self.uf_map = uf_map;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct FnInputs<'a, R> {
-    pub ir_fn: IrFn<'a>,
+    pub prover_fn: ProverFn<'a>,
     pub inputs: HashMap<String, IrTypedBitVec<'a, R>>,
 }
 
@@ -70,11 +128,11 @@ impl<'a, R> FnInputs<'a, R> {
     }
 
     pub fn fixed_implicit_activation(&self) -> bool {
-        self.ir_fn.fixed_implicit_activation
+        self.prover_fn.fixed_implicit_activation
     }
 
     pub fn params(&self) -> &'a [ir::Param] {
-        self.ir_fn.params()
+        self.prover_fn.params()
     }
 
     pub fn params_len(&self) -> usize {
@@ -98,12 +156,12 @@ impl<'a, R> FnInputs<'a, R> {
     }
 
     pub fn name(&self) -> &str {
-        self.ir_fn.name()
+        self.prover_fn.name()
     }
 
     pub fn get_fn(&self, name: &str) -> &'a ir::Fn {
         let pkg = self
-            .ir_fn
+            .prover_fn
             .pkg_ref
             .expect("fn lookup requires package context");
         pkg.get_fn(name)
@@ -206,9 +264,6 @@ impl std::str::FromStr for AssertionSemantics {
     }
 }
 
-// Map param name -> allowed IrValues for domain constraints.
-pub type ParamDomains = HashMap<String, Vec<IrValue>>;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UfSignature {
     pub arg_widths: Vec<usize>,
@@ -233,12 +288,6 @@ impl<S: Solver> UfRegistry<S> {
         }
         Self { ufs }
     }
-}
-
-pub struct ProverFn<'a> {
-    pub ir_fn: &'a IrFn<'a>,
-    pub domains: Option<ParamDomains>,
-    pub uf_map: HashMap<String, String>,
 }
 
 // Result types
@@ -286,6 +335,35 @@ pub enum EquivResult {
     },
     ToolchainDisproved(String),
     Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct EquivReport {
+    pub duration: Duration,
+    pub result: EquivResult,
+}
+
+impl EquivReport {
+    pub fn is_success(&self) -> bool {
+        matches!(self.result, EquivResult::Proved)
+    }
+
+    pub fn error_str(&self) -> Option<String> {
+        match &self.result {
+            EquivResult::Proved => None,
+            EquivResult::Disproved {
+                lhs_inputs,
+                rhs_inputs,
+                lhs_output,
+                rhs_output,
+            } => Some(format!(
+                "lhs_inputs: {:?}, rhs_inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
+                lhs_inputs, rhs_inputs, lhs_output, rhs_output
+            )),
+            EquivResult::ToolchainDisproved(msg) => Some(msg.clone()),
+            EquivResult::Error(msg) => Some(msg.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]

@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::process;
 use std::process::Command;
 use xlsynth::mangle_dslx_name;
-use xlsynth_pir::ir;
 
 // By default in the driver we treat warnings as errors.
 pub const DEFAULT_WARNINGS_AS_ERRORS: bool = true;
@@ -512,7 +511,7 @@ pub fn execute_command_with_context(
 // DSLX helpers shared across subcommands
 // -----------------------------------------------------------------------------
 
-use xlsynth_prover::types::{ParamDomains, UfSignature};
+use xlsynth_prover::prover::types::ParamDomains;
 
 pub fn get_enum_domain(
     tcm: &xlsynth::dslx::TypecheckedModule,
@@ -613,81 +612,6 @@ pub fn parse_uf_spec(
         }
     }
     m
-}
-
-pub fn merge_uf_signature(
-    mut sigs1: HashMap<String, UfSignature>,
-    sigs2: &HashMap<String, UfSignature>,
-) -> HashMap<String, UfSignature> {
-    for (k, v) in sigs2 {
-        if let Some(prev) = sigs1.get(k) {
-            if *prev != *v {
-                eprintln!(
-                    "Conflicting UF signature for symbol '{}': {:?} vs {:?}",
-                    k, prev, v
-                );
-                std::process::exit(1);
-            }
-        } else {
-            sigs1.insert(k.clone(), v.clone());
-        }
-    }
-    sigs1
-}
-
-pub fn infer_uf_signature(
-    pkg: &ir::Package,
-    uf_map: &HashMap<String, String>,
-) -> HashMap<String, UfSignature> {
-    let mut uf_sigs: std::collections::HashMap<String, UfSignature> =
-        std::collections::HashMap::new();
-    let mut add_sig = |pkg: &ir::Package, mapping: &HashMap<String, String>| {
-        for (fn_name, uf_sym) in mapping {
-            if let Some(f) = pkg.get_fn(fn_name) {
-                let arg_widths: Vec<usize> = f.params.iter().map(|p| p.ty.bit_count()).collect();
-                let ret_width = f.ret_ty.bit_count();
-                let sig = UfSignature {
-                    arg_widths,
-                    ret_width,
-                };
-                if let Some(prev) = uf_sigs.get(uf_sym) {
-                    if prev != &sig {
-                        eprintln!(
-                            "Conflicting UF signature for symbol '{}': {:?} vs {:?}",
-                            uf_sym, prev, sig
-                        );
-                        std::process::exit(1);
-                    }
-                } else {
-                    uf_sigs.insert(uf_sym.clone(), sig);
-                }
-            } else if let Some(f) = pkg.get_fn(&("__itok".to_string() + fn_name)) {
-                let arg_widths: Vec<usize> =
-                    f.params.iter().skip(2).map(|p| p.ty.bit_count()).collect();
-                let ret_width = f.ret_ty.bit_count();
-                let sig = UfSignature {
-                    arg_widths,
-                    ret_width,
-                };
-                if let Some(prev) = uf_sigs.get(uf_sym) {
-                    if prev != &sig {
-                        eprintln!(
-                            "Conflicting UF signature for symbol '{}': {:?} vs {:?}",
-                            uf_sym, prev, sig
-                        );
-                        std::process::exit(1);
-                    }
-                } else {
-                    uf_sigs.insert(uf_sym.clone(), sig);
-                }
-            } else {
-                eprintln!("Unknown function '{}' when inferring UF signature", fn_name);
-                std::process::exit(1);
-            }
-        }
-    };
-    add_sig(&pkg, &uf_map);
-    uf_sigs
 }
 
 #[cfg(test)]

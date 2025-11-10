@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::types::{BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAssertionSemantics};
 use crate::prover::Prover;
-use crate::types::{
-    BoolPropertyResult, IrFn, ParamDomains, ProverFn, QuickCheckAssertionSemantics,
-};
 
 use std::collections::HashMap;
 use xlsynth::IrValue;
@@ -381,23 +379,15 @@ pub fn prove_enum_in_bound(
             return BoolPropertyResult::Error(format!("IR function '{}' not found", property_name));
         }
     };
-    let ir_fn = IrFn {
-        fn_ref: property_fn,
-        pkg_ref: Some(&instrumented_pkg),
-        fixed_implicit_activation: true,
-    };
-    let prover_fn = ProverFn {
-        ir_fn: &ir_fn,
-        domains: top_domains.cloned(),
-        uf_map: HashMap::new(),
-    };
+    let prover_fn = ProverFn::new(property_fn, Some(&instrumented_pkg))
+        .with_fixed_implicit_activation(true)
+        .with_domains(top_domains.cloned());
 
     let label_regex = format!("^{}::", ASSERT_LABEL_PREFIX);
-    prover.prove_ir_fn_always_true_full(
+    prover.prove_ir_quickcheck(
         &prover_fn,
         QuickCheckAssertionSemantics::Never,
         Some(label_regex.as_str()),
-        &HashMap::new(),
     )
 }
 
@@ -729,35 +719,35 @@ fn __itok__top(
     #[cfg(feature = "with-bitwuzla-built")]
     #[test]
     fn nested_targets_prove_success_bitwuzla_built() {
-        let prover = crate::bitwuzla_backend::BitwuzlaOptions::new();
+        let prover = crate::solver::bitwuzla::BitwuzlaOptions::new();
         check_nested_targets(&prover);
     }
 
     #[cfg(feature = "with-boolector-built")]
     #[test]
     fn nested_targets_prove_success_boolector_built() {
-        let prover = crate::boolector_backend::BoolectorConfig::new();
+        let prover = crate::solver::boolector::BoolectorConfig::new();
         check_nested_targets(&prover);
     }
 
     #[cfg(feature = "with-bitwuzla-binary-test")]
     #[test]
     fn nested_targets_prove_success_bitwuzla_binary() {
-        let prover = crate::easy_smt_backend::EasySmtConfig::bitwuzla();
+        let prover = crate::solver::easy_smt::EasySmtConfig::bitwuzla();
         check_nested_targets(&prover);
     }
 
     #[cfg(feature = "with-boolector-binary-test")]
     #[test]
     fn nested_targets_prove_success_boolector_binary() {
-        let prover = crate::easy_smt_backend::EasySmtConfig::boolector();
+        let prover = crate::solver::easy_smt::EasySmtConfig::boolector();
         check_nested_targets(&prover);
     }
 
     #[cfg(feature = "with-z3-binary-test")]
     #[test]
     fn nested_targets_prove_success_z3_binary() {
-        let prover = crate::easy_smt_backend::EasySmtConfig::z3();
+        let prover = crate::solver::easy_smt::EasySmtConfig::z3();
         check_nested_targets(&prover);
     }
 }

@@ -6,13 +6,13 @@ use xlsynth_g8r::check_equivalence;
 use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::bitwuzla_backend::{Bitwuzla, BitwuzlaOptions};
+use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
 #[cfg(feature = "has-boolector")]
-use xlsynth_prover::boolector_backend::{Boolector, BoolectorConfig};
+use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
-use xlsynth_prover::easy_smt_backend::{EasySmtConfig, EasySmtSolver};
-use xlsynth_prover::prove_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
-use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn};
+use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
+use xlsynth_prover::prover::ir_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
 
 // Insert helper that checks consistency among the external tool, a primary
 // solver result, and an optional per-bit parallel solver result.
@@ -107,8 +107,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let bitwuzla_result = prove_ir_fn_equiv::<Bitwuzla>(
             &BitwuzlaOptions::new(),
-            &IrFn::new(orig_fn, None),
-            &IrFn::new(opt_fn, None),
+            &ProverFn::new(orig_fn, None),
+            &ProverFn::new(opt_fn, None),
             AssertionSemantics::Same,
             None,
             false,
@@ -126,8 +126,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let boolector_result = prove_ir_fn_equiv::<Boolector>(
             &BoolectorConfig::new(),
-            &IrFn::new(orig_fn, None),
-            &IrFn::new(opt_fn, None),
+            &ProverFn::new(orig_fn, None),
+            &ProverFn::new(opt_fn, None),
             AssertionSemantics::Same,
             None,
             false,
@@ -145,8 +145,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let boolector_result = prove_ir_fn_equiv::<EasySmtSolver>(
             &EasySmtConfig::boolector(),
-            &IrFn::new(orig_fn, None),
-            &IrFn::new(opt_fn, None),
+            &ProverFn::new(orig_fn, None),
+            &ProverFn::new(opt_fn, None),
             AssertionSemantics::Same,
             None,
             false,
@@ -164,8 +164,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let bitwuzla_result = prove_ir_fn_equiv::<EasySmtSolver>(
             &EasySmtConfig::bitwuzla(),
-            &IrFn::new(orig_fn, None),
-            &IrFn::new(opt_fn, None),
+            &ProverFn::new(orig_fn, None),
+            &ProverFn::new(opt_fn, None),
             AssertionSemantics::Same,
             None,
             false,
@@ -183,8 +183,8 @@ fuzz_target!(|sample: FuzzSample| {
     {
         let z3_result = prove_ir_fn_equiv::<EasySmtSolver>(
             &EasySmtConfig::z3(),
-            &IrFn::new(orig_fn, None),
-            &IrFn::new(opt_fn, None),
+            &ProverFn::new(orig_fn, None),
+            &ProverFn::new(opt_fn, None),
             AssertionSemantics::Same,
             None,
             false,
@@ -198,8 +198,8 @@ fuzz_target!(|sample: FuzzSample| {
         if output_bit_count <= 64 {
             let bitwuzla_parallel_result = prove_ir_fn_equiv_output_bits_parallel::<Bitwuzla>(
                 &BitwuzlaOptions::new(),
-                &IrFn::new(orig_fn, None),
-                &IrFn::new(opt_fn, None),
+                &ProverFn::new(orig_fn, None),
+                &ProverFn::new(opt_fn, None),
                 AssertionSemantics::Same,
                 None,
                 false,

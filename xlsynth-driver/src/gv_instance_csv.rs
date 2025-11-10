@@ -7,7 +7,7 @@ use clap::ArgMatches;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::PathBuf;
 use xlsynth_g8r::netlist::parse::{Parser, TokenScanner};
 use xlsynth_g8r::netlist::utils::instance_names_and_types;

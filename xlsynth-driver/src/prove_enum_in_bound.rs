@@ -12,9 +12,9 @@ use xlsynth::{
     mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
 };
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_prover::enum_in_bound::{prove_enum_in_bound, ASSERT_LABEL_PREFIX};
+use xlsynth_prover::prover::enum_in_bound::{prove_enum_in_bound, ASSERT_LABEL_PREFIX};
+use xlsynth_prover::prover::types::{BoolPropertyResult, FnInput, FnOutput};
 use xlsynth_prover::prover::{prover_for_choice, SolverChoice};
-use xlsynth_prover::types::{BoolPropertyResult, FnInput, FnOutput};
 
 const SUBCOMMAND: &str = "prove-enum-in-bound";
 
@@ -164,7 +164,8 @@ pub fn handle_prove_enum_in_bound(matches: &clap::ArgMatches, config: &Option<To
         );
     });
 
-    let mut target_domains: HashMap<String, xlsynth_prover::types::ParamDomains> = HashMap::new();
+    let mut target_domains: HashMap<String, xlsynth_prover::prover::types::ParamDomains> =
+        HashMap::new();
     for target in &targets {
         let domains = get_function_enum_param_domains(&typechecked, target).unwrap_or_else(|err| {
             report_cli_error_and_exit(&err, Some(SUBCOMMAND), vec![("target", target.as_str())]);

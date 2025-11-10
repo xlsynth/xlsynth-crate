@@ -71,7 +71,7 @@ impl FileWithHistory {
         Self {
             base_source: file,
             edits: Vec::new(),
-            text: text,
+            text,
         }
     }
 }

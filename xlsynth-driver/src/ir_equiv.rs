@@ -1,237 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Use some pragmas since when the configuration does not have certain
-// configured engines on we would get a bunch of warnings.
-#![allow(unused)]
-
-use crate::common::{infer_uf_signature, merge_uf_signature};
 use crate::toolchain_config::ToolchainConfig;
-use crate::tools::run_check_ir_equivalence_main;
-use xlsynth_pir::ir;
-use xlsynth_prover::solver_interface::Solver;
-
-use std::collections::HashMap;
-use xlsynth::IrValue;
-use xlsynth_pir::ir_parser;
-use xlsynth_prover::prove_equiv::{
-    prove_ir_fn_equiv_full, prove_ir_fn_equiv_output_bits_parallel,
-    prove_ir_fn_equiv_split_input_bit,
-};
-use xlsynth_prover::prover::{Prover, SolverChoice};
-use xlsynth_prover::types::{AssertionSemantics, EquivResult, IrFn, ProverFn};
-
-use crate::parallelism::ParallelismStrategy;
+use serde::Serialize;
+use std::path::Path;
+use xlsynth_prover::ir_equiv::run_ir_equiv as prover_run_ir_equiv;
+pub use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule};
+use xlsynth_prover::prover::types::EquivParallelism;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivReport};
+use xlsynth_prover::prover::SolverChoice;
 
 const SUBCOMMAND: &str = "ir-equiv";
-use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct EquivOutcome {
     pub time_micros: u128,
     pub success: bool,
-    pub counterexample: Option<String>,
-}
-
-// -----------------------------------------------------------------------------
-// Shared equivalence input arguments (solver choice handled outside)
-// -----------------------------------------------------------------------------
-
-pub struct EquivInputs<'a> {
-    pub lhs_ir_text: &'a str,
-    pub rhs_ir_text: &'a str,
-    pub lhs_top: Option<&'a str>,
-    pub rhs_top: Option<&'a str>,
-    pub flatten_aggregates: bool,
-    pub drop_params: &'a [String],
-    pub strategy: ParallelismStrategy,
-    pub assertion_semantics: AssertionSemantics,
-    pub lhs_fixed_implicit_activation: bool,
-    pub rhs_fixed_implicit_activation: bool,
-    pub subcommand: &'a str,
-    pub lhs_origin: &'a str,
-    pub rhs_origin: &'a str,
-    pub lhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
-    pub rhs_param_domains: Option<HashMap<String, Vec<IrValue>>>,
-    pub lhs_uf_map: HashMap<String, String>,
-    pub rhs_uf_map: HashMap<String, String>,
-    pub assert_label_filter: Option<String>,
-}
-
-// Helper: parse IR text into a Package, pick top (explicit or package top),
-// drop params. Returns the parsed package and an owned function (potentially
-// modified by drop_params). It is okay to keep the unmodified package as we do
-// not allow recursion in the IR.
-fn parse_and_prepare_fn(
-    ir_text: &str,
-    top: Option<&str>,
-    drop_params: &[String],
-    subcommand: &str,
-    origin: &str,
-    side: &str,
-) -> (ir::Package, ir::Fn) {
-    let pkg = match ir_parser::Parser::new(ir_text).parse_package() {
-        Ok(pkg) => pkg,
-        Err(e) => {
-            eprintln!(
-                "[{}] Failed to parse {} IR ({}): {}",
-                subcommand, side, origin, e
-            );
-            std::process::exit(1);
-        }
-    };
-    let fn_owned = if let Some(top_name) = top {
-        pkg.get_fn(top_name).cloned().unwrap_or_else(|| {
-            eprintln!(
-                "[{}] Top function '{}' not found in {} IR (origin: {})",
-                subcommand, top_name, side, origin
-            );
-            std::process::exit(1);
-        })
-    } else {
-        pkg.get_top_fn().cloned().unwrap_or_else(|| {
-            eprintln!(
-                "[{}] No top function found in {} IR (origin: {})",
-                subcommand, side, origin
-            );
-            std::process::exit(1);
-        })
-    };
-    let fn_owned = fn_owned
-        .drop_params(drop_params)
-        .expect("Dropped parameter used in function body");
-    (pkg, fn_owned)
-}
-
-/// Internal helper that runs equivalence via a provided Prover (native path)
-fn run_equiv_with_prover(prover: &dyn Prover, inputs: &EquivInputs) -> EquivOutcome {
-    let (lhs_pkg, lhs_fn_dropped) = parse_and_prepare_fn(
-        inputs.lhs_ir_text,
-        inputs.lhs_top,
-        inputs.drop_params,
-        inputs.subcommand,
-        inputs.lhs_origin,
-        "LHS",
-    );
-    let (rhs_pkg, rhs_fn_dropped) = parse_and_prepare_fn(
-        inputs.rhs_ir_text,
-        inputs.rhs_top,
-        inputs.drop_params,
-        inputs.subcommand,
-        inputs.rhs_origin,
-        "RHS",
-    );
-
-    let lhs_ir_fn = IrFn {
-        fn_ref: &lhs_fn_dropped,
-        pkg_ref: Some(&lhs_pkg),
-        fixed_implicit_activation: inputs.lhs_fixed_implicit_activation,
-    };
-    let rhs_ir_fn = IrFn {
-        fn_ref: &rhs_fn_dropped,
-        pkg_ref: Some(&rhs_pkg),
-        fixed_implicit_activation: inputs.rhs_fixed_implicit_activation,
-    };
-
-    let assert_label_filter = inputs.assert_label_filter.as_deref();
-
-    let start_time = std::time::Instant::now();
-    let result = match inputs.strategy {
-        ParallelismStrategy::SingleThreaded => {
-            let lhs_uf_sigs = infer_uf_signature(&lhs_pkg, &inputs.lhs_uf_map);
-            let rhs_uf_sigs = infer_uf_signature(&rhs_pkg, &inputs.rhs_uf_map);
-            let uf_sigs = merge_uf_signature(lhs_uf_sigs, &rhs_uf_sigs);
-
-            let lhs_side = ProverFn {
-                ir_fn: &lhs_ir_fn,
-                domains: inputs.lhs_param_domains.clone(),
-                uf_map: inputs.lhs_uf_map.clone(),
-            };
-            let rhs_side = ProverFn {
-                ir_fn: &rhs_ir_fn,
-                domains: inputs.rhs_param_domains.clone(),
-                uf_map: inputs.rhs_uf_map.clone(),
-            };
-
-            prover.prove_ir_fn_equiv_full(
-                &lhs_side,
-                &rhs_side,
-                inputs.assertion_semantics,
-                assert_label_filter,
-                inputs.flatten_aggregates,
-                &uf_sigs,
-            )
-        }
-        ParallelismStrategy::OutputBits => prover.prove_ir_fn_equiv_output_bits_parallel(
-            &lhs_ir_fn,
-            &rhs_ir_fn,
-            inputs.assertion_semantics,
-            assert_label_filter,
-            inputs.flatten_aggregates,
-        ),
-        ParallelismStrategy::InputBitSplit => prover.prove_ir_fn_equiv_split_input_bit(
-            &lhs_ir_fn,
-            &rhs_ir_fn,
-            0,
-            0,
-            inputs.assertion_semantics,
-            assert_label_filter,
-            inputs.flatten_aggregates,
-        ),
-    };
-    let micros = start_time.elapsed().as_micros();
-
-    match result {
-        EquivResult::Proved => EquivOutcome {
-            time_micros: micros,
-            success: true,
-            counterexample: None,
-        },
-        EquivResult::Disproved {
-            lhs_inputs,
-            rhs_inputs,
-            lhs_output,
-            rhs_output,
-        } => {
-            let cex_str = format!(
-                "lhs_inputs: {:?}, rhs_inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
-                lhs_inputs, rhs_inputs, lhs_output, rhs_output
-            );
-            EquivOutcome {
-                time_micros: micros,
-                success: false,
-                counterexample: Some(cex_str),
-            }
-        }
-        EquivResult::Error(msg) => {
-            eprintln!("[{}] Error: {}", inputs.subcommand, msg);
-            std::process::exit(1);
-        }
-        EquivResult::ToolchainDisproved(msg) => EquivOutcome {
-            time_micros: micros,
-            success: false,
-            counterexample: Some(msg),
-        },
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Unified dispatch function (toolchain vs native) for reuse by both subcommands
-// -----------------------------------------------------------------------------
-
-pub fn dispatch_ir_equiv(
-    solver_choice: Option<SolverChoice>,
-    tool_path: Option<&str>,
-    inputs: &EquivInputs,
-) -> EquivOutcome {
-    log::info!(
-        "dispatch_ir_equiv; solver_choice: {:?}, tool_path: {:?}",
-        solver_choice,
-        tool_path
-    );
-    let choice = solver_choice.unwrap_or(SolverChoice::Auto);
-    let tool_path_ref = tool_path.map(std::path::Path::new);
-    let prover = xlsynth_prover::prover::prover_for_choice(choice, tool_path_ref);
-    run_equiv_with_prover(&*prover, inputs)
+    pub error_str: Option<String>,
 }
 
 /// Implements the "ir-equiv" subcommand.
@@ -277,7 +61,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     let strategy = matches
         .get_one::<String>("parallelism_strategy")
         .map(|s| s.parse().unwrap())
-        .unwrap_or(ParallelismStrategy::SingleThreaded);
+        .unwrap_or(EquivParallelism::SingleThreaded);
     let lhs_fixed_implicit_activation = matches
         .get_one::<String>("lhs_fixed_implicit_activation")
         .map(|s| s.parse().unwrap())
@@ -299,28 +83,31 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         std::process::exit(1)
     });
 
-    let inputs = EquivInputs {
-        lhs_ir_text: &lhs_ir_text,
-        rhs_ir_text: &rhs_ir_text,
-        lhs_top,
-        rhs_top,
-        flatten_aggregates,
-        drop_params: &drop_params,
-        strategy,
-        assertion_semantics: *assertion_semantics,
-        lhs_fixed_implicit_activation,
-        rhs_fixed_implicit_activation,
-        subcommand: SUBCOMMAND,
-        lhs_origin: lhs,
-        rhs_origin: rhs,
-        lhs_param_domains: None,
-        rhs_param_domains: None,
-        lhs_uf_map: std::collections::HashMap::new(),
-        rhs_uf_map: std::collections::HashMap::new(),
-        assert_label_filter: matches.get_one::<String>("assert_label_filter").cloned(),
-    };
+    let assert_label_filter = matches
+        .get_one::<String>("assert_label_filter")
+        .map(|s| s.as_str());
 
-    let outcome = dispatch_ir_equiv(solver, tool_path, &inputs);
+    let tool_path_ref = tool_path.map(Path::new);
+
+    let request = IrEquivRequest::new(
+        IrModule::new(&lhs_ir_text)
+            .with_path(Some(Path::new(lhs)))
+            .with_top(lhs_top)
+            .with_fixed_implicit_activation(lhs_fixed_implicit_activation),
+        IrModule::new(&rhs_ir_text)
+            .with_path(Some(Path::new(rhs)))
+            .with_top(rhs_top)
+            .with_fixed_implicit_activation(rhs_fixed_implicit_activation),
+    )
+    .with_drop_params(&drop_params)
+    .with_flatten_aggregates(flatten_aggregates)
+    .with_parallelism(strategy)
+    .with_assertion_semantics(*assertion_semantics)
+    .with_assert_label_filter(assert_label_filter)
+    .with_solver(solver)
+    .with_tool_path(tool_path_ref);
+
+    let outcome = dispatch_ir_equiv(&request, SUBCOMMAND);
     if let Some(path) = output_json {
         std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
     }
@@ -331,11 +118,34 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         std::process::exit(0);
     } else {
         eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-        if let Some(cex) = outcome.counterexample {
-            eprintln!("[{}] failure: {}", SUBCOMMAND, cex);
+        if let Some(err) = outcome.error_str.as_ref() {
+            eprintln!("[{}] failure: {}", SUBCOMMAND, err);
         } else {
             eprintln!("[{}] failure", SUBCOMMAND);
         }
         std::process::exit(1);
+    }
+}
+
+pub fn dispatch_ir_equiv(request: &IrEquivRequest<'_>, subcommand: &str) -> EquivOutcome {
+    log::info!(
+        "dispatch_ir_equiv; solver_choice: {:?}, tool_path: {:?}",
+        request.solver,
+        request.tool_path
+    );
+    match prover_run_ir_equiv(request) {
+        Ok(report) => outcome_from_report(report),
+        Err(err) => {
+            eprintln!("[{}] {}", subcommand, err);
+            std::process::exit(1);
+        }
+    }
+}
+
+pub fn outcome_from_report(report: EquivReport) -> EquivOutcome {
+    EquivOutcome {
+        time_micros: report.duration.as_micros(),
+        success: report.is_success(),
+        error_str: report.error_str(),
     }
 }
