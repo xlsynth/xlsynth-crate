@@ -99,11 +99,9 @@ impl Prover for ExternalProver {
                         "External provers do not support fixed implicit activation".to_string(),
                     );
                 }
-                if (lhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false))
-                    || (rhs.domains.as_ref().map(|d| !d.is_empty()).unwrap_or(false))
-                {
-                    println!(
-                        "Warning: External provers do not support domains for arguments. Enums will be treated as possibly out of bounds."
+                if lhs.has_domains() || rhs.has_domains() {
+                    return EquivResult::Error(
+                        "External provers do not support parameter domains".to_string(),
                     );
                 }
                 if assertion_semantics != AssertionSemantics::Same {
