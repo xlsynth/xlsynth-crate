@@ -804,7 +804,7 @@ Runs a prover plan described by a JSON file with a process-based scheduler.
 
 - assume-enum-in-bound: When `true`, constrains enum-typed parameters to their declared enumerators (domain restriction) during proofs. This is usually desirable because the underlying bit-width can represent more values than the defined enum members. Default is `true` for supported solvers. Supported by native SMT backends (e.g., z3-binary, bitwuzla, boolector) and not by the toolchain or legacy boolector paths; requesting it where unsupported results in an error.
 
-- assertion-semantics: How to treat `assert` statements when proving equivalence. Let r_l/r_r be results and s_l/s_r indicate that no assertion failed on the left/right.
+- assertion-semantics (default: `ignore`): How to treat `assert` statements when proving equivalence. Let r_l/r_r be results and s_l/s_r indicate that no assertion failed on the left/right.
 
   - ignore: Ignore assertions.
   - never: Both sides must never fail; results must match.
