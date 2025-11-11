@@ -96,7 +96,7 @@ impl<'a> IrEquivRequest<'a> {
             drop_params: &[],
             flatten_aggregates: false,
             parallelism: EquivParallelism::SingleThreaded,
-            assertion_semantics: AssertionSemantics::Same,
+            assertion_semantics: AssertionSemantics::Ignore,
             assert_label_filter: None,
             solver: None,
             tool_path: None,
