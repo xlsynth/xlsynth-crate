@@ -155,7 +155,7 @@ impl<'a> DslxEquivRequest<'a> {
             drop_params: &[],
             flatten_aggregates: false,
             parallelism: EquivParallelism::SingleThreaded,
-            assertion_semantics: AssertionSemantics::Same,
+            assertion_semantics: AssertionSemantics::Ignore,
             assert_label_filter: None,
             solver: None,
             options: DslxOptions::default(),
@@ -516,7 +516,6 @@ mod tests {
         let request = DslxEquivRequest::new(lhs_module, rhs_module)
             .with_drop_params(&drop_params)
             .with_parallelism(EquivParallelism::SingleThreaded)
-            .with_assertion_semantics(AssertionSemantics::Same)
             .with_solver(Some(SolverChoice::Auto))
             .with_assume_enum_in_bound(true)
             .with_optimize(true);
