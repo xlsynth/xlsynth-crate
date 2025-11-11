@@ -1117,6 +1117,7 @@ extern "C" {
 
     pub fn xls_vast_verilog_file_add_include(f: *mut CVastFile, path: *const std::os::raw::c_char);
     pub fn xls_vast_verilog_file_emit(f: *const CVastFile) -> *mut std::os::raw::c_char;
+    pub fn xls_vast_expression_emit(expr: *mut CVastExpression) -> *mut std::os::raw::c_char;
 
     // -- DSLX
 
