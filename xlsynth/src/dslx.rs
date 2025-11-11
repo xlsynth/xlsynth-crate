@@ -67,6 +67,195 @@ impl From<sys::DslxModuleMemberKind> for ModuleMemberKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributeKind {
+    Cfg,
+    DslxFormatDisable,
+    ExternVerilog,
+    SvType,
+    Test,
+    TestProc,
+    Quickcheck,
+}
+
+impl AttributeKind {
+    fn from_raw(kind: sys::DslxAttributeKind) -> Self {
+        match kind {
+            sys::XLS_DSLX_ATTRIBUTE_KIND_CFG => AttributeKind::Cfg,
+            sys::XLS_DSLX_ATTRIBUTE_KIND_DSLX_FORMAT_DISABLE => AttributeKind::DslxFormatDisable,
+            sys::XLS_DSLX_ATTRIBUTE_KIND_EXTERN_VERILOG => AttributeKind::ExternVerilog,
+            sys::XLS_DSLX_ATTRIBUTE_KIND_SV_TYPE => AttributeKind::SvType,
+            sys::XLS_DSLX_ATTRIBUTE_KIND_TEST => AttributeKind::Test,
+            sys::XLS_DSLX_ATTRIBUTE_KIND_TEST_PROC => AttributeKind::TestProc,
+            sys::XLS_DSLX_ATTRIBUTE_KIND_QUICKCHECK => AttributeKind::Quickcheck,
+            _ => panic!("Unknown DSLX attribute kind: {}", kind),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributeArgumentKind {
+    String,
+    StringKeyValue,
+    IntKeyValue,
+}
+
+impl AttributeArgumentKind {
+    fn from_raw(kind: sys::DslxAttributeArgumentKind) -> Self {
+        match kind {
+            sys::XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_STRING => AttributeArgumentKind::String,
+            sys::XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_STRING_KEY_VALUE => {
+                AttributeArgumentKind::StringKeyValue
+            }
+            sys::XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_INT_KEY_VALUE => {
+                AttributeArgumentKind::IntKeyValue
+            }
+            _ => panic!("Unknown DSLX attribute argument kind: {}", kind),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttributeArgument {
+    String(String),
+    StringKeyValue { key: String, value: String },
+    IntKeyValue { key: String, value: i64 },
+}
+
+impl fmt::Display for AttributeArgument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AttributeArgument::String(value) => write!(f, "\"{value}\""),
+            AttributeArgument::StringKeyValue { key, value } => {
+                write!(f, "{key}=\"{value}\"")
+            }
+            AttributeArgument::IntKeyValue { key, value } => write!(f, "{key}={value}"),
+        }
+    }
+}
+
+pub struct Attribute {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxAttribute,
+}
+
+impl Clone for Attribute {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent.clone(),
+            ptr: self.ptr,
+        }
+    }
+}
+
+impl Attribute {
+    fn ensure_index(&self, index: usize) {
+        assert!(
+            index < self.argument_count(),
+            "attribute argument index {index} out of bounds (count={})",
+            self.argument_count()
+        );
+    }
+
+    pub fn kind(&self) -> AttributeKind {
+        let raw = unsafe { sys::xls_dslx_attribute_get_kind(self.ptr) };
+        AttributeKind::from_raw(raw)
+    }
+
+    pub fn argument_count(&self) -> usize {
+        unsafe { sys::xls_dslx_attribute_get_argument_count(self.ptr) as usize }
+    }
+
+    pub fn get_argument_kind(&self, index: usize) -> AttributeArgumentKind {
+        self.ensure_index(index);
+        let raw = unsafe { sys::xls_dslx_attribute_get_argument_kind(self.ptr, index as i64) };
+        AttributeArgumentKind::from_raw(raw)
+    }
+
+    pub fn get_string_argument(&self, index: usize) -> Option<String> {
+        if self.get_argument_kind(index) != AttributeArgumentKind::String {
+            return None;
+        }
+        let c_str = unsafe { sys::xls_dslx_attribute_get_string_argument(self.ptr, index as i64) };
+        Some(unsafe { c_str_to_rust(c_str) })
+    }
+
+    pub fn get_key_value_argument_key(&self, index: usize) -> Option<String> {
+        match self.get_argument_kind(index) {
+            AttributeArgumentKind::StringKeyValue | AttributeArgumentKind::IntKeyValue => {
+                let c_str = unsafe {
+                    sys::xls_dslx_attribute_get_key_value_argument_key(self.ptr, index as i64)
+                };
+                Some(unsafe { c_str_to_rust(c_str) })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get_key_value_string_argument_value(&self, index: usize) -> Option<String> {
+        if self.get_argument_kind(index) != AttributeArgumentKind::StringKeyValue {
+            return None;
+        }
+        let c_str = unsafe {
+            sys::xls_dslx_attribute_get_key_value_string_argument_value(self.ptr, index as i64)
+        };
+        Some(unsafe { c_str_to_rust(c_str) })
+    }
+
+    pub fn get_key_value_int_argument_value(&self, index: usize) -> Option<i64> {
+        if self.get_argument_kind(index) != AttributeArgumentKind::IntKeyValue {
+            return None;
+        }
+        let value = unsafe {
+            sys::xls_dslx_attribute_get_key_value_int_argument_value(self.ptr, index as i64)
+        };
+        Some(value)
+    }
+
+    pub fn get_argument(&self, index: usize) -> AttributeArgument {
+        match self.get_argument_kind(index) {
+            AttributeArgumentKind::String => AttributeArgument::String(
+                self.get_string_argument(index)
+                    .expect("string argument should be present"),
+            ),
+            AttributeArgumentKind::StringKeyValue => {
+                let key = self
+                    .get_key_value_argument_key(index)
+                    .expect("key should be present for string key/value argument");
+                let value = self
+                    .get_key_value_string_argument_value(index)
+                    .expect("string value should be present");
+                AttributeArgument::StringKeyValue { key, value }
+            }
+            AttributeArgumentKind::IntKeyValue => {
+                let key = self
+                    .get_key_value_argument_key(index)
+                    .expect("key should be present for int key/value argument");
+                let value = self
+                    .get_key_value_int_argument_value(index)
+                    .expect("int value should be present");
+                AttributeArgument::IntKeyValue { key, value }
+            }
+        }
+    }
+
+    pub fn arguments(&self) -> Vec<AttributeArgument> {
+        (0..self.argument_count())
+            .map(|index| self.get_argument(index))
+            .collect()
+    }
+
+    pub fn to_text(&self) -> String {
+        unsafe { c_str_to_rust(sys::xls_dslx_attribute_to_string(self.ptr)) }
+    }
+}
+
+impl fmt::Display for Attribute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
+    }
+}
+
 struct ImportDataPtr {
     ptr: *mut CDslxImportData,
 }
@@ -655,6 +844,22 @@ impl Expr {
             ptr: module_ptr,
         }
     }
+
+    pub fn to_text(&self) -> String {
+        unsafe { crate::c_str_to_rust(sys::xls_dslx_expr_to_string(self.ptr)) }
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
+    }
+}
+
+impl fmt::Debug for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
+    }
 }
 
 // -- EnumDef
@@ -947,6 +1152,11 @@ pub struct Param {
     ptr: *mut sys::CDslxParam,
 }
 
+pub struct ParametricBinding {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxParametricBinding,
+}
+
 impl Param {
     pub fn get_name(&self) -> String {
         unsafe { c_str_to_rust(sys::xls_dslx_param_get_name(self.ptr)) }
@@ -956,6 +1166,36 @@ impl Param {
         TypeAnnotation {
             parent: self.parent.clone(),
             ptr: unsafe { sys::xls_dslx_param_get_type_annotation(self.ptr) },
+        }
+    }
+}
+
+impl ParametricBinding {
+    pub fn get_identifier(&self) -> String {
+        unsafe { c_str_to_rust(sys::xls_dslx_parametric_binding_get_identifier(self.ptr)) }
+    }
+
+    pub fn get_type_annotation(&self) -> Option<TypeAnnotation> {
+        let ptr = unsafe { sys::xls_dslx_parametric_binding_get_type_annotation(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(TypeAnnotation {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
+    pub fn get_expr(&self) -> Option<Expr> {
+        let ptr = unsafe { sys::xls_dslx_parametric_binding_get_expr(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Expr {
+                parent: self.parent.clone(),
+                ptr,
+            })
         }
     }
 }
@@ -975,6 +1215,10 @@ impl Function {
         unsafe { sys::xls_dslx_function_is_parametric(self.ptr) }
     }
 
+    pub fn is_public(&self) -> bool {
+        unsafe { sys::xls_dslx_function_is_public(self.ptr) }
+    }
+
     pub fn get_param_count(&self) -> usize {
         unsafe { sys::xls_dslx_function_get_param_count(self.ptr) as usize }
     }
@@ -987,6 +1231,83 @@ impl Function {
         Param {
             parent: self.parent.clone(),
             ptr: p,
+        }
+    }
+
+    pub fn get_attribute_count(&self) -> usize {
+        unsafe { sys::xls_dslx_function_get_attribute_count(self.ptr) as usize }
+    }
+
+    pub fn get_attribute(&self, idx: usize) -> Attribute {
+        if idx >= self.get_attribute_count() {
+            panic!(
+                "attribute index {} out of bounds for function {}",
+                idx,
+                self.get_identifier()
+            );
+        }
+        let ptr = unsafe { sys::xls_dslx_function_get_attribute(self.ptr, idx as i64) };
+        if ptr.is_null() {
+            panic!("xls_dslx_function_get_attribute returned null pointer");
+        }
+        Attribute {
+            parent: self.parent.clone(),
+            ptr,
+        }
+    }
+
+    pub fn attributes(&self) -> Vec<Attribute> {
+        (0..self.get_attribute_count())
+            .map(|idx| self.get_attribute(idx))
+            .collect()
+    }
+
+    pub fn get_parametric_binding_count(&self) -> usize {
+        unsafe { sys::xls_dslx_function_get_parametric_binding_count(self.ptr) as usize }
+    }
+
+    pub fn get_parametric_binding(&self, idx: usize) -> ParametricBinding {
+        if idx >= self.get_parametric_binding_count() {
+            panic!("Failed to get function parametric binding at index {}", idx);
+        }
+        let ptr = unsafe { sys::xls_dslx_function_get_parametric_binding(self.ptr, idx as i64) };
+        if ptr.is_null() {
+            panic!(
+                "xls_dslx_function_get_parametric_binding returned null for index {}",
+                idx
+            );
+        }
+        ParametricBinding {
+            parent: self.parent.clone(),
+            ptr,
+        }
+    }
+
+    pub fn parametric_bindings(&self) -> Vec<ParametricBinding> {
+        (0..self.get_parametric_binding_count())
+            .map(|idx| self.get_parametric_binding(idx))
+            .collect()
+    }
+
+    pub fn get_body(&self) -> Expr {
+        let ptr = unsafe { sys::xls_dslx_function_get_body(self.ptr) };
+        if ptr.is_null() {
+            panic!("xls_dslx_function_get_body returned null pointer");
+        }
+        Expr {
+            parent: self.parent.clone(),
+            ptr,
+        }
+    }
+
+    pub fn get_return_type(&self) -> TypeAnnotation {
+        let ptr = unsafe { sys::xls_dslx_function_get_return_type(self.ptr) };
+        if ptr.is_null() {
+            panic!("xls_dslx_function_get_return_type returned null pointer");
+        }
+        TypeAnnotation {
+            parent: self.parent.clone(),
+            ptr,
         }
     }
 }
@@ -1724,12 +2045,17 @@ impl TypeInfo {
         }
     }
 
-    pub fn get_type_for_type_annotation(&self, type_annotation: &TypeAnnotation) -> Type {
-        Type {
-            parent: self.parent.clone(),
-            ptr: unsafe {
-                sys::xls_dslx_type_info_get_type_type_annotation(self.ptr, type_annotation.ptr)
-            },
+    pub fn get_type_for_type_annotation(&self, type_annotation: &TypeAnnotation) -> Option<Type> {
+        let ptr = unsafe {
+            sys::xls_dslx_type_info_get_type_type_annotation(self.ptr, type_annotation.ptr)
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Type {
+                parent: self.parent.clone(),
+                ptr,
+            })
         }
     }
 
@@ -2163,7 +2489,7 @@ mod tests {
         let type_a = member_a.get_type();
         // Inspect the inferred type information for the type AST node.
         {
-            let concrete_type_a = type_info.get_type_for_type_annotation(&type_a);
+            let concrete_type_a = type_info.get_type_for_type_annotation(&type_a).unwrap();
             assert_eq!(concrete_type_a.to_string().unwrap(), "uN[32]");
             assert_eq!(concrete_type_a.get_total_bit_count().unwrap(), 32);
 
@@ -2178,7 +2504,7 @@ mod tests {
         let type_b = member_b.get_type();
         // Inspect the inferred type information for the type AST node.
         {
-            let concrete_type_b = type_info.get_type_for_type_annotation(&type_b);
+            let concrete_type_b = type_info.get_type_for_type_annotation(&type_b).unwrap();
             assert_eq!(concrete_type_b.to_string().unwrap(), "uN[16]");
             assert_eq!(concrete_type_b.get_total_bit_count().unwrap(), 16);
 
@@ -2355,17 +2681,171 @@ fn main() -> u32 {
                     assert_eq!(f.get_param_count(), 2);
                     let p0 = f.get_param(0);
                     assert_eq!(p0.get_name(), "a");
-                    let p0_ty = type_info.get_type_for_type_annotation(&p0.get_type_annotation());
+                    let p0_ty = type_info
+                        .get_type_for_type_annotation(&p0.get_type_annotation())
+                        .unwrap();
                     assert!(p0_ty.is_bits_like().is_some());
 
                     let p1 = f.get_param(1);
                     assert_eq!(p1.get_name(), "b");
-                    let p1_ty = type_info.get_type_for_type_annotation(&p1.get_type_annotation());
+                    let p1_ty = type_info
+                        .get_type_for_type_annotation(&p1.get_type_annotation())
+                        .unwrap();
                     assert!(p1_ty.is_enum());
                 }
             }
         }
         assert!(found, "function f not found");
+    }
+
+    #[test]
+    fn test_function_parametric_binding_accessors() {
+        let dslx = r#"
+pub fn add<N: u32 = {32}>(x: bits[N], y: bits[N]) -> bits[N] {
+    x + y
+}
+
+fn helper(x: u32) -> u32 { x }
+"#;
+        let mut import_data = ImportData::default();
+        let tcm = parse_and_typecheck(
+            dslx,
+            "/fake/param_binding_test.x",
+            "param_binding_test_mod",
+            &mut import_data,
+        )
+        .expect("parse-and-typecheck success");
+        let module = tcm.get_module();
+        let type_info = tcm.get_type_info();
+
+        use crate::dslx::MatchableModuleMember;
+
+        let mut add_fn: Option<Function> = None;
+        let mut helper_fn: Option<Function> = None;
+        for i in 0..module.get_member_count() {
+            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
+                match f.get_identifier().as_str() {
+                    "add" => add_fn = Some(f),
+                    "helper" => helper_fn = Some(f),
+                    _ => {}
+                }
+            }
+        }
+
+        let add_fn = add_fn.expect("add function present");
+        assert!(add_fn.is_public());
+        assert!(add_fn.is_parametric());
+        assert_eq!(add_fn.get_parametric_binding_count(), 1);
+        let bindings = add_fn.parametric_bindings();
+        assert_eq!(bindings.len(), 1);
+        let binding = &bindings[0];
+        assert_eq!(binding.get_identifier(), "N");
+        let binding_type_annotation = binding
+            .get_type_annotation()
+            .expect("binding has type annotation");
+        assert!(
+            type_info
+                .get_type_for_type_annotation(&binding_type_annotation)
+                .is_none(),
+            "binding type annotation for parametric function cannot be resolved"
+        );
+        let binding_expr = binding.get_expr().expect("binding has default expr");
+        let binding_expr_text = binding_expr.to_text();
+        assert!(
+            binding_expr_text.contains("32"),
+            "{}",
+            format!(
+                "expected binding expr text to contain `32`, got {}",
+                binding_expr_text
+            )
+        );
+
+        let return_type_annotation = add_fn.get_return_type();
+        let return_type = type_info.get_type_for_type_annotation(&return_type_annotation);
+        assert!(
+            return_type.is_none(),
+            "return type for parametric function cannot be resolved"
+        );
+        let body_text = add_fn.get_body().to_text();
+        assert!(
+            body_text.contains("x + y"),
+            "{}",
+            format!("expected body text to contain `x + y`, got {}", body_text)
+        );
+
+        let helper_fn = helper_fn.expect("helper function present");
+        assert!(!helper_fn.is_public());
+        assert!(!helper_fn.is_parametric());
+        assert_eq!(helper_fn.get_parametric_binding_count(), 0);
+        let helper_return_type_annotation = helper_fn.get_return_type();
+        let helper_return_type = type_info
+            .get_type_for_type_annotation(&helper_return_type_annotation)
+            .unwrap()
+            .to_string()
+            .expect("helper return type string");
+        assert_eq!(helper_return_type, "uN[32]");
+    }
+
+    #[test]
+    fn test_function_attributes() {
+        let dslx = r#"
+#[cfg(test)]
+fn cfg_fn(x: u32) -> u32 { x }
+
+#[dslx_format_disable("fmt-off")]
+fn fmt_fn(x: u32) -> u32 { x }
+
+fn plain_fn(x: u32) -> u32 { x }
+"#;
+        let mut import_data = ImportData::default();
+        let tcm = parse_and_typecheck(dslx, "/fake/attr_test.x", "attr_test_mod", &mut import_data)
+            .expect("parse-and-typecheck success");
+        let module = tcm.get_module();
+
+        use crate::dslx::MatchableModuleMember;
+
+        let mut cfg_fn: Option<Function> = None;
+        let mut fmt_fn: Option<Function> = None;
+        let mut plain_fn: Option<Function> = None;
+        for i in 0..module.get_member_count() {
+            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
+                match f.get_identifier().as_str() {
+                    "cfg_fn" => cfg_fn = Some(f),
+                    "fmt_fn" => fmt_fn = Some(f),
+                    "plain_fn" => plain_fn = Some(f),
+                    _ => {}
+                }
+            }
+        }
+
+        let cfg_fn = cfg_fn.expect("cfg_fn present");
+        assert_eq!(cfg_fn.get_attribute_count(), 1);
+        let cfg_attr = cfg_fn.get_attribute(0);
+        assert_eq!(cfg_attr.kind(), AttributeKind::Cfg);
+        let cfg_args = cfg_attr.arguments();
+        assert_eq!(cfg_args.len(), 1);
+        match &cfg_args[0] {
+            AttributeArgument::String(value) => assert_eq!(value, "test"),
+            other => panic!("unexpected cfg attribute argument: {:?}", other),
+        }
+        assert!(cfg_attr.to_text().contains("cfg"));
+
+        // ensure no unexpected extra functions
+
+        let fmt_fn = fmt_fn.expect("fmt_fn present");
+        assert_eq!(fmt_fn.get_attribute_count(), 1);
+        let fmt_attr = fmt_fn.get_attribute(0);
+        assert_eq!(fmt_attr.kind(), AttributeKind::DslxFormatDisable);
+        let fmt_args = fmt_attr.arguments();
+        assert_eq!(fmt_args.len(), 1);
+        match &fmt_args[0] {
+            AttributeArgument::String(value) => assert_eq!(value, "fmt-off"),
+            other => panic!("unexpected format-disable attribute argument: {:?}", other),
+        }
+        assert!(fmt_attr.to_text().contains("dslx_format_disable"));
+
+        let plain_fn = plain_fn.expect("plain_fn present");
+        assert_eq!(plain_fn.get_attribute_count(), 0);
     }
 
     #[test]
@@ -2421,7 +2901,9 @@ fn main() -> u32 {
         let f = f_opt.expect("function f found");
         assert_eq!(f.get_param_count(), 1);
         let p0 = f.get_param(0);
-        let p0_ty = main_type_info.get_type_for_type_annotation(&p0.get_type_annotation());
+        let p0_ty = main_type_info
+            .get_type_for_type_annotation(&p0.get_type_annotation())
+            .unwrap();
         assert!(p0_ty.is_enum());
 
         // Get the EnumDef backing the imported type and grab a value expression from

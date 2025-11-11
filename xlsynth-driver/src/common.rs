@@ -552,7 +552,7 @@ pub fn get_function_enum_param_domains(
                     let p = f.get_param(pidx);
                     let name = p.get_name();
                     let ta = p.get_type_annotation();
-                    let ty = type_info.get_type_for_type_annotation(&ta);
+                    let ty = type_info.get_type_for_type_annotation(&ta).unwrap();
                     if ty.is_enum() {
                         let enum_def = ty.get_enum_def().unwrap();
                         let values = get_enum_domain(tcm, &enum_def);
