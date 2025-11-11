@@ -3,6 +3,7 @@
 pub mod dslx_equiv;
 pub mod dslx_specializer;
 pub mod dslx_tactics;
+pub mod dslx_utils;
 pub mod ir_equiv;
 pub mod ir_utils;
 pub mod prover;

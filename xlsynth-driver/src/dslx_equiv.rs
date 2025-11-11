@@ -8,8 +8,9 @@ use crate::proofs::script::{
     OblTreeConfig, ScriptStep,
 };
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use xlsynth_prover::dslx_equiv::{run_dslx_equiv, DslxEquivRequest, DslxModule};
+use xlsynth_prover::dslx_specializer::specialize_dslx_module;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism};
 use xlsynth_prover::prover::SolverChoice;
 
@@ -62,9 +63,18 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let rhs_path = std::path::Path::new(rhs_file);
 
     let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
-    let dslx_stdlib_path = dslx_stdlib_path.as_deref();
+    let dslx_stdlib_path_ref = dslx_stdlib_path.as_deref().map(Path::new);
     let dslx_path = get_dslx_path(matches, config);
-    let dslx_path = dslx_path.as_deref();
+    let additional_search_paths: Vec<PathBuf> = dslx_path
+        .as_deref()
+        .map(|paths| {
+            paths
+                .split(';')
+                .filter(|p| !p.is_empty())
+                .map(std::path::PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
 
     let enable_warnings = config
         .as_ref()
@@ -230,29 +240,63 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
             std::process::exit(1);
         });
 
-        let lhs_top = lhs_top.unwrap();
-        let rhs_top = rhs_top.unwrap();
+        let lhs_top_spec = lhs_top.unwrap();
+        let rhs_top_spec = rhs_top.unwrap();
+
+        let lhs_specialized = match specialize_dslx_module(
+            &lhs_contents,
+            lhs_path,
+            lhs_top_spec,
+            dslx_stdlib_path_ref,
+            &additional_search_paths,
+        ) {
+            Ok(output) => output,
+            Err(err) => {
+                eprintln!(
+                    "[{}] DSLX specialization failed\n  path: {}\n  error: {}",
+                    SUBCOMMAND,
+                    lhs_path.display(),
+                    err
+                );
+                std::process::exit(1);
+            }
+        };
+        let rhs_specialized = match specialize_dslx_module(
+            &rhs_contents,
+            rhs_path,
+            rhs_top_spec,
+            dslx_stdlib_path_ref,
+            &additional_search_paths,
+        ) {
+            Ok(output) => output,
+            Err(err) => {
+                eprintln!(
+                    "[{}] DSLX specialization failed\n  path: {}\n  error: {}",
+                    SUBCOMMAND,
+                    rhs_path.display(),
+                    err
+                );
+                std::process::exit(1);
+            }
+        };
+
+        let lhs_source_owned = lhs_specialized.source;
+        let rhs_source_owned = rhs_specialized.source;
+        let lhs_top_resolved = lhs_specialized.top_name;
+        let rhs_top_resolved = rhs_specialized.top_name;
+        let lhs_top = lhs_top_resolved.as_str();
+        let rhs_top = rhs_top_resolved.as_str();
 
         let tool_path = config
             .as_ref()
             .and_then(|c| c.tool_path.as_deref())
             .map(Path::new);
 
-        let additional_search_paths: Vec<std::path::PathBuf> = dslx_path
-            .map(|paths| {
-                paths
-                    .split(';')
-                    .filter(|p| !p.is_empty())
-                    .map(std::path::PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let lhs_module = DslxModule::new(&lhs_contents, lhs_top)
+        let lhs_module = DslxModule::new(lhs_source_owned.as_str(), lhs_top)
             .with_path(Some(lhs_path))
             .with_uf_map(&lhs_uf_map)
             .with_fixed_implicit_activation(lhs_fixed_implicit_activation);
-        let rhs_module = DslxModule::new(&rhs_contents, rhs_top)
+        let rhs_module = DslxModule::new(rhs_source_owned.as_str(), rhs_top)
             .with_path(Some(rhs_path))
             .with_uf_map(&rhs_uf_map)
             .with_fixed_implicit_activation(rhs_fixed_implicit_activation);
@@ -267,7 +311,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
             .with_assume_enum_in_bound(assume_enum_in_bound)
             .with_optimize(!use_unoptimized_ir)
             .with_tool_path(tool_path)
-            .with_dslx_stdlib_path(dslx_stdlib_path.map(Path::new))
+            .with_dslx_stdlib_path(dslx_stdlib_path_ref)
             .with_additional_search_paths(additional_search_paths)
             .with_enable_warnings(enable_warnings)
             .with_disable_warnings(disable_warnings)
