@@ -6,6 +6,7 @@
 
 use std::{
     cmp::Ordering,
+    convert::TryFrom,
     fmt,
     hash::{Hash, Hasher},
     mem::ManuallyDrop,
@@ -386,20 +387,34 @@ impl TypecheckedModule {
         functions: &[&Function],
         install_subject: &str,
     ) -> Result<TypecheckedModule, XlsynthError> {
-        let mut function_ptrs: Vec<*mut sys::CDslxFunction> =
-            functions.iter().map(|f| f.ptr).collect();
+        let mut member_storage: Vec<ModuleMember> = Vec::with_capacity(functions.len());
+        for &function in functions {
+            member_storage.push(ModuleMember::try_from(function)?);
+        }
+        let member_refs: Vec<&ModuleMember> = member_storage.iter().collect();
+        self.clone_ignoring_members(import_data, &member_refs, install_subject)
+    }
+
+    pub fn clone_ignoring_members(
+        &self,
+        import_data: &mut ImportData,
+        members: &[&ModuleMember],
+        install_subject: &str,
+    ) -> Result<TypecheckedModule, XlsynthError> {
+        let mut member_ptrs: Vec<*mut sys::CDslxModuleMember> =
+            members.iter().map(|member| member.ptr).collect();
         let install_subject_cstr = std::ffi::CString::new(install_subject).unwrap();
         unsafe {
             let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
             let mut result_out: *mut sys::CDslxTypecheckedModule = std::ptr::null_mut();
-            let success = sys::xls_dslx_typechecked_module_clone_removing_functions(
+            let success = sys::xls_dslx_typechecked_module_clone_removing_members(
                 self.ptr.ptr,
-                if function_ptrs.is_empty() {
+                if member_ptrs.is_empty() {
                     std::ptr::null_mut()
                 } else {
-                    function_ptrs.as_mut_ptr()
+                    member_ptrs.as_mut_ptr()
                 },
-                function_ptrs.len(),
+                member_ptrs.len(),
                 install_subject_cstr.as_ptr(),
                 import_data.ptr.ptr,
                 &mut error_out,
@@ -585,6 +600,18 @@ impl std::fmt::Display for ConstantDef {
     }
 }
 
+impl TryFrom<&ConstantDef> for ModuleMember {
+    type Error = XlsynthError;
+
+    fn try_from(constant_def: &ConstantDef) -> Result<Self, Self::Error> {
+        let ptr = unsafe { sys::xls_dslx_module_member_from_constant_def(constant_def.ptr) };
+        ModuleMember::from_raw(&constant_def.parent, ptr).ok_or_else(|| {
+            let name = constant_def.get_name();
+            XlsynthError(format!("constant `{name}` is not a member of the module"))
+        })
+    }
+}
+
 pub struct ModuleMember {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxModuleMember,
@@ -619,6 +646,20 @@ impl std::fmt::Display for MatchableModuleMember {
 }
 
 impl ModuleMember {
+    fn from_raw(
+        parent: &Rc<TypecheckedModulePtr>,
+        ptr: *mut sys::CDslxModuleMember,
+    ) -> Option<Self> {
+        if ptr.is_null() {
+            None
+        } else {
+            Some(ModuleMember {
+                parent: parent.clone(),
+                ptr,
+            })
+        }
+    }
+
     pub fn to_matchable(&self) -> Option<MatchableModuleMember> {
         let kind = unsafe { sys::xls_dslx_module_member_get_kind(self.ptr) };
         match ModuleMemberKind::from(kind) {
@@ -707,6 +748,20 @@ impl Quickcheck {
 impl std::fmt::Display for Quickcheck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_text())
+    }
+}
+
+impl TryFrom<&Quickcheck> for ModuleMember {
+    type Error = XlsynthError;
+
+    fn try_from(quickcheck: &Quickcheck) -> Result<Self, Self::Error> {
+        let ptr = unsafe { sys::xls_dslx_module_member_from_quickcheck(quickcheck.ptr) };
+        ModuleMember::from_raw(&quickcheck.parent, ptr).ok_or_else(|| {
+            let func_name = quickcheck.get_function().get_identifier();
+            XlsynthError(format!(
+                "quickcheck for `{func_name}` is not a member of the module"
+            ))
+        })
     }
 }
 
@@ -902,6 +957,18 @@ impl EnumDef {
 impl std::fmt::Display for EnumDef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_text())
+    }
+}
+
+impl TryFrom<&EnumDef> for ModuleMember {
+    type Error = XlsynthError;
+
+    fn try_from(enum_def: &EnumDef) -> Result<Self, Self::Error> {
+        let ptr = unsafe { sys::xls_dslx_module_member_from_enum_def(enum_def.ptr) };
+        ModuleMember::from_raw(&enum_def.parent, ptr).ok_or_else(|| {
+            let name = enum_def.get_identifier();
+            XlsynthError(format!("enum `{name}` is not a member of the module"))
+        })
     }
 }
 
@@ -1102,6 +1169,18 @@ impl std::fmt::Display for StructDef {
     }
 }
 
+impl TryFrom<&StructDef> for ModuleMember {
+    type Error = XlsynthError;
+
+    fn try_from(struct_def: &StructDef) -> Result<Self, Self::Error> {
+        let ptr = unsafe { sys::xls_dslx_module_member_from_struct_def(struct_def.ptr) };
+        ModuleMember::from_raw(&struct_def.parent, ptr).ok_or_else(|| {
+            let name = struct_def.get_identifier();
+            XlsynthError(format!("struct `{name}` is not a member of the module"))
+        })
+    }
+}
+
 pub struct TypeAlias {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxTypeAlias,
@@ -1129,6 +1208,18 @@ impl TypeAlias {
 impl std::fmt::Display for TypeAlias {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_text())
+    }
+}
+
+impl TryFrom<&TypeAlias> for ModuleMember {
+    type Error = XlsynthError;
+
+    fn try_from(type_alias: &TypeAlias) -> Result<Self, Self::Error> {
+        let ptr = unsafe { sys::xls_dslx_module_member_from_type_alias(type_alias.ptr) };
+        ModuleMember::from_raw(&type_alias.parent, ptr).ok_or_else(|| {
+            let name = type_alias.get_identifier();
+            XlsynthError(format!("type alias `{name}` is not a member of the module"))
+        })
     }
 }
 
@@ -1315,6 +1406,20 @@ impl Function {
 impl std::fmt::Display for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_text())
+    }
+}
+
+impl TryFrom<&Function> for ModuleMember {
+    type Error = XlsynthError;
+
+    fn try_from(function: &Function) -> Result<Self, Self::Error> {
+        let ptr = unsafe { sys::xls_dslx_module_member_from_function(function.ptr) };
+        ModuleMember::from_raw(&function.parent, ptr).ok_or_else(|| {
+            let identifier = function.get_identifier();
+            XlsynthError(format!(
+                "function `{identifier}` is not a member of the module"
+            ))
+        })
     }
 }
 

@@ -1173,6 +1173,16 @@ extern "C" {
         result_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
+    pub fn xls_dslx_typechecked_module_clone_removing_members(
+        tm: *mut CDslxTypecheckedModule,
+        members: *mut *mut CDslxModuleMember,
+        member_count: libc::size_t,
+        install_subject: *const std::os::raw::c_char,
+        import_data: *mut CDslxImportData,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxTypecheckedModule,
+    ) -> bool;
+
     pub fn xls_dslx_replace_invocations_in_module(
         tm: *mut CDslxTypecheckedModule,
         callers: *const *mut CDslxFunction,
@@ -1269,6 +1279,30 @@ extern "C" {
     pub fn xls_dslx_module_member_get_enum_def(
         member: *const CDslxModuleMember,
     ) -> *mut CDslxEnumDef;
+    pub fn xls_dslx_module_member_get_function(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxFunction;
+    pub fn xls_dslx_module_member_get_quickcheck(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxQuickcheck;
+    pub fn xls_dslx_module_member_from_constant_def(
+        constant_def: *mut CDslxConstantDef,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_struct_def(
+        struct_def: *mut CDslxStructDef,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_enum_def(
+        enum_def: *mut CDslxEnumDef,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_type_alias(
+        type_alias: *mut CDslxTypeAlias,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_function(
+        function: *mut CDslxFunction,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_quickcheck(
+        quickcheck: *mut CDslxQuickcheck,
+    ) -> *mut CDslxModuleMember;
 
     pub fn xls_dslx_colon_ref_get_attr(
         colon_ref: *const CDslxColonRef,
@@ -2249,9 +2283,6 @@ extern "C" {
         name_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
 
-    pub fn xls_dslx_module_member_get_function(
-        member: *const CDslxModuleMember,
-    ) -> *mut CDslxFunction;
     pub fn xls_dslx_function_is_parametric(function: *const CDslxFunction) -> bool;
     pub fn xls_dslx_function_is_public(function: *const CDslxFunction) -> bool;
     pub fn xls_dslx_function_get_identifier(
@@ -2324,10 +2355,6 @@ extern "C" {
     ) -> bool;
 
     // -- Quickcheck APIs
-    pub fn xls_dslx_module_member_get_quickcheck(
-        member: *const CDslxModuleMember,
-    ) -> *mut CDslxQuickcheck;
-
     pub fn xls_dslx_quickcheck_get_function(qc: *const CDslxQuickcheck) -> *mut CDslxFunction;
 
     /// Returns true iff the Quickcheck has the `exhaustive` test-cases
