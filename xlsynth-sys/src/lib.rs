@@ -304,6 +304,16 @@ pub struct CDslxParam {
 }
 
 #[repr(C)]
+pub struct CDslxAttribute {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CDslxParametricBinding {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CDslxCallGraph {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -377,6 +387,22 @@ pub const XLS_VAST_DATA_KIND_GENVAR: VastDataKind = 7;
 pub type DslxTypeDefinitionKind = i32;
 
 pub type DslxModuleMemberKind = i32;
+
+pub type DslxAttributeKind = i32;
+
+pub const XLS_DSLX_ATTRIBUTE_KIND_CFG: DslxAttributeKind = 0;
+pub const XLS_DSLX_ATTRIBUTE_KIND_DSLX_FORMAT_DISABLE: DslxAttributeKind = 1;
+pub const XLS_DSLX_ATTRIBUTE_KIND_EXTERN_VERILOG: DslxAttributeKind = 2;
+pub const XLS_DSLX_ATTRIBUTE_KIND_SV_TYPE: DslxAttributeKind = 3;
+pub const XLS_DSLX_ATTRIBUTE_KIND_TEST: DslxAttributeKind = 4;
+pub const XLS_DSLX_ATTRIBUTE_KIND_TEST_PROC: DslxAttributeKind = 5;
+pub const XLS_DSLX_ATTRIBUTE_KIND_QUICKCHECK: DslxAttributeKind = 6;
+
+pub type DslxAttributeArgumentKind = i32;
+
+pub const XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_STRING: DslxAttributeArgumentKind = 0;
+pub const XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_STRING_KEY_VALUE: DslxAttributeArgumentKind = 1;
+pub const XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_INT_KEY_VALUE: DslxAttributeArgumentKind = 2;
 
 pub const XLS_CALLING_CONVENTION_TYPICAL: XlsCallingConvention = 0;
 pub const XLS_CALLING_CONVENTION_IMPLICIT_TOKEN: XlsCallingConvention = 1;
@@ -1147,6 +1173,16 @@ extern "C" {
         result_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
+    pub fn xls_dslx_typechecked_module_clone_removing_members(
+        tm: *mut CDslxTypecheckedModule,
+        members: *mut *mut CDslxModuleMember,
+        member_count: libc::size_t,
+        install_subject: *const std::os::raw::c_char,
+        import_data: *mut CDslxImportData,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut *mut CDslxTypecheckedModule,
+    ) -> bool;
+
     pub fn xls_dslx_replace_invocations_in_module(
         tm: *mut CDslxTypecheckedModule,
         callers: *const *mut CDslxFunction,
@@ -1243,6 +1279,30 @@ extern "C" {
     pub fn xls_dslx_module_member_get_enum_def(
         member: *const CDslxModuleMember,
     ) -> *mut CDslxEnumDef;
+    pub fn xls_dslx_module_member_get_function(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxFunction;
+    pub fn xls_dslx_module_member_get_quickcheck(
+        member: *const CDslxModuleMember,
+    ) -> *mut CDslxQuickcheck;
+    pub fn xls_dslx_module_member_from_constant_def(
+        constant_def: *mut CDslxConstantDef,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_struct_def(
+        struct_def: *mut CDslxStructDef,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_enum_def(
+        enum_def: *mut CDslxEnumDef,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_type_alias(
+        type_alias: *mut CDslxTypeAlias,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_function(
+        function: *mut CDslxFunction,
+    ) -> *mut CDslxModuleMember;
+    pub fn xls_dslx_module_member_from_quickcheck(
+        quickcheck: *mut CDslxQuickcheck,
+    ) -> *mut CDslxModuleMember;
 
     pub fn xls_dslx_colon_ref_get_attr(
         colon_ref: *const CDslxColonRef,
@@ -1561,6 +1621,7 @@ extern "C" {
         constant_def: *const CDslxConstantDef,
     ) -> *mut std::os::raw::c_char;
     pub fn xls_dslx_quickcheck_to_string(qc: *const CDslxQuickcheck) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_expr_to_string(expr: *const CDslxExpr) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_type_info_get_const_expr(
         type_info: *mut CDslxTypeInfo,
@@ -2222,22 +2283,68 @@ extern "C" {
         name_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
 
-    pub fn xls_dslx_module_member_get_function(
-        member: *const CDslxModuleMember,
-    ) -> *mut CDslxFunction;
     pub fn xls_dslx_function_is_parametric(function: *const CDslxFunction) -> bool;
+    pub fn xls_dslx_function_is_public(function: *const CDslxFunction) -> bool;
     pub fn xls_dslx_function_get_identifier(
         function: *const CDslxFunction,
     ) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_function_get_param_count(function: *const CDslxFunction) -> i64;
+    pub fn xls_dslx_function_get_parametric_binding_count(function: *const CDslxFunction) -> i64;
     pub fn xls_dslx_function_get_param(
         function: *const CDslxFunction,
         index: i64,
     ) -> *mut CDslxParam;
+    pub fn xls_dslx_function_get_parametric_binding(
+        function: *const CDslxFunction,
+        index: i64,
+    ) -> *mut CDslxParametricBinding;
+    pub fn xls_dslx_function_get_body(function: *const CDslxFunction) -> *mut CDslxExpr;
+    pub fn xls_dslx_function_get_return_type(
+        function: *const CDslxFunction,
+    ) -> *mut CDslxTypeAnnotation;
+    pub fn xls_dslx_function_get_attribute_count(function: *const CDslxFunction) -> i64;
+    pub fn xls_dslx_function_get_attribute(
+        function: *const CDslxFunction,
+        index: i64,
+    ) -> *mut CDslxAttribute;
     pub fn xls_dslx_param_get_name(param: *const CDslxParam) -> *mut std::os::raw::c_char;
     pub fn xls_dslx_param_get_type_annotation(param: *const CDslxParam)
         -> *mut CDslxTypeAnnotation;
+    pub fn xls_dslx_attribute_get_kind(attribute: *const CDslxAttribute) -> DslxAttributeKind;
+    pub fn xls_dslx_attribute_get_argument_count(attribute: *const CDslxAttribute) -> i64;
+    pub fn xls_dslx_attribute_get_argument_kind(
+        attribute: *const CDslxAttribute,
+        index: i64,
+    ) -> DslxAttributeArgumentKind;
+    pub fn xls_dslx_attribute_get_string_argument(
+        attribute: *const CDslxAttribute,
+        index: i64,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_attribute_get_key_value_argument_key(
+        attribute: *const CDslxAttribute,
+        index: i64,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_attribute_get_key_value_string_argument_value(
+        attribute: *const CDslxAttribute,
+        index: i64,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_attribute_get_key_value_int_argument_value(
+        attribute: *const CDslxAttribute,
+        index: i64,
+    ) -> i64;
+    pub fn xls_dslx_attribute_to_string(
+        attribute: *const CDslxAttribute,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_parametric_binding_get_identifier(
+        binding: *const CDslxParametricBinding,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_parametric_binding_get_type_annotation(
+        binding: *const CDslxParametricBinding,
+    ) -> *mut CDslxTypeAnnotation;
+    pub fn xls_dslx_parametric_binding_get_expr(
+        binding: *const CDslxParametricBinding,
+    ) -> *mut CDslxExpr;
 
     // -- "requires implicit token?" determination for a DSLX function
     pub fn xls_dslx_type_info_get_requires_implicit_token(
@@ -2248,10 +2355,6 @@ extern "C" {
     ) -> bool;
 
     // -- Quickcheck APIs
-    pub fn xls_dslx_module_member_get_quickcheck(
-        member: *const CDslxModuleMember,
-    ) -> *mut CDslxQuickcheck;
-
     pub fn xls_dslx_quickcheck_get_function(qc: *const CDslxQuickcheck) -> *mut CDslxFunction;
 
     /// Returns true iff the Quickcheck has the `exhaustive` test-cases

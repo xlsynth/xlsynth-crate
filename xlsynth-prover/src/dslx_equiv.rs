@@ -441,7 +441,9 @@ fn get_function_enum_param_domains(
                     let param = f.get_param(pidx);
                     let name = param.get_name();
                     let type_annotation = param.get_type_annotation();
-                    let ty = type_info.get_type_for_type_annotation(&type_annotation);
+                    let ty = type_info
+                        .get_type_for_type_annotation(&type_annotation)
+                        .unwrap();
                     if ty.is_enum() {
                         let enum_def = ty.get_enum_def().expect("enum def");
                         let values = collect_enum_values(tcm, &enum_def);

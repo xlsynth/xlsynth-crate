@@ -91,7 +91,9 @@ fn convert_enum(
     builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
     let tups = enum_as_tups(enum_def, type_info);
-    let enum_underlying = type_info.get_type_for_type_annotation(&enum_def.get_underlying());
+    let enum_underlying = type_info
+        .get_type_for_type_annotation(&enum_def.get_underlying())
+        .expect("enum underlying type should be present");
     let (is_signed, underlying_bit_count) = enum_underlying
         .is_bits_like()
         .unwrap_or_else(|| panic!("enum underlying type should be bits-like"));
@@ -127,7 +129,9 @@ fn convert_type_alias(
 ) -> Result<(), XlsynthError> {
     let alias_name = type_alias.get_identifier();
     let type_annotation = type_alias.get_type_annotation();
-    let alias_type = type_info.get_type_for_type_annotation(&type_annotation);
+    let alias_type = type_info
+        .get_type_for_type_annotation(&type_annotation)
+        .expect("alias type should be present");
     builder.add_alias(&alias_name, &type_annotation, &alias_type)
 }
 
