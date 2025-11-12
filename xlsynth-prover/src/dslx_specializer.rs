@@ -972,10 +972,10 @@ pub fn top() -> u32 {
             &[],
         )?;
 
-        assert!(specialized.contains("fn helper_function"));
-        assert!(!specialized.contains("helper_property"));
-        assert!(!specialized.contains("helper_secondary_function"));
-        assert!(!specialized.contains("helper_test"));
+        assert!(specialized.source.contains("fn helper_function"));
+        assert!(!specialized.source.contains("helper_property"));
+        assert!(!specialized.source.contains("helper_secondary_function"));
+        assert!(!specialized.source.contains("helper_test"));
 
         Ok(())
     }
