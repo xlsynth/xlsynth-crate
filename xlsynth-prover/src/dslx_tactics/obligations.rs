@@ -53,10 +53,28 @@ impl LecSide {
 
 #[derive(Clone, Debug)]
 pub struct LecObligation {
-    pub selector_segment: String,
     pub lhs: LecSide,
     pub rhs: LecSide,
+}
+
+#[derive(Clone, Debug)]
+pub struct QcObligation {
+    pub file: FileWithHistory,
+    pub tests: Vec<String>,
+    pub uf_map: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ObligationPayload {
+    Lec(LecObligation),
+    QuickCheck(QcObligation),
+}
+
+#[derive(Clone, Debug)]
+pub struct ProverObligation {
+    pub selector_segment: String,
     pub description: Option<String>,
+    pub payload: ObligationPayload,
 }
 
 pub enum Side {
@@ -65,21 +83,17 @@ pub enum Side {
 }
 
 impl LecObligation {
-    pub fn clone_lhs_self(&self, selector: &str, description: Option<&str>) -> Self {
+    pub fn clone_lhs_self(&self) -> Self {
         Self {
-            selector_segment: selector.to_string(),
             lhs: self.lhs.clone(),
             rhs: self.lhs.clone(),
-            description: description.map(|s| s.to_string()),
         }
     }
 
-    pub fn clone_rhs_self(&self, selector: &str, description: Option<&str>) -> Self {
+    pub fn clone_rhs_self(&self) -> Self {
         Self {
-            selector_segment: selector.to_string(),
             lhs: self.rhs.clone(),
             rhs: self.rhs.clone(),
-            description: description.map(|s| s.to_string()),
         }
     }
 
@@ -120,9 +134,42 @@ impl LecObligation {
         self.rhs.uf_map.insert(right.to_string(), uf.to_string());
         self
     }
+}
 
+impl QcObligation {
+    pub fn apply_edit(&mut self, edit: Edit) -> Result<(), String> {
+        self.file.apply_edit(edit)
+    }
+
+    pub fn set_tests(&mut self, tests: Vec<String>) -> &mut Self {
+        self.tests = tests;
+        self
+    }
+
+    pub fn add_test<S: Into<String>>(&mut self, test: S) -> &mut Self {
+        self.tests.push(test.into());
+        self
+    }
+
+    pub fn clear_uf_map(&mut self) -> &mut Self {
+        self.uf_map.clear();
+        self
+    }
+
+    pub fn set_uf_map(&mut self, map: BTreeMap<String, String>) -> &mut Self {
+        self.uf_map = map;
+        self
+    }
+}
+
+impl ProverObligation {
     pub fn set_selector_segment(&mut self, selector: &str) -> &mut Self {
         self.selector_segment = selector.to_string();
+        self
+    }
+
+    pub fn set_description(&mut self, description: Option<&str>) -> &mut Self {
+        self.description = description.map(|s| s.to_string());
         self
     }
 }

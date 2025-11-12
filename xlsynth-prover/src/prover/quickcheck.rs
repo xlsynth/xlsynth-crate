@@ -353,6 +353,51 @@ where
     results
 }
 
+pub fn discover_quickcheck_tests(
+    entry_file: &Path,
+    dslx_stdlib_path: Option<&Path>,
+    additional_search_paths: &[&Path],
+    test_filter: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut import_data = ImportData::new(dslx_stdlib_path, additional_search_paths);
+    let contents = fs::read_to_string(entry_file)
+        .map_err(|e| format!("failed to read DSLX file {}: {}", entry_file.display(), e))?;
+    let module_name = entry_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("invalid module name for {}", entry_file.display()))?;
+    let path_str = entry_file
+        .to_str()
+        .ok_or_else(|| "DSLX quickcheck entry file must be valid UTF-8".to_string())?;
+    let type_checked =
+        xlsynth::dslx::parse_and_typecheck(&contents, path_str, module_name, &mut import_data)
+            .map_err(|e| format!("DSLX parse/type-check failed for quickcheck discovery: {e}"))?;
+
+    let module = type_checked.get_module();
+    let regex = test_filter
+        .map(|pattern| {
+            Regex::new(pattern)
+                .map_err(|e| format!("invalid regular expression in quickcheck test filter: {e}"))
+        })
+        .transpose()?;
+
+    let mut tests = Vec::new();
+    for idx in 0..module.get_member_count() {
+        if let Some(MatchableModuleMember::Quickcheck(qc)) = module.get_member(idx).to_matchable() {
+            let function = qc.get_function();
+            let fn_ident = function.get_identifier().to_string();
+            if regex
+                .as_ref()
+                .map(|re| re.is_match(fn_ident.as_str()))
+                .unwrap_or(true)
+            {
+                tests.push(fn_ident);
+            }
+        }
+    }
+    Ok(tests)
+}
+
 #[cfg(test)]
 mod test_utils {
     use super::*;

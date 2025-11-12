@@ -3842,6 +3842,51 @@ fn test_prove_quickcheck_solver_param(solver: &str, should_succeed: bool) {
     }
 }
 
+#[test]
+fn test_prove_quickcheck_script_mode() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("qc_script.x");
+    std::fs::write(&dslx_path, QUICKCHECK_DSLX).unwrap();
+
+    let script_path = temp_dir.path().join("script.json");
+    let script_json = r#"[{"selector":["root"],"command":"Solve"}]"#;
+    std::fs::write(&script_path, script_json).unwrap();
+
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("prove-quickcheck")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--solver")
+        .arg("toolchain")
+        .arg("--test_filter")
+        .arg(".*success")
+        .arg("--tactic_json")
+        .arg(script_path.to_str().unwrap())
+        .output()
+        .expect("prove-quickcheck invocation should run");
+    println!("output: {:?}", output);
+
+    assert!(
+        output.status.success(),
+        "prove-quickcheck tactic run should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[prove-quickcheck] success: QuickCheck obligations proved"),
+        "unexpected stdout: {}",
+        stdout
+    );
+}
+
 // Parameterized version of the multi-quickcheck test that explicitly invokes
 // each solver (external or SMT backend) to ensure the fallback to
 // implicit-token mangled names works with each configured solver backend. Only

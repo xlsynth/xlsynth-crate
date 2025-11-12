@@ -6,7 +6,7 @@ pub mod utils;
 
 use self::cosliced::CoslicedTactic;
 use self::focus::FocusTactic;
-use crate::dslx_tactics::obligations::LecObligation;
+use crate::dslx_tactics::obligations::ProverObligation;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +17,7 @@ pub trait IsTactic: Send + Sync + std::fmt::Debug + Serialize + DeserializeOwned
     fn name(&self) -> &'static str;
 
     /// Applies the tactic to the given base obligation.
-    fn apply(&self, base: &LecObligation) -> Result<Vec<LecObligation>, String>;
+    fn apply(&self, base: &ProverObligation) -> Result<Vec<ProverObligation>, String>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ impl IsTactic for Tactic {
         }
     }
 
-    fn apply(&self, base: &LecObligation) -> Result<Vec<LecObligation>, String> {
+    fn apply(&self, base: &ProverObligation) -> Result<Vec<ProverObligation>, String> {
         match self {
             Tactic::Cosliced(t) => t.apply(base),
             Tactic::Focus(t) => t.apply(base),

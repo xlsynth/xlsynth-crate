@@ -14,6 +14,7 @@ pub mod types;
 pub mod uf;
 
 pub use external_prover::ExternalProver;
+pub use quickcheck::discover_quickcheck_tests;
 
 use self::quickcheck::build_assert_label_regex;
 use self::types::{
