@@ -660,6 +660,11 @@ impl ModuleMember {
         }
     }
 
+    pub fn kind(&self) -> ModuleMemberKind {
+        let kind = unsafe { sys::xls_dslx_module_member_get_kind(self.ptr) };
+        ModuleMemberKind::from(kind)
+    }
+
     pub fn to_matchable(&self) -> Option<MatchableModuleMember> {
         let kind = unsafe { sys::xls_dslx_module_member_get_kind(self.ptr) };
         match ModuleMemberKind::from(kind) {

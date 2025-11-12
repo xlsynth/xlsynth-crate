@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use log::{debug, info};
 use xlsynth::dslx::{
     Function, FunctionCallGraph, FunctionSpecializationRequest, ImportData, InvocationRewriteRule,
-    MatchableModuleMember, Module, ParametricEnv, TypeInfo, TypecheckedModule, parse_and_typecheck,
+    MatchableModuleMember, Module, ModuleMember, ModuleMemberKind, ParametricEnv, TypeInfo,
+    TypecheckedModule, parse_and_typecheck,
 };
 use xlsynth::{
     DslxCallingConvention, XlsynthError, dslx_path_to_module_name, mangle_dslx_name_with_env,
@@ -544,19 +545,38 @@ fn prune_unreachable_functions(
 
     debug!("Prune reachability set: {:?}", reachable);
 
-    let mut to_remove = Vec::new();
+    let mut to_remove_members: Vec<ModuleMember> = Vec::new();
     for (name, function) in &functions {
         if reachable.contains(name) {
             continue;
         }
-        to_remove.push(function.clone());
+        let member = ModuleMember::try_from(function)?;
+        to_remove_members.push(member);
     }
-    if to_remove.is_empty() {
+    accumulate_test_and_quickcheck_members(&tm, &mut to_remove_members)?;
+    if to_remove_members.is_empty() {
         return Ok(tm);
     }
-    let refs: Vec<&Function> = to_remove.iter().collect();
+    let refs: Vec<&ModuleMember> = to_remove_members.iter().collect();
     let install_subject = format!("{}.prune", module_name);
-    tm.clone_ignoring_functions(import_data, &refs, &install_subject)
+    tm.clone_ignoring_members(import_data, &refs, &install_subject)
+}
+
+fn accumulate_test_and_quickcheck_members(
+    tm: &TypecheckedModule,
+    members: &mut Vec<ModuleMember>,
+) -> Result<(), XlsynthError> {
+    let module = tm.get_module();
+    for idx in 0..module.get_member_count() {
+        let member = module.get_member(idx);
+        match member.kind() {
+            ModuleMemberKind::Quickcheck
+            | ModuleMemberKind::TestFunction
+            | ModuleMemberKind::TestProc => members.push(member),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -790,6 +810,49 @@ pub fn top() -> u32 {
 
         assert!(specialized.contains("fn helper_"));
         assert!(!specialized.contains("fn unused"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn prune_removes_quickchecks_and_tests() -> Result<(), XlsynthError> {
+        let source = r#"
+fn helper_function(x: u32) -> u32 {
+    x + u32:1
+}
+
+fn helper_secondary_function(x: u32) -> u32 {
+    x + u32:1
+}
+
+#[quickcheck]
+fn helper_property(x: u32) -> bool {
+    helper_secondary_function(x) >= x
+}
+
+#[test]
+fn helper_test() {
+    let _ = helper_function(u32:5);
+    ()
+}
+
+pub fn top() -> u32 {
+    helper_function(u32:42)
+}
+"#;
+
+        let specialized = specialize_dslx_module(
+            source,
+            Path::new("prune_quickcheck_test.x"),
+            "top",
+            None,
+            &[],
+        )?;
+
+        assert!(specialized.contains("fn helper_function"));
+        assert!(!specialized.contains("helper_property"));
+        assert!(!specialized.contains("helper_secondary_function"));
+        assert!(!specialized.contains("helper_test"));
 
         Ok(())
     }
