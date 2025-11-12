@@ -299,20 +299,49 @@ fn check_implicit_stage_numbering(
     Ok(())
 }
 
-/// Uses the DSLX front-end to identify parametric stage functions following
-/// the implicit `<top>_cycle<N>` naming convention. Additional search paths
-/// are supplied so imports resolve the same way as during IR conversion.
+/// Ensures the stage functions selected for stitching are non-parametric. When
+/// `explicit_stages` is provided we check those names directly. Otherwise the
+/// scan includes functions named like `<top>_cycle<N>`. This second branch is
+/// prone to false positives (parametric functions named like `<top>_cycle<N>`,
+/// but not the ones being stitched).
 fn check_for_parametric_stages(
     tc_module: &xlsynth::dslx::TypecheckedModule,
+    top: &str,
+    explicit_stages: Option<&[String]>,
 ) -> Result<(), xlsynth::XlsynthError> {
     let module = tc_module.get_module();
     let mut offending = HashSet::new();
-    for i in 0..module.get_member_count() {
-        let member = module.get_member(i);
-        if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
-            let name = func.get_identifier();
-            if is_implicit_stage_name(&name) && func.is_parametric() {
-                offending.insert(name);
+    match explicit_stages {
+        Some(stages) => {
+            let stages_set: HashSet<&str> = stages.iter().map(|s| s.as_str()).collect();
+            if stages_set.is_empty() {
+                return Ok(());
+            }
+            for i in 0..module.get_member_count() {
+                let member = module.get_member(i);
+                if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
+                    let name = func.get_identifier();
+                    if stages_set.contains(name.as_str()) && func.is_parametric() {
+                        offending.insert(name);
+                    }
+                }
+            }
+        }
+        None => {
+            // Note: even this is more prone to false positives than necessary; we should
+            // check for {top}_cycle0, {top}_cycle1, etc.
+            let prefix = format!("{top}_cycle");
+            for i in 0..module.get_member_count() {
+                let member = module.get_member(i);
+                if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
+                    let name = func.get_identifier();
+                    if name.starts_with(&prefix)
+                        && is_implicit_stage_name(&name)
+                        && func.is_parametric()
+                    {
+                        offending.insert(name);
+                    }
+                }
             }
         }
     }
@@ -364,7 +393,7 @@ pub fn stitch_pipeline<'a>(
     let typechecked_module =
         dslx::parse_and_typecheck(dslx, path.to_str().unwrap(), module_name, &mut import_data)?;
 
-    check_for_parametric_stages(&typechecked_module)?;
+    check_for_parametric_stages(&typechecked_module, top, explicit_stages)?;
     // If relying on implicit stage discovery, ensure any discovered
     // `<top>_cycleN` functions start at 0 and are contiguous.
     if explicit_stages.is_none() {
@@ -546,6 +575,40 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
         )
         .unwrap();
         compare_golden_sv(&result, "tests/goldens/one.golden.sv");
+    }
+
+    #[test]
+    fn test_irrelevant_parametrics_are_ignored_by_stitch() {
+        let dslx = r#"
+fn parmetric_not_stitched0<N: u32>(x: u32) -> u32 { x }
+fn parmetric_not_stitched1<N: u32>(x: u32) -> u32 { x }
+
+fn stitchme_cycle0(x: u32) -> u32 { parmetric_not_stitched0<u32:4>(x) }
+fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
+"#;
+        let result = stitch_pipeline(
+            dslx,
+            Path::new("test.x"),
+            "stitchme",
+            &StitchPipelineOptions {
+                verilog_version: VerilogVersion::SystemVerilog,
+                explicit_stages: None,
+                stdlib_path: None,
+                search_paths: Vec::new(),
+                flop_inputs: true,
+                flop_outputs: true,
+                input_valid_signal: None,
+                output_valid_signal: None,
+                reset_signal: None,
+                reset_active_low: false,
+                add_invariant_assertions: true,
+                array_index_bounds_checking: true,
+                output_module_name: "stitchme",
+            },
+        )
+        .unwrap();
+
+        xlsynth_test_helpers::assert_valid_sv(&result);
     }
 
     /// Generates the verilog for two stages composed in DSLX stitching:
