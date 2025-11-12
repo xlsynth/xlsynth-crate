@@ -38,6 +38,10 @@ impl IsTactic for FocusTactic {
             }
         }
 
+        if self.pairs.is_empty() {
+            return Err("focus tactic requires at least one pair".to_string());
+        }
+
         match &base.payload {
             ObligationPayload::Lec(lec) => self.apply_to_lec(lec),
             ObligationPayload::QuickCheck(qc) => self.apply_to_qc(qc),
@@ -74,12 +78,6 @@ impl FocusTactic {
     }
 
     fn apply_to_qc(&self, base: &QcObligation) -> Result<Vec<ProverObligation>, String> {
-        if self.pairs.is_empty() {
-            return Err(
-                "focus tactic requires at least one pair for QuickCheck obligations".to_string(),
-            );
-        }
-
         let mut obligations: Vec<ProverObligation> = Vec::new();
 
         for (idx, pair) in self.pairs.iter().enumerate() {
