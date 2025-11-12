@@ -4340,6 +4340,95 @@ fn test_dslx_equiv_solver_param(solver: &str, should_succeed: bool) {
     }
 }
 
+#[test]
+fn test_dslx_equiv_parametric_top_specialization_checks_bindings() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let lhs_dslx = r#"
+fn main<N: u32>() -> u32 {
+    N
+}
+"#;
+    let rhs_dslx = r#"
+fn main<N: u32>() -> u32 {
+    N
+}
+"#;
+
+    let lhs_path = temp_dir.path().join("lhs_param.x");
+    let rhs_path = temp_dir.path().join("rhs_param.x");
+    std::fs::write(&lhs_path, lhs_dslx).unwrap();
+    std::fs::write(&rhs_path, rhs_dslx).unwrap();
+
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let mut toolchain_toml_contents = "[toolchain]\n".to_string();
+    toolchain_toml_contents = add_tool_path_value(&toolchain_toml_contents);
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let success = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main<u32:16>")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .expect("dslx-equiv invocation should run");
+
+    let success_stdout = String::from_utf8_lossy(&success.stdout);
+    let success_stderr = String::from_utf8_lossy(&success.stderr);
+    assert!(
+        success.status.success(),
+        "dslx-equiv should succeed with matching value-only specializations. stdout: {}\nstderr: {}",
+        success_stdout,
+        success_stderr
+    );
+    assert!(
+        success_stdout.contains("success"),
+        "expected success marker in stdout: {}",
+        success_stdout
+    );
+
+    let mismatch = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("dslx-equiv")
+        .arg(lhs_path.to_str().unwrap())
+        .arg(rhs_path.to_str().unwrap())
+        .arg("--lhs_dslx_top")
+        .arg("main<u32:16>")
+        .arg("--rhs_dslx_top")
+        .arg("main<u32:8>")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .expect("dslx-equiv invocation without bindings should run");
+
+    let mismatch_stdout = String::from_utf8_lossy(&mismatch.stdout);
+    let mismatch_stderr = String::from_utf8_lossy(&mismatch.stderr);
+    assert!(
+        !mismatch.status.success(),
+        "dslx-equiv should fail when value-only specializations disagree. stdout: {}\nstderr: {}",
+        mismatch_stdout,
+        mismatch_stderr
+    );
+    assert!(
+        mismatch_stderr.contains("failure")
+            || mismatch_stdout.contains("failure")
+            || mismatch_stderr.contains("inequivalent")
+            || mismatch_stdout.contains("inequivalent"),
+        "expected inequivalence marker in output. stdout: {}\nstderr: {}",
+        mismatch_stdout,
+        mismatch_stderr
+    );
+}
+
 #[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla"; "dslx_equiv_default_semantics_bitwuzla"))]
 #[test_case("toolchain"; "dslx_equiv_default_semantics_toolchain")]
 fn test_dslx_equiv_default_semantics_matches_toolchain(solver: &str) {
@@ -7232,4 +7321,54 @@ fn call() -> bits[32] { helper(bits[32]:0x0) }
 
     // Top-level call should remain and invoke the specialized helper.
     assert!(stdout.contains("fn call"));
+}
+
+#[test]
+fn test_dslx_specialize_parametric_top_binding() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx_source = r#"
+fn id<N: u32>(x: bits[N]) -> bits[N] { x }
+
+fn call<N: u32>(x: bits[N]) -> bits[N] { id(x) }
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("parametric_top.x");
+    std::fs::write(&dslx_path, dslx_source).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("dslx-specialize")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("call<u32:32>")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        output.status.success(),
+        "dslx-specialize failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        stdout.contains("fn call_32"),
+        "Expected specialized clone of call(); module:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fn id_32"),
+        "Expected specialized clone of id(); module:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("fn call<N"),
+        "Expected parametric top definition to be removed; module:\n{}",
+        stdout
+    );
 }

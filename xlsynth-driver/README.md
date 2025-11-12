@@ -259,7 +259,10 @@ Creates a new DSLX module in which every parametric function reachable from a gi
 
 - Required flags:
   - `--dslx_input_file <FILE>` – DSLX source containing the top.
-  - `--dslx_top <NAME>` – entry function used as the root for reachability.
+  - `--dslx_top <NAME>` – entry function used as the root for reachability. Parameterized
+    tops can be specialized by providing positional bindings, e.g. `--dslx_top foo<u32:32>`.
+    Each value must be a DSLX typed literal (`TYPE:VALUE`), in the same order as the
+    function's parametric bindings.
 - Optional flags:
   - `--dslx_path <P1;P2;...>` – semicolon-separated list of additional search directories.
   - `--dslx_stdlib_path <PATH>` – override the XLS DSLX standard library root.

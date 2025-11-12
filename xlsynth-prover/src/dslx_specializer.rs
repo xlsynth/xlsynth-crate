@@ -13,13 +13,24 @@ use xlsynth::{
     DslxCallingConvention, XlsynthError, dslx_path_to_module_name, mangle_dslx_name_with_env,
 };
 
+use crate::dslx_utils::{parse_top_function_spec, resolve_parametric_env};
+
+#[derive(Debug)]
+pub struct SpecializedModule {
+    pub source: String,
+    pub top_name: String,
+}
+
 pub fn specialize_dslx_module(
     dslx_source: &str,
     source_path: &Path,
     top_function: &str,
     stdlib_path: Option<&Path>,
     additional_search_paths: &[PathBuf],
-) -> Result<String, XlsynthError> {
+) -> Result<SpecializedModule, XlsynthError> {
+    let parsed_top = parse_top_function_spec(top_function)?;
+    let top_name = parsed_top.name.clone();
+
     let module_name = dslx_path_to_module_name(source_path)?;
     let additional_refs: Vec<&Path> = additional_search_paths
         .iter()
@@ -27,15 +38,34 @@ pub fn specialize_dslx_module(
         .collect();
     let mut import_data = ImportData::new(stdlib_path, &additional_refs);
     info!("Parsing and typechecking module '{}'", module_name);
-    let mut tm = parse_and_typecheck(
+    let tm = parse_and_typecheck(
         dslx_source,
         source_path.to_str().unwrap(),
         module_name,
         &mut import_data,
     )?;
-    tm = specialize_typechecked_module(tm, &mut import_data, module_name, top_function)?;
     let module = tm.get_module();
-    Ok(module.to_string())
+    let functions = collect_functions(&module);
+    let top_fn = functions.get(&top_name).ok_or_else(|| {
+        XlsynthError(format!(
+            "Top function '{}' not found in module '{}'.",
+            top_name, module_name
+        ))
+    })?;
+    let top_env = resolve_parametric_env(top_fn, &parsed_top, /* require_explicit= */ true)?;
+
+    let (tm, final_top) = specialize_typechecked_module(
+        tm,
+        &mut import_data,
+        module_name,
+        &top_name,
+        top_env.as_ref(),
+    )?;
+    let module = tm.get_module();
+    Ok(SpecializedModule {
+        source: module.to_string(),
+        top_name: final_top,
+    })
 }
 
 fn specialize_typechecked_module(
@@ -43,15 +73,25 @@ fn specialize_typechecked_module(
     import_data: &mut ImportData,
     module_name: &str,
     top_function: &str,
-) -> Result<TypecheckedModule, XlsynthError> {
-    info!("Initial pruning of unreachable functions");
-    let tm = prune_unreachable_functions(
-        tm,
-        import_data,
-        &(module_name.to_string() + ".initial_prune"),
-        top_function,
-        &HashSet::new(),
-    )?;
+    top_env: Option<&ParametricEnv>,
+) -> Result<(TypecheckedModule, String), XlsynthError> {
+    let tm = if top_env.is_some() {
+        // When a parameter environment is provided we cannot rely on the initial
+        // call graph reachability analysis: parametric callees may appear
+        // unreachable until the requested specializations are installed. Skip the
+        // early pruning step so we have the full module available for cloning.
+        info!("Skipping initial prune because a top parameter environment was provided");
+        tm
+    } else {
+        info!("Initial pruning of unreachable functions");
+        prune_unreachable_functions(
+            tm,
+            import_data,
+            &(module_name.to_string() + ".initial_prune"),
+            top_function,
+            &HashSet::new(),
+        )?
+    };
 
     info!(
         "Building call graph for module '{}', top '{}'.",
@@ -59,10 +99,10 @@ fn specialize_typechecked_module(
     );
 
     let (tm_with_specializations, spec_name_map) =
-        accumulate_specializations(tm, import_data, module_name, top_function)?;
+        accumulate_specializations(tm, import_data, module_name, top_function, top_env)?;
 
     if spec_name_map.is_empty() {
-        return Ok(tm_with_specializations);
+        return Ok((tm_with_specializations, top_function.to_string()));
     }
 
     info!("Rewriting specialized calls");
@@ -75,14 +115,31 @@ fn specialize_typechecked_module(
 
     let specialized_to_keep: HashSet<String> = spec_name_map.values().cloned().collect();
 
+    let root_top = if let Some(env) = top_env {
+        spec_name_map
+            .iter()
+            .find_map(|((name, candidate_env), spec_name)| {
+                if name == top_function && candidate_env == env {
+                    Some(spec_name.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| top_function.to_string())
+    } else {
+        top_function.to_string()
+    };
+
     info!("Pruning unreachable functions");
-    prune_unreachable_functions(
+    let tm_final = prune_unreachable_functions(
         tm_rewritten,
         import_data,
         module_name,
-        top_function,
+        &root_top,
         &specialized_to_keep,
-    )
+    )?;
+
+    Ok((tm_final, root_top))
 }
 
 fn accumulate_specializations(
@@ -90,25 +147,29 @@ fn accumulate_specializations(
     import_data: &mut ImportData,
     module_name: &str,
     top_function: &str,
+    top_env: Option<&ParametricEnv>,
 ) -> Result<(TypecheckedModule, HashMap<(String, ParametricEnv), String>), XlsynthError> {
     let mut spec_name_map: HashMap<(String, ParametricEnv), String> = HashMap::new();
     let mut iteration: u32 = 0;
+    let top_function_owned = top_function.to_string();
+    let mut current_top_name = top_function_owned.clone();
+    let mut top_env_owned = top_env.cloned();
     loop {
         iteration += 1;
         debug!("Iteration {} starting", iteration);
 
         let module = tm_current.get_module();
         let functions = collect_functions(&module);
-        if !functions.contains_key(top_function) {
+        if !functions.contains_key(&current_top_name) {
             return Err(XlsynthError(format!(
                 "Top function '{}' not found in module '{}'.",
-                top_function, module_name
+                current_top_name, module_name
             )));
         }
 
         let type_info = tm_current.get_type_info();
         let call_graph = type_info.build_function_call_graph()?;
-        let reachable = reachable_functions(top_function, &call_graph)?;
+        let reachable = reachable_functions(&current_top_name, &call_graph)?;
         debug!(
             "Iteration {} reachable functions: {:?}",
             iteration, reachable
@@ -119,6 +180,17 @@ fn accumulate_specializations(
             envs.retain(|env| !spec_name_map.contains_key(&(function_name.clone(), env.clone())));
             !envs.is_empty()
         });
+        if let Some(env) = top_env {
+            let already_done = spec_name_map
+                .iter()
+                .any(|((name, existing_env), _)| name == top_function && existing_env == env);
+            if !already_done {
+                specializations
+                    .entry(top_function.to_string())
+                    .or_insert_with(BTreeSet::new)
+                    .insert(env.clone());
+            }
+        }
 
         if specializations.is_empty() {
             if spec_name_map.is_empty() {
@@ -139,6 +211,14 @@ fn accumulate_specializations(
             new_tm.get_module().to_string()
         );
         spec_name_map.extend(new_names.into_iter());
+        if let Some(env) = top_env_owned.as_ref() {
+            if let Some(spec_name) = spec_name_map.get(&(top_function_owned.clone(), env.clone())) {
+                current_top_name = spec_name.clone();
+                // We only need to update once; avoid repeated lookups by clearing the env
+                // so we do not spend additional work cloning the key.
+                top_env_owned = None;
+            }
+        }
         tm_current = new_tm;
     }
 
@@ -608,12 +688,12 @@ pub fn top() -> bits[4] {
         let specialized =
             specialize_dslx_module(source, Path::new("multiphase_test.x"), "top", None, &[])?;
 
-        assert!(specialized.contains("fn wrapper_"));
-        assert!(specialized.contains("fn intermediate_"));
-        assert!(specialized.contains("fn widen_"));
-        assert!(!specialized.contains("fn wrapper<K: u32>"));
-        assert!(!specialized.contains("fn intermediate<M: u32>"));
-        assert!(!specialized.contains("fn widen<N: u32>"));
+        assert!(specialized.source.contains("fn wrapper_"));
+        assert!(specialized.source.contains("fn intermediate_"));
+        assert!(specialized.source.contains("fn widen_"));
+        assert!(!specialized.source.contains("fn wrapper<K: u32>"));
+        assert!(!specialized.source.contains("fn intermediate<M: u32>"));
+        assert!(!specialized.source.contains("fn widen<N: u32>"));
 
         Ok(())
     }
@@ -634,6 +714,45 @@ fn identity<N: u32>(x: bits[N]) -> bits[N] { x }
         .expect_err("expected missing top error");
         let message = format!("{}", err);
         assert!(message.contains("Top function 'does_not_exist'"));
+    }
+
+    #[test]
+    fn parametric_top_with_bindings_is_specialized() {
+        let source = r#"
+fn id<N: u32>(x: bits[N]) -> bits[N] { x }
+
+fn helper<N: u32>(x: bits[N]) -> bits[N] { id(x) }
+
+fn top<N: u32>(x: bits[N]) -> bits[N] { helper(x) }
+"#;
+        let specialized = specialize_dslx_module(
+            source,
+            Path::new("parametric_top_bindings.x"),
+            "top<u32:32>",
+            None,
+            &[],
+        )
+        .expect("specialize with explicit bindings succeeds");
+        assert!(
+            specialized.source.contains("fn top_"),
+            "Expected specialized top clone; module:\n{}",
+            specialized.source
+        );
+        assert!(
+            specialized.source.contains("fn helper_"),
+            "Expected specialized helper clone; module:\n{}",
+            specialized.source
+        );
+        assert!(
+            !specialized.source.contains("fn top<N"),
+            "Expected parametric top definition to be removed; module:\n{}",
+            specialized.source
+        );
+        assert!(
+            specialized.top_name.starts_with("top_"),
+            "Expected specialized top name; got {}",
+            specialized.top_name
+        );
     }
 
     #[test]
@@ -663,10 +782,10 @@ pub fn top() -> uN[6] {
             &[],
         )
         .expect("select_poly specialization succeeds");
-        assert!(specialized.contains("fn repeat_"));
-        assert!(specialized.contains("fn select_poly_"));
-        assert!(!specialized.contains("fn repeat<"));
-        assert!(!specialized.contains("fn select_poly<"));
+        assert!(specialized.source.contains("fn repeat_"));
+        assert!(specialized.source.contains("fn select_poly_"));
+        assert!(!specialized.source.contains("fn repeat<"));
+        assert!(!specialized.source.contains("fn select_poly<"));
     }
 
     #[test]
@@ -702,14 +821,18 @@ pub fn top() -> bool {
             &[],
         )
         .expect("higher-order interval_matches specialization succeeds");
-        assert!(specialized.contains("fn interval_matches_"));
-        assert!(specialized.contains("fn repeat_"));
-        assert!(specialized.contains("fn select_poly_"));
-        assert!(specialized.contains("interval_matches_6"));
-        assert!(!specialized.contains("fn interval_matches<"));
-        assert!(!specialized.contains("fn repeat<"));
-        assert!(!specialized.contains("fn select_poly<"));
-        assert!(!specialized.contains("map(zip(vals, rep), interval_matches);"));
+        assert!(specialized.source.contains("fn interval_matches_"));
+        assert!(specialized.source.contains("fn repeat_"));
+        assert!(specialized.source.contains("fn select_poly_"));
+        assert!(specialized.source.contains("interval_matches_6"));
+        assert!(!specialized.source.contains("fn interval_matches<"));
+        assert!(!specialized.source.contains("fn repeat<"));
+        assert!(!specialized.source.contains("fn select_poly<"));
+        assert!(
+            !specialized
+                .source
+                .contains("map(zip(vals, rep), interval_matches);")
+        );
     }
 
     #[test]
@@ -750,9 +873,9 @@ pub fn top() -> (uN[23], uN[23]) {
             &[],
         )
         .expect("discard_sign_bit callers should be fully rewritten");
-        assert!(specialized.contains("discard_sign_bit_24_23"));
-        assert!(!specialized.contains("fn discard_sign_bit<N"));
-        assert!(!specialized.contains("discard_sign_bit(val"));
+        assert!(specialized.source.contains("discard_sign_bit_24_23"));
+        assert!(!specialized.source.contains("fn discard_sign_bit<N"));
+        assert!(!specialized.source.contains("discard_sign_bit(val"));
     }
 
     #[test]
@@ -779,12 +902,12 @@ pub fn top() -> bits[8] {
         let specialized =
             specialize_dslx_module(source, Path::new("chain_rewrite_test.x"), "top", None, &[])?;
 
-        assert!(specialized.contains("fn wrapper_"));
-        assert!(specialized.contains("fn intermediate_"));
-        assert!(specialized.contains("fn widen_"));
-        assert!(specialized.contains("widen_8("));
-        assert!(specialized.contains("intermediate_8("));
-        assert!(!specialized.contains("fn widen<N: u32>"));
+        assert!(specialized.source.contains("fn wrapper_"));
+        assert!(specialized.source.contains("fn intermediate_"));
+        assert!(specialized.source.contains("fn widen_"));
+        assert!(specialized.source.contains("widen_8("));
+        assert!(specialized.source.contains("intermediate_8("));
+        assert!(!specialized.source.contains("fn widen<N: u32>"));
 
         Ok(())
     }
@@ -808,8 +931,8 @@ pub fn top() -> u32 {
         let specialized =
             specialize_dslx_module(source, Path::new("prune_unused.x"), "top", None, &[])?;
 
-        assert!(specialized.contains("fn helper_"));
-        assert!(!specialized.contains("fn unused"));
+        assert!(specialized.source.contains("fn helper_"));
+        assert!(!specialized.source.contains("fn unused"));
 
         Ok(())
     }
@@ -849,10 +972,10 @@ pub fn top() -> u32 {
             &[],
         )?;
 
-        assert!(specialized.contains("fn helper_function"));
-        assert!(!specialized.contains("helper_property"));
-        assert!(!specialized.contains("helper_secondary_function"));
-        assert!(!specialized.contains("helper_test"));
+        assert!(specialized.source.contains("fn helper_function"));
+        assert!(!specialized.source.contains("helper_property"));
+        assert!(!specialized.source.contains("helper_secondary_function"));
+        assert!(!specialized.source.contains("helper_test"));
 
         Ok(())
     }
@@ -878,17 +1001,17 @@ pub fn top() -> (bits[4], bits[6]) {
         let specialized =
             specialize_dslx_module(source, Path::new("multi_env_test.x"), "top", None, &[])?;
 
-        assert!(specialized.contains("fn wrapper_"));
-        assert!(specialized.contains("fn wrapper_4"));
-        assert!(specialized.contains("fn wrapper_6"));
-        assert!(specialized.contains("fn widen_4"));
-        assert!(specialized.contains("fn widen_6"));
-        assert!(specialized.contains("wrapper_4("));
-        assert!(specialized.contains("wrapper_6("));
-        assert!(specialized.contains("widen_4("));
-        assert!(specialized.contains("widen_6("));
-        assert!(!specialized.contains("fn wrapper<K: u32>"));
-        assert!(!specialized.contains("fn widen<N: u32>"));
+        assert!(specialized.source.contains("fn wrapper_"));
+        assert!(specialized.source.contains("fn wrapper_4"));
+        assert!(specialized.source.contains("fn wrapper_6"));
+        assert!(specialized.source.contains("fn widen_4"));
+        assert!(specialized.source.contains("fn widen_6"));
+        assert!(specialized.source.contains("wrapper_4("));
+        assert!(specialized.source.contains("wrapper_6("));
+        assert!(specialized.source.contains("widen_4("));
+        assert!(specialized.source.contains("widen_6("));
+        assert!(!specialized.source.contains("fn wrapper<K: u32>"));
+        assert!(!specialized.source.contains("fn widen<N: u32>"));
 
         Ok(())
     }
@@ -918,12 +1041,12 @@ pub fn top() -> (bits[8], bits[8]) {
         let specialized =
             specialize_dslx_module(source, Path::new("dedupe_env_test.x"), "top", None, &[])?;
 
-        assert_eq!(count_occurrences(&specialized, "fn wrapper_8"), 1);
-        assert_eq!(count_occurrences(&specialized, "fn widen_8"), 1);
-        assert!(specialized.contains("wrapper_8("));
-        assert!(specialized.contains("widen_8("));
-        assert!(!specialized.contains("fn wrapper<K: u32>"));
-        assert!(!specialized.contains("fn widen<N: u32>"));
+        assert_eq!(count_occurrences(&specialized.source, "fn wrapper_8"), 1);
+        assert_eq!(count_occurrences(&specialized.source, "fn widen_8"), 1);
+        assert!(specialized.source.contains("wrapper_8("));
+        assert!(specialized.source.contains("widen_8("));
+        assert!(!specialized.source.contains("fn wrapper<K: u32>"));
+        assert!(!specialized.source.contains("fn widen<N: u32>"));
 
         Ok(())
     }
@@ -945,8 +1068,8 @@ pub fn top() -> bits[24] {
         let specialized =
             specialize_dslx_module(source, Path::new("simple_param_helper.x"), "top", None, &[])?;
 
-        assert!(specialized.contains("fn to_bits_"));
-        assert!(!specialized.contains("fn to_bits<"));
+        assert!(specialized.source.contains("fn to_bits_"));
+        assert!(!specialized.source.contains("fn to_bits<"));
 
         Ok(())
     }

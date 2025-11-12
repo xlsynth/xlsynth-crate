@@ -38,7 +38,7 @@ pub fn handle_dslx_specialize(matches: &ArgMatches, config: &Option<ToolchainCon
     let stdlib_path_ref = stdlib_path.as_deref();
     let additional_search_paths = search_paths;
 
-    let specialized_text = match xlsynth_prover::dslx_specializer::specialize_dslx_module(
+    let specialized_module = match xlsynth_prover::dslx_specializer::specialize_dslx_module(
         &dslx_contents,
         input_path,
         top,
@@ -58,5 +58,5 @@ pub fn handle_dslx_specialize(matches: &ArgMatches, config: &Option<ToolchainCon
         }
     };
 
-    println!("{}", specialized_text);
+    println!("{}", specialized_module.source);
 }
