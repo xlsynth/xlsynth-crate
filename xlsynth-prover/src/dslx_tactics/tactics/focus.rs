@@ -3,7 +3,7 @@
 //! Focus tactic: prove a set of function pairs equivalent and a skeleton
 //! equivalence with those functions abstracted as shared UFs.
 
-use crate::dslx_tactics::obligations::{LecObligation, Side};
+use crate::dslx_tactics::obligations::{ObligationPayload, ProverObligation, Side};
 use crate::dslx_tactics::tactics::IsTactic;
 use crate::dslx_tactics::tactics::utils::is_valid_ident;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ impl IsTactic for FocusTactic {
         "focus"
     }
 
-    fn apply(&self, base: &LecObligation) -> Result<Vec<LecObligation>, String> {
+    fn apply(&self, base: &ProverObligation) -> Result<Vec<ProverObligation>, String> {
         // Basic validation
         for (idx, p) in self.pairs.iter().enumerate() {
             if !is_valid_ident(&p.lhs) {
@@ -35,24 +35,39 @@ impl IsTactic for FocusTactic {
             }
         }
 
-        let mut obligations: Vec<LecObligation> = Vec::new();
+        let base_lec = match &base.payload {
+            ObligationPayload::Lec(lec) => lec,
+            _ => return Err("focus tactic requires a Lec obligation".to_string()),
+        };
+
+        let mut obligations: Vec<ProverObligation> = Vec::new();
 
         // 1) Per-pair equivalence checks
         for (idx, p) in self.pairs.iter().enumerate() {
-            let mut ob = base.clone();
-            ob.set_selector_segment(&format!("pair_{}", idx + 1));
-            ob.set_top(Side::Lhs, &p.lhs);
-            ob.set_top(Side::Rhs, &p.rhs);
+            let mut ob = ProverObligation {
+                selector_segment: format!("pair_{}", idx + 1),
+                description: None,
+                payload: ObligationPayload::Lec(base_lec.clone()),
+            };
+            if let ObligationPayload::Lec(lec) = &mut ob.payload {
+                lec.set_top(Side::Lhs, &p.lhs);
+                lec.set_top(Side::Rhs, &p.rhs);
+            }
             obligations.push(ob);
         }
 
         // 2) Skeleton with shared UFs for focused functions
         {
-            let mut ob = base.clone();
-            ob.set_selector_segment("skeleton");
-            for (idx, p) in self.pairs.iter().enumerate() {
-                let uf = format!("__uf_focus_{}", idx + 1);
-                ob.set_uf_alias(&p.lhs, &p.rhs, &uf);
+            let mut ob = ProverObligation {
+                selector_segment: "skeleton".to_string(),
+                description: None,
+                payload: ObligationPayload::Lec(base_lec.clone()),
+            };
+            if let ObligationPayload::Lec(lec) = &mut ob.payload {
+                for (idx, p) in self.pairs.iter().enumerate() {
+                    let uf = format!("__uf_focus_{}", idx + 1);
+                    lec.set_uf_alias(&p.lhs, &p.rhs, &uf);
+                }
             }
             obligations.push(ob);
         }
@@ -64,9 +79,11 @@ impl IsTactic for FocusTactic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dslx_tactics::obligations::{FileWithHistory, LecSide, SourceFile};
+    use crate::dslx_tactics::obligations::{
+        FileWithHistory, LecObligation, LecSide, ObligationPayload, ProverObligation, SourceFile,
+    };
 
-    fn base_obligation_with(sel: &str) -> LecObligation {
+    fn base_obligation_with(sel: &str) -> ProverObligation {
         let lhs = LecSide {
             top_func: "f1".to_string(),
             uf_map: std::collections::BTreeMap::new(),
@@ -85,11 +102,10 @@ mod tests {
                 text: String::new(),
             },
         };
-        LecObligation {
+        ProverObligation {
             selector_segment: sel.to_string(),
-            lhs,
-            rhs,
             description: None,
+            payload: ObligationPayload::Lec(LecObligation { lhs, rhs }),
         }
     }
 
@@ -112,35 +128,47 @@ mod tests {
         assert_eq!(obs.len(), 3);
 
         let p1 = obs.iter().find(|o| o.selector_segment == "pair_1").unwrap();
-        assert_eq!(p1.lhs.top_func, "a");
-        assert_eq!(p1.rhs.top_func, "b");
-        assert_eq!(p1.lhs.file.edits.len(), 0);
-        assert_eq!(p1.rhs.file.edits.len(), 0);
+        let p1_lec = match &p1.payload {
+            ObligationPayload::Lec(lec) => lec,
+            _ => panic!("expected Lec payload"),
+        };
+        assert_eq!(p1_lec.lhs.top_func, "a");
+        assert_eq!(p1_lec.rhs.top_func, "b");
+        assert_eq!(p1_lec.lhs.file.edits.len(), 0);
+        assert_eq!(p1_lec.rhs.file.edits.len(), 0);
 
         let p2 = obs.iter().find(|o| o.selector_segment == "pair_2").unwrap();
-        assert_eq!(p2.lhs.top_func, "c");
-        assert_eq!(p2.rhs.top_func, "d");
+        let p2_lec = match &p2.payload {
+            ObligationPayload::Lec(lec) => lec,
+            _ => panic!("expected Lec payload"),
+        };
+        assert_eq!(p2_lec.lhs.top_func, "c");
+        assert_eq!(p2_lec.rhs.top_func, "d");
 
         let skel = obs
             .iter()
             .find(|o| o.selector_segment == "skeleton")
             .unwrap();
-        assert_eq!(skel.lhs.top_func, "f1");
-        assert_eq!(skel.rhs.top_func, "f2");
+        let skel_lec = match &skel.payload {
+            ObligationPayload::Lec(lec) => lec,
+            _ => panic!("expected Lec payload"),
+        };
+        assert_eq!(skel_lec.lhs.top_func, "f1");
+        assert_eq!(skel_lec.rhs.top_func, "f2");
         assert_eq!(
-            skel.lhs.uf_map.get("a").map(|s| s.as_str()),
+            skel_lec.lhs.uf_map.get("a").map(|s| s.as_str()),
             Some("__uf_focus_1")
         );
         assert_eq!(
-            skel.rhs.uf_map.get("b").map(|s| s.as_str()),
+            skel_lec.rhs.uf_map.get("b").map(|s| s.as_str()),
             Some("__uf_focus_1")
         );
         assert_eq!(
-            skel.lhs.uf_map.get("c").map(|s| s.as_str()),
+            skel_lec.lhs.uf_map.get("c").map(|s| s.as_str()),
             Some("__uf_focus_2")
         );
         assert_eq!(
-            skel.rhs.uf_map.get("d").map(|s| s.as_str()),
+            skel_lec.rhs.uf_map.get("d").map(|s| s.as_str()),
             Some("__uf_focus_2")
         );
     }

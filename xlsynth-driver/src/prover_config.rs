@@ -116,6 +116,8 @@ pub struct DslxEquivConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProveQuickcheckConfig {
     pub dslx_input_file: PathBuf,
+    pub dslx_path: Option<Vec<PathBuf>>,
+    pub dslx_stdlib_path: Option<PathBuf>,
     pub test_filter: Option<String>,
     pub solver: Option<SolverChoice>,
     pub assertion_semantics: Option<QuickCheckAssertionSemantics>,
@@ -268,6 +270,19 @@ impl ToDriverCommand for ProveQuickcheckConfig {
             "dslx_input_file",
             &self.dslx_input_file.display().to_string(),
         );
+        if let Some(paths) = &self.dslx_path {
+            if !paths.is_empty() {
+                let joined = paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(";");
+                add_flag(&mut cmd, "dslx_path", &joined);
+            }
+        }
+        if let Some(stdlib) = &self.dslx_stdlib_path {
+            add_flag(&mut cmd, "dslx_stdlib_path", &stdlib.display().to_string());
+        }
         if let Some(filter) = &self.test_filter {
             add_flag(&mut cmd, "test_filter", filter);
         }
@@ -553,6 +568,8 @@ mod tests {
     fn test_prove_quickcheck_to_command_args() {
         let cfg = ProveQuickcheckConfig {
             dslx_input_file: "qc.x".into(),
+            dslx_path: Some(vec!["a".into(), "b".into()]),
+            dslx_stdlib_path: Some("stdlib".into()),
             test_filter: Some(".*mytest".into()),
             solver: Some(SolverChoice::Toolchain),
             assertion_semantics: Some(QuickCheckAssertionSemantics::Assume),
@@ -566,6 +583,10 @@ mod tests {
                 "prove-quickcheck",
                 "--dslx_input_file",
                 "qc.x",
+                "--dslx_path",
+                "a;b",
+                "--dslx_stdlib_path",
+                "stdlib",
                 "--test_filter",
                 ".*mytest",
                 "--solver",

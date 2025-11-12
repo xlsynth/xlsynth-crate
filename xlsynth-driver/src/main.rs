@@ -1297,6 +1297,20 @@ fn main() {
                 .about("Prove that DSLX #[quickcheck] functions always return true")
                 .add_dslx_input_args(false)
                 .arg(
+                    clap::Arg::new("tactic_json")
+                        .long("tactic_json")
+                        .value_name("PATH")
+                        .help("Path to a tactic script as a JSON array of steps. When present, uses the tactic-based prover instead of direct QuickCheck proving.")
+                        .conflicts_with("tactic_jsonl"),
+                )
+                .arg(
+                    clap::Arg::new("tactic_jsonl")
+                        .long("tactic_jsonl")
+                        .value_name("PATH")
+                        .help("Path to a tactic script as JSONL (one JSON object per line). When present, uses the tactic-based prover instead of direct QuickCheck proving.")
+                        .conflicts_with("tactic_json"),
+                )
+                .arg(
                     clap::Arg::new("test_filter")
                         .long("test_filter")
                         .value_name("FILTER")

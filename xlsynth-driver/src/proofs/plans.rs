@@ -2,8 +2,11 @@
 
 use std::path::Path;
 
-use crate::proofs::obligations::LecObligation;
-use crate::prover_config::{DslxEquivConfig, GroupKind, ProverPlan, ProverTask};
+use crate::proofs::obligations::{ObligationPayload, ProverObligation};
+use crate::prover_config::{
+    DslxEquivConfig, GroupKind, ProveQuickcheckConfig, ProverPlan, ProverTask,
+};
+use regex::escape;
 use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::SolverChoice;
 
@@ -38,7 +41,7 @@ impl ObligationPlan {
 }
 
 pub fn build_plan_from_obligations(
-    obligations: &[(String, LecObligation)],
+    obligations: &[(String, ProverObligation)],
     dslx_stdlib_path: Option<&Path>,
     dslx_paths: &[&Path],
     solver: Option<SolverChoice>,
@@ -48,48 +51,98 @@ pub fn build_plan_from_obligations(
     let mut tasks: Vec<ProverPlan> = Vec::new();
 
     for (i, (task_id, ob)) in obligations.iter().enumerate() {
-        let lhs_text = ob.lhs.file.text.clone();
-        let rhs_text = ob.rhs.file.text.clone();
-        let lhs_path = write_text(&tempdir, &format!("ob{}_lhs.x", i), &lhs_text)?;
-        let rhs_path = write_text(&tempdir, &format!("ob{}_rhs.x", i), &rhs_text)?;
+        match &ob.payload {
+            ObligationPayload::Lec(lec) => {
+                let lhs_text = lec.lhs.file.text.clone();
+                let rhs_text = lec.rhs.file.text.clone();
+                let lhs_path = write_text(&tempdir, &format!("ob{}_lhs.x", i), &lhs_text)?;
+                let rhs_path = write_text(&tempdir, &format!("ob{}_rhs.x", i), &rhs_text)?;
 
-        let lhs_uf: Vec<String> = ob
-            .lhs
-            .uf_map
-            .iter()
-            .map(|(f, u)| format!("{}:{}", f, u))
-            .collect();
-        let rhs_uf: Vec<String> = ob
-            .rhs
-            .uf_map
-            .iter()
-            .map(|(f, u)| format!("{}:{}", f, u))
-            .collect();
+                let lhs_uf: Vec<String> = lec
+                    .lhs
+                    .uf_map
+                    .iter()
+                    .map(|(f, u)| format!("{}:{}", f, u))
+                    .collect();
+                let rhs_uf: Vec<String> = lec
+                    .rhs
+                    .uf_map
+                    .iter()
+                    .map(|(f, u)| format!("{}:{}", f, u))
+                    .collect();
 
-        let mut cfg = DslxEquivConfig {
-            lhs_dslx_file: lhs_path,
-            rhs_dslx_file: rhs_path,
-            lhs_dslx_top: Some(ob.lhs.top_func.clone()),
-            rhs_dslx_top: Some(ob.rhs.top_func.clone()),
-            solver: solver.clone(),
-            flatten_aggregates: Some(false),
-            assertion_semantics: Some(AssertionSemantics::Same),
-            json: None,
-            ..Default::default()
-        };
-        cfg_with_paths(&mut cfg, dslx_stdlib_path, dslx_paths);
-        if !lhs_uf.is_empty() {
-            cfg.lhs_uf = Some(lhs_uf);
+                let mut cfg = DslxEquivConfig {
+                    lhs_dslx_file: lhs_path,
+                    rhs_dslx_file: rhs_path,
+                    lhs_dslx_top: Some(lec.lhs.top_func.clone()),
+                    rhs_dslx_top: Some(lec.rhs.top_func.clone()),
+                    solver: solver.clone(),
+                    flatten_aggregates: Some(false),
+                    assertion_semantics: Some(AssertionSemantics::Ignore),
+                    json: None,
+                    ..Default::default()
+                };
+                cfg_with_paths(&mut cfg, dslx_stdlib_path, dslx_paths);
+                if !lhs_uf.is_empty() {
+                    cfg.lhs_uf = Some(lhs_uf);
+                }
+                if !rhs_uf.is_empty() {
+                    cfg.rhs_uf = Some(rhs_uf);
+                }
+
+                tasks.push(ProverPlan::Task {
+                    task: ProverTask::DslxEquiv { config: cfg },
+                    timeout_ms,
+                    task_id: Some(task_id.clone()),
+                });
+            }
+            ObligationPayload::QuickCheck(qc) => {
+                let qc_text = qc.file.text.clone();
+                let qc_path = write_text(&tempdir, &format!("ob{}_qc.x", i), &qc_text)?;
+
+                let test_filter = if qc.tests.is_empty() {
+                    None
+                } else {
+                    let mut tests = qc.tests.clone();
+                    tests.sort();
+                    let escaped: Vec<String> = tests.iter().map(|t| escape(t)).collect();
+                    let pattern = if escaped.len() == 1 {
+                        format!("^{}$", escaped[0])
+                    } else {
+                        format!("^({})$", escaped.join("|"))
+                    };
+                    Some(pattern)
+                };
+
+                let uf: Vec<String> = qc
+                    .uf_map
+                    .iter()
+                    .map(|(f, u)| format!("{}:{}", f, u))
+                    .collect();
+
+                let cfg = ProveQuickcheckConfig {
+                    dslx_input_file: qc_path,
+                    dslx_path: if dslx_paths.is_empty() {
+                        None
+                    } else {
+                        Some(dslx_paths.iter().map(|p| (*p).to_path_buf()).collect())
+                    },
+                    dslx_stdlib_path: dslx_stdlib_path.map(|p| p.to_path_buf()),
+                    test_filter,
+                    solver: solver.clone(),
+                    assertion_semantics: None,
+                    uf: if uf.is_empty() { None } else { Some(uf) },
+                    assert_label_filter: None,
+                    json: None,
+                };
+
+                tasks.push(ProverPlan::Task {
+                    task: ProverTask::ProveQuickcheck { config: cfg },
+                    timeout_ms,
+                    task_id: Some(task_id.clone()),
+                });
+            }
         }
-        if !rhs_uf.is_empty() {
-            cfg.rhs_uf = Some(rhs_uf);
-        }
-
-        tasks.push(ProverPlan::Task {
-            task: ProverTask::DslxEquiv { config: cfg },
-            timeout_ms,
-            task_id: Some(task_id.clone()),
-        });
     }
 
     let plan = ProverPlan::Group {

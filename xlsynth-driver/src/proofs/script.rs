@@ -2,14 +2,12 @@
 
 //! Script-driven obligation tree execution with selectors and tactics.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use crate::proofs::obligations::LecObligation;
+use crate::proofs::obligations::ProverObligation;
 use crate::proofs::plans::{build_plan_from_obligations, ObligationPlan};
-#[cfg(test)]
-use crate::proofs::tactics::cosliced::{CoslicedTactic, NamedSlice};
 use crate::proofs::tactics::{IsTactic, Tactic};
 use crate::prover::{run_prover_plan, ProverReport, ProverReportNode, TaskOutcome};
 use serde::{Deserialize, Serialize};
@@ -39,12 +37,12 @@ pub enum NodeStatus {
 
 #[derive(Debug)]
 pub enum NodeKind {
-    Leaf(LecObligation),
+    Leaf(ProverObligation),
     Internal {
         #[allow(dead_code)]
         tactic: Tactic,
         children: Vec<OblNode>,
-        original: LecObligation,
+        original: ProverObligation,
     },
 }
 
@@ -59,7 +57,7 @@ pub struct OblNode {
 }
 
 impl OblNode {
-    pub fn leaf(seg: String, parent: &Selector, ob: LecObligation) -> Self {
+    pub fn leaf(seg: String, parent: &Selector, ob: ProverObligation) -> Self {
         Self {
             segment: seg.clone(),
             selector: join_selector(parent, &seg),
@@ -70,6 +68,7 @@ impl OblNode {
     }
 }
 
+#[derive(Debug)]
 pub struct OblTreeConfig {
     pub dslx_stdlib_path: Option<PathBuf>,
     pub dslx_paths: Vec<PathBuf>,
@@ -77,20 +76,20 @@ pub struct OblTreeConfig {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug)]
 pub struct OblTree {
     pub root: OblNode,
     pub config: OblTreeConfig,
 }
 
 impl OblTree {
-    pub fn new(root_obligation: LecObligation, config: OblTreeConfig) -> Self {
-        let mut ob = root_obligation;
+    pub fn new(mut root_obligation: ProverObligation, config: OblTreeConfig) -> Self {
         // Ensure root obligation has selector segment = "root"
-        ob.selector_segment = "root".to_string();
+        root_obligation.selector_segment = "root".to_string();
         let root = OblNode {
             segment: "root".to_string(),
             selector: root_selector(),
-            kind: NodeKind::Leaf(ob),
+            kind: NodeKind::Leaf(root_obligation),
             status: NodeStatus::Open,
             solve: false,
         };
@@ -137,24 +136,15 @@ fn apply_tactic(
         _ => return Err("tactic requires a leaf".to_string()),
     };
     let children_obs = tactic.apply(&base)?;
-    let mut segs: HashSet<String> = HashSet::new();
     let mut children: Vec<OblNode> = Vec::new();
     for (idx, ob) in children_obs.into_iter().enumerate() {
-        let parent_last = parent_selector
-            .last()
-            .cloned()
-            .unwrap_or_else(|| "".to_string());
-        let mut seg = if ob.selector_segment.is_empty() || ob.selector_segment == parent_last {
-            "skeleton".to_string()
-        } else {
-            ob.selector_segment.clone()
-        };
-        if seg == parent_last || seg.is_empty() {
-            seg = format!("child_{}", idx + 1);
+        if ob.selector_segment.is_empty() {
+            return Err(format!(
+                "tactic produced child {} with empty selector segment",
+                idx + 1
+            ));
         }
-        if !segs.insert(seg.clone()) {
-            return Err(format!("duplicate child selector segment: {}", seg));
-        }
+        let seg = ob.selector_segment.clone();
         children.push(OblNode::leaf(seg, parent_selector, ob));
     }
     node.kind = NodeKind::Internal {
@@ -165,7 +155,7 @@ fn apply_tactic(
     Ok(())
 }
 
-fn collect_solve_targets(node: &OblNode, out: &mut Vec<(Selector, LecObligation)>) {
+fn collect_solve_targets(node: &OblNode, out: &mut Vec<(Selector, ProverObligation)>) {
     match &node.kind {
         NodeKind::Leaf(ob) => {
             if node.solve {
@@ -180,6 +170,7 @@ fn collect_solve_targets(node: &OblNode, out: &mut Vec<(Selector, LecObligation)
     }
 }
 
+#[derive(Clone, Debug)]
 enum TaskSimple {
     Success,
     Failure,
@@ -208,6 +199,90 @@ fn collect_outcomes(report: &ProverReportNode) -> HashMap<String, TaskSimple> {
         }
     }
     out
+}
+
+fn update_from_outcome(
+    tree: &mut OblTree,
+    report: &ProverReport,
+    sel: Selector,
+    path: &str,
+    status: Option<TaskSimple>,
+    solved: &mut Vec<Selector>,
+    failed_logs: &mut Vec<TaskLogEntry>,
+    indefinite_logs: &mut Vec<TaskLogEntry>,
+    rolled_back: &mut Vec<RollbackEntry>,
+) {
+    match status {
+        Some(TaskSimple::Success) => {
+            if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
+                n.status = NodeStatus::Solved;
+            }
+            let _ = report.plan.find_task_node(path);
+            solved.push(sel);
+        }
+        Some(TaskSimple::Failure) => {
+            if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
+                n.status = NodeStatus::Failed;
+            }
+            if let Some(task_node) = report.plan.find_task_node(path) {
+                if let ProverReportNode::Task {
+                    task_id,
+                    cmdline,
+                    stdout,
+                    stderr,
+                    ..
+                } = task_node
+                {
+                    println!(
+                        "FAILED TASK id={:?}\ncmd={}\nstdout=\n{}\nstderr=\n{}\n",
+                        task_id,
+                        cmdline.as_deref().unwrap_or(""),
+                        stdout.as_deref().unwrap_or(""),
+                        stderr.as_deref().unwrap_or("")
+                    );
+                    failed_logs.push(TaskLogEntry {
+                        selector: sel.clone(),
+                        stdout: stdout.clone(),
+                        stderr: stderr.clone(),
+                    });
+                }
+            }
+            if sel.len() > 1 {
+                let parent_sel: Selector = sel[..sel.len() - 1].to_vec();
+                if let Some(parent) = OblTree::find_mut(&mut tree.root, &parent_sel) {
+                    if let NodeKind::Internal { original, .. } = &parent.kind {
+                        let original_ob = original.clone();
+                        parent.kind = NodeKind::Leaf(original_ob);
+                        parent.status = NodeStatus::Open;
+                        parent.solve = false;
+                    }
+                    rolled_back.push(RollbackEntry {
+                        selector: parent_sel,
+                        reason_selector: sel,
+                    });
+                }
+            }
+        }
+        Some(TaskSimple::Indefinite) => {
+            if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
+                n.status = NodeStatus::Pending;
+            }
+            if let Some(task_node) = report.plan.find_task_node(path) {
+                if let ProverReportNode::Task { stdout, stderr, .. } = task_node {
+                    indefinite_logs.push(TaskLogEntry {
+                        selector: sel,
+                        stdout: stdout.clone(),
+                        stderr: stderr.clone(),
+                    });
+                }
+            }
+        }
+        None => {
+            if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
+                n.status = NodeStatus::Pending;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -313,12 +388,13 @@ pub fn execute_script(tree: &mut OblTree, steps: &[ScriptStep]) -> Result<Script
     }
 
     // 2) Gather solve leaves and build obligations with selector paths.
-    let mut targets: Vec<(Selector, LecObligation)> = Vec::new();
+    let mut targets: Vec<(Selector, ProverObligation)> = Vec::new();
     collect_solve_targets(&tree.root, &mut targets);
-    let obligations_with_ids: Vec<(String, LecObligation)> = targets
-        .iter()
-        .map(|(sel, ob)| (selector_to_path(sel), ob.clone()))
-        .collect();
+    let mut obligations_with_ids: Vec<(String, ProverObligation)> = Vec::new();
+    for (sel, ob) in targets.iter() {
+        let path = selector_to_path(sel);
+        obligations_with_ids.push((path, ob.clone()));
+    }
 
     log::debug!("obligations_to_solve={}", obligations_with_ids.len());
 
@@ -359,84 +435,20 @@ pub fn execute_script(tree: &mut OblTree, steps: &[ScriptStep]) -> Result<Script
     let mut indefinite_logs: Vec<TaskLogEntry> = Vec::new();
     let mut rolled_back: Vec<RollbackEntry> = Vec::new();
 
-    for (sel, _ob) in targets.into_iter() {
+    for (sel, _) in targets.into_iter() {
         let path = selector_to_path(&sel);
-        match outcomes.get(&path) {
-            Some(TaskSimple::Success) => {
-                if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
-                    n.status = NodeStatus::Solved;
-                }
-                let _ = report.plan.find_task_node(&path);
-                solved.push(sel.clone());
-            }
-            Some(TaskSimple::Failure) => {
-                if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
-                    n.status = NodeStatus::Failed;
-                }
-                // Print failure details if available
-                let tid_path = selector_to_path(&sel);
-                if let Some(task_node) = report.plan.find_task_node(&tid_path) {
-                    if let ProverReportNode::Task {
-                        task_id,
-                        cmdline,
-                        stdout,
-                        stderr,
-                        ..
-                    } = task_node
-                    {
-                        println!(
-                            "FAILED TASK id={:?}\ncmd={}\nstdout=\n{}\nstderr=\n{}\n",
-                            task_id,
-                            cmdline.as_deref().unwrap_or(""),
-                            stdout.as_deref().unwrap_or(""),
-                            stderr.as_deref().unwrap_or("")
-                        );
-                        failed_logs.push(TaskLogEntry {
-                            selector: sel.clone(),
-                            stdout: stdout.clone(),
-                            stderr: stderr.clone(),
-                        });
-                    }
-                }
-
-                // Rollback parent tactic
-                if sel.len() > 1 {
-                    let parent_sel: Selector = sel[..sel.len() - 1].to_vec();
-                    if let Some(parent) = OblTree::find_mut(&mut tree.root, &parent_sel) {
-                        if let NodeKind::Internal { original, .. } = &parent.kind {
-                            let original_ob = original.clone();
-                            parent.kind = NodeKind::Leaf(original_ob);
-                            parent.status = NodeStatus::Open;
-                            parent.solve = false;
-                        }
-                        rolled_back.push(RollbackEntry {
-                            selector: parent_sel,
-                            reason_selector: sel.clone(),
-                        });
-                    }
-                }
-            }
-            Some(TaskSimple::Indefinite) => {
-                if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
-                    n.status = NodeStatus::Pending;
-                }
-                if let Some(task_node) = report.plan.find_task_node(&path) {
-                    if let ProverReportNode::Task { stdout, stderr, .. } = task_node {
-                        indefinite_logs.push(TaskLogEntry {
-                            selector: sel.clone(),
-                            stdout: stdout.clone(),
-                            stderr: stderr.clone(),
-                        });
-                    }
-                }
-            }
-            None => {
-                // No outcome available; mark pending conservatively.
-                if let Some(n) = OblTree::find_mut(&mut tree.root, &sel) {
-                    n.status = NodeStatus::Pending;
-                }
-            }
-        }
+        let status = outcomes.get(&path).cloned();
+        update_from_outcome(
+            tree,
+            &report,
+            sel,
+            &path,
+            status,
+            &mut solved,
+            &mut failed_logs,
+            &mut indefinite_logs,
+            &mut rolled_back,
+        );
     }
 
     Ok(ScriptReport {
@@ -448,16 +460,20 @@ pub fn execute_script(tree: &mut OblTree, steps: &[ScriptStep]) -> Result<Script
 }
 
 #[cfg(test)]
+#[cfg(feature = "has-bitwuzla")]
 mod tests {
     use super::*;
-    use crate::proofs::obligations::SourceFile;
+    use crate::proofs::obligations::{
+        FileWithHistory, LecObligation, ObligationPayload, ProverObligation, SourceFile,
+    };
+    use crate::proofs::tactics::cosliced::{CoslicedTactic, NamedSlice};
 
     fn sel(parts: &[&str]) -> Selector {
         parts.iter().map(|s| s.to_string()).collect()
     }
 
-    fn base_obligation() -> LecObligation {
-        use crate::proofs::obligations::{FileWithHistory, LecSide, SourceFile};
+    fn base_obligation() -> ProverObligation {
+        use crate::proofs::obligations::LecSide;
         let dslx = "pub fn f(x: u8) -> u8 { x + u8:3 }".to_string();
         let lhs = LecSide {
             top_func: "f".to_string(),
@@ -477,11 +493,10 @@ mod tests {
                 text: dslx,
             },
         };
-        LecObligation {
+        ProverObligation {
             selector_segment: "root".to_string(),
-            lhs,
-            rhs,
             description: None,
+            payload: ObligationPayload::Lec(LecObligation { lhs, rhs }),
         }
     }
 
@@ -492,14 +507,10 @@ mod tests {
             solver: None,
             timeout_ms: Some(5000),
         };
-        #[cfg(any(feature = "with-bitwuzla-built", feature = "with-bitwuzla-system"))]
-        {
-            cfg.solver = Some(SolverChoice::Bitwuzla);
-        }
+        cfg.solver = Some(SolverChoice::Bitwuzla);
         cfg
     }
 
-    #[cfg(any(feature = "with-bitwuzla-built", feature = "with-bitwuzla-system"))]
     #[test]
     fn cosliced_then_solve_all_succeeds() {
         let mut tree = OblTree::new(base_obligation(), base_config());

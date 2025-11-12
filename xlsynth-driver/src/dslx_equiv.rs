@@ -2,7 +2,7 @@
 
 use crate::common::{parse_uf_spec, resolve_type_inference_v2};
 use crate::ir_equiv::outcome_from_report;
-use crate::proofs::obligations::{LecObligation, LecSide};
+use crate::proofs::obligations::{LecObligation, LecSide, ObligationPayload, ProverObligation};
 use crate::proofs::script::{
     execute_script, read_script_steps_from_json_path, read_script_steps_from_jsonl_path, OblTree,
     OblTreeConfig, ScriptStep,
@@ -160,11 +160,13 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let root_ob = LecObligation {
-            selector_segment: "root".to_string(),
-            lhs: lhs_side,
-            rhs: rhs_side,
+        let root_ob = ProverObligation {
+            selector_segment: String::new(),
             description: None,
+            payload: ObligationPayload::Lec(LecObligation {
+                lhs: lhs_side,
+                rhs: rhs_side,
+            }),
         };
         let dslx_paths_vec: Vec<std::path::PathBuf> = dslx_path
             .map(|s| {

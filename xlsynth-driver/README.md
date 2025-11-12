@@ -764,6 +764,7 @@ root
 Proves that DSLX `#[quickcheck]` functions always return true.
 
 - Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
+- Scripts: `--tactic_json <PATH>` (`--tactic_jsonl <PATH>` for JSONL) switches to the tactic/script-driven workflow so you can edit QuickCheck obligations before solving.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
 - Backend: `--solver <...>` selects the solver/toolchain (`auto` defers to the library's feature-based default).
 - Semantics: `--assertion-semantics <ignore|never|assume>` (defaults to `never`; external toolchain supports only `never`).
@@ -969,10 +970,13 @@ Schema details
 
   - Required: `dslx_input_file` (path)
   - Optional:
+    - `dslx_path`: array of paths (joined with `;`)
+    - `dslx_stdlib_path`: path
     - `test_filter`: string (regex)
     - `solver`: same values as above
     - `assertion_semantics`: `ignore` | `never` | `assume`
     - `uf`: array of strings, each "`<func_name>:<uf_name>`". Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
+    - `assert_label_filter`: string (regex)
     - `json`: bool
     - `timeout_ms`: integer (milliseconds) — optional per-task timeout
 

@@ -4,16 +4,24 @@
 //! `#[quickcheck]` function in a DSLX file (or a selected one) always
 //! returns `true` for every possible input using an SMT solver.
 
-// use std::collections::HashMap;
-
 use crate::common::parse_uf_spec;
+use crate::proofs::obligations::{
+    FileWithHistory, ObligationPayload, ProverObligation, QcObligation,
+};
+use crate::proofs::script::{
+    execute_script, read_script_steps_from_json_path, read_script_steps_from_jsonl_path, OblTree,
+    OblTreeConfig,
+};
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use xlsynth_prover::prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
-use xlsynth_prover::prover::{Prover, SolverChoice};
+use xlsynth_prover::prover::{discover_quickcheck_tests, Prover, SolverChoice};
+
+const SUBCOMMAND: &str = "prove-quickcheck";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckTestOutcome {
@@ -72,6 +80,109 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
 
     let module_name = input_path.file_stem().unwrap().to_str().unwrap();
     let uf_map = parse_uf_spec(module_name, matches.get_many::<String>("uf"));
+
+    let tactic_json_path = matches.get_one::<String>("tactic_json").cloned();
+    let tactic_jsonl_path = matches.get_one::<String>("tactic_jsonl").cloned();
+    if tactic_json_path.is_some() && tactic_jsonl_path.is_some() {
+        eprintln!(
+            "[{}] Error: --tactic_json and --tactic_jsonl cannot be used together",
+            SUBCOMMAND
+        );
+        std::process::exit(1);
+    }
+    let output_json = matches.get_one::<String>("output_json").cloned();
+
+    if tactic_json_path.is_some() || tactic_jsonl_path.is_some() {
+        let quickcheck_tests = match discover_quickcheck_tests(
+            input_path,
+            dslx_stdlib_path_buf.as_deref(),
+            &additional_search_paths_refs,
+            test_filter,
+        ) {
+            Ok(tests) => tests,
+            Err(e) => {
+                report_cli_error_and_exit(&e, Some(SUBCOMMAND), vec![("file", input_file_str)]);
+            }
+        };
+
+        if quickcheck_tests.is_empty() {
+            report_cli_error_and_exit(
+                "No matching quickcheck functions found",
+                Some(SUBCOMMAND),
+                vec![("file", input_file_str)],
+            );
+        }
+
+        let input_path_buf = input_path.to_path_buf();
+        let qc_uf_map: BTreeMap<String, String> =
+            uf_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let root_qc = QcObligation {
+            file: FileWithHistory::from_path(&input_path_buf),
+            tests: quickcheck_tests.clone(),
+            uf_map: qc_uf_map,
+        };
+
+        let cfg = OblTreeConfig {
+            dslx_stdlib_path: dslx_stdlib_path_buf.clone(),
+            dslx_paths: additional_search_paths.clone(),
+            solver: solver_choice_opt.clone(),
+            timeout_ms: None,
+        };
+
+        let root_obligation = ProverObligation {
+            selector_segment: String::new(),
+            description: None,
+            payload: ObligationPayload::QuickCheck(root_qc),
+        };
+        let mut tree = OblTree::new(root_obligation, cfg);
+
+        let steps = if let Some(path) = tactic_json_path.as_ref() {
+            match read_script_steps_from_json_path(path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[{}] {}", SUBCOMMAND, e);
+                    std::process::exit(2);
+                }
+            }
+        } else if let Some(path) = tactic_jsonl_path.as_ref() {
+            match read_script_steps_from_jsonl_path(path) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[{}] {}", SUBCOMMAND, e);
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            unreachable!("tactic script presence already checked");
+        };
+
+        let start = std::time::Instant::now();
+        let report = match execute_script(&mut tree, &steps) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[{}] execute_script error: {}", SUBCOMMAND, e);
+                std::process::exit(2);
+            }
+        };
+        let dur = start.elapsed();
+        let success = report.failed.is_empty() && report.indefinite.is_empty();
+        if let Some(path) = output_json.as_ref() {
+            let json = serde_json::json!({
+                "success": success,
+                "report": report,
+            });
+            std::fs::write(path, serde_json::to_string(&json).unwrap()).unwrap();
+        }
+        if success {
+            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            println!("[{}] success: QuickCheck obligations proved", SUBCOMMAND);
+            std::process::exit(0);
+        } else {
+            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
+            eprintln!("[{}] failure", SUBCOMMAND);
+            std::process::exit(1);
+        }
+    }
     // UF semantics: functions mapped to the same <uf_name> are treated as the
     // same uninterpreted symbol (assumed equivalent) and assertions inside them
     // are ignored during proving.
@@ -162,8 +273,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         tests: results,
     };
 
-    let output_json = matches.get_one::<String>("output_json");
-    if let Some(path) = output_json {
+    if let Some(path) = output_json.as_ref() {
         std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
     }
 
