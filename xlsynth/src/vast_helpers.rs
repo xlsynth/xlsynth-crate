@@ -133,7 +133,7 @@ pub fn add_registers<'a>(
     let mut assigned_values: Vec<Expr> = Vec::with_capacity(registers.len());
     for r in registers.iter() {
         let val: Expr = match &r.enable {
-            Some(en) => file.make_ternary(&en, &r.next, &r.reg),
+            Some(en) => file.make_ternary(en, &r.next, &r.reg),
             None => r.next.clone(),
         };
         assigned_values.push(val);
@@ -159,7 +159,7 @@ pub fn add_registers<'a>(
         let mut else_blk = cond.add_else();
         for (i, r) in registers.iter().enumerate() {
             if let Some(ref rv) = r.reset_value {
-                then_blk.add_nonblocking_assignment(&r.reg, &rv);
+                then_blk.add_nonblocking_assignment(&r.reg, rv);
                 else_blk.add_nonblocking_assignment(&r.reg, &assigned_values[i]);
             }
         }
@@ -275,8 +275,8 @@ pub fn bitwise_or_reduce_array_elements(
 
 #[cfg(test)]
 mod tests {
-    use pretty_assertions::assert_eq;
     use crate::vast::{VastFile, VastFileType};
+    use pretty_assertions::assert_eq;
 
     use super::*;
 
