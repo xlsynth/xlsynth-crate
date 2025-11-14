@@ -23,6 +23,17 @@ pub struct ToggleStats {
     pub primary_output_toggles: usize,
 }
 
+impl Into<crate::result_proto::ToggleStats> for ToggleStats {
+    fn into(self) -> crate::result_proto::ToggleStats {
+        crate::result_proto::ToggleStats {
+            gate_output_toggles: self.gate_output_toggles as u64,
+            gate_input_toggles: self.gate_input_toggles as u64,
+            primary_input_toggles: self.primary_input_toggles as u64,
+            primary_output_toggles: self.primary_output_toggles as u64,
+        }
+    }
+}
+
 /// Counts toggles at gate outputs, primary inputs, and in the raw batch input
 /// vectors for a batch of input vectors.
 ///
