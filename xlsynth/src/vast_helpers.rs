@@ -59,6 +59,7 @@ fn emit_registers_with_templates(
             keys.get(&TemplateVariable::ResetValue),
             keys.get(&TemplateVariable::Enable),
         ) {
+            // TODO(meheff): use a CodegenOptions verify method instead of these unwraps
             (Some(_), Some(_)) => emit_template(
                 opts.reg_with_reset_with_en_template.as_ref().unwrap(),
                 &keys,

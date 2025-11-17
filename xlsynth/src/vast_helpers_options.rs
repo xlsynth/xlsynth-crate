@@ -106,6 +106,7 @@ fn normalize_and_validate_template(
     Ok(normalized)
 }
 
+// TODO(meheff): add a verify method
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodegenOptions {
     pub includes: Option<Vec<String>>,
