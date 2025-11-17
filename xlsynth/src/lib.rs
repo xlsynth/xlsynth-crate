@@ -9,6 +9,8 @@ mod lib_support;
 pub mod rust_bridge_builder;
 pub mod sv_bridge_builder;
 pub mod vast;
+pub mod vast_helpers;
+pub mod vast_helpers_options;
 pub mod xlsynth_error;
 
 use std::ffi::CString;
