@@ -99,6 +99,7 @@ pub enum AttributeArgumentKind {
     String,
     StringKeyValue,
     IntKeyValue,
+    StringLiteral,
 }
 
 impl AttributeArgumentKind {
@@ -111,6 +112,9 @@ impl AttributeArgumentKind {
             sys::XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_INT_KEY_VALUE => {
                 AttributeArgumentKind::IntKeyValue
             }
+            sys::XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_STRING_LITERAL => {
+                AttributeArgumentKind::StringLiteral
+            }
             _ => panic!("Unknown DSLX attribute argument kind: {}", kind),
         }
     }
@@ -121,16 +125,18 @@ pub enum AttributeArgument {
     String(String),
     StringKeyValue { key: String, value: String },
     IntKeyValue { key: String, value: i64 },
+    StringLiteral(String),
 }
 
 impl fmt::Display for AttributeArgument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AttributeArgument::String(value) => write!(f, "\"{value}\""),
+            AttributeArgument::String(value) => write!(f, "{value}"),
             AttributeArgument::StringKeyValue { key, value } => {
                 write!(f, "{key}=\"{value}\"")
             }
             AttributeArgument::IntKeyValue { key, value } => write!(f, "{key}={value}"),
+            AttributeArgument::StringLiteral(value) => write!(f, "\"{value}\""),
         }
     }
 }
@@ -178,6 +184,15 @@ impl Attribute {
             return None;
         }
         let c_str = unsafe { sys::xls_dslx_attribute_get_string_argument(self.ptr, index as i64) };
+        Some(unsafe { c_str_to_rust(c_str) })
+    }
+
+    pub fn get_string_literal_argument(&self, index: usize) -> Option<String> {
+        if self.get_argument_kind(index) != AttributeArgumentKind::StringLiteral {
+            return None;
+        }
+        let c_str =
+            unsafe { sys::xls_dslx_attribute_get_string_literal_argument(self.ptr, index as i64) };
         Some(unsafe { c_str_to_rust(c_str) })
     }
 
@@ -236,6 +251,12 @@ impl Attribute {
                     .get_key_value_int_argument_value(index)
                     .expect("int value should be present");
                 AttributeArgument::IntKeyValue { key, value }
+            }
+            AttributeArgumentKind::StringLiteral => {
+                let value = self
+                    .get_string_literal_argument(index)
+                    .expect("string literal value should be present");
+                AttributeArgument::StringLiteral(value)
             }
         }
     }
@@ -2949,7 +2970,7 @@ fn plain_fn(x: u32) -> u32 { x }
         let fmt_args = fmt_attr.arguments();
         assert_eq!(fmt_args.len(), 1);
         match &fmt_args[0] {
-            AttributeArgument::String(value) => assert_eq!(value, "fmt-off"),
+            AttributeArgument::StringLiteral(value) => assert_eq!(value, "fmt-off"),
             other => panic!("unexpected format-disable attribute argument: {:?}", other),
         }
         assert!(fmt_attr.to_text().contains("dslx_format_disable"));

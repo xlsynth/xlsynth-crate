@@ -1095,9 +1095,11 @@ impl GenerateLoop {
         unsafe { sys::xls_vast_generate_loop_add_inline_verilog_statement(self.inner, stmt.inner) }
     }
 
-    pub fn add_macro_statement(&mut self, macro_ref: &MacroRef) {
+    pub fn add_macro_statement(&mut self, macro_statement: &MacroStatement) {
         let _locked = self.parent.lock().unwrap();
-        unsafe { sys::xls_vast_generate_loop_add_macro_statement(self.inner, macro_ref.inner) }
+        unsafe {
+            sys::xls_vast_generate_loop_add_macro_statement(self.inner, macro_statement.inner)
+        }
     }
 }
 
@@ -1129,6 +1131,19 @@ impl VastFile {
         let c_include = CString::new(include).unwrap();
         let locked = self.ptr.lock().unwrap();
         unsafe { sys::xls_vast_verilog_file_add_include(locked.0, c_include.as_ptr()) }
+    }
+
+    /// Adds a file-level blank line.
+    pub fn add_blank_line(&mut self, blank_line: BlankLine) {
+        let locked = self.ptr.lock().unwrap();
+        unsafe { sys::xls_vast_verilog_file_add_blank_line(locked.0, blank_line.inner) }
+    }
+
+    /// Adds a file-level `// ...` style comment from text.
+    pub fn add_comment_text(&mut self, text: &str) {
+        let c_text = CString::new(text).unwrap();
+        let locked = self.ptr.lock().unwrap();
+        unsafe { sys::xls_vast_verilog_file_add_comment(locked.0, c_text.as_ptr()) }
     }
 
     pub fn add_module(&mut self, name: &str) -> VastModule {
@@ -1314,7 +1329,7 @@ impl VastFile {
     ) -> VastDataType {
         let locked = self.ptr.lock().unwrap();
         let data_type = unsafe {
-            sys::xls_vast_verilog_file_make_bit_vector_type_expr(
+            sys::xls_vast_verilog_file_make_bit_vector_type_with_expression(
                 locked.0,
                 width_expr.inner,
                 is_signed,
@@ -1523,10 +1538,19 @@ impl VastFile {
         }
     }
 
-    pub fn make_macro_statement(&mut self, macro_ref: &MacroRef) -> MacroStatement {
+    pub fn make_macro_statement(
+        &mut self,
+        macro_ref: &MacroRef,
+        emit_semicolon: bool,
+    ) -> MacroStatement {
         let locked = self.ptr.lock().unwrap();
-        let inner =
-            unsafe { sys::xls_vast_verilog_file_make_macro_statement(locked.0, macro_ref.inner) };
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_macro_statement(
+                locked.0,
+                macro_ref.inner,
+                emit_semicolon,
+            )
+        };
         MacroStatement {
             inner,
             parent: self.ptr.clone(),

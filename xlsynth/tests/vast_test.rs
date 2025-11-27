@@ -1152,13 +1152,17 @@ fn test_module_macro_statement_simple() {
     let mut module = file.add_module("macro_mod");
 
     // Add a simple macro statement: `MY_MACRO;
-    let mref = file.make_macro_ref("MY_MACRO");
-    let mstmt = file.make_macro_statement(&mref);
-    module.add_member_macro_statement(mstmt);
+    let mref1 = file.make_macro_ref("MY_MACRO1");
+    let mstmt1 = file.make_macro_statement(&mref1, true);
+    let mref2 = file.make_macro_ref("MY_MACRO2");
+    let mstmt2 = file.make_macro_statement(&mref2, false);
+    module.add_member_macro_statement(mstmt1);
+    module.add_member_macro_statement(mstmt2);
 
     let verilog = file.emit();
     let want = r#"module macro_mod;
-  `MY_MACRO;
+  `MY_MACRO1;
+  `MY_MACRO2
 endmodule
 "#;
     assert_eq!(verilog, want);
@@ -1179,11 +1183,13 @@ fn test_generate_loop_with_inline_and_macro() {
     gen.add_comment(&comment);
     gen.add_blank_line();
     let mref = file.make_macro_ref("DO_SOMETHING");
-    gen.add_macro_statement(&mref);
+    let mstmt = file.make_macro_statement(&mref, true);
+    gen.add_macro_statement(&mstmt);
     // Macro with arguments.
     let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
     let mref_args = file.make_macro_ref_with_args("DO_THING", &[&three]);
-    gen.add_macro_statement(&mref_args);
+    let mstmt_args = file.make_macro_statement(&mref_args, false);
+    gen.add_macro_statement(&mstmt_args);
 
     let verilog = file.emit();
     let want = r#"module gen_with_macros;
@@ -1191,7 +1197,7 @@ fn test_generate_loop_with_inline_and_macro() {
     // inside
 
     `DO_SOMETHING;
-    `DO_THING(3);
+    `DO_THING(3)
   end
 endmodule
 "#;
@@ -1204,4 +1210,23 @@ fn test_expression_emit_plain_literal() {
     let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
     let s = three.emit();
     assert_eq!(s, "3");
+}
+
+#[test]
+fn test_file_level_comment_and_blank_line() {
+    let mut file = VastFile::new(VastFileType::Verilog);
+    file.add_comment_text("top-level comment");
+    let blank = file.make_blank_line();
+    file.add_blank_line(blank);
+    let mut module = file.add_module("M");
+    let scalar = file.make_scalar_type();
+    module.add_wire("w", &scalar);
+    let verilog = file.emit();
+    let want = r#"// top-level comment
+
+module M;
+  wire w;
+endmodule
+"#;
+    assert_eq!(verilog, want);
 }
