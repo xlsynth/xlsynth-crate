@@ -22,6 +22,7 @@ use prost::Message;
 use prost_reflect::DescriptorPool;
 
 mod proto {
+    #![allow(dead_code)]
     include!(concat!(env!("OUT_DIR"), "/xlsynth.estimator.rs"));
 }
 

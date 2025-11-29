@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::convert::TryFrom;
 // Generated code from proto
 pub mod proto {
+    #![allow(dead_code)]
     include!(concat!(env!("OUT_DIR"), "/xls.estimator_model.rs"));
 }
 

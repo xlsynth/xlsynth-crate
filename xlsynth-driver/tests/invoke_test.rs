@@ -1976,6 +1976,7 @@ fn test_ir2gates_output_json_file() {
 }
 
 // Test for ir-equiv subcommand using Solver
+#[allow(dead_code)]
 fn test_irequiv_subcommand_solver_equivalent(solver: &str) {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2101,6 +2102,7 @@ fn test_irequiv_subcommand_solver_invoke_equivalent_param(solver: &str) {
 }
 
 // Test for ir-equiv subcommand using Solver
+#[allow(dead_code)]
 fn test_irequiv_subcommand_solver_equivalent_with_fixed_implicit_activation(solver: &str) {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2166,6 +2168,7 @@ fn test_irequiv_subcommand_solver_equivalent_with_fixed_implicit_activation(solv
 
 /// Test for ir-equiv command with different IR top entry
 /// points.
+#[allow(dead_code)]
 fn test_irequiv_subcommand_solver_different_top_entry_points(solver: &str) {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2205,6 +2208,7 @@ fn test_irequiv_subcommand_solver_different_top_entry_points(solver: &str) {
     assert!(stdout.contains("Solver proved equivalence"));
 }
 
+#[allow(dead_code)]
 fn test_irequiv_subcommand_solver_output_bits_strategy(solver: &str) {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -5725,6 +5729,7 @@ fn test_prove_quickcheck_json_array_mixed() {
     assert_eq!(name_success.get("qc_failure"), Some(&false));
 }
 
+#[allow(dead_code)]
 fn prove_enum_in_bound_success_for_solver(solver: &str) {
     let dslx = r#"
         enum MyE : u2 { A = 0, B = 1 }
@@ -5777,6 +5782,7 @@ fn prove_enum_in_bound_success_for_solver(solver: &str) {
     assert_eq!(json["assert_label_prefix"], "enum-in-bound");
 }
 
+#[allow(dead_code)]
 fn prove_enum_in_bound_failure_for_solver(solver: &str) {
     let dslx = r#"
         enum MyE : u2 { A = 0, B = 1 }
@@ -6760,6 +6766,7 @@ fn test_prover_nested_any_all_fails() {
 #[cfg_attr(feature="with-z3-binary-test", test_case::test_case("z3-binary"; "dslx_equiv_uf_z3_binary"))]
 #[cfg_attr(feature="with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "dslx_equiv_uf_bitwuzla_binary"))]
 #[cfg_attr(feature="with-boolector-binary-test", test_case::test_case("boolector-binary"; "dslx_equiv_uf_boolector_binary"))]
+#[allow(dead_code)]
 fn test_dslx_equiv_uninterpreted_functions_solver_param(solver: &str) {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -6997,6 +7004,7 @@ top fn main(x: bits[8]) -> bits[8] {
 #[cfg_attr(feature="with-z3-binary-test", test_case::test_case("z3-binary"; "qc_uf_z3_binary"))]
 #[cfg_attr(feature="with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "qc_uf_bitwuzla_binary"))]
 #[cfg_attr(feature="with-boolector-binary-test", test_case::test_case("boolector-binary"; "qc_uf_boolector_binary"))]
+#[allow(dead_code)]
 fn test_prove_quickcheck_uninterpreted_functions_solver_param(solver: &str) {
     let _ = env_logger::builder().is_test(true).try_init();
 
