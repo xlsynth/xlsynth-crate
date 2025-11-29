@@ -18,10 +18,12 @@ use rand::Rng;
 use std::{collections::HashSet, error::Error};
 use xlsynth::IrBits;
 
+use crate::aig::bulk_replace::{SubstitutionMap, bulk_replace};
+use crate::aig::get_summary_stats::get_gate_depth;
+use crate::aig::{AigOperand, AigRef, GateFn};
 use crate::{
-    bulk_replace::SubstitutionMap, bulk_replace::bulk_replace, gate::AigOperand, gate::AigRef,
-    gate::GateFn, gate_builder::GateBuilderOptions, get_summary_stats::get_gate_depth,
-    propose_equiv::EquivNode, propose_equiv::propose_equivalence_classes,
+    gate_builder::GateBuilderOptions, propose_equiv::EquivNode,
+    propose_equiv::propose_equivalence_classes,
     prove_gate_fn_equiv_varisat::validate_equivalence_classes,
 };
 
@@ -212,7 +214,7 @@ mod tests {
     #[allow(unused_imports)]
     use crate::assert_within;
     use crate::{
-        check_equivalence, gate_builder::GateBuilder, get_summary_stats::get_summary_stats,
+        aig::get_summary_stats::get_summary_stats, check_equivalence, gate_builder::GateBuilder,
         test_utils::setup_padded_graph_with_equal_depth_opposite_polarity,
     };
     use rand::SeedableRng;

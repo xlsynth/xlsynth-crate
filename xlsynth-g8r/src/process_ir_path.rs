@@ -7,19 +7,19 @@ use std::collections::HashMap;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
+use crate::aig::fanout::fanout_histogram;
+use crate::aig::find_structures;
+use crate::aig::fraig;
+use crate::aig::fraig::{DidConverge, FraigIterationStat, IterationBounds};
+use crate::aig::gate;
+use crate::aig::get_summary_stats::get_gate_depth;
+use crate::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
+use crate::aig::logical_effort;
+use crate::aig::logical_effort::compute_logical_effort_min_delay;
+use crate::aig_serdes::emit_netlist;
+use crate::aig_serdes::ir2gate;
+use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
-use crate::count_toggles;
-use crate::emit_netlist;
-use crate::fanout::fanout_histogram;
-use crate::find_structures;
-use crate::fraig;
-use crate::fraig::{DidConverge, FraigIterationStat, IterationBounds};
-use crate::gate;
-use crate::get_summary_stats::get_gate_depth;
-use crate::graph_logical_effort;
-use crate::graph_logical_effort::analyze_graph_logical_effort;
-use crate::ir2gate;
-use crate::logical_effort::compute_logical_effort_min_delay;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -196,7 +196,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
 
     // Compute critical path delay
     let logical_effort_deepest_path_min_delay =
-        compute_logical_effort_min_delay(&gate_fn, &crate::logical_effort::Options::default());
+        compute_logical_effort_min_delay(&gate_fn, &logical_effort::Options::default());
 
     // Compute fanout histogram and include in summary stats
     let hist = fanout_histogram(&gate_fn);

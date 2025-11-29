@@ -552,7 +552,7 @@ impl TypecheckedModule {
                 &mut error_out,
                 &mut result_out,
             );
-            debug!("Replace invocations in module success: {}", success);
+            debug!("Replace invocations in module success: {success}");
             if success {
                 assert!(error_out.is_null());
                 assert!(!result_out.is_null());

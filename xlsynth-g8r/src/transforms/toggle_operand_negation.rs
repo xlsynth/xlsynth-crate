@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigRef, GateFn};
+use crate::aig::{AigNode, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -87,7 +87,7 @@ impl Transform for ToggleOperandNegationTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::AigRef;
+    use crate::aig::AigRef;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::test_utils::setup_simple_graph;
 

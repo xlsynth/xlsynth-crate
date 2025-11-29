@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::dce::dce;
-use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::dce::dce;
+use crate::aig::topo;
+use crate::aig::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
 /// Strongly-typed wrapper for substitutions to prevent chaining.
@@ -382,7 +383,7 @@ pub fn bulk_substitute(
     let replaced_fn = new_builder.build();
 
     replaced_fn.check_invariants_with_debug_assert();
-    crate::topo::debug_assert_no_cycles(&replaced_fn.gates, "bulk_substitute");
+    topo::debug_assert_no_cycles(&replaced_fn.gates, "bulk_substitute");
     replaced_fn
 }
 
@@ -390,9 +391,9 @@ pub fn bulk_substitute(
 mod tests {
     use super::*;
     use crate::{
+        aig::get_summary_stats::{SummaryStats, get_summary_stats},
         check_equivalence,
         gate_builder::GateBuilderOptions,
-        get_summary_stats::{SummaryStats, get_summary_stats},
         test_utils::{
             setup_graph_for_constant_replace, setup_graph_with_more_redundancies,
             setup_graph_with_redundancies, setup_invalid_graph_with_cycle,

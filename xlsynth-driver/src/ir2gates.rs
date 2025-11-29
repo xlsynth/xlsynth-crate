@@ -4,18 +4,20 @@
 
 use clap::ArgMatches;
 use rand_xoshiro::rand_core::SeedableRng;
+use xlsynth_g8r::aig::{self, fraig, logical_effort};
 use xlsynth_pir::ir_parser;
 
 use crate::toolchain_config::ToolchainConfig;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use xlsynth_g8r::count_toggles;
-use xlsynth_g8r::emit_netlist;
-use xlsynth_g8r::fanout::fanout_histogram;
-use xlsynth_g8r::get_summary_stats::get_gate_depth;
-use xlsynth_g8r::graph_logical_effort::{self, analyze_graph_logical_effort};
+use xlsynth_g8r::aig::fanout::fanout_histogram;
+use xlsynth_g8r::aig::get_summary_stats::get_gate_depth;
+use xlsynth_g8r::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
+use xlsynth_g8r::aig::logical_effort::compute_logical_effort_min_delay;
+use xlsynth_g8r::aig_serdes::{emit_netlist, ir2gate};
+use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_g8r::logical_effort::compute_logical_effort_min_delay;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::use_count::get_id_to_use_count;
 use xlsynth_pir::fuzz_utils::arbitrary_irbits;
@@ -197,7 +199,7 @@ fn ir_to_gatefn_with_stats(
     fraig_max_iterations: Option<usize>,
     fraig_sim_samples: Option<usize>,
 ) -> (
-    xlsynth_g8r::gate::GateFn,
+    xlsynth_g8r::aig::GateFn,
     process_ir_path::Ir2GatesSummaryStats,
 ) {
     // Build GateFn directly and compute stats (duplicates selected logic from
@@ -219,9 +221,9 @@ fn ir_to_gatefn_with_stats(
             std::process::exit(1);
         }
     };
-    let gatify_output = xlsynth_g8r::ir2gate::gatify(
+    let gatify_output = ir2gate::gatify(
         &ir_top,
-        xlsynth_g8r::ir2gate::GatifyOptions {
+        ir2gate::GatifyOptions {
             fold,
             hash,
             adder_mapping: AdderMapping::default(),
@@ -231,14 +233,14 @@ fn ir_to_gatefn_with_stats(
     .unwrap();
     let mut gate_fn = gatify_output.gate_fn;
     // Prepare to capture fraig statistics if fraig is enabled.
-    let mut fraig_did_converge: Option<xlsynth_g8r::fraig::DidConverge> = None;
-    let mut fraig_iteration_stats: Option<Vec<xlsynth_g8r::fraig::FraigIterationStat>> = None;
+    let mut fraig_did_converge: Option<fraig::DidConverge> = None;
+    let mut fraig_iteration_stats: Option<Vec<fraig::FraigIterationStat>> = None;
     // Apply fraig if requested
     if fraig {
         let iteration_bounds = if let Some(max_iterations) = fraig_max_iterations {
-            xlsynth_g8r::fraig::IterationBounds::MaxIterations(max_iterations)
+            fraig::IterationBounds::MaxIterations(max_iterations)
         } else {
-            xlsynth_g8r::fraig::IterationBounds::ToConvergence
+            fraig::IterationBounds::ToConvergence
         };
         let sim_samples = match fraig_sim_samples {
             Some(n) => n,
@@ -250,8 +252,7 @@ fn ir_to_gatefn_with_stats(
             }
         };
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0);
-        let fraig_result =
-            xlsynth_g8r::fraig::fraig_optimize(&gate_fn, sim_samples, iteration_bounds, &mut rng);
+        let fraig_result = fraig::fraig_optimize(&gate_fn, sim_samples, iteration_bounds, &mut rng);
         match fraig_result {
             Ok((optimized_fn, did_converge, iteration_stats)) => {
                 gate_fn = optimized_fn;
@@ -265,16 +266,13 @@ fn ir_to_gatefn_with_stats(
         }
     }
     // Compute statistics directly from the GateFn (mirrors process_ir_path)
-    let id_to_use_count: std::collections::HashMap<xlsynth_g8r::gate::AigRef, usize> =
-        get_id_to_use_count(&gate_fn);
-    let live_nodes: Vec<xlsynth_g8r::gate::AigRef> = id_to_use_count.keys().cloned().collect();
+    let id_to_use_count: HashMap<aig::AigRef, usize> = get_id_to_use_count(&gate_fn);
+    let live_nodes: Vec<aig::AigRef> = id_to_use_count.keys().cloned().collect();
 
     let depth_stats = get_gate_depth(&gate_fn, &live_nodes);
 
-    let logical_effort_deepest_path_min_delay = compute_logical_effort_min_delay(
-        &gate_fn,
-        &xlsynth_g8r::logical_effort::Options::default(),
-    );
+    let logical_effort_deepest_path_min_delay =
+        compute_logical_effort_min_delay(&gate_fn, &logical_effort::Options::default());
 
     let hist = fanout_histogram(&gate_fn);
     let hist_sorted: std::collections::BTreeMap<usize, usize> = hist.clone().into_iter().collect();

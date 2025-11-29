@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -117,7 +117,7 @@ impl Transform for DoubleNegateTransform {
                 let mut ops: Vec<AigOperand> = output_bv_mut.iter_lsb_to_msb().copied().collect();
                 if *bit_idx < ops.len() {
                     ops[*bit_idx] = new_op_val;
-                    *output_bv_mut = crate::gate::AigBitVector::from_lsb_is_index_0(&ops);
+                    *output_bv_mut = AigBitVector::from_lsb_is_index_0(&ops);
                     Ok(())
                 } else {
                     Err(anyhow!(
@@ -182,7 +182,7 @@ impl Transform for DoubleNegateTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::{AigNode, AigOperand, AigRef};
+    use crate::aig::{AigNode, AigOperand, AigRef};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     fn test_do_double_negate_primitive_direct(

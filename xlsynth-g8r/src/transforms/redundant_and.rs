@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::topo;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -19,7 +20,7 @@ pub fn insert_redundant_and_primitive(g: &mut GateFn, op: AigOperand) -> AigRef 
     g.gates.push(new_gate);
     // Strong post-condition: inserting a fresh AND(x,x) must never introduce
     // cycles.
-    crate::topo::debug_assert_no_cycles(&g.gates, "insert_redundant_and_primitive");
+    topo::debug_assert_no_cycles(&g.gates, "insert_redundant_and_primitive");
     new_ref
 }
 
@@ -154,7 +155,7 @@ impl Transform for InsertRedundantAndTransform {
                 };
                 g.outputs[*output_idx].bit_vector.set_lsb(*bit_idx, new_op);
                 // Post-condition: wrapping output must not create cycles.
-                crate::topo::debug_assert_no_cycles(
+                topo::debug_assert_no_cycles(
                     &g.gates,
                     "InsertRedundantAndTransform::apply (OutputPortBit)",
                 );
@@ -194,7 +195,7 @@ impl Transform for InsertRedundantAndTransform {
                         } else {
                             *a = new_op;
                         }
-                        crate::topo::debug_assert_no_cycles(
+                        topo::debug_assert_no_cycles(
                             &g.gates,
                             "InsertRedundantAndTransform::apply (Operand)",
                         );

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
-use crate::topo::topo_sort_refs;
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
+use crate::aig::topo::topo_sort_refs;
 use std::collections::{HashMap, HashSet};
 
 /// Dead-code elimination that is robust to *any* node ordering.
@@ -144,7 +144,7 @@ pub fn dce_safe(orig_fn: &GateFn) -> GateFn {
                 .filter(|&id| {
                     !matches!(
                         result.gates[id],
-                        crate::gate::AigNode::Input { .. } | crate::gate::AigNode::Literal(_)
+                        AigNode::Input { .. } | AigNode::Literal(_)
                     )
                 })
                 .collect();

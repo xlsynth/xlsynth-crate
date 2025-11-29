@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::topo;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -139,7 +140,7 @@ fn build_balanced(g: &mut GateFn, nodes: &[AigRef], ops: &[AigOperand]) -> Resul
     let mut idx = 0;
     helper(g, nodes, ops, 0, ops.len() - 1, &mut idx)?;
     debug_assert_eq!(idx, nodes.len());
-    crate::topo::debug_assert_no_cycles(&g.gates, "balance_and_tree");
+    topo::debug_assert_no_cycles(&g.gates, "balance_and_tree");
     Ok(())
 }
 
@@ -200,7 +201,7 @@ fn build_chain(
             }
         }
     }
-    crate::topo::debug_assert_no_cycles(&g.gates, "unbalance_and_tree");
+    topo::debug_assert_no_cycles(&g.gates, "unbalance_and_tree");
     Ok(())
 }
 
@@ -433,7 +434,7 @@ impl Transform for UnbalanceAndTreeTransform {
                 }
                 build_chain(g, orient, &nodes, &ops)?;
                 // Assert strong invariant: UnbalanceAndTree must not create cycles.
-                crate::topo::debug_assert_no_cycles(&g.gates, "unbalance_and_tree");
+                topo::debug_assert_no_cycles(&g.gates, "unbalance_and_tree");
                 if let AigNode::And2 { tags: Some(ts), .. } = &mut g.gates[root.id] {
                     ts.retain(|t| t != TAG_LEFT && t != TAG_RIGHT);
                     if ts.is_empty() {

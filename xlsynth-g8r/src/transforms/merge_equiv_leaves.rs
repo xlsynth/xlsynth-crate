@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::aig_hasher::AigHasher;
-use crate::gate::{AigNode, AigRef, GateFn};
+use crate::aig::aig_hasher::AigHasher;
+use crate::aig::gate::{AigNode, AigRef, GateFn};
 use crate::transforms::rewire_operand::rewire_operand_primitive;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,

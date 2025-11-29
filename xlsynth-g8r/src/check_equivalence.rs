@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use crate::{gate, gate2ir};
+use crate::{aig::GateFn, aig_serdes::gate2ir};
 use xlsynth_pir::ir;
 
 pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), String> {
@@ -89,7 +89,7 @@ fn get_fn_signature(f: &ir::Fn) -> String {
     signature
 }
 
-pub fn validate_same_signature(orig_fn: &ir::Fn, gate_fn: &gate::GateFn) -> Result<(), String> {
+pub fn validate_same_signature(orig_fn: &ir::Fn, gate_fn: &GateFn) -> Result<(), String> {
     let gate_signature = gate_fn.get_signature();
     let orig_signature = get_fn_signature(orig_fn);
     if orig_signature != gate_signature {
@@ -106,7 +106,7 @@ pub fn validate_same_signature(orig_fn: &ir::Fn, gate_fn: &gate::GateFn) -> Resu
 /// bit vector for each parameter / result tuple element) then we adjust in the
 /// conversion from "gate IR" to "XLS IR" to use the original function's
 /// signature so we can check XLS IR equivalence directly.
-pub fn validate_same_fn(orig_fn: &ir::Fn, gate_fn: &gate::GateFn) -> Result<(), String> {
+pub fn validate_same_fn(orig_fn: &ir::Fn, gate_fn: &GateFn) -> Result<(), String> {
     let orig_ir_fn_text: String = orig_fn.to_string();
     let xlsynth_package_ir: String =
         gate2ir::gate_fn_to_xlsynth_ir(gate_fn, "gate", &orig_fn.get_type())
@@ -203,23 +203,21 @@ fn run_external_ir_tool(orig_pkg: &str, gate_pkg: &str) -> IrCheckResult {
 }
 
 /// Structured variant of `prove_same_gate_fn_via_ir`.
-pub fn prove_same_gate_fn_via_ir_status(lhs: &gate::GateFn, rhs: &gate::GateFn) -> IrCheckResult {
+pub fn prove_same_gate_fn_via_ir_status(lhs: &GateFn, rhs: &GateFn) -> IrCheckResult {
     let lhs_type = lhs.get_flat_type();
     let rhs_type = rhs.get_flat_type();
     if lhs_type != rhs_type {
         return IrCheckResult::OtherProcessError("type mismatch".to_string());
     }
-    let lhs_ir: xlsynth::IrPackage =
-        crate::gate2ir::gate_fn_to_xlsynth_ir(lhs, "lhs", &lhs_type).unwrap();
-    let rhs_ir: xlsynth::IrPackage =
-        crate::gate2ir::gate_fn_to_xlsynth_ir(rhs, "rhs", &rhs_type).unwrap();
+    let lhs_ir: xlsynth::IrPackage = gate2ir::gate_fn_to_xlsynth_ir(lhs, "lhs", &lhs_type).unwrap();
+    let rhs_ir: xlsynth::IrPackage = gate2ir::gate_fn_to_xlsynth_ir(rhs, "rhs", &rhs_type).unwrap();
 
     run_external_ir_tool(&lhs_ir.to_string(), &rhs_ir.to_string())
 }
 
 /// Backwards-compatibility wrapper that preserves the original
 /// Result<(),String> behaviour used elsewhere in the codebase.
-pub fn prove_same_gate_fn_via_ir(lhs: &gate::GateFn, rhs: &gate::GateFn) -> Result<(), String> {
+pub fn prove_same_gate_fn_via_ir(lhs: &GateFn, rhs: &GateFn) -> Result<(), String> {
     match prove_same_gate_fn_via_ir_status(lhs, rhs) {
         IrCheckResult::Equivalent => Ok(()),
         IrCheckResult::NotEquivalent => Err("not equivalent".to_string()),
@@ -231,7 +229,8 @@ pub fn prove_same_gate_fn_via_ir(lhs: &gate::GateFn, rhs: &gate::GateFn) -> Resu
 #[cfg(test)]
 mod tests {
     use crate::{
-        gate::AigBitVector,
+        aig::gate::AigBitVector,
+        aig_serdes::gate2ir,
         gate_builder::{GateBuilder, GateBuilderOptions},
     };
     use xlsynth_pir::ir_parser;

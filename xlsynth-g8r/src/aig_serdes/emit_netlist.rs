@@ -3,7 +3,7 @@
 //! Uses the xlsynth VAST APIs to build a netlist verilog representation of the
 //! given gates.
 
-use crate::gate;
+use crate::aig::gate;
 use crate::verilog_version::VerilogVersion;
 use std::collections::BTreeMap;
 use std::rc::Rc;

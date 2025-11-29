@@ -2,7 +2,7 @@
 
 //! Boolean formula AST and parser for Liberty cell functions.
 
-use crate::gate::AigOperand;
+use crate::aig::gate::AigOperand;
 use crate::gate_builder::GateBuilder;
 use std::collections::HashMap;
 
@@ -243,7 +243,10 @@ fn parse_atom(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::{
+        aig::gate::AigBitVector,
+        gate_builder::{GateBuilder, GateBuilderOptions},
+    };
 
     #[test]
     fn test_parse_simple_and() {
@@ -420,7 +423,7 @@ mod tests {
         let out = term
             .emit_formula_term(&mut gb, &input_map, &context)
             .unwrap();
-        gb.add_output("out".to_string(), crate::gate::AigBitVector::from_bit(out));
+        gb.add_output("out".to_string(), AigBitVector::from_bit(out));
         let gate_fn = gb.build();
         let s = gate_fn.to_string();
         assert!(s.contains("and(a[0], b[0])"));
@@ -446,7 +449,7 @@ mod tests {
         let out = term
             .emit_formula_term(&mut gb, &input_map, &context)
             .unwrap();
-        gb.add_output("out".to_string(), crate::gate::AigBitVector::from_bit(out));
+        gb.add_output("out".to_string(), AigBitVector::from_bit(out));
         let gate_fn = gb.build();
         let s = gate_fn.to_string();
         log::info!("GateFn output: {}", s);

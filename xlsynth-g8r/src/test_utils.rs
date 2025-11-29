@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
+use crate::aig::aig_hasher;
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
+use crate::aig_serdes::ir2gate;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-use crate::ir2gate;
 use crate::ir2gate_utils::gatify_add_ripple_carry;
 use half::bf16;
 use std::path::Path;
@@ -605,8 +606,8 @@ pub fn structurally_equivalent(a: &GateFn, b: &GateFn) -> bool {
     if a.outputs.len() != b.outputs.len() {
         return false;
     }
-    let mut hasher_a = crate::aig_hasher::AigHasher::new();
-    let mut hasher_b = crate::aig_hasher::AigHasher::new();
+    let mut hasher_a = aig_hasher::AigHasher::new();
+    let mut hasher_b = aig_hasher::AigHasher::new();
     for (out_a, out_b) in a.outputs.iter().zip(b.outputs.iter()) {
         if out_a.bit_vector.get_bit_count() != out_b.bit_vector.get_bit_count() {
             return false;
@@ -626,6 +627,8 @@ pub fn structurally_equivalent(a: &GateFn, b: &GateFn) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::aig::topo;
+
     use super::*;
 
     #[test]
@@ -652,7 +655,7 @@ mod tests {
         }
         let test_graph = setup_invalid_graph_with_cycle();
         let result = std::panic::catch_unwind(|| {
-            crate::topo::debug_assert_no_cycles(
+            topo::debug_assert_no_cycles(
                 &test_graph.g.gates,
                 "test_invalid_graph_with_cycle_fails_validation",
             );

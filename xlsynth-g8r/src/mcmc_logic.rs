@@ -14,11 +14,11 @@ use rand::prelude::{Rng, SeedableRng, SliceRandom};
 use rand_pcg::Pcg64Mcg;
 
 // Imports from the xlsynth_g8r crate
-use crate::dce;
-use crate::gate::GateFn;
-use crate::gate_simd::{self, Vec256};
-use crate::get_summary_stats;
-use crate::ir2gate::{self, GatifyOptions};
+use crate::aig::gate::GateFn;
+use crate::aig::get_summary_stats::get_summary_stats;
+use crate::aig::{dce, get_summary_stats};
+use crate::aig_serdes::ir2gate::{self, GatifyOptions};
+use crate::aig_sim::gate_simd::{self, Vec256};
 
 #[cfg(not(any(feature = "with-z3-system", feature = "with-z3-built")))]
 use crate::check_equivalence::prove_same_gate_fn_via_ir;
@@ -875,7 +875,7 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
                 let contents = fs::read_to_string(path).map_err(|e| {
                     anyhow::anyhow!("Failed to read GateFn file '{}': {}", p_str, e)
                 })?;
-                let gfn = GateFn::from_str(&contents).map_err(|e| {
+                let gfn = GateFn::try_from(contents.as_str()).map_err(|e| {
                     anyhow::anyhow!("Failed to parse GateFn from '{}': {}", p_str, e)
                 })?;
                 let g_cost = cost(&gfn);

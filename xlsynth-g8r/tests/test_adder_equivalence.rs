@@ -4,9 +4,9 @@
 
 use test_case::test_case;
 
+use xlsynth_g8r::aig_serdes::gate2ir;
+use xlsynth_g8r::aig_serdes::ir2gate;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::gate2ir;
-use xlsynth_g8r::ir2gate;
 use xlsynth_pir::ir_parser;
 
 #[test_case(1)]

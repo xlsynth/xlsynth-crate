@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
-use crate::topo::reaches_target as node_reaches_target;
-use crate::topo::reaches_target as reaches;
+use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::topo::{self, reaches_target as node_reaches_target};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -97,7 +96,7 @@ pub fn factor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), 
         };
     }
 
-    crate::topo::debug_assert_no_cycles(&g.gates, "factor_shared_and_primitive");
+    topo::debug_assert_no_cycles(&g.gates, "factor_shared_and_primitive");
     Ok(())
 }
 
@@ -105,7 +104,7 @@ pub fn factor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), 
 /// The operand that is not the `And2` child becomes the common factor.
 pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'static str> {
     // Ensure we start with an acyclic graph.
-    crate::topo::debug_assert_no_cycles(&g.gates, "unfactor_shared_and_primitive (pre)");
+    topo::debug_assert_no_cycles(&g.gates, "unfactor_shared_and_primitive (pre)");
 
     let (left, right) = match g.gates[outer.id] {
         AigNode::And2 { a, b, .. } => (a, b),
@@ -222,7 +221,7 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         }
     }
 
-    crate::topo::debug_assert_no_cycles(&g.gates, "unfactor_shared_and_primitive (post)");
+    topo::debug_assert_no_cycles(&g.gates, "unfactor_shared_and_primitive (post)");
     Ok(())
 }
 
@@ -333,7 +332,7 @@ fn can_factor_without_cycle(g: &GateFn, outer: AigRef) -> bool {
 
     // After factoring we will create a new edge shared -> outer
     // This is safe unless shared already (transitively) reaches outer.
-    if reaches(&g.gates, shared.node, outer) {
+    if node_reaches_target(&g.gates, shared.node, outer) {
         return false;
     }
 

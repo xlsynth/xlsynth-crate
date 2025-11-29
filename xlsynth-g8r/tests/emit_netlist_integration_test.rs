@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use xlsynth_g8r::emit_netlist::emit_netlist;
+    use xlsynth_g8r::aig_serdes::emit_netlist::emit_netlist;
     use xlsynth_g8r::test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample};
     // Use pretty_assertions if detailed diffs are needed in the future, but remove
     // for now as not strictly used. use pretty_assertions::assert_eq;

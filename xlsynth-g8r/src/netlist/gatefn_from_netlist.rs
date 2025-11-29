@@ -2,9 +2,7 @@
 
 //! Project a parsed netlist and Liberty proto into a GateFn.
 
-use crate::gate::AigBitVector;
-use crate::gate::AigOperand;
-use crate::gate::GateFn;
+use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty_proto::Library;
 use crate::netlist::parse::{Net, NetIndex, NetlistModule};

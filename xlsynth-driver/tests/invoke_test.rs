@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
 use xlsynth::IrBits;
-use xlsynth_g8r::gate::AigBitVector;
+use xlsynth_g8r::aig::AigBitVector;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 
 use test_case::test_case;

@@ -2,11 +2,11 @@
 
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize};
+use xlsynth_g8r::aig::get_summary_stats::get_gate_depth;
+use xlsynth_g8r::aig::{AigBitVector, GateFn};
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::fraig::{IterationBounds, fraig_optimize};
-use xlsynth_g8r::gate::{AigBitVector, GateFn};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::ir2gate_utils::{
     gatify_add_brent_kung, gatify_add_carry_select, gatify_add_kogge_stone, gatify_add_ripple_carry,
 };

@@ -7,7 +7,7 @@ use bitvec::vec::BitVec;
 use xlsynth::IrBits;
 use xlsynth_pir::ir_value_utils::ir_bits_from_bitvec_lsb_is_0;
 
-use crate::topo::post_order_operands;
+use crate::aig::topo::post_order_operands;
 use xlsynth_pir::ir;
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]

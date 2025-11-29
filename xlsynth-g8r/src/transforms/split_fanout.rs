@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::duplicate::duplicate;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
@@ -159,7 +159,7 @@ pub fn merge_fanout_primitive(
             }
         }
         if changed {
-            output.bit_vector = crate::gate::AigBitVector::from_lsb_is_index_0(&ops);
+            output.bit_vector = AigBitVector::from_lsb_is_index_0(&ops);
         }
     }
     Ok(())

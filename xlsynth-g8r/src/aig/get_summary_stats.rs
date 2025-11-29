@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::fanout::fanout_histogram;
-use crate::gate::{self, AigNode};
-use crate::topo::topo_sort_refs;
+use crate::aig::fanout::fanout_histogram;
+use crate::aig::gate::{self, AigNode};
+use crate::aig::topo::topo_sort_refs;
 use crate::use_count::get_id_to_use_count;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};

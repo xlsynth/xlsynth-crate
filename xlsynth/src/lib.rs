@@ -190,9 +190,7 @@ pub fn convert_dslx_to_ir_text(
             let ir_text = c_str_to_rust(ir_out);
             if ir_text.trim().is_empty() {
                 return Err(XlsynthError(format!(
-                    "INTERNAL: DSLX to IR conversion returned empty IR text for module '{module}' ({path}).",
-                    module = module_name,
-                    path = path_str,
+                    "INTERNAL: DSLX to IR conversion returned empty IR text for module '{module_name}' ({path_str})."
                 )));
             }
             Ok(DslxToIrTextResult {

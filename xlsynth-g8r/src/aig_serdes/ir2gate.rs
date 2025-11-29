@@ -3,8 +3,8 @@
 //! Functionality for converting an IR function into a gate function via
 //! `gatify`.
 
+use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::check_equivalence;
-use crate::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use std::collections::HashMap;
 use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
@@ -2108,7 +2108,8 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String
 
 #[cfg(test)]
 mod tests {
-    use crate::{ir2gate::GatifyOptions, ir2gate::gatify};
+    use crate::ir2gate_utils::AdderMapping;
+    use crate::{aig_serdes::ir2gate::GatifyOptions, aig_serdes::ir2gate::gatify};
     use xlsynth_pir::ir;
     use xlsynth_pir::ir_parser;
 
@@ -2118,13 +2119,13 @@ mod tests {
         let mut parser = ir_parser::Parser::new(ir_text);
         let ir_fn = parser.parse_fn().unwrap();
 
-        let gatify_output = crate::ir2gate::gatify(
+        let gatify_output = gatify(
             &ir_fn,
-            crate::ir2gate::GatifyOptions {
+            GatifyOptions {
                 fold: false,
                 hash: false,
                 check_equivalence: false,
-                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+                adder_mapping: AdderMapping::default(),
             },
         )
         .unwrap();
@@ -2156,7 +2157,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 fold: true,               // Folding shouldn't affect this test
                 check_equivalence: false, // Not needed for this map check
                 hash: true,
-                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+                adder_mapping: AdderMapping::default(),
             },
         )
         .unwrap();

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigOperand, AigRef, GateFn};
+use crate::aig::{AigOperand, AigRef, GateFn};
 use anyhow::Result;
 use std::fmt::{self, Debug};
 

@@ -10,8 +10,7 @@
 //! inconsistency so that upstream tooling can rely on strong invariants when
 //! manipulating the resulting `GateFn`.
 
-use crate::gate;
-use crate::gate::{AigNode, AigOperand};
+use crate::aig::{AigNode, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use std::collections::HashMap;
 
@@ -19,7 +18,7 @@ use std::collections::HashMap;
 /// operand (useful for debugging / diagnostics).
 #[derive(Debug)]
 pub struct LoadAigerResult {
-    pub gate_fn: gate::GateFn,
+    pub gate_fn: GateFn,
     pub var_to_operand: HashMap<u32, AigOperand>,
 }
 
@@ -301,7 +300,7 @@ fn split_base_bit(name: &str) -> Option<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emit_aiger::emit_aiger;
+    use crate::aig_serdes::emit_aiger::emit_aiger;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::test_utils::structurally_equivalent;
 

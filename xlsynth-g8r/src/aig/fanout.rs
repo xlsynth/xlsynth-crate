@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::gate::{AigNode, GateFn};
+use crate::aig::gate::{AigNode, GateFn};
 
 /// Computes a histogram of fanout counts for all nodes in the given GateFn.
 ///

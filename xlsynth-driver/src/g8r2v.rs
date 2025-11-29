@@ -17,12 +17,12 @@ pub fn handle_g8r2v(matches: &clap::ArgMatches) -> Result<(), String> {
 
     let g8r_contents = std::fs::read_to_string(g8r_input_file)
         .map_err(|e| format!("Failed to read .g8r file '{}': {}", g8r_input_file, e))?;
-    let gate_fn = xlsynth_g8r::gate::GateFn::from_str(&g8r_contents)
+    let gate_fn = xlsynth_g8r::aig::GateFn::try_from(g8r_contents.as_str())
         .map_err(|e| format!("Failed to parse GateFn from '{}': {}", g8r_input_file, e))?;
 
     let final_module_name = module_name_override.as_deref().unwrap_or(&gate_fn.name);
 
-    let netlist_str = xlsynth_g8r::emit_netlist::emit_netlist(
+    let netlist_str = xlsynth_g8r::aig_serdes::emit_netlist::emit_netlist(
         final_module_name,
         &gate_fn,
         flop_inputs,

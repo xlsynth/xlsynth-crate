@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_g8r::gate::GateFn;
+use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::test_utils::{load_bf16_add_sample, structurally_equivalent};
 
 #[test]
