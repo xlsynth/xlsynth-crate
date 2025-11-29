@@ -94,6 +94,16 @@ def _clzt10_dslx() -> str:
     return "import std;\n" "\n" "fn main(x: u10) -> u4 {\n" "    std::clzt(x)\n" "}\n"
 
 
+def _abs_diff_8_dslx() -> str:
+    return (
+        "import abs_diff;\n"
+        "\n"
+        "fn main(x: u8, y: u8) -> u8 {\n"
+        "    abs_diff::to_corrected(abs_diff::abs_diff(x, y))\n"
+        "}\n"
+    )
+
+
 def _collect_git_info(cwd: Path) -> Dict[str, object]:
     info: Dict[str, object] = {}
     try:
@@ -134,7 +144,7 @@ def _collect_env() -> Dict[str, Optional[str]]:
     return {k: os.environ.get(k) for k in keys}
 
 
-KNOWN_WORKLOADS = ("bf16_add", "bf16_mul", "clzt_10")
+KNOWN_WORKLOADS = ("bf16_add", "bf16_mul", "clzt_10", "abs_diff_8")
 
 
 def main() -> int:
@@ -188,8 +198,12 @@ def main() -> int:
                 if wl in ("bf16_add", "bf16_mul"):
                     op = "add" if wl == "bf16_add" else "mul"
                     _write_text(tmp_dslx, _bf16_dslx(op))
-                else:
+                elif wl == "clzt_10":
                     _write_text(tmp_dslx, _clzt10_dslx())
+                elif wl == "abs_diff_8":
+                    _write_text(tmp_dslx, _abs_diff_8_dslx())
+                else:
+                    raise ValueError(f"unhandled workload {wl}")
                 # Get optimized IR via dslx2ir --opt
                 try:
                     dslx2ir_opt_args = [
@@ -300,6 +314,8 @@ def main() -> int:
         _write_text(dslx_path, _bf16_dslx(op))
     elif args.workload == "clzt_10":
         _write_text(dslx_path, _clzt10_dslx())
+    elif args.workload == "abs_diff_8":
+        _write_text(dslx_path, _abs_diff_8_dslx())
     else:
         sys.stderr.write(f"error: unsupported workload: {args.workload}\n")
         return 2
