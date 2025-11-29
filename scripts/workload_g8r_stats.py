@@ -6,6 +6,7 @@ Generate g8r stats bundle for a selected BF16 workload.
 Outputs into --out-dir:
 - <workload>.x (DSLX)
 - <workload>.ir, <workload>.opt.ir
+- <workload>.stripped.opt.ir (optimized IR without position data)
 - <workload>.g8r (GateFn text), <workload>.g8r.bin (bincode)
 - <workload>.sv (netlist)
 - report.txt (human-readable ir2gates report incl. repeated structures)
@@ -21,6 +22,8 @@ Usage:
   python scripts/workload_g8r_stats.py --workload bf16_add --out-dir /tmp/bf16stats
   python scripts/workload_g8r_stats.py --workload bf16_mul --out-dir /tmp/bf16stats
   python scripts/workload_g8r_stats.py --workload clzt_10  --out-dir /tmp/clztstats
+  # If --workload is omitted, prints a summary table for all known workloads:
+  #   workload nodes depth
 """
 
 import argparse
@@ -28,6 +31,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -112,15 +116,18 @@ def _collect_env() -> Dict[str, Optional[str]]:
     return {k: os.environ.get(k) for k in keys}
 
 
+KNOWN_WORKLOADS = ("bf16_add", "bf16_mul", "clzt_10")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate g8r stats bundle for BF16 workloads."
     )
     parser.add_argument(
         "--workload",
-        required=True,
-        choices=["bf16_add", "bf16_mul", "clzt_10"],
-        help="Workload to generate (bf16_add|bf16_mul|clzt_10).",
+        required=False,
+        choices=list(KNOWN_WORKLOADS),
+        help="Workload to generate (bf16_add|bf16_mul|clzt_10). If omitted, prints a summary table for all.",
     )
     parser.add_argument(
         "--out-dir",
@@ -145,9 +152,69 @@ def main() -> int:
 
     # File paths
     base = args.workload
+    if base is None:
+        # Summary mode: print table of nodes/depth for all known workloads.
+        print("workload nodes depth")
+        dslx_path_env = os.environ.get("DSLX_PATH")
+        for wl in KNOWN_WORKLOADS:
+            with tempfile.TemporaryDirectory(prefix=f"g8r_{wl}_") as tmpd:
+                tmp = Path(tmpd)
+                tmp_dslx = tmp / f"{wl}.x"
+                if wl in ("bf16_add", "bf16_mul"):
+                    op = "add" if wl == "bf16_add" else "mul"
+                    _write_text(tmp_dslx, _bf16_dslx(op))
+                else:
+                    _write_text(tmp_dslx, _clzt10_dslx())
+                # Get optimized IR via dslx2ir --opt
+                try:
+                    dslx2ir_opt_args = [
+                        "xlsynth-driver",
+                        "dslx2ir",
+                        "--dslx_input_file",
+                        str(tmp_dslx),
+                        "--dslx_top",
+                        "main",
+                        "--opt",
+                        "true",
+                    ]
+                    if dslx_stdlib_path:
+                        dslx2ir_opt_args += ["--dslx_stdlib_path", dslx_stdlib_path]
+                    if dslx_path_env:
+                        dslx2ir_opt_args += ["--dslx_path", dslx_path_env]
+                    res = _run_cmd(dslx2ir_opt_args, cwd=repo)
+                    tmp_opt_ir = tmp / f"{wl}.opt.ir"
+                    _write_text(tmp_opt_ir, res.stdout)
+                except subprocess.CalledProcessError as e:
+                    sys.stderr.write(e.stderr or "")
+                    print(f"{wl} - -")
+                    continue
+                # Compute stats via ir2g8r --stats-out
+                tmp_stats = tmp / "stats.json"
+                try:
+                    _run_cmd(
+                        [
+                            "xlsynth-driver",
+                            "ir2g8r",
+                            str(tmp_opt_ir),
+                            "--stats-out",
+                            str(tmp_stats),
+                        ],
+                        cwd=repo,
+                        # Capture and discard stdout to avoid GateFn text polluting the table.
+                        capture_stdout=True,
+                    )
+                    stats = json.loads(tmp_stats.read_text(encoding="utf-8"))
+                    nodes = stats.get("live_nodes", "-")
+                    depth = stats.get("deepest_path", "-")
+                    print(f"{wl} {nodes} {depth}")
+                except subprocess.CalledProcessError as e:
+                    sys.stderr.write(e.stderr or "")
+                    print(f"{wl} - -")
+        return 0
     dslx_path = out_dir / f"{base}.x"
     ir_path = out_dir / f"{base}.ir"
     opt_ir_path = out_dir / f"{base}.opt.ir"
+    opt_ir_stripped_path = out_dir / f"{base}.stripped.opt.ir"
     g8r_txt_path = out_dir / f"{base}.g8r"
     g8r_bin_path = out_dir / f"{base}.g8r.bin"
     sv_path = out_dir / f"{base}.sv"
@@ -212,6 +279,22 @@ def main() -> int:
         sys.stderr.write("error: dslx2ir --opt failed\n")
         return 3
 
+    # 3a) Strip position data from optimized IR
+    try:
+        res = _run_cmd(
+            [
+                "xlsynth-driver",
+                "ir-strip-pos-data",
+                str(opt_ir_path),
+            ],
+            cwd=repo,
+        )
+        _write_text(opt_ir_stripped_path, res.stdout)
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write(e.stderr or "")
+        sys.stderr.write("error: ir-strip-pos-data failed\n")
+        return 3
+
     # 3b) ir2gates (human-readable report to stdout; capture to report.txt)
     try:
         res = _run_cmd(
@@ -258,6 +341,7 @@ def main() -> int:
             "dslx": str(dslx_path),
             "ir": str(ir_path),
             "opt_ir": str(opt_ir_path),
+            "opt_ir_stripped": str(opt_ir_stripped_path),
             "g8r_txt": str(g8r_txt_path),
             "g8r_bin": str(g8r_bin_path),
             "netlist_sv": str(sv_path),
