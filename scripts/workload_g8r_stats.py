@@ -98,8 +98,8 @@ def _abs_diff_8_dslx() -> str:
     return (
         "import abs_diff;\n"
         "\n"
-        "fn main(x: u8, y: u8) -> u8 {\n"
-        "    abs_diff::to_corrected(abs_diff::abs_diff(x, y))\n"
+        "fn main(x: u8, y: u8) -> abs_diff::AbsDiffResult<8> {\n"
+        "    abs_diff::abs_diff(x, y)\n"
         "}\n"
     )
 
