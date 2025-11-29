@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_g8r::emit_aiger::emit_aiger;
-use xlsynth_g8r::gate_builder::GateBuilderOptions;
-use xlsynth_g8r::load_aiger::load_aiger;
+use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
+use xlsynth_g8r::aig::GateBuilderOptions;
+use xlsynth_g8r::aig_serdes::load_aiger::load_aiger;
 use xlsynth_g8r::test_utils::structurally_equivalent;
 use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
 

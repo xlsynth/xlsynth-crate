@@ -15,7 +15,6 @@ use rand_pcg::Pcg64Mcg;
 
 // Imports from the xlsynth_g8r crate
 use crate::aig::gate::GateFn;
-use crate::aig::get_summary_stats::get_summary_stats;
 use crate::aig::{dce, get_summary_stats};
 use crate::aig_serdes::ir2gate::{self, GatifyOptions};
 use crate::aig_sim::gate_simd::{self, Vec256};

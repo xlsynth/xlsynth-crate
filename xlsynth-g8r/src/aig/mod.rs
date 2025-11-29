@@ -15,3 +15,4 @@ pub mod match_and_rewrite;
 pub mod topo;
 
 pub use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
+pub use crate::gate_builder::{GateBuilder, GateBuilderOptions};

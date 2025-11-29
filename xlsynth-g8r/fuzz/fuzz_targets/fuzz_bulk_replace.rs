@@ -7,11 +7,10 @@ use rand::prelude::IteratorRandom;
 use rand::Rng;
 use std::collections::HashMap;
 
-use xlsynth_g8r::bulk_replace::{bulk_replace, SubstitutionMap};
-use xlsynth_g8r::dce::dce;
-use xlsynth_g8r::gate::{AigBitVector, AigOperand, AigRef, GateFn};
-use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::gate_sim::{eval, Collect};
+use xlsynth_g8r::aig::bulk_replace::{bulk_replace, SubstitutionMap};
+use xlsynth_g8r::aig::dce::dce;
+use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateFn, GateBuilder, GateBuilderOptions};
+use xlsynth_g8r::aig_sim::gate_sim::{eval, Collect};
 
 use xlsynth_pir::fuzz_utils;
 
