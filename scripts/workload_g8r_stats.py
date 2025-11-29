@@ -8,7 +8,8 @@ Outputs into --out-dir:
 - <workload>.ir, <workload>.opt.ir
 - <workload>.stripped.opt.ir (optimized IR without position data)
 - <workload>.g8r (GateFn text), <workload>.g8r.bin (bincode)
-- <workload>.sv (netlist)
+- <workload>.gv (gate-level netlist emitted from GateFn)
+- <workload>.combo.v (IR-level combinational SystemVerilog codegen via ir2combo)
 - report.txt (human-readable ir2gates report incl. repeated structures)
 - stats.json (core stats only; no toggle data)
 - run.json (run metadata)
@@ -172,6 +173,8 @@ def main() -> int:
         )
         return 1
 
+    xlsynth_tools_env = os.environ.get("XLSYNTH_TOOLS")
+
     # File paths
     base = args.workload
     if base is None:
@@ -272,10 +275,24 @@ def main() -> int:
     opt_ir_stripped_path = out_dir / f"{base}.stripped.opt.ir"
     g8r_txt_path = out_dir / f"{base}.g8r"
     g8r_bin_path = out_dir / f"{base}.g8rbin"
-    sv_path = out_dir / f"{base}.sv"
+    gv_path = out_dir / f"{base}.gv"
+    codegen_combo_path = out_dir / f"{base}.combo.v"
     report_txt_path = out_dir / "report.txt"
     stats_json_path = out_dir / "stats.json"
     run_json_path = out_dir / "run.json"
+    netlist_flags: list[str] = ["--netlist-out", str(gv_path)]
+    toolchain_flag: list[str] = []
+    toolchain_meta: Optional[str] = None
+    if xlsynth_tools_env:
+        toolchain_path = out_dir / "xlsynth-toolchain.toml"
+        tool_path_value = Path(xlsynth_tools_env).expanduser().resolve()
+        toolchain_content = (
+            "[toolchain]\n" f"tool_path = {json.dumps(str(tool_path_value))}\n"
+        )
+        _write_text(toolchain_path, toolchain_content)
+        toolchain_flag = ["--toolchain", str(toolchain_path)]
+        toolchain_meta = str(toolchain_path)
+    combo_generated = False
 
     # 1) Emit DSLX
     if args.workload in ("bf16_add", "bf16_mul"):
@@ -375,8 +392,7 @@ def main() -> int:
                 str(opt_ir_path),
                 "--stats-out",
                 str(stats_json_path),
-                "--netlist-out",
-                str(sv_path),
+                *netlist_flags,
                 "--bin-out",
                 str(g8r_bin_path),
             ],
@@ -387,6 +403,33 @@ def main() -> int:
         sys.stderr.write(e.stderr or "")
         sys.stderr.write("error: ir2g8r failed\n")
         return 4
+
+    combo_generated = False
+    if toolchain_flag:
+        try:
+            res = _run_cmd(
+                [
+                    str(driver),
+                    *toolchain_flag,
+                    "ir2combo",
+                    str(opt_ir_path),
+                    "--delay_model",
+                    "unit",
+                    "--use_system_verilog",
+                    "true",
+                ],
+                cwd=repo,
+            )
+            _write_text(codegen_combo_path, res.stdout)
+            combo_generated = True
+        except subprocess.CalledProcessError as e:
+            sys.stderr.write(e.stderr or "")
+            sys.stderr.write("error: ir2combo failed\n")
+            return 3
+    else:
+        sys.stderr.write(
+            "info: skipping ir2combo because no toolchain configuration is available.\n"
+        )
 
     # 4a) Prove GateFn equivalence across engines and capture JSON report.
     # We compare the text-vs-binary serializations using the driver's g8r-equiv.
@@ -423,7 +466,8 @@ def main() -> int:
             "opt_ir_stripped": str(opt_ir_stripped_path),
             "g8r_txt": str(g8r_txt_path),
             "g8r_bin": str(g8r_bin_path),
-            "netlist_sv": str(sv_path),
+            "netlist_gv": str(gv_path),
+            "codegen_combo_v": str(codegen_combo_path) if combo_generated else None,
             "stats_json": str(stats_json_path),
             "proof_json": str(proof_json_path),
         },
@@ -431,6 +475,7 @@ def main() -> int:
         "xlsynth_driver": _collect_driver_version(repo, driver),
         "cargo_metadata": _collect_cargo_metadata(repo),
         "env": _collect_env(),
+        "toolchain": toolchain_meta,
     }
     run_json_path.write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
