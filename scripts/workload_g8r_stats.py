@@ -40,6 +40,23 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _resolve_xlsynth_driver(repo_root: Path) -> Path:
+    # Prefer a locally built release driver; fall back to debug if present.
+    candidates = [
+        repo_root / "target" / "release" / "xlsynth-driver",
+        # repo_root / "target" / "debug" / "xlsynth-driver",
+    ]
+    for cand in candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return cand
+    raise FileNotFoundError(
+        "xlsynth-driver not found. Expected at:\n"
+        f"  {candidates[0]}\n"
+        "Please build it first, e.g.:\n"
+        "  cargo build -p xlsynth-driver --release"
+    )
+
+
 def _run_cmd(
     args: list[str],
     *,
@@ -92,10 +109,10 @@ def _collect_git_info(cwd: Path) -> Dict[str, object]:
     return info
 
 
-def _collect_driver_version(cwd: Path) -> Dict[str, object]:
+def _collect_driver_version(cwd: Path, driver_path: Path) -> Dict[str, object]:
     try:
-        out = _run_cmd(["xlsynth-driver", "version"], cwd=cwd).stdout.strip()
-        return {"version": out}
+        out = _run_cmd([str(driver_path), "version"], cwd=cwd).stdout.strip()
+        return {"version": out, "exe": str(driver_path)}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -140,6 +157,13 @@ def main() -> int:
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve and require a locally built xlsynth-driver binary.
+    try:
+        driver = _resolve_xlsynth_driver(repo)
+    except FileNotFoundError as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+
     # Ensure DSLX stdlib is discoverable.
     dslx_stdlib_path = os.environ.get("DSLX_STDLIB_PATH")
     if not dslx_stdlib_path:
@@ -168,7 +192,7 @@ def main() -> int:
                 # Get optimized IR via dslx2ir --opt
                 try:
                     dslx2ir_opt_args = [
-                        "xlsynth-driver",
+                        str(driver),
                         "dslx2ir",
                         "--dslx_input_file",
                         str(tmp_dslx),
@@ -193,7 +217,7 @@ def main() -> int:
                 try:
                     _run_cmd(
                         [
-                            "xlsynth-driver",
+                            str(driver),
                             "ir2g8r",
                             str(tmp_opt_ir),
                             "--stats-out",
@@ -216,7 +240,7 @@ def main() -> int:
     opt_ir_path = out_dir / f"{base}.opt.ir"
     opt_ir_stripped_path = out_dir / f"{base}.stripped.opt.ir"
     g8r_txt_path = out_dir / f"{base}.g8r"
-    g8r_bin_path = out_dir / f"{base}.g8r.bin"
+    g8r_bin_path = out_dir / f"{base}.g8rbin"
     sv_path = out_dir / f"{base}.sv"
     report_txt_path = out_dir / "report.txt"
     stats_json_path = out_dir / "stats.json"
@@ -235,7 +259,7 @@ def main() -> int:
     # 2) dslx2ir
     try:
         dslx2ir_args = [
-            "xlsynth-driver",
+            str(driver),
             "dslx2ir",
             "--dslx_input_file",
             str(dslx_path),
@@ -258,7 +282,7 @@ def main() -> int:
     # 3) optimized IR via dslx2ir --opt (avoids needing the IR-level top symbol)
     try:
         dslx2ir_opt_args = [
-            "xlsynth-driver",
+            str(driver),
             "dslx2ir",
             "--dslx_input_file",
             str(dslx_path),
@@ -283,7 +307,7 @@ def main() -> int:
     try:
         res = _run_cmd(
             [
-                "xlsynth-driver",
+                str(driver),
                 "ir-strip-pos-data",
                 str(opt_ir_path),
             ],
@@ -299,7 +323,7 @@ def main() -> int:
     try:
         res = _run_cmd(
             [
-                "xlsynth-driver",
+                str(driver),
                 "ir2gates",
                 str(opt_ir_path),
             ],
@@ -315,7 +339,7 @@ def main() -> int:
     try:
         res = _run_cmd(
             [
-                "xlsynth-driver",
+                str(driver),
                 "ir2g8r",
                 str(opt_ir_path),
                 "--stats-out",
@@ -333,6 +357,30 @@ def main() -> int:
         sys.stderr.write("error: ir2g8r failed\n")
         return 4
 
+    # 4a) Prove GateFn equivalence across engines and capture JSON report.
+    # We compare the text-vs-binary serializations using the driver's g8r-equiv.
+    # Note: This runs multiple engines (including an IR-based checker when configured)
+    # and writes a JSON report to proof.json; we don't fail the overall script if the
+    # prover exits non-zero, but we do capture its stdout/stderr for postmortem.
+    proof_json_path = out_dir / "proof.json"
+    try:
+        res = _run_cmd(
+            [
+                str(driver),
+                "g8r-equiv",
+                str(g8r_txt_path),
+                str(g8r_bin_path),
+            ],
+            cwd=repo,
+            check=False,  # Do not make the entire script fail if any engine disagrees.
+        )
+        _write_text(proof_json_path, res.stdout or "")
+        if res.returncode != 0 and (res.stderr or "").strip():
+            sys.stderr.write(res.stderr)
+    except Exception as e:
+        sys.stderr.write(f"warning: failed to run g8r-equiv: {type(e).__name__}: {e}\n")
+        # Still continue; proof.json may be empty or missing.
+
     # 5) Metadata
     run_meta = {
         "workload": args.workload,
@@ -346,9 +394,10 @@ def main() -> int:
             "g8r_bin": str(g8r_bin_path),
             "netlist_sv": str(sv_path),
             "stats_json": str(stats_json_path),
+            "proof_json": str(proof_json_path),
         },
         "git": _collect_git_info(repo),
-        "xlsynth_driver": _collect_driver_version(repo),
+        "xlsynth_driver": _collect_driver_version(repo, driver),
         "cargo_metadata": _collect_cargo_metadata(repo),
         "env": _collect_env(),
     }

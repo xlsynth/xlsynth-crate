@@ -85,6 +85,12 @@ fn gatify_priority_sel(
         cases.len()
     );
 
+    if cases.len() == 1 && default_bits.is_some() {
+        assert_eq!(selector_bits.get_bit_count(), 1);
+        let selector = selector_bits.get_lsb(0);
+        return gb.add_mux2_vec(selector, &default_bits.unwrap(), &cases[0]);
+    }
+
     let mut masked_cases = vec![];
     // As we process cases we track whether any prior case had been selected.
     let mut any_prior_selected = gb.get_false();
