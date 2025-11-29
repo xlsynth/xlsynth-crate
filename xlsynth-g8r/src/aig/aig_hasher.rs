@@ -3,8 +3,8 @@
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
-use crate::gate::{AigNode, AigOperand, AigRef};
-use crate::topo::postorder_for_aig_refs_node_only;
+use crate::aig::gate::{AigNode, AigOperand, AigRef};
+use crate::aig::topo::postorder_for_aig_refs_node_only;
 
 /// Holds the "latest/best" depth and AigRef for a given hash.
 struct HashData {
@@ -174,7 +174,7 @@ impl AigHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::{AigNode, AigOperand, AigRef};
+    use crate::aig::gate::{AigNode, AigOperand, AigRef};
     use crate::test_utils::{setup_graph_with_redundancies, setup_simple_graph};
 
     #[test]

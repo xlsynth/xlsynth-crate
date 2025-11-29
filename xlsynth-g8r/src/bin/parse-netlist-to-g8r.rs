@@ -13,7 +13,7 @@ use xlsynth_g8r::liberty::cell_formula::{self, Term};
 use xlsynth_g8r::liberty_proto;
 
 use prost::Message;
-use xlsynth_g8r::gate2ir::gate_fn_to_xlsynth_ir;
+use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
 use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
 #[derive(Parser, Debug)]

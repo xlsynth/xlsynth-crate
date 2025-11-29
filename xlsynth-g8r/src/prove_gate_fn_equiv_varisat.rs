@@ -11,10 +11,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::gate::{AigNode, AigRef, GateFn};
+use crate::aig::gate::{AigNode, AigRef, GateFn};
+use crate::aig::topo::extract_cone;
 use crate::propose_equiv::EquivNode;
 pub use crate::prove_gate_fn_equiv_common::EquivResult;
-use crate::topo::extract_cone;
 use varisat::ExtendFormula;
 use xlsynth::IrBits;
 
@@ -426,7 +426,7 @@ mod tests {
     use rand::SeedableRng;
 
     use crate::{
-        gate::GateFn,
+        aig::gate::GateFn,
         propose_equiv::{EquivNode, propose_equivalence_classes},
         test_utils::{
             Opt, load_bf16_add_sample, load_bf16_mul_sample, setup_graph_with_redundancies,

@@ -6,7 +6,7 @@
 //! * gatify_add_ripple_carry: instantiates a ripple-carry adder
 //! * gatify_barrel_shifter: instantiates a barrel shifter (logarithmic stages)
 
-use crate::gate::{self, AigBitVector, AigOperand};
+use crate::aig::gate::{self, AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gate_builder::ReductionKind;
 
@@ -469,10 +469,10 @@ pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool)
 #[cfg(test)]
 mod tests {
     use crate::{
+        aig::gate::AigBitVector,
+        aig_serdes::ir2gate::{gatify_ule_via_adder, gatify_ule_via_bit_tests},
         check_equivalence,
-        gate::AigBitVector,
         gate_builder::GateBuilderOptions,
-        ir2gate::{gatify_ule_via_adder, gatify_ule_via_bit_tests},
     };
 
     use super::*;

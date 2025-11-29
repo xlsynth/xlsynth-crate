@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::topo;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -44,11 +45,11 @@ pub fn push_negation_primitive(g: &mut GateFn, node: AigRef) -> Result<(), &'sta
             }
         }
         if changed {
-            output.bit_vector = crate::gate::AigBitVector::from_lsb_is_index_0(&ops);
+            output.bit_vector = AigBitVector::from_lsb_is_index_0(&ops);
         }
     }
 
-    crate::topo::debug_assert_no_cycles(&g.gates, "push_negation_primitive");
+    topo::debug_assert_no_cycles(&g.gates, "push_negation_primitive");
     Ok(())
 }
 
@@ -104,7 +105,7 @@ impl Transform for PushNegationTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::AigRef;
+    use crate::aig::gate::AigRef;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     #[test]

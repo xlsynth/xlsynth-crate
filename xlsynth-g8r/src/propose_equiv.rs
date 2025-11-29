@@ -2,8 +2,8 @@
 
 //! Functionality for proposing equivalence classes via concrete simulation.
 
-use crate::gate::{AigNode, AigRef, GateFn};
-use crate::gate_sim::{self, Collect, GateSimResult};
+use crate::aig::{AigNode, AigRef, GateFn};
+use crate::aig_sim::gate_sim::{self, Collect, GateSimResult};
 use bitvec::vec::BitVec;
 use xlsynth::IrBits;
 use xlsynth_pir::fuzz_utils::arbitrary_irbits;

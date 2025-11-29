@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::gate::{AigNode, AigRef, GateFn};
+use crate::aig::{AigNode, AigRef, GateFn};
 use crate::prove_gate_fn_equiv_common::EquivResult;
 use z3::{
     Config, Context, SatResult, Solver,

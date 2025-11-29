@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -203,7 +203,7 @@ impl Transform for RemoveFalseAndTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::AigNode;
+    use crate::aig::gate::AigNode;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::test_utils::setup_simple_graph;
 

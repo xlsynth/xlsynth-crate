@@ -13,11 +13,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::Builder;
-use xlsynth_g8r::gate::GateFn;
-use xlsynth_g8r::get_summary_stats::SummaryStats;
+use xlsynth_g8r::aig::GateFn;
+use xlsynth_g8r::aig::get_summary_stats::SummaryStats;
 
-use xlsynth_g8r::fraig::{IterationBounds, fraig_optimize};
-use xlsynth_g8r::get_summary_stats;
+use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize};
+use xlsynth_g8r::aig::get_summary_stats;
 use xlsynth_g8r::mcmc_logic::{Best, McmcOptions, Objective, cost, load_start, mcmc};
 
 use std::time::{Duration, Instant};

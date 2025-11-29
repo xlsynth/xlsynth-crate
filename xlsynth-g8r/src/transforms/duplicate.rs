@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigRef, GateFn};
-use crate::topo::topo_sort_refs;
+use crate::aig::gate::{AigBitVector, AigNode, AigRef, GateFn};
+use crate::aig::topo::topo_sort_refs;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -115,7 +115,7 @@ pub fn unduplicate<R: rand::Rng + ?Sized>(g: &mut GateFn, rng: &mut R) -> Option
             }
         }
         if modified_ops {
-            output_spec.bit_vector = crate::gate::AigBitVector::from_lsb_is_index_0(&current_ops);
+            output_spec.bit_vector = AigBitVector::from_lsb_is_index_0(&current_ops);
         }
     }
     Some(kill)
@@ -316,7 +316,7 @@ impl Transform for UnduplicateGateTransform {
                             }
                             if modified_ops {
                                 output_spec.bit_vector =
-                                    crate::gate::AigBitVector::from_lsb_is_index_0(&current_ops);
+                                    AigBitVector::from_lsb_is_index_0(&current_ops);
                             }
                         }
                         Ok(())
@@ -347,7 +347,7 @@ impl Transform for UnduplicateGateTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::AigRef;
+    use crate::aig::gate::AigRef;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::test_utils::setup_simple_graph;
 

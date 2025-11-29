@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::{AigNode, AigOperand, AigRef, GateFn};
 use crate::use_count::get_id_to_use_count;
 
 fn traverse_to_structure(
@@ -73,7 +73,7 @@ pub fn find_structures(f: &GateFn) -> HashMap<String, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gate::AigBitVector;
+    use crate::aig::AigBitVector;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     #[test]

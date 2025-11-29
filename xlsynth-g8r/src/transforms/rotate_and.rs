@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
-use crate::topo::reaches_target as node_reaches_target;
+use crate::aig::topo;
+use crate::aig::topo::reaches_target as node_reaches_target;
+use crate::aig::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -68,7 +69,7 @@ pub fn rotate_and_right_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &
     }
 
     // Sanity-check: ensure we did not introduce cycles.
-    crate::topo::debug_assert_no_cycles(&g.gates, "rotate_and_right_primitive");
+    topo::debug_assert_no_cycles(&g.gates, "rotate_and_right_primitive");
     Ok(())
 }
 
@@ -128,7 +129,7 @@ pub fn rotate_and_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
     }
 
     // Sanity-check that we didn't create a cycle.
-    crate::topo::debug_assert_no_cycles(&g.gates, "rotate_and_left_primitive");
+    topo::debug_assert_no_cycles(&g.gates, "rotate_and_left_primitive");
     Ok(())
 }
 

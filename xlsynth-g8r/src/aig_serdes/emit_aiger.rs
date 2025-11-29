@@ -27,7 +27,7 @@
 // while still compiling with `--release` (they become no-ops outside of debug
 // builds).
 
-use crate::gate::{self, AigNode, AigOperand};
+use crate::aig::gate::{self, AigNode, AigOperand};
 use std::fmt::Write as _; // for write! macro on String // Needed for AigBitVector in tests
 
 /// Converts the given operand into an AIGER literal.

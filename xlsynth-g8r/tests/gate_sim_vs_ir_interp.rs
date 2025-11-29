@@ -9,11 +9,11 @@ use std::collections::HashMap;
 
 use half::bf16;
 use rand::Rng;
+use xlsynth_g8r::aig::AigRef;
+use xlsynth_g8r::aig::get_summary_stats::get_gate_depth;
+use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 #[allow(unused_imports)]
 use xlsynth_g8r::assert_within;
-use xlsynth_g8r::gate::AigRef;
-use xlsynth_g8r::gate_sim::{self, Collect};
-use xlsynth_g8r::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::test_utils::{
     Opt, flat_ir_bits_to_ir_value_bf16, ir_value_bf16_to_flat_ir_bits, load_bf16_mul_sample,
     make_bf16,

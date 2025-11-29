@@ -2,7 +2,8 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_g8r::ir2gate::gatify;
+use xlsynth_g8r::aig_serdes::ir2gate;
+use xlsynth_g8r::ir2gate_utils;
 use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
 
@@ -40,26 +41,26 @@ fuzz_target!(|sample: FuzzSample| {
     let parsed_fn = parsed_package.get_top_fn().unwrap();
 
     // Convert to gates with folding disabled to make less machinery under test.
-    let _gate_fn_no_fold = gatify(
+    let _gate_fn_no_fold = ir2gate::gatify(
         &parsed_fn,
-        xlsynth_g8r::ir2gate::GatifyOptions {
+        ir2gate::GatifyOptions {
             fold: false,
             hash: false,
             check_equivalence: true,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
+            adder_mapping: ir2gate_utils::AdderMapping::default(),
         },
     );
 
     log::info!("unfolded conversion succeeded, attempting folded version...");
 
     // Now check the folded version is also equivalent.
-    let _gate_fn_fold = gatify(
+    let _gate_fn_fold = ir2gate::gatify(
         &parsed_fn,
-        xlsynth_g8r::ir2gate::GatifyOptions {
+        ir2gate::GatifyOptions {
             fold: true,
             hash: true,
             check_equivalence: true,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
+            adder_mapping: ir2gate_utils::AdderMapping::default(),
         },
     );
 

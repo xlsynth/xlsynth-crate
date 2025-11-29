@@ -13,7 +13,7 @@
 //! Basic example usage:
 //! ```
 //! use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-//! use xlsynth_g8r::gate::{GateFn, AigBitVector, AigOperand};
+//! use xlsynth_g8r::aig::{GateFn, AigBitVector, AigOperand};
 //!
 //! let mut builder = GateBuilder::new("my_and_gate".to_string(), GateBuilderOptions::opt());
 //! let a: AigBitVector = builder.add_input("a".to_string(), 1);
@@ -30,9 +30,9 @@ use std::iter::zip;
 use xlsynth::IrBits;
 
 use crate::{
-    aig_hasher::AigHasher,
-    aig_simplify,
-    gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output},
+    aig::aig_hasher::AigHasher,
+    aig::aig_simplify,
+    aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -766,8 +766,8 @@ impl GateBuilder {
 #[cfg(test)]
 mod tests {
     use crate::{
+        aig::get_summary_stats::{SummaryStats, get_summary_stats},
         check_equivalence,
-        get_summary_stats::{SummaryStats, get_summary_stats},
     };
 
     use super::*;

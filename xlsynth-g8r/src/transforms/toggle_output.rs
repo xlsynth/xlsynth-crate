@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigBitVector, AigOperand, GateFn};
+use crate::aig::{AigBitVector, AigOperand, GateFn, topo};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -94,7 +94,7 @@ impl Transform for ToggleOutputBitTransform {
             } => {
                 let res = do_toggle_output_bit(g, *output_idx, *bit_idx);
                 // Assert strong invariant: toggling output bit must not create cycles.
-                crate::topo::debug_assert_no_cycles(&g.gates, "toggle_output_bit");
+                topo::debug_assert_no_cycles(&g.gates, "toggle_output_bit");
                 res
             }
             _ => Err(anyhow!(
@@ -113,7 +113,7 @@ impl Transform for ToggleOutputBitTransform {
 mod tests {
     use super::*;
     use crate::{
-        gate::AigRef,
+        aig::AigRef,
         gate_builder::{GateBuilder, GateBuilderOptions},
     };
 

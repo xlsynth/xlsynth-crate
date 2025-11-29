@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::GateFn;
-use crate::gate_sim::{Collect, eval};
+use crate::aig::{AigNode, GateFn};
+use crate::aig_sim::gate_sim::{Collect, eval};
 use bitvec::vec::BitVec;
 use serde::Serialize;
 use xlsynth::IrBits;
@@ -60,7 +60,7 @@ pub fn count_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> ToggleSt
         .iter()
         .enumerate()
         .filter_map(|(idx, gate)| {
-            if matches!(gate, crate::gate::AigNode::And2 { .. }) {
+            if matches!(gate, AigNode::And2 { .. }) {
                 Some(idx)
             } else {
                 None
@@ -147,7 +147,7 @@ pub fn count_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> ToggleSt
 mod tests {
     use super::*;
     use crate::{
-        gate::AigBitVector,
+        aig::gate::AigBitVector,
         gate_builder::{GateBuilder, GateBuilderOptions},
     };
     use xlsynth::IrBits;

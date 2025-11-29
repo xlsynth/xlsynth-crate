@@ -9,7 +9,7 @@
 //! All computations therefore boil down to bit-wise operations on these
 //! 256-bit vectors.
 
-use crate::gate::{AigNode, GateFn};
+use crate::aig::gate::{AigNode, GateFn};
 use core::simd::u64x4;
 use std::ops::{BitAnd, Not};
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigRef, GateFn};
-use crate::topo::reaches_target as node_reaches_target;
+use crate::aig::gate::{AigNode, AigRef, GateFn};
+use crate::aig::topo::{self, reaches_target as node_reaches_target};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };
@@ -48,7 +48,7 @@ pub fn and_absorb_right_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &
         *b = inner_b;
     }
 
-    crate::topo::debug_assert_no_cycles(&g.gates, "and_absorb_right_primitive");
+    topo::debug_assert_no_cycles(&g.gates, "and_absorb_right_primitive");
     Ok(())
 }
 
@@ -91,7 +91,7 @@ pub fn and_absorb_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
         *b = inner_b;
     }
 
-    crate::topo::debug_assert_no_cycles(&g.gates, "and_absorb_left_primitive");
+    topo::debug_assert_no_cycles(&g.gates, "and_absorb_left_primitive");
     Ok(())
 }
 

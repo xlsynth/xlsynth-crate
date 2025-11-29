@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigRef, GateFn};
-use crate::get_summary_stats::get_gate_depth;
+use crate::aig::get_summary_stats::get_gate_depth;
+use crate::aig::{AigNode, AigRef, GateFn};
 use crate::use_count::get_id_to_use_count;
 use std::collections::HashMap;
 

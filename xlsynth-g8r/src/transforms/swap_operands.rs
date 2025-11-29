@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigRef, GateFn};
+use crate::aig::{AigNode, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };

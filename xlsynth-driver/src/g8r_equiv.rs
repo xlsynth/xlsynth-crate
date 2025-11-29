@@ -2,8 +2,8 @@
 
 use serde::Serialize;
 
+use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::check_equivalence::{self, IrCheckResult};
-use xlsynth_g8r::gate::GateFn;
 use xlsynth_g8r::prove_gate_fn_equiv_varisat::{self, EquivResult};
 #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
 use xlsynth_g8r::prove_gate_fn_equiv_z3;
@@ -46,7 +46,7 @@ fn load_gate_fn(path: &Path) -> Result<GateFn, String> {
     } else {
         let txt = String::from_utf8(bytes)
             .map_err(|e| format!("failed to decode utf8 from {}: {}", path.display(), e))?;
-        GateFn::from_str(&txt)
+        GateFn::try_from(txt.as_str())
             .map_err(|e| format!("failed to parse GateFn from {}: {}", path.display(), e))
     }
 }

@@ -6,11 +6,9 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use xlsynth::IrBits;
-use xlsynth_g8r::{
-    gate_sim::{self, Collect},
-    gate_simd,
-    test_utils::{Opt, load_bf16_add_sample},
-};
+use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
+use xlsynth_g8r::aig_sim::gate_simd;
+use xlsynth_g8r::test_utils::{Opt, load_bf16_add_sample};
 
 /// Number of samples that the SIMD evaluator expects (one per bit lane).
 const BATCH: usize = 256;
@@ -20,7 +18,7 @@ const BATCH: usize = 256;
 ///    `IrBits` (`&[IrBits; 2]`) suitable for `gate_sim::eval`.
 /// 2. `simd_inputs` – a Vec of `Vec256`, each representing one input bit over
 ///    the 256-wide batch, suitable for `gate_simd::eval`.
-fn prepare_inputs() -> (Vec<[IrBits; 2]>, Vec<xlsynth_g8r::gate_simd::Vec256>) {
+fn prepare_inputs() -> (Vec<[IrBits; 2]>, Vec<gate_simd::Vec256>) {
     let mut rng = StdRng::seed_from_u64(0x5eed);
 
     // First gather the scalar representation.
@@ -50,9 +48,9 @@ fn prepare_inputs() -> (Vec<[IrBits; 2]>, Vec<xlsynth_g8r::gate_simd::Vec256>) {
     }
 
     // Convert accumulators into Vec256s.
-    let simd_inputs: Vec<xlsynth_g8r::gate_simd::Vec256> = bit_accumulators
+    let simd_inputs: Vec<gate_simd::Vec256> = bit_accumulators
         .into_iter()
-        .map(|words| xlsynth_g8r::gate_simd::Vec256(core::simd::u64x4::from_array(words)))
+        .map(|words| gate_simd::Vec256(core::simd::u64x4::from_array(words)))
         .collect();
 
     (scalar_inputs, simd_inputs)

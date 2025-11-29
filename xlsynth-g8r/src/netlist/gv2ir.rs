@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate2ir::gate_fn_to_xlsynth_ir;
+use crate::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
 use crate::liberty::descriptor::liberty_descriptor_pool;
 use crate::liberty_proto::Library;
 use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;

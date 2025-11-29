@@ -6,7 +6,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use rand::prelude::SeedableRng;
 use rand_pcg::Pcg64Mcg;
 use std::time::Duration;
-use xlsynth_g8r::gate_simd::{self, Vec256};
+use xlsynth_g8r::aig_sim::gate_simd::{self, Vec256};
 use xlsynth_g8r::mcmc_logic::{
     McmcContext, McmcIterationOutput, Objective, build_transform_weights, cost, load_start,
     mcmc_iteration,
@@ -83,16 +83,17 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     baseline_outputs,
                 )
             },
-            |(
-                current_gfn,
-                current_cost,
-                mut best_gfn,
-                mut best_cost,
-                all_transforms,
-                mut rng,
-                simd_inputs,
-                baseline_outputs,
-            )| {
+            |args| {
+                let (
+                    current_gfn,
+                    current_cost,
+                    mut best_gfn,
+                    mut best_cost,
+                    all_transforms,
+                    mut rng,
+                    simd_inputs,
+                    baseline_outputs,
+                ): (_, _, _, _, _, _, Vec<Vec256>, Vec<Vec256>) = args;
                 let objective = Objective::Product;
                 let weights = build_transform_weights(&all_transforms, objective);
                 let mut context = McmcContext {

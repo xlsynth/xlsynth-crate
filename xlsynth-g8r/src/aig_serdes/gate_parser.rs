@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
+use crate::aig::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -331,8 +331,9 @@ pub fn parse_gate_fn(text: &str) -> Result<GateFn, ParseError> {
     })
 }
 
-impl GateFn {
-    pub fn from_str(text: &str) -> Result<Self, ParseError> {
+impl TryFrom<&str> for GateFn {
+    type Error = ParseError;
+    fn try_from(text: &str) -> Result<Self, Self::Error> {
         parse_gate_fn(text)
     }
 }
@@ -346,16 +347,16 @@ mod tests {
     fn test_round_trip_simple() {
         let g = setup_simple_graph().g;
         let text = g.to_string();
-        let parsed = GateFn::from_str(&text).unwrap();
+        let parsed = GateFn::try_from(text.as_str()).unwrap();
         assert!(structurally_equivalent(&g, &parsed));
     }
 
     #[test]
     fn test_parse_bool_literal() {
         let src = "fn t() -> (o: bits[1]=[%0]) { %0 = literal(true) }";
-        let _g = GateFn::from_str(src).unwrap();
+        let _g = GateFn::try_from(src).unwrap();
         let src2 = "fn t() -> (o: bits[1]=[%0]) { %0 = literal(false) }";
-        let _ = GateFn::from_str(src2).unwrap();
+        let _ = GateFn::try_from(src2).unwrap();
     }
 
     #[test]
@@ -364,7 +365,7 @@ mod tests {
 
         let g = setup_graph_for_constant_replace().g;
         let text = g.to_string();
-        let parsed = GateFn::from_str(&text).unwrap();
+        let parsed = GateFn::try_from(text.as_str()).unwrap();
         assert!(structurally_equivalent(&g, &parsed));
     }
 }

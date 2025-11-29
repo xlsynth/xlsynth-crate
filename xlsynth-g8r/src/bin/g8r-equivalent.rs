@@ -14,7 +14,7 @@ use std::process::exit;
 use anyhow::Context;
 use clap::Parser;
 
-use xlsynth_g8r::gate::GateFn;
+use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::mcmc_logic::oracle_equiv_sat;
 use xlsynth_g8r::prove_gate_fn_equiv_varisat::{self, EquivResult};
 
@@ -42,7 +42,7 @@ fn load_gfn(p: &PathBuf) -> anyhow::Result<GateFn> {
     } else {
         let txt = String::from_utf8(bytes)
             .map_err(|e| anyhow::anyhow!("failed to decode utf8 from {}: {}", p.display(), e))?;
-        GateFn::from_str(&txt)
+        GateFn::try_from(txt.as_str())
             .map_err(|e| anyhow::anyhow!("failed to parse GateFn from {}: {}", p.display(), e))
     }
 }

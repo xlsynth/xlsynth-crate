@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef, GateFn};
-use crate::topo::reaches_target as node_reaches_target;
+use crate::aig::topo::reaches_target as node_reaches_target;
+use crate::aig::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
 };

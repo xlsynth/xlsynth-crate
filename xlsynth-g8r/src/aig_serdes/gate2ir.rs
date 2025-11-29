@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::iter::zip;
 
-use crate::gate::{self, AigNode, AigOperand};
+use crate::aig::gate::{self, AigNode, AigOperand};
 use xlsynth;
 use xlsynth::{BValue, FnBuilder, IrType, IrValue, XlsynthError};
 use xlsynth_pir::ir::{self, ArrayTypeData};
@@ -279,7 +279,7 @@ pub fn gate_fn_to_xlsynth_ir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ir2gate::GatifyOptions, ir2gate::gatify};
+    use crate::{aig_serdes::ir2gate::GatifyOptions, aig_serdes::ir2gate::gatify};
     use xlsynth_pir::ir_parser;
 
     #[test]

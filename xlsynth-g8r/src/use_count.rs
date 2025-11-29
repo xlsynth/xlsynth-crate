@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::gate;
+use crate::aig::gate;
 
 /// Computes a use count for the nodes in the gate function.
 ///

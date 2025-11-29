@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::gate::{AigNode, AigOperand, AigRef};
+use crate::aig::gate::{AigNode, AigOperand, AigRef};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Returns a postorder traversal of the AIG nodes reachable from aig_ref (dedup

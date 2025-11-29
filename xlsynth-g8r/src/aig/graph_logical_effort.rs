@@ -2,8 +2,8 @@
 
 //! Graph-based logical effort worst-case delay estimation.
 
-use crate::gate::{AigRef, GateFn};
-use crate::topo::topo_sort_refs;
+use crate::aig::topo::topo_sort_refs;
+use crate::aig::{AigNode, AigRef, GateFn};
 use std::collections::HashMap;
 
 #[derive(Copy, Clone, Debug)]
@@ -26,7 +26,7 @@ struct State {
 fn worst_case_delay<F>(
     dag: &HashMap<AigRef, Vec<(AigRef, f64, f64)>>,
     pin_load: F,
-    gate_nodes: &[crate::gate::AigNode],
+    gate_nodes: &[AigNode],
 ) -> (Vec<AigRef>, f64)
 where
     F: Fn(AigRef, AigRef) -> f64,
@@ -235,7 +235,7 @@ pub fn analyze_graph_logical_effort(
     for (i, node) in gate_fn.gates.iter().enumerate() {
         let u = AigRef { id: i };
         match node {
-            crate::gate::AigNode::And2 { a, b, .. } => {
+            AigNode::And2 { a, b, .. } => {
                 dag.entry(a.node).or_default().push((u, g_nand, p_nand));
                 dag.entry(b.node).or_default().push((u, g_nand, p_nand));
             }

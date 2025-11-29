@@ -27,7 +27,7 @@ pub struct RegisterDefinition {
 fn emit_template(template: &str, keys: &HashMap<TemplateVariable, String>) -> String {
     let mut template = template.to_string();
     for (key, value) in keys {
-        let placeholder = format!("{{{{{}}}}}", key);
+        let placeholder = format!("{{{{{key}}}}}");
         template = template.replace(&placeholder, value);
     }
     template
@@ -68,7 +68,7 @@ fn emit_registers_with_templates(
             (None, Some(_)) => emit_template(opts.reg_with_en_template.as_ref().unwrap(), &keys),
             (None, None) => emit_template(opts.reg_template.as_ref().unwrap(), &keys),
         };
-        let inline_statement = file.make_inline_verilog_statement(&format!("{};", inline_string));
+        let inline_statement = file.make_inline_verilog_statement(&format!("{inline_string};"));
         match scope {
             RegisterScope::Module(module) => {
                 module.add_member_inline_statement(inline_statement);

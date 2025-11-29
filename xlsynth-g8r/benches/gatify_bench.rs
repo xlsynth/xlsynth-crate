@@ -5,8 +5,8 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use xlsynth_g8r::{
+    aig_serdes::ir2gate,
     gate_builder::GateBuilderOptions,
-    ir2gate,
     ir2gate_utils::AdderMapping,
     test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample},
 };

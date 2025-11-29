@@ -7,7 +7,7 @@ use std::{collections::HashMap, iter::zip};
 use bitvec::vec::BitVec;
 use xlsynth::IrBits;
 
-use crate::gate::{AigNode, AigOperand, GateFn};
+use crate::aig::{AigNode, AigOperand, GateFn};
 
 pub struct GateSimResult {
     pub outputs: Vec<IrBits>,
