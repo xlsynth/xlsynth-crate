@@ -13,7 +13,7 @@
 //! Basic example usage:
 //! ```
 //! use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-//! use xlsynth_g8r::gate::{GateFn, AigBitVector, AigOperand};
+//! use xlsynth_g8r::aig::{GateFn, AigBitVector, AigOperand};
 //!
 //! let mut builder = GateBuilder::new("my_and_gate".to_string(), GateBuilderOptions::opt());
 //! let a: AigBitVector = builder.add_input("a".to_string(), 1);
