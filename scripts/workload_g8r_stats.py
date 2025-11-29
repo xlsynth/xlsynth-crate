@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """
 Generate g8r stats bundle for a selected BF16 workload.
 
