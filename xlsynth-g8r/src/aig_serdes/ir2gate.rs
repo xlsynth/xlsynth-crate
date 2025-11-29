@@ -272,6 +272,13 @@ fn gatify_sel(
     default_bits: Option<AigBitVector>,
 ) -> AigBitVector {
     let case_count = cases.len();
+
+    if case_count == 2 && default_bits.is_none() {
+        assert_eq!(selector_bits.get_bit_count(), 1);
+        let selector = selector_bits.get_lsb(0);
+        return gb.add_mux2_vec(selector, &cases[0], &cases[1]);
+    }
+
     let index_decoded = gatify_decode(gb, case_count, selector_bits);
 
     let mut ohs_cases: Vec<AigBitVector> = Vec::new();
