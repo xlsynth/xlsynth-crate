@@ -148,14 +148,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--out-dir",
-        required=True,
+        required=False,
         help="Output directory to populate with artifacts.",
     )
     args = parser.parse_args()
 
     repo = _repo_root()
-    out_dir = Path(args.out_dir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve and require a locally built xlsynth-driver binary.
     try:
@@ -178,7 +176,7 @@ def main() -> int:
     base = args.workload
     if base is None:
         # Summary mode: print table of nodes/depth for all known workloads.
-        print("workload nodes depth")
+        print("workload nodes depth equiv")
         dslx_path_env = os.environ.get("DSLX_PATH")
         for wl in KNOWN_WORKLOADS:
             with tempfile.TemporaryDirectory(prefix=f"g8r_{wl}_") as tmpd:
@@ -212,29 +210,62 @@ def main() -> int:
                     sys.stderr.write(e.stderr or "")
                     print(f"{wl} - -")
                     continue
-                # Compute stats via ir2g8r --stats-out
+                # Compute stats via ir2g8r --stats-out and emit GateFn text/bin to temp.
                 tmp_stats = tmp / "stats.json"
+                tmp_g8r_txt = tmp / f"{wl}.g8r"
+                tmp_g8r_bin = tmp / f"{wl}.g8rbin"
                 try:
-                    _run_cmd(
+                    res_ir2g8r = _run_cmd(
                         [
                             str(driver),
                             "ir2g8r",
                             str(tmp_opt_ir),
                             "--stats-out",
                             str(tmp_stats),
+                            "--bin-out",
+                            str(tmp_g8r_bin),
                         ],
                         cwd=repo,
-                        # Capture and discard stdout to avoid GateFn text polluting the table.
                         capture_stdout=True,
                     )
+                    # Capture GateFn text to a temp file.
+                    _write_text(tmp_g8r_txt, res_ir2g8r.stdout)
                     stats = json.loads(tmp_stats.read_text(encoding="utf-8"))
                     nodes = stats.get("live_nodes", "-")
                     depth = stats.get("deepest_path", "-")
-                    print(f"{wl} {nodes} {depth}")
+                    # Prove equivalence between text and binary encodings via g8r-equiv.
+                    equiv_status = "error"
+                    try:
+                        res_equiv = _run_cmd(
+                            [
+                                str(driver),
+                                "g8r-equiv",
+                                str(tmp_g8r_txt),
+                                str(tmp_g8r_bin),
+                            ],
+                            cwd=repo,
+                            capture_stdout=True,
+                            check=False,
+                        )
+                        if res_equiv.returncode == 0:
+                            equiv_status = "true"
+                        elif res_equiv.returncode == 1:
+                            equiv_status = "false"
+                        else:
+                            equiv_status = "error"
+                    except Exception:
+                        equiv_status = "error"
+                    print(f"{wl} {nodes} {depth} {equiv_status}")
                 except subprocess.CalledProcessError as e:
                     sys.stderr.write(e.stderr or "")
-                    print(f"{wl} - -")
+                    print(f"{wl} - - error")
         return 0
+    # Require and prepare output directory when a specific workload is requested.
+    if not args.out_dir:
+        sys.stderr.write("error: --out-dir is required when --workload is provided.\n")
+        return 1
+    out_dir = Path(args.out_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
     dslx_path = out_dir / f"{base}.x"
     ir_path = out_dir / f"{base}.ir"
     opt_ir_path = out_dir / f"{base}.opt.ir"
