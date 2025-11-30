@@ -85,6 +85,17 @@ fn gatify_priority_sel(
         cases.len()
     );
 
+    if cases.len() == 1 && default_bits.is_some() {
+        assert_eq!(selector_bits.get_bit_count(), 1);
+        let selector = selector_bits.get_lsb(0);
+        // Note: if all the selector bits are zero we use the default bit value.
+        return gb.add_mux2_vec(
+            selector,
+            /* on_true= */ &cases[0],
+            /* on_false= */ &default_bits.unwrap(),
+        );
+    }
+
     let mut masked_cases = vec![];
     // As we process cases we track whether any prior case had been selected.
     let mut any_prior_selected = gb.get_false();
@@ -266,6 +277,15 @@ fn gatify_sel(
     default_bits: Option<AigBitVector>,
 ) -> AigBitVector {
     let case_count = cases.len();
+
+    if case_count == 2 && default_bits.is_none() {
+        assert_eq!(selector_bits.get_bit_count(), 1);
+        let selector = selector_bits.get_lsb(0);
+        return gb.add_mux2_vec(
+            selector, /* on_true= */ &cases[1], /* on_false= */ &cases[0],
+        );
+    }
+
     let index_decoded = gatify_decode(gb, case_count, selector_bits);
 
     let mut ohs_cases: Vec<AigBitVector> = Vec::new();
