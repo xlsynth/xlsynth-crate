@@ -2,6 +2,8 @@
 members = [
     "xlsynth",
     "xlsynth-sys",
+    "xlsynth-mcmc",
+    "xlsynth-mcmc-pir",
     "xlsynth-driver",
     "xlsynth-estimator",
     "xlsynth-g8r",

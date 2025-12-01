@@ -196,7 +196,7 @@ fn run_chain(
             Err(_e) => gfn.clone(),
         }
     };
-    best.try_update(metric_val, fraig_gfn);
+    let _ = best.try_update(metric_val, fraig_gfn);
     Ok(())
 }
 
@@ -290,7 +290,7 @@ fn run_explore_exploit(
                                 Err(_e) => local_gfn.clone(),
                             }
                         };
-                        best_cl.try_update(metric_val, fraig_gfn);
+                        let _ = best_cl.try_update(metric_val, fraig_gfn);
 
                         // All chains (including explorer) may jump to the
                         // latest global best if they drift too far behind.
