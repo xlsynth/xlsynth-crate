@@ -403,6 +403,7 @@ pub type DslxAttributeArgumentKind = i32;
 pub const XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_STRING: DslxAttributeArgumentKind = 0;
 pub const XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_STRING_KEY_VALUE: DslxAttributeArgumentKind = 1;
 pub const XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_INT_KEY_VALUE: DslxAttributeArgumentKind = 2;
+pub const XLS_DSLX_ATTRIBUTE_ARGUMENT_KIND_STRING_LITERAL: DslxAttributeArgumentKind = 3;
 
 pub const XLS_CALLING_CONVENTION_TYPICAL: XlsCallingConvention = 0;
 pub const XLS_CALLING_CONVENTION_IMPLICIT_TOKEN: XlsCallingConvention = 1;
@@ -816,7 +817,7 @@ extern "C" {
         bit_count: i64,
         is_signed: bool,
     ) -> *mut CVastDataType;
-    pub fn xls_vast_verilog_file_make_bit_vector_type_expr(
+    pub fn xls_vast_verilog_file_make_bit_vector_type_with_expression(
         f: *mut CVastFile,
         width_expr: *mut CVastExpression,
         is_signed: bool,
@@ -1137,11 +1138,17 @@ extern "C" {
     pub fn xls_vast_verilog_file_make_macro_statement(
         f: *mut CVastFile,
         r#ref: *mut CVastMacroRef,
+        emit_semicolon: bool,
     ) -> *mut CVastMacroStatement;
 
     pub fn xls_vast_logic_ref_get_name(v: *mut CVastLogicRef) -> *mut std::os::raw::c_char;
 
     pub fn xls_vast_verilog_file_add_include(f: *mut CVastFile, path: *const std::os::raw::c_char);
+    pub fn xls_vast_verilog_file_add_blank_line(f: *mut CVastFile, blank_line: *mut CVastBlankLine);
+    pub fn xls_vast_verilog_file_add_comment(
+        f: *mut CVastFile,
+        comment: *const std::os::raw::c_char,
+    );
     pub fn xls_vast_verilog_file_emit(f: *const CVastFile) -> *mut std::os::raw::c_char;
     pub fn xls_vast_expression_emit(expr: *mut CVastExpression) -> *mut std::os::raw::c_char;
 
@@ -2262,7 +2269,7 @@ extern "C" {
     );
     pub fn xls_vast_generate_loop_add_macro_statement(
         loop_: *mut CVastGenerateLoop,
-        macro_ref: *mut CVastMacroRef,
+        macro_statement: *mut CVastMacroStatement,
     );
 
     pub fn xls_function_type_get_param_count(fty: *mut CIrFunctionType) -> i64;
@@ -2318,6 +2325,10 @@ extern "C" {
         index: i64,
     ) -> DslxAttributeArgumentKind;
     pub fn xls_dslx_attribute_get_string_argument(
+        attribute: *const CDslxAttribute,
+        index: i64,
+    ) -> *mut std::os::raw::c_char;
+    pub fn xls_dslx_attribute_get_string_literal_argument(
         attribute: *const CDslxAttribute,
         index: i64,
     ) -> *mut std::os::raw::c_char;
