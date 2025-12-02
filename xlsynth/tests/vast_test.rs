@@ -759,16 +759,18 @@ endmodule
 }
 
 #[test]
-fn test_inline_and_blank_members() {
+fn test_inline_blank_comment_module_members() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let mut module = file.add_module("M");
     module.add_member_inline_statement(file.make_inline_verilog_statement("/* first */"));
     module.add_member_blank_line(file.make_blank_line());
+    module.add_member_comment(file.make_comment("Single line comment"));
     module.add_member_inline_statement(file.make_inline_verilog_statement("/* second */"));
     let verilog = file.emit();
     let want = r#"module M;
   /* first */
 
+  // Single line comment
   /* second */
 endmodule
 "#;
