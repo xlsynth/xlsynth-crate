@@ -626,6 +626,11 @@ impl VastModule {
         unsafe { sys::xls_vast_verilog_module_add_member_blank_line(self.inner, blank.inner) }
     }
 
+    pub fn add_member_comment(&mut self, comment: Comment) {
+        let _locked = self.parent.lock().unwrap();
+        unsafe { sys::xls_vast_verilog_module_add_member_comment(self.inner, comment.inner) }
+    }
+
     pub fn add_member_inline_statement(&mut self, stmt: InlineVerilogStatement) {
         let _locked = self.parent.lock().unwrap();
         unsafe { sys::xls_vast_verilog_module_add_member_inline_statement(self.inner, stmt.inner) }
