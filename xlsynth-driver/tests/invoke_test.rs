@@ -2603,6 +2603,44 @@ fn test_ir2g8r_emits_all_outputs() {
 }
 
 #[test]
+fn test_g8r2ir_basic_ir_output() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    // Build a simple 1-bit GateFn: y = a & a.
+    let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let y_val = g8_builder.add_and_binary(*a_val.get_lsb(0), *a_val.get_lsb(0));
+    g8_builder.add_output("y".to_string(), AigBitVector::from_bit(y_val));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2ir")
+        .arg(g8r_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r2ir failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ir_text = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Compare against golden IR to lock in the reconstructed package shape.
+    let golden_rel = "tests/test_g8r2ir_basic_ir_output.golden.ir";
+    let golden_dir = std::path::Path::new(golden_rel).parent().unwrap();
+    let _ = std::fs::create_dir_all(golden_dir);
+    compare_golden_text(&ir_text, golden_rel);
+}
+
+#[test]
 fn test_g8r2v_add_clk_port_behavior() {
     let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
     let a_val = g8_builder.add_input("a".to_string(), 1);

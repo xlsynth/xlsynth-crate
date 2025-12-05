@@ -8,6 +8,7 @@ Outputs into --out-dir:
 - <workload>.ir, <workload>.opt.ir
 - <workload>.stripped.opt.ir (optimized IR without position data)
 - <workload>.g8r (GateFn text), <workload>.g8r.bin (bincode)
+- <workload>.g8r.ir (XLS IR package reconstructed from the GateFn)
 - <workload>.gv (gate-level netlist emitted from GateFn)
 - <workload>.combo.v (IR-level combinational SystemVerilog codegen via ir2combo)
 - report.txt (human-readable ir2gates report incl. repeated structures)
@@ -289,6 +290,7 @@ def main() -> int:
     opt_ir_stripped_path = out_dir / f"{base}.stripped.opt.ir"
     g8r_txt_path = out_dir / f"{base}.g8r"
     g8r_bin_path = out_dir / f"{base}.g8rbin"
+    g8r_ir_path = out_dir / f"{base}.g8r.ir"
     gv_path = out_dir / f"{base}.gv"
     codegen_combo_path = out_dir / f"{base}.combo.v"
     report_txt_path = out_dir / "report.txt"
@@ -420,6 +422,22 @@ def main() -> int:
         sys.stderr.write("error: ir2g8r failed\n")
         return 4
 
+    # 4b) g8r2ir (reconstruct XLS IR package corresponding to the GateFn)
+    try:
+        res = _run_cmd(
+            [
+                str(driver),
+                "g8r2ir",
+                str(g8r_txt_path),
+            ],
+            cwd=repo,
+        )
+        _write_text(g8r_ir_path, res.stdout)
+    except subprocess.CalledProcessError as e:
+        sys.stderr.write(e.stderr or "")
+        sys.stderr.write("error: g8r2ir failed\n")
+        return 4
+
     combo_generated = False
     if toolchain_flag:
         try:
@@ -482,6 +500,7 @@ def main() -> int:
             "opt_ir_stripped": str(opt_ir_stripped_path),
             "g8r_txt": str(g8r_txt_path),
             "g8r_bin": str(g8r_bin_path),
+            "g8r_ir": str(g8r_ir_path),
             "netlist_gv": str(gv_path),
             "codegen_combo_v": str(codegen_combo_path) if combo_generated else None,
             "stats_json": str(stats_json_path),
