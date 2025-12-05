@@ -70,6 +70,21 @@ pub enum Signedness {
     Signed,
 }
 
+fn gatify_add_with_mapping(
+    adder_mapping: AdderMapping,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    c_in: AigOperand,
+    tag: Option<&str>,
+    gb: &mut GateBuilder,
+) -> (AigOperand, AigBitVector) {
+    match adder_mapping {
+        AdderMapping::RippleCarry => gatify_add_ripple_carry(lhs_bits, rhs_bits, c_in, tag, gb),
+        AdderMapping::BrentKung => gatify_add_brent_kung(lhs_bits, rhs_bits, c_in, tag, gb),
+        AdderMapping::KoggeStone => gatify_add_kogge_stone(lhs_bits, rhs_bits, c_in, tag, gb),
+    }
+}
+
 fn gatify_priority_sel(
     gb: &mut GateBuilder,
     output_bit_count: usize,
@@ -795,29 +810,15 @@ pub fn gatify_scmp(
     } else {
         // For multi-bit signed comparisons, compute diff = a - b = a + (not b) + 1.
         let b_complement = gb.add_not_vec(rhs_bits);
-        let (_carry, diff) = match adder_mapping {
-            AdderMapping::RippleCarry => gatify_add_ripple_carry(
-                lhs_bits,
-                &b_complement,
-                gb.get_true(),
-                Some(&format!("scmp_{}", text_id)),
-                gb,
-            ),
-            AdderMapping::BrentKung => gatify_add_brent_kung(
-                lhs_bits,
-                &b_complement,
-                gb.get_true(),
-                Some(&format!("scmp_{}", text_id)),
-                gb,
-            ),
-            AdderMapping::KoggeStone => gatify_add_kogge_stone(
-                lhs_bits,
-                &b_complement,
-                gb.get_true(),
-                Some(&format!("scmp_{}", text_id)),
-                gb,
-            ),
-        };
+        let scmp_tag = format!("scmp_{}", text_id);
+        let (_carry, diff) = gatify_add_with_mapping(
+            adder_mapping,
+            lhs_bits,
+            &b_complement,
+            gb.get_true(),
+            Some(&scmp_tag),
+            gb,
+        );
         let a_msb = lhs_bits.get_msb(0);
         let b_msb = rhs_bits.get_msb(0);
         let diff_msb = diff.get_msb(0);
@@ -1420,11 +1421,13 @@ fn gatify_internal(
                 let zero = g8_builder.add_literal(
                     &xlsynth::IrBits::make_ubits(arg_gates.get_bit_count(), 0).unwrap(),
                 );
-                let (_, result) = gatify_add_ripple_carry(
+                let neg_tag = format!("neg_{}", node.text_id);
+                let (_, result) = gatify_add_with_mapping(
+                    options.adder_mapping,
                     &not_arg,
                     &zero,
                     g8_builder.get_true(),
-                    Some(&format!("neg_{}", node.text_id)),
+                    Some(&neg_tag),
                     g8_builder,
                 );
                 env.add(node_ref, GateOrVec::BitVector(result));
@@ -1718,29 +1721,15 @@ fn gatify_internal(
                 let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
                 let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
                 assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
-                let (_c_out, gates) = match options.adder_mapping {
-                    crate::ir2gate_utils::AdderMapping::RippleCarry => gatify_add_ripple_carry(
-                        &a_gate_refs,
-                        &b_gate_refs,
-                        g8_builder.get_false(),
-                        Some(&format!("add_{}", node.text_id)),
-                        g8_builder,
-                    ),
-                    crate::ir2gate_utils::AdderMapping::BrentKung => gatify_add_brent_kung(
-                        &a_gate_refs,
-                        &b_gate_refs,
-                        g8_builder.get_false(),
-                        Some(&format!("add_{}", node.text_id)),
-                        g8_builder,
-                    ),
-                    crate::ir2gate_utils::AdderMapping::KoggeStone => gatify_add_kogge_stone(
-                        &a_gate_refs,
-                        &b_gate_refs,
-                        g8_builder.get_false(),
-                        Some(&format!("add_{}", node.text_id)),
-                        g8_builder,
-                    ),
-                };
+                let add_tag = format!("add_{}", node.text_id);
+                let (_c_out, gates) = gatify_add_with_mapping(
+                    options.adder_mapping,
+                    &a_gate_refs,
+                    &b_gate_refs,
+                    g8_builder.get_false(),
+                    Some(&add_tag),
+                    g8_builder,
+                );
                 assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
                 env.add(node_ref, GateOrVec::BitVector(gates));
             }
@@ -1749,29 +1738,15 @@ fn gatify_internal(
                 let b_gate_refs = env.get_bit_vector(*b).expect("sub rhs should be present");
                 assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
                 let b_complement = g8_builder.add_not_vec(&b_gate_refs);
-                let (_c_out, gates) = match options.adder_mapping {
-                    crate::ir2gate_utils::AdderMapping::RippleCarry => gatify_add_ripple_carry(
-                        &a_gate_refs,
-                        &b_complement,
-                        g8_builder.get_true(),
-                        Some(&format!("sub_{}", node.text_id)),
-                        g8_builder,
-                    ),
-                    crate::ir2gate_utils::AdderMapping::BrentKung => gatify_add_brent_kung(
-                        &a_gate_refs,
-                        &b_complement,
-                        g8_builder.get_true(),
-                        Some(&format!("sub_{}", node.text_id)),
-                        g8_builder,
-                    ),
-                    crate::ir2gate_utils::AdderMapping::KoggeStone => gatify_add_kogge_stone(
-                        &a_gate_refs,
-                        &b_complement,
-                        g8_builder.get_true(),
-                        Some(&format!("sub_{}", node.text_id)),
-                        g8_builder,
-                    ),
-                };
+                let sub_tag = format!("sub_{}", node.text_id);
+                let (_c_out, gates) = gatify_add_with_mapping(
+                    options.adder_mapping,
+                    &a_gate_refs,
+                    &b_complement,
+                    g8_builder.get_true(),
+                    Some(&sub_tag),
+                    g8_builder,
+                );
                 let output_bit_count = node.ty.bit_count();
                 assert_eq!(gates.get_bit_count(), output_bit_count);
                 for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
