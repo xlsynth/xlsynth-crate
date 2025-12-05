@@ -47,6 +47,7 @@ mod dslx_specialize;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod fn_eval;
+mod g8r2ir;
 mod g8r2v;
 mod g8r_equiv;
 mod gv2ir;
@@ -1191,6 +1192,16 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("g8r2ir")
+                .about("Converts a .g8r or .g8rbin GateFn file to an XLS IR package on stdout.")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("The input .g8r or .g8rbin file")
+                        .required(true)
+                        .index(1),
+                )
+        )
+        .subcommand(
             clap::Command::new("g8r-equiv")
                 .about("Checks if two GateFns are equivalent using available engines")
                 .arg(
@@ -1747,6 +1758,9 @@ fn main() {
             if let Err(e) = g8r2v::handle_g8r2v(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
             }
+        }
+        Some(("g8r2ir", subm)) => {
+            g8r2ir::handle_g8r2ir(subm, &config);
         }
         Some(("g8r-equiv", subm)) => {
             g8r_equiv::handle_g8r_equiv(subm, &config);

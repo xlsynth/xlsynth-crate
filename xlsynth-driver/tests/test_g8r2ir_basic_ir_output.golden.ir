@@ -1,0 +1,6 @@
+package gate
+
+top fn testmod(a: bits[1] id=1) -> bits[1] {
+  ret and.2: bits[1] = and(a, a, id=2)
+}
+

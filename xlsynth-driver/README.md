@@ -166,6 +166,25 @@ xlsynth-driver g8r2v my_module.g8r \
   --module-name=my_module_g8r > my_module.ugv
 ```
 
+### `g8r2ir`: GateFn to XLS IR package
+
+Converts a `.g8r` (text) or `.g8rbin` (bincode) file containing a gate-level `GateFn` into an XLS IR *package* and prints it on **stdout**.
+
+- The reconstructed IR uses the GateFn’s flattened bit-vector signature (one `bits[W]` parameter per input and a `bits[W]` or tuple-of-bits return type).
+- This is useful for IR-level inspection, equivalence checking, and debugging of GateFn transforms.
+
+Positional arguments:
+
+- `<g8r_input_file>` – input `.g8r` or `.g8rbin` file.
+
+Example usage:
+
+```shell
+xlsynth-driver g8r2ir my_module.g8r > my_module.g8r.ir
+```
+
+The output is always written to stdout; redirect to a `.ir` file as needed.
+
 ### `ir-round-trip`
 
 Parses an IR file and writes it back to stdout. Useful for validating round-trip stability and (optionally) removing position metadata.
