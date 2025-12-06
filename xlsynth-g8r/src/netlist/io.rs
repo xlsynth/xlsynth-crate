@@ -10,11 +10,11 @@
 //!   `StringInterner`.
 
 use crate::netlist::parse::{
-    Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, Parser as NetlistParser,
-    PortDirection, PortId, TokenScanner,
+    Net, NetlistModule, Parser as NetlistParser,
+    TokenScanner,
 };
 use anyhow::{Result, anyhow};
-use flate2::bufread::MultiGzDecoder as BufMultiGzDecoder;
+use flate2::read::MultiGzDecoder;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;

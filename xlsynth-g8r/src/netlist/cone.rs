@@ -16,18 +16,15 @@
 
 use crate::liberty::descriptor::liberty_descriptor_pool;
 use crate::liberty_proto::{Library, Pin, PinDirection};
-use crate::netlist::parse::{
-    Net, NetIndex, NetRef, NetlistModule, NetlistPort, Parser as NetlistParser, PortDirection,
-    PortId, TokenScanner,
-};
-use anyhow::{Result, anyhow};
-use flate2::bufread::MultiGzDecoder as BufMultiGzDecoder;
+use crate::netlist::io::{ParsedNetlist, parse_netlist_from_path};
+use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistModule, NetlistPort, PortDirection, PortId};
+use anyhow::{anyhow};
 use prost::Message;
 use prost_reflect::DynamicMessage;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::Path;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -181,10 +178,7 @@ impl<'a> ModuleConeContext<'a> {
 
         for (inst_idx, inst) in module.instances.iter().enumerate() {
             let type_sym = inst.type_name;
-            let type_name = interner
-                .resolve(type_sym)
-                .unwrap_or("<unknown>")
-                .to_string();
+            let type_name = resolve_to_string(interner, type_sym);
             let cell = cell_by_name
                 .get(type_name.as_str())
                 .copied()
@@ -204,10 +198,7 @@ impl<'a> ModuleConeContext<'a> {
             let mut ports_for_instance: HashMap<PortId, InstancePort> = HashMap::new();
 
             for (port_sym, netref) in &inst.connections {
-                let port_name = interner
-                    .resolve(*port_sym)
-                    .unwrap_or("<unknown>")
-                    .to_string();
+                let port_name = resolve_to_string(interner, *port_sym);
                 let pin = pins_by_name.get(port_name.as_str()).copied().ok_or(
                     ConeError::UnknownCellPin {
                         cell: cell.name.clone(),
@@ -273,6 +264,16 @@ impl<'a> ModuleConeContext<'a> {
             dff_types,
         })
     }
+}
+
+fn resolve_to_string(
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    sym: SymbolU32,
+) -> String {
+    interner
+        .resolve(sym)
+        .expect("symbol should always resolve in interner")
+        .to_string()
 }
 
 fn collect_net_indices(netref: &NetRef, out: &mut Vec<NetIndex>) {
@@ -346,7 +347,7 @@ where
     // Resolve the starting instance index.
     let mut matches: Vec<usize> = Vec::new();
     for (idx, inst) in module.instances.iter().enumerate() {
-        let name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
+        let name = resolve_to_string(interner, inst.instance_name);
         if name == start_instance {
             matches.push(idx);
         }
@@ -370,7 +371,7 @@ where
     let mut ports_by_name: HashMap<String, PortId> = HashMap::new();
     for p in &ctx.instance_ports[start_idx] {
         ports_by_sym.insert(p.port, p);
-        let name = interner.resolve(p.port).unwrap_or("<unknown>").to_string();
+        let name = resolve_to_string(interner, p.port);
         ports_by_name.insert(name, p.port);
     }
 
@@ -431,22 +432,13 @@ where
 
     // Emit visits for the starting instance pins.
     let start_inst = &module.instances[start_idx];
-    let inst_type_str = interner
-        .resolve(start_inst.type_name)
-        .unwrap_or("<unknown>")
-        .to_string();
-    let inst_name_str = interner
-        .resolve(start_inst.instance_name)
-        .unwrap_or("<unknown>")
-        .to_string();
+    let inst_type_str = resolve_to_string(interner, start_inst.type_name);
+    let inst_name_str = resolve_to_string(interner, start_inst.instance_name);
 
     // Ensure we only emit each (instance, port) pair once.
     let mut emitted_ports: HashSet<(usize, PortId)> = HashSet::new();
     for port_sym in &chosen_ports {
-        let port_name = interner
-            .resolve(*port_sym)
-            .unwrap_or("<unknown>")
-            .to_string();
+        let port_name = resolve_to_string(interner, *port_sym);
         if emitted_ports.insert((start_idx, *port_sym)) {
             let visit = ConeVisit {
                 instance_type: inst_type_str.clone(),
@@ -522,21 +514,9 @@ where
                     }
 
                     let nbr_inst = &ctx.module.instances[*nbr_inst_idx];
-                    let nbr_type_str = ctx
-                        .interner
-                        .resolve(nbr_inst.type_name)
-                        .unwrap_or("<unknown>")
-                        .to_string();
-                    let nbr_name_str = ctx
-                        .interner
-                        .resolve(nbr_inst.instance_name)
-                        .unwrap_or("<unknown>")
-                        .to_string();
-                    let nbr_port_name = ctx
-                        .interner
-                        .resolve(*nbr_port_sym)
-                        .unwrap_or("<unknown>")
-                        .to_string();
+                    let nbr_type_str = resolve_to_string(&ctx.interner, nbr_inst.type_name);
+                    let nbr_name_str = resolve_to_string(&ctx.interner, nbr_inst.instance_name);
+                    let nbr_port_name = resolve_to_string(&ctx.interner, *nbr_port_sym);
 
                     if emitted_ports.insert((*nbr_inst_idx, *nbr_port_sym)) {
                         let visit = ConeVisit {
@@ -605,7 +585,7 @@ pub fn visit_cone_from_paths<F>(
 where
     F: FnMut(&ConeVisit) -> ConeResult<()>,
 {
-    let parsed: ParsedNetlist = crate::netlist::io::parse_netlist_from_path(netlist_path)
+    let parsed: ParsedNetlist = parse_netlist_from_path(netlist_path)
         .map_err(|e| ConeError::NetlistParse(format!("{}", e)))?;
     let lib = load_liberty_for_cone(liberty_proto_path)?;
 
@@ -614,7 +594,7 @@ where
         Some(name) => {
             let mut found: Option<&NetlistModule> = None;
             for m in &parsed.modules {
-                let m_name = parsed.interner.resolve(m.name).unwrap_or("<unknown>");
+                let m_name = resolve_to_string(&parsed.interner, m.name);
                 if m_name == name {
                     found = Some(m);
                     break;
