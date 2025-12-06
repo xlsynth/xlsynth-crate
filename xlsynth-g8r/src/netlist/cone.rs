@@ -289,69 +289,6 @@ fn collect_net_indices(netref: &NetRef, out: &mut Vec<NetIndex>) {
     }
 }
 
-/// Convenience struct returned when parsing a netlist from disk for cone
-/// traversal.
-pub struct ParsedNetlistForCone {
-    pub modules: Vec<NetlistModule>,
-    pub nets: Vec<Net>,
-    pub interner: StringInterner<StringBackend<SymbolU32>>,
-}
-
-/// Parse a gate-level netlist (optionally gzipped) into modules, nets, and the
-/// interner needed for cone traversal.
-pub fn parse_netlist_for_cone(path: &Path) -> ConeResult<ParsedNetlistForCone> {
-    let file = File::open(path).map_err(|e| {
-        ConeError::NetlistParse(format!("opening netlist '{}': {}", path.display(), e))
-    })?;
-    let is_gz = path.extension().map(|e| e == "gz").unwrap_or(false);
-    let reader: Box<dyn Read> = if is_gz {
-        Box::new(BufMultiGzDecoder::new(BufReader::new(file)))
-    } else {
-        Box::new(file)
-    };
-
-    let lookup_path = path.to_path_buf();
-    let lookup_is_gz = is_gz;
-    let lookup = move |lineno: u32| -> Option<String> {
-        let f = File::open(&lookup_path).ok()?;
-        if lookup_is_gz {
-            let br = BufReader::new(f);
-            let gz = BufMultiGzDecoder::new(br);
-            let rdr = BufReader::new(gz);
-            rdr.lines().nth((lineno - 1) as usize).and_then(Result::ok)
-        } else {
-            let rdr = BufReader::new(f);
-            rdr.lines().nth((lineno - 1) as usize).and_then(Result::ok)
-        }
-    };
-
-    let scanner = TokenScanner::with_line_lookup(reader, Box::new(lookup));
-    let mut parser: NetlistParser<Box<dyn Read>> = NetlistParser::new(scanner);
-    let modules = parser.parse_file().map_err(|e| {
-        ConeError::NetlistParse(format!(
-            "{} at {:?}\n{}\n{}^",
-            e.message,
-            e.span,
-            parser
-                .get_line(e.span.start.lineno)
-                .unwrap_or_else(|| "<line unavailable>".to_string()),
-            " ".repeat((e.span.start.colno as usize).saturating_sub(1))
-        ))
-    })?;
-
-    if modules.is_empty() {
-        return Err(ConeError::NoModulesParsed {
-            path: path.display().to_string(),
-        });
-    }
-
-    Ok(ParsedNetlistForCone {
-        modules,
-        nets: parser.nets,
-        interner: parser.interner,
-    })
-}
-
 /// Load a Liberty proto (binary or textproto) into a `Library`.
 pub fn load_liberty_for_cone(path: &Path) -> ConeResult<Library> {
     let mut buf: Vec<u8> = Vec::new();
@@ -668,7 +605,8 @@ pub fn visit_cone_from_paths<F>(
 where
     F: FnMut(&ConeVisit) -> ConeResult<()>,
 {
-    let parsed = parse_netlist_for_cone(netlist_path)?;
+    let parsed: ParsedNetlist = crate::netlist::io::parse_netlist_from_path(netlist_path)
+        .map_err(|e| ConeError::NetlistParse(format!("{}", e)))?;
     let lib = load_liberty_for_cone(liberty_proto_path)?;
 
     // Select the target module.
