@@ -14,7 +14,8 @@
 //! visited `(instance_type, instance_name, traversal_pin)` triple in a
 //! deterministic order.
 
-use crate::liberty_proto::{Library, Pin, PinDirection};
+use crate::liberty::IndexedLibrary;
+use crate::liberty_proto::PinDirection;
 use crate::netlist::io::ParsedNetlist;
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, NetlistPort, PortDirection, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -145,14 +146,9 @@ impl<'a> ModuleConeContext<'a> {
         module: &'a NetlistModule,
         nets: &'a [Net],
         interner: &'a StringInterner<StringBackend<SymbolU32>>,
-        lib: &'a Library,
+        lib: &IndexedLibrary,
         dff_cell_names: &HashSet<String>,
     ) -> ConeResult<Self> {
-        // Build a map from Liberty cell name to &Cell.
-        let mut cell_by_name: HashMap<&str, &crate::liberty_proto::Cell> = HashMap::new();
-        for cell in &lib.cells {
-            cell_by_name.insert(cell.name.as_str(), cell);
-        }
 
         // Map from module port net symbol -> PortDirection.
         let mut port_dir_by_sym: HashMap<SymbolU32, PortDirection> = HashMap::new();
@@ -174,32 +170,24 @@ impl<'a> ModuleConeContext<'a> {
         for (inst_idx, inst) in module.instances.iter().enumerate() {
             let type_sym = inst.type_name;
             let type_name = resolve_to_string(interner, type_sym);
-            let cell = cell_by_name
-                .get(type_name.as_str())
-                .copied()
+            let cell = lib
+                .get_cell(type_name.as_str())
                 .ok_or(ConeError::UnknownCellType { cell: type_name })?;
 
             if dff_cell_names.contains(&cell.name) {
                 dff_types.insert(type_sym);
             }
 
-            // Build per-port summary and net driver/load maps.
-            // First, build a lookup of Liberty pins by name for this cell.
-            let mut pins_by_name: HashMap<&str, &Pin> = HashMap::new();
-            for pin in &cell.pins {
-                pins_by_name.insert(pin.name.as_str(), pin);
-            }
-
             let mut ports_for_instance: HashMap<PortId, InstancePort> = HashMap::new();
 
             for (port_sym, netref) in &inst.connections {
                 let port_name = resolve_to_string(interner, *port_sym);
-                let pin = pins_by_name.get(port_name.as_str()).copied().ok_or(
-                    ConeError::UnknownCellPin {
+                let pin = lib
+                    .pin_by_name(cell.name.as_str(), port_name.as_str())
+                    .ok_or(ConeError::UnknownCellPin {
                         cell: cell.name.clone(),
                         pin: port_name,
-                    },
-                )?;
+                    })?;
 
                 let dir = PinDirection::try_from(pin.direction).unwrap_or(PinDirection::Invalid);
                 let entry = ports_for_instance
@@ -281,7 +269,7 @@ pub fn visit_module_cone<OnVisitFn>(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    lib: &Library,
+    lib: &IndexedLibrary,
     dff_cell_names: &HashSet<String>,
     start_instance: &str,
     start_pins: Option<&[String]>,
@@ -523,7 +511,7 @@ where
 /// and run cone traversal using a provided Liberty library.
 pub fn visit_cone_in_parsed_netlist<OnVisitFn>(
     parsed: &ParsedNetlist,
-    lib: &Library,
+    lib: &IndexedLibrary,
     module_name: Option<&str>,
     start_instance: &str,
     start_pins: Option<&[String]>,
@@ -565,7 +553,7 @@ where
         module,
         &parsed.nets,
         &parsed.interner,
-        &lib,
+        lib,
         dff_cell_names,
         start_instance,
         start_pins,
@@ -578,7 +566,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty_proto::{Cell, Library};
+    use crate::liberty::IndexedLibrary;
+    use crate::liberty_proto::{Cell, Library, Pin};
     use crate::netlist::parse::{
         Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
@@ -676,6 +665,7 @@ mod tests {
         };
 
         let lib = make_simple_inverter_lib();
+        let indexed = IndexedLibrary::new(lib);
 
         let mut visits: Vec<ConeVisit> = Vec::new();
         let dff_cells: HashSet<String> = HashSet::new();
@@ -683,7 +673,7 @@ mod tests {
             &module,
             &nets,
             &interner,
-            &lib,
+            &indexed,
             &dff_cells,
             "u1",
             None,
@@ -828,13 +818,14 @@ mod tests {
             ],
         };
 
+        let indexed = IndexedLibrary::new(lib);
         let mut visits: Vec<ConeVisit> = Vec::new();
         let dff_cells: HashSet<String> = HashSet::new();
         visit_module_cone(
             &module,
             &nets,
             &interner,
-            &lib,
+            &indexed,
             &dff_cells,
             "u1",
             None,

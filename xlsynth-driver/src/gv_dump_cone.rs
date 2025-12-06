@@ -6,10 +6,9 @@ use csv::WriterBuilder;
 use std::collections::HashSet;
 use std::io::BufWriter;
 use std::path::Path;
-use xlsynth_g8r::netlist::{
-    self,
-    cone::{ConeError, ConeVisit, StopCondition, TraversalDirection},
-};
+use xlsynth_g8r::netlist::cone::{ConeError, ConeVisit, StopCondition, TraversalDirection};
+use xlsynth_g8r::liberty::IndexedLibrary;
+use xlsynth_g8r::netlist;
 
 fn parse_traversal_direction(dir: &str) -> Result<TraversalDirection, String> {
     match dir {
@@ -193,9 +192,11 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
         }
     };
 
+    let indexed_lib = IndexedLibrary::new(liberty_lib);
+
     let visit_result = netlist::cone::visit_cone_in_parsed_netlist(
         &parsed_netlist,
-        &liberty_lib,
+        &indexed_lib,
         module_name,
         instance_name.as_str(),
         start_pins.as_ref().map(|v| v.as_slice()),
