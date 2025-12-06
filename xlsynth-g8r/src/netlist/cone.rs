@@ -7,8 +7,8 @@
 //!
 //! - A `NetlistModule` plus the global `nets` array and `interner`.
 //! - A Liberty `Library` describing per-cell pin directions.
-//! - A start instance name, optional start pin list, traversal direction, and
-//!   a stop condition.
+//! - A start instance name, optional start pin list, traversal direction, and a
+//!   stop condition.
 //!
 //! The traversal walks instance-to-instance and invokes a user callback on each
 //! visited `(instance_type, instance_name, traversal_pin)` triple in a
@@ -92,7 +92,11 @@ impl std::fmt::Display for ConeError {
                 name, count
             ),
             ConeError::UnknownCellType { cell } => {
-                write!(f, "cell type '{}' is not present in the Liberty library", cell)
+                write!(
+                    f,
+                    "cell type '{}' is not present in the Liberty library",
+                    cell
+                )
             }
             ConeError::UnknownCellPin { cell, pin } => write!(
                 f,
@@ -139,7 +143,8 @@ struct ModuleConeContext<'a> {
     /// For each `NetIndex`, whether it corresponds to a module port and, if so,
     /// in which direction.
     net_port_direction: Vec<Option<PortDirection>>,
-    /// Set of cell type symbols classified as DFFs (used for StopCondition::AtDff).
+    /// Set of cell type symbols classified as DFFs (used for
+    /// StopCondition::AtDff).
     dff_types: HashSet<PortId>,
 }
 
@@ -159,7 +164,10 @@ impl<'a> ModuleConeContext<'a> {
 
         // Map from module port net symbol -> PortDirection.
         let mut port_dir_by_sym: HashMap<SymbolU32, PortDirection> = HashMap::new();
-        for NetlistPort { direction, name, .. } in &module.ports {
+        for NetlistPort {
+            direction, name, ..
+        } in &module.ports
+        {
             port_dir_by_sym.insert(*name, direction.clone());
         }
 
@@ -200,16 +208,14 @@ impl<'a> ModuleConeContext<'a> {
                     .resolve(*port_sym)
                     .unwrap_or("<unknown>")
                     .to_string();
-                let pin = pins_by_name
-                    .get(port_name.as_str())
-                    .copied()
-                    .ok_or(ConeError::UnknownCellPin {
+                let pin = pins_by_name.get(port_name.as_str()).copied().ok_or(
+                    ConeError::UnknownCellPin {
                         cell: cell.name.clone(),
                         pin: port_name,
-                    })?;
+                    },
+                )?;
 
-                let dir =
-                    PinDirection::try_from(pin.direction).unwrap_or(PinDirection::Invalid);
+                let dir = PinDirection::try_from(pin.direction).unwrap_or(PinDirection::Invalid);
                 let entry = ports_for_instance
                     .entry(*port_sym)
                     .or_insert_with(|| InstancePort {
@@ -295,11 +301,7 @@ pub struct ParsedNetlistForCone {
 /// interner needed for cone traversal.
 pub fn parse_netlist_for_cone(path: &Path) -> ConeResult<ParsedNetlistForCone> {
     let file = File::open(path).map_err(|e| {
-        ConeError::NetlistParse(format!(
-            "opening netlist '{}': {}",
-            path.display(),
-            e
-        ))
+        ConeError::NetlistParse(format!("opening netlist '{}': {}", path.display(), e))
     })?;
     let is_gz = path.extension().map(|e| e == "gz").unwrap_or(false);
     let reader: Box<dyn Read> = if is_gz {
@@ -355,19 +357,11 @@ pub fn load_liberty_for_cone(path: &Path) -> ConeResult<Library> {
     let mut buf: Vec<u8> = Vec::new();
     File::open(path)
         .map_err(|e| {
-            ConeError::Liberty(format!(
-                "opening liberty proto '{}': {}",
-                path.display(),
-                e
-            ))
+            ConeError::Liberty(format!("opening liberty proto '{}': {}", path.display(), e))
         })?
         .read_to_end(&mut buf)
         .map_err(|e| {
-            ConeError::Liberty(format!(
-                "reading liberty proto '{}': {}",
-                path.display(),
-                e
-            ))
+            ConeError::Liberty(format!("reading liberty proto '{}': {}", path.display(), e))
         })?;
 
     let lib = Library::decode(&buf[..]).or_else(|_| {
@@ -375,8 +369,7 @@ pub fn load_liberty_for_cone(path: &Path) -> ConeResult<Library> {
         let msg_desc = descriptor_pool
             .get_message_by_name("liberty.Library")
             .ok_or_else(|| anyhow!("missing liberty.Library descriptor"))?;
-        let dyn_msg =
-            DynamicMessage::parse_text_format(msg_desc, std::str::from_utf8(&buf)?)?;
+        let dyn_msg = DynamicMessage::parse_text_format(msg_desc, std::str::from_utf8(&buf)?)?;
         let encoded = dyn_msg.encode_to_vec();
         Ok::<Library, anyhow::Error>(Library::decode(&encoded[..])?)
     });
@@ -416,9 +409,7 @@ where
     // Resolve the starting instance index.
     let mut matches: Vec<usize> = Vec::new();
     for (idx, inst) in module.instances.iter().enumerate() {
-        let name = interner
-            .resolve(inst.instance_name)
-            .unwrap_or("<unknown>");
+        let name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
         if name == start_instance {
             matches.push(idx);
         }
@@ -450,12 +441,12 @@ where
     match start_pins {
         Some(list) => {
             for pin_name in list {
-                let port_sym = ports_by_name.get(pin_name).ok_or(
-                    ConeError::Invariant(format!(
+                let port_sym = ports_by_name
+                    .get(pin_name)
+                    .ok_or(ConeError::Invariant(format!(
                         "start pin '{}' not found on instance '{}'",
                         pin_name, start_instance
-                    )),
-                )?;
+                    )))?;
                 let p = ports_by_sym
                     .get(port_sym)
                     .ok_or(ConeError::Invariant(format!(
@@ -685,10 +676,7 @@ where
         Some(name) => {
             let mut found: Option<&NetlistModule> = None;
             for m in &parsed.modules {
-                let m_name = parsed
-                    .interner
-                    .resolve(m.name)
-                    .unwrap_or("<unknown>");
+                let m_name = parsed.interner.resolve(m.name).unwrap_or("<unknown>");
                 if m_name == name {
                     found = Some(m);
                     break;
@@ -730,8 +718,8 @@ mod tests {
     use crate::netlist::parse::{
         Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
-    use std::collections::HashSet;
     use pretty_assertions::assert_eq;
+    use std::collections::HashSet;
 
     fn make_simple_inverter_lib() -> Library {
         Library {
@@ -766,9 +754,18 @@ mod tests {
         let top = interner.get_or_intern("top");
 
         let nets = vec![
-            Net { name: a, width: None },
-            Net { name: n1, width: None },
-            Net { name: y, width: None },
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n1,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
         ];
 
         let ports = vec![
@@ -863,9 +860,18 @@ mod tests {
         let top = interner.get_or_intern("top");
 
         let nets = vec![
-            Net { name: a, width: None },
-            Net { name: n1, width: None },
-            Net { name: y, width: None },
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n1,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
         ];
 
         let ports = vec![

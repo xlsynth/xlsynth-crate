@@ -6,9 +6,7 @@ use csv::WriterBuilder;
 use std::collections::HashSet;
 use std::io::BufWriter;
 use std::path::Path;
-use xlsynth_g8r::netlist::cone::{
-    ConeError, ConeVisit, StopCondition, TraversalDirection,
-};
+use xlsynth_g8r::netlist::cone::{ConeError, ConeVisit, StopCondition, TraversalDirection};
 
 fn parse_traversal_direction(dir: &str) -> Result<TraversalDirection, String> {
     match dir {
@@ -67,10 +65,7 @@ fn cone_error_to_report_message(err: ConeError) -> (String, Vec<(&'static str, S
         ),
         ConeError::AmbiguousInstance { name, count } => (
             "start instance is ambiguous in module".to_string(),
-            vec![
-                ("instance", name),
-                ("count", format!("{}", count)),
-            ],
+            vec![("instance", name), ("count", format!("{}", count))],
         ),
         ConeError::UnknownCellType { cell } => (
             "cell type from netlist is missing in Liberty library".to_string(),
@@ -78,10 +73,7 @@ fn cone_error_to_report_message(err: ConeError) -> (String, Vec<(&'static str, S
         ),
         ConeError::UnknownCellPin { cell, pin } => (
             "cell pin from netlist is missing in Liberty library".to_string(),
-            vec![
-                ("cell_type", cell),
-                ("pin", pin),
-            ],
+            vec![("cell_type", cell), ("pin", pin)],
         ),
         ConeError::NoModulesParsed { path } => (
             "no modules parsed from netlist".to_string(),
