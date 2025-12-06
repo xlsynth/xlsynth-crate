@@ -53,6 +53,7 @@ mod g8r_equiv;
 mod gv2ir;
 mod gv_instance_csv;
 mod gv_read_stats;
+mod gv_dump_cone;
 mod ir2combo;
 mod ir2delayinfo;
 mod ir2gates;
@@ -1151,6 +1152,78 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("gv-dump-cone")
+                .about("Traverse the cone around a gate-level instance and emit CSV rows (instance_type,instance_name,traversal_pin) to stdout")
+                .arg(
+                    clap::Arg::new("netlist")
+                        .help("Input gate-level netlist (.gv or .gv.gz)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .value_name("LIBERTY_PROTO")
+                        .help("Liberty proto (.proto or .textproto) describing the cell library used by the netlist")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Optional module name to restrict the search; required when the netlist contains multiple modules"),
+                )
+                .arg(
+                    clap::Arg::new("instance")
+                        .long("instance")
+                        .value_name("INSTANCE")
+                        .help("Instance name at the cone center")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("start-pins")
+                        .long("start-pins")
+                        .value_name("CSV")
+                        .help("Optional comma-separated list of starting pins on the instance; defaults to all input pins for --traverse=fanin and all output pins for --traverse=fanout")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("traverse")
+                        .long("traverse")
+                        .value_name("DIRECTION")
+                        .help("Traversal direction from the instance: fanin or fanout")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("dff_cells")
+                        .long("dff_cells")
+                        .value_name("CSV")
+                        .help("Comma-separated list of DFF cell names that should act as stop boundaries when using --stop-at-dff")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("stop-at-levels")
+                        .long("stop-at-levels")
+                        .value_name("N")
+                        .help("Stop traversal once instances beyond distance N from the start instance would be reached"),
+                )
+                .arg(
+                    clap::Arg::new("stop-at-dff")
+                        .long("stop-at-dff")
+                        .help("Stop traversal at DFF-like cells inferred from the Liberty library; do not traverse beyond them")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("stop-at-block-port")
+                        .long("stop-at-block-port")
+                        .help("Stop traversal at module ports; do not traverse beyond the block boundary")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
             clap::Command::new("g8r2v")
                 .about("Converts a .g8r or .g8rbin file to a .ugv netlist on stdout, optionally adding a clock port as the first input.")
                 .arg(
@@ -1753,6 +1826,9 @@ fn main() {
         }
         Some(("gv-read-stats", subm)) => {
             gv_read_stats::handle_gv_read_stats(subm);
+        }
+        Some(("gv-dump-cone", subm)) => {
+            gv_dump_cone::handle_gv_dump_cone(subm);
         }
         Some(("g8r2v", subm)) => {
             if let Err(e) = g8r2v::handle_g8r2v(subm) {
