@@ -47,6 +47,25 @@ pub enum NetRef {
     Concat(Vec<NetRef>), // { a, b[5], c[7:0], 1'b0 }
 }
 
+impl NetRef {
+    /// Collect all `NetIndex` values reachable from this `NetRef` into `out`.
+    pub fn collect_net_indices(&self, out: &mut Vec<NetIndex>) {
+        match self {
+            NetRef::Simple(idx)
+            | NetRef::BitSelect(idx, _)
+            | NetRef::PartSelect(idx, _, _) => {
+                out.push(*idx);
+            }
+            NetRef::Concat(elems) => {
+                for e in elems {
+                    e.collect_net_indices(out);
+                }
+            }
+            NetRef::Literal(_) | NetRef::Unconnected => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetlistInstance {
     pub type_name: PortId,

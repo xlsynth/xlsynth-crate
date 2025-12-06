@@ -16,7 +16,7 @@
 
 use crate::liberty_proto::{Library, Pin, PinDirection};
 use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
-use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistModule, NetlistPort, PortDirection, PortId};
+use crate::netlist::parse::{Net, NetIndex, NetlistModule, NetlistPort, PortDirection, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::path::Path;
@@ -212,7 +212,7 @@ impl<'a> ModuleConeContext<'a> {
                     });
 
                 let mut net_indices: Vec<NetIndex> = Vec::new();
-                collect_net_indices(netref, &mut net_indices);
+                netref.collect_net_indices(&mut net_indices);
                 for idx in net_indices {
                     if idx.0 >= nets.len() {
                         return Err(ConeError::Invariant(format!(
@@ -270,20 +270,6 @@ fn resolve_to_string(
         .resolve(sym)
         .expect("symbol should always resolve in interner")
         .to_string()
-}
-
-fn collect_net_indices(netref: &NetRef, out: &mut Vec<NetIndex>) {
-    match netref {
-        NetRef::Simple(idx) | NetRef::BitSelect(idx, _) | NetRef::PartSelect(idx, _, _) => {
-            out.push(*idx);
-        }
-        NetRef::Concat(elems) => {
-            for e in elems {
-                collect_net_indices(e, out);
-            }
-        }
-        NetRef::Literal(_) | NetRef::Unconnected => {}
-    }
 }
 
 /// Traverse the cone around `start_instance` in `module`, calling `on_visit`
