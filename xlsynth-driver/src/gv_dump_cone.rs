@@ -6,7 +6,10 @@ use csv::WriterBuilder;
 use std::collections::HashSet;
 use std::io::BufWriter;
 use std::path::Path;
-use xlsynth_g8r::netlist::cone::{ConeError, ConeVisit, StopCondition, TraversalDirection};
+use xlsynth_g8r::netlist::{
+    self,
+    cone::{ConeError, ConeVisit, StopCondition, TraversalDirection},
+};
 
 fn parse_traversal_direction(dir: &str) -> Result<TraversalDirection, String> {
     match dir {
@@ -165,9 +168,34 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
         );
     }
 
-    let visit_result = xlsynth_g8r::netlist::cone::visit_cone_from_paths(
-        Path::new(netlist_path),
-        Path::new(liberty_proto_path),
+    let parsed_netlist = match netlist::io::parse_netlist_from_path(Path::new(netlist_path)) {
+        Ok(p) => p,
+        Err(e) => {
+            let (msg, details) =
+                cone_error_to_report_message(ConeError::NetlistParse(format!("{}", e)));
+            let mut kvs: Vec<(&str, &str)> = Vec::new();
+            for (k, v) in &details {
+                kvs.push((*k, v.as_str()));
+            }
+            report_cli_error_and_exit(&msg, None, kvs);
+        }
+    };
+
+    let liberty_lib = match netlist::io::load_liberty_from_path(Path::new(liberty_proto_path)) {
+        Ok(l) => l,
+        Err(e) => {
+            let (msg, details) = cone_error_to_report_message(ConeError::Liberty(format!("{}", e)));
+            let mut kvs: Vec<(&str, &str)> = Vec::new();
+            for (k, v) in &details {
+                kvs.push((*k, v.as_str()));
+            }
+            report_cli_error_and_exit(&msg, None, kvs);
+        }
+    };
+
+    let visit_result = netlist::cone::visit_cone_in_parsed_netlist(
+        &parsed_netlist,
+        &liberty_lib,
         module_name,
         instance_name.as_str(),
         start_pins.as_ref().map(|v| v.as_slice()),

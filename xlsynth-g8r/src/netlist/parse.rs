@@ -51,9 +51,7 @@ impl NetRef {
     /// Collect all `NetIndex` values reachable from this `NetRef` into `out`.
     pub fn collect_net_indices(&self, out: &mut Vec<NetIndex>) {
         match self {
-            NetRef::Simple(idx)
-            | NetRef::BitSelect(idx, _)
-            | NetRef::PartSelect(idx, _, _) => {
+            NetRef::Simple(idx) | NetRef::BitSelect(idx, _) | NetRef::PartSelect(idx, _, _) => {
                 out.push(*idx);
             }
             NetRef::Concat(elems) => {

@@ -9,21 +9,18 @@
 //! - Producing the parsed modules together with the global `nets` array and
 //!   `StringInterner`.
 
-use crate::netlist::parse::{
-    Net, NetlistModule, Parser as NetlistParser,
-    TokenScanner,
-};
 use crate::liberty::descriptor::liberty_descriptor_pool;
 use crate::liberty_proto::Library;
+use crate::netlist::parse::{Net, NetlistModule, Parser as NetlistParser, TokenScanner};
 use anyhow::{Result, anyhow};
 use flate2::read::MultiGzDecoder;
+use prost::Message;
+use prost_reflect::DynamicMessage;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
-use prost::Message;
-use prost_reflect::DynamicMessage;
 
 /// Parsed netlist plus the global nets and interner.
 pub struct ParsedNetlist {

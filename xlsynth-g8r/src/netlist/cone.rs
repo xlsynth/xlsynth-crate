@@ -15,11 +15,10 @@
 //! deterministic order.
 
 use crate::liberty_proto::{Library, Pin, PinDirection};
-use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
+use crate::netlist::io::ParsedNetlist;
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, NetlistPort, PortDirection, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
-use std::path::Path;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
@@ -275,8 +274,9 @@ fn resolve_to_string(
 /// Traverse the cone around `start_instance` in `module`, calling `on_visit`
 /// for each visited `(instance_type, instance_name, traversal_pin)` triple.
 ///
-/// This is the core traversal routine; callers that need file I/O should use
-/// [`visit_cone_from_paths`] instead.
+/// This is the core traversal routine; callers that need file I/O should first
+/// parse a netlist and load a Liberty library in outer layers and then invoke
+/// this function (or [`visit_cone_in_parsed_netlist`]).
 pub fn visit_module_cone<OnVisitFn>(
     module: &NetlistModule,
     nets: &[Net],
@@ -519,10 +519,10 @@ where
     Ok(())
 }
 
-/// High-level convenience entry point: parse the netlist from disk, select a
-/// module, and run cone traversal using a provided Liberty library.
-pub fn visit_cone_from_path_and_lib<OnVisitFn>(
-    netlist_path: &Path,
+/// High-level convenience entry point: select a module from a parsed netlist
+/// and run cone traversal using a provided Liberty library.
+pub fn visit_cone_in_parsed_netlist<OnVisitFn>(
+    parsed: &ParsedNetlist,
     lib: &Library,
     module_name: Option<&str>,
     start_instance: &str,
@@ -535,9 +535,6 @@ pub fn visit_cone_from_path_and_lib<OnVisitFn>(
 where
     OnVisitFn: FnMut(&ConeVisit) -> ConeResult<()>,
 {
-    let parsed: ParsedNetlist = parse_netlist_from_path(netlist_path)
-        .map_err(|e| ConeError::NetlistParse(format!("{}", e)))?;
-
     // Select the target module.
     let module = match module_name {
         Some(name) => {
@@ -575,38 +572,6 @@ where
         direction,
         stop,
         &mut on_visit,
-    )
-}
-
-/// High-level convenience entry point: parse the netlist and Liberty proto from
-/// disk, select a module, and run cone traversal.
-pub fn visit_cone_from_paths<OnVisitFn>(
-    netlist_path: &Path,
-    liberty_proto_path: &Path,
-    module_name: Option<&str>,
-    start_instance: &str,
-    start_pins: Option<&[String]>,
-    direction: TraversalDirection,
-    stop: StopCondition,
-    dff_cell_names: &HashSet<String>,
-    on_visit: OnVisitFn,
-) -> ConeResult<()>
-where
-    OnVisitFn: FnMut(&ConeVisit) -> ConeResult<()>,
-{
-    let lib = load_liberty_from_path(liberty_proto_path)
-        .map_err(|e| ConeError::Liberty(format!("{}", e)))?;
-
-    visit_cone_from_path_and_lib(
-        netlist_path,
-        &lib,
-        module_name,
-        start_instance,
-        start_pins,
-        direction,
-        stop,
-        dff_cell_names,
-        on_visit,
     )
 }
 
