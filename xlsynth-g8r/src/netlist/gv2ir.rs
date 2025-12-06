@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
-use crate::liberty::descriptor::liberty_descriptor_pool;
-use crate::liberty_proto::Library;
 use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
+use crate::netlist::io::load_liberty_from_path;
 use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
 use anyhow::{Context, Result, anyhow};
 use flate2::bufread::MultiGzDecoder as BufMultiGzDecoder;
-use prost::Message;
-use prost_reflect::DynamicMessage;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -44,23 +41,6 @@ fn line_lookup(path: &Path, is_gz: bool) -> Box<dyn Fn(u32) -> Option<String>> {
     })
 }
 
-fn load_liberty_proto(path: &Path) -> Result<Library> {
-    let mut buf = Vec::new();
-    File::open(path)
-        .with_context(|| format!("opening liberty proto '{}'", path.display()))?
-        .read_to_end(&mut buf)?;
-    let lib = Library::decode(&buf[..]).or_else(|_| {
-        let descriptor_pool = liberty_descriptor_pool();
-        let msg_desc = descriptor_pool
-            .get_message_by_name("liberty.Library")
-            .ok_or_else(|| anyhow!("missing liberty.Library descriptor"))?;
-        let dyn_msg = DynamicMessage::parse_text_format(msg_desc, std::str::from_utf8(&buf)?)?;
-        let encoded = dyn_msg.encode_to_vec();
-        Ok::<Library, anyhow::Error>(Library::decode(&encoded[..])?)
-    })?;
-    Ok(lib)
-}
-
 pub fn convert_gv2ir_paths(
     netlist_path: &Path,
     liberty_proto_path: &Path,
@@ -93,7 +73,7 @@ pub fn convert_gv2ir_paths(
     let module = &modules[0];
 
     // Liberty
-    let liberty_lib = load_liberty_proto(liberty_proto_path)?;
+    let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
 
     // Build DFF cell sets: identity and inverted. Start from provided names
     // (identity), then add by matching formula strings (if provided).

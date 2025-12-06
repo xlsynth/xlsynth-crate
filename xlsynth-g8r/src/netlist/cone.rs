@@ -14,17 +14,11 @@
 //! visited `(instance_type, instance_name, traversal_pin)` triple in a
 //! deterministic order.
 
-use crate::liberty::descriptor::liberty_descriptor_pool;
 use crate::liberty_proto::{Library, Pin, PinDirection};
-use crate::netlist::io::{ParsedNetlist, parse_netlist_from_path};
+use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
 use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistModule, NetlistPort, PortDirection, PortId};
-use anyhow::{anyhow};
-use prost::Message;
-use prost_reflect::DynamicMessage;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -42,8 +36,8 @@ pub enum StopCondition {
     /// Stop once instances beyond this graph distance (in edges) would be
     /// reached. Level 0 is the starting instance.
     Levels(u32),
-    /// Stop at DFF instances as inferred from Liberty; do not traverse beyond
-    /// them, but include them in the visit stream.
+    /// Stop at DFF cell instances; do not traverse beyond them, but include
+    /// them in the visit stream.
     AtDff,
     /// Stop at module ports (primary inputs/outputs); do not traverse beyond
     /// the block boundary, but include instances that connect to the port.
@@ -128,9 +122,11 @@ struct InstancePort {
 
 /// Per-module context with adjacency maps and cached metadata.
 struct ModuleConeContext<'a> {
+    /// The module being traversed.
     module: &'a NetlistModule,
     nets: &'a [Net],
     interner: &'a StringInterner<StringBackend<SymbolU32>>,
+
     /// For each instance index in `module.instances`, the list of its ports.
     instance_ports: Vec<Vec<InstancePort>>,
     /// For each `NetIndex`, the instance ports that drive the net.
@@ -290,36 +286,9 @@ fn collect_net_indices(netref: &NetRef, out: &mut Vec<NetIndex>) {
     }
 }
 
-/// Load a Liberty proto (binary or textproto) into a `Library`.
+/// Load a Liberty proto for cone traversal, mapping errors into `ConeError`.
 pub fn load_liberty_for_cone(path: &Path) -> ConeResult<Library> {
-    let mut buf: Vec<u8> = Vec::new();
-    File::open(path)
-        .map_err(|e| {
-            ConeError::Liberty(format!("opening liberty proto '{}': {}", path.display(), e))
-        })?
-        .read_to_end(&mut buf)
-        .map_err(|e| {
-            ConeError::Liberty(format!("reading liberty proto '{}': {}", path.display(), e))
-        })?;
-
-    let lib = Library::decode(&buf[..]).or_else(|_| {
-        let descriptor_pool = liberty_descriptor_pool();
-        let msg_desc = descriptor_pool
-            .get_message_by_name("liberty.Library")
-            .ok_or_else(|| anyhow!("missing liberty.Library descriptor"))?;
-        let dyn_msg = DynamicMessage::parse_text_format(msg_desc, std::str::from_utf8(&buf)?)?;
-        let encoded = dyn_msg.encode_to_vec();
-        Ok::<Library, anyhow::Error>(Library::decode(&encoded[..])?)
-    });
-
-    match lib {
-        Ok(v) => Ok(v),
-        Err(e) => Err(ConeError::Liberty(format!(
-            "decoding liberty proto '{}': {}",
-            path.display(),
-            e
-        ))),
-    }
+    load_liberty_from_path(path).map_err(|e| ConeError::Liberty(format!("{}", e)))
 }
 
 /// Traverse the cone around `start_instance` in `module`, calling `on_visit`
@@ -570,8 +539,9 @@ where
 }
 
 /// High-level convenience entry point: parse the netlist and Liberty proto from
-/// disk, select a module, and run cone traversal.
-pub fn visit_cone_from_paths<F>(
+/// disk, select a module, and run cone traversal, using an injected Liberty
+/// loader.
+pub fn visit_cone_from_paths_with_lib_loader<F, L>(
     netlist_path: &Path,
     liberty_proto_path: &Path,
     module_name: Option<&str>,
@@ -580,14 +550,16 @@ pub fn visit_cone_from_paths<F>(
     direction: TraversalDirection,
     stop: StopCondition,
     dff_cell_names: &HashSet<String>,
-    on_visit: F,
+    mut on_visit: F,
+    load_liberty: L,
 ) -> ConeResult<()>
 where
     F: FnMut(&ConeVisit) -> ConeResult<()>,
+    L: FnOnce(&Path) -> ConeResult<Library>,
 {
     let parsed: ParsedNetlist = parse_netlist_from_path(netlist_path)
         .map_err(|e| ConeError::NetlistParse(format!("{}", e)))?;
-    let lib = load_liberty_for_cone(liberty_proto_path)?;
+    let lib = load_liberty(liberty_proto_path)?;
 
     // Select the target module.
     let module = match module_name {
@@ -625,7 +597,37 @@ where
         start_pins,
         direction,
         stop,
+        &mut on_visit,
+    )
+}
+
+/// High-level convenience entry point: parse the netlist and Liberty proto from
+/// disk, select a module, and run cone traversal.
+pub fn visit_cone_from_paths<F>(
+    netlist_path: &Path,
+    liberty_proto_path: &Path,
+    module_name: Option<&str>,
+    start_instance: &str,
+    start_pins: Option<&[String]>,
+    direction: TraversalDirection,
+    stop: StopCondition,
+    dff_cell_names: &HashSet<String>,
+    on_visit: F,
+) -> ConeResult<()>
+where
+    F: FnMut(&ConeVisit) -> ConeResult<()>,
+{
+    visit_cone_from_paths_with_lib_loader(
+        netlist_path,
+        liberty_proto_path,
+        module_name,
+        start_instance,
+        start_pins,
+        direction,
+        stop,
+        dff_cell_names,
         on_visit,
+        load_liberty_for_cone,
     )
 }
 
