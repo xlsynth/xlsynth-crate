@@ -718,13 +718,25 @@ impl<R: Read + 'static> TokenScanner<R> {
             };
             if self.peekc() == Some('\'') {
                 self.popc(); // consume '
-                // Now parse base and value as a string until whitespace or punctuation
+                // Now parse base and value as a string, but only consume characters
+                // that are valid inside a Verilog number literal (base char plus
+                // digits/hex digits, x/z/?, and underscores). This ensures we do
+                // not accidentally swallow structural punctuation like '}' that
+                // should be tokenized separately.
                 let mut base_and_value = String::new();
                 while let Some(c) = self.peekc() {
-                    if c.is_whitespace() || c == ')' || c == ';' || c == ',' {
+                    if c.is_ascii_alphanumeric()
+                        || c == '_'
+                        || c == 'x'
+                        || c == 'X'
+                        || c == 'z'
+                        || c == 'Z'
+                        || c == '?'
+                    {
+                        base_and_value.push(self.popc().unwrap());
+                    } else {
                         break;
                     }
-                    base_and_value.push(self.popc().unwrap());
                 }
                 // Convert Verilog base to Rust-style
                 let base_and_value = if let Some((_base, _rest)) = base_and_value
@@ -2712,6 +2724,34 @@ wire [255:0] a;"#;
             _ => panic!("Expected VerilogInt for 16'd42"),
         }
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_concat_with_trailing_verilog_literal_and_close_brace() {
+        // Regression test: previously, the '}' in "3'b0})" could be swallowed
+        // into the VerilogInt token, causing the concat parser to fail with
+        // "expected '}' to close concatenation".
+        let src = r#"
+module m(a, y);
+  input [1:0] a;
+  output [3:0] y;
+  MYCELL u1 (.Y({a, 3'b0}));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let insts = &modules[0].instances;
+        assert_eq!(insts.len(), 1);
+        let (port_sym, netref) = &insts[0].connections[0];
+        let port_name = parser.interner.resolve(*port_sym).unwrap();
+        assert_eq!(port_name, "Y");
+        match netref {
+            NetRef::Concat(elems) => {
+                assert_eq!(elems.len(), 2);
+            }
+            other => panic!("expected Concat for .Y connection, got {:?}", other),
+        }
     }
 
     #[test]
