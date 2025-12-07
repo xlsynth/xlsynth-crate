@@ -16,8 +16,9 @@
 
 use crate::liberty::IndexedLibrary;
 use crate::liberty_proto::PinDirection;
+use crate::netlist::connectivity::NetlistConnectivity;
 use crate::netlist::io::ParsedNetlist;
-use crate::netlist::parse::{Net, NetIndex, NetlistModule, NetlistPort, PortDirection, PortId};
+use crate::netlist::parse::{InstIndex, Net, NetIndex, NetlistModule, NetlistPort, PortDirection, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use string_interner::symbol::SymbolU32;
@@ -127,12 +128,11 @@ struct ModuleConeContext<'a> {
     nets: &'a [Net],
     interner: &'a StringInterner<StringBackend<SymbolU32>>,
 
+    /// Net-level connectivity (drivers and loads per net).
+    connectivity: NetlistConnectivity<'a>,
+
     /// For each instance index in `module.instances`, the list of its ports.
     instance_ports: Vec<Vec<InstancePort>>,
-    /// For each `NetIndex`, the instance ports that drive the net.
-    net_drivers: Vec<Vec<(usize, PortId)>>,
-    /// For each `NetIndex`, the instance ports that load the net.
-    net_loads: Vec<Vec<(usize, PortId)>>,
     /// For each `NetIndex`, whether it corresponds to a module port and, if so,
     /// in which direction.
     net_port_direction: Vec<Option<PortDirection>>,
@@ -146,7 +146,7 @@ impl<'a> ModuleConeContext<'a> {
         module: &'a NetlistModule,
         nets: &'a [Net],
         interner: &'a StringInterner<StringBackend<SymbolU32>>,
-        lib: &IndexedLibrary,
+        lib: &'a IndexedLibrary,
         dff_cell_names: &HashSet<String>,
     ) -> ConeResult<Self> {
 
@@ -161,13 +161,11 @@ impl<'a> ModuleConeContext<'a> {
 
         let mut instance_ports: Vec<Vec<InstancePort>> = Vec::with_capacity(module.instances.len());
         instance_ports.resize_with(module.instances.len(), || Vec::new());
-        let mut net_drivers: Vec<Vec<(usize, PortId)>> = vec![Vec::new(); nets.len()];
-        let mut net_loads: Vec<Vec<(usize, PortId)>> = vec![Vec::new(); nets.len()];
 
         // Precompute dff_types as a set of type-name symbols used by instances.
         let mut dff_types: HashSet<PortId> = HashSet::new();
 
-        for (inst_idx, inst) in module.instances.iter().enumerate() {
+        for (inst_idx_raw, inst) in module.instances.iter().enumerate() {
             let type_sym = inst.type_name;
             let type_name = resolve_to_string(interner, type_sym);
             let cell = lib
@@ -209,23 +207,10 @@ impl<'a> ModuleConeContext<'a> {
                         )));
                     }
                     entry.nets.push(idx);
-                    match dir {
-                        PinDirection::Output => {
-                            net_drivers[idx.0].push((inst_idx, *port_sym));
-                        }
-                        PinDirection::Input => {
-                            net_loads[idx.0].push((inst_idx, *port_sym));
-                        }
-                        PinDirection::Invalid => {
-                            // Treat invalid as both to avoid silently dropping connectivity.
-                            net_drivers[idx.0].push((inst_idx, *port_sym));
-                            net_loads[idx.0].push((inst_idx, *port_sym));
-                        }
-                    }
                 }
             }
 
-            instance_ports[inst_idx] = ports_for_instance.into_values().collect();
+            instance_ports[inst_idx_raw] = ports_for_instance.into_values().collect();
         }
 
         // Map nets to module port directions (if any).
@@ -236,13 +221,14 @@ impl<'a> ModuleConeContext<'a> {
             }
         }
 
+        let connectivity = NetlistConnectivity::new(module, nets, interner, lib);
+
         Ok(ModuleConeContext {
             module,
             nets,
             interner,
+            connectivity,
             instance_ports,
-            net_drivers,
-            net_loads,
             net_port_direction,
             dff_types,
         })
@@ -301,13 +287,13 @@ where
             count: matches.len(),
         });
     }
-    let start_idx = matches[0];
+    let start_idx = InstIndex(matches[0]);
 
     // Build a map from PortId to InstancePort for the starting instance to
     // resolve and validate start pins.
     let mut ports_by_sym: HashMap<PortId, &InstancePort> = HashMap::new();
     let mut ports_by_name: HashMap<String, PortId> = HashMap::new();
-    for p in &ctx.instance_ports[start_idx] {
+    for p in &ctx.instance_ports[start_idx.0] {
         ports_by_sym.insert(p.port, p);
         let name = resolve_to_string(interner, p.port);
         ports_by_name.insert(name, p.port);
@@ -351,7 +337,7 @@ where
             }
         }
         None => {
-            for p in &ctx.instance_ports[start_idx] {
+            for p in &ctx.instance_ports[start_idx.0] {
                 match direction {
                     TraversalDirection::Fanin => {
                         if p.dir == PinDirection::Input {
@@ -369,12 +355,12 @@ where
     }
 
     // Emit visits for the starting instance pins.
-    let start_inst = &module.instances[start_idx];
+    let start_inst = &module.instances[start_idx.0];
     let inst_type_str = resolve_to_string(interner, start_inst.type_name);
     let inst_name_str = resolve_to_string(interner, start_inst.instance_name);
 
     // Ensure we only emit each (instance, port) pair once.
-    let mut emitted_ports: HashSet<(usize, PortId)> = HashSet::new();
+    let mut emitted_ports: HashSet<(InstIndex, PortId)> = HashSet::new();
     for port_sym in &chosen_ports {
         let port_name = resolve_to_string(interner, *port_sym);
         if emitted_ports.insert((start_idx, *port_sym)) {
@@ -390,11 +376,11 @@ where
     // BFS over instances, bounded by StopCondition.
     #[derive(Clone, Copy)]
     struct QueueEntry {
-        inst_idx: usize,
+        inst_idx: InstIndex,
         level: u32,
     }
 
-    let mut visited_instances: HashSet<usize> = HashSet::new();
+    let mut visited_instances: HashSet<InstIndex> = HashSet::new();
     visited_instances.insert(start_idx);
 
     let mut queue: VecDeque<QueueEntry> = VecDeque::new();
@@ -404,7 +390,7 @@ where
     });
 
     while let Some(QueueEntry { inst_idx, level }) = queue.pop_front() {
-        let ports = &ctx.instance_ports[inst_idx];
+        let ports = &ctx.instance_ports[inst_idx.0];
 
         for port in ports {
             // Only traverse through pins consistent with the global direction.
@@ -441,8 +427,8 @@ where
                 }
 
                 let neighbors = match direction {
-                    TraversalDirection::Fanin => &ctx.net_drivers[net_idx.0],
-                    TraversalDirection::Fanout => &ctx.net_loads[net_idx.0],
+                    TraversalDirection::Fanin => ctx.connectivity.drivers_for_net(*net_idx),
+                    TraversalDirection::Fanout => ctx.connectivity.loads_for_net(*net_idx),
                 };
 
                 for (nbr_inst_idx, nbr_port_sym) in neighbors {
@@ -451,7 +437,7 @@ where
                         continue;
                     }
 
-                    let nbr_inst = &ctx.module.instances[*nbr_inst_idx];
+                    let nbr_inst = &ctx.module.instances[nbr_inst_idx.0];
                     let nbr_type_str = resolve_to_string(&ctx.interner, nbr_inst.type_name);
                     let nbr_name_str = resolve_to_string(&ctx.interner, nbr_inst.instance_name);
                     let nbr_port_name = resolve_to_string(&ctx.interner, *nbr_port_sym);

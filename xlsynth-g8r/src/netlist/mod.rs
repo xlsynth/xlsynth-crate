@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod cone;
+pub mod connectivity;
 pub mod gatefn_from_netlist;
 pub mod gv2ir;
 pub mod integrity;

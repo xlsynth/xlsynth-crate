@@ -15,6 +15,10 @@ pub type NetId = SymbolU32;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetIndex(pub usize);
 
+/// Index into `NetlistModule.instances`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InstIndex(pub usize);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Net {
     pub name: NetId,
