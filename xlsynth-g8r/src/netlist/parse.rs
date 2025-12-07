@@ -1145,8 +1145,90 @@ impl<R: Read + 'static> Parser<R> {
         }
     }
 
-    /// Parses: assign <ident>([msb:lsb]|[idx]) = <literal>;
-    /// Only accepts RHS as a Verilog integer literal; errors otherwise.
+    /// Parses optional "[idx]" or "[msb:lsb]" bit/part-select that may follow an
+    /// identifier in an assign statement, for either the LHS or RHS.
+    fn parse_optional_assign_bit_or_part_select(&mut self, side_label: &str) -> Result<(), ScanError> {
+        if let Some(next) = self.scanner.peekt()? {
+            if matches!(next.payload, TokenPayload::OBrack) {
+                // consume '['
+                self.scanner.popt()?;
+                // parse msb or idx
+                let t0 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: format!(
+                        "expected index or msb in assign {} bit/part-select",
+                        side_label
+                    ),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                match t0.payload {
+                    TokenPayload::VerilogInt { .. } => {}
+                    _ => {
+                        return Err(ScanError {
+                            message: format!(
+                                "expected integer in assign {} bit/part-select",
+                                side_label
+                            ),
+                            span: t0.span,
+                        });
+                    }
+                }
+                // Optional : lsb
+                if let Some(peek) = self.scanner.peekt()? {
+                    if matches!(peek.payload, TokenPayload::Colon) {
+                        self.scanner.popt()?; // consume ':'
+                        let t1 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: format!("expected lsb in {} part-select", side_label),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        match t1.payload {
+                            TokenPayload::VerilogInt { .. } => {}
+                            _ => {
+                                return Err(ScanError {
+                                    message: format!(
+                                        "expected integer for lsb in {} part-select",
+                                        side_label
+                                    ),
+                                    span: t1.span,
+                                });
+                            }
+                        }
+                    }
+                }
+                // expect ']'
+                let t_cb = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: format!(
+                        "expected ']' after {} bit/part-select",
+                        side_label
+                    ),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                if !matches!(t_cb.payload, TokenPayload::CBrack) {
+                    return Err(ScanError {
+                        message: format!(
+                            "expected ']' after {} bit/part-select",
+                            side_label
+                        ),
+                        span: t_cb.span,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Parses: assign <ident>([msb:lsb]|[idx]) = <literal_or_ident>;
+    /// Only accepts RHS as either a Verilog integer literal or a simple
+    /// identifier; errors otherwise. The assign statement is currently ignored
+    /// semantically and only parsed for basic structural validation.
     fn parse_assign_literal(&mut self) -> Result<(), ScanError> {
         // consume 'assign' identifier
         let t_assign = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -1182,65 +1264,7 @@ impl<R: Read + 'static> Parser<R> {
         }
 
         // Optional bit- or part-select on the LHS: [idx] or [msb:lsb]
-        if let Some(next) = self.scanner.peekt()? {
-            if matches!(next.payload, TokenPayload::OBrack) {
-                // consume '['
-                self.scanner.popt()?;
-                // parse msb or idx
-                let t0 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected index or msb in assign bit/part-select".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                match t0.payload {
-                    TokenPayload::VerilogInt { .. } => {}
-                    _ => {
-                        return Err(ScanError {
-                            message: "expected integer in assign bit/part-select".to_string(),
-                            span: t0.span,
-                        });
-                    }
-                }
-                // Optional : lsb
-                if let Some(peek) = self.scanner.peekt()? {
-                    if matches!(peek.payload, TokenPayload::Colon) {
-                        self.scanner.popt()?; // consume ':'
-                        let t1 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                            message: "expected lsb in part-select".to_string(),
-                            span: Span {
-                                start: self.scanner.pos,
-                                limit: self.scanner.pos,
-                            },
-                        })?;
-                        match t1.payload {
-                            TokenPayload::VerilogInt { .. } => {}
-                            _ => {
-                                return Err(ScanError {
-                                    message: "expected integer for lsb in part-select".to_string(),
-                                    span: t1.span,
-                                });
-                            }
-                        }
-                    }
-                }
-                // expect ']'
-                let t_cb = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected ']' after bit/part-select".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                if !matches!(t_cb.payload, TokenPayload::CBrack) {
-                    return Err(ScanError {
-                        message: "expected ']' after bit/part-select".to_string(),
-                        span: t_cb.span,
-                    });
-                }
-            }
-        }
+        self.parse_optional_assign_bit_or_part_select("LHS")?;
 
         // expect '='
         let t_eq = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -1257,9 +1281,11 @@ impl<R: Read + 'static> Parser<R> {
             });
         }
 
-        // RHS literal
+        // RHS literal or identifier (for simple feed-throughs like "assign out = in;"
+        // or "assign out[0] = in[0];"). We allow an optional bit- or part-select
+        // after an identifier, mirroring the LHS handling.
         let t_rhs = self.scanner.popt()?.ok_or_else(|| ScanError {
-            message: "expected literal on right-hand side of assign".to_string(),
+            message: "expected literal or identifier on right-hand side of assign".to_string(),
             span: Span {
                 start: self.scanner.pos,
                 limit: self.scanner.pos,
@@ -1267,9 +1293,13 @@ impl<R: Read + 'static> Parser<R> {
         })?;
         match t_rhs.payload {
             TokenPayload::VerilogInt { .. } => {}
+            TokenPayload::Identifier(_) => {
+                // Optional bit- or part-select on the RHS identifier: [idx] or [msb:lsb]
+                self.parse_optional_assign_bit_or_part_select("RHS")?;
+            }
             _ => {
                 return Err(ScanError {
-                    message: "only literal RHS supported in assign".to_string(),
+                    message: "only literal or identifier RHS supported in assign".to_string(),
                     span: t_rhs.span,
                 });
             }
