@@ -8,9 +8,9 @@
 
 use crate::liberty::IndexedLibrary;
 use crate::liberty_proto::PinDirection;
-use crate::netlist::parse::{InstIndex, Net, NetIndex, NetlistModule, PortId};
+use crate::netlist::parse::{InstIndex, Net, NetIndex, NetlistModule, PortDirection, PortId};
 use string_interner::symbol::SymbolU32;
-use string_interner::{StringInterner, backend::StringBackend};
+use string_interner::{backend::StringBackend, StringInterner};
 use std::collections::HashMap;
 
 /// Instances and ports that connect to a net.
@@ -21,6 +21,36 @@ pub struct NetNeighbors {
     pub loads: Vec<(InstIndex, PortId)>,
 }
 
+/// Lightweight per-port summary used when reasoning about instance-level
+/// connectivity.
+pub struct InstancePortInfo {
+    /// Logical port identifier on the instance (symbol for the Liberty pin
+    /// name, e.g. `A` or `Y`).
+    pub port: PortId,
+    /// Direction of this pin on the cell (input/output), as derived from the
+    /// Liberty library.
+    pub dir: PinDirection,
+    /// All `NetIndex` values reachable from this port's connection expression.
+    ///
+    /// This may contain multiple nets when the Verilog connection is a concat
+    /// (e.g. `{a, b[5], c[7:0], 1'b0}`) or when a bus slice spans several
+    /// underlying nets.
+    pub nets: Vec<NetIndex>,
+}
+
+/// Block-level attachment for a net that touches one or more module ports.
+///
+/// This structure is stored sparsely: only nets that are attached to at least
+/// one module port get an entry in the `NetlistConnectivity` map.
+pub struct BlockPortBoundary {
+    /// True if this net is attached to at least one module input port.
+    pub has_input: bool,
+    /// True if this net is attached to at least one module output port.
+    pub has_output: bool,
+    /// True if this net is attached to at least one module inout port.
+    pub has_inout: bool,
+}
+
 /// Per-module connectivity derived from a `NetlistModule` and `IndexedLibrary`.
 pub struct NetlistConnectivity<'a> {
     pub module: &'a NetlistModule,
@@ -28,6 +58,13 @@ pub struct NetlistConnectivity<'a> {
     pub lib: &'a IndexedLibrary,
     /// For each `NetIndex.0`, the instances and ports that drive/load it.
     pub net_neighbors: Vec<NetNeighbors>,
+    /// Sparse map from nets that touch module ports to their block-port roles
+    /// (whether they are attached to input / output / inout ports).
+    pub block_port_nets: HashMap<NetIndex, BlockPortBoundary>,
+    /// For each instance index in `module.instances`, the list of its ports,
+    /// pin directions, and connected nets. Ports for each instance are stored
+    /// in a deterministic order by port name.
+    instance_ports: Vec<Vec<InstancePortInfo>>,
 }
 
 impl<'a> NetlistConnectivity<'a> {
@@ -40,11 +77,42 @@ impl<'a> NetlistConnectivity<'a> {
         interner: &StringInterner<StringBackend<SymbolU32>>,
         lib: &'a IndexedLibrary,
     ) -> Self {
+        // Map from module port net symbol -> PortDirection for sparse
+        // block-port attachment metadata.
+        let mut port_dir_by_sym: HashMap<SymbolU32, PortDirection> = HashMap::new();
+        for port in &module.ports {
+            port_dir_by_sym.insert(port.name, port.direction.clone());
+        }
+
+        // Sparse per-net module-port attachment (only nets that touch block
+        // ports get entries).
+        let mut block_port_nets: HashMap<NetIndex, BlockPortBoundary> = HashMap::new();
+        for (idx, net) in nets.iter().enumerate() {
+            if let Some(dir) = port_dir_by_sym.get(&net.name) {
+                let entry = block_port_nets
+                    .entry(NetIndex(idx))
+                    .or_insert_with(|| BlockPortBoundary {
+                        has_input: false,
+                        has_output: false,
+                        has_inout: false,
+                    });
+                match dir {
+                    PortDirection::Input => entry.has_input = true,
+                    PortDirection::Output => entry.has_output = true,
+                    PortDirection::Inout => entry.has_inout = true,
+                }
+            }
+        }
+
         let mut net_neighbors: Vec<NetNeighbors> = Vec::with_capacity(nets.len());
         net_neighbors.resize_with(nets.len(), || NetNeighbors {
             drivers: Vec::new(),
             loads: Vec::new(),
         });
+
+        let mut instance_ports: Vec<Vec<InstancePortInfo>> =
+            Vec::with_capacity(module.instances.len());
+        instance_ports.resize_with(module.instances.len(), Vec::new);
 
         for (inst_idx_raw, inst) in module.instances.iter().enumerate() {
             let inst_idx = InstIndex(inst_idx_raw);
@@ -73,11 +141,21 @@ impl<'a> NetlistConnectivity<'a> {
                 }
             }
 
+            let mut ports_for_instance: HashMap<PortId, InstancePortInfo> = HashMap::new();
+
             for (port_sym, netref) in &inst.connections {
                 let port_name = resolve_to_string(interner, *port_sym);
                 let dir = *dir_by_pin
                     .get(port_name.as_str())
                     .unwrap_or(&PinDirection::Invalid);
+
+                let entry = ports_for_instance
+                    .entry(*port_sym)
+                    .or_insert_with(|| InstancePortInfo {
+                        port: *port_sym,
+                        dir,
+                        nets: Vec::new(),
+                    });
 
                 let mut net_indices: Vec<NetIndex> = Vec::new();
                 netref.collect_net_indices(&mut net_indices);
@@ -86,17 +164,22 @@ impl<'a> NetlistConnectivity<'a> {
                     if idx.0 >= nets.len() {
                         continue;
                     }
-                    let entry = &mut net_neighbors[idx.0];
+                    let nn_entry = &mut net_neighbors[idx.0];
                     match dir {
-                        PinDirection::Output => entry.drivers.push((inst_idx, *port_sym)),
-                        PinDirection::Input => entry.loads.push((inst_idx, *port_sym)),
+                        PinDirection::Output => nn_entry.drivers.push((inst_idx, *port_sym)),
+                        PinDirection::Input => nn_entry.loads.push((inst_idx, *port_sym)),
                         PinDirection::Invalid => {
-                            entry.drivers.push((inst_idx, *port_sym));
-                            entry.loads.push((inst_idx, *port_sym));
+                            nn_entry.drivers.push((inst_idx, *port_sym));
+                            nn_entry.loads.push((inst_idx, *port_sym));
                         }
                     }
+                    entry.nets.push(idx);
                 }
             }
+
+            let mut ports_vec: Vec<InstancePortInfo> = ports_for_instance.into_values().collect();
+            ports_vec.sort_by_key(|p| resolve_to_string(interner, p.port));
+            instance_ports[inst_idx_raw] = ports_vec;
         }
 
         NetlistConnectivity {
@@ -104,6 +187,8 @@ impl<'a> NetlistConnectivity<'a> {
             nets,
             lib,
             net_neighbors,
+            block_port_nets,
+            instance_ports,
         }
     }
 
@@ -115,6 +200,27 @@ impl<'a> NetlistConnectivity<'a> {
     /// Returns the instances and ports that load `net`.
     pub fn loads_for_net(&self, net: NetIndex) -> &[(InstIndex, PortId)] {
         &self.net_neighbors[net.0].loads
+    }
+
+    /// Returns true if `net` is attached to at least one module port (input,
+    /// output, or inout).
+    pub fn is_block_port_net(&self, net: NetIndex) -> bool {
+        self.block_port_nets.contains_key(&net)
+    }
+
+    /// Returns the sparse block-port boundary metadata for `net`, if any.
+    pub fn net_block_port_boundary(&self, net: NetIndex) -> Option<&BlockPortBoundary> {
+        self.block_port_nets.get(&net)
+    }
+
+    /// Returns the per-port view for `inst_idx`, including pin direction and
+    /// connected nets.
+    pub fn instance_ports(
+        &self,
+        inst_idx: InstIndex,
+        _interner: &StringInterner<StringBackend<SymbolU32>>,
+    ) -> &[InstancePortInfo] {
+        &self.instance_ports[inst_idx.0]
     }
 }
 
@@ -249,8 +355,77 @@ mod tests {
         assert_eq!(drivers_n2.len(), 1);
         assert!(loads_n2.is_empty());
     }
+
+    #[test]
+    fn block_port_nets_match_module_ports() {
+        let (module, nets, interner, indexed) = make_simple_module_and_lib();
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed);
+
+        // Net 0 corresponds to primary input "a".
+        assert!(conn.is_block_port_net(NetIndex(0)));
+        let b0 = conn
+            .net_block_port_boundary(NetIndex(0))
+            .expect("net 0 should have block-port metadata");
+        assert!(b0.has_input);
+        assert!(!b0.has_output);
+        assert!(!b0.has_inout);
+
+        // Net 1 is internal-only.
+        assert!(!conn.is_block_port_net(NetIndex(1)));
+        assert!(conn.net_block_port_boundary(NetIndex(1)).is_none());
+
+        // Net 2 corresponds to primary output "y".
+        assert!(conn.is_block_port_net(NetIndex(2)));
+        let b2 = conn
+            .net_block_port_boundary(NetIndex(2))
+            .expect("net 2 should have block-port metadata");
+        assert!(!b2.has_input);
+        assert!(b2.has_output);
+        assert!(!b2.has_inout);
+    }
+
+    #[test]
+    fn instance_ports_reports_directions_and_nets() {
+        let (module, nets, interner, indexed) = make_simple_module_and_lib();
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed);
+
+        // Instance 0: INVX1 u1
+        let ports_u1 = conn.instance_ports(InstIndex(0), &interner);
+        let mut rendered_u1: Vec<(String, PinDirection, Vec<NetIndex>)> = Vec::new();
+        for p in ports_u1.iter() {
+            let name = interner
+                .resolve(p.port)
+                .expect("port symbol should resolve")
+                .to_string();
+            rendered_u1.push((name, p.dir, p.nets.clone()));
+        }
+
+        // Expect a deterministic ordering by port name.
+        assert_eq!(rendered_u1.len(), 2);
+        assert_eq!(rendered_u1[0].0, "A");
+        assert_eq!(rendered_u1[0].1, PinDirection::Input);
+        assert_eq!(rendered_u1[0].2, vec![NetIndex(0)]);
+        assert_eq!(rendered_u1[1].0, "Y");
+        assert_eq!(rendered_u1[1].1, PinDirection::Output);
+        assert_eq!(rendered_u1[1].2, vec![NetIndex(1)]);
+
+        // Instance 1: INVX1 u2
+        let ports_u2 = conn.instance_ports(InstIndex(1), &interner);
+        let mut rendered_u2: Vec<(String, PinDirection, Vec<NetIndex>)> = Vec::new();
+        for p in ports_u2.iter() {
+            let name = interner
+                .resolve(p.port)
+                .expect("port symbol should resolve")
+                .to_string();
+            rendered_u2.push((name, p.dir, p.nets.clone()));
+        }
+
+        assert_eq!(rendered_u2.len(), 2);
+        assert_eq!(rendered_u2[0].0, "A");
+        assert_eq!(rendered_u2[0].1, PinDirection::Input);
+        assert_eq!(rendered_u2[0].2, vec![NetIndex(1)]);
+        assert_eq!(rendered_u2[1].0, "Y");
+        assert_eq!(rendered_u2[1].1, PinDirection::Output);
+        assert_eq!(rendered_u2[1].2, vec![NetIndex(2)]);
+    }
 }
-
-
-
-

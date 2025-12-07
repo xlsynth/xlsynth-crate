@@ -18,9 +18,8 @@ use crate::liberty::IndexedLibrary;
 use crate::liberty_proto::PinDirection;
 use crate::netlist::connectivity::NetlistConnectivity;
 use crate::netlist::io::ParsedNetlist;
-use crate::netlist::parse::{InstIndex, Net, NetIndex, NetlistModule, NetlistPort, PortDirection, PortId};
+use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::convert::TryFrom;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
@@ -114,13 +113,6 @@ impl std::error::Error for ConeError {}
 
 type ConeResult<T> = std::result::Result<T, ConeError>;
 
-/// Lightweight per-port summary used during traversal.
-struct InstancePort {
-    port: PortId,
-    dir: PinDirection,
-    nets: Vec<NetIndex>,
-}
-
 /// Per-module context with adjacency maps and cached metadata.
 struct ModuleConeContext<'a> {
     /// The module being traversed.
@@ -128,14 +120,9 @@ struct ModuleConeContext<'a> {
     nets: &'a [Net],
     interner: &'a StringInterner<StringBackend<SymbolU32>>,
 
-    /// Net-level connectivity (drivers and loads per net).
+    /// Net-level connectivity (drivers and loads per net), plus cached
+    /// instance-port and module-port metadata.
     connectivity: NetlistConnectivity<'a>,
-
-    /// For each instance index in `module.instances`, the list of its ports.
-    instance_ports: Vec<Vec<InstancePort>>,
-    /// For each `NetIndex`, whether it corresponds to a module port and, if so,
-    /// in which direction.
-    net_port_direction: Vec<Option<PortDirection>>,
     /// Set of cell type symbols classified as DFFs (used for
     /// StopCondition::AtDff).
     dff_types: HashSet<PortId>,
@@ -149,23 +136,10 @@ impl<'a> ModuleConeContext<'a> {
         lib: &'a IndexedLibrary,
         dff_cell_names: &HashSet<String>,
     ) -> ConeResult<Self> {
-
-        // Map from module port net symbol -> PortDirection.
-        let mut port_dir_by_sym: HashMap<SymbolU32, PortDirection> = HashMap::new();
-        for NetlistPort {
-            direction, name, ..
-        } in &module.ports
-        {
-            port_dir_by_sym.insert(*name, direction.clone());
-        }
-
-        let mut instance_ports: Vec<Vec<InstancePort>> = Vec::with_capacity(module.instances.len());
-        instance_ports.resize_with(module.instances.len(), || Vec::new());
-
         // Precompute dff_types as a set of type-name symbols used by instances.
         let mut dff_types: HashSet<PortId> = HashSet::new();
 
-        for (inst_idx_raw, inst) in module.instances.iter().enumerate() {
+        for (_inst_idx_raw, inst) in module.instances.iter().enumerate() {
             let type_sym = inst.type_name;
             let type_name = resolve_to_string(interner, type_sym);
             let cell = lib
@@ -175,52 +149,7 @@ impl<'a> ModuleConeContext<'a> {
             if dff_cell_names.contains(&cell.name) {
                 dff_types.insert(type_sym);
             }
-
-            let mut ports_for_instance: HashMap<PortId, InstancePort> = HashMap::new();
-
-            for (port_sym, netref) in &inst.connections {
-                let port_name = resolve_to_string(interner, *port_sym);
-                let pin = lib
-                    .pin_by_name(cell.name.as_str(), port_name.as_str())
-                    .ok_or(ConeError::UnknownCellPin {
-                        cell: cell.name.clone(),
-                        pin: port_name,
-                    })?;
-
-                let dir = PinDirection::try_from(pin.direction).unwrap_or(PinDirection::Invalid);
-                let entry = ports_for_instance
-                    .entry(*port_sym)
-                    .or_insert_with(|| InstancePort {
-                        port: *port_sym,
-                        dir,
-                        nets: Vec::new(),
-                    });
-
-                let mut net_indices: Vec<NetIndex> = Vec::new();
-                netref.collect_net_indices(&mut net_indices);
-                for idx in net_indices {
-                    if idx.0 >= nets.len() {
-                        return Err(ConeError::Invariant(format!(
-                            "NetIndex({}) out of bounds for nets (len={})",
-                            idx.0,
-                            nets.len()
-                        )));
-                    }
-                    entry.nets.push(idx);
-                }
-            }
-
-            instance_ports[inst_idx_raw] = ports_for_instance.into_values().collect();
         }
-
-        // Map nets to module port directions (if any).
-        let mut net_port_direction: Vec<Option<PortDirection>> = vec![None; nets.len()];
-        for (idx, net) in nets.iter().enumerate() {
-            if let Some(dir) = port_dir_by_sym.get(&net.name) {
-                net_port_direction[idx] = Some(dir.clone());
-            }
-        }
-
         let connectivity = NetlistConnectivity::new(module, nets, interner, lib);
 
         Ok(ModuleConeContext {
@@ -228,8 +157,6 @@ impl<'a> ModuleConeContext<'a> {
             nets,
             interner,
             connectivity,
-            instance_ports,
-            net_port_direction,
             dff_types,
         })
     }
@@ -291,10 +218,12 @@ where
 
     // Build a map from PortId to InstancePort for the starting instance to
     // resolve and validate start pins.
-    let mut ports_by_sym: HashMap<PortId, &InstancePort> = HashMap::new();
+    let inst_ports = ctx.connectivity.instance_ports(start_idx, interner);
+
+    let mut ports_by_sym: HashMap<PortId, PinDirection> = HashMap::new();
     let mut ports_by_name: HashMap<String, PortId> = HashMap::new();
-    for p in &ctx.instance_ports[start_idx.0] {
-        ports_by_sym.insert(p.port, p);
+    for p in inst_ports.iter() {
+        ports_by_sym.insert(p.port, p.dir);
         let name = resolve_to_string(interner, p.port);
         ports_by_name.insert(name, p.port);
     }
@@ -309,7 +238,7 @@ where
                         "start pin '{}' not found on instance '{}'",
                         pin_name, start_instance
                     )))?;
-                let p = ports_by_sym
+                let dir = ports_by_sym
                     .get(port_sym)
                     .ok_or(ConeError::Invariant(format!(
                         "internal error: missing port_sym for pin '{}' on instance '{}'",
@@ -317,7 +246,7 @@ where
                     )))?;
                 match direction {
                     TraversalDirection::Fanin => {
-                        if p.dir != PinDirection::Input {
+                        if *dir != PinDirection::Input {
                             return Err(ConeError::Invariant(format!(
                                 "start pin '{}' on instance '{}' is not an INPUT pin for fanin traversal",
                                 pin_name, start_instance
@@ -325,7 +254,7 @@ where
                         }
                     }
                     TraversalDirection::Fanout => {
-                        if p.dir != PinDirection::Output {
+                        if *dir != PinDirection::Output {
                             return Err(ConeError::Invariant(format!(
                                 "start pin '{}' on instance '{}' is not an OUTPUT pin for fanout traversal",
                                 pin_name, start_instance
@@ -337,7 +266,7 @@ where
             }
         }
         None => {
-            for p in &ctx.instance_ports[start_idx.0] {
+            for p in inst_ports.iter() {
                 match direction {
                     TraversalDirection::Fanin => {
                         if p.dir == PinDirection::Input {
@@ -390,9 +319,9 @@ where
     });
 
     while let Some(QueueEntry { inst_idx, level }) = queue.pop_front() {
-        let ports = &ctx.instance_ports[inst_idx.0];
+        let ports = ctx.connectivity.instance_ports(inst_idx, &ctx.interner);
 
-        for port in ports {
+        for port in ports.iter() {
             // Only traverse through pins consistent with the global direction.
             let traverse_through = match direction {
                 TraversalDirection::Fanin => port.dir == PinDirection::Input,
@@ -413,10 +342,10 @@ where
 
                 // If we are stopping at block ports, do not traverse across
                 // module boundary nets.
-                if matches!(stop, StopCondition::AtBlockPort) {
-                    if ctx.net_port_direction[net_idx.0].is_some() {
-                        continue;
-                    }
+                if matches!(stop, StopCondition::AtBlockPort)
+                    && ctx.connectivity.is_block_port_net(*net_idx)
+                {
+                    continue;
                 }
 
                 let neighbor_level = level + 1;
@@ -555,7 +484,7 @@ mod tests {
     use crate::liberty::IndexedLibrary;
     use crate::liberty_proto::{Cell, Library, Pin};
     use crate::netlist::parse::{
-        Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
+        Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
     use pretty_assertions::assert_eq;
     use std::collections::HashSet;
