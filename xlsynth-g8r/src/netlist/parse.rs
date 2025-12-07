@@ -22,8 +22,8 @@ pub struct InstIndex(pub usize);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Net {
     pub name: NetId,
-    pub width: Option<(u32, u32)>, /* (msb, lsb)
-                                    * TODO: add more net properties as needed */
+    /// Optional (msb, lsb) width for this net.
+    pub width: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +212,15 @@ pub struct Span {
     pub limit: Pos,
 }
 
+impl Span {
+    pub fn to_human_string(&self) -> String {
+        format!(
+            "{}:{}..{}:{}",
+            self.start.lineno, self.start.colno, self.limit.lineno, self.limit.colno
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub payload: TokenPayload,
@@ -378,7 +387,7 @@ impl<R: Read + 'static> TokenScanner<R> {
         let line = (self.line_lookup)(span.start.lineno)
             .unwrap_or_else(|| "<line unavailable>".to_string());
         let col = (span.start.colno as usize).saturating_sub(1);
-        log::error!("ScanError: {} at {:?}", msg, span);
+        log::error!("ScanError: {} @ {}", msg, span.to_human_string());
         log::error!("{}", line);
         log::error!("{}^", " ".repeat(col));
         ScanError {
@@ -709,13 +718,25 @@ impl<R: Read + 'static> TokenScanner<R> {
             };
             if self.peekc() == Some('\'') {
                 self.popc(); // consume '
-                // Now parse base and value as a string until whitespace or punctuation
+                // Now parse base and value as a string, but only consume characters
+                // that are valid inside a Verilog number literal (base char plus
+                // digits/hex digits, x/z/?, and underscores). This ensures we do
+                // not accidentally swallow structural punctuation like '}' that
+                // should be tokenized separately.
                 let mut base_and_value = String::new();
                 while let Some(c) = self.peekc() {
-                    if c.is_whitespace() || c == ')' || c == ';' || c == ',' {
+                    if c.is_ascii_alphanumeric()
+                        || c == '_'
+                        || c == 'x'
+                        || c == 'X'
+                        || c == 'z'
+                        || c == 'Z'
+                        || c == '?'
+                    {
+                        base_and_value.push(self.popc().unwrap());
+                    } else {
                         break;
                     }
-                    base_and_value.push(self.popc().unwrap());
                 }
                 // Convert Verilog base to Rust-style
                 let base_and_value = if let Some((_base, _rest)) = base_and_value
@@ -905,6 +926,14 @@ pub struct Parser<R: Read + 'static> {
     pub interner: StringInterner<StringBackend<SymbolU32>>,
     pub nets: Vec<Net>,
     net_index_by_name: HashMap<NetId, NetIndex>,
+    /// Index into `nets` where the current module's nets begin.
+    /// Used to scope name lookups so that widths are checked per-module
+    /// instead of across the entire file.
+    current_module_net_start: usize,
+    /// Span where each net's current width was first determined, keyed by
+    /// net name. Used only for diagnostics when reporting conflicting
+    /// widths during parsing; not carried into result artifacts.
+    net_width_span_by_name: HashMap<NetId, Span>,
 }
 
 impl<R: Read + 'static> Parser<R> {
@@ -914,6 +943,8 @@ impl<R: Read + 'static> Parser<R> {
             interner: StringInterner::new(),
             nets: Vec::new(),
             net_index_by_name: HashMap::new(),
+            current_module_net_start: 0,
+            net_width_span_by_name: HashMap::new(),
         }
     }
 
@@ -998,11 +1029,14 @@ impl<R: Read + 'static> Parser<R> {
         match net_tok.payload {
             TokenPayload::Identifier(s) => {
                 let net_sym = self.interner.get_or_intern(s);
-                // Lookup declared net
+                // Lookup declared net (scoped to the current module).
                 let net_idx = if let Some(&idx) = self.net_index_by_name.get(&net_sym) {
                     idx
-                } else if let Some(pos) = self.nets.iter().position(|n| n.name == net_sym) {
-                    let idx = NetIndex(pos);
+                } else if let Some(pos) = self.nets[self.current_module_net_start..]
+                    .iter()
+                    .position(|n| n.name == net_sym)
+                {
+                    let idx = NetIndex(self.current_module_net_start + pos);
                     self.net_index_by_name.insert(net_sym, idx);
                     idx
                 } else {
@@ -1120,16 +1154,30 @@ impl<R: Read + 'static> Parser<R> {
             let existing = &mut self.nets[idx.0];
             match (existing.width, width) {
                 (None, None) => {}
-                (None, Some(w)) => existing.width = Some(w),
+                (None, Some(w)) => {
+                    existing.width = Some(w);
+                    self.net_width_span_by_name.insert(name, err_span);
+                }
                 (Some(_), None) => {}
                 (Some(a), Some(b)) => {
                     if a != b {
+                        debug_assert!(
+                            self.net_width_span_by_name.contains_key(&name),
+                            "Net with known width should carry a width span for diagnostics"
+                        );
+                        let prev_span = self
+                            .net_width_span_by_name
+                            .get(&name)
+                            .copied()
+                            .unwrap_or(err_span);
                         return Err(ScanError {
                             message: format!(
-                                "conflicting widths for net '{}': {:?} vs {:?}",
+                                "conflicting widths for net '{}': {:?} vs {:?}; previously determined width was {:?} @ {}",
                                 self.interner.resolve(name).unwrap_or("<unknown>"),
                                 a,
-                                b
+                                b,
+                                a,
+                                prev_span.to_human_string()
                             ),
                             span: err_span,
                         });
@@ -1140,13 +1188,95 @@ impl<R: Read + 'static> Parser<R> {
         } else {
             let idx = NetIndex(self.nets.len());
             self.nets.push(Net { name, width });
+            if width.is_some() {
+                self.net_width_span_by_name.insert(name, err_span);
+            }
             self.net_index_by_name.insert(name, idx);
             Ok(idx)
         }
     }
 
-    /// Parses: assign <ident>([msb:lsb]|[idx]) = <literal>;
-    /// Only accepts RHS as a Verilog integer literal; errors otherwise.
+    /// Parses optional "[idx]" or "[msb:lsb]" bit/part-select that may follow
+    /// an identifier in an assign statement, for either the LHS or RHS.
+    fn parse_optional_assign_bit_or_part_select(
+        &mut self,
+        side_label: &str,
+    ) -> Result<(), ScanError> {
+        if let Some(next) = self.scanner.peekt()? {
+            if matches!(next.payload, TokenPayload::OBrack) {
+                // consume '['
+                self.scanner.popt()?;
+                // parse msb or idx
+                let t0 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: format!(
+                        "expected index or msb in assign {} bit/part-select",
+                        side_label
+                    ),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                match t0.payload {
+                    TokenPayload::VerilogInt { .. } => {}
+                    _ => {
+                        return Err(ScanError {
+                            message: format!(
+                                "expected integer in assign {} bit/part-select",
+                                side_label
+                            ),
+                            span: t0.span,
+                        });
+                    }
+                }
+                // Optional : lsb
+                if let Some(peek) = self.scanner.peekt()? {
+                    if matches!(peek.payload, TokenPayload::Colon) {
+                        self.scanner.popt()?; // consume ':'
+                        let t1 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: format!("expected lsb in {} part-select", side_label),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        match t1.payload {
+                            TokenPayload::VerilogInt { .. } => {}
+                            _ => {
+                                return Err(ScanError {
+                                    message: format!(
+                                        "expected integer for lsb in {} part-select",
+                                        side_label
+                                    ),
+                                    span: t1.span,
+                                });
+                            }
+                        }
+                    }
+                }
+                // expect ']'
+                let t_cb = self.scanner.popt()?.ok_or_else(|| ScanError {
+                    message: format!("expected ']' after {} bit/part-select", side_label),
+                    span: Span {
+                        start: self.scanner.pos,
+                        limit: self.scanner.pos,
+                    },
+                })?;
+                if !matches!(t_cb.payload, TokenPayload::CBrack) {
+                    return Err(ScanError {
+                        message: format!("expected ']' after {} bit/part-select", side_label),
+                        span: t_cb.span,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Parses: assign <ident>([msb:lsb]|[idx]) = <literal_or_ident>;
+    /// Only accepts RHS as either a Verilog integer literal or a simple
+    /// identifier; errors otherwise. The assign statement is currently ignored
+    /// semantically and only parsed for basic structural validation.
     fn parse_assign_literal(&mut self) -> Result<(), ScanError> {
         // consume 'assign' identifier
         let t_assign = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -1182,65 +1312,7 @@ impl<R: Read + 'static> Parser<R> {
         }
 
         // Optional bit- or part-select on the LHS: [idx] or [msb:lsb]
-        if let Some(next) = self.scanner.peekt()? {
-            if matches!(next.payload, TokenPayload::OBrack) {
-                // consume '['
-                self.scanner.popt()?;
-                // parse msb or idx
-                let t0 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected index or msb in assign bit/part-select".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                match t0.payload {
-                    TokenPayload::VerilogInt { .. } => {}
-                    _ => {
-                        return Err(ScanError {
-                            message: "expected integer in assign bit/part-select".to_string(),
-                            span: t0.span,
-                        });
-                    }
-                }
-                // Optional : lsb
-                if let Some(peek) = self.scanner.peekt()? {
-                    if matches!(peek.payload, TokenPayload::Colon) {
-                        self.scanner.popt()?; // consume ':'
-                        let t1 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                            message: "expected lsb in part-select".to_string(),
-                            span: Span {
-                                start: self.scanner.pos,
-                                limit: self.scanner.pos,
-                            },
-                        })?;
-                        match t1.payload {
-                            TokenPayload::VerilogInt { .. } => {}
-                            _ => {
-                                return Err(ScanError {
-                                    message: "expected integer for lsb in part-select".to_string(),
-                                    span: t1.span,
-                                });
-                            }
-                        }
-                    }
-                }
-                // expect ']'
-                let t_cb = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected ']' after bit/part-select".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                if !matches!(t_cb.payload, TokenPayload::CBrack) {
-                    return Err(ScanError {
-                        message: "expected ']' after bit/part-select".to_string(),
-                        span: t_cb.span,
-                    });
-                }
-            }
-        }
+        self.parse_optional_assign_bit_or_part_select("LHS")?;
 
         // expect '='
         let t_eq = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -1257,9 +1329,11 @@ impl<R: Read + 'static> Parser<R> {
             });
         }
 
-        // RHS literal
+        // RHS literal or identifier (for simple feed-throughs like "assign out = in;"
+        // or "assign out[0] = in[0];"). We allow an optional bit- or part-select
+        // after an identifier, mirroring the LHS handling.
         let t_rhs = self.scanner.popt()?.ok_or_else(|| ScanError {
-            message: "expected literal on right-hand side of assign".to_string(),
+            message: "expected literal or identifier on right-hand side of assign".to_string(),
             span: Span {
                 start: self.scanner.pos,
                 limit: self.scanner.pos,
@@ -1267,9 +1341,13 @@ impl<R: Read + 'static> Parser<R> {
         })?;
         match t_rhs.payload {
             TokenPayload::VerilogInt { .. } => {}
+            TokenPayload::Identifier(_) => {
+                // Optional bit- or part-select on the RHS identifier: [idx] or [msb:lsb]
+                self.parse_optional_assign_bit_or_part_select("RHS")?;
+            }
             _ => {
                 return Err(ScanError {
-                    message: "only literal RHS supported in assign".to_string(),
+                    message: "only literal or identifier RHS supported in assign".to_string(),
                     span: t_rhs.span,
                 });
             }
@@ -1330,6 +1408,14 @@ impl<R: Read + 'static> Parser<R> {
     }
 
     pub fn parse_module(&mut self) -> Result<NetlistModule, ScanError> {
+        // Each module has its own namespace for nets. Reset the per-module
+        // name index and record where this module's nets begin in the global
+        // `nets` vector so that lookups (and width checks) are scoped
+        // per-module instead of across the entire file.
+        self.current_module_net_start = self.nets.len();
+        self.net_index_by_name.clear();
+        self.net_width_span_by_name.clear();
+
         // Expect 'module' keyword
         let tok = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected 'module' keyword".to_string(),
@@ -1773,15 +1859,6 @@ impl<R: Read + 'static> Parser<R> {
                 },
             })?;
             if !matches!(semi.payload, TokenPayload::Semi) {
-                let line = (self.scanner.line_lookup)(semi.span.start.lineno)
-                    .unwrap_or_else(|| "<line unavailable>".to_string());
-                log::error!(
-                    "expected ';' after wire decl, got {:?} at {:?}\n{}\n{}^",
-                    semi.payload,
-                    semi.span,
-                    line,
-                    " ".repeat((semi.span.start.colno as usize).saturating_sub(1))
-                );
                 return Err(ScanError {
                     message: "expected ';' after wire decl".to_string(),
                     span: semi.span,
@@ -1835,17 +1912,8 @@ impl<R: Read + 'static> Parser<R> {
         let instance_name = match inst_tok.payload {
             TokenPayload::Identifier(s) => self.interner.get_or_intern(s),
             ref other => {
-                let line = (self.scanner.line_lookup)(inst_tok.span.start.lineno)
-                    .unwrap_or_else(|| "<line unavailable>".to_string());
-                log::error!(
-                    "expected identifier for instance name, got {:?} at {:?}\n{}\n{}^",
-                    other,
-                    inst_tok.span,
-                    line,
-                    " ".repeat((inst_tok.span.start.colno as usize).saturating_sub(1))
-                );
                 return Err(ScanError {
-                    message: "expected identifier for instance name".to_string(),
+                    message: format!("expected identifier for instance name; got {:?}", other),
                     span: inst_tok.span,
                 });
             }
@@ -2659,6 +2727,34 @@ wire [255:0] a;"#;
     }
 
     #[test]
+    fn test_concat_with_trailing_verilog_literal_and_close_brace() {
+        // Regression test: previously, the '}' in "3'b0})" could be swallowed
+        // into the VerilogInt token, causing the concat parser to fail with
+        // "expected '}' to close concatenation".
+        let src = r#"
+module m(a, y);
+  input [1:0] a;
+  output [3:0] y;
+  MYCELL u1 (.Y({a, 3'b0}));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let insts = &modules[0].instances;
+        assert_eq!(insts.len(), 1);
+        let (port_sym, netref) = &insts[0].connections[0];
+        let port_name = parser.interner.resolve(*port_sym).unwrap();
+        assert_eq!(port_name, "Y");
+        match netref {
+            NetRef::Concat(elems) => {
+                assert_eq!(elems.len(), 2);
+            }
+            other => panic!("expected Concat for .Y connection, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_parse_instance_unconnected_output() {
         let src = r#"
 module m(a, y);
@@ -2793,5 +2889,39 @@ endmodule
             .parse_file()
             .expect_err("should error on width conflict");
         assert!(err.message.contains("conflicting widths for net 'out'"));
+        assert!(
+            err.message.contains("previously determined width was"),
+            "error message should mention previous width location for diagnostics: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_conflicting_widths_across_modules_are_ok() {
+        // Two separate modules may legitimately use the same net name with
+        // different widths; width consistency is a per-module property, not
+        // global to the file.
+        let src = r#"
+module m1(gen_in);
+  input [7:0] gen_in;
+endmodule
+
+module m2(gen_in);
+  input [3:0] gen_in;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse should succeed");
+        assert_eq!(modules.len(), 2);
+        // Sanity check: each module sees exactly one net named gen_in, with
+        // its own width.
+        let gen_in_nets: Vec<&Net> = parser
+            .nets
+            .iter()
+            .filter(|n| parser.interner.resolve(n.name).unwrap() == "gen_in")
+            .collect();
+        assert_eq!(gen_in_nets.len(), 2);
+        assert!(gen_in_nets.iter().any(|n| n.width == Some((7, 0))));
+        assert!(gen_in_nets.iter().any(|n| n.width == Some((3, 0))));
     }
 }
