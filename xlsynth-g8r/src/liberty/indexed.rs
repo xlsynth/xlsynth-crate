@@ -58,9 +58,7 @@ impl IndexedLibrary {
                 }
                 *opt_map = Some(map);
             }
-            opt_map
-                .as_ref()
-                .and_then(|m| m.get(name).copied())
+            opt_map.as_ref().and_then(|m| m.get(name).copied())
         };
         idx_opt
     }
@@ -250,6 +248,3 @@ mod tests {
         assert!(indexed.pin_by_name("NO_SUCH_CELL", "Y").is_none());
     }
 }
-
-
-

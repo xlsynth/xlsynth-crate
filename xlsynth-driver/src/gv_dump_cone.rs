@@ -6,9 +6,9 @@ use csv::WriterBuilder;
 use std::collections::HashSet;
 use std::io::BufWriter;
 use std::path::Path;
-use xlsynth_g8r::netlist::cone::{ConeError, ConeVisit, StopCondition, TraversalDirection};
 use xlsynth_g8r::liberty::IndexedLibrary;
 use xlsynth_g8r::netlist;
+use xlsynth_g8r::netlist::cone::{ConeError, ConeVisit, StopCondition, TraversalDirection};
 
 fn parse_traversal_direction(dir: &str) -> Result<TraversalDirection, String> {
     match dir {

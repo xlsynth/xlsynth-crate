@@ -9,9 +9,9 @@
 use crate::liberty::IndexedLibrary;
 use crate::liberty_proto::PinDirection;
 use crate::netlist::parse::{InstIndex, Net, NetIndex, NetlistModule, PortDirection, PortId};
-use string_interner::symbol::SymbolU32;
-use string_interner::{backend::StringBackend, StringInterner};
 use std::collections::HashMap;
+use string_interner::symbol::SymbolU32;
+use string_interner::{StringInterner, backend::StringBackend};
 
 /// Instances and ports that connect to a net.
 pub struct NetNeighbors {
@@ -89,13 +89,14 @@ impl<'a> NetlistConnectivity<'a> {
         let mut block_port_nets: HashMap<NetIndex, BlockPortBoundary> = HashMap::new();
         for (idx, net) in nets.iter().enumerate() {
             if let Some(dir) = port_dir_by_sym.get(&net.name) {
-                let entry = block_port_nets
-                    .entry(NetIndex(idx))
-                    .or_insert_with(|| BlockPortBoundary {
-                        has_input: false,
-                        has_output: false,
-                        has_inout: false,
-                    });
+                let entry =
+                    block_port_nets
+                        .entry(NetIndex(idx))
+                        .or_insert_with(|| BlockPortBoundary {
+                            has_input: false,
+                            has_output: false,
+                            has_inout: false,
+                        });
                 match dir {
                     PortDirection::Input => entry.has_input = true,
                     PortDirection::Output => entry.has_output = true,
@@ -149,13 +150,14 @@ impl<'a> NetlistConnectivity<'a> {
                     .get(port_name.as_str())
                     .unwrap_or(&PinDirection::Invalid);
 
-                let entry = ports_for_instance
-                    .entry(*port_sym)
-                    .or_insert_with(|| InstancePortInfo {
-                        port: *port_sym,
-                        dir,
-                        nets: Vec::new(),
-                    });
+                let entry =
+                    ports_for_instance
+                        .entry(*port_sym)
+                        .or_insert_with(|| InstancePortInfo {
+                            port: *port_sym,
+                            dir,
+                            nets: Vec::new(),
+                        });
 
                 let mut net_indices: Vec<NetIndex> = Vec::new();
                 netref.collect_net_indices(&mut net_indices);
@@ -242,9 +244,12 @@ mod tests {
         Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
 
-    fn make_simple_module_and_lib()
-        -> (NetlistModule, Vec<Net>, StringInterner<StringBackend<SymbolU32>>, IndexedLibrary)
-    {
+    fn make_simple_module_and_lib() -> (
+        NetlistModule,
+        Vec<Net>,
+        StringInterner<StringBackend<SymbolU32>>,
+        IndexedLibrary,
+    ) {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
         let n1 = interner.get_or_intern("n1");
