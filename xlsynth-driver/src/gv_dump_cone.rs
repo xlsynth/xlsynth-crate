@@ -65,33 +65,39 @@ fn cone_error_to_report_message(err: ConeError) -> (String, Vec<(&'static str, S
             "start instance not found in module".to_string(),
             vec![("instance", name)],
         ),
-        ConeError::UnknownCellType { cell } => (
+        ConeError::UnknownCellType {
+            cell,
+            instance,
+            lineno,
+            colno,
+        } => (
             "cell type from netlist is missing in Liberty library".to_string(),
-            vec![("cell_type", cell)],
+            vec![
+                ("cell_type", cell),
+                ("instance", instance),
+                ("inst_lineno", format!("{}", lineno)),
+                ("inst_colno", format!("{}", colno)),
+            ],
+        ),
+        ConeError::InvalidStartPin {
+            instance,
+            pin,
+            reason,
+        } => (
+            "invalid start pin for cone traversal".to_string(),
+            vec![
+                ("instance", instance),
+                ("pin", pin),
+                ("reason", reason),
+            ],
         ),
         ConeError::UnknownCellPin { cell, pin } => (
             "cell pin from netlist is missing in Liberty library".to_string(),
             vec![("cell_type", cell), ("pin", pin)],
         ),
-        ConeError::NoModulesParsed { path } => (
-            "no modules parsed from netlist".to_string(),
-            vec![("netlist", path)],
-        ),
         ConeError::ModuleNotFound { name } => (
             "requested module name was not found in netlist".to_string(),
             vec![("module_name", name)],
-        ),
-        ConeError::NetlistParse(msg) => (
-            "failed to parse gate-level netlist".to_string(),
-            vec![("detail", msg)],
-        ),
-        ConeError::Liberty(msg) => (
-            "failed to parse Liberty proto".to_string(),
-            vec![("detail", msg)],
-        ),
-        ConeError::Invariant(msg) => (
-            "cone traversal invariant failed".to_string(),
-            vec![("detail", msg)],
         ),
     }
 }
@@ -166,25 +172,22 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
     let parsed_netlist = match netlist::io::parse_netlist_from_path(Path::new(netlist_path)) {
         Ok(p) => p,
         Err(e) => {
-            let (msg, details) =
-                cone_error_to_report_message(ConeError::NetlistParse(format!("{}", e)));
-            let mut kvs: Vec<(&str, &str)> = Vec::new();
-            for (k, v) in &details {
-                kvs.push((*k, v.as_str()));
-            }
-            report_cli_error_and_exit(&msg, None, kvs);
+            report_cli_error_and_exit(
+                "failed to parse gate-level netlist",
+                Some(&format!("{}", e)),
+                vec![("netlist", netlist_path.as_str())],
+            );
         }
     };
 
     let liberty_lib = match netlist::io::load_liberty_from_path(Path::new(liberty_proto_path)) {
         Ok(l) => l,
         Err(e) => {
-            let (msg, details) = cone_error_to_report_message(ConeError::Liberty(format!("{}", e)));
-            let mut kvs: Vec<(&str, &str)> = Vec::new();
-            for (k, v) in &details {
-                kvs.push((*k, v.as_str()));
-            }
-            report_cli_error_and_exit(&msg, None, kvs);
+            report_cli_error_and_exit(
+                "failed to parse Liberty proto",
+                Some(&format!("{}", e)),
+                vec![("liberty_proto", liberty_proto_path.as_str())],
+            );
         }
     };
 
@@ -204,8 +207,14 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
              instance_name,
              traversal_pin,
          }| {
-            wtr.write_record([instance_type, instance_name, traversal_pin])
-                .map_err(|e| ConeError::Invariant(format!("failed to write CSV record: {}", e)))
+            if let Err(e) = wtr.write_record([instance_type, instance_name, traversal_pin]) {
+                report_cli_error_and_exit(
+                    "failed to write CSV record",
+                    Some(&format!("{}", e)),
+                    vec![],
+                );
+            }
+            Ok(())
         },
     );
 

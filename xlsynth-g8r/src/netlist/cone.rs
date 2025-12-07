@@ -60,19 +60,28 @@ pub struct ConeVisit {
 /// Error type for cone traversal.
 #[derive(Debug)]
 pub enum ConeError {
+    /// Given when the user supplies an instance name to start from that is not present in the module.
     MissingInstance { name: String },
+    /// Given when an instance has a cell type that is not present in our liberty data.
     UnknownCellType {
         cell: String,
         instance: String,
         lineno: u32,
         colno: u32,
     },
+    /// Given when the user specifies a start pin or direction that is invalid
+    /// for the chosen instance.
+    InvalidStartPin {
+        instance: String,
+        pin: String,
+        reason: String,
+    },
+    /// Given when the user specifies a pin that is not present on the start cell
+    /// in the Liberty data.
     UnknownCellPin { cell: String, pin: String },
-    NoModulesParsed { path: String },
+    /// Given when the requested module name is not present in the parsed
+    /// netlist.
     ModuleNotFound { name: String },
-    NetlistParse(String),
-    Liberty(String),
-    Invariant(String),
 }
 
 impl std::fmt::Display for ConeError {
@@ -93,22 +102,23 @@ impl std::fmt::Display for ConeError {
                     instance, lineno, colno, cell
                 )
             }
+            ConeError::InvalidStartPin {
+                instance,
+                pin,
+                reason,
+            } => write!(
+                f,
+                "invalid start pin '{}' on instance '{}': {}",
+                pin, instance, reason
+            ),
             ConeError::UnknownCellPin { cell, pin } => write!(
                 f,
                 "pin '{}' is not present on cell type '{}' in the Liberty library",
                 pin, cell
             ),
-            ConeError::NoModulesParsed { path } => write!(
-                f,
-                "no modules parsed from '{}'; expected at least one module",
-                path
-            ),
             ConeError::ModuleNotFound { name } => {
                 write!(f, "module '{}' was not found in the netlist", name)
             }
-            ConeError::NetlistParse(msg) => write!(f, "netlist parse error: {}", msg),
-            ConeError::Liberty(msg) => write!(f, "liberty parse error: {}", msg),
-            ConeError::Invariant(msg) => write!(f, "cone traversal invariant failed: {}", msg),
         }
     }
 }
@@ -242,33 +252,34 @@ where
     match start_pins {
         Some(list) => {
             for pin_name in list {
-                let port_sym = ports_by_name
-                    .get(pin_name)
-                    .ok_or(ConeError::Invariant(format!(
-                        "start pin '{}' not found on instance '{}'",
-                        pin_name, start_instance
-                    )))?;
-                let dir = ports_by_sym
-                    .get(port_sym)
-                    .ok_or(ConeError::Invariant(format!(
-                        "internal error: missing port_sym for pin '{}' on instance '{}'",
-                        pin_name, start_instance
-                    )))?;
+                let port_sym = ports_by_name.get(pin_name).ok_or_else(|| {
+                    ConeError::InvalidStartPin {
+                        instance: start_instance.to_string(),
+                        pin: pin_name.clone(),
+                        reason: "pin not found on instance".to_string(),
+                    }
+                })?;
+                let dir = ports_by_sym.get(port_sym).expect(
+                    "internal error: missing port_sym in ports_by_sym for validated start pin",
+                );
                 match direction {
                     TraversalDirection::Fanin => {
                         if *dir != PinDirection::Input {
-                            return Err(ConeError::Invariant(format!(
-                                "start pin '{}' on instance '{}' is not an INPUT pin for fanin traversal",
-                                pin_name, start_instance
-                            )));
+                            return Err(ConeError::InvalidStartPin {
+                                instance: start_instance.to_string(),
+                                pin: pin_name.clone(),
+                                reason: "pin is not an INPUT pin for fanin traversal".to_string(),
+                            });
                         }
                     }
                     TraversalDirection::Fanout => {
                         if *dir != PinDirection::Output {
-                            return Err(ConeError::Invariant(format!(
-                                "start pin '{}' on instance '{}' is not an OUTPUT pin for fanout traversal",
-                                pin_name, start_instance
-                            )));
+                            return Err(ConeError::InvalidStartPin {
+                                instance: start_instance.to_string(),
+                                pin: pin_name.clone(),
+                                reason:
+                                    "pin is not an OUTPUT pin for fanout traversal".to_string(),
+                            });
                         }
                     }
                 }
@@ -342,12 +353,14 @@ where
             }
 
             for net_idx in &port.nets {
+                debug_assert!(
+                    net_idx.0 < ctx.nets.len(),
+                    "NetIndex({}) out of bounds for nets (len={}) during traversal",
+                    net_idx.0,
+                    ctx.nets.len()
+                );
                 if net_idx.0 >= ctx.nets.len() {
-                    return Err(ConeError::Invariant(format!(
-                        "NetIndex({}) out of bounds for nets (len={}) during traversal",
-                        net_idx.0,
-                        ctx.nets.len()
-                    )));
+                    continue;
                 }
 
                 // If we are stopping at block ports, do not traverse across
@@ -465,10 +478,12 @@ where
         }
         None => {
             if parsed.modules.len() != 1 {
-                return Err(ConeError::Invariant(format!(
-                    "netlist contains {} modules; specify --module_name to disambiguate",
-                    parsed.modules.len()
-                )));
+                return Err(ConeError::ModuleNotFound {
+                    name: format!(
+                        "netlist contains {} modules; specify --module_name to disambiguate",
+                        parsed.modules.len()
+                    ),
+                });
             }
             &parsed.modules[0]
         }
