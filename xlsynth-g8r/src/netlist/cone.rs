@@ -59,9 +59,11 @@ pub struct ConeVisit {
 /// Error type for cone traversal.
 #[derive(Debug)]
 pub enum ConeError {
-    /// Given when the user supplies an instance name to start from that is not present in the module.
+    /// Given when the user supplies an instance name to start from that is not
+    /// present in the module.
     MissingInstance { name: String },
-    /// Given when an instance has a cell type that is not present in our liberty data.
+    /// Given when an instance has a cell type that is not present in our
+    /// liberty data.
     UnknownCellType {
         cell: String,
         instance: String,
@@ -75,8 +77,8 @@ pub enum ConeError {
         pin: String,
         reason: String,
     },
-    /// Given when the user specifies a pin that is not present on the start cell
-    /// in the Liberty data.
+    /// Given when the user specifies a pin that is not present on the start
+    /// cell in the Liberty data.
     UnknownCellPin { cell: String, pin: String },
 }
 
@@ -149,14 +151,14 @@ impl<'a> ModuleConeContext<'a> {
         for (_inst_idx_raw, inst) in module.instances.iter().enumerate() {
             let type_sym = inst.type_name;
             let type_name = resolve_to_string(interner, type_sym);
-            let cell = lib
-                .get_cell(type_name.as_str())
-                .ok_or_else(|| ConeError::UnknownCellType {
-                    cell: type_name.clone(),
-                    instance: resolve_to_string(interner, inst.instance_name),
-                    lineno: inst.inst_lineno,
-                    colno: inst.inst_colno,
-                })?;
+            let cell =
+                lib.get_cell(type_name.as_str())
+                    .ok_or_else(|| ConeError::UnknownCellType {
+                        cell: type_name.clone(),
+                        instance: resolve_to_string(interner, inst.instance_name),
+                        lineno: inst.inst_lineno,
+                        colno: inst.inst_colno,
+                    })?;
 
             if dff_cell_names.contains(&cell.name) {
                 dff_types.insert(type_sym);
@@ -245,13 +247,14 @@ where
     match start_pins {
         Some(list) => {
             for pin_name in list {
-                let port_sym = ports_by_name.get(pin_name).ok_or_else(|| {
-                    ConeError::InvalidStartPin {
-                        instance: start_instance.to_string(),
-                        pin: pin_name.clone(),
-                        reason: "pin not found on instance".to_string(),
-                    }
-                })?;
+                let port_sym =
+                    ports_by_name
+                        .get(pin_name)
+                        .ok_or_else(|| ConeError::InvalidStartPin {
+                            instance: start_instance.to_string(),
+                            pin: pin_name.clone(),
+                            reason: "pin not found on instance".to_string(),
+                        })?;
                 let dir = ports_by_sym.get(port_sym).expect(
                     "internal error: missing port_sym in ports_by_sym for validated start pin",
                 );
@@ -270,8 +273,7 @@ where
                             return Err(ConeError::InvalidStartPin {
                                 instance: start_instance.to_string(),
                                 pin: pin_name.clone(),
-                                reason:
-                                    "pin is not an OUTPUT pin for fanout traversal".to_string(),
+                                reason: "pin is not an OUTPUT pin for fanout traversal".to_string(),
                             });
                         }
                     }

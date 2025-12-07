@@ -85,11 +85,7 @@ fn cone_error_to_report_message(err: ConeError) -> (String, Vec<(&'static str, S
             reason,
         } => (
             "invalid start pin for cone traversal".to_string(),
-            vec![
-                ("instance", instance),
-                ("pin", pin),
-                ("reason", reason),
-            ],
+            vec![("instance", instance), ("pin", pin), ("reason", reason)],
         ),
         ConeError::UnknownCellPin { cell, pin } => (
             "cell pin from netlist is missing in Liberty library".to_string(),

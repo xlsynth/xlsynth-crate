@@ -38,8 +38,8 @@ pub struct NetlistPort {
 /// Invariants enforced by the parser:
 /// - `instances` is the list of instance declarations in the module body.
 /// - `instance_name` values are **unique within a module**; if the input
-///   netlist contains multiple instances with the same name, parsing fails
-///   with a `ScanError` instead of constructing a `NetlistModule`.
+///   netlist contains multiple instances with the same name, parsing fails with
+///   a `ScanError` instead of constructing a `NetlistModule`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetlistModule {
     pub name: PortId,
@@ -1426,8 +1426,7 @@ impl<R: Read + 'static> Parser<R> {
         let mut instances = Vec::new();
         // Enforce uniqueness of instance names within a module: we track the
         // set of already-seen names and reject duplicates.
-        let mut instance_names: HashSet<PortId> =
-            HashSet::new();
+        let mut instance_names: HashSet<PortId> = HashSet::new();
         loop {
             match self.scanner.peekt()? {
                 Some(tok) => match &tok.payload {
@@ -1464,9 +1463,7 @@ impl<R: Read + 'static> Parser<R> {
                             return Err(ScanError {
                                 message: format!(
                                     "duplicate instance name '{}' in module",
-                                    self.interner
-                                        .resolve(instance.instance_name)
-                                        .unwrap()
+                                    self.interner.resolve(instance.instance_name).unwrap()
                                 ),
                                 span: Span {
                                     start: instance_start_pos,
