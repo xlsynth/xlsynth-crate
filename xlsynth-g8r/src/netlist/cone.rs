@@ -17,7 +17,6 @@
 use crate::liberty::IndexedLibrary;
 use crate::liberty_proto::PinDirection;
 use crate::netlist::connectivity::NetlistConnectivity;
-use crate::netlist::io::ParsedNetlist;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use string_interner::symbol::SymbolU32;
@@ -79,9 +78,6 @@ pub enum ConeError {
     /// Given when the user specifies a pin that is not present on the start cell
     /// in the Liberty data.
     UnknownCellPin { cell: String, pin: String },
-    /// Given when the requested module name is not present in the parsed
-    /// netlist.
-    ModuleNotFound { name: String },
 }
 
 impl std::fmt::Display for ConeError {
@@ -116,9 +112,6 @@ impl std::fmt::Display for ConeError {
                 "pin '{}' is not present on cell type '{}' in the Liberty library",
                 pin, cell
             ),
-            ConeError::ModuleNotFound { name } => {
-                write!(f, "module '{}' was not found in the netlist", name)
-            }
         }
     }
 }
@@ -196,7 +189,7 @@ fn resolve_to_string(
 ///
 /// This is the core traversal routine; callers that need file I/O should first
 /// parse a netlist and load a Liberty library in outer layers and then invoke
-/// this function (or [`visit_cone_in_parsed_netlist`]).
+/// this function.
 pub fn visit_module_cone<OnVisitFn>(
     module: &NetlistModule,
     nets: &[Net],
@@ -443,64 +436,6 @@ where
     }
 
     Ok(())
-}
-
-/// High-level convenience entry point: select a module from a parsed netlist
-/// and run cone traversal using a provided Liberty library.
-pub fn visit_cone_in_parsed_netlist<OnVisitFn>(
-    parsed: &ParsedNetlist,
-    lib: &IndexedLibrary,
-    module_name: Option<&str>,
-    start_instance: &str,
-    start_pins: Option<&[String]>,
-    direction: TraversalDirection,
-    stop: StopCondition,
-    dff_cell_names: &HashSet<String>,
-    mut on_visit: OnVisitFn,
-) -> ConeResult<()>
-where
-    OnVisitFn: FnMut(&ConeVisit) -> ConeResult<()>,
-{
-    // Select the target module.
-    let module = match module_name {
-        Some(name) => {
-            let mut found: Option<&NetlistModule> = None;
-            for m in &parsed.modules {
-                let m_name = resolve_to_string(&parsed.interner, m.name);
-                if m_name == name {
-                    found = Some(m);
-                    break;
-                }
-            }
-            found.ok_or_else(|| ConeError::ModuleNotFound {
-                name: name.to_string(),
-            })?
-        }
-        None => {
-            if parsed.modules.len() != 1 {
-                return Err(ConeError::ModuleNotFound {
-                    name: format!(
-                        "netlist contains {} modules; specify --module_name to disambiguate",
-                        parsed.modules.len()
-                    ),
-                });
-            }
-            &parsed.modules[0]
-        }
-    };
-
-    visit_module_cone(
-        module,
-        &parsed.nets,
-        &parsed.interner,
-        lib,
-        dff_cell_names,
-        start_instance,
-        start_pins,
-        direction,
-        stop,
-        &mut on_visit,
-    )
 }
 
 #[cfg(test)]

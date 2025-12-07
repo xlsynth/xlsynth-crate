@@ -95,10 +95,6 @@ fn cone_error_to_report_message(err: ConeError) -> (String, Vec<(&'static str, S
             "cell pin from netlist is missing in Liberty library".to_string(),
             vec![("cell_type", cell), ("pin", pin)],
         ),
-        ConeError::ModuleNotFound { name } => (
-            "requested module name was not found in netlist".to_string(),
-            vec![("module_name", name)],
-        ),
     }
 }
 
@@ -193,15 +189,55 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
 
     let indexed_lib = IndexedLibrary::new(liberty_lib);
 
-    let visit_result = netlist::cone::visit_cone_in_parsed_netlist(
-        &parsed_netlist,
+    // Select the target module in entry-point code rather than in the cone
+    // traversal library.
+    let module: &netlist::parse::NetlistModule = match module_name {
+        Some(name) => {
+            let mut found: Option<&netlist::parse::NetlistModule> = None;
+            for m in &parsed_netlist.modules {
+                let m_name = parsed_netlist
+                    .interner
+                    .resolve(m.name)
+                    .expect("module name symbol should resolve");
+                if m_name == name {
+                    found = Some(m);
+                    break;
+                }
+            }
+            match found {
+                Some(m) => m,
+                None => {
+                    report_cli_error_and_exit(
+                        "requested module name was not found in netlist",
+                        None,
+                        vec![("module_name", name)],
+                    );
+                }
+            }
+        }
+        None => {
+            if parsed_netlist.modules.len() != 1 {
+                let count_str = format!("{}", parsed_netlist.modules.len());
+                report_cli_error_and_exit(
+                    "netlist contains multiple modules; specify --module_name to disambiguate",
+                    None,
+                    vec![("module_count", count_str.as_str())],
+                );
+            }
+            &parsed_netlist.modules[0]
+        }
+    };
+
+    let visit_result = netlist::cone::visit_module_cone(
+        module,
+        &parsed_netlist.nets,
+        &parsed_netlist.interner,
         &indexed_lib,
-        module_name,
+        &dff_cells,
         instance_name.as_str(),
         start_pins.as_ref().map(|v| v.as_slice()),
         direction,
         stop,
-        &dff_cells,
         |ConeVisit {
              instance_type,
              instance_name,
