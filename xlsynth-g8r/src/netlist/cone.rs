@@ -1,0 +1,784 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Cone traversal for gate-level netlists.
+//!
+//! This module provides a small API for traversing the fanin/fanout cone around
+//! a particular instance in a parsed gate-level netlist. Callers supply:
+//!
+//! - A `NetlistModule` plus the global `nets` array and `interner`.
+//! - A Liberty `Library` describing per-cell pin directions.
+//! - A start instance name, optional start pin list, traversal direction, and a
+//!   stop condition.
+//!
+//! The traversal walks instance-to-instance and invokes a user callback on each
+//! visited `(instance_type, instance_name, traversal_pin)` triple in a
+//! deterministic order.
+
+use crate::liberty::IndexedLibrary;
+use crate::liberty_proto::PinDirection;
+use crate::netlist::connectivity::NetlistConnectivity;
+use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
+use std::collections::{HashMap, HashSet, VecDeque};
+use string_interner::symbol::SymbolU32;
+use string_interner::{StringInterner, backend::StringBackend};
+
+/// Direction to traverse the cone from the starting instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalDirection {
+    Fanin,
+    Fanout,
+}
+
+/// Condition that bounds how far the cone traversal proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopCondition {
+    /// Stop once instances beyond this graph distance (in edges) would be
+    /// reached. Level 0 is the starting instance.
+    Levels(u32),
+    /// Stop at DFF cell instances; do not traverse beyond them, but include
+    /// them in the visit stream.
+    AtDff,
+    /// Stop at module ports (primary inputs/outputs); do not traverse beyond
+    /// the block boundary, but include instances that connect to the port.
+    AtBlockPort,
+}
+
+/// One visit in the cone traversal.
+///
+/// - `instance_type` is the Liberty cell name (e.g. `INVX1`).
+/// - `instance_name` is the Verilog instance label (e.g. `u123`).
+/// - `traversal_pin` is the pin name on this instance through which the cone
+///   traversal reaches or departs this instance, depending on direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConeVisit {
+    pub instance_type: String,
+    pub instance_name: String,
+    pub traversal_pin: String,
+}
+
+/// Error type for cone traversal.
+#[derive(Debug)]
+pub enum ConeError {
+    /// Given when the user supplies an instance name to start from that is not
+    /// present in the module.
+    MissingInstance { name: String },
+    /// Given when an instance has a cell type that is not present in our
+    /// liberty data.
+    UnknownCellType {
+        cell: String,
+        instance: String,
+        lineno: u32,
+        colno: u32,
+    },
+    /// Given when the user specifies a start pin or direction that is invalid
+    /// for the chosen instance.
+    InvalidStartPin {
+        instance: String,
+        pin: String,
+        reason: String,
+    },
+    /// Given when the user specifies a pin that is not present on the start
+    /// cell in the Liberty data.
+    UnknownCellPin { cell: String, pin: String },
+}
+
+impl std::fmt::Display for ConeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConeError::MissingInstance { name } => {
+                write!(f, "start instance '{}' was not found in the module", name)
+            }
+            ConeError::UnknownCellType {
+                cell,
+                instance,
+                lineno,
+                colno,
+            } => {
+                write!(
+                    f,
+                    "instance '{}' at {}:{} has cell type '{}' that is not present in the Liberty library",
+                    instance, lineno, colno, cell
+                )
+            }
+            ConeError::InvalidStartPin {
+                instance,
+                pin,
+                reason,
+            } => write!(
+                f,
+                "invalid start pin '{}' on instance '{}': {}",
+                pin, instance, reason
+            ),
+            ConeError::UnknownCellPin { cell, pin } => write!(
+                f,
+                "pin '{}' is not present on cell type '{}' in the Liberty library",
+                pin, cell
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConeError {}
+
+type ConeResult<T> = std::result::Result<T, ConeError>;
+
+/// Per-module context with adjacency maps and cached metadata.
+struct ModuleConeContext<'a> {
+    /// The module being traversed.
+    module: &'a NetlistModule,
+    nets: &'a [Net],
+    interner: &'a StringInterner<StringBackend<SymbolU32>>,
+
+    /// Net-level connectivity (drivers and loads per net), plus cached
+    /// instance-port and module-port metadata.
+    connectivity: NetlistConnectivity<'a>,
+    /// Set of cell type symbols classified as DFFs (used for
+    /// StopCondition::AtDff).
+    dff_types: HashSet<PortId>,
+}
+
+impl<'a> ModuleConeContext<'a> {
+    fn new(
+        module: &'a NetlistModule,
+        nets: &'a [Net],
+        interner: &'a StringInterner<StringBackend<SymbolU32>>,
+        lib: &'a IndexedLibrary,
+        dff_cell_names: &HashSet<String>,
+    ) -> ConeResult<Self> {
+        // Precompute dff_types as a set of type-name symbols used by instances.
+        let mut dff_types: HashSet<PortId> = HashSet::new();
+
+        for (_inst_idx_raw, inst) in module.instances.iter().enumerate() {
+            let type_sym = inst.type_name;
+            let type_name = resolve_to_string(interner, type_sym);
+            let cell =
+                lib.get_cell(type_name.as_str())
+                    .ok_or_else(|| ConeError::UnknownCellType {
+                        cell: type_name.clone(),
+                        instance: resolve_to_string(interner, inst.instance_name),
+                        lineno: inst.inst_lineno,
+                        colno: inst.inst_colno,
+                    })?;
+
+            if dff_cell_names.contains(&cell.name) {
+                dff_types.insert(type_sym);
+            }
+        }
+        let connectivity = NetlistConnectivity::new(module, nets, interner, lib);
+
+        Ok(ModuleConeContext {
+            module,
+            nets,
+            interner,
+            connectivity,
+            dff_types,
+        })
+    }
+}
+
+fn resolve_to_string(
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    sym: SymbolU32,
+) -> String {
+    interner
+        .resolve(sym)
+        .expect("symbol should always resolve in interner")
+        .to_string()
+}
+
+/// Traverse the cone around `start_instance` in `module`, calling `on_visit`
+/// for each visited `(instance_type, instance_name, traversal_pin)` triple.
+///
+/// This is the core traversal routine; callers that need file I/O should first
+/// parse a netlist and load a Liberty library in outer layers and then invoke
+/// this function.
+pub fn visit_module_cone<OnVisitFn>(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    lib: &IndexedLibrary,
+    dff_cell_names: &HashSet<String>,
+    start_instance: &str,
+    start_pins: Option<&[String]>,
+    direction: TraversalDirection,
+    stop: StopCondition,
+    mut on_visit: OnVisitFn,
+) -> ConeResult<()>
+where
+    OnVisitFn: FnMut(&ConeVisit) -> ConeResult<()>,
+{
+    let ctx = ModuleConeContext::new(module, nets, interner, lib, dff_cell_names)?;
+
+    // Resolve the starting instance index.
+    let mut matches: Vec<usize> = Vec::new();
+    for (idx, inst) in module.instances.iter().enumerate() {
+        let name = resolve_to_string(interner, inst.instance_name);
+        if name == start_instance {
+            matches.push(idx);
+        }
+    }
+    if matches.is_empty() {
+        return Err(ConeError::MissingInstance {
+            name: start_instance.to_string(),
+        });
+    }
+    // `NetlistModule` parsing enforces that instance names are unique within a
+    // module; multiple matches here would indicate a parser invariant bug.
+    debug_assert_eq!(
+        matches.len(),
+        1,
+        "parser should enforce unique instance names per module"
+    );
+    let start_idx = InstIndex(matches[0]);
+
+    // Build a map from PortId to InstancePort for the starting instance to
+    // resolve and validate start pins.
+    let inst_ports = ctx.connectivity.instance_ports(start_idx, interner);
+
+    let mut ports_by_sym: HashMap<PortId, PinDirection> = HashMap::new();
+    let mut ports_by_name: HashMap<String, PortId> = HashMap::new();
+    for p in inst_ports.iter() {
+        ports_by_sym.insert(p.port, p.dir);
+        let name = resolve_to_string(interner, p.port);
+        ports_by_name.insert(name, p.port);
+    }
+
+    let mut chosen_ports: Vec<PortId> = Vec::new();
+    match start_pins {
+        Some(list) => {
+            for pin_name in list {
+                let port_sym =
+                    ports_by_name
+                        .get(pin_name)
+                        .ok_or_else(|| ConeError::InvalidStartPin {
+                            instance: start_instance.to_string(),
+                            pin: pin_name.clone(),
+                            reason: "pin not found on instance".to_string(),
+                        })?;
+                let dir = ports_by_sym.get(port_sym).expect(
+                    "internal error: missing port_sym in ports_by_sym for validated start pin",
+                );
+                match direction {
+                    TraversalDirection::Fanin => {
+                        if *dir != PinDirection::Input {
+                            return Err(ConeError::InvalidStartPin {
+                                instance: start_instance.to_string(),
+                                pin: pin_name.clone(),
+                                reason: "pin is not an INPUT pin for fanin traversal".to_string(),
+                            });
+                        }
+                    }
+                    TraversalDirection::Fanout => {
+                        if *dir != PinDirection::Output {
+                            return Err(ConeError::InvalidStartPin {
+                                instance: start_instance.to_string(),
+                                pin: pin_name.clone(),
+                                reason: "pin is not an OUTPUT pin for fanout traversal".to_string(),
+                            });
+                        }
+                    }
+                }
+                chosen_ports.push(*port_sym);
+            }
+        }
+        None => {
+            for p in inst_ports.iter() {
+                match direction {
+                    TraversalDirection::Fanin => {
+                        if p.dir == PinDirection::Input {
+                            chosen_ports.push(p.port);
+                        }
+                    }
+                    TraversalDirection::Fanout => {
+                        if p.dir == PinDirection::Output {
+                            chosen_ports.push(p.port);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Emit visits for the starting instance pins.
+    let start_inst = &module.instances[start_idx.0];
+    let inst_type_str = resolve_to_string(interner, start_inst.type_name);
+    let inst_name_str = resolve_to_string(interner, start_inst.instance_name);
+
+    // Ensure we only emit each (instance, port) pair once.
+    let mut emitted_ports: HashSet<(InstIndex, PortId)> = HashSet::new();
+    for port_sym in &chosen_ports {
+        let port_name = resolve_to_string(interner, *port_sym);
+        if emitted_ports.insert((start_idx, *port_sym)) {
+            let visit = ConeVisit {
+                instance_type: inst_type_str.clone(),
+                instance_name: inst_name_str.clone(),
+                traversal_pin: port_name,
+            };
+            on_visit(&visit)?;
+        }
+    }
+
+    // BFS over instances, bounded by StopCondition.
+    #[derive(Clone, Copy)]
+    struct QueueEntry {
+        inst_idx: InstIndex,
+        level: u32,
+    }
+
+    let mut visited_instances: HashSet<InstIndex> = HashSet::new();
+    visited_instances.insert(start_idx);
+
+    let mut queue: VecDeque<QueueEntry> = VecDeque::new();
+    queue.push_back(QueueEntry {
+        inst_idx: start_idx,
+        level: 0,
+    });
+
+    while let Some(QueueEntry { inst_idx, level }) = queue.pop_front() {
+        let ports = ctx.connectivity.instance_ports(inst_idx, &ctx.interner);
+
+        for port in ports.iter() {
+            // Only traverse through pins consistent with the global direction.
+            let traverse_through = match direction {
+                TraversalDirection::Fanin => port.dir == PinDirection::Input,
+                TraversalDirection::Fanout => port.dir == PinDirection::Output,
+            };
+            if !traverse_through {
+                continue;
+            }
+
+            for net_idx in &port.nets {
+                assert!(
+                    net_idx.0 < ctx.nets.len(),
+                    "NetIndex({}) out of bounds for nets (len={}) during traversal",
+                    net_idx.0,
+                    ctx.nets.len()
+                );
+
+                // If we are stopping at block ports, do not traverse across
+                // module boundary nets.
+                if matches!(stop, StopCondition::AtBlockPort)
+                    && ctx.connectivity.is_block_port_net(*net_idx)
+                {
+                    continue;
+                }
+
+                let neighbor_level = level + 1;
+                if let StopCondition::Levels(max) = stop {
+                    if neighbor_level > max {
+                        continue;
+                    }
+                }
+
+                let neighbors = match direction {
+                    TraversalDirection::Fanin => ctx.connectivity.drivers_for_net(*net_idx),
+                    TraversalDirection::Fanout => ctx.connectivity.loads_for_net(*net_idx),
+                };
+
+                for (nbr_inst_idx, nbr_port_sym) in neighbors {
+                    // Skip self-loops; the starting instance has already been emitted.
+                    if *nbr_inst_idx == inst_idx {
+                        continue;
+                    }
+
+                    let nbr_inst = &ctx.module.instances[nbr_inst_idx.0];
+                    let nbr_type_str = resolve_to_string(&ctx.interner, nbr_inst.type_name);
+                    let nbr_name_str = resolve_to_string(&ctx.interner, nbr_inst.instance_name);
+                    let nbr_port_name = resolve_to_string(&ctx.interner, *nbr_port_sym);
+
+                    if emitted_ports.insert((*nbr_inst_idx, *nbr_port_sym)) {
+                        let visit = ConeVisit {
+                            instance_type: nbr_type_str,
+                            instance_name: nbr_name_str,
+                            traversal_pin: nbr_port_name,
+                        };
+                        on_visit(&visit)?;
+                    }
+
+                    // Decide whether to enqueue this neighbor for further
+                    // expansion.
+                    let is_dff = ctx.dff_types.contains(&nbr_inst.type_name);
+                    match stop {
+                        StopCondition::Levels(max) => {
+                            if neighbor_level < max && visited_instances.insert(*nbr_inst_idx) {
+                                queue.push_back(QueueEntry {
+                                    inst_idx: *nbr_inst_idx,
+                                    level: neighbor_level,
+                                });
+                            }
+                        }
+                        StopCondition::AtDff => {
+                            if is_dff {
+                                // Include the DFF in the output but do not
+                                // traverse beyond it.
+                                continue;
+                            }
+                            if visited_instances.insert(*nbr_inst_idx) {
+                                queue.push_back(QueueEntry {
+                                    inst_idx: *nbr_inst_idx,
+                                    level: neighbor_level,
+                                });
+                            }
+                        }
+                        StopCondition::AtBlockPort => {
+                            if visited_instances.insert(*nbr_inst_idx) {
+                                queue.push_back(QueueEntry {
+                                    inst_idx: *nbr_inst_idx,
+                                    level: neighbor_level,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::liberty::{IndexedLibrary, test_utils::make_test_library};
+    use crate::liberty_proto::Library;
+    use crate::netlist::parse::{
+        Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
+    };
+    use pretty_assertions::assert_eq;
+    use std::collections::HashSet;
+
+    #[test]
+    fn simple_fanout_levels() {
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let n1 = interner.get_or_intern("n1");
+        let y = interner.get_or_intern("y");
+        let invx1 = interner.get_or_intern("INVX1");
+        let u1 = interner.get_or_intern("u1");
+        let u2 = interner.get_or_intern("u2");
+        let top = interner.get_or_intern("top");
+
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n1,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
+        ];
+
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: y,
+            },
+        ];
+
+        let instances = vec![
+            NetlistInstance {
+                type_name: invx1,
+                instance_name: u1,
+                connections: vec![
+                    (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
+                    (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(1))),
+                ],
+                inst_lineno: 0,
+                inst_colno: 0,
+            },
+            NetlistInstance {
+                type_name: invx1,
+                instance_name: u2,
+                connections: vec![
+                    (interner.get_or_intern("A"), NetRef::Simple(NetIndex(1))),
+                    (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(2))),
+                ],
+                inst_lineno: 0,
+                inst_colno: 0,
+            },
+        ];
+
+        let module = NetlistModule {
+            name: top,
+            ports,
+            wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            instances,
+        };
+
+        let lib: Library = make_test_library();
+        let indexed = IndexedLibrary::new(lib);
+
+        let mut visits: Vec<ConeVisit> = Vec::new();
+        let dff_cells: HashSet<String> = HashSet::new();
+        visit_module_cone(
+            &module,
+            &nets,
+            &interner,
+            &indexed,
+            &dff_cells,
+            "u1",
+            None,
+            TraversalDirection::Fanout,
+            StopCondition::Levels(1),
+            |v| {
+                visits.push(v.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let rendered: String = {
+            let mut rows: Vec<String> = Vec::new();
+            for v in &visits {
+                rows.push(format!(
+                    "{},{},{}",
+                    v.instance_type, v.instance_name, v.traversal_pin
+                ));
+            }
+            rows.join("\n")
+        };
+
+        let want = "INVX1,u1,Y\nINVX1,u2,A";
+        assert_eq!(rendered, want);
+    }
+
+    #[test]
+    fn fanout_to_two_pins_on_same_gate() {
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let n1 = interner.get_or_intern("n1");
+        let y = interner.get_or_intern("y");
+        let invx1 = interner.get_or_intern("INVX1");
+        let and2x1 = interner.get_or_intern("AND2X1");
+        let u1 = interner.get_or_intern("u1");
+        let u_and = interner.get_or_intern("u_and");
+        let top = interner.get_or_intern("top");
+
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n1,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
+        ];
+
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: y,
+            },
+        ];
+
+        // Topology:
+        //   a -> INVX1 u1 -> n1
+        //   n1 drives both A and B pins of AND2X1 u_and -> y
+        let instances = vec![
+            NetlistInstance {
+                type_name: invx1,
+                instance_name: u1,
+                connections: vec![
+                    (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
+                    (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(1))),
+                ],
+                inst_lineno: 0,
+                inst_colno: 0,
+            },
+            NetlistInstance {
+                type_name: and2x1,
+                instance_name: u_and,
+                connections: vec![
+                    (interner.get_or_intern("A"), NetRef::Simple(NetIndex(1))),
+                    (interner.get_or_intern("B"), NetRef::Simple(NetIndex(1))),
+                    (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(2))),
+                ],
+                inst_lineno: 0,
+                inst_colno: 0,
+            },
+        ];
+
+        let module = NetlistModule {
+            name: top,
+            ports,
+            wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            instances,
+        };
+
+        // Liberty library with INVX1 (from common test utils) and AND2X1 cell.
+        let mut lib: Library = make_test_library();
+        lib.cells.push(crate::liberty_proto::Cell {
+            name: "AND2X1".to_string(),
+            pins: vec![
+                crate::liberty_proto::Pin {
+                    direction: crate::liberty_proto::PinDirection::Input as i32,
+                    function: "".to_string(),
+                    name: "A".to_string(),
+                },
+                crate::liberty_proto::Pin {
+                    direction: crate::liberty_proto::PinDirection::Input as i32,
+                    function: "".to_string(),
+                    name: "B".to_string(),
+                },
+                crate::liberty_proto::Pin {
+                    direction: crate::liberty_proto::PinDirection::Output as i32,
+                    function: "(A*B)".to_string(),
+                    name: "Y".to_string(),
+                },
+            ],
+            area: 2.0,
+        });
+
+        let indexed = IndexedLibrary::new(lib);
+        let mut visits: Vec<ConeVisit> = Vec::new();
+        let dff_cells: HashSet<String> = HashSet::new();
+        visit_module_cone(
+            &module,
+            &nets,
+            &interner,
+            &indexed,
+            &dff_cells,
+            "u1",
+            None,
+            TraversalDirection::Fanout,
+            StopCondition::Levels(1),
+            |v| {
+                visits.push(v.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let rendered: String = {
+            let mut rows: Vec<String> = Vec::new();
+            for v in &visits {
+                rows.push(format!(
+                    "{},{},{}",
+                    v.instance_type, v.instance_name, v.traversal_pin
+                ));
+            }
+            rows.join("\n")
+        };
+
+        let want = "INVX1,u1,Y\nAND2X1,u_and,A\nAND2X1,u_and,B";
+        assert_eq!(rendered, want);
+    }
+
+    #[test]
+    fn self_loop_on_instance_is_not_visited_twice() {
+        // Construct a degenerate netlist where an INVX1 instance has both its
+        // input and output pins tied to the same net. The cone traversal should
+        // emit the starting instance once for its chosen start pin, and should
+        // not re-visit the same instance via a self-loop edge.
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let y = interner.get_or_intern("y");
+        let invx1 = interner.get_or_intern("INVX1");
+        let u1 = interner.get_or_intern("u1");
+        let top = interner.get_or_intern("top");
+
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
+        ];
+
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: y,
+            },
+        ];
+
+        // Topology:
+        //   a drives both A and Y pins of INVX1 u1 (self-loop on the instance).
+        let instances = vec![NetlistInstance {
+            type_name: invx1,
+            instance_name: u1,
+            connections: vec![
+                (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
+                (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(0))),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+
+        let module = NetlistModule {
+            name: top,
+            ports,
+            wires: vec![NetIndex(0), NetIndex(1)],
+            instances,
+        };
+
+        let lib: Library = make_test_library();
+        let indexed = IndexedLibrary::new(lib);
+        let mut visits: Vec<ConeVisit> = Vec::new();
+        let dff_cells: HashSet<String> = HashSet::new();
+        visit_module_cone(
+            &module,
+            &nets,
+            &interner,
+            &indexed,
+            &dff_cells,
+            "u1",
+            None,
+            TraversalDirection::Fanout,
+            StopCondition::Levels(1),
+            |v| {
+                visits.push(v.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let rendered: String = {
+            let mut rows: Vec<String> = Vec::new();
+            for v in &visits {
+                rows.push(format!(
+                    "{},{},{}",
+                    v.instance_type, v.instance_name, v.traversal_pin
+                ));
+            }
+            rows.join("\n")
+        };
+
+        // We should only see the starting instance once for its output pin Y;
+        // the self-loop back to the same instance via A should be ignored.
+        let want = "INVX1,u1,Y";
+        assert_eq!(rendered, want);
+    }
+}

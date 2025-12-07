@@ -2,7 +2,7 @@
 
 //! Token scanner and parser for gate-level netlists.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{BufRead, BufReader, Read};
 use string_interner::symbol::SymbolU32;
@@ -14,6 +14,10 @@ pub type NetId = SymbolU32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetIndex(pub usize);
+
+/// Index into `NetlistModule.instances`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InstIndex(pub usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Net {
@@ -29,6 +33,13 @@ pub struct NetlistPort {
     pub name: PortId,
 }
 
+/// Parsed gate-level module.
+///
+/// Invariants enforced by the parser:
+/// - `instances` is the list of instance declarations in the module body.
+/// - `instance_name` values are **unique within a module**; if the input
+///   netlist contains multiple instances with the same name, parsing fails with
+///   a `ScanError` instead of constructing a `NetlistModule`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetlistModule {
     pub name: PortId,
@@ -45,6 +56,23 @@ pub enum NetRef {
     Literal(IrBits),
     Unconnected,
     Concat(Vec<NetRef>), // { a, b[5], c[7:0], 1'b0 }
+}
+
+impl NetRef {
+    /// Collect all `NetIndex` values reachable from this `NetRef` into `out`.
+    pub fn collect_net_indices(&self, out: &mut Vec<NetIndex>) {
+        match self {
+            NetRef::Simple(idx) | NetRef::BitSelect(idx, _) | NetRef::PartSelect(idx, _, _) => {
+                out.push(*idx);
+            }
+            NetRef::Concat(elems) => {
+                for e in elems {
+                    e.collect_net_indices(out);
+                }
+            }
+            NetRef::Literal(_) | NetRef::Unconnected => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1396,6 +1424,9 @@ impl<R: Read + 'static> Parser<R> {
         let mut ports = Vec::new();
         let mut wires = Vec::new();
         let mut instances = Vec::new();
+        // Enforce uniqueness of instance names within a module: we track the
+        // set of already-seen names and reject duplicates.
+        let mut instance_names: HashSet<PortId> = HashSet::new();
         loop {
             match self.scanner.peekt()? {
                 Some(tok) => match &tok.payload {
@@ -1424,6 +1455,22 @@ impl<R: Read + 'static> Parser<R> {
                     }
                     TokenPayload::Identifier(_) => {
                         let instance = self.parse_instance()?;
+                        if !instance_names.insert(instance.instance_name) {
+                            let instance_start_pos = Pos {
+                                lineno: instance.inst_lineno,
+                                colno: instance.inst_colno,
+                            };
+                            return Err(ScanError {
+                                message: format!(
+                                    "duplicate instance name '{}' in module",
+                                    self.interner.resolve(instance.instance_name).unwrap()
+                                ),
+                                span: Span {
+                                    start: instance_start_pos,
+                                    limit: instance_start_pos,
+                                },
+                            });
+                        }
                         instances.push(instance);
                     }
                     // Skip comments and annotations

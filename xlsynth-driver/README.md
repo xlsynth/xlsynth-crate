@@ -96,6 +96,43 @@ xlsynth-driver gv-read-stats my_module.gv.gz
 
 This command has no flags.
 
+### `gv-dump-cone`: traverse a netlist cone and emit CSV
+
+Traverses the fanin or fanout cone around a particular gate-level instance and prints a CSV
+stream to stdout with one row per visited `(instance_type,instance_name,traversal_pin)` triple.
+
+Basic usage:
+
+```shell
+xlsynth-driver gv-dump-cone \
+  my_module.gv.gz \
+  --liberty_proto ~/asap7.proto \
+  --instance u123 \
+  --traverse fanin \
+  --stop-at-levels 3
+```
+
+Key flags:
+
+- `--liberty_proto <LIBERTY_PROTO>`: Liberty proto (.proto or .textproto) describing the cell library used by the netlist. Required.
+- `--instance <INSTANCE>`: Instance name at the cone center. Required.
+- `--traverse <fanin|fanout>`: Traversal direction from the center instance. Required.
+- One of (exactly one is required):
+  - `--stop-at-levels <N>`: Stop traversal once instances beyond graph distance `N` from the start instance would be reached.
+  - `--stop-at-dff`: Stop traversal at DFF-like cells inferred from the Liberty library; do not traverse beyond them.
+  - `--stop-at-block-port`: Stop traversal at module ports; do not traverse beyond the module boundary.
+
+Additional flags:
+
+- `--module_name <MODULE>`: Optional module name to restrict the search; required when the netlist contains multiple modules.
+- `--start-pins <CSV>`: Optional comma-separated list of starting pins on the instance; defaults to all input pins for `--traverse=fanin` and all output pins for `--traverse=fanout`.
+- `--dff_cells <CSV>`: Comma-separated list of DFF cell names that should be treated as stop boundaries when using `--stop-at-dff` (required if `--stop-at-dff` is selected).
+
+Output format:
+
+- A single header row: `instance_type,instance_name,traversal_pin`
+- One data row per visited instance/pin in a deterministic traversal order.
+
 ### `ir2g8r`: IR to gate-level representation
 
 Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist in AIG form).
