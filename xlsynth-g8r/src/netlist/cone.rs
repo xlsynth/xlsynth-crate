@@ -460,9 +460,18 @@ mod tests {
         let top = interner.get_or_intern("top");
 
         let nets = vec![
-            Net { name: a, width: None },
-            Net { name: n1, width: None },
-            Net { name: y, width: None },
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n1,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
         ];
 
         let ports = vec![
@@ -558,9 +567,18 @@ mod tests {
         let top = interner.get_or_intern("top");
 
         let nets = vec![
-            Net { name: a, width: None },
-            Net { name: n1, width: None },
-            Net { name: y, width: None },
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n1,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
         ];
 
         let ports = vec![
@@ -683,8 +701,14 @@ mod tests {
         let top = interner.get_or_intern("top");
 
         let nets = vec![
-            Net { name: a, width: None },
-            Net { name: y, width: None },
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
         ];
 
         let ports = vec![

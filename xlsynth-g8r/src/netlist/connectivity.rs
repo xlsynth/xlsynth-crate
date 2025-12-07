@@ -259,9 +259,18 @@ mod tests {
         let u2 = interner.get_or_intern("u2");
 
         let nets = vec![
-            Net { name: a, width: None },
-            Net { name: n1, width: None },
-            Net { name: y, width: None },
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n1,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
         ];
 
         let ports = vec![

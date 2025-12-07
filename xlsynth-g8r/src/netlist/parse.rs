@@ -214,7 +214,10 @@ pub struct Span {
 
 impl Span {
     pub fn to_human_string(&self) -> String {
-        format!("{}:{}..{}:{}", self.start.lineno, self.start.colno, self.limit.lineno, self.limit.colno)
+        format!(
+            "{}:{}..{}:{}",
+            self.start.lineno, self.start.colno, self.limit.lineno, self.limit.colno
+        )
     }
 }
 
@@ -1181,9 +1184,12 @@ impl<R: Read + 'static> Parser<R> {
         }
     }
 
-    /// Parses optional "[idx]" or "[msb:lsb]" bit/part-select that may follow an
-    /// identifier in an assign statement, for either the LHS or RHS.
-    fn parse_optional_assign_bit_or_part_select(&mut self, side_label: &str) -> Result<(), ScanError> {
+    /// Parses optional "[idx]" or "[msb:lsb]" bit/part-select that may follow
+    /// an identifier in an assign statement, for either the LHS or RHS.
+    fn parse_optional_assign_bit_or_part_select(
+        &mut self,
+        side_label: &str,
+    ) -> Result<(), ScanError> {
         if let Some(next) = self.scanner.peekt()? {
             if matches!(next.payload, TokenPayload::OBrack) {
                 // consume '['
@@ -1238,10 +1244,7 @@ impl<R: Read + 'static> Parser<R> {
                 }
                 // expect ']'
                 let t_cb = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: format!(
-                        "expected ']' after {} bit/part-select",
-                        side_label
-                    ),
+                    message: format!("expected ']' after {} bit/part-select", side_label),
                     span: Span {
                         start: self.scanner.pos,
                         limit: self.scanner.pos,
@@ -1249,10 +1252,7 @@ impl<R: Read + 'static> Parser<R> {
                 })?;
                 if !matches!(t_cb.payload, TokenPayload::CBrack) {
                     return Err(ScanError {
-                        message: format!(
-                            "expected ']' after {} bit/part-select",
-                            side_label
-                        ),
+                        message: format!("expected ']' after {} bit/part-select", side_label),
                         span: t_cb.span,
                     });
                 }

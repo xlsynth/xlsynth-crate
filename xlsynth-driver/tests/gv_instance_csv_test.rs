@@ -85,10 +85,7 @@ endmodule
         lines.iter().any(|&l| l == "u_feed,feedthrough"),
         "missing u_feed"
     );
-    assert!(
-        lines.iter().any(|&l| l == "inst1,NAND2X1"),
-        "missing inst1"
-    );
+    assert!(lines.iter().any(|&l| l == "inst1,NAND2X1"), "missing inst1");
 }
 
 #[test]
@@ -130,8 +127,5 @@ endmodule
         lines.iter().any(|&l| l == "u_feed,feedthrough_bus"),
         "missing u_feed"
     );
-    assert!(
-        lines.iter().any(|&l| l == "inst1,NAND2X1"),
-        "missing inst1"
-    );
+    assert!(lines.iter().any(|&l| l == "inst1,NAND2X1"), "missing inst1");
 }
