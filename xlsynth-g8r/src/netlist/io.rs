@@ -60,9 +60,9 @@ pub fn parse_netlist_from_path(path: &Path) -> Result<ParsedNetlist> {
     let mut parser: NetlistParser<Box<dyn Read>> = NetlistParser::new(scanner);
     let modules = parser.parse_file().map_err(|e| {
         anyhow!(format!(
-            "{} at {:?}\n{}\n{}^",
+            "{} @ {}\n{}\n{}^",
             e.message,
-            e.span,
+            e.span.to_human_string(),
             parser
                 .get_line(e.span.start.lineno)
                 .unwrap_or_else(|| "<line unavailable>".to_string()),

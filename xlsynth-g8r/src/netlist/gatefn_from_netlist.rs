@@ -708,14 +708,8 @@ mod tests {
         let invx1 = interner.get_or_intern("INVX1");
         let u1 = interner.get_or_intern("u1");
         let nets = vec![
-            Net {
-                name: a,
-                width: None,
-            },
-            Net {
-                name: y,
-                width: None,
-            },
+            Net { name: a, width: None },
+            Net { name: y, width: None },
         ];
         let ports = vec![
             NetlistPort {
@@ -791,14 +785,8 @@ mod tests {
         let invx1 = interner.get_or_intern("INVX1");
         let u1 = interner.get_or_intern("u1");
         let nets = vec![
-            Net {
-                name: a,
-                width: None,
-            },
-            Net {
-                name: y,
-                width: None,
-            },
+            Net { name: a, width: None },
+            Net { name: y, width: None },
         ];
         let ports = vec![
             NetlistPort {
@@ -868,10 +856,7 @@ mod tests {
         let y = interner.get_or_intern("y");
         let and2 = interner.get_or_intern("AND2");
         let u1 = interner.get_or_intern("u1");
-        let nets = vec![Net {
-            name: y,
-            width: None,
-        }];
+        let nets = vec![Net { name: y, width: None }];
         let ports = vec![NetlistPort {
             direction: PortDirection::Output,
             width: None,
@@ -940,10 +925,7 @@ mod tests {
         let u1 = interner.get_or_intern("u1");
         // n is a 4-bit net
         let nets = vec![
-            Net {
-                name: a,
-                width: None,
-            },
+            Net { name: a, width: None },
             Net {
                 name: n,
                 width: Some((3, 0)),
@@ -1033,10 +1015,7 @@ mod tests {
 
         // a: 1-bit input, y: 4-bit output
         let nets = vec![
-            Net {
-                name: a,
-                width: None,
-            },
+            Net { name: a, width: None },
             Net {
                 name: y,
                 width: Some((3, 0)),
@@ -1220,14 +1199,8 @@ mod tests {
         let dff = interner.get_or_intern("DFF");
         let u1 = interner.get_or_intern("u1");
         let nets = vec![
-            Net {
-                name: d,
-                width: None,
-            },
-            Net {
-                name: q,
-                width: None,
-            },
+            Net { name: d, width: None },
+            Net { name: q, width: None },
         ];
         let ports = vec![
             NetlistPort {
@@ -1310,14 +1283,8 @@ mod tests {
         let u1 = interner.get_or_intern("u1");
 
         let nets = vec![
-            Net {
-                name: d,
-                width: None,
-            },
-            Net {
-                name: qn,
-                width: None,
-            },
+            Net { name: d, width: None },
+            Net { name: qn, width: None },
         ];
         let ports = vec![
             NetlistPort {
@@ -1390,10 +1357,7 @@ mod tests {
         let u1 = interner.get_or_intern("u1");
 
         let nets = vec![
-            Net {
-                name: d,
-                width: None,
-            },
+            Net { name: d, width: None },
             Net {
                 name: y,
                 width: Some((3, 0)),
@@ -1561,14 +1525,8 @@ mod tests {
         let and2 = interner.get_or_intern("AND2");
         let u1 = interner.get_or_intern("u1");
         let nets = vec![
-            Net {
-                name: a,
-                width: None,
-            },
-            Net {
-                name: y,
-                width: None,
-            },
+            Net { name: a, width: None },
+            Net { name: y, width: None },
         ];
         let ports = vec![
             NetlistPort {

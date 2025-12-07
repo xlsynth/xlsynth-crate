@@ -77,9 +77,9 @@ pub fn read_netlist_stats(path: &Path) -> Result<NetlistStats> {
                 .unwrap_or_else(|| "<line unavailable>".to_string());
             let col = (e.span.start.colno as usize).saturating_sub(1);
             let msg = format!(
-                "{} at {:?}\n{}\n{}^",
+                "{} @ {}\n{}\n{}^",
                 e.message,
-                e.span,
+                e.span.to_human_string(),
                 line,
                 " ".repeat(col)
             );

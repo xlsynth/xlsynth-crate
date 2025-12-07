@@ -22,8 +22,8 @@ pub struct InstIndex(pub usize);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Net {
     pub name: NetId,
-    pub width: Option<(u32, u32)>, /* (msb, lsb)
-                                    * TODO: add more net properties as needed */
+    /// Optional (msb, lsb) width for this net.
+    pub width: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +212,12 @@ pub struct Span {
     pub limit: Pos,
 }
 
+impl Span {
+    pub fn to_human_string(&self) -> String {
+        format!("{}:{}..{}:{}", self.start.lineno, self.start.colno, self.limit.lineno, self.limit.colno)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub payload: TokenPayload,
@@ -378,7 +384,7 @@ impl<R: Read + 'static> TokenScanner<R> {
         let line = (self.line_lookup)(span.start.lineno)
             .unwrap_or_else(|| "<line unavailable>".to_string());
         let col = (span.start.colno as usize).saturating_sub(1);
-        log::error!("ScanError: {} at {:?}", msg, span);
+        log::error!("ScanError: {} @ {}", msg, span.to_human_string());
         log::error!("{}", line);
         log::error!("{}^", " ".repeat(col));
         ScanError {
@@ -905,6 +911,14 @@ pub struct Parser<R: Read + 'static> {
     pub interner: StringInterner<StringBackend<SymbolU32>>,
     pub nets: Vec<Net>,
     net_index_by_name: HashMap<NetId, NetIndex>,
+    /// Index into `nets` where the current module's nets begin.
+    /// Used to scope name lookups so that widths are checked per-module
+    /// instead of across the entire file.
+    current_module_net_start: usize,
+    /// Span where each net's current width was first determined, keyed by
+    /// net name. Used only for diagnostics when reporting conflicting
+    /// widths during parsing; not carried into result artifacts.
+    net_width_span_by_name: HashMap<NetId, Span>,
 }
 
 impl<R: Read + 'static> Parser<R> {
@@ -914,6 +928,8 @@ impl<R: Read + 'static> Parser<R> {
             interner: StringInterner::new(),
             nets: Vec::new(),
             net_index_by_name: HashMap::new(),
+            current_module_net_start: 0,
+            net_width_span_by_name: HashMap::new(),
         }
     }
 
@@ -998,11 +1014,14 @@ impl<R: Read + 'static> Parser<R> {
         match net_tok.payload {
             TokenPayload::Identifier(s) => {
                 let net_sym = self.interner.get_or_intern(s);
-                // Lookup declared net
+                // Lookup declared net (scoped to the current module).
                 let net_idx = if let Some(&idx) = self.net_index_by_name.get(&net_sym) {
                     idx
-                } else if let Some(pos) = self.nets.iter().position(|n| n.name == net_sym) {
-                    let idx = NetIndex(pos);
+                } else if let Some(pos) = self.nets[self.current_module_net_start..]
+                    .iter()
+                    .position(|n| n.name == net_sym)
+                {
+                    let idx = NetIndex(self.current_module_net_start + pos);
                     self.net_index_by_name.insert(net_sym, idx);
                     idx
                 } else {
@@ -1120,16 +1139,30 @@ impl<R: Read + 'static> Parser<R> {
             let existing = &mut self.nets[idx.0];
             match (existing.width, width) {
                 (None, None) => {}
-                (None, Some(w)) => existing.width = Some(w),
+                (None, Some(w)) => {
+                    existing.width = Some(w);
+                    self.net_width_span_by_name.insert(name, err_span);
+                }
                 (Some(_), None) => {}
                 (Some(a), Some(b)) => {
                     if a != b {
+                        debug_assert!(
+                            self.net_width_span_by_name.contains_key(&name),
+                            "Net with known width should carry a width span for diagnostics"
+                        );
+                        let prev_span = self
+                            .net_width_span_by_name
+                            .get(&name)
+                            .copied()
+                            .unwrap_or(err_span);
                         return Err(ScanError {
                             message: format!(
-                                "conflicting widths for net '{}': {:?} vs {:?}",
+                                "conflicting widths for net '{}': {:?} vs {:?}; previously determined width was {:?} @ {}",
                                 self.interner.resolve(name).unwrap_or("<unknown>"),
                                 a,
-                                b
+                                b,
+                                a,
+                                prev_span.to_human_string()
                             ),
                             span: err_span,
                         });
@@ -1140,6 +1173,9 @@ impl<R: Read + 'static> Parser<R> {
         } else {
             let idx = NetIndex(self.nets.len());
             self.nets.push(Net { name, width });
+            if width.is_some() {
+                self.net_width_span_by_name.insert(name, err_span);
+            }
             self.net_index_by_name.insert(name, idx);
             Ok(idx)
         }
@@ -1360,6 +1396,14 @@ impl<R: Read + 'static> Parser<R> {
     }
 
     pub fn parse_module(&mut self) -> Result<NetlistModule, ScanError> {
+        // Each module has its own namespace for nets. Reset the per-module
+        // name index and record where this module's nets begin in the global
+        // `nets` vector so that lookups (and width checks) are scoped
+        // per-module instead of across the entire file.
+        self.current_module_net_start = self.nets.len();
+        self.net_index_by_name.clear();
+        self.net_width_span_by_name.clear();
+
         // Expect 'module' keyword
         let tok = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected 'module' keyword".to_string(),
@@ -1803,15 +1847,6 @@ impl<R: Read + 'static> Parser<R> {
                 },
             })?;
             if !matches!(semi.payload, TokenPayload::Semi) {
-                let line = (self.scanner.line_lookup)(semi.span.start.lineno)
-                    .unwrap_or_else(|| "<line unavailable>".to_string());
-                log::error!(
-                    "expected ';' after wire decl, got {:?} at {:?}\n{}\n{}^",
-                    semi.payload,
-                    semi.span,
-                    line,
-                    " ".repeat((semi.span.start.colno as usize).saturating_sub(1))
-                );
                 return Err(ScanError {
                     message: "expected ';' after wire decl".to_string(),
                     span: semi.span,
@@ -1865,17 +1900,8 @@ impl<R: Read + 'static> Parser<R> {
         let instance_name = match inst_tok.payload {
             TokenPayload::Identifier(s) => self.interner.get_or_intern(s),
             ref other => {
-                let line = (self.scanner.line_lookup)(inst_tok.span.start.lineno)
-                    .unwrap_or_else(|| "<line unavailable>".to_string());
-                log::error!(
-                    "expected identifier for instance name, got {:?} at {:?}\n{}\n{}^",
-                    other,
-                    inst_tok.span,
-                    line,
-                    " ".repeat((inst_tok.span.start.colno as usize).saturating_sub(1))
-                );
                 return Err(ScanError {
-                    message: "expected identifier for instance name".to_string(),
+                    message: format!("expected identifier for instance name; got {:?}", other),
                     span: inst_tok.span,
                 });
             }
@@ -2823,5 +2849,39 @@ endmodule
             .parse_file()
             .expect_err("should error on width conflict");
         assert!(err.message.contains("conflicting widths for net 'out'"));
+        assert!(
+            err.message.contains("previously determined width was"),
+            "error message should mention previous width location for diagnostics: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_conflicting_widths_across_modules_are_ok() {
+        // Two separate modules may legitimately use the same net name with
+        // different widths; width consistency is a per-module property, not
+        // global to the file.
+        let src = r#"
+module m1(gen_in);
+  input [7:0] gen_in;
+endmodule
+
+module m2(gen_in);
+  input [3:0] gen_in;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse should succeed");
+        assert_eq!(modules.len(), 2);
+        // Sanity check: each module sees exactly one net named gen_in, with
+        // its own width.
+        let gen_in_nets: Vec<&Net> = parser
+            .nets
+            .iter()
+            .filter(|n| parser.interner.resolve(n.name).unwrap() == "gen_in")
+            .collect();
+        assert_eq!(gen_in_nets.len(), 2);
+        assert!(gen_in_nets.iter().any(|n| n.width == Some((7, 0))));
+        assert!(gen_in_nets.iter().any(|n| n.width == Some((3, 0))));
     }
 }
