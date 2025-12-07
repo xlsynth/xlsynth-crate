@@ -348,15 +348,12 @@ where
             }
 
             for net_idx in &port.nets {
-                debug_assert!(
+                assert!(
                     net_idx.0 < ctx.nets.len(),
                     "NetIndex({}) out of bounds for nets (len={}) during traversal",
                     net_idx.0,
                     ctx.nets.len()
                 );
-                if net_idx.0 >= ctx.nets.len() {
-                    continue;
-                }
 
                 // If we are stopping at block ports, do not traverse across
                 // module boundary nets.
@@ -443,34 +440,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty::IndexedLibrary;
-    use crate::liberty_proto::{Cell, Library, Pin};
+    use crate::liberty::{IndexedLibrary, test_utils::make_test_library};
+    use crate::liberty_proto::Library;
     use crate::netlist::parse::{
         Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
     use pretty_assertions::assert_eq;
     use std::collections::HashSet;
-
-    fn make_simple_inverter_lib() -> Library {
-        Library {
-            cells: vec![Cell {
-                name: "INVX1".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        function: "".to_string(),
-                        name: "A".to_string(),
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        function: "(!A)".to_string(),
-                        name: "Y".to_string(),
-                    },
-                ],
-                area: 1.0,
-            }],
-        }
-    }
 
     #[test]
     fn simple_fanout_levels() {
@@ -541,7 +517,7 @@ mod tests {
             instances,
         };
 
-        let lib = make_simple_inverter_lib();
+        let lib: Library = make_test_library();
         let indexed = IndexedLibrary::new(lib);
 
         let mut visits: Vec<ConeVisit> = Vec::new();
@@ -652,48 +628,29 @@ mod tests {
             instances,
         };
 
-        // Liberty library with INVX1 and AND2X1 cells.
-        let lib = Library {
-            cells: vec![
-                Cell {
-                    name: "INVX1".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "A".to_string(),
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            function: "(!A)".to_string(),
-                            name: "Y".to_string(),
-                        },
-                    ],
-                    area: 1.0,
+        // Liberty library with INVX1 (from common test utils) and AND2X1 cell.
+        let mut lib: Library = make_test_library();
+        lib.cells.push(crate::liberty_proto::Cell {
+            name: "AND2X1".to_string(),
+            pins: vec![
+                crate::liberty_proto::Pin {
+                    direction: crate::liberty_proto::PinDirection::Input as i32,
+                    function: "".to_string(),
+                    name: "A".to_string(),
                 },
-                Cell {
-                    name: "AND2X1".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "A".to_string(),
-                        },
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "B".to_string(),
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            function: "(A*B)".to_string(),
-                            name: "Y".to_string(),
-                        },
-                    ],
-                    area: 2.0,
+                crate::liberty_proto::Pin {
+                    direction: crate::liberty_proto::PinDirection::Input as i32,
+                    function: "".to_string(),
+                    name: "B".to_string(),
+                },
+                crate::liberty_proto::Pin {
+                    direction: crate::liberty_proto::PinDirection::Output as i32,
+                    function: "(A*B)".to_string(),
+                    name: "Y".to_string(),
                 },
             ],
-        };
+            area: 2.0,
+        });
 
         let indexed = IndexedLibrary::new(lib);
         let mut visits: Vec<ConeVisit> = Vec::new();
@@ -727,6 +684,101 @@ mod tests {
         };
 
         let want = "INVX1,u1,Y\nAND2X1,u_and,A\nAND2X1,u_and,B";
+        assert_eq!(rendered, want);
+    }
+
+    #[test]
+    fn self_loop_on_instance_is_not_visited_twice() {
+        // Construct a degenerate netlist where an INVX1 instance has both its
+        // input and output pins tied to the same net. The cone traversal should
+        // emit the starting instance once for its chosen start pin, and should
+        // not re-visit the same instance via a self-loop edge.
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let y = interner.get_or_intern("y");
+        let invx1 = interner.get_or_intern("INVX1");
+        let u1 = interner.get_or_intern("u1");
+        let top = interner.get_or_intern("top");
+
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
+        ];
+
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: y,
+            },
+        ];
+
+        // Topology:
+        //   a drives both A and Y pins of INVX1 u1 (self-loop on the instance).
+        let instances = vec![NetlistInstance {
+            type_name: invx1,
+            instance_name: u1,
+            connections: vec![
+                (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
+                (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(0))),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+
+        let module = NetlistModule {
+            name: top,
+            ports,
+            wires: vec![NetIndex(0), NetIndex(1)],
+            instances,
+        };
+
+        let lib: Library = make_test_library();
+        let indexed = IndexedLibrary::new(lib);
+        let mut visits: Vec<ConeVisit> = Vec::new();
+        let dff_cells: HashSet<String> = HashSet::new();
+        visit_module_cone(
+            &module,
+            &nets,
+            &interner,
+            &indexed,
+            &dff_cells,
+            "u1",
+            None,
+            TraversalDirection::Fanout,
+            StopCondition::Levels(1),
+            |v| {
+                visits.push(v.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let rendered: String = {
+            let mut rows: Vec<String> = Vec::new();
+            for v in &visits {
+                rows.push(format!(
+                    "{},{},{}",
+                    v.instance_type, v.instance_name, v.traversal_pin
+                ));
+            }
+            rows.join("\n")
+        };
+
+        // We should only see the starting instance once for its output pin Y;
+        // the self-loop back to the same instance via A should be ignored.
+        let want = "INVX1,u1,Y";
         assert_eq!(rendered, want);
     }
 }

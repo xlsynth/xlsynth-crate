@@ -156,45 +156,7 @@ impl IndexedLibrary {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_test_library() -> Library {
-        Library {
-            cells: vec![
-                Cell {
-                    name: "INVX1".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "A".to_string(),
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            function: "(!A)".to_string(),
-                            name: "Y".to_string(),
-                        },
-                    ],
-                    area: 1.0,
-                },
-                Cell {
-                    name: "BUF".to_string(),
-                    pins: vec![
-                        Pin {
-                            direction: PinDirection::Input as i32,
-                            function: "".to_string(),
-                            name: "I".to_string(),
-                        },
-                        Pin {
-                            direction: PinDirection::Output as i32,
-                            function: "I".to_string(),
-                            name: "O".to_string(),
-                        },
-                    ],
-                    area: 1.0,
-                },
-            ],
-        }
-    }
+    use crate::liberty::test_utils::make_test_library;
 
     #[test]
     fn get_cell_finds_by_name() {
