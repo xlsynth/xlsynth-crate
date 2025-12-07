@@ -65,10 +65,6 @@ fn cone_error_to_report_message(err: ConeError) -> (String, Vec<(&'static str, S
             "start instance not found in module".to_string(),
             vec![("instance", name)],
         ),
-        ConeError::AmbiguousInstance { name, count } => (
-            "start instance is ambiguous in module".to_string(),
-            vec![("instance", name), ("count", format!("{}", count))],
-        ),
         ConeError::UnknownCellType { cell } => (
             "cell type from netlist is missing in Liberty library".to_string(),
             vec![("cell_type", cell)],

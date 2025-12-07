@@ -61,8 +61,12 @@ pub struct ConeVisit {
 #[derive(Debug)]
 pub enum ConeError {
     MissingInstance { name: String },
-    AmbiguousInstance { name: String, count: usize },
-    UnknownCellType { cell: String },
+    UnknownCellType {
+        cell: String,
+        instance: String,
+        lineno: u32,
+        colno: u32,
+    },
     UnknownCellPin { cell: String, pin: String },
     NoModulesParsed { path: String },
     ModuleNotFound { name: String },
@@ -77,16 +81,16 @@ impl std::fmt::Display for ConeError {
             ConeError::MissingInstance { name } => {
                 write!(f, "start instance '{}' was not found in the module", name)
             }
-            ConeError::AmbiguousInstance { name, count } => write!(
-                f,
-                "start instance '{}' is ambiguous: found {} instances with this name",
-                name, count
-            ),
-            ConeError::UnknownCellType { cell } => {
+            ConeError::UnknownCellType {
+                cell,
+                instance,
+                lineno,
+                colno,
+            } => {
                 write!(
                     f,
-                    "cell type '{}' is not present in the Liberty library",
-                    cell
+                    "instance '{}' at {}:{} has cell type '{}' that is not present in the Liberty library",
+                    instance, lineno, colno, cell
                 )
             }
             ConeError::UnknownCellPin { cell, pin } => write!(
@@ -144,7 +148,12 @@ impl<'a> ModuleConeContext<'a> {
             let type_name = resolve_to_string(interner, type_sym);
             let cell = lib
                 .get_cell(type_name.as_str())
-                .ok_or(ConeError::UnknownCellType { cell: type_name })?;
+                .ok_or_else(|| ConeError::UnknownCellType {
+                    cell: type_name.clone(),
+                    instance: resolve_to_string(interner, inst.instance_name),
+                    lineno: inst.inst_lineno,
+                    colno: inst.inst_colno,
+                })?;
 
             if dff_cell_names.contains(&cell.name) {
                 dff_types.insert(type_sym);
@@ -208,12 +217,13 @@ where
             name: start_instance.to_string(),
         });
     }
-    if matches.len() > 1 {
-        return Err(ConeError::AmbiguousInstance {
-            name: start_instance.to_string(),
-            count: matches.len(),
-        });
-    }
+    // `NetlistModule` parsing enforces that instance names are unique within a
+    // module; multiple matches here would indicate a parser invariant bug.
+    debug_assert_eq!(
+        matches.len(),
+        1,
+        "parser should enforce unique instance names per module"
+    );
     let start_idx = InstIndex(matches[0]);
 
     // Build a map from PortId to InstancePort for the starting instance to
