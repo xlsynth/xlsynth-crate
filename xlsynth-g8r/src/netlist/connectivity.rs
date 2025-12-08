@@ -78,129 +78,16 @@ impl<'a> NetlistConnectivity<'a> {
         lib: &'a IndexedLibrary,
         module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     ) -> Self {
-        // Map from module port net symbol -> PortDirection for sparse
-        // block-port attachment metadata.
-        let mut port_dir_by_sym: HashMap<SymbolU32, PortDirection> = HashMap::new();
-        for port in &module.ports {
-            port_dir_by_sym.insert(port.name, port.direction.clone());
-        }
-
-        // Sparse per-net module-port attachment (only nets that touch block
-        // ports get entries).
-        let mut block_port_nets: HashMap<NetIndex, BlockPortBoundary> = HashMap::new();
-        for (idx, net) in nets.iter().enumerate() {
-            if let Some(dir) = port_dir_by_sym.get(&net.name) {
-                let entry =
-                    block_port_nets
-                        .entry(NetIndex(idx))
-                        .or_insert_with(|| BlockPortBoundary {
-                            has_input: false,
-                            has_output: false,
-                            has_inout: false,
-                        });
-                match dir {
-                    PortDirection::Input => entry.has_input = true,
-                    PortDirection::Output => entry.has_output = true,
-                    PortDirection::Inout => entry.has_inout = true,
-                }
-            }
-        }
-
-        let mut net_neighbors: Vec<NetNeighbors> = Vec::with_capacity(nets.len());
-        net_neighbors.resize_with(nets.len(), || NetNeighbors {
-            drivers: Vec::new(),
-            loads: Vec::new(),
-        });
-
-        let mut instance_ports: Vec<Vec<InstancePortInfo>> =
-            Vec::with_capacity(module.instances.len());
-        instance_ports.resize_with(module.instances.len(), Vec::new);
-
-        for (inst_idx_raw, inst) in module.instances.iter().enumerate() {
-            let inst_idx = InstIndex(inst_idx_raw);
-
-            // Resolve cell or module pin directions once per instance.
-            let type_sym = inst.type_name;
-            let type_name = resolve_to_string(interner, type_sym);
-
-            // Build pin-name -> direction map for this instance type.
-            //
-            // Preference order:
-            // - Liberty cell pin directions when a matching cell is present.
-            // - Module port directions when the type matches a parsed module name and
-            //   `module_port_dirs` is provided.
-            // - Otherwise, skip connectivity for this instance (maintaining historical
-            //   behavior where unknown cell types are treated as an invariant violation).
-            let mut dir_by_pin: HashMap<String, PinDirection> = HashMap::new();
-
-            if let Some(cell) = lib.get_cell(type_name.as_str()) {
-                for pin in &cell.pins {
-                    let dir_val = pin.direction;
-                    let dir = if dir_val == PinDirection::Input as i32 {
-                        PinDirection::Input
-                    } else if dir_val == PinDirection::Output as i32 {
-                        PinDirection::Output
-                    } else {
-                        PinDirection::Invalid
-                    };
-                    dir_by_pin.insert(pin.name.clone(), dir);
-                }
-            } else if let Some(module_maps) = module_port_dirs {
-                if let Some(port_dirs) = module_maps.get(&type_sym) {
-                    for (port_sym, dir) in port_dirs {
-                        let port_name = resolve_to_string(interner, *port_sym);
-                        dir_by_pin.insert(port_name, *dir);
-                    }
-                } else {
-                    // Unknown instance type: skip connectivity as before.
-                    continue;
-                }
-            } else {
-                // No module port directions provided and no Liberty cell: skip.
-                continue;
-            }
-
-            let mut ports_for_instance: HashMap<PortId, InstancePortInfo> = HashMap::new();
-
-            for (port_sym, netref) in &inst.connections {
-                let port_name = resolve_to_string(interner, *port_sym);
-                let dir = *dir_by_pin
-                    .get(port_name.as_str())
-                    .unwrap_or(&PinDirection::Invalid);
-
-                let entry =
-                    ports_for_instance
-                        .entry(*port_sym)
-                        .or_insert_with(|| InstancePortInfo {
-                            port: *port_sym,
-                            dir,
-                            nets: Vec::new(),
-                        });
-
-                let mut net_indices: Vec<NetIndex> = Vec::new();
-                netref.collect_net_indices(&mut net_indices);
-
-                for idx in net_indices {
-                    if idx.0 >= nets.len() {
-                        continue;
-                    }
-                    let nn_entry = &mut net_neighbors[idx.0];
-                    match dir {
-                        PinDirection::Output => nn_entry.drivers.push((inst_idx, *port_sym)),
-                        PinDirection::Input => nn_entry.loads.push((inst_idx, *port_sym)),
-                        PinDirection::Invalid => {
-                            nn_entry.drivers.push((inst_idx, *port_sym));
-                            nn_entry.loads.push((inst_idx, *port_sym));
-                        }
-                    }
-                    entry.nets.push(idx);
-                }
-            }
-
-            let mut ports_vec: Vec<InstancePortInfo> = ports_for_instance.into_values().collect();
-            ports_vec.sort_by_key(|p| resolve_to_string(interner, p.port));
-            instance_ports[inst_idx_raw] = ports_vec;
-        }
+        let block_port_nets = build_block_port_nets(module, nets);
+        let mut net_neighbors = create_empty_net_neighbors(nets.len());
+        let instance_ports = build_instance_connectivity(
+            module,
+            nets,
+            interner,
+            lib,
+            module_port_dirs,
+            &mut net_neighbors,
+        );
 
         NetlistConnectivity {
             module,
@@ -241,6 +128,166 @@ impl<'a> NetlistConnectivity<'a> {
         _interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> &[InstancePortInfo] {
         &self.instance_ports[inst_idx.0]
+    }
+}
+
+fn build_block_port_nets(
+    module: &NetlistModule,
+    nets: &[Net],
+) -> HashMap<NetIndex, BlockPortBoundary> {
+    // Map from module port net symbol -> PortDirection for sparse block-port
+    // attachment metadata.
+    let mut port_dir_by_sym: HashMap<SymbolU32, PortDirection> = HashMap::new();
+    for port in &module.ports {
+        port_dir_by_sym.insert(port.name, port.direction.clone());
+    }
+
+    // Sparse per-net module-port attachment (only nets that touch block ports
+    // get entries).
+    let mut block_port_nets: HashMap<NetIndex, BlockPortBoundary> = HashMap::new();
+    for (idx, net) in nets.iter().enumerate() {
+        if let Some(dir) = port_dir_by_sym.get(&net.name) {
+            let entry =
+                block_port_nets
+                    .entry(NetIndex(idx))
+                    .or_insert_with(|| BlockPortBoundary {
+                        has_input: false,
+                        has_output: false,
+                        has_inout: false,
+                    });
+            match dir {
+                PortDirection::Input => entry.has_input = true,
+                PortDirection::Output => entry.has_output = true,
+                PortDirection::Inout => entry.has_inout = true,
+            }
+        }
+    }
+
+    block_port_nets
+}
+
+fn create_empty_net_neighbors(nets_len: usize) -> Vec<NetNeighbors> {
+    let mut net_neighbors: Vec<NetNeighbors> = Vec::with_capacity(nets_len);
+    net_neighbors.resize_with(nets_len, || NetNeighbors {
+        drivers: Vec::new(),
+        loads: Vec::new(),
+    });
+    net_neighbors
+}
+
+fn build_instance_connectivity(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    lib: &IndexedLibrary,
+    module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
+    net_neighbors: &mut [NetNeighbors],
+) -> Vec<Vec<InstancePortInfo>> {
+    let mut instance_ports: Vec<Vec<InstancePortInfo>> =
+        Vec::with_capacity(module.instances.len());
+    instance_ports.resize_with(module.instances.len(), Vec::new);
+
+    for (inst_idx_raw, inst) in module.instances.iter().enumerate() {
+        let inst_idx = InstIndex(inst_idx_raw);
+
+        // Resolve cell or module pin directions once per instance.
+        let type_sym = inst.type_name;
+        let type_name = resolve_to_string(interner, type_sym);
+
+        let Some(dir_by_pin) =
+            build_dir_by_pin_for_instance(lib, module_port_dirs, interner, type_sym, type_name)
+        else {
+            // Unknown instance type: skip connectivity as before.
+            continue;
+        };
+
+        let mut ports_for_instance: HashMap<PortId, InstancePortInfo> = HashMap::new();
+
+        for (port_sym, netref) in &inst.connections {
+            let port_name = resolve_to_string(interner, *port_sym);
+            let dir = *dir_by_pin
+                .get(port_name.as_str())
+                .unwrap_or(&PinDirection::Invalid);
+
+            let entry =
+                ports_for_instance
+                    .entry(*port_sym)
+                    .or_insert_with(|| InstancePortInfo {
+                        port: *port_sym,
+                        dir,
+                        nets: Vec::new(),
+                    });
+
+            let mut net_indices: Vec<NetIndex> = Vec::new();
+            netref.collect_net_indices(&mut net_indices);
+
+            for idx in net_indices {
+                if idx.0 >= nets.len() {
+                    continue;
+                }
+                let nn_entry = &mut net_neighbors[idx.0];
+                match dir {
+                    PinDirection::Output => nn_entry.drivers.push((inst_idx, *port_sym)),
+                    PinDirection::Input => nn_entry.loads.push((inst_idx, *port_sym)),
+                    PinDirection::Invalid => {
+                        nn_entry.drivers.push((inst_idx, *port_sym));
+                        nn_entry.loads.push((inst_idx, *port_sym));
+                    }
+                }
+                entry.nets.push(idx);
+            }
+        }
+
+        let mut ports_vec: Vec<InstancePortInfo> = ports_for_instance.into_values().collect();
+        ports_vec.sort_by_key(|p| resolve_to_string(interner, p.port));
+        instance_ports[inst_idx_raw] = ports_vec;
+    }
+
+    instance_ports
+}
+
+fn build_dir_by_pin_for_instance(
+    lib: &IndexedLibrary,
+    module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    type_sym: PortId,
+    type_name: String,
+) -> Option<HashMap<String, PinDirection>> {
+    // Build pin-name -> direction map for this instance type.
+    //
+    // Preference order:
+    // - Liberty cell pin directions when a matching cell is present.
+    // - Module port directions when the type matches a parsed module name and
+    //   `module_port_dirs` is provided.
+    // - Otherwise, skip connectivity for this instance (maintaining historical
+    //   behavior where unknown cell types are treated as an invariant violation).
+    let mut dir_by_pin: HashMap<String, PinDirection> = HashMap::new();
+
+    if let Some(cell) = lib.get_cell(type_name.as_str()) {
+        for pin in &cell.pins {
+            let dir_val = pin.direction;
+            let dir = if dir_val == PinDirection::Input as i32 {
+                PinDirection::Input
+            } else if dir_val == PinDirection::Output as i32 {
+                PinDirection::Output
+            } else {
+                PinDirection::Invalid
+            };
+            dir_by_pin.insert(pin.name.clone(), dir);
+        }
+        Some(dir_by_pin)
+    } else if let Some(module_maps) = module_port_dirs {
+        if let Some(port_dirs) = module_maps.get(&type_sym) {
+            for (port_sym, dir) in port_dirs {
+                let port_name = resolve_to_string(interner, *port_sym);
+                dir_by_pin.insert(port_name, *dir);
+            }
+            Some(dir_by_pin)
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
