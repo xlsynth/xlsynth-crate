@@ -147,14 +147,13 @@ fn build_block_port_nets(
     let mut block_port_nets: HashMap<NetIndex, BlockPortBoundary> = HashMap::new();
     for (idx, net) in nets.iter().enumerate() {
         if let Some(dir) = port_dir_by_sym.get(&net.name) {
-            let entry =
-                block_port_nets
-                    .entry(NetIndex(idx))
-                    .or_insert_with(|| BlockPortBoundary {
-                        has_input: false,
-                        has_output: false,
-                        has_inout: false,
-                    });
+            let entry = block_port_nets
+                .entry(NetIndex(idx))
+                .or_insert_with(|| BlockPortBoundary {
+                    has_input: false,
+                    has_output: false,
+                    has_inout: false,
+                });
             match dir {
                 PortDirection::Input => entry.has_input = true,
                 PortDirection::Output => entry.has_output = true,
@@ -183,8 +182,7 @@ fn build_instance_connectivity(
     module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     net_neighbors: &mut [NetNeighbors],
 ) -> Vec<Vec<InstancePortInfo>> {
-    let mut instance_ports: Vec<Vec<InstancePortInfo>> =
-        Vec::with_capacity(module.instances.len());
+    let mut instance_ports: Vec<Vec<InstancePortInfo>> = Vec::with_capacity(module.instances.len());
     instance_ports.resize_with(module.instances.len(), Vec::new);
 
     for (inst_idx_raw, inst) in module.instances.iter().enumerate() {
@@ -209,14 +207,13 @@ fn build_instance_connectivity(
                 .get(port_name.as_str())
                 .unwrap_or(&PinDirection::Invalid);
 
-            let entry =
-                ports_for_instance
-                    .entry(*port_sym)
-                    .or_insert_with(|| InstancePortInfo {
-                        port: *port_sym,
-                        dir,
-                        nets: Vec::new(),
-                    });
+            let entry = ports_for_instance
+                .entry(*port_sym)
+                .or_insert_with(|| InstancePortInfo {
+                    port: *port_sym,
+                    dir,
+                    nets: Vec::new(),
+                });
 
             let mut net_indices: Vec<NetIndex> = Vec::new();
             netref.collect_net_indices(&mut net_indices);
