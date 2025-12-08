@@ -76,6 +76,7 @@ impl<'a> NetlistConnectivity<'a> {
         nets: &'a [Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
         lib: &'a IndexedLibrary,
+        module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     ) -> Self {
         // Map from module port net symbol -> PortDirection for sparse
         // block-port attachment metadata.
@@ -118,28 +119,45 @@ impl<'a> NetlistConnectivity<'a> {
         for (inst_idx_raw, inst) in module.instances.iter().enumerate() {
             let inst_idx = InstIndex(inst_idx_raw);
 
-            // Resolve cell and pin directions once per instance.
-            let type_name = resolve_to_string(interner, inst.type_name);
-            let cell = match lib.get_cell(type_name.as_str()) {
-                Some(c) => c,
-                None => {
-                    // Missing cell types are considered an invariant violation;
-                    // skip connectivity for this instance.
+            // Resolve cell or module pin directions once per instance.
+            let type_sym = inst.type_name;
+            let type_name = resolve_to_string(interner, type_sym);
+
+            // Build pin-name -> direction map for this instance type.
+            //
+            // Preference order:
+            // - Liberty cell pin directions when a matching cell is present.
+            // - Module port directions when the type matches a parsed module name and
+            //   `module_port_dirs` is provided.
+            // - Otherwise, skip connectivity for this instance (maintaining historical
+            //   behavior where unknown cell types are treated as an invariant violation).
+            let mut dir_by_pin: HashMap<String, PinDirection> = HashMap::new();
+
+            if let Some(cell) = lib.get_cell(type_name.as_str()) {
+                for pin in &cell.pins {
+                    let dir_val = pin.direction;
+                    let dir = if dir_val == PinDirection::Input as i32 {
+                        PinDirection::Input
+                    } else if dir_val == PinDirection::Output as i32 {
+                        PinDirection::Output
+                    } else {
+                        PinDirection::Invalid
+                    };
+                    dir_by_pin.insert(pin.name.clone(), dir);
+                }
+            } else if let Some(module_maps) = module_port_dirs {
+                if let Some(port_dirs) = module_maps.get(&type_sym) {
+                    for (port_sym, dir) in port_dirs {
+                        let port_name = resolve_to_string(interner, *port_sym);
+                        dir_by_pin.insert(port_name, *dir);
+                    }
+                } else {
+                    // Unknown instance type: skip connectivity as before.
                     continue;
                 }
-            };
-
-            // Build pin-name -> direction map for this cell.
-            let mut dir_by_pin: HashMap<&str, PinDirection> = HashMap::new();
-            for pin in &cell.pins {
-                let dir_val = pin.direction;
-                if dir_val == PinDirection::Input as i32 {
-                    dir_by_pin.insert(pin.name.as_str(), PinDirection::Input);
-                } else if dir_val == PinDirection::Output as i32 {
-                    dir_by_pin.insert(pin.name.as_str(), PinDirection::Output);
-                } else {
-                    dir_by_pin.insert(pin.name.as_str(), PinDirection::Invalid);
-                }
+            } else {
+                // No module port directions provided and no Liberty cell: skip.
+                continue;
             }
 
             let mut ports_for_instance: HashMap<PortId, InstancePortInfo> = HashMap::new();
@@ -224,6 +242,34 @@ impl<'a> NetlistConnectivity<'a> {
     ) -> &[InstancePortInfo] {
         &self.instance_ports[inst_idx.0]
     }
+}
+
+/// Builds a mapping from module name symbol to its port directions expressed
+/// in Liberty `PinDirection` terms.
+///
+/// This helper allows connectivity and cone-traversal code to treat instances
+/// whose type is another module (rather than a Liberty cell) as having
+/// well-defined pin directions derived from the module's port list.
+pub fn build_module_port_directions(
+    modules: &[NetlistModule],
+) -> HashMap<PortId, HashMap<PortId, PinDirection>> {
+    let mut result: HashMap<PortId, HashMap<PortId, PinDirection>> = HashMap::new();
+
+    for m in modules {
+        let mut port_dirs: HashMap<PortId, PinDirection> = HashMap::new();
+        for p in &m.ports {
+            let dir = match p.direction {
+                PortDirection::Input => PinDirection::Input,
+                PortDirection::Output => PinDirection::Output,
+                // Treat inout ports conservatively as "both directions".
+                PortDirection::Inout => PinDirection::Invalid,
+            };
+            port_dirs.insert(p.name, dir);
+        }
+        result.insert(m.name, port_dirs);
+    }
+
+    result
 }
 
 fn resolve_to_string(
@@ -342,7 +388,7 @@ mod tests {
     #[test]
     fn connectivity_identifies_simple_drivers_and_loads() {
         let (module, nets, interner, indexed) = make_simple_module_and_lib();
-        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed);
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None);
 
         // Net 0: driven by no instance (primary input), loaded by u1.A.
         let loads_n0 = conn.loads_for_net(NetIndex(0));
@@ -364,7 +410,7 @@ mod tests {
     #[test]
     fn block_port_nets_match_module_ports() {
         let (module, nets, interner, indexed) = make_simple_module_and_lib();
-        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed);
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None);
 
         // Net 0 corresponds to primary input "a".
         assert!(conn.is_block_port_net(NetIndex(0)));
@@ -392,7 +438,7 @@ mod tests {
     #[test]
     fn instance_ports_reports_directions_and_nets() {
         let (module, nets, interner, indexed) = make_simple_module_and_lib();
-        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed);
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None);
 
         // Instance 0: INVX1 u1
         let ports_u1 = conn.instance_ports(InstIndex(0), &interner);

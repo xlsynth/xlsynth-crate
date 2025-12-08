@@ -126,7 +126,9 @@ Materializes a randomized sequence of token-like payloads, emits a textual netli
 Primarily tests:
 
 - Tokenization stability for identifiers, keywords, punctuation, comments
-- Verilog-style integer literal tokenization (with/without width)
+- Verilog-style integer literal tokenization (with/without width), including
+  cases that appear near structural punctuation so that implicit nets and
+  concatenations are tokenized correctly.
 - Top-level annotation tokenization with string-valued fields
 
 ______________________________________________________________________

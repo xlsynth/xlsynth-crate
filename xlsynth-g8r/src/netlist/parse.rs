@@ -40,6 +40,10 @@ pub struct NetlistPort {
 /// - `instance_name` values are **unique within a module**; if the input
 ///   netlist contains multiple instances with the same name, parsing fails with
 ///   a `ScanError` instead of constructing a `NetlistModule`.
+/// - Gate-level parsing honors Verilog implicit-wire semantics: if an
+///   identifier is used in a net context but has not been explicitly declared,
+///   the parser (by default) synthesizes an implicit 1-bit `wire` for that
+///   name, scoped to the current module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetlistModule {
     pub name: PortId,
@@ -934,10 +938,18 @@ pub struct Parser<R: Read + 'static> {
     /// net name. Used only for diagnostics when reporting conflicting
     /// widths during parsing; not carried into result artifacts.
     net_width_span_by_name: HashMap<NetId, Span>,
+    /// Whether the parser should synthesize implicit nets when an identifier
+    /// is used in a net context but has not been explicitly declared.
+    allow_implicit_nets: bool,
+    /// Names of nets that were first introduced implicitly (via use in a
+    /// net context) rather than via an explicit declaration. Tracked
+    /// per-module for diagnostics; not carried into result artifacts.
+    implicit_net_by_name: HashSet<NetId>,
 }
 
 impl<R: Read + 'static> Parser<R> {
-    pub fn new(scanner: TokenScanner<R>) -> Self {
+    /// Construct a parser with explicit control over implicit-net handling.
+    pub fn new_with_options(scanner: TokenScanner<R>, allow_implicit_nets: bool) -> Self {
         Self {
             scanner,
             interner: StringInterner::new(),
@@ -945,7 +957,15 @@ impl<R: Read + 'static> Parser<R> {
             net_index_by_name: HashMap::new(),
             current_module_net_start: 0,
             net_width_span_by_name: HashMap::new(),
+            allow_implicit_nets,
+            implicit_net_by_name: HashSet::new(),
         }
+    }
+
+    /// Construct a parser with implicit nets enabled (default gate-level
+    /// behavior matching Verilog's implicit wire semantics).
+    pub fn new(scanner: TokenScanner<R>) -> Self {
+        Self::new_with_options(scanner, /* allow_implicit_nets= */ true)
     }
 
     fn parse_netref_expr(&mut self) -> Result<NetRef, ScanError> {
@@ -1040,13 +1060,27 @@ impl<R: Read + 'static> Parser<R> {
                     self.net_index_by_name.insert(net_sym, idx);
                     idx
                 } else {
-                    return Err(ScanError {
-                        message: format!(
-                            "net '{}' not declared as wire",
-                            self.interner.resolve(net_sym).unwrap()
-                        ),
-                        span: net_tok.span,
-                    });
+                    if self.allow_implicit_nets {
+                        // Create an implicit 1-bit wire for this net, using a
+                        // width of (0, 0) to reflect a single bit.
+                        let idx = NetIndex(self.nets.len());
+                        self.nets.push(Net {
+                            name: net_sym,
+                            width: Some((0, 0)),
+                        });
+                        self.net_index_by_name.insert(net_sym, idx);
+                        self.net_width_span_by_name.insert(net_sym, net_tok.span);
+                        self.implicit_net_by_name.insert(net_sym);
+                        idx
+                    } else {
+                        return Err(ScanError {
+                            message: format!(
+                                "net '{}' not declared as wire",
+                                self.interner.resolve(net_sym).unwrap()
+                            ),
+                            span: net_tok.span,
+                        });
+                    }
                 };
                 // Optional bit/part select
                 if let Some(next) = self.scanner.peekt()? {
@@ -1415,6 +1449,7 @@ impl<R: Read + 'static> Parser<R> {
         self.current_module_net_start = self.nets.len();
         self.net_index_by_name.clear();
         self.net_width_span_by_name.clear();
+        self.implicit_net_by_name.clear();
 
         // Expect 'module' keyword
         let tok = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -2727,6 +2762,32 @@ wire [255:0] a;"#;
     }
 
     #[test]
+    fn test_implicit_net_created_on_use_in_instance_connection() {
+        // Module where a net is only used in instance connections (no explicit
+        // wire declaration). With implicit nets enabled, parsing should succeed
+        // and the net should appear in the global nets array.
+        let src = r#"
+module m(a, y);
+  input a;
+  output y;
+  DummyCell u0 (.in_valid(a), .in(a), .out_valid(data_valid_d));
+  DummyCell u1 (.in_valid(data_valid_d), .in(a), .out_valid(y));
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        // There should be a net named data_valid_d created implicitly.
+        let dv_nets: Vec<&Net> = parser
+            .nets
+            .iter()
+            .filter(|n| parser.interner.resolve(n.name).unwrap() == "data_valid_d")
+            .collect();
+        assert_eq!(dv_nets.len(), 1);
+        assert_eq!(dv_nets[0].width, Some((0, 0)));
+    }
+
+    #[test]
     fn test_concat_with_trailing_verilog_literal_and_close_brace() {
         // Regression test: previously, the '}' in "3'b0})" could be swallowed
         // into the VerilogInt token, causing the concat parser to fail with
@@ -2752,6 +2813,31 @@ endmodule
             }
             other => panic!("expected Concat for .Y connection, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_unknown_net_errors_when_implicit_nets_disabled() {
+        // When implicit nets are disabled, undeclared nets should still
+        // produce a clear error rather than being synthesized implicitly.
+        let src = r#"
+module m(a, y);
+  input a;
+  output y;
+  DummyCell u0 (.in_valid(a), .in(a), .out_valid(data_valid_d));
+endmodule
+"#;
+        let mut parser = Parser::new_with_options(
+            TokenScanner::from_str(src),
+            /* allow_implicit_nets= */ false,
+        );
+        let err = parser
+            .parse_file()
+            .expect_err("should error on unknown net");
+        assert!(
+            err.message.contains("not declared as wire"),
+            "unexpected error message: {}",
+            err.message
+        );
     }
 
     #[test]

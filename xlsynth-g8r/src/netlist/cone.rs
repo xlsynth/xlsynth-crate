@@ -144,6 +144,7 @@ impl<'a> ModuleConeContext<'a> {
         interner: &'a StringInterner<StringBackend<SymbolU32>>,
         lib: &'a IndexedLibrary,
         dff_cell_names: &HashSet<String>,
+        module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     ) -> ConeResult<Self> {
         // Precompute dff_types as a set of type-name symbols used by instances.
         let mut dff_types: HashSet<PortId> = HashSet::new();
@@ -151,20 +152,32 @@ impl<'a> ModuleConeContext<'a> {
         for (_inst_idx_raw, inst) in module.instances.iter().enumerate() {
             let type_sym = inst.type_name;
             let type_name = resolve_to_string(interner, type_sym);
-            let cell =
-                lib.get_cell(type_name.as_str())
-                    .ok_or_else(|| ConeError::UnknownCellType {
-                        cell: type_name.clone(),
-                        instance: resolve_to_string(interner, inst.instance_name),
-                        lineno: inst.inst_lineno,
-                        colno: inst.inst_colno,
-                    })?;
 
-            if dff_cell_names.contains(&cell.name) {
-                dff_types.insert(type_sym);
+            if let Some(cell) = lib.get_cell(type_name.as_str()) {
+                if dff_cell_names.contains(&cell.name) {
+                    dff_types.insert(type_sym);
+                }
+                continue;
             }
+
+            // If this instance type is another module in the parsed netlist,
+            // allow it without requiring a Liberty cell. Such instances are not
+            // treated as DFF boundaries (they cannot appear in `dff_cell_names`
+            // which are specified in terms of Liberty cell names).
+            if let Some(module_maps) = module_port_dirs {
+                if module_maps.contains_key(&type_sym) {
+                    continue;
+                }
+            }
+
+            return Err(ConeError::UnknownCellType {
+                cell: type_name.clone(),
+                instance: resolve_to_string(interner, inst.instance_name),
+                lineno: inst.inst_lineno,
+                colno: inst.inst_colno,
+            });
         }
-        let connectivity = NetlistConnectivity::new(module, nets, interner, lib);
+        let connectivity = NetlistConnectivity::new(module, nets, interner, lib, module_port_dirs);
 
         Ok(ModuleConeContext {
             module,
@@ -198,6 +211,7 @@ pub fn visit_module_cone<OnVisitFn>(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     lib: &IndexedLibrary,
     dff_cell_names: &HashSet<String>,
+    module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     start_instance: &str,
     start_pins: Option<&[String]>,
     direction: TraversalDirection,
@@ -207,7 +221,14 @@ pub fn visit_module_cone<OnVisitFn>(
 where
     OnVisitFn: FnMut(&ConeVisit) -> ConeResult<()>,
 {
-    let ctx = ModuleConeContext::new(module, nets, interner, lib, dff_cell_names)?;
+    let ctx = ModuleConeContext::new(
+        module,
+        nets,
+        interner,
+        lib,
+        dff_cell_names,
+        module_port_dirs,
+    )?;
 
     // Resolve the starting instance index.
     let mut matches: Vec<usize> = Vec::new();
@@ -528,11 +549,12 @@ mod tests {
             &interner,
             &indexed,
             &dff_cells,
+            None,
             "u1",
             None,
             TraversalDirection::Fanout,
             StopCondition::Levels(1),
-            |v| {
+            |v: &ConeVisit| {
                 visits.push(v.clone());
                 Ok(())
             },
@@ -661,11 +683,12 @@ mod tests {
             &interner,
             &indexed,
             &dff_cells,
+            None::<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
             "u1",
             None,
             TraversalDirection::Fanout,
             StopCondition::Levels(1),
-            |v| {
+            |v: &ConeVisit| {
                 visits.push(v.clone());
                 Ok(())
             },
@@ -754,11 +777,12 @@ mod tests {
             &interner,
             &indexed,
             &dff_cells,
+            None::<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
             "u1",
             None,
             TraversalDirection::Fanout,
             StopCondition::Levels(1),
-            |v| {
+            |v: &ConeVisit| {
                 visits.push(v.clone());
                 Ok(())
             },
