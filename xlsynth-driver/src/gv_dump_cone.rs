@@ -153,8 +153,7 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
         .from_writer(BufWriter::new(handle));
 
     // Header row.
-    if let Err(e) =
-        wtr.write_record(["instance_type", "instance_name", "traversal_pin", "levels"])
+    if let Err(e) = wtr.write_record(["instance_type", "instance_name", "traversal_pin", "levels"])
     {
         report_cli_error_and_exit(
             "failed to write CSV header to stdout",
