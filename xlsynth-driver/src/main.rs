@@ -1153,7 +1153,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("gv-dump-cone")
-                .about("Traverse the cone around a gate-level instance and emit CSV rows (instance_type,instance_name,traversal_pin) to stdout")
+                .about("Traverse the cone around a gate-level instance and emit CSV rows (instance_type,instance_name,traversal_pin,levels) to stdout")
                 .arg(
                     clap::Arg::new("netlist")
                         .help("Input gate-level netlist (.gv or .gv.gz)")

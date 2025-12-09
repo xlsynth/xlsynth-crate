@@ -49,11 +49,14 @@ pub enum StopCondition {
 /// - `instance_name` is the Verilog instance label (e.g. `u123`).
 /// - `traversal_pin` is the pin name on this instance through which the cone
 ///   traversal reaches or departs this instance, depending on direction.
+/// - `level` is the BFS distance in instance hops from the starting instance;
+///   the starting instance is always at level 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConeVisit {
     pub instance_type: String,
     pub instance_name: String,
     pub traversal_pin: String,
+    pub level: u32,
 }
 
 /// Error type for cone traversal.
@@ -144,6 +147,7 @@ impl<'a> ModuleConeContext<'a> {
         interner: &'a StringInterner<StringBackend<SymbolU32>>,
         lib: &'a IndexedLibrary,
         dff_cell_names: &HashSet<String>,
+        module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     ) -> ConeResult<Self> {
         // Precompute dff_types as a set of type-name symbols used by instances.
         let mut dff_types: HashSet<PortId> = HashSet::new();
@@ -151,20 +155,32 @@ impl<'a> ModuleConeContext<'a> {
         for (_inst_idx_raw, inst) in module.instances.iter().enumerate() {
             let type_sym = inst.type_name;
             let type_name = resolve_to_string(interner, type_sym);
-            let cell =
-                lib.get_cell(type_name.as_str())
-                    .ok_or_else(|| ConeError::UnknownCellType {
-                        cell: type_name.clone(),
-                        instance: resolve_to_string(interner, inst.instance_name),
-                        lineno: inst.inst_lineno,
-                        colno: inst.inst_colno,
-                    })?;
 
-            if dff_cell_names.contains(&cell.name) {
-                dff_types.insert(type_sym);
+            if let Some(cell) = lib.get_cell(type_name.as_str()) {
+                if dff_cell_names.contains(&cell.name) {
+                    dff_types.insert(type_sym);
+                }
+                continue;
             }
+
+            // If this instance type is another module in the parsed netlist,
+            // allow it without requiring a Liberty cell. Such instances are not
+            // treated as DFF boundaries (they cannot appear in `dff_cell_names`
+            // which are specified in terms of Liberty cell names).
+            if let Some(module_maps) = module_port_dirs {
+                if module_maps.contains_key(&type_sym) {
+                    continue;
+                }
+            }
+
+            return Err(ConeError::UnknownCellType {
+                cell: type_name.clone(),
+                instance: resolve_to_string(interner, inst.instance_name),
+                lineno: inst.inst_lineno,
+                colno: inst.inst_colno,
+            });
         }
-        let connectivity = NetlistConnectivity::new(module, nets, interner, lib);
+        let connectivity = NetlistConnectivity::new(module, nets, interner, lib, module_port_dirs);
 
         Ok(ModuleConeContext {
             module,
@@ -198,6 +214,7 @@ pub fn visit_module_cone<OnVisitFn>(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     lib: &IndexedLibrary,
     dff_cell_names: &HashSet<String>,
+    module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     start_instance: &str,
     start_pins: Option<&[String]>,
     direction: TraversalDirection,
@@ -207,7 +224,14 @@ pub fn visit_module_cone<OnVisitFn>(
 where
     OnVisitFn: FnMut(&ConeVisit) -> ConeResult<()>,
 {
-    let ctx = ModuleConeContext::new(module, nets, interner, lib, dff_cell_names)?;
+    let ctx = ModuleConeContext::new(
+        module,
+        nets,
+        interner,
+        lib,
+        dff_cell_names,
+        module_port_dirs,
+    )?;
 
     // Resolve the starting instance index.
     let mut matches: Vec<usize> = Vec::new();
@@ -299,7 +323,7 @@ where
         }
     }
 
-    // Emit visits for the starting instance pins.
+    // Emit visits for the starting instance pins at level 0.
     let start_inst = &module.instances[start_idx.0];
     let inst_type_str = resolve_to_string(interner, start_inst.type_name);
     let inst_name_str = resolve_to_string(interner, start_inst.instance_name);
@@ -313,6 +337,7 @@ where
                 instance_type: inst_type_str.clone(),
                 instance_name: inst_name_str.clone(),
                 traversal_pin: port_name,
+                level: 0,
             };
             on_visit(&visit)?;
         }
@@ -391,6 +416,7 @@ where
                             instance_type: nbr_type_str,
                             instance_name: nbr_name_str,
                             traversal_pin: nbr_port_name,
+                            level: neighbor_level,
                         };
                         on_visit(&visit)?;
                     }
@@ -528,11 +554,12 @@ mod tests {
             &interner,
             &indexed,
             &dff_cells,
+            None,
             "u1",
             None,
             TraversalDirection::Fanout,
             StopCondition::Levels(1),
-            |v| {
+            |v: &ConeVisit| {
                 visits.push(v.clone());
                 Ok(())
             },
@@ -543,14 +570,14 @@ mod tests {
             let mut rows: Vec<String> = Vec::new();
             for v in &visits {
                 rows.push(format!(
-                    "{},{},{}",
-                    v.instance_type, v.instance_name, v.traversal_pin
+                    "{},{},{},{}",
+                    v.instance_type, v.instance_name, v.traversal_pin, v.level
                 ));
             }
             rows.join("\n")
         };
 
-        let want = "INVX1,u1,Y\nINVX1,u2,A";
+        let want = "INVX1,u1,Y,0\nINVX1,u2,A,1";
         assert_eq!(rendered, want);
     }
 
@@ -661,11 +688,12 @@ mod tests {
             &interner,
             &indexed,
             &dff_cells,
+            None::<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
             "u1",
             None,
             TraversalDirection::Fanout,
             StopCondition::Levels(1),
-            |v| {
+            |v: &ConeVisit| {
                 visits.push(v.clone());
                 Ok(())
             },
@@ -676,14 +704,14 @@ mod tests {
             let mut rows: Vec<String> = Vec::new();
             for v in &visits {
                 rows.push(format!(
-                    "{},{},{}",
-                    v.instance_type, v.instance_name, v.traversal_pin
+                    "{},{},{},{}",
+                    v.instance_type, v.instance_name, v.traversal_pin, v.level
                 ));
             }
             rows.join("\n")
         };
 
-        let want = "INVX1,u1,Y\nAND2X1,u_and,A\nAND2X1,u_and,B";
+        let want = "INVX1,u1,Y,0\nAND2X1,u_and,A,1\nAND2X1,u_and,B,1";
         assert_eq!(rendered, want);
     }
 
@@ -754,11 +782,12 @@ mod tests {
             &interner,
             &indexed,
             &dff_cells,
+            None::<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
             "u1",
             None,
             TraversalDirection::Fanout,
             StopCondition::Levels(1),
-            |v| {
+            |v: &ConeVisit| {
                 visits.push(v.clone());
                 Ok(())
             },
@@ -769,16 +798,17 @@ mod tests {
             let mut rows: Vec<String> = Vec::new();
             for v in &visits {
                 rows.push(format!(
-                    "{},{},{}",
-                    v.instance_type, v.instance_name, v.traversal_pin
+                    "{},{},{},{}",
+                    v.instance_type, v.instance_name, v.traversal_pin, v.level
                 ));
             }
             rows.join("\n")
         };
 
-        // We should only see the starting instance once for its output pin Y;
-        // the self-loop back to the same instance via A should be ignored.
-        let want = "INVX1,u1,Y";
+        // We should only see the starting instance once for its output pin Y at
+        // level 0; the self-loop back to the same instance via A should be
+        // ignored.
+        let want = "INVX1,u1,Y,0";
         assert_eq!(rendered, want);
     }
 }

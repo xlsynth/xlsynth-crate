@@ -22,8 +22,8 @@ fn test_gv_instance_csv_minimal_netlist() {
 module test (a, y);
     input a;
     output y;
-    NAND2X1 inst1 (.A(a), .B(a), .Y(y));
-    NOR2X1 inst2 (.A(a), .B(y), .Y(y));
+    NAND2 inst1 (.A(a), .B(a), .Y(y));
+    NOR2 inst2 (.A(a), .B(y), .Y(y));
 endmodule
 "#;
     let in_file = tempfile::NamedTempFile::new().unwrap();
@@ -40,11 +40,18 @@ endmodule
         .expect("run driver");
     assert!(status.success(), "process failed: {status}");
     let s = read_gzipped_csv(out_file.path());
-    // No header, just rows: instance_name,cell_type\n
+    // Header + rows: module_name,instance_name,cell_type\n
     let lines: Vec<_> = s.lines().collect();
-    assert_eq!(lines.len(), 2, "should be 2 instances found");
-    assert!(lines.iter().any(|&l| l == "inst1,NAND2X1"), "missing inst1");
-    assert!(lines.iter().any(|&l| l == "inst2,NOR2X1"), "missing inst2");
+    assert_eq!(lines.len(), 3, "should be 2 instances found plus header");
+    assert_eq!(lines[0], "module_name,instance_name,cell_type");
+    assert!(
+        lines.iter().any(|&l| l == "test,inst1,NAND2"),
+        "missing inst1"
+    );
+    assert!(
+        lines.iter().any(|&l| l == "test,inst2,NOR2"),
+        "missing inst2"
+    );
 }
 
 #[test]
@@ -61,7 +68,7 @@ module top (a, y);
     output y;
     wire w;
     feedthrough u_feed (.in(a), .out(w));
-    NAND2X1 inst1 (.A(w), .B(a), .Y(y));
+    NAND2 inst1 (.A(w), .B(a), .Y(y));
 endmodule
 "#;
     let in_file = tempfile::NamedTempFile::new().unwrap();
@@ -78,14 +85,18 @@ endmodule
         .expect("run driver");
     assert!(status.success(), "process failed: {status}");
     let s = read_gzipped_csv(out_file.path());
-    // No header, just rows: instance_name,cell_type\n
+    // Header + rows: module_name,instance_name,cell_type\n
     let lines: Vec<_> = s.lines().collect();
-    assert_eq!(lines.len(), 2, "should be 2 instances found");
+    assert_eq!(lines.len(), 3, "should be 2 instances found plus header");
+    assert_eq!(lines[0], "module_name,instance_name,cell_type");
     assert!(
-        lines.iter().any(|&l| l == "u_feed,feedthrough"),
+        lines.iter().any(|&l| l == "top,u_feed,feedthrough"),
         "missing u_feed"
     );
-    assert!(lines.iter().any(|&l| l == "inst1,NAND2X1"), "missing inst1");
+    assert!(
+        lines.iter().any(|&l| l == "top,inst1,NAND2"),
+        "missing inst1"
+    );
 }
 
 #[test]
@@ -103,7 +114,7 @@ module top_bus (a, y);
     output [1:0] y;
     wire [1:0] w;
     feedthrough_bus u_feed (.in(a), .out(w));
-    NAND2X1 inst1 (.A(w[0]), .B(a[1]), .Y(y[0]));
+    NAND2 inst1 (.A(w[0]), .B(a[1]), .Y(y[0]));
 endmodule
 "#;
     let in_file = tempfile::NamedTempFile::new().unwrap();
@@ -120,12 +131,16 @@ endmodule
         .expect("run driver");
     assert!(status.success(), "process failed: {status}");
     let s = read_gzipped_csv(out_file.path());
-    // No header, just rows: instance_name,cell_type\n
+    // Header + rows: module_name,instance_name,cell_type\n
     let lines: Vec<_> = s.lines().collect();
-    assert_eq!(lines.len(), 2, "should be 2 instances found");
+    assert_eq!(lines.len(), 3, "should be 2 instances found plus header");
+    assert_eq!(lines[0], "module_name,instance_name,cell_type");
     assert!(
-        lines.iter().any(|&l| l == "u_feed,feedthrough_bus"),
+        lines.iter().any(|&l| l == "top_bus,u_feed,feedthrough_bus"),
         "missing u_feed"
     );
-    assert!(lines.iter().any(|&l| l == "inst1,NAND2X1"), "missing inst1");
+    assert!(
+        lines.iter().any(|&l| l == "top_bus,inst1,NAND2"),
+        "missing inst1"
+    );
 }
