@@ -99,7 +99,7 @@ This command has no flags.
 ### `gv-dump-cone`: traverse a netlist cone and emit CSV
 
 Traverses the fanin or fanout cone around a particular gate-level instance and prints a CSV
-stream to stdout with one row per visited `(instance_type,instance_name,traversal_pin)` triple.
+stream to stdout with one row per visited `(instance_type,instance_name,traversal_pin,levels)` tuple.
 
 Basic usage:
 
@@ -130,7 +130,7 @@ Additional flags:
 
 Output format:
 
-- A single header row: `instance_type,instance_name,traversal_pin`
+- A single header row: `instance_type,instance_name,traversal_pin,levels`
 - One data row per visited instance/pin in a deterministic traversal order.
 
 ### `ir2g8r`: IR to gate-level representation

@@ -69,9 +69,9 @@ endmodule
     let got = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
 
     let want = "\
-instance_type,instance_name,traversal_pin
-INVX1,u1,Y
-INVX1,u2,A
+instance_type,instance_name,traversal_pin,levels
+INVX1,u1,Y,0
+INVX1,u2,A,1
 ";
 
     assert_eq!(got, want);
