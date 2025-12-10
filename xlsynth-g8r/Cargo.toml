@@ -97,3 +97,7 @@ harness = false
 [[bench]]
 name = "sim_vs_simd_bench"
 harness = false
+
+[[bench]]
+name = "netlist_parse_bench"
+harness = false

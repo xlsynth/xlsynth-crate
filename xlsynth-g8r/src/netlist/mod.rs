@@ -9,3 +9,4 @@ pub mod io;
 pub mod parse;
 pub mod stats;
 pub mod utils;
+pub mod bench_synth_netlist;
