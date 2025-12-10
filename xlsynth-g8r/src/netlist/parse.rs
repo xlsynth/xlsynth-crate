@@ -610,23 +610,57 @@ impl<R: Read + 'static> TokenScanner<R> {
     fn pop_identifier(&mut self, start: Pos) -> Token {
         let mut ident = String::new();
         // Check if it's an escaped identifier
-        if self.peekc() == Some('\\') {
-            self.popc(); // Consume the backslash character.
-            while let Some(c) = self.peekc() {
+        if self.peekb() == Some(b'\\') {
+            // Escaped identifier: leading backslash, terminated by whitespace.
+            self.popb(); // Consume the backslash character.
+            while let Some(b) = self.peekb() {
+                let c = b as char;
                 if c.is_whitespace() {
-                    // End of escaped identifier, consume the whitespace
-                    self.popc();
+                    // End of escaped identifier, consume the whitespace.
+                    self.popb();
                     break;
                 }
-                ident.push(self.popc().unwrap());
+                self.popb();
+                ident.push(c);
             }
         } else {
-            // Regular identifier
-            while let Some(c) = self.peekc() {
-                if c.is_alphanumeric() || c == '_' {
-                    ident.push(self.popc().unwrap());
-                } else {
+            // Regular identifier: one or more [A-Za-z0-9_]. These identifiers
+            // are ASCII-only, so we can scan chunks directly from the
+            // BufReader buffer and advance by byte count.
+            loop {
+                if self.done {
                     break;
+                }
+                match self.reader.fill_buf() {
+                    Ok(buf) => {
+                        if buf.is_empty() {
+                            self.done = true;
+                            break;
+                        }
+                        let mut consumed = 0usize;
+                        for &b in buf {
+                            let c = b as char;
+                            if c.is_alphanumeric() || c == '_' {
+                                ident.push(c);
+                                consumed += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if consumed == 0 {
+                            // No identifier characters at the front of this
+                            // buffer; identifier is complete.
+                            break;
+                        }
+                        // Identifiers do not contain newlines, so we can
+                        // update the column using the total byte count.
+                        self.pos.colno += consumed as u32;
+                        self.reader.consume(consumed);
+                    }
+                    Err(_) => {
+                        self.done = true;
+                        break;
+                    }
                 }
             }
         }
