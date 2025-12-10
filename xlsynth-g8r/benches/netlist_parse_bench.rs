@@ -25,10 +25,8 @@ fn netlist_parse_benchmark(c: &mut Criterion) {
     let mut temp_files: Vec<NamedTempFile> = Vec::new();
 
     for &instance_count in sizes {
-        let netlist_text =
-            netlist::bench_synth_netlist::make_chain_netlist(instance_count);
-        let mut tmp =
-            NamedTempFile::new().expect("create synthetic netlist temp file");
+        let netlist_text = netlist::bench_synth_netlist::make_chain_netlist(instance_count);
+        let mut tmp = NamedTempFile::new().expect("create synthetic netlist temp file");
         IoWrite::write_all(&mut tmp, netlist_text.as_bytes())
             .expect("write synthetic netlist text");
         let path_buf = tmp.path().to_path_buf();
@@ -55,5 +53,3 @@ fn netlist_parse_benchmark(c: &mut Criterion) {
 
 criterion_group!(benches, netlist_parse_benchmark);
 criterion_main!(benches);
-
-

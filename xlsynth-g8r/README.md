@@ -18,4 +18,3 @@ Run the synthetic netlist-parse microbenchmark with:
 ```shell
 cargo bench -p xlsynth-g8r --bench netlist_parse_bench -- --verbose
 ```
-

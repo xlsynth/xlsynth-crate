@@ -67,5 +67,3 @@ pub fn make_chain_netlist(instance_count: usize) -> String {
 
     s
 }
-
-
