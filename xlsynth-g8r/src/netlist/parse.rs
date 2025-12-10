@@ -333,14 +333,6 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
     }
 
-    pub fn peekc(&mut self) -> Option<char> {
-        self.peekb().map(|b| b as char)
-    }
-
-    pub fn popc(&mut self) -> Option<char> {
-        self.popb().map(|b| b as char)
-    }
-
     pub fn peekt(&mut self) -> Result<Option<&Token>, ScanError> {
         if self.lookahead.is_none() && !self.done {
             self.lookahead = self.next_token()?;
@@ -411,49 +403,55 @@ impl<R: Read + 'static> TokenScanner<R> {
 
     fn pop_annotation(&mut self, start: Pos) -> Result<Token, ScanError> {
         // We have already seen '(', next should be '*'
-        assert_eq!(self.popc(), Some('('));
-        assert_eq!(self.popc(), Some('*'));
+        assert_eq!(self.popb(), Some(b'('));
+        assert_eq!(self.popb(), Some(b'*'));
         // Skip whitespace
-        while let Some(c) = self.peekc() {
+        while let Some(b) = self.peekb() {
+            let c = b as char;
             if c.is_whitespace() {
-                self.popc();
+                self.popb();
             } else {
                 break;
             }
         }
         // Parse key
         let mut key = String::new();
-        while let Some(c) = self.peekc() {
+        while let Some(b) = self.peekb() {
+            let c = b as char;
             if c.is_alphanumeric() || c == '_' {
-                key.push(self.popc().unwrap());
+                self.popb();
+                key.push(c);
             } else {
                 break;
             }
         }
         // Skip whitespace
-        while let Some(c) = self.peekc() {
+        while let Some(b) = self.peekb() {
+            let c = b as char;
             if c.is_whitespace() {
-                self.popc();
+                self.popb();
             } else {
                 break;
             }
         }
         // Expect '='
-        assert_eq!(self.popc(), Some('='));
+        assert_eq!(self.popb(), Some(b'='));
         // Skip whitespace
-        while let Some(c) = self.peekc() {
+        while let Some(b) = self.peekb() {
+            let c = b as char;
             if c.is_whitespace() {
-                self.popc();
+                self.popb();
             } else {
                 break;
             }
         }
         // Parse value (string, integer, or Verilog integer)
-        let value: AnnotationValue = match self.peekc() {
-            Some('"') => {
-                self.popc(); // consume opening quote
+        let value: AnnotationValue = match self.peekb() {
+            Some(b'"') => {
+                self.popb(); // consume opening quote
                 let mut s = String::new();
-                while let Some(c) = self.popc() {
+                while let Some(b) = self.popb() {
+                    let c = b as char;
                     if c == '"' {
                         break;
                     }
@@ -461,12 +459,13 @@ impl<R: Read + 'static> TokenScanner<R> {
                 }
                 AnnotationValue::String(s)
             }
-            Some(c) if c.is_ascii_digit() => {
+            Some(b) if (b as char).is_ascii_digit() => {
                 // Check for Verilog integer: $width'$base$value
                 let mut num = String::new();
-                while let Some(c) = self.peekc() {
-                    if c.is_ascii_digit() {
-                        num.push(self.popc().unwrap());
+                while let Some(b2) = self.peekb() {
+                    if (b2 as char).is_ascii_digit() {
+                        self.popb();
+                        num.push(b2 as char);
                     } else {
                         break;
                     }
@@ -476,15 +475,17 @@ impl<R: Read + 'static> TokenScanner<R> {
                 } else {
                     None
                 };
-                if self.peekc() == Some('\'') {
-                    self.popc(); // consume '
+                if self.peekb() == Some(b'\'') {
+                    self.popb(); // consume '
                     // Now parse base and value as a string until whitespace or '*' or ')'
                     let mut base_and_value = String::new();
-                    while let Some(c) = self.peekc() {
-                        if c.is_whitespace() || c == '*' || c == ')' {
+                    while let Some(b2) = self.peekb() {
+                        let c2 = b2 as char;
+                        if c2.is_whitespace() || c2 == '*' || c2 == ')' {
                             break;
                         }
-                        base_and_value.push(self.popc().unwrap());
+                        self.popb();
+                        base_and_value.push(c2);
                     }
                     // Convert Verilog base to Rust-style
                     let base_and_value = if let Some((_base, _rest)) = base_and_value
@@ -512,15 +513,16 @@ impl<R: Read + 'static> TokenScanner<R> {
                         .to_bits()
                         .unwrap();
                     // Skip whitespace
-                    while let Some(c) = self.peekc() {
-                        if c.is_whitespace() {
-                            self.popc();
+                    while let Some(b2) = self.peekb() {
+                        let c2 = b2 as char;
+                        if c2.is_whitespace() {
+                            self.popb();
                         } else {
                             break;
                         }
                     }
                     // Expect '*)'
-                    if self.popc() != Some('*') {
+                    if self.popb() != Some(b'*') {
                         return Err(self.error_with_context(
                             "Expected '*' to close annotation",
                             Span {
@@ -529,7 +531,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                             },
                         ));
                     }
-                    if self.popc() != Some(')') {
+                    if self.popb() != Some(b')') {
                         return Err(self.error_with_context(
                             "Expected ')' to close annotation",
                             Span {
@@ -551,12 +553,13 @@ impl<R: Read + 'static> TokenScanner<R> {
                     AnnotationValue::I64(num.parse().unwrap())
                 }
             }
-            Some(c) if c == '-' => {
+            Some(b) if b == b'-' => {
                 let mut num = String::new();
-                num.push(self.popc().unwrap());
-                while let Some(c) = self.peekc() {
-                    if c.is_ascii_digit() {
-                        num.push(self.popc().unwrap());
+                num.push('-');
+                while let Some(b2) = self.peekb() {
+                    if (b2 as char).is_ascii_digit() {
+                        self.popb();
+                        num.push(b2 as char);
                     } else {
                         break;
                     }
@@ -574,15 +577,16 @@ impl<R: Read + 'static> TokenScanner<R> {
             }
         };
         // Skip whitespace
-        while let Some(c) = self.peekc() {
+        while let Some(b) = self.peekb() {
+            let c = b as char;
             if c.is_whitespace() {
-                self.popc();
+                self.popb();
             } else {
                 break;
             }
         }
         // Expect '*)'
-        if self.popc() != Some('*') {
+        if self.popb() != Some(b'*') {
             return Err(self.error_with_context(
                 "Expected '*' to close annotation",
                 Span {
@@ -591,7 +595,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 },
             ));
         }
-        if self.popc() != Some(')') {
+        if self.popb() != Some(b')') {
             return Err(self.error_with_context(
                 "Expected ')' to close annotation",
                 Span {
@@ -703,17 +707,19 @@ impl<R: Read + 'static> TokenScanner<R> {
             self.popb();
             // read directive word (letters/underscores)
             let mut word = String::new();
-            while let Some(ch) = self.peekc() {
-                if ch.is_ascii_alphabetic() || ch == '_' {
-                    word.push(self.popc().unwrap());
+            while let Some(b2) = self.peekb() {
+                let c2 = b2 as char;
+                if c2.is_ascii_alphabetic() || c2 == '_' {
+                    self.popb();
+                    word.push(c2);
                 } else {
                     break;
                 }
             }
             if word == "timescale" {
                 // consume until end-of-line (including the newline if present)
-                while let Some(ch) = self.popc() {
-                    if ch == '\n' {
+                while let Some(b2) = self.popb() {
+                    if b2 == b'\n' {
                         break;
                     }
                 }
@@ -751,9 +757,10 @@ impl<R: Read + 'static> TokenScanner<R> {
         // Handle number (plain integer literal or Verilog-style literal)
         if b.is_ascii_digit() {
             let mut num = String::new();
-            while let Some(c) = self.peekc() {
-                if c.is_ascii_digit() {
-                    num.push(self.popc().unwrap());
+            while let Some(b2) = self.peekb() {
+                if b2.is_ascii_digit() {
+                    self.popb();
+                    num.push(b2 as char);
                 } else {
                     break;
                 }
@@ -763,24 +770,25 @@ impl<R: Read + 'static> TokenScanner<R> {
             } else {
                 None
             };
-            if self.peekc() == Some('\'') {
-                self.popc(); // consume '
+            if self.peekb() == Some(b'\'') {
+                self.popb(); // consume '
                 // Now parse base and value as a string, but only consume characters
                 // that are valid inside a Verilog number literal (base char plus
                 // digits/hex digits, x/z/?, and underscores). This ensures we do
                 // not accidentally swallow structural punctuation like '}' that
                 // should be tokenized separately.
                 let mut base_and_value = String::new();
-                while let Some(c) = self.peekc() {
-                    if c.is_ascii_alphanumeric()
-                        || c == '_'
-                        || c == 'x'
-                        || c == 'X'
-                        || c == 'z'
-                        || c == 'Z'
-                        || c == '?'
+                while let Some(b2) = self.peekb() {
+                    if b2.is_ascii_alphanumeric()
+                        || b2 == b'_'
+                        || b2 == b'x'
+                        || b2 == b'X'
+                        || b2 == b'z'
+                        || b2 == b'Z'
+                        || b2 == b'?'
                     {
-                        base_and_value.push(self.popc().unwrap());
+                        self.popb();
+                        base_and_value.push(b2 as char);
                     } else {
                         break;
                     }
@@ -844,15 +852,15 @@ impl<R: Read + 'static> TokenScanner<R> {
         // Handle line comments
         if b == b'/' {
             self.popb();
-            match self.peekc() {
-                Some('/') => {
-                    self.popc();
+            match self.peekb() {
+                Some(b'/') => {
+                    self.popb();
                     let mut comment = String::new();
-                    while let Some(ch) = self.popc() {
-                        if ch == '\n' {
+                    while let Some(b2) = self.popb() {
+                        if b2 == b'\n' {
                             break;
                         }
-                        comment.push(ch);
+                        comment.push(b2 as char);
                     }
                     let limit = self.pos;
                     return Ok(Some(Token {
@@ -860,15 +868,15 @@ impl<R: Read + 'static> TokenScanner<R> {
                         span: Span { start, limit },
                     }));
                 }
-                Some('*') => {
+                Some(b'*') => {
                     // Skip block comment
-                    self.popc(); // consume '*'
-                    let mut prev = None;
-                    while let Some(ch) = self.popc() {
-                        if prev == Some('*') && ch == '/' {
+                    self.popb(); // consume '*'
+                    let mut prev: Option<u8> = None;
+                    while let Some(b2) = self.popb() {
+                        if prev == Some(b'*') && b2 == b'/' {
                             break;
                         }
-                        prev = Some(ch);
+                        prev = Some(b2);
                     }
                     // After skipping, try to get the next token
                     return match self.next_token()? {
