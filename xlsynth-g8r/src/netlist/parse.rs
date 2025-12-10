@@ -290,12 +290,13 @@ impl<'a> TokenScanner<std::io::Cursor<&'a [u8]>> {
 }
 
 impl<R: Read + 'static> TokenScanner<R> {
-    pub fn peekc(&mut self) -> Option<char> {
+    #[inline]
+    fn peekb(&mut self) -> Option<u8> {
         if self.done {
             return None;
         }
         match self.reader.fill_buf() {
-            Ok(buf) => buf.first().copied().map(|b| b as char),
+            Ok(buf) => buf.first().copied(),
             Err(_) => {
                 self.done = true;
                 None
@@ -303,23 +304,23 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
     }
 
-    pub fn popc(&mut self) -> Option<char> {
+    #[inline]
+    fn popb(&mut self) -> Option<u8> {
         if self.done {
             return None;
         }
         match self.reader.fill_buf() {
             Ok(buf) => {
                 if let Some(&b) = buf.first() {
-                    let c = b as char;
-                    if c == '\n' {
+                    if b == b'\n' {
                         self.pos.lineno += 1;
                         self.pos.colno = 1;
                     } else {
                         self.pos.colno += 1;
                     }
-                    // Consume exactly one byte
+                    // Consume exactly one byte.
                     self.reader.consume(1);
-                    Some(c)
+                    Some(b)
                 } else {
                     self.done = true;
                     None
@@ -330,6 +331,14 @@ impl<R: Read + 'static> TokenScanner<R> {
                 None
             }
         }
+    }
+
+    pub fn peekc(&mut self) -> Option<char> {
+        self.peekb().map(|b| b as char)
+    }
+
+    pub fn popc(&mut self) -> Option<char> {
+        self.popb().map(|b| b as char)
     }
 
     pub fn peekt(&mut self) -> Result<Option<&Token>, ScanError> {
@@ -638,26 +647,26 @@ impl<R: Read + 'static> TokenScanner<R> {
     pub fn next_token(&mut self) -> Result<Option<Token>, ScanError> {
         // Always skip whitespace (except newlines) before any token logic
         loop {
-            match self.peekc() {
-                Some(c) if c.is_whitespace() && c != '\n' => {
-                    self.popc();
+            match self.peekb() {
+                Some(b) if b.is_ascii_whitespace() && b != b'\n' => {
+                    self.popb();
                 }
                 _ => break,
             }
         }
         let start = self.pos;
-        let c = match self.peekc() {
-            Some(c) => c,
+        let b = match self.peekb() {
+            Some(b) => b,
             None => return Ok(None),
         };
         // Handle Verilog preprocessor-style directive lines we want to ignore.
         // Currently, we skip lines that begin with `` `timescale`` anywhere in
         // the file. This consumes through the end of the line and resumes
         // scanning as if the directive were not present.
-        if c == '`' {
+        if b == b'`' {
             let directive_start = start;
             // consume backtick
-            self.popc();
+            self.popb();
             // read directive word (letters/underscores)
             let mut word = String::new();
             while let Some(ch) = self.peekc() {
@@ -692,7 +701,7 @@ impl<R: Read + 'static> TokenScanner<R> {
             }
         }
         // Handle annotation: use non-consuming two-byte lookahead for "(*"
-        if c == '(' {
+        if b == b'(' {
             if let Ok(buf) = self.reader.fill_buf() {
                 if buf.len() >= 2 && buf[0] == b'(' && buf[1] == b'*' {
                     return self.pop_annotation(start).map(Some);
@@ -702,11 +711,11 @@ impl<R: Read + 'static> TokenScanner<R> {
         // Handle identifier/keyword
         //
         // Note that "escaped identifiers" can begin with the backslash character.
-        if c.is_ascii_alphabetic() || c == '_' || c == '\\' {
+        if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' {
             return Ok(Some(self.pop_identifier(start)));
         }
         // Handle number (plain integer literal or Verilog-style literal)
-        if c.is_ascii_digit() {
+        if b.is_ascii_digit() {
             let mut num = String::new();
             while let Some(c) = self.peekc() {
                 if c.is_ascii_digit() {
@@ -799,8 +808,8 @@ impl<R: Read + 'static> TokenScanner<R> {
             }
         }
         // Handle line comments
-        if c == '/' {
-            self.popc();
+        if b == b'/' {
+            self.popb();
             match self.peekc() {
                 Some('/') => {
                     self.popc();
@@ -841,53 +850,53 @@ impl<R: Read + 'static> TokenScanner<R> {
             }
         }
         // Handle punctuation
-        let payload = match c {
-            '(' => {
-                self.popc();
+        let payload = match b {
+            b'(' => {
+                self.popb();
                 TokenPayload::OParen
             }
-            ')' => {
-                self.popc();
+            b')' => {
+                self.popb();
                 TokenPayload::CParen
             }
-            '[' => {
-                self.popc();
+            b'[' => {
+                self.popb();
                 TokenPayload::OBrack
             }
-            ']' => {
-                self.popc();
+            b']' => {
+                self.popb();
                 TokenPayload::CBrack
             }
-            '{' => {
-                self.popc();
+            b'{' => {
+                self.popb();
                 TokenPayload::OBrace
             }
-            '}' => {
-                self.popc();
+            b'}' => {
+                self.popb();
                 TokenPayload::CBrace
             }
-            ':' => {
-                self.popc();
+            b':' => {
+                self.popb();
                 TokenPayload::Colon
             }
-            ';' => {
-                self.popc();
+            b';' => {
+                self.popb();
                 TokenPayload::Semi
             }
-            ',' => {
-                self.popc();
+            b',' => {
+                self.popb();
                 TokenPayload::Comma
             }
-            '.' => {
-                self.popc();
+            b'.' => {
+                self.popb();
                 TokenPayload::Dot
             }
-            '=' => {
-                self.popc();
+            b'=' => {
+                self.popb();
                 TokenPayload::Equals
             }
-            '\n' => {
-                self.popc();
+            b'\n' => {
+                self.popb();
                 return match self.next_token()? {
                     Some(tok) => Ok(Some(tok)),
                     None => Ok(None),
@@ -897,7 +906,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 // Error for unknown token
                 let limit = self.pos;
                 return Err(self.error_with_context(
-                    &format!("Unexpected character '{}'", c),
+                    &format!("Unexpected character '{}'", b as char),
                     Span { start, limit },
                 ));
             }
