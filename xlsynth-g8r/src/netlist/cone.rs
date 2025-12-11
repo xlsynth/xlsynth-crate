@@ -438,16 +438,6 @@ where
 
                 for (nbr_inst_idx, nbr_port_sym) in neighbors {
                     if is_clocking_pin_for_instance(&ctx, *nbr_inst_idx, *nbr_port_sym) {
-                        let nbr_inst = &ctx.module.instances[nbr_inst_idx.0];
-                        let nbr_type = resolve_to_string(&ctx.interner, nbr_inst.type_name);
-                        let nbr_name = resolve_to_string(&ctx.interner, nbr_inst.instance_name);
-                        let nbr_port_name = resolve_to_string(&ctx.interner, *nbr_port_sym);
-                        log::debug!(
-                            "visit_module_cone: skipping clocking pin {}.{} on instance {} as neighbor",
-                            nbr_type,
-                            nbr_port_name,
-                            nbr_name
-                        );
                         continue;
                     }
                     // Skip self-loops; the starting instance has already been emitted.
