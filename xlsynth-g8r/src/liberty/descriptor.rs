@@ -2,7 +2,11 @@
 
 use prost_reflect::DescriptorPool;
 
-/// Embedded compiled descriptor set for liberty.proto
+/// Embedded compiled descriptor set for liberty.proto.
+///
+/// This descriptor is checked in under `proto/liberty.bin` so that crates
+/// depending on xlsynth-g8r only need prost/prost-reflect at build time,
+/// not protoc/prost-build.
 pub const LIBERTY_DESCRIPTOR: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/proto/liberty.bin"));
 

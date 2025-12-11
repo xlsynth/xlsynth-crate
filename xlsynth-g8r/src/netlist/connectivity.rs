@@ -414,11 +414,13 @@ mod tests {
                         direction: PinDirection::Input as i32,
                         function: "".to_string(),
                         name: "A".to_string(),
+                        is_clocking_pin: false,
                     },
                     Pin {
                         direction: PinDirection::Output as i32,
                         function: "(!A)".to_string(),
                         name: "Y".to_string(),
+                        is_clocking_pin: false,
                     },
                 ],
                 area: 1.0,
