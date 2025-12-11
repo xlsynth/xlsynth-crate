@@ -338,21 +338,6 @@ where
                     TraversalDirection::Fanin => {
                         if p.dir == PinDirection::Input {
                             if is_clocking_pin_for_instance(&ctx, start_idx, p.port) {
-                                let inst_type = resolve_to_string(
-                                    interner,
-                                    module.instances[start_idx.0].type_name,
-                                );
-                                let inst_name = resolve_to_string(
-                                    interner,
-                                    module.instances[start_idx.0].instance_name,
-                                );
-                                let port_name = resolve_to_string(interner, p.port);
-                                log::debug!(
-                                    "visit_module_cone: skipping clocking pin {}.{} on start instance {}",
-                                    inst_type,
-                                    port_name,
-                                    inst_name
-                                );
                                 continue;
                             }
                             chosen_ports.push(p.port);
@@ -361,21 +346,6 @@ where
                     TraversalDirection::Fanout => {
                         if p.dir == PinDirection::Output {
                             if is_clocking_pin_for_instance(&ctx, start_idx, p.port) {
-                                let inst_type = resolve_to_string(
-                                    interner,
-                                    module.instances[start_idx.0].type_name,
-                                );
-                                let inst_name = resolve_to_string(
-                                    interner,
-                                    module.instances[start_idx.0].instance_name,
-                                );
-                                let port_name = resolve_to_string(interner, p.port);
-                                log::debug!(
-                                    "visit_module_cone: skipping clocking pin {}.{} on start instance {}",
-                                    inst_type,
-                                    port_name,
-                                    inst_name
-                                );
                                 continue;
                             }
                             chosen_ports.push(p.port);
@@ -435,16 +405,6 @@ where
                 continue;
             }
             if is_clocking_pin_for_instance(&ctx, inst_idx, port.port) {
-                let inst = &ctx.module.instances[inst_idx.0];
-                let inst_type = resolve_to_string(&ctx.interner, inst.type_name);
-                let inst_name = resolve_to_string(&ctx.interner, inst.instance_name);
-                let port_name = resolve_to_string(&ctx.interner, port.port);
-                log::debug!(
-                    "visit_module_cone: skipping clocking pin {}.{} on instance {} during port traversal",
-                    inst_type,
-                    port_name,
-                    inst_name
-                );
                 continue;
             }
 
