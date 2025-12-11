@@ -506,7 +506,7 @@ where
 mod tests {
     use super::*;
     use crate::liberty::{IndexedLibrary, test_utils::make_test_library};
-    use crate::liberty_proto::{Library, Pin as LibertyPin};
+    use crate::liberty_proto::Library;
     use crate::netlist::parse::{
         Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
@@ -699,19 +699,19 @@ mod tests {
         lib.cells.push(crate::liberty_proto::Cell {
             name: "AND2".to_string(),
             pins: vec![
-                LibertyPin {
+                crate::liberty_proto::Pin {
                     direction: crate::liberty_proto::PinDirection::Input as i32,
                     function: "".to_string(),
                     name: "A".to_string(),
                     is_clocking_pin: false,
                 },
-                LibertyPin {
+                crate::liberty_proto::Pin {
                     direction: crate::liberty_proto::PinDirection::Input as i32,
                     function: "".to_string(),
                     name: "B".to_string(),
                     is_clocking_pin: false,
                 },
-                LibertyPin {
+                crate::liberty_proto::Pin {
                     direction: crate::liberty_proto::PinDirection::Output as i32,
                     function: "(A*B)".to_string(),
                     name: "Y".to_string(),
@@ -929,33 +929,9 @@ mod tests {
             instances,
         };
 
-        // Liberty library with INV and DFF, where DFF.CLK is marked as a
-        // clocking pin.
-        let mut lib: Library = make_test_library();
-        lib.cells.push(crate::liberty_proto::Cell {
-            name: "DFF".to_string(),
-            pins: vec![
-                LibertyPin {
-                    direction: crate::liberty_proto::PinDirection::Input as i32,
-                    function: "".to_string(),
-                    name: "D".to_string(),
-                    is_clocking_pin: false,
-                },
-                LibertyPin {
-                    direction: crate::liberty_proto::PinDirection::Input as i32,
-                    function: "".to_string(),
-                    name: "CLK".to_string(),
-                    is_clocking_pin: true,
-                },
-                LibertyPin {
-                    direction: crate::liberty_proto::PinDirection::Output as i32,
-                    function: "D".to_string(),
-                    name: "Q".to_string(),
-                    is_clocking_pin: false,
-                },
-            ],
-            area: 1.0,
-        });
+        // Liberty library with INV, BUF, and DFF (from common test utils), where
+        // DFF.CLK is marked as a clocking pin.
+        let lib: Library = make_test_library();
 
         let indexed = IndexedLibrary::new(lib);
         let mut visits: Vec<ConeVisit> = Vec::new();
