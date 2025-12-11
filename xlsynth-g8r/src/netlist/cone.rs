@@ -20,7 +20,7 @@ use crate::netlist::connectivity::NetlistConnectivity;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use string_interner::symbol::SymbolU32;
-use string_interner::{backend::StringBackend, StringInterner};
+use string_interner::{StringInterner, backend::StringBackend};
 
 /// Direction to traverse the cone from the starting instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +192,11 @@ impl<'a> ModuleConeContext<'a> {
     }
 }
 
-fn is_clocking_pin_for_instance(ctx: &ModuleConeContext<'_>, inst_idx: InstIndex, port_sym: PortId) -> bool {
+fn is_clocking_pin_for_instance(
+    ctx: &ModuleConeContext<'_>,
+    inst_idx: InstIndex,
+    port_sym: PortId,
+) -> bool {
     let inst = &ctx.module.instances[inst_idx.0];
     let cell_name = resolve_to_string(ctx.interner, inst.type_name);
     let port_name = resolve_to_string(ctx.interner, port_sym);
@@ -334,14 +338,20 @@ where
                     TraversalDirection::Fanin => {
                         if p.dir == PinDirection::Input {
                             if is_clocking_pin_for_instance(&ctx, start_idx, p.port) {
-                                let inst_type =
-                                    resolve_to_string(interner, module.instances[start_idx.0].type_name);
-                                let inst_name =
-                                    resolve_to_string(interner, module.instances[start_idx.0].instance_name);
+                                let inst_type = resolve_to_string(
+                                    interner,
+                                    module.instances[start_idx.0].type_name,
+                                );
+                                let inst_name = resolve_to_string(
+                                    interner,
+                                    module.instances[start_idx.0].instance_name,
+                                );
                                 let port_name = resolve_to_string(interner, p.port);
                                 log::debug!(
                                     "visit_module_cone: skipping clocking pin {}.{} on start instance {}",
-                                    inst_type, port_name, inst_name
+                                    inst_type,
+                                    port_name,
+                                    inst_name
                                 );
                                 continue;
                             }
@@ -351,14 +361,20 @@ where
                     TraversalDirection::Fanout => {
                         if p.dir == PinDirection::Output {
                             if is_clocking_pin_for_instance(&ctx, start_idx, p.port) {
-                                let inst_type =
-                                    resolve_to_string(interner, module.instances[start_idx.0].type_name);
-                                let inst_name =
-                                    resolve_to_string(interner, module.instances[start_idx.0].instance_name);
+                                let inst_type = resolve_to_string(
+                                    interner,
+                                    module.instances[start_idx.0].type_name,
+                                );
+                                let inst_name = resolve_to_string(
+                                    interner,
+                                    module.instances[start_idx.0].instance_name,
+                                );
                                 let port_name = resolve_to_string(interner, p.port);
                                 log::debug!(
                                     "visit_module_cone: skipping clocking pin {}.{} on start instance {}",
-                                    inst_type, port_name, inst_name
+                                    inst_type,
+                                    port_name,
+                                    inst_name
                                 );
                                 continue;
                             }
@@ -425,7 +441,9 @@ where
                 let port_name = resolve_to_string(&ctx.interner, port.port);
                 log::debug!(
                     "visit_module_cone: skipping clocking pin {}.{} on instance {} during port traversal",
-                    inst_type, port_name, inst_name
+                    inst_type,
+                    port_name,
+                    inst_name
                 );
                 continue;
             }
@@ -461,15 +479,14 @@ where
                 for (nbr_inst_idx, nbr_port_sym) in neighbors {
                     if is_clocking_pin_for_instance(&ctx, *nbr_inst_idx, *nbr_port_sym) {
                         let nbr_inst = &ctx.module.instances[nbr_inst_idx.0];
-                        let nbr_type =
-                            resolve_to_string(&ctx.interner, nbr_inst.type_name);
-                        let nbr_name =
-                            resolve_to_string(&ctx.interner, nbr_inst.instance_name);
-                        let nbr_port_name =
-                            resolve_to_string(&ctx.interner, *nbr_port_sym);
+                        let nbr_type = resolve_to_string(&ctx.interner, nbr_inst.type_name);
+                        let nbr_name = resolve_to_string(&ctx.interner, nbr_inst.instance_name);
+                        let nbr_port_name = resolve_to_string(&ctx.interner, *nbr_port_sym);
                         log::debug!(
                             "visit_module_cone: skipping clocking pin {}.{} on instance {} as neighbor",
-                            nbr_type, nbr_port_name, nbr_name
+                            nbr_type,
+                            nbr_port_name,
+                            nbr_name
                         );
                         continue;
                     }
