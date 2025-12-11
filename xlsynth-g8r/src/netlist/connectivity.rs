@@ -344,7 +344,7 @@ mod tests {
         let a = interner.get_or_intern("a");
         let n1 = interner.get_or_intern("n1");
         let y = interner.get_or_intern("y");
-        let invx1 = interner.get_or_intern("INVX1");
+        let invx1 = interner.get_or_intern("INV");
         let u1 = interner.get_or_intern("u1");
         let u2 = interner.get_or_intern("u2");
 
@@ -408,7 +408,7 @@ mod tests {
 
         let lib_proto = Library {
             cells: vec![Cell {
-                name: "INVX1".to_string(),
+                name: "INV".to_string(),
                 pins: vec![
                     Pin {
                         direction: PinDirection::Input as i32,

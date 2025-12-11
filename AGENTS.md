@@ -84,6 +84,10 @@ foo(/*kwarg=*/false)
 
 Note there is no space before the value: `/*kwarg=*/false` (not `/*kwarg=*/ false`).
 
+- When creating fake Liberty cell libraries or gate-level netlists in tests or benches, prefer simple, unsized cell
+  names such as `INV`, `BUF`, `AND2`, `DFF`, `DFFN`, etc., unless drive strength or sizing is explicitly part of the
+  behavior under test. This keeps examples clearer and avoids suggesting unnecessary realism.
+
 ## Documentation
 
 When adding a **new** `xlsynth-driver` subcommand you **must** add a corresponding

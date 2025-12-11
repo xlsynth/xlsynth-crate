@@ -20,7 +20,7 @@ use crate::netlist::connectivity::NetlistConnectivity;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use string_interner::symbol::SymbolU32;
-use string_interner::{StringInterner, backend::StringBackend};
+use string_interner::{backend::StringBackend, StringInterner};
 
 /// Direction to traverse the cone from the starting instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub enum StopCondition {
 
 /// One visit in the cone traversal.
 ///
-/// - `instance_type` is the Liberty cell name (e.g. `INVX1`).
+/// - `instance_type` is the Liberty cell name (e.g. `INV`).
 /// - `instance_name` is the Verilog instance label (e.g. `u123`).
 /// - `traversal_pin` is the pin name on this instance through which the cone
 ///   traversal reaches or departs this instance, depending on direction.
@@ -192,6 +192,21 @@ impl<'a> ModuleConeContext<'a> {
     }
 }
 
+fn is_clocking_pin_for_instance(ctx: &ModuleConeContext<'_>, inst_idx: InstIndex, port_sym: PortId) -> bool {
+    let inst = &ctx.module.instances[inst_idx.0];
+    let cell_name = resolve_to_string(ctx.interner, inst.type_name);
+    let port_name = resolve_to_string(ctx.interner, port_sym);
+    if let Some(pin) = ctx
+        .connectivity
+        .lib
+        .pin_by_name(cell_name.as_str(), port_name.as_str())
+    {
+        pin.is_clocking_pin
+    } else {
+        false
+    }
+}
+
 fn resolve_to_string(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     sym: SymbolU32,
@@ -302,6 +317,14 @@ where
                         }
                     }
                 }
+                if is_clocking_pin_for_instance(&ctx, start_idx, *port_sym) {
+                    return Err(ConeError::InvalidStartPin {
+                        instance: start_instance.to_string(),
+                        pin: pin_name.clone(),
+                        reason: "pin is a clocking pin and cannot be used as a traversal start pin"
+                            .to_string(),
+                    });
+                }
                 chosen_ports.push(*port_sym);
             }
         }
@@ -310,11 +333,35 @@ where
                 match direction {
                     TraversalDirection::Fanin => {
                         if p.dir == PinDirection::Input {
+                            if is_clocking_pin_for_instance(&ctx, start_idx, p.port) {
+                                let inst_type =
+                                    resolve_to_string(interner, module.instances[start_idx.0].type_name);
+                                let inst_name =
+                                    resolve_to_string(interner, module.instances[start_idx.0].instance_name);
+                                let port_name = resolve_to_string(interner, p.port);
+                                log::debug!(
+                                    "visit_module_cone: skipping clocking pin {}.{} on start instance {}",
+                                    inst_type, port_name, inst_name
+                                );
+                                continue;
+                            }
                             chosen_ports.push(p.port);
                         }
                     }
                     TraversalDirection::Fanout => {
                         if p.dir == PinDirection::Output {
+                            if is_clocking_pin_for_instance(&ctx, start_idx, p.port) {
+                                let inst_type =
+                                    resolve_to_string(interner, module.instances[start_idx.0].type_name);
+                                let inst_name =
+                                    resolve_to_string(interner, module.instances[start_idx.0].instance_name);
+                                let port_name = resolve_to_string(interner, p.port);
+                                log::debug!(
+                                    "visit_module_cone: skipping clocking pin {}.{} on start instance {}",
+                                    inst_type, port_name, inst_name
+                                );
+                                continue;
+                            }
                             chosen_ports.push(p.port);
                         }
                     }
@@ -371,6 +418,17 @@ where
             if !traverse_through {
                 continue;
             }
+            if is_clocking_pin_for_instance(&ctx, inst_idx, port.port) {
+                let inst = &ctx.module.instances[inst_idx.0];
+                let inst_type = resolve_to_string(&ctx.interner, inst.type_name);
+                let inst_name = resolve_to_string(&ctx.interner, inst.instance_name);
+                let port_name = resolve_to_string(&ctx.interner, port.port);
+                log::debug!(
+                    "visit_module_cone: skipping clocking pin {}.{} on instance {} during port traversal",
+                    inst_type, port_name, inst_name
+                );
+                continue;
+            }
 
             for net_idx in &port.nets {
                 assert!(
@@ -401,6 +459,20 @@ where
                 };
 
                 for (nbr_inst_idx, nbr_port_sym) in neighbors {
+                    if is_clocking_pin_for_instance(&ctx, *nbr_inst_idx, *nbr_port_sym) {
+                        let nbr_inst = &ctx.module.instances[nbr_inst_idx.0];
+                        let nbr_type =
+                            resolve_to_string(&ctx.interner, nbr_inst.type_name);
+                        let nbr_name =
+                            resolve_to_string(&ctx.interner, nbr_inst.instance_name);
+                        let nbr_port_name =
+                            resolve_to_string(&ctx.interner, *nbr_port_sym);
+                        log::debug!(
+                            "visit_module_cone: skipping clocking pin {}.{} on instance {} as neighbor",
+                            nbr_type, nbr_port_name, nbr_name
+                        );
+                        continue;
+                    }
                     // Skip self-loops; the starting instance has already been emitted.
                     if *nbr_inst_idx == inst_idx {
                         continue;
@@ -467,7 +539,7 @@ where
 mod tests {
     use super::*;
     use crate::liberty::{IndexedLibrary, test_utils::make_test_library};
-    use crate::liberty_proto::Library;
+    use crate::liberty_proto::{Library, Pin as LibertyPin};
     use crate::netlist::parse::{
         Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
@@ -480,7 +552,7 @@ mod tests {
         let a = interner.get_or_intern("a");
         let n1 = interner.get_or_intern("n1");
         let y = interner.get_or_intern("y");
-        let invx1 = interner.get_or_intern("INVX1");
+        let invx1 = interner.get_or_intern("INV");
         let u1 = interner.get_or_intern("u1");
         let u2 = interner.get_or_intern("u2");
         let top = interner.get_or_intern("top");
@@ -577,7 +649,7 @@ mod tests {
             rows.join("\n")
         };
 
-        let want = "INVX1,u1,Y,0\nINVX1,u2,A,1";
+        let want = "INV,u1,Y,0\nINV,u2,A,1";
         assert_eq!(rendered, want);
     }
 
@@ -587,8 +659,8 @@ mod tests {
         let a = interner.get_or_intern("a");
         let n1 = interner.get_or_intern("n1");
         let y = interner.get_or_intern("y");
-        let invx1 = interner.get_or_intern("INVX1");
-        let and2x1 = interner.get_or_intern("AND2X1");
+        let invx1 = interner.get_or_intern("INV");
+        let and2x1 = interner.get_or_intern("AND2");
         let u1 = interner.get_or_intern("u1");
         let u_and = interner.get_or_intern("u_and");
         let top = interner.get_or_intern("top");
@@ -622,8 +694,8 @@ mod tests {
         ];
 
         // Topology:
-        //   a -> INVX1 u1 -> n1
-        //   n1 drives both A and B pins of AND2X1 u_and -> y
+        //   a -> INV u1 -> n1
+        //   n1 drives both A and B pins of AND2 u_and -> y
         let instances = vec![
             NetlistInstance {
                 type_name: invx1,
@@ -655,24 +727,24 @@ mod tests {
             instances,
         };
 
-        // Liberty library with INVX1 (from common test utils) and AND2X1 cell.
+        // Liberty library with INV (from common test utils) and AND2 cell.
         let mut lib: Library = make_test_library();
         lib.cells.push(crate::liberty_proto::Cell {
-            name: "AND2X1".to_string(),
+            name: "AND2".to_string(),
             pins: vec![
-                crate::liberty_proto::Pin {
+                LibertyPin {
                     direction: crate::liberty_proto::PinDirection::Input as i32,
                     function: "".to_string(),
                     name: "A".to_string(),
                     is_clocking_pin: false,
                 },
-                crate::liberty_proto::Pin {
+                LibertyPin {
                     direction: crate::liberty_proto::PinDirection::Input as i32,
                     function: "".to_string(),
                     name: "B".to_string(),
                     is_clocking_pin: false,
                 },
-                crate::liberty_proto::Pin {
+                LibertyPin {
                     direction: crate::liberty_proto::PinDirection::Output as i32,
                     function: "(A*B)".to_string(),
                     name: "Y".to_string(),
@@ -714,20 +786,20 @@ mod tests {
             rows.join("\n")
         };
 
-        let want = "INVX1,u1,Y,0\nAND2X1,u_and,A,1\nAND2X1,u_and,B,1";
+        let want = "INV,u1,Y,0\nAND2,u_and,A,1\nAND2,u_and,B,1";
         assert_eq!(rendered, want);
     }
 
     #[test]
     fn self_loop_on_instance_is_not_visited_twice() {
-        // Construct a degenerate netlist where an INVX1 instance has both its
+        // Construct a degenerate netlist where an INV instance has both its
         // input and output pins tied to the same net. The cone traversal should
         // emit the starting instance once for its chosen start pin, and should
         // not re-visit the same instance via a self-loop edge.
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
         let y = interner.get_or_intern("y");
-        let invx1 = interner.get_or_intern("INVX1");
+        let invx1 = interner.get_or_intern("INV");
         let u1 = interner.get_or_intern("u1");
         let top = interner.get_or_intern("top");
 
@@ -756,7 +828,7 @@ mod tests {
         ];
 
         // Topology:
-        //   a drives both A and Y pins of INVX1 u1 (self-loop on the instance).
+        //   a drives both A and Y pins of INV u1 (self-loop on the instance).
         let instances = vec![NetlistInstance {
             type_name: invx1,
             instance_name: u1,
@@ -811,7 +883,149 @@ mod tests {
         // We should only see the starting instance once for its output pin Y at
         // level 0; the self-loop back to the same instance via A should be
         // ignored.
-        let want = "INVX1,u1,Y,0";
+        let want = "INV,u1,Y,0";
+        assert_eq!(rendered, want);
+    }
+
+    #[test]
+    fn traversal_skips_clocking_pins() {
+        // Netlist where an INV drives a net that feeds both D and CLK pins of
+        // a DFF cell. The cone traversal should not traverse through the
+        // clocking pin, so we should never see a visit for the CLK pin.
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let n1 = interner.get_or_intern("n1");
+        let q_net = interner.get_or_intern("q_net");
+        let invx1 = interner.get_or_intern("INV");
+        let dffx1 = interner.get_or_intern("DFF");
+        let u1 = interner.get_or_intern("u1");
+        let u_dff = interner.get_or_intern("u_dff");
+        let top = interner.get_or_intern("top");
+
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n1,
+                width: None,
+            },
+            Net {
+                name: q_net,
+                width: None,
+            },
+        ];
+
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: q_net,
+            },
+        ];
+
+        let instances = vec![
+            NetlistInstance {
+                type_name: invx1,
+                instance_name: u1,
+                connections: vec![
+                    (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
+                    (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(1))),
+                ],
+                inst_lineno: 0,
+                inst_colno: 0,
+            },
+            NetlistInstance {
+                type_name: dffx1,
+                instance_name: u_dff,
+                connections: vec![
+                    // Both D and CLK consume n1; Q drives q_net.
+                    (interner.get_or_intern("D"), NetRef::Simple(NetIndex(1))),
+                    (interner.get_or_intern("CLK"), NetRef::Simple(NetIndex(1))),
+                    (interner.get_or_intern("Q"), NetRef::Simple(NetIndex(2))),
+                ],
+                inst_lineno: 0,
+                inst_colno: 0,
+            },
+        ];
+
+        let module = NetlistModule {
+            name: top,
+            ports,
+            wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            instances,
+        };
+
+        // Liberty library with INV and DFF, where DFF.CLK is marked as a
+        // clocking pin.
+        let mut lib: Library = make_test_library();
+        lib.cells.push(crate::liberty_proto::Cell {
+            name: "DFF".to_string(),
+            pins: vec![
+                LibertyPin {
+                    direction: crate::liberty_proto::PinDirection::Input as i32,
+                    function: "".to_string(),
+                    name: "D".to_string(),
+                    is_clocking_pin: false,
+                },
+                LibertyPin {
+                    direction: crate::liberty_proto::PinDirection::Input as i32,
+                    function: "".to_string(),
+                    name: "CLK".to_string(),
+                    is_clocking_pin: true,
+                },
+                LibertyPin {
+                    direction: crate::liberty_proto::PinDirection::Output as i32,
+                    function: "D".to_string(),
+                    name: "Q".to_string(),
+                    is_clocking_pin: false,
+                },
+            ],
+            area: 1.0,
+        });
+
+        let indexed = IndexedLibrary::new(lib);
+        let mut visits: Vec<ConeVisit> = Vec::new();
+        let dff_cells: HashSet<String> = HashSet::new();
+        visit_module_cone(
+            &module,
+            &nets,
+            &interner,
+            &indexed,
+            &dff_cells,
+            None::<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
+            "u1",
+            None,
+            TraversalDirection::Fanout,
+            StopCondition::Levels(1),
+            |v: &ConeVisit| {
+                visits.push(v.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let rendered: String = {
+            let mut rows: Vec<String> = Vec::new();
+            for v in &visits {
+                rows.push(format!(
+                    "{},{},{},{}",
+                    v.instance_type, v.instance_name, v.traversal_pin, v.level
+                ));
+            }
+            rows.join("\n")
+        };
+
+        // We should see the starting instance u1 at level 0, and the D pin of
+        // u_dff at level 1, but never the CLK pin (since it is marked as a
+        // clocking pin).
+        let want = "INV,u1,Y,0\nDFF,u_dff,D,1";
         assert_eq!(rendered, want);
     }
 }

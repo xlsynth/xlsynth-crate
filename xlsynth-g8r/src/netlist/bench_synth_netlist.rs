@@ -4,19 +4,19 @@
 //!
 //! The generators in this module are intended for performance benchmarking of
 //! the netlist parser and related tooling. They produce single-module
-//! gate-level netlists with simple topologies (e.g. long chains of INVX1
+//! gate-level netlists with simple topologies (e.g. long chains of INV
 //! instances) that stress tokenization and parsing without relying on any
 //! particular Liberty library.
 
 use std::fmt::Write as FmtWrite;
 
 /// Generates a synthetic gate-level netlist containing a single module `top`
-/// with a long chain of `INVX1` instances between scalar ports `a` and `y`.
+/// with a long chain of `INV` instances between scalar ports `a` and `y`.
 ///
 /// The topology is:
 ///
 /// ```text
-///   a -> INVX1 u0 -> n0 -> INVX1 u1 -> n1 -> ... -> INVX1 u{N-1} -> y
+///   a -> INV u0 -> n0 -> INV u1 -> n1 -> ... -> INV u{N-1} -> y
 /// ```
 ///
 /// All intermediate nets `n<i>` are declared as scalar `wire`s. The generated
@@ -42,7 +42,7 @@ pub fn make_chain_netlist(instance_count: usize) -> String {
         writeln!(&mut s, "  wire n{};", i).unwrap();
     }
 
-    // Instance chain. Each INVX1 drives the next net in the chain.
+    // Instance chain. Each INV drives the next net in the chain.
     for i in 0..instance_count {
         let inst_name = format!("u{}", i);
         let input_net = if i == 0 {
@@ -57,7 +57,7 @@ pub fn make_chain_netlist(instance_count: usize) -> String {
         };
         writeln!(
             &mut s,
-            "  INVX1 {} (.A({}), .Y({}));",
+            "  INV {} (.A({}), .Y({}));",
             inst_name, input_net, output_net
         )
         .unwrap();

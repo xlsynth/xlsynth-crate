@@ -705,7 +705,7 @@ mod tests {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
         let y = interner.get_or_intern("y");
-        let invx1 = interner.get_or_intern("INVX1");
+        let invx1 = interner.get_or_intern("INV");
         let u1 = interner.get_or_intern("u1");
         let nets = vec![
             Net {
@@ -753,7 +753,7 @@ mod tests {
         };
         let liberty_lib = crate::liberty_proto::Library {
             cells: vec![crate::liberty_proto::Cell {
-                name: "INVX1".to_string(),
+                name: "INV".to_string(),
                 pins: vec![
                     crate::liberty_proto::Pin {
                         name: "A".to_string(),
@@ -790,7 +790,7 @@ mod tests {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
         let y = interner.get_or_intern("y");
-        let invx1 = interner.get_or_intern("INVX1");
+        let invx1 = interner.get_or_intern("INV");
         let u1 = interner.get_or_intern("u1");
         let nets = vec![
             Net {
@@ -832,7 +832,7 @@ mod tests {
         };
         let liberty_lib = crate::liberty_proto::Library {
             cells: vec![crate::liberty_proto::Cell {
-                name: "INVX1".to_string(),
+                name: "INV".to_string(),
                 pins: vec![
                     crate::liberty_proto::Pin {
                         name: "A".to_string(),
@@ -943,7 +943,7 @@ mod tests {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
         let n = interner.get_or_intern("n");
-        let buf = interner.get_or_intern("BUFX1");
+        let buf = interner.get_or_intern("BUF");
         let u1 = interner.get_or_intern("u1");
         // n is a 4-bit net
         let nets = vec![
@@ -992,7 +992,7 @@ mod tests {
         };
         let liberty_lib = crate::liberty_proto::Library {
             cells: vec![crate::liberty_proto::Cell {
-                name: "BUFX1".to_string(),
+                name: "BUF".to_string(),
                 pins: vec![
                     crate::liberty_proto::Pin {
                         name: "A".to_string(),
@@ -1037,7 +1037,7 @@ mod tests {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
         let y = interner.get_or_intern("y");
-        let dff = interner.get_or_intern("DFFX1");
+        let dff = interner.get_or_intern("DFF");
         let u1 = interner.get_or_intern("u1");
 
         // a: 1-bit input, y: 4-bit output
@@ -1089,7 +1089,7 @@ mod tests {
         // Liberty with a DFF cell having pins D (input) and Q (output)
         let liberty_lib = crate::liberty_proto::Library {
             cells: vec![crate::liberty_proto::Cell {
-                name: "DFFX1".to_string(),
+                name: "DFF".to_string(),
                 pins: vec![
                     crate::liberty_proto::Pin {
                         name: "D".to_string(),
@@ -1108,7 +1108,7 @@ mod tests {
             }],
         };
         let mut dff_cells = std::collections::HashSet::new();
-        dff_cells.insert("DFFX1".to_string());
+        dff_cells.insert("DFF".to_string());
 
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
@@ -1134,7 +1134,7 @@ mod tests {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let x = interner.get_or_intern("x");
         let y = interner.get_or_intern("y");
-        let dff = interner.get_or_intern("DFFX1");
+        let dff = interner.get_or_intern("DFF");
         let u1 = interner.get_or_intern("u1");
 
         // x: 8-bit input, y: 8-bit output
@@ -1185,7 +1185,7 @@ mod tests {
         };
         let liberty_lib = crate::liberty_proto::Library {
             cells: vec![crate::liberty_proto::Cell {
-                name: "DFFX1".to_string(),
+                name: "DFF".to_string(),
                 pins: vec![
                     crate::liberty_proto::Pin {
                         name: "D".to_string(),
@@ -1204,7 +1204,7 @@ mod tests {
             }],
         };
         let mut dff_cells = std::collections::HashSet::new();
-        dff_cells.insert("DFFX1".to_string());
+        dff_cells.insert("DFF".to_string());
 
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
@@ -1321,7 +1321,7 @@ mod tests {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let d = interner.get_or_intern("d");
         let qn = interner.get_or_intern("qn");
-        let dffn = interner.get_or_intern("DFFN1");
+        let dffn = interner.get_or_intern("DFFN");
         let u1 = interner.get_or_intern("u1");
 
         let nets = vec![
@@ -1364,7 +1364,7 @@ mod tests {
         };
         let liberty_lib = crate::liberty_proto::Library {
             cells: vec![crate::liberty_proto::Cell {
-                name: "DFFN1".to_string(),
+                name: "DFFN".to_string(),
                 pins: vec![
                     crate::liberty_proto::Pin {
                         name: "D".to_string(),
@@ -1384,7 +1384,7 @@ mod tests {
         };
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
-        dff_cells_inverted.insert("DFFN1".to_string());
+        dff_cells_inverted.insert("DFFN".to_string());
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
             &nets,
@@ -1403,7 +1403,7 @@ mod tests {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let d = interner.get_or_intern("d");
         let y = interner.get_or_intern("y");
-        let dffn = interner.get_or_intern("DFFN1");
+        let dffn = interner.get_or_intern("DFFN");
         let u1 = interner.get_or_intern("u1");
 
         let nets = vec![
@@ -1449,7 +1449,7 @@ mod tests {
         };
         let liberty_lib = crate::liberty_proto::Library {
             cells: vec![crate::liberty_proto::Cell {
-                name: "DFFN1".to_string(),
+                name: "DFFN".to_string(),
                 pins: vec![
                     crate::liberty_proto::Pin {
                         name: "D".to_string(),
@@ -1469,7 +1469,7 @@ mod tests {
         };
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
-        dff_cells_inverted.insert("DFFN1".to_string());
+        dff_cells_inverted.insert("DFFN".to_string());
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
             &nets,
@@ -1488,7 +1488,7 @@ mod tests {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let x = interner.get_or_intern("x");
         let y = interner.get_or_intern("y");
-        let dffn = interner.get_or_intern("DFFN1");
+        let dffn = interner.get_or_intern("DFFN");
         let u1 = interner.get_or_intern("u1");
 
         let nets = vec![
@@ -1537,7 +1537,7 @@ mod tests {
         };
         let liberty_lib = crate::liberty_proto::Library {
             cells: vec![crate::liberty_proto::Cell {
-                name: "DFFN1".to_string(),
+                name: "DFFN".to_string(),
                 pins: vec![
                     crate::liberty_proto::Pin {
                         name: "D".to_string(),
@@ -1557,7 +1557,7 @@ mod tests {
         };
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
-        dff_cells_inverted.insert("DFFN1".to_string());
+        dff_cells_inverted.insert("DFFN".to_string());
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
             &nets,

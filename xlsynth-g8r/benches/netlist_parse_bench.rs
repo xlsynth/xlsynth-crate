@@ -4,7 +4,7 @@
 //!
 //! These benches exercise `netlist::io::parse_netlist_from_path` on
 //! deterministically generated single-module netlists with long chains of
-//! `INVX1` instances. The synthetic inputs are intended to approximate the
+//! `INV` instances. The synthetic inputs are intended to approximate the
 //! tokenization and parsing workload of large Genus-style gate-level netlists
 //! without depending on any external files.
 
@@ -18,7 +18,7 @@ fn netlist_parse_benchmark(c: &mut Criterion) {
     // the parser on large inputs.
     let sizes: &[usize] = &[5_000, 20_000];
 
-    let mut group = c.benchmark_group("netlist_parse_chain_invx1");
+    let mut group = c.benchmark_group("netlist_parse_chain_inv");
 
     // Keep temporary files alive for the duration of the benchmarks so their
     // paths remain valid.

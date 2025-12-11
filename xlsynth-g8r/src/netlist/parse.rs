@@ -2268,7 +2268,7 @@ module m(a, b);
   input a;
   output b;
   wire a, b;
-  INVX1 u1 (.A(a), .Y(b));
+  INV u1 (.A(a), .Y(b));
 endmodule
 "#;
         let mut parser = Parser::new(TokenScanner::from_str(src));
@@ -2278,9 +2278,9 @@ endmodule
         assert_eq!(m.instances.len(), 1);
         let inst = &m.instances[0];
         // 'u1' starts on line 6 (leading newline in the raw string), after two spaces +
-        // 'INVX1' (5 chars) + one space => column 9.
+        // 'INV' (3 chars) + one space => column 7.
         assert_eq!(inst.inst_lineno, 6);
-        assert_eq!(inst.inst_colno, 9);
+        assert_eq!(inst.inst_colno, 7);
     }
 
     #[test]
