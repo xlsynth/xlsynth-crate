@@ -4,6 +4,7 @@ use crate::liberty::util::human_readable_size;
 use crate::liberty::{CharReader, LibertyParser};
 use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
 use flate2::bufread::GzDecoder;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -38,13 +39,16 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
             if cell_block.block_type != "cell" {
                 continue;
             }
-            let mut area = 0.0;
-            let mut pins = Vec::new();
             let name = match cell_block.qualifiers.get(0) {
                 Some(crate::liberty::liberty_parser::Value::Identifier(s)) => s.clone(),
                 Some(crate::liberty::liberty_parser::Value::String(s)) => s.clone(),
                 _ => String::new(),
             };
+            let mut area = 0.0;
+            let mut clocking_pins: HashSet<String> = HashSet::new();
+
+            // First pass: gather cell-level attributes (like area) and any clocking pins
+            // referenced by ff blocks via the clocked_on attribute.
             for cell_member in &cell_block.members {
                 match cell_member {
                     crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) => {
@@ -52,43 +56,78 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                             area = value_to_f64(&attr.value);
                         }
                     }
-                    crate::liberty::liberty_parser::BlockMember::SubBlock(pin_block) => {
-                        if pin_block.block_type != "pin" {
+                    crate::liberty::liberty_parser::BlockMember::SubBlock(sub_block) => {
+                        if sub_block.block_type != "ff" {
                             continue;
                         }
-                        let mut direction = PinDirection::Invalid as i32;
-                        let mut function = String::new();
-                        let mut pin_name = String::new();
-                        if let Some(crate::liberty::liberty_parser::Value::Identifier(s)) =
-                            pin_block.qualifiers.get(0)
-                        {
-                            pin_name = s.clone();
-                        } else if let Some(crate::liberty::liberty_parser::Value::String(s)) =
-                            pin_block.qualifiers.get(0)
-                        {
-                            pin_name = s.clone();
-                        }
-                        for pin_member in &pin_block.members {
+                        for ff_member in &sub_block.members {
                             if let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) =
-                                pin_member
+                                ff_member
                             {
-                                if attr.attr_name == "direction" {
-                                    if let crate::liberty::liberty_parser::Value::Identifier(s) =
-                                        &attr.value
-                                    {
-                                        direction = direction_from_str(s);
+                                if attr.attr_name == "clocked_on" {
+                                    match &attr.value {
+                                        crate::liberty::liberty_parser::Value::String(s)
+                                        | crate::liberty::liberty_parser::Value::Identifier(s) => {
+                                            clocking_pins.insert(s.clone());
+                                        }
+                                        other => {
+                                            panic!(
+                                                "Expected string or identifier for clocked_on attribute, got {:?}",
+                                                other
+                                            );
+                                        }
                                     }
-                                } else if attr.attr_name == "function" {
-                                    function = value_to_string(&attr.value);
                                 }
                             }
                         }
-                        pins.push(Pin {
-                            direction,
-                            function,
-                            name: pin_name,
-                        });
                     }
+                }
+            }
+
+            // Second pass: build Pin protos, marking pins that are referred to by any
+            // clocked_on attribute in an ff block as clocking pins.
+            let mut pins = Vec::new();
+            for cell_member in &cell_block.members {
+                if let crate::liberty::liberty_parser::BlockMember::SubBlock(pin_block) =
+                    cell_member
+                {
+                    if pin_block.block_type != "pin" {
+                        continue;
+                    }
+                    let mut direction = PinDirection::Invalid as i32;
+                    let mut function = String::new();
+                    let mut pin_name = String::new();
+                    if let Some(crate::liberty::liberty_parser::Value::Identifier(s)) =
+                        pin_block.qualifiers.get(0)
+                    {
+                        pin_name = s.clone();
+                    } else if let Some(crate::liberty::liberty_parser::Value::String(s)) =
+                        pin_block.qualifiers.get(0)
+                    {
+                        pin_name = s.clone();
+                    }
+                    for pin_member in &pin_block.members {
+                        if let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) =
+                            pin_member
+                        {
+                            if attr.attr_name == "direction" {
+                                if let crate::liberty::liberty_parser::Value::Identifier(s) =
+                                    &attr.value
+                                {
+                                    direction = direction_from_str(s);
+                                }
+                            } else if attr.attr_name == "function" {
+                                function = value_to_string(&attr.value);
+                            }
+                        }
+                    }
+                    let is_clocking_pin = clocking_pins.contains(&pin_name);
+                    pins.push(Pin {
+                        direction,
+                        function,
+                        name: pin_name,
+                        is_clocking_pin,
+                    });
                 }
             }
             cells.push(Cell { area, pins, name });
@@ -143,6 +182,7 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::liberty::descriptor::LIBERTY_DESCRIPTOR;
     use prost::Message;
     use prost_reflect::{DescriptorPool, DynamicMessage};
     use std::io::Write;
@@ -174,12 +214,11 @@ mod tests {
         assert_eq!(lib.cells[0].name, "my_and");
         assert_eq!(lib.cells[0].area, 1.0);
         assert_eq!(lib.cells[0].pins.len(), 3);
+        assert!(!lib.cells[0].pins[0].is_clocking_pin);
+        assert!(!lib.cells[0].pins[1].is_clocking_pin);
+        assert!(!lib.cells[0].pins[2].is_clocking_pin);
         // Pretty-print using prost-reflect
-        let descriptor_pool = DescriptorPool::decode(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/liberty.bin"
-        )) as &[u8])
-        .unwrap();
+        let descriptor_pool = DescriptorPool::decode(LIBERTY_DESCRIPTOR).unwrap();
         let msg_desc = descriptor_pool
             .get_message_by_name("liberty.Library")
             .unwrap();
@@ -190,6 +229,50 @@ mod tests {
         println!("Pretty-printed textproto:\n{}", textproto);
         assert!(textproto.contains("cells:["));
         assert!(textproto.contains("name:\"my_and\""));
+    }
+
+    #[test]
+    fn test_clocked_on_marks_clocking_pin() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (my_ff) {
+                area: 2.0;
+                pin (CLK) {
+                    direction: input;
+                }
+                pin (D) {
+                    direction: input;
+                }
+                pin (Q) {
+                    direction: output;
+                }
+                ff (IQ1, IQN) {
+                    clocked_on : "CLK";
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        assert_eq!(lib.cells.len(), 1);
+        let cell = &lib.cells[0];
+        assert_eq!(cell.name, "my_ff");
+        assert_eq!(cell.pins.len(), 3);
+        let mut clk_is_clocking = None;
+        let mut d_is_clocking = None;
+        let mut q_is_clocking = None;
+        for pin in &cell.pins {
+            match pin.name.as_str() {
+                "CLK" => clk_is_clocking = Some(pin.is_clocking_pin),
+                "D" => d_is_clocking = Some(pin.is_clocking_pin),
+                "Q" => q_is_clocking = Some(pin.is_clocking_pin),
+                other => panic!("Unexpected pin name in test: {}", other),
+            }
+        }
+        assert_eq!(clk_is_clocking, Some(true));
+        assert_eq!(d_is_clocking, Some(false));
+        assert_eq!(q_is_clocking, Some(false));
     }
 
     #[test]

@@ -24,4 +24,5 @@ message Pin {
   PinDirection direction = 1;
   string function = 2;
   string name = 3;
+  bool is_clocking_pin = 4;
 }
