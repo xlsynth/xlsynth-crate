@@ -255,7 +255,7 @@ mod tests {
                 pin (Q) {
                     direction: output;
                 }
-                ff (IQ1, IQN) {
+                ff (IQN) {
                     clocked_on : "CLK";
                 }
             }
@@ -302,7 +302,7 @@ mod tests {
                 pin (Q) {
                     direction: output;
                 }
-                ff (IQ1, IQN) {
+                ff (IQN) {
                     clocked_on : "CLK1 | CLK2";
                 }
             }
