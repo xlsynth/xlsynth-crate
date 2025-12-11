@@ -163,8 +163,8 @@ mod tests {
         let lib = make_test_library();
         let indexed = IndexedLibrary::new(lib);
 
-        let inv = indexed.get_cell("INVX1").expect("INVX1 cell should exist");
-        assert_eq!(inv.name, "INVX1");
+        let inv = indexed.get_cell("INV").expect("INV cell should exist");
+        assert_eq!(inv.name, "INV");
 
         assert!(indexed.get_cell("NO_SUCH_CELL").is_none());
     }
@@ -176,11 +176,11 @@ mod tests {
 
         // First call should build indices.
         let inputs = indexed
-            .pins_for_dir("INVX1", PinDirection::Input)
-            .expect("inputs for INVX1");
+            .pins_for_dir("INV", PinDirection::Input)
+            .expect("inputs for INV");
         let outputs = indexed
-            .pins_for_dir("INVX1", PinDirection::Output)
-            .expect("outputs for INVX1");
+            .pins_for_dir("INV", PinDirection::Output)
+            .expect("outputs for INV");
 
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].name, "A");
@@ -190,8 +190,8 @@ mod tests {
 
         // Second call exercises cached indices.
         let inputs_again = indexed
-            .pins_for_dir("INVX1", PinDirection::Input)
-            .expect("inputs for INVX1 (cached)");
+            .pins_for_dir("INV", PinDirection::Input)
+            .expect("inputs for INV (cached)");
         assert_eq!(inputs_again.len(), 1);
         assert_eq!(inputs_again[0].name, "A");
     }
@@ -202,11 +202,11 @@ mod tests {
         let indexed = IndexedLibrary::new(lib);
 
         let y = indexed
-            .pin_by_name("INVX1", "Y")
-            .expect("Y pin should exist on INVX1");
+            .pin_by_name("INV", "Y")
+            .expect("Y pin should exist on INV");
         assert_eq!(y.name, "Y");
 
-        assert!(indexed.pin_by_name("INVX1", "NO_SUCH_PIN").is_none());
+        assert!(indexed.pin_by_name("INV", "NO_SUCH_PIN").is_none());
         assert!(indexed.pin_by_name("NO_SUCH_CELL", "Y").is_none());
     }
 }

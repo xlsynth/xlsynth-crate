@@ -12,7 +12,7 @@ use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
 const LIBERTY_INVERTER_AND_BUF_TEXTPROTO: &str = r#"
 cells: {
-  name: "INVX1"
+  name: "INV"
   pins: {
     name: "A"
     direction: INPUT
@@ -25,7 +25,7 @@ cells: {
   area: 1.0
 }
 cells: {
-  name: "BUFX1"
+  name: "BUF"
   pins: {
     name: "A"
     direction: INPUT
@@ -42,7 +42,7 @@ cells: {
 #[test]
 fn test_single_inverter_netlist_and_liberty() {
     let _ = env_logger::builder().is_test(true).try_init();
-    // Use the full constant (both INVX1 and BUFX1)
+    // Use the full constant (both INV and BUF)
     let liberty_textproto = LIBERTY_INVERTER_AND_BUF_TEXTPROTO;
     log::info!("Liberty textproto used in test:\n{}", liberty_textproto);
 
@@ -54,7 +54,7 @@ module top (a, y);
   wire a;
   wire y;
   wire n1;
-  INVX1 u1 (.A(a), .Y(y));
+  INV u1 (.A(a), .Y(y));
 endmodule
 "#;
 
@@ -113,10 +113,10 @@ endmodule
 
 #[test]
 fn test_single_driver_multiple_consumer_netlist() {
-    // Use the full constant for both INVX1 and BUFX1
+    // Use the full constant for both INV and BUF
     let liberty_textproto = LIBERTY_INVERTER_AND_BUF_TEXTPROTO;
 
-    // Netlist: a -> INVX1 -> n; n -> BUFX1 -> y1; n -> BUFX1 -> y2
+    // Netlist: a -> INV -> n; n -> BUF -> y1; n -> BUF -> y2
     let netlist = r#"
 module top (a, y1, y2);
   input a;
@@ -126,9 +126,9 @@ module top (a, y1, y2);
   wire n;
   wire y1;
   wire y2;
-  INVX1 u_inv (.A(a), .Y(n));
-  BUFX1 u_buf1 (.A(n), .Y(y1));
-  BUFX1 u_buf2 (.A(n), .Y(y2));
+  INV u_inv (.A(a), .Y(n));
+  BUF u_buf1 (.A(n), .Y(y1));
+  BUF u_buf2 (.A(n), .Y(y2));
 endmodule
 "#;
 

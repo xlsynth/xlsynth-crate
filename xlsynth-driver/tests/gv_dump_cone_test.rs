@@ -9,7 +9,7 @@ fn gv_dump_cone_basic_csv_output() {
     // Minimal Liberty textproto with a single inverter cell.
     let liberty_text = r#"
 cells: {
-  name: "INVX1"
+  name: "INV"
   pins: {
     name: "A"
     direction: INPUT
@@ -23,7 +23,7 @@ cells: {
 }
 "#;
 
-    // Minimal netlist: a -> INVX1 u1 -> n1 -> INVX1 u2 -> y
+    // Minimal netlist: a -> INV u1 -> n1 -> INV u2 -> y
     let netlist_text = r#"
 module top (a, y);
   input a;
@@ -31,8 +31,8 @@ module top (a, y);
   wire a;
   wire y;
   wire n1;
-  INVX1 u1 (.A(a), .Y(n1));
-  INVX1 u2 (.A(n1), .Y(y));
+  INV u1 (.A(a), .Y(n1));
+  INV u2 (.A(n1), .Y(y));
 endmodule
 "#;
 
@@ -70,8 +70,8 @@ endmodule
 
     let want = "\
 instance_type,instance_name,traversal_pin,levels
-INVX1,u1,Y,0
-INVX1,u2,A,1
+INV,u1,Y,0
+INV,u2,A,1
 ";
 
     assert_eq!(got, want);

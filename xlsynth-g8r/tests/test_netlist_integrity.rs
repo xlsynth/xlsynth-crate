@@ -7,7 +7,7 @@ use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 fn build_simple_lib() -> Library {
     Library {
         cells: vec![Cell {
-            name: "INVX1".to_string(),
+            name: "INV".to_string(),
             area: 1.0,
             pins: vec![
                 Pin {
@@ -34,7 +34,7 @@ fn test_clean_netlist() {
   output y;
   wire a;
   wire y;
-  INVX1 u1 (.A(a), .Y(y));
+  INV u1 (.A(a), .Y(y));
 endmodule"#;
     let scanner = TokenScanner::with_line_lookup(netlist.as_bytes(), Box::new(|_| None));
     let mut parser = NetlistParser::new(scanner);
@@ -53,7 +53,7 @@ fn test_findings_netlist() {
   wire a;
   wire y;
   wire n1;
-  INVX1 u1 (.A(y), .Y(y));
+  INV u1 (.A(y), .Y(y));
 endmodule"#;
     let scanner = TokenScanner::with_line_lookup(netlist.as_bytes(), Box::new(|_| None));
     let mut parser = NetlistParser::new(scanner);
