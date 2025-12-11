@@ -71,6 +71,7 @@ mod tests {
                 name: "A".to_string(),
                 direction: PinDirection::Input as i32,
                 function: "A".to_string(),
+                is_clocking_pin: false,
             }],
             name: "test_cell".to_string(),
         });

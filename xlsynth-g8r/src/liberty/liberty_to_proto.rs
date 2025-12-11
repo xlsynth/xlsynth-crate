@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::util::human_readable_size;
 use crate::liberty::{CharReader, LibertyParser};
 use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
@@ -68,7 +69,15 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                                     match &attr.value {
                                         crate::liberty::liberty_parser::Value::String(s)
                                         | crate::liberty::liberty_parser::Value::Identifier(s) => {
-                                            clocking_pins.insert(s.clone());
+                                            let term = parse_formula(s).unwrap_or_else(|e| {
+                                                panic!(
+                                                    "Failed to parse clocked_on expression {:?}: {}",
+                                                    s, e
+                                                )
+                                            });
+                                            for input in term.inputs() {
+                                                clocking_pins.insert(input);
+                                            }
                                         }
                                         other => {
                                             panic!(
@@ -273,6 +282,56 @@ mod tests {
         assert_eq!(clk_is_clocking, Some(true));
         assert_eq!(d_is_clocking, Some(false));
         assert_eq!(q_is_clocking, Some(false));
+    }
+
+    #[test]
+    fn test_clocked_on_multiple_clocks_all_marked() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (my_ff) {
+                area: 2.0;
+                pin (CLK1) {
+                    direction: input;
+                }
+                pin (CLK2) {
+                    direction: input;
+                }
+                pin (D) {
+                    direction: input;
+                }
+                pin (Q) {
+                    direction: output;
+                }
+                ff (IQ1, IQN) {
+                    clocked_on : "CLK1 | CLK2";
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        assert_eq!(lib.cells.len(), 1);
+        let cell = &lib.cells[0];
+        assert_eq!(cell.name, "my_ff");
+        assert_eq!(cell.pins.len(), 4);
+        let mut clk1 = None;
+        let mut clk2 = None;
+        let mut d = None;
+        let mut q = None;
+        for pin in &cell.pins {
+            match pin.name.as_str() {
+                "CLK1" => clk1 = Some(pin.is_clocking_pin),
+                "CLK2" => clk2 = Some(pin.is_clocking_pin),
+                "D" => d = Some(pin.is_clocking_pin),
+                "Q" => q = Some(pin.is_clocking_pin),
+                other => panic!("Unexpected pin name in test: {}", other),
+            }
+        }
+        assert_eq!(clk1, Some(true));
+        assert_eq!(clk2, Some(true));
+        assert_eq!(d, Some(false));
+        assert_eq!(q, Some(false));
     }
 
     #[test]

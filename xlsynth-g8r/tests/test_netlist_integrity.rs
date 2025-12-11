@@ -14,11 +14,13 @@ fn build_simple_lib() -> Library {
                     name: "A".to_string(),
                     direction: PinDirection::Input as i32,
                     function: String::new(),
+                    is_clocking_pin: false,
                 },
                 Pin {
                     name: "Y".to_string(),
                     direction: PinDirection::Output as i32,
                     function: String::new(),
+                    is_clocking_pin: false,
                 },
             ],
         }],
