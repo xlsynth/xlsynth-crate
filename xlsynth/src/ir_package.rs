@@ -10,8 +10,8 @@ use crate::{
     lib_support::{
         xls_function_get_name, xls_function_get_type, xls_function_type_to_string,
         xls_interpret_function, xls_package_free, xls_package_get_function,
-        xls_package_get_type_for_value, xls_package_to_string, xls_parse_ir_package,
-        xls_type_to_string,
+        xls_package_get_functions, xls_package_get_type_for_value, xls_package_to_string,
+        xls_parse_ir_package, xls_type_to_string,
     },
     IrValue,
 };
@@ -120,6 +120,14 @@ impl IrPackage {
 
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
         self.with_read(|guard| xls_package_get_function(&self.ptr, guard, name))
+    }
+
+    /// Returns all functions contained in this package.
+    ///
+    /// The returned `IrFunction` values borrow the package; they remain valid
+    /// for as long as the package is alive.
+    pub fn get_functions(&self) -> Result<Vec<IrFunction>, XlsynthError> {
+        self.with_read(|guard| xls_package_get_functions(&self.ptr, guard))
     }
 
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
@@ -349,6 +357,30 @@ mod tests {
         let ir = "package test\nfn f() -> bits[32] {\n  ret literal.1: bits[32] = literal(value=42)\n}\n";
         let package = IrPackage::parse_ir(ir, None).expect("parse success");
         package.verify().expect("verify success");
+    }
+
+    #[test]
+    fn test_ir_package_get_functions() {
+        let ir = r#"
+package test
+
+fn foo() -> bits[32] {
+  ret literal.1: bits[32] = literal(value=7)
+}
+
+fn bar(x: bits[32]) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
+}
+"#;
+        let package = IrPackage::parse_ir(ir, None).expect("parse success");
+        let mut names: Vec<String> = package
+            .get_functions()
+            .expect("get functions")
+            .iter()
+            .map(|f| f.get_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["bar".to_string(), "foo".to_string()]);
     }
 
     #[test]

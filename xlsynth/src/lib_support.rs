@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
+use libc::size_t;
 use xlsynth_sys::{
     CIrBValue, CIrBits, CIrFunction, CIrFunctionJit, CIrFunctionType, CIrPackage, CIrType,
     CIrValue, CScheduleAndCodegenResult, CTraceMessage, XlsFormatPreference,
@@ -563,6 +564,41 @@ pub(crate) fn xls_package_get_function(
         parent: package.clone(),
         ptr: result_out,
     })
+}
+
+pub(crate) fn xls_package_get_functions(
+    package: &Arc<RwLock<IrPackagePtr>>,
+    guard: RwLockReadGuard<IrPackagePtr>,
+) -> Result<Vec<crate::ir_package::IrFunction>, XlsynthError> {
+    let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+    let mut result_out: *mut *mut CIrFunction = std::ptr::null_mut();
+    let mut count_out: size_t = 0;
+    let success = unsafe {
+        xlsynth_sys::xls_package_get_functions(
+            guard.const_c_ptr() as *mut CIrPackage,
+            &mut error_out,
+            &mut result_out,
+            &mut count_out,
+        )
+    };
+    if !success {
+        return Err(XlsynthError(unsafe { c_str_to_rust(error_out) }));
+    }
+
+    let function_ptrs = unsafe { std::slice::from_raw_parts(result_out, count_out) };
+    let functions = function_ptrs
+        .iter()
+        .map(|ptr| crate::ir_package::IrFunction {
+            parent: package.clone(),
+            ptr: *ptr,
+        })
+        .collect();
+
+    unsafe {
+        xlsynth_sys::xls_function_ptr_array_free(result_out);
+    }
+
+    Ok(functions)
 }
 
 pub(crate) fn xls_function_get_type(
