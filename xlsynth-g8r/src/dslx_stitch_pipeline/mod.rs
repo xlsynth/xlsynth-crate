@@ -298,7 +298,8 @@ fn build_stitch_pipeline_ir_residual_from_discovered<'a>(
     let stage_unmangled_names: Vec<String> = discovered.iter().map(|(u, _)| u.clone()).collect();
 
     let existing_names = module_function_names(&typechecked_module.get_module());
-    let wrapper_dslx_name = choose_unique_wrapper_dslx_name(&existing_names, opts.output_module_name);
+    let wrapper_dslx_name =
+        choose_unique_wrapper_dslx_name(&existing_names, opts.output_module_name);
 
     let wrapper_dslx = make_composed_wrapper_dslx(
         typechecked_module,
@@ -762,12 +763,14 @@ pub fn stitch_pipeline<'a>(
     Ok(stitch_pipeline_run(dslx, path, top, opts, false)?.sv)
 }
 
-/// Runs the stitch pipeline and optionally captures "residual" intermediate data
-/// derived from the same stage discovery and typechecking work used for codegen.
+/// Runs the stitch pipeline and optionally captures "residual" intermediate
+/// data derived from the same stage discovery and typechecking work used for
+/// codegen.
 ///
-/// Today, the residual is a pair of IR package texts (unoptimized and optimized)
-/// that include a synthesized composed-wrapper function. This is useful for
-/// debugging and for downstream post-processing that wants a stable entry point.
+/// Today, the residual is a pair of IR package texts (unoptimized and
+/// optimized) that include a synthesized composed-wrapper function. This is
+/// useful for debugging and for downstream post-processing that wants a stable
+/// entry point.
 pub fn stitch_pipeline_run<'a>(
     dslx: &str,
     path: &Path,
