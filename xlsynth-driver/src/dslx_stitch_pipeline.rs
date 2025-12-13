@@ -130,47 +130,51 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     // the wrapper name.
     let top_for_library = stage_discovery_prefix_opt.unwrap_or(wrapper_name);
 
-    if output_unopt_ir.is_some() || output_opt_ir.is_some() {
-        let mut pkgs = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline_ir_packages(
-            &dslx,
-            std::path::Path::new(input),
-            top_for_library,
-            &options,
-        )
-        .unwrap_or_else(|e| {
-            report_cli_error_and_exit("stitch error (ir output)", Some(&e.0), vec![])
-        });
+    let capture_ir_residual = output_unopt_ir.is_some() || output_opt_ir.is_some();
 
-        if let Some(path) = output_unopt_ir {
-            let unopt_text = ensure_trailing_newline(std::mem::take(&mut pkgs.unopt_ir));
-            std::fs::write(path, unopt_text).unwrap_or_else(|e| {
-                report_cli_error_and_exit(
-                    "could not write unoptimized IR output",
-                    Some(&e.to_string()),
-                    vec![("path", path)],
-                );
-            });
-        }
-        if let Some(path) = output_opt_ir {
-            let opt_text = ensure_trailing_newline(std::mem::take(&mut pkgs.opt_ir));
-            std::fs::write(path, opt_text).unwrap_or_else(|e| {
-                report_cli_error_and_exit(
-                    "could not write optimized IR output",
-                    Some(&e.to_string()),
-                    vec![("path", path)],
-                );
-            });
-        }
-    }
-
-    let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
+    let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline_run(
         &dslx,
         std::path::Path::new(input),
         top_for_library,
         &options,
+        capture_ir_residual,
     );
     match result {
-        Ok(sv) => println!("{}", sv),
+        Ok(run_output) => {
+            let xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineRunOutput { sv, residual } =
+                run_output;
+
+            // We may want to write out the IR residuals to files.
+            if capture_ir_residual {
+                let mut pkgs = residual
+                    .expect("capture_ir_residual requested residual")
+                    .ir_packages;
+
+                if let Some(path) = output_unopt_ir {
+                    let unopt_text = ensure_trailing_newline(std::mem::take(&mut pkgs.unopt_ir));
+                    std::fs::write(path, unopt_text).unwrap_or_else(|e| {
+                        report_cli_error_and_exit(
+                            "could not write unoptimized IR output",
+                            Some(&e.to_string()),
+                            vec![("path", path)],
+                        );
+                    });
+                }
+                if let Some(path) = output_opt_ir {
+                    let opt_text = ensure_trailing_newline(std::mem::take(&mut pkgs.opt_ir));
+                    std::fs::write(path, opt_text).unwrap_or_else(|e| {
+                        report_cli_error_and_exit(
+                            "could not write optimized IR output",
+                            Some(&e.to_string()),
+                            vec![("path", path)],
+                        );
+                    });
+                }
+            }
+
+            // Now we print the SV output to stdout.
+            println!("{}", sv)
+        }
         Err(e) => report_cli_error_and_exit("stitch error", Some(&e.0), vec![]),
     }
 }

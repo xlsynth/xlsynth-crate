@@ -47,6 +47,19 @@ pub struct StitchPipelineIrPackages {
     pub opt_ir: String,
 }
 
+#[derive(Debug)]
+pub struct StitchPipelineResidual {
+    pub ir_packages: StitchPipelineIrPackages,
+    pub wrapper_dslx: String,
+    pub stage_unmangled_names: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct StitchPipelineRunOutput {
+    pub sv: String,
+    pub residual: Option<StitchPipelineResidual>,
+}
+
 fn module_function_names(module: &xlsynth::dslx::Module) -> HashSet<String> {
     let mut names = HashSet::new();
     for i in 0..module.get_member_count() {
@@ -274,6 +287,94 @@ fn normalize_wrapper_def_to_top(def: &str) -> String {
     }
 }
 
+fn build_stitch_pipeline_ir_residual_from_discovered<'a>(
+    dslx: &str,
+    path: &Path,
+    module_name: &str,
+    typechecked_module: &xlsynth::dslx::TypecheckedModule,
+    discovered: &[(String, String)],
+    opts: &StitchPipelineOptions<'a>,
+) -> Result<StitchPipelineResidual, xlsynth::XlsynthError> {
+    let stage_unmangled_names: Vec<String> = discovered.iter().map(|(u, _)| u.clone()).collect();
+
+    let existing_names = module_function_names(&typechecked_module.get_module());
+    let wrapper_dslx_name = choose_unique_wrapper_dslx_name(&existing_names, opts.output_module_name);
+
+    let wrapper_dslx = make_composed_wrapper_dslx(
+        typechecked_module,
+        &stage_unmangled_names,
+        &wrapper_dslx_name,
+    )?;
+
+    let convert_opts = DslxConvertOptions {
+        dslx_stdlib_path: opts.stdlib_path,
+        additional_search_paths: opts.search_paths.clone(),
+        enable_warnings: None,
+        disable_warnings: None,
+        force_implicit_token_calling_convention: false,
+    };
+
+    let augmented_dslx = format!(
+        r#"{dslx}
+
+// Synthesized by xlsynth-g8r for dslx-stitch-pipeline IR residual generation.
+{wrapper_dslx}
+"#,
+        dslx = dslx,
+        wrapper_dslx = wrapper_dslx
+    );
+
+    let augmented = convert_dslx_to_ir(&augmented_dslx, path, &convert_opts)?;
+    let augmented_ir = augmented.ir;
+
+    let wrapper_ir_name = mangle_dslx_name(module_name, &wrapper_dslx_name)?;
+
+    // -- Unoptimized package with wrapper as top (and all stage functions present).
+    let augmented_ir_text = augmented_ir.to_string();
+    let mut unopt_pkg = IrPackage::parse_ir(&augmented_ir_text, augmented_ir.filename())?;
+    unopt_pkg.set_top_by_name(&wrapper_ir_name)?;
+    let unopt_ir = unopt_pkg.to_string();
+
+    // -- Optimized package assembled from per-entity optimized definitions.
+    let header = ir_package_header_prefix(&unopt_ir)?.to_string();
+
+    let mut stage_defs: Vec<String> = Vec::with_capacity(discovered.len());
+    for (_unmangled, stage_mangled) in discovered {
+        let opt_pkg = optimize_ir(&augmented_ir, stage_mangled)?;
+        let opt_text = opt_pkg.to_string();
+        let def = extract_function_def(&opt_text, stage_mangled)?;
+        stage_defs.push(normalize_stage_def_to_non_top(&def));
+    }
+
+    let wrapper_opt_pkg = optimize_ir(&augmented_ir, &wrapper_ir_name)?;
+    let wrapper_opt_text = wrapper_opt_pkg.to_string();
+    let wrapper_def = extract_function_def(&wrapper_opt_text, &wrapper_ir_name)?;
+    let wrapper_def = normalize_wrapper_def_to_top(&wrapper_def);
+
+    let mut opt_ir = header;
+    for def in stage_defs {
+        opt_ir.push_str(&def);
+        if !opt_ir.ends_with("\n\n") {
+            if !opt_ir.ends_with('\n') {
+                opt_ir.push('\n');
+            }
+            opt_ir.push('\n');
+        }
+    }
+    opt_ir.push_str(&wrapper_def);
+
+    Ok(StitchPipelineResidual {
+        ir_packages: StitchPipelineIrPackages {
+            wrapper_dslx_name,
+            wrapper_ir_name,
+            unopt_ir,
+            opt_ir,
+        },
+        wrapper_dslx,
+        stage_unmangled_names,
+    })
+}
+
 /// Produces IR package texts for the stitched pipeline:
 /// - `unopt_ir`: includes all stage functions and the synthesized
 ///   composed-wrapper function, with `top` set to the wrapper.
@@ -315,73 +416,15 @@ pub fn stitch_pipeline_ir_packages<'a>(
     let discovered = discover_stage_names(&ir, path, top, explicit_stages)?;
     verify_stage_signatures(&ir, &discovered)?;
 
-    let stage_unmangled_names: Vec<String> = discovered.iter().map(|(u, _)| u.clone()).collect();
-
-    let existing_names = module_function_names(&typechecked_module.get_module());
-    let wrapper_dslx_name =
-        choose_unique_wrapper_dslx_name(&existing_names, opts.output_module_name);
-
-    let wrapper_dslx = make_composed_wrapper_dslx(
+    let residual = build_stitch_pipeline_ir_residual_from_discovered(
+        dslx,
+        path,
+        module_name,
         &typechecked_module,
-        &stage_unmangled_names,
-        &wrapper_dslx_name,
+        &discovered,
+        opts,
     )?;
-
-    let augmented_dslx = format!(
-        r#"{dslx}
-
-// Synthesized by xlsynth-g8r for dslx-stitch-pipeline IR residual generation.
-{wrapper_dslx}
-"#,
-        dslx = dslx,
-        wrapper_dslx = wrapper_dslx
-    );
-
-    let augmented = convert_dslx_to_ir(&augmented_dslx, path, &convert_opts)?;
-    let augmented_ir = augmented.ir;
-
-    let wrapper_ir_name = mangle_dslx_name(module_name, &wrapper_dslx_name)?;
-
-    // -- Unoptimized package with wrapper as top (and all stage functions present).
-    let augmented_ir_text = augmented_ir.to_string();
-    let mut unopt_pkg = IrPackage::parse_ir(&augmented_ir_text, augmented_ir.filename())?;
-    unopt_pkg.set_top_by_name(&wrapper_ir_name)?;
-    let unopt_ir = unopt_pkg.to_string();
-
-    // -- Optimized package assembled from per-entity optimized definitions.
-    let header = ir_package_header_prefix(&unopt_ir)?.to_string();
-
-    let mut stage_defs: Vec<String> = Vec::with_capacity(discovered.len());
-    for (_unmangled, stage_mangled) in &discovered {
-        let opt_pkg = optimize_ir(&augmented_ir, stage_mangled)?;
-        let opt_text = opt_pkg.to_string();
-        let def = extract_function_def(&opt_text, stage_mangled)?;
-        stage_defs.push(normalize_stage_def_to_non_top(&def));
-    }
-
-    let wrapper_opt_pkg = optimize_ir(&augmented_ir, &wrapper_ir_name)?;
-    let wrapper_opt_text = wrapper_opt_pkg.to_string();
-    let wrapper_def = extract_function_def(&wrapper_opt_text, &wrapper_ir_name)?;
-    let wrapper_def = normalize_wrapper_def_to_top(&wrapper_def);
-
-    let mut opt_ir = header;
-    for def in stage_defs {
-        opt_ir.push_str(&def);
-        if !opt_ir.ends_with("\n\n") {
-            if !opt_ir.ends_with('\n') {
-                opt_ir.push('\n');
-            }
-            opt_ir.push('\n');
-        }
-    }
-    opt_ir.push_str(&wrapper_def);
-
-    Ok(StitchPipelineIrPackages {
-        wrapper_dslx_name,
-        wrapper_ir_name,
-        unopt_ir,
-        opt_ir,
-    })
+    Ok(residual.ir_packages)
 }
 
 /// Creates a VAST "stub" module from the given `StageInfo`.
@@ -716,6 +759,22 @@ pub fn stitch_pipeline<'a>(
     top: &str,
     opts: &StitchPipelineOptions<'a>,
 ) -> Result<String, xlsynth::XlsynthError> {
+    Ok(stitch_pipeline_run(dslx, path, top, opts, false)?.sv)
+}
+
+/// Runs the stitch pipeline and optionally captures "residual" intermediate data
+/// derived from the same stage discovery and typechecking work used for codegen.
+///
+/// Today, the residual is a pair of IR package texts (unoptimized and optimized)
+/// that include a synthesized composed-wrapper function. This is useful for
+/// debugging and for downstream post-processing that wants a stable entry point.
+pub fn stitch_pipeline_run<'a>(
+    dslx: &str,
+    path: &Path,
+    top: &str,
+    opts: &StitchPipelineOptions<'a>,
+    capture_ir_residual: bool,
+) -> Result<StitchPipelineRunOutput, xlsynth::XlsynthError> {
     // Extract option fields for backwards-compat ease.
     let verilog_version = opts.verilog_version;
     let explicit_stages = opts.explicit_stages.as_ref().map(|v| v.as_slice());
@@ -818,13 +877,27 @@ pub fn stitch_pipeline<'a>(
     };
     let wrapper_sv = build_wrapper(&mut wrapper_file, &pipeline_cfg)?;
 
-    let mut text = stage_infos
+    let mut sv = stage_infos
         .iter()
         .map(|s| s.sv_text.clone())
         .collect::<Vec<_>>()
         .join("\n");
-    text.push_str(&wrapper_sv);
-    Ok(text)
+    sv.push_str(&wrapper_sv);
+
+    let residual = if capture_ir_residual {
+        Some(build_stitch_pipeline_ir_residual_from_discovered(
+            dslx,
+            path,
+            module_name,
+            &typechecked_module,
+            &stages,
+            opts,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(StitchPipelineRunOutput { sv, residual })
 }
 
 #[cfg(test)]
