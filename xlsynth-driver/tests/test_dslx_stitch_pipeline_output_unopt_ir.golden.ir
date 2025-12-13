@@ -1,0 +1,21 @@
+package foo
+
+file_number 0 "foo.x"
+
+fn __foo__foo_cycle0(x: bits[32] id=1, y: bits[32] id=2) -> (bits[32], bits[32]) {
+  add.3: bits[32] = add(x, y, id=3, pos=[(0,0,47)])
+  ret tuple.4: (bits[32], bits[32]) = tuple(add.3, x, id=4, pos=[(0,0,46)])
+}
+
+fn __foo__foo_cycle1(a: bits[32] id=5, b: bits[32] id=6) -> bits[32] {
+  ret sub.7: bits[32] = sub(a, b, id=7, pos=[(0,1,39)])
+}
+
+top fn __foo____xlsynth_stitch_pipeline__foo(x: bits[32] id=8, y: bits[32] id=9) -> bits[32] {
+  v0: (bits[32], bits[32]) = invoke(x, y, to_apply=__foo__foo_cycle0, id=10, pos=[(0,6,23)])
+  tuple_index.12: bits[32] = tuple_index(v0, index=0, id=12, pos=[(0,7,26)])
+  tuple_index.14: bits[32] = tuple_index(v0, index=1, id=14, pos=[(0,7,32)])
+  literal.11: bits[32] = literal(value=0, id=11, pos=[(0,7,27)])
+  literal.13: bits[32] = literal(value=1, id=13, pos=[(0,7,33)])
+  ret v1: bits[32] = invoke(tuple_index.12, tuple_index.14, to_apply=__foo__foo_cycle1, id=15, pos=[(0,7,23)])
+}

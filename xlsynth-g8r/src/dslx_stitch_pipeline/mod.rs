@@ -4,13 +4,14 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use xlsynth::dslx::{self, MatchableModuleMember};
+use xlsynth::dslx::{self, Function, MatchableModuleMember};
 use xlsynth::vast::VastDataType;
 use xlsynth::vast::VastFile;
 use xlsynth::vast::VastModule;
 use xlsynth::{
     DslxConvertOptions, convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen,
 };
+use xlsynth::ir_package::IrPackage;
 
 mod common;
 use common::{PipelineCfg, Port, StageInfo};
@@ -36,6 +37,344 @@ pub struct StitchPipelineOptions<'a> {
     pub add_invariant_assertions: bool,
     pub array_index_bounds_checking: bool,
     pub output_module_name: &'a str,
+}
+
+#[derive(Debug)]
+pub struct StitchPipelineIrPackages {
+    pub wrapper_dslx_name: String,
+    pub wrapper_ir_name: String,
+    pub unopt_ir: String,
+    pub opt_ir: String,
+}
+
+fn module_function_names(module: &xlsynth::dslx::Module) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for i in 0..module.get_member_count() {
+        if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
+            names.insert(f.get_identifier());
+        }
+    }
+    names
+}
+
+fn find_module_function_by_name(module: &xlsynth::dslx::Module, name: &str) -> Option<Function> {
+    for i in 0..module.get_member_count() {
+        if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
+            if f.get_identifier() == name {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
+fn choose_unique_wrapper_dslx_name(existing: &HashSet<String>, base: &str) -> String {
+    let mut sanitized = String::with_capacity(base.len());
+    for c in base.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            sanitized.push(c);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() {
+        sanitized.push('_');
+    }
+
+    let base_name = format!("__xlsynth_stitch_pipeline__{sanitized}");
+    if !existing.contains(&base_name) {
+        return base_name;
+    }
+    for i in 0.. {
+        let candidate = format!("{base_name}_{i}");
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("infinite loop should always find an unused wrapper name")
+}
+
+fn dslx_type_to_str(
+    type_info: &xlsynth::dslx::TypeInfo,
+    annotation: &xlsynth::dslx::TypeAnnotation,
+) -> Result<String, xlsynth::XlsynthError> {
+    let ty = type_info.get_type_for_type_annotation(annotation).ok_or_else(|| {
+        xlsynth::XlsynthError("could not resolve concrete type for type annotation".into())
+    })?;
+    ty.to_string()
+}
+
+fn make_composed_wrapper_dslx(
+    typechecked_module: &xlsynth::dslx::TypecheckedModule,
+    stages: &[String],
+    wrapper_dslx_name: &str,
+) -> Result<String, xlsynth::XlsynthError> {
+    let module = typechecked_module.get_module();
+    let type_info = typechecked_module.get_type_info();
+
+    let first_stage_name = stages
+        .first()
+        .expect("validated non-empty stage list before wrapper synthesis");
+    let last_stage_name = stages
+        .last()
+        .expect("validated non-empty stage list before wrapper synthesis");
+
+    let first_stage_fn = find_module_function_by_name(&module, first_stage_name).ok_or_else(|| {
+        xlsynth::XlsynthError(format!(
+            "could not find stage function `{first_stage_name}` in typechecked module"
+        ))
+    })?;
+    let last_stage_fn = find_module_function_by_name(&module, last_stage_name).ok_or_else(|| {
+        xlsynth::XlsynthError(format!(
+            "could not find stage function `{last_stage_name}` in typechecked module"
+        ))
+    })?;
+
+    let mut params = Vec::new();
+    let mut arg_names = Vec::new();
+    for i in 0..first_stage_fn.get_param_count() {
+        let p = first_stage_fn.get_param(i);
+        let name = p.get_name();
+        let ty = dslx_type_to_str(&type_info, &p.get_type_annotation())?;
+        params.push(format!("{name}: {ty}"));
+        arg_names.push(name);
+    }
+    let ret_ty = dslx_type_to_str(&type_info, &last_stage_fn.get_return_type())?;
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "fn {wrapper_dslx_name}({}) -> {ret_ty} {{",
+        params.join(", ")
+    ));
+    let mut prev_var = String::new();
+    for (i, stage_name) in stages.iter().enumerate() {
+        let stage_fn = find_module_function_by_name(&module, stage_name).ok_or_else(|| {
+            xlsynth::XlsynthError(format!(
+                "could not find stage function `{stage_name}` in typechecked module"
+            ))
+        })?;
+        let var_name = format!("v{i}");
+
+        let call_expr = if i == 0 {
+            format!("{stage_name}({})", arg_names.join(", "))
+        } else {
+            match stage_fn.get_param_count() {
+                0 => format!("{stage_name}()"),
+                1 => format!("{stage_name}({prev_var})"),
+                n => {
+                    let mut args = Vec::with_capacity(n);
+                    for idx in 0..n {
+                        args.push(format!("{prev_var}.{idx}"));
+                    }
+                    format!("{stage_name}({})", args.join(", "))
+                }
+            }
+        };
+
+        lines.push(format!("    let {var_name} = {call_expr};"));
+        prev_var = var_name;
+    }
+    lines.push(format!("    {prev_var}"));
+    lines.push("}".to_string());
+
+    Ok(lines.join("\n"))
+}
+
+fn ir_package_header_prefix(ir_text: &str) -> Result<&str, xlsynth::XlsynthError> {
+    // We want everything up to (and including) the blank line after the last
+    // `file_number` declaration.
+    //
+    // Typical structure:
+    //   package <name>
+    //
+    //   file_number 0 "<file>"
+    //
+    //   fn ...
+    //
+    let file_number_pos = ir_text.find("\nfile_number ").ok_or_else(|| {
+        xlsynth::XlsynthError("could not find `file_number` in IR text".into())
+    })?;
+    let after_file_number = &ir_text[file_number_pos + 1..];
+    let blank_line_pos = after_file_number.find("\n\n").ok_or_else(|| {
+        xlsynth::XlsynthError("could not find blank line after `file_number`".into())
+    })?;
+    let header_end = file_number_pos + 1 + blank_line_pos + 2;
+    Ok(&ir_text[..header_end])
+}
+
+fn extract_function_def(ir_text: &str, mangled_name: &str) -> Result<String, xlsynth::XlsynthError> {
+    let needle_top = format!("\ntop fn {mangled_name}(");
+    let needle_fn = format!("\nfn {mangled_name}(");
+    let start = if let Some(pos) = ir_text.find(&needle_top) {
+        pos + 1
+    } else if let Some(pos) = ir_text.find(&needle_fn) {
+        pos + 1
+    } else {
+        return Err(xlsynth::XlsynthError(format!(
+            "could not find function `{mangled_name}` in IR text"
+        )));
+    };
+
+    let func_text = &ir_text[start..];
+    let open_brace_pos = func_text.find('{').ok_or_else(|| {
+        xlsynth::XlsynthError(format!(
+            "could not find opening brace for function `{mangled_name}`"
+        ))
+    })?;
+
+    let mut depth: i64 = 0;
+    let mut end_idx: Option<usize> = None;
+    for (i, c) in func_text[open_brace_pos..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end_idx = Some(open_brace_pos + i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end_idx.ok_or_else(|| {
+        xlsynth::XlsynthError(format!(
+            "could not find closing brace for function `{mangled_name}`"
+        ))
+    })?;
+
+    // Include trailing newline if present.
+    let mut out = func_text[..end].to_string();
+    if func_text[end..].starts_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn normalize_stage_def_to_non_top(def: &str) -> String {
+    if let Some(rest) = def.strip_prefix("top fn ") {
+        format!("fn {rest}")
+    } else {
+        def.to_string()
+    }
+}
+
+fn normalize_wrapper_def_to_top(def: &str) -> String {
+    if let Some(rest) = def.strip_prefix("fn ") {
+        format!("top fn {rest}")
+    } else {
+        def.to_string()
+    }
+}
+
+/// Produces IR package texts for the stitched pipeline:
+/// - `unopt_ir`: includes all stage functions and the synthesized composed-wrapper
+///   function, with `top` set to the wrapper.
+/// - `opt_ir`: includes optimized versions of each stage function and the wrapper
+///   (optimized per-entity), assembled into a single package text with `top` set
+///   to the wrapper.
+pub fn stitch_pipeline_ir_packages<'a>(
+    dslx: &str,
+    path: &Path,
+    top: &str,
+    opts: &StitchPipelineOptions<'a>,
+) -> Result<StitchPipelineIrPackages, xlsynth::XlsynthError> {
+    let module_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| xlsynth::XlsynthError("invalid path".into()))?;
+
+    let explicit_stages = opts.explicit_stages.as_ref().map(|v| v.as_slice());
+
+    // Parse/typecheck once for validations and for synthesizing the wrapper DSLX.
+    let mut import_data = dslx::ImportData::new(opts.stdlib_path, opts.search_paths.as_slice());
+    let typechecked_module =
+        dslx::parse_and_typecheck(dslx, path.to_str().unwrap(), module_name, &mut import_data)?;
+    check_for_parametric_stages(&typechecked_module, top, explicit_stages)?;
+    if explicit_stages.is_none() {
+        check_implicit_stage_numbering(&typechecked_module, top)?;
+    }
+
+    // Convert original DSLX to IR to discover stage ordering and mangled names.
+    let convert_opts = DslxConvertOptions {
+        dslx_stdlib_path: opts.stdlib_path,
+        additional_search_paths: opts.search_paths.clone(),
+        enable_warnings: None,
+        disable_warnings: None,
+        force_implicit_token_calling_convention: false,
+    };
+    let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
+    let ir = conv.ir;
+    let discovered = discover_stage_names(&ir, path, top, explicit_stages)?;
+    verify_stage_signatures(&ir, &discovered)?;
+
+    let stage_unmangled_names: Vec<String> = discovered.iter().map(|(u, _)| u.clone()).collect();
+
+    let existing_names = module_function_names(&typechecked_module.get_module());
+    let wrapper_dslx_name =
+        choose_unique_wrapper_dslx_name(&existing_names, opts.output_module_name);
+
+    let wrapper_dslx = make_composed_wrapper_dslx(
+        &typechecked_module,
+        &stage_unmangled_names,
+        &wrapper_dslx_name,
+    )?;
+
+    let augmented_dslx = format!(
+        r#"{dslx}
+
+// Synthesized by xlsynth-g8r for dslx-stitch-pipeline IR residual generation.
+{wrapper_dslx}
+"#,
+        dslx = dslx,
+        wrapper_dslx = wrapper_dslx
+    );
+
+    let augmented = convert_dslx_to_ir(&augmented_dslx, path, &convert_opts)?;
+    let augmented_ir = augmented.ir;
+
+    let wrapper_ir_name = mangle_dslx_name(module_name, &wrapper_dslx_name)?;
+
+    // -- Unoptimized package with wrapper as top (and all stage functions present).
+    let augmented_ir_text = augmented_ir.to_string();
+    let mut unopt_pkg = IrPackage::parse_ir(&augmented_ir_text, augmented_ir.filename())?;
+    unopt_pkg.set_top_by_name(&wrapper_ir_name)?;
+    let unopt_ir = unopt_pkg.to_string();
+
+    // -- Optimized package assembled from per-entity optimized definitions.
+    let header = ir_package_header_prefix(&unopt_ir)?.to_string();
+
+    let mut stage_defs: Vec<String> = Vec::with_capacity(discovered.len());
+    for (_unmangled, stage_mangled) in &discovered {
+        let opt_pkg = optimize_ir(&augmented_ir, stage_mangled)?;
+        let opt_text = opt_pkg.to_string();
+        let def = extract_function_def(&opt_text, stage_mangled)?;
+        stage_defs.push(normalize_stage_def_to_non_top(&def));
+    }
+
+    let wrapper_opt_pkg = optimize_ir(&augmented_ir, &wrapper_ir_name)?;
+    let wrapper_opt_text = wrapper_opt_pkg.to_string();
+    let wrapper_def = extract_function_def(&wrapper_opt_text, &wrapper_ir_name)?;
+    let wrapper_def = normalize_wrapper_def_to_top(&wrapper_def);
+
+    let mut opt_ir = header;
+    for def in stage_defs {
+        opt_ir.push_str(&def);
+        if !opt_ir.ends_with("\n\n") {
+            if !opt_ir.ends_with('\n') {
+                opt_ir.push('\n');
+            }
+            opt_ir.push('\n');
+        }
+    }
+    opt_ir.push_str(&wrapper_def);
+
+    Ok(StitchPipelineIrPackages {
+        wrapper_dslx_name,
+        wrapper_ir_name,
+        unopt_ir,
+        opt_ir,
+    })
 }
 
 /// Creates a VAST "stub" module from the given `StageInfo`.

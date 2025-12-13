@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::common::get_dslx_paths;
+use crate::common::{ensure_trailing_newline, get_dslx_paths};
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
 use xlsynth_g8r::verilog_version::VerilogVersion;
 
-/// Handles the `dslx-stitch-pipeline` subcommand.
+/// Handles the `dslx-stitch-pipeline` subcommand (stitch pipeline stages).
 pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let paths = get_dslx_paths(matches, config);
     let path_refs = paths.search_path_views();
@@ -93,6 +93,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .get_one::<String>("flop_outputs")
         .map(|s| s == "true")
         .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_OUTPUTS);
+
     // Determine:
     //  * stage-discovery prefix: only used for implicit discovery of
     //    `<prefix>_cycleN` when `--stages` is not provided (from `--dslx_top`).
@@ -104,6 +105,9 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .as_deref()
         .or(stage_discovery_prefix_opt)
         .expect("validated combinations above");
+
+    let output_unopt_ir = matches.get_one::<String>("output_unopt_ir");
+    let output_opt_ir = matches.get_one::<String>("output_opt_ir");
 
     let options = xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineOptions {
         verilog_version,
@@ -125,6 +129,40 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     // are provided explicitly, this value is unused by discovery but we pass
     // the wrapper name.
     let top_for_library = stage_discovery_prefix_opt.unwrap_or(wrapper_name);
+
+    if output_unopt_ir.is_some() || output_opt_ir.is_some() {
+        let mut pkgs = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline_ir_packages(
+            &dslx,
+            std::path::Path::new(input),
+            top_for_library,
+            &options,
+        )
+        .unwrap_or_else(|e| {
+            report_cli_error_and_exit("stitch error (ir output)", Some(&e.0), vec![])
+        });
+
+        if let Some(path) = output_unopt_ir {
+            let unopt_text = ensure_trailing_newline(std::mem::take(&mut pkgs.unopt_ir));
+            std::fs::write(path, unopt_text).unwrap_or_else(|e| {
+                report_cli_error_and_exit(
+                    "could not write unoptimized IR output",
+                    Some(&e.to_string()),
+                    vec![("path", path)],
+                );
+            });
+        }
+        if let Some(path) = output_opt_ir {
+            let opt_text = ensure_trailing_newline(std::mem::take(&mut pkgs.opt_ir));
+            std::fs::write(path, opt_text).unwrap_or_else(|e| {
+                report_cli_error_and_exit(
+                    "could not write optimized IR output",
+                    Some(&e.to_string()),
+                    vec![("path", path)],
+                );
+            });
+        }
+    }
+
     let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
         &dslx,
         std::path::Path::new(input),

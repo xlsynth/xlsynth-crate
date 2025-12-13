@@ -1069,6 +1069,8 @@ The generated text is written to **stdout**; diagnostic messages appear on **std
 Supported flags:
 
 - `--use_system_verilog=<BOOL>` – emit SystemVerilog when `true` *(default)* or plain Verilog when `false`.
+- `--output_unopt_ir=<PATH>` – write the **unoptimized** stitched-pipeline IR package to `PATH` (top set to the synthesized composed-wrapper function).
+- `--output_opt_ir=<PATH>` – write the **optimized** stitched-pipeline IR package to `PATH` (top set to the synthesized composed-wrapper function).
 - `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<dslx_top>_cycleN` functions).
 - `--output_module_name=<NAME>` – wrapper module name. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
 

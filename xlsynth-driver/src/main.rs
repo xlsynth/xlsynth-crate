@@ -402,6 +402,22 @@ fn main() {
                 .about("Stitches DSLX pipeline stages")
                 .add_dslx_input_args(false)
                 .arg(
+                    clap::Arg::new("output_unopt_ir")
+                        .long("output_unopt_ir")
+                        .value_name("PATH")
+                        .help("Path to write the unoptimized IR (package) output for the stitched pipeline (top set to the composed wrapper)")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_opt_ir")
+                        .long("output_opt_ir")
+                        .value_name("PATH")
+                        .help("Path to write the optimized IR (package) output for the stitched pipeline (top set to the composed wrapper)")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("dslx_top")
                         .long("dslx_top")
                         .value_name("DSLX_TOP")
