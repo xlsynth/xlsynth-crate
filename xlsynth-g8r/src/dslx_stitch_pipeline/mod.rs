@@ -5,13 +5,13 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use xlsynth::dslx::{self, Function, MatchableModuleMember};
+use xlsynth::ir_package::IrPackage;
 use xlsynth::vast::VastDataType;
 use xlsynth::vast::VastFile;
 use xlsynth::vast::VastModule;
 use xlsynth::{
     DslxConvertOptions, convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen,
 };
-use xlsynth::ir_package::IrPackage;
 
 mod common;
 use common::{PipelineCfg, Port, StageInfo};
@@ -98,9 +98,11 @@ fn dslx_type_to_str(
     type_info: &xlsynth::dslx::TypeInfo,
     annotation: &xlsynth::dslx::TypeAnnotation,
 ) -> Result<String, xlsynth::XlsynthError> {
-    let ty = type_info.get_type_for_type_annotation(annotation).ok_or_else(|| {
-        xlsynth::XlsynthError("could not resolve concrete type for type annotation".into())
-    })?;
+    let ty = type_info
+        .get_type_for_type_annotation(annotation)
+        .ok_or_else(|| {
+            xlsynth::XlsynthError("could not resolve concrete type for type annotation".into())
+        })?;
     ty.to_string()
 }
 
@@ -119,16 +121,18 @@ fn make_composed_wrapper_dslx(
         .last()
         .expect("validated non-empty stage list before wrapper synthesis");
 
-    let first_stage_fn = find_module_function_by_name(&module, first_stage_name).ok_or_else(|| {
-        xlsynth::XlsynthError(format!(
-            "could not find stage function `{first_stage_name}` in typechecked module"
-        ))
-    })?;
-    let last_stage_fn = find_module_function_by_name(&module, last_stage_name).ok_or_else(|| {
-        xlsynth::XlsynthError(format!(
-            "could not find stage function `{last_stage_name}` in typechecked module"
-        ))
-    })?;
+    let first_stage_fn =
+        find_module_function_by_name(&module, first_stage_name).ok_or_else(|| {
+            xlsynth::XlsynthError(format!(
+                "could not find stage function `{first_stage_name}` in typechecked module"
+            ))
+        })?;
+    let last_stage_fn =
+        find_module_function_by_name(&module, last_stage_name).ok_or_else(|| {
+            xlsynth::XlsynthError(format!(
+                "could not find stage function `{last_stage_name}` in typechecked module"
+            ))
+        })?;
 
     let mut params = Vec::new();
     let mut arg_names = Vec::new();
@@ -191,9 +195,9 @@ fn ir_package_header_prefix(ir_text: &str) -> Result<&str, xlsynth::XlsynthError
     //
     //   fn ...
     //
-    let file_number_pos = ir_text.find("\nfile_number ").ok_or_else(|| {
-        xlsynth::XlsynthError("could not find `file_number` in IR text".into())
-    })?;
+    let file_number_pos = ir_text
+        .find("\nfile_number ")
+        .ok_or_else(|| xlsynth::XlsynthError("could not find `file_number` in IR text".into()))?;
     let after_file_number = &ir_text[file_number_pos + 1..];
     let blank_line_pos = after_file_number.find("\n\n").ok_or_else(|| {
         xlsynth::XlsynthError("could not find blank line after `file_number`".into())
@@ -202,7 +206,10 @@ fn ir_package_header_prefix(ir_text: &str) -> Result<&str, xlsynth::XlsynthError
     Ok(&ir_text[..header_end])
 }
 
-fn extract_function_def(ir_text: &str, mangled_name: &str) -> Result<String, xlsynth::XlsynthError> {
+fn extract_function_def(
+    ir_text: &str,
+    mangled_name: &str,
+) -> Result<String, xlsynth::XlsynthError> {
     let needle_top = format!("\ntop fn {mangled_name}(");
     let needle_fn = format!("\nfn {mangled_name}(");
     let start = if let Some(pos) = ir_text.find(&needle_top) {
@@ -268,11 +275,11 @@ fn normalize_wrapper_def_to_top(def: &str) -> String {
 }
 
 /// Produces IR package texts for the stitched pipeline:
-/// - `unopt_ir`: includes all stage functions and the synthesized composed-wrapper
-///   function, with `top` set to the wrapper.
-/// - `opt_ir`: includes optimized versions of each stage function and the wrapper
-///   (optimized per-entity), assembled into a single package text with `top` set
-///   to the wrapper.
+/// - `unopt_ir`: includes all stage functions and the synthesized
+///   composed-wrapper function, with `top` set to the wrapper.
+/// - `opt_ir`: includes optimized versions of each stage function and the
+///   wrapper (optimized per-entity), assembled into a single package text with
+///   `top` set to the wrapper.
 pub fn stitch_pipeline_ir_packages<'a>(
     dslx: &str,
     path: &Path,

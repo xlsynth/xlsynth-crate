@@ -32,8 +32,8 @@ pub fn parse_bool_flag_or(matches: &ArgMatches, flag_name: &str, default_value: 
 }
 
 /// Ensures the given text ends with a newline (`\n`) so it writes cleanly as a
-/// conventional Unix text file (and avoids noisy diffs like `\ No newline at end
-/// of file`).
+/// conventional Unix text file (and avoids noisy diffs like `\ No newline at
+/// end of file`).
 pub fn ensure_trailing_newline(mut text: String) -> String {
     if !text.ends_with('\n') {
         text.push('\n');

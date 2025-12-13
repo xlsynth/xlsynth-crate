@@ -46,8 +46,3 @@ fn foo_cycle1(a: u32, b: u32) -> u32 { a - b }
         "tests/test_dslx_stitch_pipeline_output_opt_ir.golden.ir",
     );
 }
-
-
-
-
-
