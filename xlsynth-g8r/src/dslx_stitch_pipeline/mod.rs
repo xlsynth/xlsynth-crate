@@ -81,30 +81,40 @@ fn find_module_function_by_name(module: &xlsynth::dslx::Module, name: &str) -> O
     None
 }
 
-fn choose_unique_wrapper_dslx_name(existing: &HashSet<String>, base: &str) -> String {
-    let mut sanitized = String::with_capacity(base.len());
-    for c in base.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            sanitized.push(c);
-        } else {
-            sanitized.push('_');
+fn is_valid_dslx_identifier(s: &str) -> bool {
+    let mut it = s.chars();
+    let Some(first) = it.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    for c in it {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return false;
         }
     }
-    if sanitized.is_empty() {
-        sanitized.push('_');
-    }
+    true
+}
 
-    let base_name = format!("__xlsynth_stitch_pipeline__{sanitized}");
-    if !existing.contains(&base_name) {
-        return base_name;
+fn choose_wrapper_dslx_name(
+    existing: &HashSet<String>,
+    output_module_name: &str,
+) -> Result<String, xlsynth::XlsynthError> {
+    // Intentionally strict (non-defensive): we expect the output module name to
+    // be a reasonable identifier, and we want to fail loudly if it would cause
+    // collisions in the generated residual wrapper.
+    if !is_valid_dslx_identifier(output_module_name) {
+        return Err(xlsynth::XlsynthError(format!(
+            "output module name '{output_module_name}' is not a valid DSLX identifier; please use [A-Za-z_][A-Za-z0-9_]*"
+        )));
     }
-    for i in 0.. {
-        let candidate = format!("{base_name}_{i}");
-        if !existing.contains(&candidate) {
-            return candidate;
-        }
+    if existing.contains(output_module_name) {
+        return Err(xlsynth::XlsynthError(format!(
+            "output module name '{output_module_name}' collides with an existing DSLX function; please choose a distinct --output_module_name"
+        )));
     }
-    unreachable!("infinite loop should always find an unused wrapper name")
+    Ok(output_module_name.to_string())
 }
 
 fn dslx_type_to_str(
@@ -298,8 +308,7 @@ fn build_stitch_pipeline_ir_residual_from_discovered<'a>(
     let stage_unmangled_names: Vec<String> = discovered.iter().map(|(u, _)| u.clone()).collect();
 
     let existing_names = module_function_names(&typechecked_module.get_module());
-    let wrapper_dslx_name =
-        choose_unique_wrapper_dslx_name(&existing_names, opts.output_module_name);
+    let wrapper_dslx_name = choose_wrapper_dslx_name(&existing_names, opts.output_module_name)?;
 
     let wrapper_dslx = make_composed_wrapper_dslx(
         typechecked_module,
@@ -907,6 +916,7 @@ pub fn stitch_pipeline_run<'a>(
 mod tests {
     use super::*;
     use env_logger;
+    use xlsynth::IrValue;
     use xlsynth::ir_value::IrBits;
     use xlsynth_test_helpers::{self, compare_golden_sv};
 
@@ -970,6 +980,86 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
         .unwrap();
 
         compare_golden_sv(&result, "tests/goldens/foo.golden.sv");
+    }
+
+    #[test]
+    fn test_stitch_pipeline_residual_ir_entry_points_match_reference_wrapper() {
+        // Ensures the residual IR wrapper entry point behaves like a simple
+        // DSLX wrapper that composes the stage functions.
+        let dslx = r#"fn mul_add_cycle0(x: u32, y: u32, z: u32) -> (u32, u32) { (x * y, z) }
+fn mul_add_cycle1(partial: u32, z: u32) -> u32 { partial + z }
+"#;
+        let reference_dslx = format!(
+            r#"{dslx}
+fn ref_mul_add(x: u32, y: u32, z: u32) -> u32 {{
+    let (p, zz) = mul_add_cycle0(x, y, z);
+    mul_add_cycle1(p, zz)
+}}
+"#,
+            dslx = dslx
+        );
+
+        let opts = StitchPipelineOptions {
+            verilog_version: VerilogVersion::SystemVerilog,
+            explicit_stages: None,
+            stdlib_path: None,
+            search_paths: Vec::new(),
+            flop_inputs: true,
+            flop_outputs: true,
+            input_valid_signal: None,
+            output_valid_signal: None,
+            reset_signal: None,
+            reset_active_low: false,
+            add_invariant_assertions: true,
+            array_index_bounds_checking: true,
+            output_module_name: "mul_add",
+        };
+
+        let run = stitch_pipeline_run(dslx, Path::new("test.x"), "mul_add", &opts, true).unwrap();
+        let residual = run.residual.expect("requested residual capture");
+        assert_eq!(residual.ir_packages.wrapper_dslx_name, "mul_add");
+
+        let unopt_pkg = IrPackage::parse_ir(&residual.ir_packages.unopt_ir, None).unwrap();
+        let opt_pkg = IrPackage::parse_ir(&residual.ir_packages.opt_ir, None).unwrap();
+        let unopt_wrapper = unopt_pkg
+            .get_function(&residual.ir_packages.wrapper_ir_name)
+            .unwrap();
+        let opt_wrapper = opt_pkg
+            .get_function(&residual.ir_packages.wrapper_ir_name)
+            .unwrap();
+
+        let ref_conv_opts = DslxConvertOptions {
+            dslx_stdlib_path: None,
+            additional_search_paths: Vec::new(),
+            enable_warnings: None,
+            disable_warnings: None,
+            force_implicit_token_calling_convention: false,
+        };
+        let ref_conv =
+            convert_dslx_to_ir(&reference_dslx, Path::new("test.x"), &ref_conv_opts).unwrap();
+        let ref_pkg = ref_conv.ir;
+        let ref_mangled = mangle_dslx_name("test", "ref_mul_add").unwrap();
+        let ref_wrapper = ref_pkg.get_function(&ref_mangled).unwrap();
+
+        let vectors: &[(u64, u64, u64)] = &[
+            (0, 0, 0),
+            (1, 2, 3),
+            (7, 11, 13),
+            (0x1234, 0x10, 0x55),
+            (0xffff_ffff, 2, 1),
+        ];
+        for (x, y, z) in vectors {
+            let args = vec![
+                IrValue::make_ubits(32, *x).unwrap(),
+                IrValue::make_ubits(32, *y).unwrap(),
+                IrValue::make_ubits(32, *z).unwrap(),
+            ];
+            let want = ref_wrapper.interpret(&args).unwrap();
+            let got_unopt = unopt_wrapper.interpret(&args).unwrap();
+            let got_opt = opt_wrapper.interpret(&args).unwrap();
+            assert_eq!(got_unopt, want, "unopt residual wrapper mismatch");
+            assert_eq!(got_opt, want, "opt residual wrapper mismatch");
+        }
     }
 
     #[test]

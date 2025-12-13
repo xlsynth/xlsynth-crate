@@ -11,6 +11,6 @@ fn __foo__foo_cycle1(a: bits[32] id=5, b: bits[32] id=6) -> bits[32] {
   ret sub.7: bits[32] = sub(a, b, id=7, pos=[(0,1,39)])
 }
 
-top fn __foo____xlsynth_stitch_pipeline__foo(x: bits[32] id=8, v1: bits[32] id=9) -> bits[32] {
+top fn __foo__foo(x: bits[32] id=8, v1: bits[32] id=9) -> bits[32] {
   ret v1: bits[32] = param(name=v1, id=9)
 }
