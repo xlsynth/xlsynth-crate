@@ -565,6 +565,45 @@ pub(crate) fn xls_package_get_function(
     })
 }
 
+pub(crate) fn xls_package_get_functions(
+    package: &Arc<RwLock<IrPackagePtr>>,
+    guard: RwLockWriteGuard<IrPackagePtr>,
+) -> Result<Vec<crate::ir_package::IrFunction>, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut result_out: *mut *mut CIrFunction = std::ptr::null_mut();
+        let mut count_out: libc::size_t = 0;
+        let success = xlsynth_sys::xls_package_get_functions(
+            guard.mut_c_ptr(),
+            &mut error_out,
+            &mut result_out,
+            &mut count_out,
+        );
+        if !success {
+            return Err(XlsynthError(c_str_to_rust(error_out)));
+        }
+
+        let functions = if result_out.is_null() || count_out == 0 {
+            Vec::new()
+        } else {
+            let raw_slice = std::slice::from_raw_parts(result_out, count_out);
+            raw_slice
+                .iter()
+                .map(|&ptr| crate::ir_package::IrFunction {
+                    parent: package.clone(),
+                    ptr,
+                })
+                .collect()
+        };
+
+        if !result_out.is_null() {
+            xlsynth_sys::xls_function_ptr_array_free(result_out);
+        }
+
+        Ok(functions)
+    }
+}
+
 pub(crate) fn xls_function_get_type(
     _package_write_guard: &RwLockWriteGuard<IrPackagePtr>,
     function: *const CIrFunction,

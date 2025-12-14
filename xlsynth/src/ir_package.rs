@@ -10,8 +10,8 @@ use crate::{
     lib_support::{
         xls_function_get_name, xls_function_get_type, xls_function_type_to_string,
         xls_interpret_function, xls_package_free, xls_package_get_function,
-        xls_package_get_type_for_value, xls_package_to_string, xls_parse_ir_package,
-        xls_type_to_string,
+        xls_package_get_functions, xls_package_get_type_for_value, xls_package_to_string,
+        xls_parse_ir_package, xls_type_to_string,
     },
     IrValue,
 };
@@ -120,6 +120,14 @@ impl IrPackage {
 
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
         self.with_read(|guard| xls_package_get_function(&self.ptr, guard, name))
+    }
+
+    /// Returns all functions contained within this package.
+    ///
+    /// The returned [`IrFunction`] values are tied to this package's lifetime;
+    /// they do not need to be freed separately.
+    pub fn get_functions(&self) -> Result<Vec<IrFunction>, XlsynthError> {
+        self.with_write(|guard| xls_package_get_functions(&self.ptr, guard))
     }
 
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
@@ -333,6 +341,29 @@ mod tests {
 }
 "
         );
+    }
+
+    #[test]
+    fn test_ir_package_get_functions() {
+        let mut package = IrPackage::new("test_package").unwrap();
+        let u32 = package.get_bits_type(32);
+
+        let mut builder = FnBuilder::new(&mut package, "alpha", true);
+        let x = builder.param("x", &u32);
+        builder.build_with_return_value(&x).unwrap();
+
+        let mut builder = FnBuilder::new(&mut package, "beta", true);
+        let y = builder.param("y", &u32);
+        builder.build_with_return_value(&y).unwrap();
+
+        let mut names: Vec<String> = package
+            .get_functions()
+            .unwrap()
+            .into_iter()
+            .map(|f| f.get_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
     }
 
     #[test]
