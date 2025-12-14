@@ -44,10 +44,10 @@ if command -v sudo >/dev/null 2>&1; then
   # Best-effort: if we can install the DSO into /usr/lib, do so, since that
   # matches many system link setups. If not, we still set XLS_DSO_PATH below.
   if [ -w /usr/lib ]; then
-    cp -iv "${dso_path}" /usr/lib/
+    cp -fv "${dso_path}" /usr/lib/
     ldconfig || true
   else
-    sudo cp -iv "${dso_path}" /usr/lib/ || true
+    sudo cp -fv "${dso_path}" /usr/lib/ || true
     sudo ldconfig || true
   fi
 else
@@ -71,6 +71,7 @@ export XLSYNTH_TOOLS=$(printf '%q' "${XLSYNTH_TOOLS}")
 export DSLX_STDLIB_PATH=$(printf '%q' "${DSLX_STDLIB_PATH}")
 export SLANG_PATH=$(printf '%q' "${SLANG_PATH}")
 export XLS_DSO_PATH=$(printf '%q' "${XLS_DSO_PATH}")
+export CARGO_NET_OFFLINE=true
 export PATH=\$PATH:$(printf '%q' "${repo_root}")
 EOF
 
@@ -83,6 +84,7 @@ append_source_if_missing() {
 
 # Codex Web shells can be a bit inconsistent about what gets sourced; cover the common cases.
 append_source_if_missing "${HOME}/.bashrc"
+append_source_if_missing "${HOME}/.bash_profile"
 append_source_if_missing "${HOME}/.profile"
 
 pre-commit install
@@ -93,14 +95,20 @@ pre-commit run --all-files
 echo "==> Prefetching all Cargo dependencies"
 cargo fetch --quiet
 
-echo "==> Building fuzz target (zero-second run to ensure it builds)"
-cd xlsynth-g8r && cargo fuzz run fuzz_gatify --max_seconds=0 && cd ..
+echo "==> Building fuzz target (compile-only, to ensure it builds)"
+(
+  cd xlsynth-g8r/fuzz
+  cargo fetch --quiet
+)
+(
+  cd xlsynth-g8r
+  cargo fuzz build fuzz_gatify
+)
 
 echo "==> Pre-building workspace to run all build.rs scripts"
 cargo build --workspace --all-targets --features=with-boolector-system --jobs $(nproc)
 
 echo "==> Going offline (network locked)"
 export CARGO_NET_OFFLINE=true
-append_if_missing "export CARGO_NET_OFFLINE=true"
 
 echo "✅ Maintenance complete — you can now run 'cargo test --workspace'"
