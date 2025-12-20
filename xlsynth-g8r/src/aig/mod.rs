@@ -3,6 +3,7 @@
 pub mod aig_hasher;
 pub mod aig_simplify;
 pub mod bulk_replace;
+pub mod cut_db_rewrite;
 pub mod dce;
 pub mod fanout;
 pub mod find_structures;

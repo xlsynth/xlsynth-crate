@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
+use crate::aig::cut_db_rewrite;
 use crate::aig::fanout::fanout_histogram;
 use crate::aig::find_structures;
 use crate::aig::fraig;
@@ -130,6 +131,17 @@ pub struct Options {
     pub compute_graph_logical_effort: bool,
     pub graph_logical_effort_beta1: f64,
     pub graph_logical_effort_beta2: f64,
+
+    /// Optional 4-input cut database used to rewrite the `GateFn`.
+    pub cut_db: Option<std::sync::Arc<crate::cut_db::loader::CutDb>>,
+
+    /// Deterministic bound on cut-db rewrite effort. If set to `0`, the pass
+    /// runs to convergence.
+    pub cut_db_rewrite_max_iterations: usize,
+
+    /// Maximum number of cuts kept per node during cut enumeration. If set to
+    /// `0`, cut enumeration is unbounded (not recommended for CLI use).
+    pub cut_db_rewrite_max_cuts_per_node: usize,
 }
 
 /// Command line entry point (e.g. it exits the process on error).
@@ -327,6 +339,18 @@ pub fn process_ir_path_for_cli(
         // Capture fraig results for JSON
         fraig_did_converge = Some(did_converge);
         fraig_iteration_stats = Some(iteration_stats);
+    }
+
+    if let Some(db) = options.cut_db.as_ref() {
+        log::info!("cut-db rewrite enabled");
+        gate_fn = cut_db_rewrite::rewrite_gatefn_with_cut_db(
+            &gate_fn,
+            db.as_ref(),
+            cut_db_rewrite::RewriteOptions {
+                max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
+                max_iterations: options.cut_db_rewrite_max_iterations,
+            },
+        );
     }
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
