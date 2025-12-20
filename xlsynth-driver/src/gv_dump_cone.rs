@@ -187,42 +187,21 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
 
     // Select the target module in entry-point code rather than in the cone
     // traversal library.
-    let module: &netlist::parse::NetlistModule = match module_name {
-        Some(name) => {
-            let mut found: Option<&netlist::parse::NetlistModule> = None;
-            for m in &parsed_netlist.modules {
-                let m_name = parsed_netlist
-                    .interner
-                    .resolve(m.name)
-                    .expect("module name symbol should resolve");
-                if m_name == name {
-                    found = Some(m);
-                    break;
+    let module: &netlist::parse::NetlistModule =
+        match netlist::io::select_module(&parsed_netlist, module_name) {
+            Ok(m) => m,
+            Err(e) => {
+                let mut details: Vec<(&str, &str)> = Vec::new();
+                if let Some(name) = module_name {
+                    details.push(("module_name", name));
                 }
-            }
-            match found {
-                Some(m) => m,
-                None => {
-                    report_cli_error_and_exit(
-                        "requested module name was not found in netlist",
-                        None,
-                        vec![("module_name", name)],
-                    );
-                }
-            }
-        }
-        None => {
-            if parsed_netlist.modules.len() != 1 {
-                let count_str = format!("{}", parsed_netlist.modules.len());
                 report_cli_error_and_exit(
-                    "netlist contains multiple modules; specify --module_name to disambiguate",
-                    None,
-                    vec![("module_count", count_str.as_str())],
+                    "failed to select module from netlist",
+                    Some(&format!("{}", e)),
+                    details,
                 );
             }
-            &parsed_netlist.modules[0]
-        }
-    };
+        };
 
     let visit_result = netlist::cone::visit_module_cone(
         module,

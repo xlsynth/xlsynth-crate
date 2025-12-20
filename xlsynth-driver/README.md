@@ -133,6 +133,45 @@ Output format:
 - A single header row: `instance_type,instance_name,traversal_pin`
 - One data row per visited instance/pin in a deterministic traversal order.
 
+### `gv-levels`: netlist path depth histograms
+
+Computes histograms of **maximum combinational path depth** in a gate-level netlist, where depth is measured as the number of combinational cell instances on the longest path between boundaries.
+
+Boundaries:
+
+- Start boundaries: module inputs and DFF outputs.
+- Sink boundaries: DFF inputs and module outputs.
+
+Sampling:
+
+- One sample per **DFF instance** (depth is the max across its input pins).
+- One sample per **output port**.
+- Categories reported: input-to-reg, reg-to-reg, reg-to-output, input-to-output.
+
+Basic usage (CSV):
+
+```shell
+xlsynth-driver gv-levels \
+  my_module.gv.gz \
+  --liberty_proto ~/asap7.proto \
+  --dff_cells DFFX1,DFFR_X1 \
+  --format csv
+```
+
+Key flags:
+
+- `--liberty_proto <LIBERTY_PROTO>`: Liberty proto (.proto or .textproto) describing the cell library used by the netlist. Required.
+- `--module_name <MODULE>`: Optional module name to restrict the search; required when the netlist contains multiple modules.
+- At least one of:
+  - `--dff_cells <CSV>`: Comma-separated list of DFF cell names to treat as register boundaries.
+  - `--dff_cell_formula <STR>` / `--dff_cell_invert_formula <STR>`: Auto-classify cells as DFFs by matching an output pin function string exactly (e.g. `IQ` / `IQN`).
+- `--format <text|csv>`: Output format (default `text`).
+
+Output format (CSV):
+
+- Header: `category,depth,count`
+- Rows are deterministic and sorted by category then depth.
+
 ### `ir2g8r`: IR to gate-level representation
 
 Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist in AIG form).
