@@ -8,6 +8,7 @@ Outputs into --out-dir:
 - <workload>.ir, <workload>.opt.ir
 - <workload>.stripped.opt.ir (optimized IR without position data)
 - <workload>.g8r (GateFn text), <workload>.g8r.bin (bincode)
+- <workload>.aig (binary AIGER emitted from GateFn; suitable for Berkeley ABC `read_aiger`)
 - <workload>.g8r.ir (XLS IR package reconstructed from the GateFn)
 - <workload>.gv (gate-level netlist emitted from GateFn)
 - <workload>.combo.v (IR-level combinational SystemVerilog codegen via ir2combo)
@@ -31,6 +32,8 @@ Usage:
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -78,6 +81,62 @@ def _run_cmd(
 
 def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", s)
+
+
+_ABC_PRINT_STATS_RE = re.compile(r"\band\s*=\s*(\d+)\s+lev\s*=\s*(\d+)\b")
+
+
+def _run_abc_cmd_and_get_stats(abc_exe: str, abc_cmd: str) -> Optional[Dict[str, int]]:
+    # If abc isn't available we just skip (no-op).
+    if not abc_exe:
+        return None
+    try:
+        res = _run_cmd([abc_exe, "-c", abc_cmd], capture_stdout=True, check=False)
+    except Exception:
+        return None
+    text = _strip_ansi((res.stdout or "") + "\n" + (res.stderr or ""))
+    # Example line:
+    #   /tmp/foo : i/o = 32/16 lat = 0 and = 1059 lev = 86
+    m = _ABC_PRINT_STATS_RE.search(text)
+    if not m:
+        return None
+    return {"and": int(m.group(1)), "lev": int(m.group(2))}
+
+
+def _run_abc_baseline_and_get_stats(
+    abc_exe: str, aig_path: Path
+) -> Optional[Dict[str, int]]:
+    # Baseline: read + strash + stats (keeps it consistent with the opt flow).
+    abc_cmd = f"read_aiger {aig_path}; strash; print_stats"
+    return _run_abc_cmd_and_get_stats(abc_exe, abc_cmd)
+
+
+def _run_abc_opt_and_get_stats(
+    abc_exe: str, aig_path: Path
+) -> Optional[Dict[str, int]]:
+    # Avoid relying on user-provided aliases (e.g. "resyn2") by using an
+    # explicit command sequence.
+    #
+    # Note: ABC's `print_stats` reports `and` (AND-gate count) and `lev`
+    # (logic depth / levels).
+    abc_cmd = (
+        f"read_aiger {aig_path}; "
+        "strash; "
+        "balance; rewrite; refactor; rewrite; balance; "
+        "print_stats"
+    )
+    return _run_abc_cmd_and_get_stats(abc_exe, abc_cmd)
+
+
+def _format_signed_int(v: int) -> str:
+    return f"{v:+d}"
 
 
 def _bf16_dslx(op: str) -> str:
@@ -190,7 +249,8 @@ def main() -> int:
     base = args.workload
     if base is None:
         # Summary mode: print table of nodes/depth for all known workloads.
-        print("workload nodes depth equiv")
+        abc_exe = shutil.which("abc") or ""
+        print("workload nodes depth equiv abc_and abc_lev delta_and delta_lev")
         dslx_path_env = os.environ.get("DSLX_PATH")
         for wl in KNOWN_WORKLOADS:
             with tempfile.TemporaryDirectory(prefix=f"g8r_{wl}_") as tmpd:
@@ -232,6 +292,7 @@ def main() -> int:
                 tmp_stats = tmp / "stats.json"
                 tmp_g8r_txt = tmp / f"{wl}.g8r"
                 tmp_g8r_bin = tmp / f"{wl}.g8rbin"
+                tmp_aig = tmp / f"{wl}.aig"
                 try:
                     res_ir2g8r = _run_cmd(
                         [
@@ -240,6 +301,8 @@ def main() -> int:
                             str(tmp_opt_ir),
                             "--stats-out",
                             str(tmp_stats),
+                            "--aiger-out",
+                            str(tmp_aig),
                             "--bin-out",
                             str(tmp_g8r_bin),
                         ],
@@ -273,10 +336,26 @@ def main() -> int:
                             equiv_status = "error"
                     except Exception:
                         equiv_status = "error"
-                    print(f"{wl} {nodes} {depth} {equiv_status}")
+                    abc_base = _run_abc_baseline_and_get_stats(abc_exe, tmp_aig)
+                    abc_opt = _run_abc_opt_and_get_stats(abc_exe, tmp_aig)
+
+                    if abc_base is not None and abc_opt is not None:
+                        abc_and = abc_opt["and"]
+                        abc_lev = abc_opt["lev"]
+                        delta_and = _format_signed_int(abc_opt["and"] - abc_base["and"])
+                        delta_lev = _format_signed_int(abc_opt["lev"] - abc_base["lev"])
+                    else:
+                        abc_and = "-"
+                        abc_lev = "-"
+                        delta_and = "-"
+                        delta_lev = "-"
+
+                    print(
+                        f"{wl} {nodes} {depth} {equiv_status} {abc_and} {abc_lev} {delta_and} {delta_lev}"
+                    )
                 except subprocess.CalledProcessError as e:
                     sys.stderr.write(e.stderr or "")
-                    print(f"{wl} - - error")
+                    print(f"{wl} - - error - - - -")
         return 0
     # Require and prepare output directory when a specific workload is requested.
     if not args.out_dir:
@@ -290,6 +369,7 @@ def main() -> int:
     opt_ir_stripped_path = out_dir / f"{base}.stripped.opt.ir"
     g8r_txt_path = out_dir / f"{base}.g8r"
     g8r_bin_path = out_dir / f"{base}.g8rbin"
+    aiger_aig_path = out_dir / f"{base}.aig"
     g8r_ir_path = out_dir / f"{base}.g8r.ir"
     gv_path = out_dir / f"{base}.gv"
     codegen_combo_path = out_dir / f"{base}.combo.v"
@@ -410,6 +490,8 @@ def main() -> int:
                 str(opt_ir_path),
                 "--stats-out",
                 str(stats_json_path),
+                "--aiger-out",
+                str(aiger_aig_path),
                 *netlist_flags,
                 "--bin-out",
                 str(g8r_bin_path),
@@ -500,6 +582,7 @@ def main() -> int:
             "opt_ir_stripped": str(opt_ir_stripped_path),
             "g8r_txt": str(g8r_txt_path),
             "g8r_bin": str(g8r_bin_path),
+            "aiger_aig": str(aiger_aig_path),
             "g8r_ir": str(g8r_ir_path),
             "netlist_gv": str(gv_path),
             "codegen_combo_v": str(codegen_combo_path) if combo_generated else None,

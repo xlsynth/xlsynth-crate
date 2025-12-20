@@ -1022,6 +1022,13 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
+                    clap::Arg::new("aiger_out")
+                        .long("aiger-out")
+                        .value_name("PATH")
+                        .help("Path to write the GateFn as AIGER; use .aag for ASCII or .aig for binary")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
                     clap::Arg::new("stats_out")
                         .long("stats-out")
                         .value_name("PATH")

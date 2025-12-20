@@ -140,6 +140,9 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
 - By default the pretty-printed GateFn is sent to **stdout**.
 - Additional artifacts can be emitted with flags:
   - `--bin-out <PATH>` – write the GateFn as a binary **.g8rbin** file (bincode-encoded).
+  - `--aiger-out <PATH>` – write the GateFn as AIGER for ingestion by tools like ABC:
+    - use a `.aag` suffix for ASCII AIGER (`aag`)
+    - use a `.aig` suffix for binary AIGER (`aig`)
   - `--stats-out <PATH>` – write a JSON summary of structural statistics.
   - `--netlist-out <PATH>` – write a human-readable gate-level netlist to a file.
 - The same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--toggle-sample-count`, …).
