@@ -16,6 +16,7 @@ use xlsynth_g8r::aig::get_summary_stats::get_gate_depth;
 use xlsynth_g8r::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
 use xlsynth_g8r::aig::logical_effort::compute_logical_effort_min_delay;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
+use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::aig_serdes::{emit_netlist, ir2gate};
 use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
@@ -425,16 +426,33 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     }
     // If --aiger-out is given, write the GateFn as ASCII AIGER ("aag").
     if let Some(aiger_path) = aiger_out {
-        let aiger = match emit_aiger(&gate_fn, true) {
-            Ok(aiger) => aiger,
-            Err(e) => {
-                eprintln!("Failed to emit AIGER: {}", e);
-                std::process::exit(1);
-            }
-        };
-        let mut f = File::create(aiger_path).expect("Failed to create aiger_out file");
-        f.write_all(aiger.as_bytes())
-            .expect("Failed to write aiger_out file");
+        let is_binary_aig = std::path::Path::new(aiger_path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("aig"))
+            .unwrap_or(false);
+        if is_binary_aig {
+            let bytes = match emit_aiger_binary(&gate_fn, true) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("Failed to emit binary AIGER: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let mut f = File::create(aiger_path).expect("Failed to create aiger_out file");
+            f.write_all(&bytes).expect("Failed to write aiger_out file");
+        } else {
+            let aiger = match emit_aiger(&gate_fn, true) {
+                Ok(aiger) => aiger,
+                Err(e) => {
+                    eprintln!("Failed to emit ASCII AIGER: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let mut f = File::create(aiger_path).expect("Failed to create aiger_out file");
+            f.write_all(aiger.as_bytes())
+                .expect("Failed to write aiger_out file");
+        }
     }
     // If --stats-out is given, write the stats as JSON
     if let Some(stats_path) = stats_out {
