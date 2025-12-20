@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use crate::netlist::dff::classify_dff_cells;
 use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
 use crate::netlist::io::load_liberty_from_path;
 use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
@@ -75,32 +76,12 @@ pub fn convert_gv2ir_paths(
     // Liberty
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
 
-    // Build DFF cell sets: identity and inverted. Start from provided names
-    // (identity), then add by matching formula strings (if provided).
-    let mut dff_cells_identity: HashSet<String> = dff_cells.clone();
-    if let Some(target_formula) = dff_cell_formula {
-        for cell in &liberty_lib.cells {
-            if cell
-                .pins
-                .iter()
-                .any(|p| p.direction == 1 && p.function == target_formula)
-            {
-                dff_cells_identity.insert(cell.name.clone());
-            }
-        }
-    }
-    let mut dff_cells_inverted: HashSet<String> = HashSet::new();
-    if let Some(invert_formula) = dff_cell_invert_formula {
-        for cell in &liberty_lib.cells {
-            if cell
-                .pins
-                .iter()
-                .any(|p| p.direction == 1 && p.function == invert_formula)
-            {
-                dff_cells_inverted.insert(cell.name.clone());
-            }
-        }
-    }
+    let dff = classify_dff_cells(
+        &liberty_lib,
+        dff_cells,
+        dff_cell_formula,
+        dff_cell_invert_formula,
+    )?;
 
     // Project GateFn
     let gate_fn = project_gatefn_from_netlist_and_liberty(
@@ -108,8 +89,8 @@ pub fn convert_gv2ir_paths(
         &parser.nets,
         &parser.interner,
         &liberty_lib,
-        &dff_cells_identity,
-        &dff_cells_inverted,
+        &dff.identity,
+        &dff.inverted,
     )
     .map_err(|e| anyhow!(e))?;
 

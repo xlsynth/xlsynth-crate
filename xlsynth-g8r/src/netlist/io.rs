@@ -77,6 +77,42 @@ pub fn parse_netlist_from_path(path: &Path) -> Result<ParsedNetlist> {
     })
 }
 
+/// Selects a single module from a parsed netlist.
+///
+/// If `module_name` is provided, the module must exist. If `module_name` is not
+/// provided, the parsed netlist must contain exactly one module.
+pub fn select_module<'a>(
+    parsed: &'a ParsedNetlist,
+    module_name: Option<&str>,
+) -> Result<&'a NetlistModule> {
+    match module_name {
+        Some(name) => {
+            for m in &parsed.modules {
+                let m_name = parsed
+                    .interner
+                    .resolve(m.name)
+                    .expect("module name symbol should resolve");
+                if m_name == name {
+                    return Ok(m);
+                }
+            }
+            Err(anyhow!(format!(
+                "requested module name '{}' was not found in netlist",
+                name
+            )))
+        }
+        None => {
+            if parsed.modules.len() != 1 {
+                return Err(anyhow!(format!(
+                    "netlist contains {} modules; specify --module_name to disambiguate",
+                    parsed.modules.len()
+                )));
+            }
+            Ok(&parsed.modules[0])
+        }
+    }
+}
+
 /// Load a Liberty proto (binary or textproto) into a `Library`.
 ///
 /// This helper is shared by higher-level routines that need to work from

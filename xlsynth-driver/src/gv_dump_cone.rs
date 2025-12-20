@@ -194,74 +194,63 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
 
     // Select the target module in entry-point code rather than in the cone
     // traversal library.
-    let module: &netlist::parse::NetlistModule = match module_name {
-        Some(name) => {
-            let mut found: Option<&netlist::parse::NetlistModule> = None;
-            for m in &parsed_netlist.modules {
-                let m_name = parsed_netlist
-                    .interner
-                    .resolve(m.name)
-                    .expect("module name symbol should resolve");
-                if m_name == name {
-                    found = Some(m);
-                    break;
-                }
-            }
-            match found {
-                Some(m) => m,
-                None => {
-                    report_cli_error_and_exit(
-                        "requested module name was not found in netlist",
-                        None,
-                        vec![("module_name", name)],
-                    );
-                }
-            }
-        }
-        None => {
-            if parsed_netlist.modules.len() != 1 {
-                let count_str = format!("{}", parsed_netlist.modules.len());
-                // Identify modules that contain the requested instance name to
-                // make the disambiguation error more actionable.
-                let mut modules_with_instance: Vec<String> = Vec::new();
-                for m in &parsed_netlist.modules {
-                    let m_name = parsed_netlist
-                        .interner
-                        .resolve(m.name)
-                        .expect("module name symbol should resolve")
-                        .to_string();
-                    let mut found = false;
-                    for inst in &m.instances {
-                        let inst_name = parsed_netlist
-                            .interner
-                            .resolve(inst.instance_name)
-                            .expect("instance name symbol should resolve");
-                        if inst_name == instance_name.as_str() {
-                            found = true;
-                            break;
+    let module: &netlist::parse::NetlistModule =
+        match netlist::io::select_module(&parsed_netlist, module_name) {
+            Ok(m) => m,
+            Err(e) => {
+                // Add extra context beyond `select_module()` when we can.
+                match module_name {
+                    Some(name) => {
+                        report_cli_error_and_exit(
+                            "failed to select module from netlist",
+                            Some(&format!("{}", e)),
+                            vec![("module_name", name)],
+                        );
+                    }
+                    None => {
+                        // `select_module()` fails here because the netlist has
+                        // multiple modules; identify which modules contain the
+                        // requested instance to make the error more actionable.
+                        let count_str = format!("{}", parsed_netlist.modules.len());
+                        let mut modules_with_instance: Vec<String> = Vec::new();
+                        for m in &parsed_netlist.modules {
+                            let m_name = parsed_netlist
+                                .interner
+                                .resolve(m.name)
+                                .expect("module name symbol should resolve")
+                                .to_string();
+                            let mut found = false;
+                            for inst in &m.instances {
+                                let inst_name = parsed_netlist
+                                    .interner
+                                    .resolve(inst.instance_name)
+                                    .expect("instance name symbol should resolve");
+                                if inst_name == instance_name.as_str() {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if found {
+                                modules_with_instance.push(m_name);
+                            }
                         }
-                    }
-                    if found {
-                        modules_with_instance.push(m_name);
+                        let modules_str = if modules_with_instance.is_empty() {
+                            "<none>".to_string()
+                        } else {
+                            modules_with_instance.join(",")
+                        };
+                        report_cli_error_and_exit(
+                        "netlist contains multiple modules; specify --module_name to disambiguate",
+                        None,
+                        vec![
+                            ("module_count", count_str.as_str()),
+                            ("modules_with_instance", modules_str.as_str()),
+                        ],
+                    );
                     }
                 }
-                let modules_str = if modules_with_instance.is_empty() {
-                    "<none>".to_string()
-                } else {
-                    modules_with_instance.join(",")
-                };
-                report_cli_error_and_exit(
-                    "netlist contains multiple modules; specify --module_name to disambiguate",
-                    None,
-                    vec![
-                        ("module_count", count_str.as_str()),
-                        ("modules_with_instance", modules_str.as_str()),
-                    ],
-                );
             }
-            &parsed_netlist.modules[0]
-        }
-    };
+        };
 
     let visit_result = netlist::cone::visit_module_cone(
         module,

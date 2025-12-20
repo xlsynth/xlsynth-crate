@@ -84,4 +84,31 @@ pub mod test_utils {
             ],
         }
     }
+
+    /// Extends `make_test_library()` with a minimal DFF cell used by tests that
+    /// need register boundaries.
+    ///
+    /// Contains a `DFFX1` cell with `D` (input) and `Q` (output).
+    pub fn make_test_library_with_dff() -> Library {
+        let mut lib = make_test_library();
+        lib.cells.push(Cell {
+            name: "DFFX1".to_string(),
+            pins: vec![
+                Pin {
+                    direction: PinDirection::Input as i32,
+                    function: "".to_string(),
+                    name: "D".to_string(),
+                    is_clocking_pin: false,
+                },
+                Pin {
+                    direction: PinDirection::Output as i32,
+                    function: "IQ".to_string(),
+                    name: "Q".to_string(),
+                    is_clocking_pin: false,
+                },
+            ],
+            area: 1.0,
+        });
+        lib
+    }
 }

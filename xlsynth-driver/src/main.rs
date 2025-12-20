@@ -53,6 +53,7 @@ mod g8r_equiv;
 mod gv2ir;
 mod gv_dump_cone;
 mod gv_instance_csv;
+mod gv_levels;
 mod gv_read_stats;
 mod ir2combo;
 mod ir2delayinfo;
@@ -1224,6 +1225,59 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("gv-levels")
+                .about("Compute histograms of maximum combinational path depth between netlist boundaries")
+                .arg(
+                    clap::Arg::new("netlist")
+                        .help("Input gate-level netlist (.gv or .gv.gz)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .value_name("LIBERTY_PROTO")
+                        .help("Liberty proto (.proto or .textproto) describing the cell library used by the netlist")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Optional module name to restrict the search; required when the netlist contains multiple modules"),
+                )
+                .arg(
+                    clap::Arg::new("dff_cells")
+                        .long("dff_cells")
+                        .value_name("CSV")
+                        .help("Comma-separated list of DFF cell names to treat as register boundaries")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("dff_cell_formula")
+                        .long("dff_cell_formula")
+                        .value_name("STR")
+                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF for boundary classification (e.g. IQ)")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("dff_cell_invert_formula")
+                        .long("dff_cell_invert_formula")
+                        .value_name("STR")
+                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF for boundary classification (e.g. IQN)")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("format")
+                        .long("format")
+                        .value_name("FORMAT")
+                        .help("Output format: text|csv (default text)")
+                        .default_value("text")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("g8r2v")
                 .about("Converts a .g8r or .g8rbin file to a .ugv netlist on stdout, optionally adding a clock port as the first input.")
                 .arg(
@@ -1829,6 +1883,9 @@ fn main() {
         }
         Some(("gv-dump-cone", subm)) => {
             gv_dump_cone::handle_gv_dump_cone(subm);
+        }
+        Some(("gv-levels", subm)) => {
+            gv_levels::handle_gv_levels(subm);
         }
         Some(("g8r2v", subm)) => {
             if let Err(e) = g8r2v::handle_g8r2v(subm) {
