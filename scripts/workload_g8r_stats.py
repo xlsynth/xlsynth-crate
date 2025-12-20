@@ -8,6 +8,7 @@ Outputs into --out-dir:
 - <workload>.ir, <workload>.opt.ir
 - <workload>.stripped.opt.ir (optimized IR without position data)
 - <workload>.g8r (GateFn text), <workload>.g8r.bin (bincode)
+- <workload>.aag (ASCII AIGER emitted from GateFn)
 - <workload>.g8r.ir (XLS IR package reconstructed from the GateFn)
 - <workload>.gv (gate-level netlist emitted from GateFn)
 - <workload>.combo.v (IR-level combinational SystemVerilog codegen via ir2combo)
@@ -290,6 +291,7 @@ def main() -> int:
     opt_ir_stripped_path = out_dir / f"{base}.stripped.opt.ir"
     g8r_txt_path = out_dir / f"{base}.g8r"
     g8r_bin_path = out_dir / f"{base}.g8rbin"
+    aiger_aag_path = out_dir / f"{base}.aag"
     g8r_ir_path = out_dir / f"{base}.g8r.ir"
     gv_path = out_dir / f"{base}.gv"
     codegen_combo_path = out_dir / f"{base}.combo.v"
@@ -410,6 +412,8 @@ def main() -> int:
                 str(opt_ir_path),
                 "--stats-out",
                 str(stats_json_path),
+                "--aiger-out",
+                str(aiger_aag_path),
                 *netlist_flags,
                 "--bin-out",
                 str(g8r_bin_path),
@@ -500,6 +504,7 @@ def main() -> int:
             "opt_ir_stripped": str(opt_ir_stripped_path),
             "g8r_txt": str(g8r_txt_path),
             "g8r_bin": str(g8r_bin_path),
+            "aiger_aag": str(aiger_aag_path),
             "g8r_ir": str(g8r_ir_path),
             "netlist_gv": str(gv_path),
             "codegen_combo_v": str(codegen_combo_path) if combo_generated else None,
