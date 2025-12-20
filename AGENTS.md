@@ -84,6 +84,10 @@ foo(/*kwarg=*/false)
 
 Note there is no space before the value: `/*kwarg=*/false` (not `/*kwarg=*/ false`).
 
+## Test fixtures: keep libraries minimal
+
+When writing unit tests that use Liberty or other cell libraries as fixtures, prefer minimal libraries with placeholder values. Do not introduce cell sizing (areas, drive strengths, timing arcs, etc.) into tests unless the test is explicitly about sizing or timing.
+
 ## Documentation
 
 When adding a **new** `xlsynth-driver` subcommand you **must** add a corresponding
