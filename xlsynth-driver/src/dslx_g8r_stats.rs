@@ -107,6 +107,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
             compute_graph_logical_effort: true,
             graph_logical_effort_beta1: 1.0,
             graph_logical_effort_beta2: 0.0,
+            cut_db: None,
         },
     );
 

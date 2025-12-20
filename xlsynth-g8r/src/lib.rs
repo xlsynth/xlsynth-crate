@@ -9,6 +9,7 @@ pub mod aig_serdes;
 pub mod aig_sim;
 
 pub mod check_equivalence;
+pub mod cut_db;
 pub mod dslx_stitch_pipeline;
 pub mod gate_builder;
 pub mod ir2gate_utils;

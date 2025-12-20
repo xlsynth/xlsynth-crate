@@ -68,6 +68,7 @@ struct Args {
 fn main() {
     let _ = env_logger::builder().try_init();
     let args = Args::parse();
+    let cut_db = Some(xlsynth_g8r::cut_db::loader::CutDb::load_default());
 
     let options = Options {
         check_equivalence: args.check_equivalence,
@@ -86,6 +87,7 @@ fn main() {
         graph_logical_effort_beta2: args.graph_logical_effort_beta2,
         fraig_max_iterations: args.fraig_max_iterations,
         fraig_sim_samples: args.fraig_sim_samples,
+        cut_db,
     };
     let input_path = std::path::Path::new(&args.input);
     process_ir_path_for_cli(input_path, &options);

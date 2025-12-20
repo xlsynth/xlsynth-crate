@@ -1,0 +1,611 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Cut-db–driven AIG rewrite pass (4-leaf cuts).
+//!
+//! First implementation goal: aggressively reduce global output depth, and then
+//! reduce AND-count as a secondary objective, using the precomputed 4-input cut
+//! database.
+
+use std::collections::BTreeSet;
+
+use crate::aig::dce::dce;
+use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::get_summary_stats::get_gate_depth;
+use crate::aig::topo::topo_sort_refs;
+use crate::cut_db::fragment::{GateFnFragment, Lit};
+use crate::cut_db::loader::CutDb;
+use crate::cut_db::tt16::TruthTable16;
+use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::use_count::get_id_to_use_count;
+
+#[derive(Debug, Clone, Copy)]
+pub struct RewriteOptions {
+    pub max_cuts_per_node: usize,
+    pub max_iterations: usize,
+}
+
+impl Default for RewriteOptions {
+    fn default() -> Self {
+        Self {
+            // Keep the pass lightweight by default; callers that want a more
+            // exhaustive search can increase these.
+            max_cuts_per_node: 64,
+            max_iterations: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Cut {
+    leaves: Vec<AigOperand>, // sorted
+    tt: TruthTable16,
+}
+
+fn negate_tt(tt: TruthTable16) -> TruthTable16 {
+    tt.not()
+}
+
+/// Remaps `tt` from `old_leaves` order into the larger `union_leaves` order.
+fn embed_tt_into_union(
+    tt: TruthTable16,
+    old_leaves: &[AigOperand],
+    union_leaves: &[AigOperand],
+) -> TruthTable16 {
+    if old_leaves.is_empty() {
+        return tt;
+    }
+    let mut map: [usize; 4] = [0; 4];
+    for (i, leaf) in old_leaves.iter().enumerate() {
+        let j = union_leaves
+            .binary_search(leaf)
+            .expect("old leaf must appear in union");
+        map[i] = j;
+    }
+    let old_len = old_leaves.len();
+    let mut out = TruthTable16::const0();
+    for assign in 0u8..16 {
+        let mut old_assign: u8 = 0;
+        for i in 0..old_len {
+            let bit = ((assign >> map[i]) & 1) != 0;
+            old_assign |= (bit as u8) << i;
+        }
+        let bit = tt.get_bit(old_assign);
+        out.set_bit(assign, bit);
+    }
+    out
+}
+
+/// Returns the precomputed cuts for `op`, flipping truth tables if `op` is
+/// negated.
+fn cuts_for_operand(cuts_by_node: &[Vec<Cut>], op: AigOperand) -> Vec<Cut> {
+    let mut v = cuts_by_node[op.node.id].clone();
+    if op.negated {
+        for c in &mut v {
+            c.tt = negate_tt(c.tt);
+        }
+    }
+    v
+}
+
+/// Enumerates and prunes all 4-feasible cuts (with truth tables) for every node
+/// in `g`.
+fn compute_cuts(g: &GateFn, max_cuts_per_node: usize) -> Vec<Vec<Cut>> {
+    let topo = topo_sort_refs(&g.gates);
+    let mut cuts_by_node: Vec<Vec<Cut>> = vec![Vec::new(); g.gates.len()];
+
+    for r in topo {
+        let node = &g.gates[r.id];
+        let mut cuts: Vec<Cut> = Vec::new();
+
+        // Trivial self-cut: allow this node to be used as a leaf for its fanout.
+        cuts.push(Cut {
+            leaves: vec![AigOperand {
+                node: r,
+                negated: false,
+            }],
+            tt: TruthTable16::var(0),
+        });
+
+        match node {
+            AigNode::Input { .. } => {
+                // Inputs already covered by self-cut.
+            }
+            AigNode::Literal(v) => {
+                // Constant cut with no leaves.
+                cuts.push(Cut {
+                    leaves: Vec::new(),
+                    tt: if *v {
+                        TruthTable16::const1()
+                    } else {
+                        TruthTable16::const0()
+                    },
+                });
+            }
+            AigNode::And2 { a, b, .. } => {
+                let a_cuts = cuts_for_operand(&cuts_by_node, *a);
+                let b_cuts = cuts_for_operand(&cuts_by_node, *b);
+                for ca in &a_cuts {
+                    for cb in &b_cuts {
+                        let mut set: BTreeSet<AigOperand> = BTreeSet::new();
+                        set.extend(ca.leaves.iter().copied());
+                        set.extend(cb.leaves.iter().copied());
+                        if set.len() > 4 {
+                            continue;
+                        }
+                        let union_leaves: Vec<AigOperand> = set.into_iter().collect();
+                        let ca_tt = embed_tt_into_union(ca.tt, &ca.leaves, &union_leaves);
+                        let cb_tt = embed_tt_into_union(cb.tt, &cb.leaves, &union_leaves);
+                        let tt = ca_tt.and(cb_tt);
+                        cuts.push(Cut {
+                            leaves: union_leaves,
+                            tt,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Deterministic pruning: sort + dedup + truncate.
+        cuts.sort();
+        cuts.dedup();
+        cuts.truncate(max_cuts_per_node);
+        cuts_by_node[r.id] = cuts;
+    }
+
+    cuts_by_node
+}
+
+/// Instantiates a `GateFnFragment` into `gb`, wiring its leaves from `leaf_ops`
+/// (missing leaves default to 0).
+fn instantiate_fragment(
+    gb: &mut GateBuilder,
+    frag: &GateFnFragment,
+    leaf_ops: &[AigOperand],
+) -> AigOperand {
+    let mut ops: Vec<AigOperand> = Vec::with_capacity(5 + frag.nodes.len());
+    for i in 0..4usize {
+        if i < leaf_ops.len() {
+            ops.push(leaf_ops[i]);
+        } else {
+            ops.push(gb.get_false());
+        }
+    }
+    ops.push(gb.get_false()); // const0
+
+    let op_from_lit = |lit: Lit, ops: &[AigOperand]| -> AigOperand {
+        let mut op = ops[lit.id as usize];
+        if lit.negated {
+            op = op.negate();
+        }
+        op
+    };
+
+    for node in &frag.nodes {
+        let op = match *node {
+            crate::cut_db::fragment::FragmentNode::And2 { a, b } => {
+                let a_op = op_from_lit(a, &ops);
+                let b_op = op_from_lit(b, &ops);
+                gb.add_and_binary(a_op, b_op)
+            }
+        };
+        ops.push(op);
+    }
+
+    op_from_lit(frag.output, &ops)
+}
+
+#[derive(Debug, Clone)]
+struct Replacement {
+    root: AigRef,
+    leaf_ops: Vec<AigOperand>,
+    frag: GateFnFragment,
+    score_depth: usize,
+    score_ands: u16,
+}
+
+fn stable_fragment_key(frag: &GateFnFragment) -> u64 {
+    // Deterministic tie-break key. This is not a cryptographic hash; it’s just
+    // a stable ordering aid.
+    let mut acc: u64 = 1469598103934665603; // FNV offset basis
+    let mix_u64 = |acc: &mut u64, v: u64| {
+        *acc ^= v;
+        *acc = acc.wrapping_mul(1099511628211);
+    };
+    for n in &frag.nodes {
+        match *n {
+            crate::cut_db::fragment::FragmentNode::And2 { a, b } => {
+                mix_u64(&mut acc, (a.id as u64) | ((a.negated as u64) << 16));
+                mix_u64(&mut acc, (b.id as u64) | ((b.negated as u64) << 16));
+            }
+        }
+    }
+    mix_u64(
+        &mut acc,
+        (frag.output.id as u64) | ((frag.output.negated as u64) << 16),
+    );
+    acc
+}
+
+/// Picks a small, deterministically ordered set of candidate replacements for
+/// `root` using `db` and the current depth map.
+fn choose_candidate_replacements_for_root(
+    root: AigRef,
+    cuts_by_node: &[Vec<Cut>],
+    depth_map: &std::collections::HashMap<AigRef, usize>,
+    db: &CutDb,
+) -> Vec<Replacement> {
+    let mut cands: Vec<Replacement> = Vec::new();
+
+    for cut in &cuts_by_node[root.id] {
+        // Skip trivial self-cut.
+        if cut.leaves.len() == 1 && cut.leaves[0].node == root && !cut.leaves[0].negated {
+            continue;
+        }
+        if cut.leaves.len() > 4 {
+            continue;
+        }
+
+        let (xform, pareto) = db.lookup(cut.tt.0);
+        for p in pareto {
+            let frag = p.frag.apply_npn(xform);
+            let input_depths = frag.input_depths();
+            let mut new_depth_at_root: usize = 0;
+            for (i, leaf) in cut.leaves.iter().enumerate() {
+                let leaf_depth = *depth_map.get(&leaf.node).unwrap_or(&0);
+                let cand = leaf_depth + (input_depths[i] as usize);
+                new_depth_at_root = core::cmp::max(new_depth_at_root, cand);
+            }
+
+            let score_depth = new_depth_at_root;
+            let score_ands = p.ands;
+
+            cands.push(Replacement {
+                root,
+                leaf_ops: cut.leaves.clone(),
+                frag,
+                score_depth,
+                score_ands,
+            });
+        }
+    }
+
+    // Deterministic ordering + cap for performance.
+    cands.sort_by(|a, b| {
+        (
+            a.score_depth,
+            a.score_ands,
+            a.root.id,
+            &a.leaf_ops,
+            stable_fragment_key(&a.frag),
+        )
+            .cmp(&(
+                b.score_depth,
+                b.score_ands,
+                b.root.id,
+                &b.leaf_ops,
+                stable_fragment_key(&b.frag),
+            ))
+    });
+    cands.truncate(16);
+    cands
+}
+
+/// Rebuilds `g` while replacing `repl.root` with `repl.frag`, then runs DCE.
+fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
+    let mut gb = GateBuilder::new(g.name.clone(), GateBuilderOptions::opt());
+
+    let mut orig_to_new: std::collections::HashMap<AigRef, AigOperand> =
+        std::collections::HashMap::new();
+
+    // Build primary inputs in the same order.
+    for input in &g.inputs {
+        let bv = gb.add_input(input.name.clone(), input.bit_vector.get_bit_count());
+        for (i, op) in bv.iter_lsb_to_msb().enumerate() {
+            // Map to the original input node by looking at the operand in the original
+            // GateFn.
+            let orig_op = input.bit_vector.get_lsb(i);
+            orig_to_new.insert(orig_op.node, *op);
+        }
+    }
+
+    // Worklist-based rebuild from outputs.
+    let mut worklist: Vec<AigRef> = g
+        .outputs
+        .iter()
+        .flat_map(|o| o.bit_vector.iter_lsb_to_msb())
+        .map(|op| op.node)
+        .collect();
+
+    let mut processing: std::collections::BTreeSet<AigRef> = std::collections::BTreeSet::new();
+
+    while let Some(r) = worklist.pop() {
+        if orig_to_new.contains_key(&r) {
+            continue;
+        }
+        if !processing.insert(r) {
+            continue;
+        }
+
+        if r == repl.root {
+            // Ensure leaf nodes are built first.
+            let mut all_ready = true;
+            let mut leaf_new_ops: Vec<AigOperand> = Vec::with_capacity(repl.leaf_ops.len());
+            for leaf in &repl.leaf_ops {
+                if let Some(op) = orig_to_new.get(&leaf.node).copied() {
+                    let op = if leaf.negated { op.negate() } else { op };
+                    leaf_new_ops.push(op);
+                } else {
+                    all_ready = false;
+                    worklist.push(r);
+                    worklist.push(leaf.node);
+                }
+            }
+            if !all_ready {
+                processing.remove(&r);
+                continue;
+            }
+
+            let new_op = instantiate_fragment(&mut gb, &repl.frag, &leaf_new_ops);
+            orig_to_new.insert(r, new_op);
+            processing.remove(&r);
+            continue;
+        }
+
+        match &g.gates[r.id] {
+            AigNode::Input { .. } => {
+                // Inputs already mapped above.
+                processing.remove(&r);
+            }
+            AigNode::Literal(v) => {
+                let op = if *v { gb.get_true() } else { gb.get_false() };
+                orig_to_new.insert(r, op);
+                processing.remove(&r);
+            }
+            AigNode::And2 { a, b, .. } => {
+                if !orig_to_new.contains_key(&a.node) {
+                    worklist.push(r);
+                    worklist.push(a.node);
+                    processing.remove(&r);
+                    continue;
+                }
+                if !orig_to_new.contains_key(&b.node) {
+                    worklist.push(r);
+                    worklist.push(b.node);
+                    processing.remove(&r);
+                    continue;
+                }
+                let mut new_a = orig_to_new[&a.node];
+                if a.negated {
+                    new_a = new_a.negate();
+                }
+                let mut new_b = orig_to_new[&b.node];
+                if b.negated {
+                    new_b = new_b.negate();
+                }
+                let new_op = gb.add_and_binary(new_a, new_b);
+                orig_to_new.insert(r, new_op);
+                processing.remove(&r);
+            }
+        }
+    }
+
+    // Build outputs in the same order.
+    for output in &g.outputs {
+        let mut bits: Vec<AigOperand> = Vec::with_capacity(output.bit_vector.get_bit_count());
+        for op in output.bit_vector.iter_lsb_to_msb() {
+            let mut new_op = orig_to_new[&op.node];
+            if op.negated {
+                new_op = new_op.negate();
+            }
+            bits.push(new_op);
+        }
+        let bv = crate::aig::AigBitVector::from_lsb_is_index_0(&bits);
+        gb.add_output(output.name.clone(), bv);
+    }
+
+    let mut out = gb.build();
+    out = dce(&out);
+    out
+}
+
+/// Performs iterative depth-first rewriting using the 4-input cut DB.
+pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) -> GateFn {
+    let mut cur = g.clone();
+
+    for _iter in 0..opts.max_iterations {
+        let id_to_use_count = get_id_to_use_count(&cur);
+        let live_nodes: Vec<AigRef> = id_to_use_count.keys().cloned().collect();
+        let depth_stats = get_gate_depth(&cur, &live_nodes);
+        let cur_global_depth = depth_stats.deepest_path.len();
+        log::info!(
+            "cut-db rewrite iter: live_nodes={} global_depth={}",
+            live_nodes.len(),
+            cur_global_depth
+        );
+
+        // Focus on nodes on deepest path, from outputs downward (as returned).
+        let path = depth_stats.deepest_path.clone();
+        if path.is_empty() {
+            break;
+        }
+
+        let cuts_by_node = compute_cuts(&cur, opts.max_cuts_per_node);
+        let depth_map = depth_stats.ref_to_depth;
+
+        let mut candidates: Vec<Replacement> = Vec::new();
+        for &r in &path {
+            candidates.extend(choose_candidate_replacements_for_root(
+                r,
+                &cuts_by_node,
+                &depth_map,
+                db,
+            ));
+        }
+
+        candidates.sort_by(|a, b| {
+            (
+                a.score_depth,
+                a.score_ands,
+                a.root.id,
+                &a.leaf_ops,
+                stable_fragment_key(&a.frag),
+            )
+                .cmp(&(
+                    b.score_depth,
+                    b.score_ands,
+                    b.root.id,
+                    &b.leaf_ops,
+                    stable_fragment_key(&b.frag),
+                ))
+        });
+
+        if candidates.is_empty() {
+            log::info!("cut-db rewrite: no acceptable replacement found on deepest path");
+            break;
+        }
+
+        // Accept any candidate that reduces live node count without increasing
+        // global depth (and still accept strict depth improvements).
+        let mut applied = false;
+        for cand in candidates {
+            let new_g = rebuild_with_replacement(&cur, &cand);
+            let new_id_to_use_count = get_id_to_use_count(&new_g);
+            let new_live: Vec<AigRef> = new_id_to_use_count.keys().cloned().collect();
+            let new_depth_stats = get_gate_depth(&new_g, &new_live);
+            let new_global_depth = new_depth_stats.deepest_path.len();
+
+            let improves_depth = new_global_depth < cur_global_depth;
+            let preserves_depth = new_global_depth == cur_global_depth;
+            let improves_nodes = new_live.len() < live_nodes.len();
+
+            log::info!(
+                "cut-db rewrite candidate: root={} old_depth={} new_depth={} old_live_nodes={} new_live_nodes={} cand_root_depth={} cand_root_ands={}",
+                cand.root.id,
+                cur_global_depth,
+                new_global_depth,
+                live_nodes.len(),
+                new_live.len(),
+                cand.score_depth,
+                cand.score_ands
+            );
+
+            if improves_depth || (preserves_depth && improves_nodes) {
+                cur = new_g;
+                applied = true;
+                break;
+            }
+        }
+
+        if applied {
+            continue;
+        }
+
+        log::info!("cut-db rewrite: no candidate improved global depth or node count; stopping");
+        break;
+    }
+
+    cur
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aig::get_summary_stats::get_summary_stats;
+    use crate::cut_db::fragment::{FIRST_NODE_ID, FragmentNode};
+    use crate::cut_db::npn::canon_tt16;
+    use crate::cut_db::pareto::ParetoPoint;
+    use crate::cut_db::serdes::CanonEntry;
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+
+    fn make_balanced_and4_frag() -> GateFnFragment {
+        GateFnFragment {
+            nodes: vec![
+                FragmentNode::And2 {
+                    a: Lit::new(0, false),
+                    b: Lit::new(1, false),
+                },
+                FragmentNode::And2 {
+                    a: Lit::new(2, false),
+                    b: Lit::new(3, false),
+                },
+                FragmentNode::And2 {
+                    a: Lit::new(FIRST_NODE_ID, false),
+                    b: Lit::new(FIRST_NODE_ID + 1, false),
+                },
+            ],
+            output: Lit::new(FIRST_NODE_ID + 2, false),
+        }
+    }
+
+    #[test]
+    fn test_cut_db_rewrite_does_not_increase_global_depth() {
+        // Function: a & b & c & d. Truth table is 1 only at assignment 0b1111 => bit
+        // 15.
+        let and4_tt = TruthTable16(0x8000);
+        let frag = make_balanced_and4_frag();
+        assert_eq!(frag.eval_tt16(), and4_tt);
+
+        let (canon_tt, xform) = canon_tt16(and4_tt);
+        let canon_frag = frag.apply_npn(xform.inverse());
+        assert_eq!(canon_frag.eval_tt16(), canon_tt);
+
+        let entry = CanonEntry {
+            canon_tt,
+            pareto: vec![ParetoPoint {
+                tt: canon_tt,
+                ands: 3,
+                depth: 2,
+                frag: canon_frag,
+            }],
+        };
+        let canon_entries = vec![
+            CanonEntry {
+                canon_tt: TruthTable16(0),
+                pareto: Vec::new(),
+            },
+            entry,
+        ];
+        let mut dense = vec![
+            crate::cut_db::loader::DenseInfo {
+                canon_index: 0,
+                xform: crate::cut_db::npn::NpnTransform::identity(),
+            };
+            65536
+        ];
+        dense[and4_tt.0 as usize] = crate::cut_db::loader::DenseInfo {
+            canon_index: 1,
+            xform,
+        };
+        let db = CutDb::from_raw_for_test(canon_entries, dense);
+
+        // Build a deep (unbalanced) AND4 to give the rewriter something to improve.
+        let mut gb = GateBuilder::new("t".to_string(), GateBuilderOptions::opt());
+        let a = gb.add_input("a".to_string(), 1);
+        let b = gb.add_input("b".to_string(), 1);
+        let c = gb.add_input("c".to_string(), 1);
+        let d = gb.add_input("d".to_string(), 1);
+        let ab = gb.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+        let abc = gb.add_and_binary(ab, *c.get_lsb(0));
+        let abcd = gb.add_and_binary(abc, *d.get_lsb(0));
+        gb.add_output("o".to_string(), crate::aig::AigBitVector::from_bit(abcd));
+        let g = gb.build();
+
+        let before = get_summary_stats(&g);
+        let rewritten = rewrite_gatefn_with_cut_db(
+            &g,
+            &db,
+            RewriteOptions {
+                max_cuts_per_node: 32,
+                max_iterations: 8,
+            },
+        );
+        let after = get_summary_stats(&rewritten);
+
+        assert!(
+            after.deepest_path <= before.deepest_path,
+            "global depth should not increase: before={} after={}",
+            before.deepest_path,
+            after.deepest_path
+        );
+    }
+}

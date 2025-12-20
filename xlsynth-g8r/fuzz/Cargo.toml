@@ -105,6 +105,12 @@ path = "fuzz_targets/fuzz_netlist_scanner.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_cut_db_rewrite_equiv"
+path = "fuzz_targets/fuzz_cut_db_rewrite_equiv.rs"
+test = false
+doc = false
+
 [features]
 # No default optional features; required solver integrations are always enabled via dependency specification above.
 default = []

@@ -19,6 +19,7 @@ use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::aig_serdes::{emit_netlist, ir2gate};
 use xlsynth_g8r::aig_sim::count_toggles;
+use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::use_count::get_id_to_use_count;
@@ -41,6 +42,7 @@ fn ir2gates(
     fraig_max_iterations: Option<usize>,
     fraig_sim_samples: Option<usize>,
     output_json: Option<&std::path::Path>,
+    cut_db: Option<std::sync::Arc<CutDb>>,
 ) {
     log::info!("ir2gates");
     let options = process_ir_path::Options {
@@ -60,6 +62,7 @@ fn ir2gates(
         graph_logical_effort_beta2,
         fraig_max_iterations,
         fraig_sim_samples,
+        cut_db,
     };
     let stats = process_ir_path::process_ir_path_for_cli(input_file, &options);
     if quiet {
@@ -189,6 +192,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     };
 
     let output_json = matches.get_one::<String>("output_json");
+    let cut_db = Some(CutDb::load_default());
 
     let input_path = std::path::Path::new(input_file);
     ir2gates(
@@ -208,6 +212,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         fraig_max_iterations,
         fraig_sim_samples,
         output_json.map(|s| std::path::Path::new(s)),
+        cut_db,
     );
 }
 
@@ -223,6 +228,7 @@ fn ir_to_gatefn_with_stats(
     graph_logical_effort_beta2: f64,
     fraig_max_iterations: Option<usize>,
     fraig_sim_samples: Option<usize>,
+    cut_db: Option<std::sync::Arc<xlsynth_g8r::cut_db::loader::CutDb>>,
 ) -> (
     xlsynth_g8r::aig::GateFn,
     process_ir_path::Ir2GatesSummaryStats,
@@ -291,6 +297,16 @@ fn ir_to_gatefn_with_stats(
             }
         }
     }
+
+    if let Some(db) = cut_db.as_ref() {
+        log::info!("cut-db rewrite enabled");
+        gate_fn = xlsynth_g8r::aig::cut_db_rewrite::rewrite_gatefn_with_cut_db(
+            &gate_fn,
+            db.as_ref(),
+            xlsynth_g8r::aig::cut_db_rewrite::RewriteOptions::default(),
+        );
+    }
+
     // Compute statistics directly from the GateFn (mirrors process_ir_path)
     let id_to_use_count: HashMap<aig::AigRef, usize> = get_id_to_use_count(&gate_fn);
     let live_nodes: Vec<aig::AigRef> = id_to_use_count.keys().cloned().collect();
@@ -427,6 +443,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let aiger_out = matches.get_one::<String>("aiger_out");
     let stats_out = matches.get_one::<String>("stats_out");
     let netlist_out = matches.get_one::<String>("netlist_out");
+    let cut_db = Some(CutDb::load_default());
     let input_path = std::path::Path::new(input_file);
     let (gate_fn, stats) = ir_to_gatefn_with_stats(
         input_path,
@@ -440,6 +457,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         graph_logical_effort_beta2,
         fraig_max_iterations,
         fraig_sim_samples,
+        cut_db,
     );
     // Always print the GateFn to stdout
     println!("{}", gate_fn.to_string());

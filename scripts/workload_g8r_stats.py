@@ -30,6 +30,10 @@ Usage:
   python scripts/workload_g8r_stats.py --bin target/aarch64-apple-darwin/release/xlsynth-driver --workload bf16_add --out-dir /tmp/bf16stats
   # If --workload is omitted, prints a summary table for all known workloads:
   #   workload nodes depth
+
+Cut DB:
+- The `g8r` pipeline embeds the in-tree cut database by default; this script does
+  not need to pass any cut-db path.
 """
 
 import argparse
@@ -323,18 +327,19 @@ def main() -> int:
                 tmp_g8r_bin = tmp / f"{wl}.g8rbin"
                 tmp_aig = tmp / f"{wl}.aig"
                 try:
+                    ir2g8r_args = [
+                        str(driver),
+                        "ir2g8r",
+                        str(tmp_opt_ir),
+                        "--stats-out",
+                        str(tmp_stats),
+                        "--aiger-out",
+                        str(tmp_aig),
+                        "--bin-out",
+                        str(tmp_g8r_bin),
+                    ]
                     res_ir2g8r = _run_cmd(
-                        [
-                            str(driver),
-                            "ir2g8r",
-                            str(tmp_opt_ir),
-                            "--stats-out",
-                            str(tmp_stats),
-                            "--aiger-out",
-                            str(tmp_aig),
-                            "--bin-out",
-                            str(tmp_g8r_bin),
-                        ],
+                        ir2g8r_args,
                         cwd=repo,
                         capture_stdout=True,
                     )
@@ -496,14 +501,8 @@ def main() -> int:
 
     # 3b) ir2gates (human-readable report to stdout; capture to report.txt)
     try:
-        res = _run_cmd(
-            [
-                str(driver),
-                "ir2gates",
-                str(opt_ir_path),
-            ],
-            cwd=repo,
-        )
+        ir2gates_args = [str(driver), "ir2gates", str(opt_ir_path)]
+        res = _run_cmd(ir2gates_args, cwd=repo)
         _write_text(report_txt_path, res.stdout)
     except subprocess.CalledProcessError as e:
         sys.stderr.write(e.stderr or "")
@@ -512,21 +511,19 @@ def main() -> int:
 
     # 4) ir2g8r (stats/netlist/bin; GateFn text goes to stdout)
     try:
-        res = _run_cmd(
-            [
-                str(driver),
-                "ir2g8r",
-                str(opt_ir_path),
-                "--stats-out",
-                str(stats_json_path),
-                "--aiger-out",
-                str(aiger_aig_path),
-                *netlist_flags,
-                "--bin-out",
-                str(g8r_bin_path),
-            ],
-            cwd=repo,
-        )
+        ir2g8r_args = [
+            str(driver),
+            "ir2g8r",
+            str(opt_ir_path),
+            "--stats-out",
+            str(stats_json_path),
+            "--aiger-out",
+            str(aiger_aig_path),
+            *netlist_flags,
+            "--bin-out",
+            str(g8r_bin_path),
+        ]
+        res = _run_cmd(ir2g8r_args, cwd=repo)
         _write_text(g8r_txt_path, res.stdout)
     except subprocess.CalledProcessError as e:
         sys.stderr.write(e.stderr or "")
