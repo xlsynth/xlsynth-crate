@@ -8,9 +8,21 @@
 
 use std::collections::VecDeque;
 
+use rayon::prelude::*;
+
 use crate::cut_db::fragment::{FragmentNode, GateFnFragment, Lit, FIRST_NODE_ID};
 use crate::cut_db::pareto::{dominates, same_cost, ParetoPoint};
 use crate::cut_db::tt16::TruthTable16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CandidateKey {
+    tt: TruthTable16,
+    ands: u16,
+    depth: u16,
+    q_index: usize,
+    lhs_neg: bool,
+    rhs_neg: bool,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct EnumerateOptions {
@@ -22,6 +34,9 @@ pub struct EnumerateOptions {
 
     /// If set, emit `log::info!` progress every N worklist pops.
     pub progress_every_pops: Option<u64>,
+
+    /// Chunk size for parallelizing the `p × all_points` expansion.
+    pub parallel_chunk_size: usize,
 }
 
 impl Default for EnumerateOptions {
@@ -29,6 +44,7 @@ impl Default for EnumerateOptions {
         Self {
             max_ands: None,
             progress_every_pops: None,
+            parallel_chunk_size: 4096,
         }
     }
 }
@@ -68,6 +84,15 @@ fn insert_pareto(frontier: &mut Vec<ParetoPoint>, cand: ParetoPoint) -> bool {
     // Remove anything dominated by candidate.
     frontier.retain(|p| !dominates(&cand, p));
     frontier.push(cand);
+    true
+}
+
+fn can_insert_pareto(frontier: &[ParetoPoint], ands: u16, depth: u16) -> bool {
+    for p in frontier {
+        if (p.ands <= ands && p.depth <= depth) || (p.ands == ands && p.depth == depth) {
+            return false;
+        }
+    }
     true
 }
 
@@ -193,19 +218,22 @@ pub fn enumerate_full_space(options: EnumerateOptions) -> FullSpaceDb {
 
         // Snapshot current all-points length to avoid infinite growth within this pop.
         let current_points_len = all_points.len();
-        for qi in 0..current_points_len {
-            let q = all_points[qi].clone();
-            // Enumerate operand polarity combos (free NOT on edges).
-            for lhs_neg in [false, true] {
-                let p_tt = negate_tt(p.tt, lhs_neg);
-                for rhs_neg in [false, true] {
-                    let q_tt = negate_tt(q.tt, rhs_neg);
-                    let cand_tt = p_tt.and(q_tt);
 
-                    // AND-count/depth composition (tree-like composition).
-                    // Note: this is exact for the constructed witness; the enumerator
-                    // maintains a Pareto set and will prune dominated higher-cost
-                    // candidates.
+        // Generate small candidate keys in parallel over chunks of `all_points`.
+        // We intentionally do NOT build fragments in the parallel phase; fragments
+        // are expensive to allocate and most candidates will be dominated. Instead
+        // we build fragments only for candidates that survive the fast Pareto check
+        // during the deterministic sequential merge phase.
+        let chunk_size = core::cmp::max(1, options.parallel_chunk_size);
+        let frontiers_snapshot = &db.frontiers;
+        let chunk_results: Vec<(usize, Vec<CandidateKey>)> = all_points[..current_points_len]
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let mut v: Vec<CandidateKey> = Vec::with_capacity(chunk.len() * 4);
+                let base = chunk_idx * chunk_size;
+                for (j, q) in chunk.iter().enumerate() {
+                    let qi = base + j;
                     let cand_ands = p.ands + q.ands + 1;
                     if let Some(max_ands) = options.max_ands {
                         if cand_ands > max_ands {
@@ -214,31 +242,66 @@ pub fn enumerate_full_space(options: EnumerateOptions) -> FullSpaceDb {
                     }
                     let cand_depth = 1 + core::cmp::max(p.depth, q.depth);
 
-                    // Build witness fragment by concatenation + new AND node.
-                    let cand_frag = combine_and(&p.frag, &q.frag, lhs_neg, rhs_neg);
-
-                    debug_assert_eq!(cand_frag.and_count(), cand_ands);
-                    debug_assert_eq!(cand_frag.depth(), cand_depth);
-
-                    // Quick semantic consistency check in debug builds.
-                    debug_assert_eq!(cand_frag.eval_tt16(), cand_tt);
-
-                    let cand = ParetoPoint {
-                        tt: cand_tt,
-                        ands: cand_ands,
-                        depth: cand_depth,
-                        frag: cand_frag,
-                    };
-
-                    let idx = cand_tt.0 as usize;
-                    let was_empty = db.frontiers[idx].is_empty();
-                    if insert_pareto(&mut db.frontiers[idx], cand.clone()) {
-                        if was_empty {
-                            db.covered_count += 1;
+                    for lhs_neg in [false, true] {
+                        let p_tt = negate_tt(p.tt, lhs_neg);
+                        for rhs_neg in [false, true] {
+                            let q_tt = negate_tt(q.tt, rhs_neg);
+                            let cand_tt = p_tt.and(q_tt);
+                            let idx = cand_tt.0 as usize;
+                            // Safe pruning: if dominated by the current frontier snapshot,
+                            // it will remain dominated as frontiers only ever improve.
+                            if !can_insert_pareto(&frontiers_snapshot[idx], cand_ands, cand_depth) {
+                                continue;
+                            }
+                            v.push(CandidateKey {
+                                tt: cand_tt,
+                                ands: cand_ands,
+                                depth: cand_depth,
+                                q_index: qi,
+                                lhs_neg,
+                                rhs_neg,
+                            });
                         }
-                        all_points.push(cand.clone());
-                        worklist.push_back(cand);
                     }
+                }
+                (chunk_idx, v)
+            })
+            .collect();
+
+        // Deterministic merge order across rayon scheduling:
+        // process chunks in ascending chunk index, and candidates in the order they
+        // were generated within the chunk.
+        let mut chunk_results = chunk_results;
+        chunk_results.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+
+        for (_chunk_idx, keys) in chunk_results {
+            for key in keys {
+                let idx = key.tt.0 as usize;
+                if !can_insert_pareto(&db.frontiers[idx], key.ands, key.depth) {
+                    continue;
+                }
+
+                let q = &all_points[key.q_index];
+                let cand_frag = combine_and(&p.frag, &q.frag, key.lhs_neg, key.rhs_neg);
+
+                debug_assert_eq!(cand_frag.and_count(), key.ands);
+                debug_assert_eq!(cand_frag.depth(), key.depth);
+                debug_assert_eq!(cand_frag.eval_tt16(), key.tt);
+
+                let cand = ParetoPoint {
+                    tt: key.tt,
+                    ands: key.ands,
+                    depth: key.depth,
+                    frag: cand_frag,
+                };
+
+                let was_empty = db.frontiers[idx].is_empty();
+                if insert_pareto(&mut db.frontiers[idx], cand.clone()) {
+                    if was_empty {
+                        db.covered_count += 1;
+                    }
+                    all_points.push(cand.clone());
+                    worklist.push_back(cand);
                 }
             }
         }
@@ -263,6 +326,7 @@ mod tests {
         let db = enumerate_full_space(EnumerateOptions {
             max_ands: Some(0),
             progress_every_pops: None,
+            parallel_chunk_size: 64,
         });
         assert!(!db.frontiers[TruthTable16::const0().0 as usize].is_empty());
         assert!(!db.frontiers[TruthTable16::var(0).0 as usize].is_empty());
@@ -295,5 +359,3 @@ mod tests {
         assert_eq!(f[0].depth, base.depth);
     }
 }
-
-

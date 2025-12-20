@@ -101,5 +101,3 @@ impl CutDb {
         (info.xform, entry.pareto.as_slice())
     }
 }
-
-

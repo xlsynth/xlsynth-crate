@@ -96,6 +96,7 @@ mod tests {
         let full = enumerate_full_space(EnumerateOptions {
             max_ands: Some(2),
             progress_every_pops: None,
+            parallel_chunk_size: 64,
         });
         let canon = canon_from_full_space(&full);
 
@@ -110,5 +111,3 @@ mod tests {
         };
     }
 }
-
-

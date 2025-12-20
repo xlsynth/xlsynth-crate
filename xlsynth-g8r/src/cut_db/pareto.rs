@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::cut_db::fragment::GateFnFragment;
 use crate::cut_db::tt16::TruthTable16;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct ParetoPoint {
     pub tt: TruthTable16,
     pub ands: u16,
@@ -24,5 +26,3 @@ pub fn dominates(a: &ParetoPoint, b: &ParetoPoint) -> bool {
 pub fn same_cost(a: &ParetoPoint, b: &ParetoPoint) -> bool {
     a.ands == b.ands && a.depth == b.depth
 }
-
-

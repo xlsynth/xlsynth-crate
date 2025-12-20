@@ -89,5 +89,3 @@ pub fn encode_assignment(bits: [bool; 4]) -> u8 {
         | ((bits[2] as u8) << 2)
         | ((bits[3] as u8) << 3)
 }
-
-
