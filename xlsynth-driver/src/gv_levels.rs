@@ -49,6 +49,17 @@ fn print_text_report(
                 out.push_str(&format!("  {}: {}\n", depth, count));
             }
         }
+        if let Some(ex) = report.max_examples.get(&cat) {
+            let path = if ex.instance_path.is_empty() {
+                "<none>".to_string()
+            } else {
+                ex.instance_path.join(" -> ")
+            };
+            out.push_str(&format!(
+                "  max-depth example (depth={} sink={}): {}\n",
+                ex.depth, ex.sink, path
+            ));
+        }
     }
     std::io::stdout().write_all(out.as_bytes())
 }
@@ -59,7 +70,7 @@ fn print_csv_report(
     let mut wtr = csv::WriterBuilder::new()
         .has_headers(true)
         .from_writer(std::io::stdout());
-    wtr.write_record(["category", "depth", "count"])?;
+    wtr.write_record(["category", "depth", "count", "example_path"])?;
 
     let cats = [
         LevelsCategory::InputToReg,
@@ -70,7 +81,28 @@ fn print_csv_report(
     for cat in cats {
         if let Some(h) = report.histograms.get(&cat) {
             for (depth, count) in h {
-                wtr.write_record([cat.as_str(), &format!("{}", depth), &format!("{}", count)])?;
+                let example_path = "";
+                if let Some(ex) = report.max_examples.get(&cat) {
+                    if ex.depth == *depth && !ex.instance_path.is_empty() {
+                        // NB: Avoid commas so CSV remains easy to scan.
+                        // (The csv writer will quote if needed.)
+                        // Also, this is deterministic due to stable trace selection.
+                        let joined = ex.instance_path.join(" -> ");
+                        wtr.write_record([
+                            cat.as_str(),
+                            &format!("{}", depth),
+                            &format!("{}", count),
+                            joined.as_str(),
+                        ])?;
+                        continue;
+                    }
+                }
+                wtr.write_record([
+                    cat.as_str(),
+                    &format!("{}", depth),
+                    &format!("{}", count),
+                    example_path,
+                ])?;
             }
         }
     }

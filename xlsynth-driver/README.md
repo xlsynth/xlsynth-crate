@@ -169,8 +169,9 @@ Key flags:
 
 Output format (CSV):
 
-- Header: `category,depth,count`
+- Header: `category,depth,count,example_path`
 - Rows are deterministic and sorted by category then depth.
+- The `example_path` column is populated only for the **maximum depth** row in each category, and contains a single sample instance path (combinational instances only) that attains that maximum depth.
 
 ### `ir2g8r`: IR to gate-level representation
 

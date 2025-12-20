@@ -37,7 +37,8 @@ cells: {
 "#;
 
     // Netlist:
-    // a -> INVX1 u1 -> n1 -> DFFX1 udff0 -> q0 -> INVX1 u2 -> y
+    // a -> INVX1 u1 -> n1 -> DFFX1 udff0 -> q0 -> INVX1 u2 -> n2 -> INVX1 u3 -> n3
+    // -> DFFX1 udff1 -> q1 -> INVX1 u4 -> y
     let netlist_text = r#"
 module top (a, y);
   input a;
@@ -46,9 +47,15 @@ module top (a, y);
   wire y;
   wire n1;
   wire q0;
+  wire n2;
+  wire n3;
+  wire q1;
   INVX1 u1 (.A(a), .Y(n1));
   DFFX1 udff0 (.D(n1), .Q(q0));
-  INVX1 u2 (.A(q0), .Y(y));
+  INVX1 u2 (.A(q0), .Y(n2));
+  INVX1 u3 (.A(n2), .Y(n3));
+  DFFX1 udff1 (.D(n3), .Q(q1));
+  INVX1 u4 (.A(q1), .Y(y));
 endmodule
 "#;
 
@@ -82,9 +89,10 @@ endmodule
 
     let got = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     let want = "\
-category,depth,count
-input-to-reg,1,1
-reg-to-output,1,1
+category,depth,count,example_path
+input-to-reg,1,1,u1(INVX1)
+reg-to-reg,2,1,u2(INVX1) -> u3(INVX1)
+reg-to-output,1,1,u4(INVX1)
 ";
     assert_eq!(got, want);
 }

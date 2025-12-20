@@ -77,6 +77,19 @@ pub struct LevelsReport {
     pub num_instances: usize,
     pub num_dff_instances: usize,
     pub num_output_ports: usize,
+    /// For each category, a deterministic example showing one sink sample that
+    /// attains the maximum depth observed in that category.
+    pub max_examples: BTreeMap<LevelsCategory, LevelsMaxExample>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LevelsMaxExample {
+    pub depth: u32,
+    /// Human-readable sink identifier (e.g. `port:y` or `inst:udff0`).
+    pub sink: String,
+    /// Path of combinational instances along a max-depth path, ordered from
+    /// boundary start to sink.
+    pub instance_path: Vec<String>,
 }
 
 fn resolve_to_string(
@@ -144,6 +157,128 @@ fn add_hist_sample(
     *entry.entry(depth).or_insert(0) += 1;
 }
 
+#[derive(Debug, Clone)]
+enum TracePrev {
+    InstOut {
+        inst: InstIndex,
+        input_net: Option<NetIndex>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct NetTrace {
+    info: PathInfo,
+    prev: Option<TracePrev>,
+}
+
+fn default_trace() -> NetTrace {
+    NetTrace {
+        info: PathInfo {
+            depth: 0,
+            origin: OriginKind::Other,
+        },
+        prev: None,
+    }
+}
+
+fn prev_tie_key(prev: &Option<TracePrev>) -> (u32, u32) {
+    match prev {
+        None => (u32::MAX, u32::MAX),
+        Some(TracePrev::InstOut { inst, input_net }) => (
+            inst.0 as u32,
+            input_net.map(|n| n.0 as u32).unwrap_or(u32::MAX),
+        ),
+    }
+}
+
+fn trace_better_than(a: &NetTrace, b: &NetTrace) -> bool {
+    if a.info.better_than(&b.info) {
+        return true;
+    }
+    if b.info.better_than(&a.info) {
+        return false;
+    }
+    // Same PathInfo: deterministically prefer the smaller predecessor key.
+    prev_tie_key(&a.prev) < prev_tie_key(&b.prev)
+}
+
+fn format_instance_id(
+    module: &NetlistModule,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    inst: InstIndex,
+) -> String {
+    let i = &module.instances[inst.0];
+    let inst_name = resolve_to_string(interner, i.instance_name);
+    let cell_name = resolve_to_string(interner, i.type_name);
+    format!("{}({})", inst_name, cell_name)
+}
+
+fn build_instance_path_for_net(
+    module: &NetlistModule,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    net_traces: &[Option<NetTrace>],
+    sink_net: NetIndex,
+) -> Vec<String> {
+    let mut out_rev: Vec<String> = Vec::new();
+    let mut cur = Some(sink_net);
+    // Bound the traversal to avoid accidental infinite loops if invariants are
+    // violated.
+    for _ in 0..(module.instances.len() + 1) {
+        let Some(net_idx) = cur else {
+            break;
+        };
+        let Some(trace) = &net_traces[net_idx.0] else {
+            break;
+        };
+        match &trace.prev {
+            None => break,
+            Some(TracePrev::InstOut { inst, input_net }) => {
+                out_rev.push(format_instance_id(module, interner, *inst));
+                cur = *input_net;
+            }
+        }
+    }
+    out_rev.reverse();
+    out_rev
+}
+
+fn maybe_update_max_example(
+    max_examples: &mut BTreeMap<LevelsCategory, LevelsMaxExample>,
+    cat: LevelsCategory,
+    depth: u32,
+    sink: String,
+    instance_path: Vec<String>,
+) {
+    match max_examples.get(&cat) {
+        None => {
+            max_examples.insert(
+                cat,
+                LevelsMaxExample {
+                    depth,
+                    sink,
+                    instance_path,
+                },
+            );
+        }
+        Some(existing) => {
+            if depth > existing.depth
+                || (depth == existing.depth
+                    && (sink < existing.sink
+                        || (sink == existing.sink && instance_path < existing.instance_path)))
+            {
+                max_examples.insert(
+                    cat,
+                    LevelsMaxExample {
+                        depth,
+                        sink,
+                        instance_path,
+                    },
+                );
+            }
+        }
+    }
+}
+
 /// Computes per-category depth histograms for the given module.
 pub fn compute_levels(
     module: &NetlistModule,
@@ -166,8 +301,9 @@ pub fn compute_levels(
 
     let num_dff_instances = is_dff_inst.iter().filter(|v| **v).count();
 
-    // Seed per-net path info with boundaries.
-    let mut net_info: Vec<Option<PathInfo>> = vec![None; nets.len()];
+    // Seed per-net path info with boundaries, plus predecessor information for
+    // reconstructing example max-depth paths.
+    let mut net_traces: Vec<Option<NetTrace>> = vec![None; nets.len()];
 
     // Module inputs are start boundaries.
     for port in &module.ports {
@@ -181,13 +317,17 @@ pub fn compute_levels(
             depth: 0,
             origin: OriginKind::Input,
         };
-        match &mut net_info[net_idx.0] {
+        let candidate_trace = NetTrace {
+            info: candidate,
+            prev: None,
+        };
+        match &mut net_traces[net_idx.0] {
             Some(existing) => {
-                if candidate.better_than(existing) {
-                    *existing = candidate;
+                if trace_better_than(&candidate_trace, existing) {
+                    *existing = candidate_trace;
                 }
             }
-            None => net_info[net_idx.0] = Some(candidate),
+            None => net_traces[net_idx.0] = Some(candidate_trace),
         }
     }
 
@@ -205,14 +345,18 @@ pub fn compute_levels(
                 depth: 0,
                 origin: OriginKind::Reg,
             };
+            let candidate_trace = NetTrace {
+                info: candidate,
+                prev: None,
+            };
             for net_idx in &port.nets {
-                match &mut net_info[net_idx.0] {
+                match &mut net_traces[net_idx.0] {
                     Some(existing) => {
-                        if candidate.better_than(existing) {
-                            *existing = candidate;
+                        if trace_better_than(&candidate_trace, existing) {
+                            *existing = candidate_trace.clone();
                         }
                     }
-                    None => net_info[net_idx.0] = Some(candidate),
+                    None => net_traces[net_idx.0] = Some(candidate_trace.clone()),
                 }
             }
         }
@@ -277,28 +421,37 @@ pub fn compute_levels(
         processed_comb += 1;
 
         // Best input path among this combinational instance's inputs.
-        let mut best = PathInfo {
-            depth: 0,
-            origin: OriginKind::Other,
-        };
+        let mut best = default_trace();
+        let mut best_input_net: Option<NetIndex> = None;
         for port in conn.instance_ports(inst_idx, interner) {
             if port.dir != PinDirection::Input {
                 continue;
             }
-            for net_idx in &port.nets {
-                let candidate = net_info[net_idx.0].unwrap_or(PathInfo {
-                    depth: 0,
-                    origin: OriginKind::Other,
-                });
-                if candidate.better_than(&best) {
+            let mut nets_sorted = port.nets.clone();
+            nets_sorted.sort_by_key(|n| n.0);
+            for net_idx in &nets_sorted {
+                let candidate = net_traces[net_idx.0].clone().unwrap_or_else(default_trace);
+                if trace_better_than(&candidate, &best)
+                    || (candidate.info.depth == best.info.depth
+                        && candidate.info.origin == best.info.origin
+                        && (best_input_net.is_none()
+                            || net_idx.0 < best_input_net.expect("checked").0))
+                {
                     best = candidate;
+                    best_input_net = Some(*net_idx);
                 }
             }
         }
 
-        let out = PathInfo {
-            depth: best.depth + 1,
-            origin: best.origin,
+        let out_trace = NetTrace {
+            info: PathInfo {
+                depth: best.info.depth + 1,
+                origin: best.info.origin,
+            },
+            prev: Some(TracePrev::InstOut {
+                inst: inst_idx,
+                input_net: best_input_net,
+            }),
         };
 
         for port in conn.instance_ports(inst_idx, interner) {
@@ -306,13 +459,13 @@ pub fn compute_levels(
                 continue;
             }
             for net_idx in &port.nets {
-                match &mut net_info[net_idx.0] {
+                match &mut net_traces[net_idx.0] {
                     Some(existing) => {
-                        if out.better_than(existing) {
-                            *existing = out;
+                        if trace_better_than(&out_trace, existing) {
+                            *existing = out_trace.clone();
                         }
                     }
-                    None => net_info[net_idx.0] = Some(out),
+                    None => net_traces[net_idx.0] = Some(out_trace.clone()),
                 }
             }
         }
@@ -349,6 +502,7 @@ pub fn compute_levels(
 
     // Build histograms for sinks.
     let mut histograms: BTreeMap<LevelsCategory, BTreeMap<u32, u64>> = BTreeMap::new();
+    let mut max_examples: BTreeMap<LevelsCategory, LevelsMaxExample> = BTreeMap::new();
 
     // DFF sink samples: one per DFF instance (max over input pins).
     for (inst_idx_raw, _inst) in module.instances.iter().enumerate() {
@@ -356,30 +510,39 @@ pub fn compute_levels(
             continue;
         }
         let inst_idx = InstIndex(inst_idx_raw);
-        let mut best = PathInfo {
-            depth: 0,
-            origin: OriginKind::Other,
-        };
+        let mut best = default_trace();
+        let mut best_sink_net: Option<NetIndex> = None;
         for port in conn.instance_ports(inst_idx, interner) {
             if port.dir != PinDirection::Input {
                 continue;
             }
-            for net_idx in &port.nets {
-                let candidate = net_info[net_idx.0].unwrap_or(PathInfo {
-                    depth: 0,
-                    origin: OriginKind::Other,
-                });
-                if candidate.better_than(&best) {
+            let mut nets_sorted = port.nets.clone();
+            nets_sorted.sort_by_key(|n| n.0);
+            for net_idx in &nets_sorted {
+                let candidate = net_traces[net_idx.0].clone().unwrap_or_else(default_trace);
+                if trace_better_than(&candidate, &best)
+                    || (candidate.info.depth == best.info.depth
+                        && candidate.info.origin == best.info.origin
+                        && (best_sink_net.is_none()
+                            || net_idx.0 < best_sink_net.expect("checked").0))
+                {
                     best = candidate;
+                    best_sink_net = Some(*net_idx);
                 }
             }
         }
-        let cat = if matches!(best.origin, OriginKind::Reg) {
+        let cat = if matches!(best.info.origin, OriginKind::Reg) {
             LevelsCategory::RegToReg
         } else {
             LevelsCategory::InputToReg
         };
-        add_hist_sample(&mut histograms, cat, best.depth);
+        add_hist_sample(&mut histograms, cat, best.info.depth);
+        let inst_name = resolve_to_string(interner, module.instances[inst_idx_raw].instance_name);
+        let sink = format!("inst:{}", inst_name);
+        let instance_path = best_sink_net
+            .map(|n| build_instance_path_for_net(module, interner, &net_traces, n))
+            .unwrap_or_default();
+        maybe_update_max_example(&mut max_examples, cat, best.info.depth, sink, instance_path);
     }
 
     // Output port samples: one per module output port.
@@ -392,16 +555,17 @@ pub fn compute_levels(
         let Some(net_idx) = net_index_by_sym.get(&port.name).copied() else {
             continue;
         };
-        let best = net_info[net_idx.0].unwrap_or(PathInfo {
-            depth: 0,
-            origin: OriginKind::Other,
-        });
-        let cat = if matches!(best.origin, OriginKind::Reg) {
+        let best = net_traces[net_idx.0].clone().unwrap_or_else(default_trace);
+        let cat = if matches!(best.info.origin, OriginKind::Reg) {
             LevelsCategory::RegToOutput
         } else {
             LevelsCategory::InputToOutput
         };
-        add_hist_sample(&mut histograms, cat, best.depth);
+        add_hist_sample(&mut histograms, cat, best.info.depth);
+        let port_name = resolve_to_string(interner, port.name);
+        let sink = format!("port:{}", port_name);
+        let instance_path = build_instance_path_for_net(module, interner, &net_traces, net_idx);
+        maybe_update_max_example(&mut max_examples, cat, best.info.depth, sink, instance_path);
     }
 
     Ok(LevelsReport {
@@ -409,6 +573,7 @@ pub fn compute_levels(
         num_instances: module.instances.len(),
         num_dff_instances,
         num_output_ports,
+        max_examples,
     })
 }
 
