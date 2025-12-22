@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ir;
+use crate::ir::NodePayload as P;
 use crate::ir_utils::get_topological;
 use xlsynth::{IrBits, IrValue};
 
@@ -60,6 +61,59 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     let r = lhs_bits.umul(&rhs_bits);
                     IrValue::from_bits(&r)
+                }
+                ir::Binop::Uge => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.uge(&rhs_bits))
+                }
+                ir::Binop::Ugt => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.ugt(&rhs_bits))
+                }
+                ir::Binop::Ult => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.ult(&rhs_bits))
+                }
+                ir::Binop::Ule => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.ule(&rhs_bits))
+                }
+                ir::Binop::Sgt => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.sgt(&rhs_bits))
+                }
+                ir::Binop::Sge => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.sge(&rhs_bits))
+                }
+                ir::Binop::Slt => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.slt(&rhs_bits))
+                }
+                ir::Binop::Sle => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.sle(&rhs_bits))
+                }
+                ir::Binop::Gate => {
+                    // XLS `gate`: when predicate is false, returns all-zero value.
+                    // Predicate is expected to be bits[1].
+                    let pred = lhs_value.to_bool().expect("gate predicate must be bits[1]");
+                    if pred {
+                        rhs_value.clone()
+                    } else {
+                        let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                        let zeros: Vec<bool> = vec![false; rhs_bits.get_bit_count()];
+                        let out = IrBits::from_lsb_is_0(&zeros);
+                        IrValue::from_bits(&out)
+                    }
                 }
                 _ => panic!("Unsupported binop: {:?}", binop),
             }
@@ -330,7 +384,22 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     let r = acc.not();
                     IrValue::from_bits(&r)
                 }
-                ir::NaryOp::Concat => panic!("Unsupported nary op: concat"),
+                ir::NaryOp::Concat => {
+                    // XLS concat semantics: concat(x0, x1, ..., xn-1) places x0 in the MSBs and
+                    // xn-1 in the LSBs.
+                    //
+                    // Our `IrBits` is indexed with LSB at bit 0, so we build the output bits
+                    // vector by appending operands in reverse order.
+                    let mut out: Vec<bool> = Vec::new();
+                    for operand in operands.iter().rev() {
+                        let bits: IrBits = env.get(operand).unwrap().to_bits().unwrap();
+                        for i in 0..bits.get_bit_count() {
+                            out.push(bits.get_bit(i).unwrap());
+                        }
+                    }
+                    let out_bits = IrBits::from_lsb_is_0(&out);
+                    IrValue::from_bits(&out_bits)
+                }
             }
         }
         ir::NodePayload::PrioritySel {
@@ -604,6 +673,148 @@ pub enum FnEvalResult {
     Failure(FnEvalFailure),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SelectKind {
+    CaseIndex,
+    Default,
+    NoCaseSelected,
+}
+
+/// Observed selection decision for select-like nodes (`sel`, `priority_sel`,
+/// `one_hot_sel`).
+///
+/// `selected_index` is meaningful only for `CaseIndex`; for other kinds it is
+/// set to `usize::MAX` as a sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectEvent {
+    pub node_ref: ir::NodeRef,
+    pub node_text_id: usize,
+    pub select_kind: SelectKind,
+    pub selected_index: usize,
+}
+
+pub trait EvalObserver {
+    fn on_select(&mut self, ev: SelectEvent);
+}
+
+fn observe_select_like_node(
+    nr: ir::NodeRef,
+    node: &ir::Node,
+    env: &HashMap<ir::NodeRef, IrValue>,
+    observer: &mut dyn EvalObserver,
+) {
+    match &node.payload {
+        P::Sel {
+            selector,
+            cases,
+            default,
+        } => {
+            assert!(!cases.is_empty(), "Sel must have at least one case");
+            let sel_bits: IrBits = env
+                .get(selector)
+                .expect("Sel selector must be evaluated")
+                .to_bits()
+                .expect("Sel selector must be bits");
+            let sel_w = sel_bits.get_bit_count();
+
+            let mut chosen = SelectEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                select_kind: if default.is_some() {
+                    SelectKind::Default
+                } else {
+                    // No explicit default: XLS semantics use the last case as an implicit default.
+                    SelectKind::Default
+                },
+                selected_index: usize::MAX,
+            };
+
+            // Iterate cases in reverse and select when selector == index.
+            for (i, _case_ref) in cases.iter().enumerate().rev() {
+                let idx_bits = if sel_w == 0 {
+                    IrBits::make_ubits(0, 0).unwrap()
+                } else {
+                    IrBits::make_ubits(sel_w, i as u64).unwrap()
+                };
+                if sel_bits.equals(&idx_bits) {
+                    chosen.select_kind = SelectKind::CaseIndex;
+                    chosen.selected_index = i;
+                }
+            }
+            observer.on_select(chosen);
+        }
+        P::PrioritySel {
+            selector,
+            cases,
+            default,
+        } => {
+            // `eval_pure` requires a default arm; keep the same invariant here.
+            default.expect("PrioritySel requires a default value");
+            let sel_bits: IrBits = env
+                .get(selector)
+                .expect("PrioritySel selector must be evaluated")
+                .to_bits()
+                .expect("PrioritySel selector must be bits");
+            let sel_w = sel_bits.get_bit_count();
+
+            let mut chosen = SelectEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                select_kind: SelectKind::Default,
+                selected_index: usize::MAX,
+            };
+
+            // Highest index has lowest priority; index 0 has highest priority.
+            for (idx, _case_ref) in cases.iter().enumerate().rev() {
+                if idx < sel_w {
+                    let bit_set = sel_bits.get_bit(idx).expect("selector bit in range");
+                    if bit_set {
+                        chosen.select_kind = SelectKind::CaseIndex;
+                        chosen.selected_index = idx;
+                    }
+                }
+            }
+            observer.on_select(chosen);
+        }
+        P::OneHotSel { selector, cases } => {
+            assert!(!cases.is_empty(), "OneHotSel must have at least one case");
+            let sel_bits: IrBits = env
+                .get(selector)
+                .expect("OneHotSel selector must be evaluated")
+                .to_bits()
+                .expect("OneHotSel selector must be bits");
+            let sel_w = sel_bits.get_bit_count();
+
+            let mut any = false;
+            for (i, _case_ref) in cases.iter().enumerate() {
+                let bit_set = if i < sel_w {
+                    sel_bits.get_bit(i).expect("selector bit in range")
+                } else {
+                    false
+                };
+                if bit_set {
+                    any = true;
+                    observer.on_select(SelectEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        select_kind: SelectKind::CaseIndex,
+                        selected_index: i,
+                    });
+                }
+            }
+            if !any {
+                observer.on_select(SelectEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    select_kind: SelectKind::NoCaseSelected,
+                    selected_index: usize::MAX,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Evaluates an IR function by visiting nodes in topological order.
 ///
 /// - Produces `TraceMessage`s for `trace` nodes whose `activated` predicate is
@@ -611,7 +822,11 @@ pub enum FnEvalResult {
 /// - Records `AssertionFailure`s for `assert` nodes whose `activate` predicate
 ///   is true.
 /// - Returns the value of the function's return node on success.
-pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
+pub fn eval_fn_with_observer(
+    f: &ir::Fn,
+    args: &[IrValue],
+    mut observer: Option<&mut dyn EvalObserver>,
+) -> FnEvalResult {
     assert_eq!(
         args.len(),
         f.params.len(),
@@ -631,7 +846,6 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
 
     for nr in get_topological(f) {
         let node = f.get_node(nr);
-        use ir::NodePayload as P;
         let value: IrValue = match &node.payload {
             P::Nil => {
                 // Reserved zero node: produce the unit tuple value.
@@ -889,7 +1103,12 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                     }
                 }
             }
-            _ => eval_pure(node, &env),
+            _ => {
+                if let Some(obs) = observer.as_deref_mut() {
+                    observe_select_like_node(nr, node, &env, obs);
+                }
+                eval_pure(node, &env)
+            }
         };
         // Coerce only for specific nodes where a wider internal computation is
         // permitted by semantics but the annotated type narrows (e.g. smul/umul,
@@ -955,11 +1174,31 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
     }
 }
 
+pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
+    eval_fn_with_observer(f, args, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ir_parser::Parser;
     use maplit::hashmap;
+
+    struct RecordingObserver {
+        events: Vec<SelectEvent>,
+    }
+
+    impl RecordingObserver {
+        fn new() -> Self {
+            Self { events: Vec::new() }
+        }
+    }
+
+    impl EvalObserver for RecordingObserver {
+        fn on_select(&mut self, ev: SelectEvent) {
+            self.events.push(ev);
+        }
+    }
 
     #[test]
     fn test_eval_pure_literal() {
@@ -1202,6 +1441,27 @@ mod tests {
         };
         let v: IrValue = eval_pure(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1111).unwrap());
+    }
+
+    #[test]
+    fn test_eval_pure_nary_concat_places_first_operand_in_msbs() {
+        // concat(a, b) where a=0b10 (2 bits) and b=0b01 (2 bits) => 0b1001.
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => IrValue::make_ubits(2, 0b10).unwrap(),
+            ir::NodeRef { index: 2 } => IrValue::make_ubits(2, 0b01).unwrap(),
+        );
+        let n = ir::Node {
+            text_id: 8,
+            name: None,
+            ty: ir::Type::Bits(4),
+            payload: ir::NodePayload::Nary(
+                ir::NaryOp::Concat,
+                vec![ir::NodeRef { index: 1 }, ir::NodeRef { index: 2 }],
+            ),
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, IrValue::make_ubits(4, 0b1001).unwrap());
     }
 
     #[test]
@@ -1451,6 +1711,84 @@ fn f(x: bits[1] id=1) -> bits[1] {
             }
             other => panic!("unexpected result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_eval_fn_with_observer_none_matches_eval_fn() {
+        let ir_text = r#"package test
+
+fn f(selidx: bits[2] id=1, prio: bits[2] id=2, oh: bits[3] id=3, a: bits[8] id=4, b: bits[8] id=5, c: bits[8] id=6, d: bits[8] id=7) -> (bits[8], bits[8], bits[8]) {
+  s: bits[8] = sel(selidx, cases=[a, b, c], default=d, id=10)
+  p: bits[8] = priority_sel(prio, cases=[a, b], default=d, id=11)
+  o: bits[8] = one_hot_sel(oh, cases=[a, b, c], id=12)
+  ret t: (bits[8], bits[8], bits[8]) = tuple(s, p, o, id=13)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        let args = [
+            IrValue::make_ubits(2, 1).unwrap(),     // selidx -> case 1
+            IrValue::make_ubits(2, 2).unwrap(),     // prio bit1 set -> case 1
+            IrValue::make_ubits(3, 0b101).unwrap(), // onehot bits 0 and 2 set
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 20).unwrap(),
+            IrValue::make_ubits(8, 30).unwrap(),
+            IrValue::make_ubits(8, 40).unwrap(),
+        ];
+
+        let r0 = eval_fn(&f, &args);
+        let r1 = eval_fn_with_observer(&f, &args, None);
+        assert_eq!(r0, r1);
+    }
+
+    #[test]
+    fn test_select_observer_emits_expected_events() {
+        let ir_text = r#"package test
+
+fn f(selidx: bits[2] id=1, prio: bits[2] id=2, oh: bits[3] id=3, a: bits[8] id=4, b: bits[8] id=5, c: bits[8] id=6, d: bits[8] id=7) -> (bits[8], bits[8], bits[8]) {
+  s: bits[8] = sel(selidx, cases=[a, b, c], default=d, id=10)
+  p: bits[8] = priority_sel(prio, cases=[a, b], default=d, id=11)
+  o: bits[8] = one_hot_sel(oh, cases=[a, b, c], id=12)
+  ret t: (bits[8], bits[8], bits[8]) = tuple(s, p, o, id=13)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        let args = [
+            IrValue::make_ubits(2, 1).unwrap(),     // selidx -> case 1
+            IrValue::make_ubits(2, 2).unwrap(),     // prio bit1 set -> case 1
+            IrValue::make_ubits(3, 0b101).unwrap(), // onehot bits 0 and 2 set
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 20).unwrap(),
+            IrValue::make_ubits(8, 30).unwrap(),
+            IrValue::make_ubits(8, 40).unwrap(),
+        ];
+
+        let mut obs = RecordingObserver::new();
+        let _ = eval_fn_with_observer(&f, &args, Some(&mut obs));
+
+        let got: Vec<(usize, SelectKind, usize)> = obs
+            .events
+            .iter()
+            .map(|e| (e.node_text_id, e.select_kind, e.selected_index))
+            .collect();
+        let want: Vec<(usize, SelectKind, usize)> = vec![
+            (10, SelectKind::CaseIndex, 1),
+            (11, SelectKind::CaseIndex, 1),
+            (12, SelectKind::CaseIndex, 0),
+            (12, SelectKind::CaseIndex, 2),
+        ];
+        assert_eq!(got, want);
     }
 
     #[test]

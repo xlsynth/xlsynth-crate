@@ -68,6 +68,59 @@ pub fn ir_value_from_bits_with_type(bits: &IrBits, ty: &ir::Type) -> IrValue {
     }
 }
 
+pub fn ir_bits_from_value_with_type(value: &IrValue, ty: &ir::Type) -> IrBits {
+    match ty {
+        ir::Type::Bits(width) => {
+            let bits = value.to_bits().expect("bits value must be bits");
+            assert_eq!(
+                bits.get_bit_count(),
+                *width,
+                "bits width mismatch: expected {} got {}",
+                width,
+                bits.get_bit_count()
+            );
+            bits
+        }
+        ir::Type::Array(array_ty) => {
+            let elements = value.get_elements().expect("array value must be array");
+            assert_eq!(
+                elements.len(),
+                array_ty.element_count,
+                "array length mismatch: expected {} got {}",
+                array_ty.element_count,
+                elements.len()
+            );
+            let mut out: Vec<bool> = Vec::with_capacity(ty.bit_count());
+            for elem in elements.iter() {
+                let elem_bits = ir_bits_from_value_with_type(elem, &array_ty.element_type);
+                for i in 0..elem_bits.get_bit_count() {
+                    out.push(elem_bits.get_bit(i).unwrap());
+                }
+            }
+            IrBits::from_lsb_is_0(&out)
+        }
+        ir::Type::Tuple(types) => {
+            let elements = value.get_elements().expect("tuple value must be tuple");
+            assert_eq!(
+                elements.len(),
+                types.len(),
+                "tuple arity mismatch: expected {} got {}",
+                types.len(),
+                elements.len()
+            );
+            let mut out: Vec<bool> = Vec::with_capacity(ty.bit_count());
+            for (elem, elem_ty) in elements.iter().zip(types.iter()) {
+                let elem_bits = ir_bits_from_value_with_type(elem, elem_ty);
+                for i in 0..elem_bits.get_bit_count() {
+                    out.push(elem_bits.get_bit(i).unwrap());
+                }
+            }
+            IrBits::from_lsb_is_0(&out)
+        }
+        ir::Type::Token => IrBits::make_ubits(0, 0).unwrap(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +225,26 @@ mod tests {
         let ir = IrBits::from_msb_is_0(&bits);
         assert_eq!(ir, IrBits::make_ubits(0, 0).unwrap());
         assert_eq!(ir.get_bit_count(), 0);
+    }
+
+    #[test]
+    fn test_ir_bits_from_value_with_type_round_trips_tuple_and_array() {
+        let ty = ir::Type::Tuple(vec![
+            Box::new(ir::Type::Bits(4)),
+            Box::new(ir::Type::new_array(ir::Type::Bits(2), 3)),
+        ]);
+        let v = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 0b1010).unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(2, 0).unwrap(),
+                IrValue::make_ubits(2, 1).unwrap(),
+                IrValue::make_ubits(2, 2).unwrap(),
+            ])
+            .unwrap(),
+        ]);
+        let bits = ir_bits_from_value_with_type(&v, &ty);
+        assert_eq!(bits.get_bit_count(), ty.bit_count());
+        let v2 = ir_value_from_bits_with_type(&bits, &ty);
+        assert_eq!(v2, v);
     }
 }
