@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::thread::JoinHandle;
 
 use blake3::Hasher;
 use rand::rngs::StdRng;
@@ -59,24 +64,47 @@ pub struct MuxNodeSpace {
     pub kind: MuxNodeKind,
     pub cases_len: usize,
     pub has_default: bool,
+    pub selector_bit_count: Option<usize>,
 }
 
 impl MuxNodeSpace {
     pub fn feature_possibilities(&self) -> usize {
         match self.kind {
-            // CaseIndex(i) for each case, plus Default.
-            MuxNodeKind::Sel | MuxNodeKind::PrioritySel => self.cases_len + 1,
-            // CaseIndex(i) for each case, plus NoCaseSelected.
-            MuxNodeKind::OneHotSel => self.cases_len + 1,
+            MuxNodeKind::Sel => {
+                let w = self.selector_bit_count.unwrap_or(0);
+                let space: usize = if w >= (usize::BITS as usize) {
+                    usize::MAX
+                } else {
+                    1usize << w
+                };
+                let reachable_cases = std::cmp::min(self.cases_len, space);
+                let out_of_range_possible = space > self.cases_len;
+                let default_possible = out_of_range_possible;
+                reachable_cases + (default_possible as usize)
+            }
+            MuxNodeKind::PrioritySel => {
+                let w = self.selector_bit_count.unwrap_or(0);
+                let reachable_cases = std::cmp::min(self.cases_len, w);
+                reachable_cases + 1
+            }
+            MuxNodeKind::OneHotSel => {
+                let w = self.selector_bit_count.unwrap_or(0);
+                let reachable_cases = std::cmp::min(self.cases_len, w);
+                reachable_cases + 1
+            }
         }
     }
 
     pub fn log10_path_possibilities_upper_bound(&self) -> f64 {
         match self.kind {
-            // One event per select: CaseIndex(i) or Default.
-            MuxNodeKind::Sel | MuxNodeKind::PrioritySel => (self.cases_len as f64 + 1.0).log10(),
-            // A subset of cases may be selected.
-            MuxNodeKind::OneHotSel => (self.cases_len as f64) * std::f64::consts::LOG10_2,
+            MuxNodeKind::Sel | MuxNodeKind::PrioritySel => {
+                (self.feature_possibilities() as f64).log10()
+            }
+            MuxNodeKind::OneHotSel => {
+                let w = self.selector_bit_count.unwrap_or(0);
+                let reachable_cases = std::cmp::min(self.cases_len, w);
+                (reachable_cases as f64) * std::f64::consts::LOG10_2
+            }
         }
     }
 }
@@ -148,58 +176,58 @@ struct Observations {
     path_new: bool,
 }
 
-#[derive(Debug)]
-struct MuxObserver<'a> {
-    mux_map: &'a mut FeatureMap64k,
-    path_map: &'a mut FeatureMap64k,
-    path_hasher: Hasher,
-    mux_new: bool,
-    path_new: bool,
+#[derive(Debug, Clone)]
+struct CandidateFeatures {
+    mux_indices: Vec<usize>,
+    path_index: usize,
 }
 
-impl<'a> MuxObserver<'a> {
-    fn new(mux_map: &'a mut FeatureMap64k, path_map: &'a mut FeatureMap64k) -> Self {
+fn mux_feature_hash(f: &MuxFeature) -> blake3::Hash {
+    let mut hasher = Hasher::new();
+    hasher.update(b"xlsynth-autocov:mux");
+    hasher.update(&f.node_id.to_le_bytes());
+    hasher.update(&[match f.select_kind {
+        MuxSelectKind::CaseIndex => 0,
+        MuxSelectKind::Default => 1,
+        MuxSelectKind::NoCaseSelected => 2,
+    }]);
+    hasher.update(&f.selected_index.to_le_bytes());
+    hasher.finalize()
+}
+
+fn hash_mux_feature(f: &MuxFeature) -> usize {
+    let h = mux_feature_hash(f);
+    u16::from_le_bytes([h.as_bytes()[0], h.as_bytes()[1]]) as usize
+}
+
+#[derive(Debug)]
+struct CollectingMuxObserver {
+    mux_indices: Vec<usize>,
+    path_hasher: Hasher,
+}
+
+impl CollectingMuxObserver {
+    fn new() -> Self {
         let mut path_hasher = Hasher::new();
         path_hasher.update(b"xlsynth-autocov:path");
         Self {
-            mux_map,
-            path_map,
+            mux_indices: Vec::new(),
             path_hasher,
-            mux_new: false,
-            path_new: false,
         }
     }
 
-    fn finish(mut self) -> Observations {
+    fn finish(self) -> CandidateFeatures {
         let path_hash = self.path_hasher.finalize();
-        let idx = u16::from_le_bytes([path_hash.as_bytes()[0], path_hash.as_bytes()[1]]) as usize;
-        self.path_new |= self.path_map.observe_index(idx);
-        Observations {
-            mux_new: self.mux_new,
-            path_new: self.path_new,
+        let path_index =
+            u16::from_le_bytes([path_hash.as_bytes()[0], path_hash.as_bytes()[1]]) as usize;
+        CandidateFeatures {
+            mux_indices: self.mux_indices,
+            path_index,
         }
-    }
-
-    fn mux_feature_hash(f: &MuxFeature) -> blake3::Hash {
-        let mut hasher = Hasher::new();
-        hasher.update(b"xlsynth-autocov:mux");
-        hasher.update(&f.node_id.to_le_bytes());
-        hasher.update(&[match f.select_kind {
-            MuxSelectKind::CaseIndex => 0,
-            MuxSelectKind::Default => 1,
-            MuxSelectKind::NoCaseSelected => 2,
-        }]);
-        hasher.update(&f.selected_index.to_le_bytes());
-        hasher.finalize()
-    }
-
-    fn hash_mux_feature(f: &MuxFeature) -> usize {
-        let h = Self::mux_feature_hash(f);
-        u16::from_le_bytes([h.as_bytes()[0], h.as_bytes()[1]]) as usize
     }
 }
 
-impl EvalObserver for MuxObserver<'_> {
+impl EvalObserver for CollectingMuxObserver {
     fn on_select(&mut self, ev: SelectEvent) {
         let selected_index_u16 = if ev.select_kind == SelectKind::CaseIndex {
             u16::try_from(ev.selected_index).unwrap_or(u16::MAX)
@@ -213,8 +241,8 @@ impl EvalObserver for MuxObserver<'_> {
             selected_index: selected_index_u16,
         };
 
-        let idx = Self::hash_mux_feature(&feature);
-        self.mux_new |= self.mux_map.observe_index(idx);
+        let idx = hash_mux_feature(&feature);
+        self.mux_indices.push(idx);
 
         // Path hash is the concatenation of the mux features in observation order.
         self.path_hasher.update(&feature.node_id.to_le_bytes());
@@ -240,6 +268,7 @@ pub struct AutocovEngine {
     path_map: FeatureMap64k,
 
     corpus: Vec<IrBits>,
+    corpus_hashes: BTreeSet<[u8; 32]>,
 }
 
 impl AutocovEngine {
@@ -287,6 +316,7 @@ impl AutocovEngine {
             mux_map: FeatureMap64k::new(),
             path_map: FeatureMap64k::new(),
             corpus: Vec::new(),
+            corpus_hashes: BTreeSet::new(),
         })
     }
 
@@ -309,11 +339,48 @@ impl AutocovEngine {
             ));
         }
         let bits = ir_bits_from_value_with_type(tuple_value, &self.args_tuple_type);
+        if !self.insert_corpus_hash(&bits) {
+            return Ok(());
+        }
         // Seed feature maps from the existing corpus so subsequent runs don't
         // treat already-covered paths/features as novel.
-        let _ = self.evaluate_candidate(&bits);
+        let features = self.evaluate_candidate_features(&bits);
+        self.apply_candidate_features(&features);
         self.corpus.push(bits);
         Ok(())
+    }
+
+    pub fn seed_structured_corpus<'a>(
+        &mut self,
+        two_hot_max_bits: usize,
+        sink: Option<&'a mut (dyn CorpusSink + 'a)>,
+    ) -> usize {
+        let sink_ptr: Option<*mut (dyn CorpusSink + 'a)> =
+            sink.map(|s| s as *mut (dyn CorpusSink + 'a));
+
+        let mut added = 0usize;
+        let n = self.args_bit_count;
+
+        // Always seed all-zeros and all-ones.
+        added += self.force_add_seed_bits(self.make_all_zeros_bits(), sink_ptr) as usize;
+        added += self.force_add_seed_bits(self.make_all_ones_bits(), sink_ptr) as usize;
+
+        // One-hot.
+        for i in 0..n {
+            added += self.force_add_seed_bits(self.make_one_hot_bits(i), sink_ptr) as usize;
+        }
+
+        // Two-hot (can be quadratic).
+        if n <= two_hot_max_bits {
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    added +=
+                        self.force_add_seed_bits(self.make_two_hot_bits(i, j), sink_ptr) as usize;
+                }
+            }
+        }
+
+        added
     }
 
     pub fn get_mux_space_summary(&self) -> MuxSpaceSummary {
@@ -322,35 +389,50 @@ impl AutocovEngine {
             let n = self.f.get_node(nr);
             match &n.payload {
                 ir::NodePayload::Sel {
-                    selector: _,
+                    selector,
                     cases,
                     default,
                 } => {
+                    let selector_bit_count = match self.f.get_node_ty(*selector) {
+                        ir::Type::Bits(w) => Some(*w),
+                        _ => None,
+                    };
                     muxes.push(MuxNodeSpace {
                         node_text_id: n.text_id,
                         kind: MuxNodeKind::Sel,
                         cases_len: cases.len(),
                         has_default: default.is_some(),
+                        selector_bit_count,
                     });
                 }
                 ir::NodePayload::PrioritySel {
-                    selector: _,
+                    selector,
                     cases,
                     default,
                 } => {
+                    let selector_bit_count = match self.f.get_node_ty(*selector) {
+                        ir::Type::Bits(w) => Some(*w),
+                        _ => None,
+                    };
                     muxes.push(MuxNodeSpace {
                         node_text_id: n.text_id,
                         kind: MuxNodeKind::PrioritySel,
                         cases_len: cases.len(),
                         has_default: default.is_some(),
+                        selector_bit_count,
                     });
                 }
-                ir::NodePayload::OneHotSel { selector: _, cases } => {
+                ir::NodePayload::OneHotSel { selector, cases } => {
+                    let selector_bit_count = match self.f.get_node_ty(*selector) {
+                        ir::Type::Bits(w) => Some(*w),
+                        _ => None,
+                    };
                     muxes.push(MuxNodeSpace {
                         node_text_id: n.text_id,
                         kind: MuxNodeKind::OneHotSel,
                         cases_len: cases.len(),
                         has_default: false,
+                        selector_bit_count,
                     });
                 }
                 _ => {}
@@ -406,8 +488,8 @@ impl AutocovEngine {
             }
 
             let cand = self.generate_proposal();
-            let obs = self.evaluate_candidate(&cand);
-            let added = self.maybe_add_to_corpus(cand, obs, sink_ptr);
+            let features = self.evaluate_candidate_features(&cand);
+            let added = self.maybe_add_to_corpus(cand, &features, sink_ptr);
 
             if let Some(p_ptr) = progress_ptr {
                 let should_report = added
@@ -431,6 +513,188 @@ impl AutocovEngine {
 
         AutocovReport {
             iters,
+            corpus_len: self.corpus.len(),
+            mux_features_set: self.mux_map.set_count(),
+            path_features_set: self.path_map.set_count(),
+        }
+    }
+
+    pub fn run_parallel_with_sinks<'a>(
+        &mut self,
+        threads: usize,
+        sink: Option<&'a mut (dyn CorpusSink + 'a)>,
+        progress: Option<&'a mut (dyn ProgressSink + 'a)>,
+        progress_every_iters: Option<u64>,
+    ) -> AutocovReport {
+        assert!(threads > 0, "threads must be > 0");
+        let sink_ptr: Option<*mut (dyn CorpusSink + 'a)> =
+            sink.map(|s| s as *mut (dyn CorpusSink + 'a));
+        let progress_ptr: Option<*mut (dyn ProgressSink + 'a)> =
+            progress.map(|p| p as *mut (dyn ProgressSink + 'a));
+
+        #[derive(Debug)]
+        struct WorkItem {
+            seq: u64,
+            bits: IrBits,
+        }
+
+        #[derive(Debug)]
+        struct WorkResult {
+            seq: u64,
+            bits: IrBits,
+            features: CandidateFeatures,
+        }
+
+        let work_cap = std::cmp::max(threads * 4, 16);
+        let (work_tx, work_rx): (SyncSender<WorkItem>, Receiver<WorkItem>) = sync_channel(work_cap);
+        let (res_tx, res_rx) = sync_channel::<WorkResult>(work_cap);
+
+        let f = Arc::new(self.f.clone());
+        let args_tuple_type = Arc::new(self.args_tuple_type.clone());
+        let work_rx = Arc::new(Mutex::new(work_rx));
+
+        fn spawn_worker(
+            f: Arc<ir::Fn>,
+            args_tuple_type: Arc<ir::Type>,
+            work_rx: Arc<Mutex<Receiver<WorkItem>>>,
+            res_tx: SyncSender<WorkResult>,
+        ) -> JoinHandle<()> {
+            std::thread::spawn(move || {
+                loop {
+                    let item = {
+                        let rx = work_rx.lock().unwrap();
+                        rx.recv()
+                    };
+                    let item = match item {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
+                    let features = {
+                        let tuple_value =
+                            ir_value_from_bits_with_type(&item.bits, args_tuple_type.as_ref());
+                        let args = tuple_value.get_elements().unwrap();
+                        let mut obs = CollectingMuxObserver::new();
+                        let _ = xlsynth_pir::ir_eval::eval_fn_with_observer(
+                            f.as_ref(),
+                            &args,
+                            Some(&mut obs),
+                        );
+                        obs.finish()
+                    };
+                    // Best-effort: ignore send failures (coordinator gone).
+                    let _ = res_tx.send(WorkResult {
+                        seq: item.seq,
+                        bits: item.bits,
+                        features,
+                    });
+                }
+            })
+        }
+
+        let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            workers.push(spawn_worker(
+                f.clone(),
+                args_tuple_type.clone(),
+                work_rx.clone(),
+                res_tx.clone(),
+            ));
+        }
+        drop(res_tx);
+
+        let mut seq_next_send: u64 = 0;
+        let mut seq_next_apply: u64 = 0;
+        let mut inflight: usize = 0;
+        let mut pending: BTreeMap<u64, WorkResult> = BTreeMap::new();
+
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Some(max) = self.max_iters {
+                if seq_next_send >= max {
+                    break;
+                }
+            }
+
+            while inflight < work_cap {
+                if self.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Some(max) = self.max_iters {
+                    if seq_next_send >= max {
+                        break;
+                    }
+                }
+                let bits = self.generate_proposal();
+                if work_tx
+                    .send(WorkItem {
+                        seq: seq_next_send,
+                        bits,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                inflight += 1;
+                seq_next_send += 1;
+            }
+
+            if inflight == 0 {
+                break;
+            }
+
+            let r = match res_rx.recv() {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            pending.insert(r.seq, r);
+
+            while let Some(r) = pending.remove(&seq_next_apply) {
+                let added = self.maybe_add_to_corpus(r.bits, &r.features, sink_ptr);
+                inflight -= 1;
+
+                if let Some(p_ptr) = progress_ptr {
+                    let should_report = added
+                        || progress_every_iters
+                            .is_some_and(|every| every > 0 && ((seq_next_apply + 1) % every == 0));
+                    if should_report {
+                        let p = AutocovProgress {
+                            iters: seq_next_apply + 1,
+                            corpus_len: self.corpus.len(),
+                            mux_features_set: self.mux_map.set_count(),
+                            path_features_set: self.path_map.set_count(),
+                            last_iter_added: added,
+                        };
+                        unsafe { &mut *p_ptr }.on_progress(p);
+                    }
+                }
+
+                seq_next_apply += 1;
+            }
+        }
+
+        // Stop workers and drain outstanding results for determinism.
+        drop(work_tx);
+        while inflight > 0 {
+            if let Ok(r) = res_rx.recv() {
+                pending.insert(r.seq, r);
+                while let Some(r) = pending.remove(&seq_next_apply) {
+                    let _ = self.maybe_add_to_corpus(r.bits, &r.features, sink_ptr);
+                    inflight -= 1;
+                    seq_next_apply += 1;
+                }
+            } else {
+                break;
+            }
+        }
+
+        for h in workers {
+            let _ = h.join();
+        }
+
+        AutocovReport {
+            iters: seq_next_apply,
             corpus_len: self.corpus.len(),
             mux_features_set: self.mux_map.set_count(),
             path_features_set: self.path_map.set_count(),
@@ -507,6 +771,65 @@ impl AutocovEngine {
         v
     }
 
+    fn make_all_zeros_bits(&self) -> IrBits {
+        let v: Vec<bool> = vec![false; self.args_bit_count];
+        IrBits::from_lsb_is_0(&v)
+    }
+
+    fn make_all_ones_bits(&self) -> IrBits {
+        let v: Vec<bool> = vec![true; self.args_bit_count];
+        IrBits::from_lsb_is_0(&v)
+    }
+
+    fn make_one_hot_bits(&self, idx: usize) -> IrBits {
+        assert!(idx < self.args_bit_count);
+        let mut v: Vec<bool> = vec![false; self.args_bit_count];
+        v[idx] = true;
+        IrBits::from_lsb_is_0(&v)
+    }
+
+    fn make_two_hot_bits(&self, i: usize, j: usize) -> IrBits {
+        assert!(i < self.args_bit_count);
+        assert!(j < self.args_bit_count);
+        assert!(i != j);
+        let mut v: Vec<bool> = vec![false; self.args_bit_count];
+        v[i] = true;
+        v[j] = true;
+        IrBits::from_lsb_is_0(&v)
+    }
+
+    fn hash_bits(bits: &IrBits) -> [u8; 32] {
+        let mut h = Hasher::new();
+        h.update(b"xlsynth-autocov:candidate-bits");
+        h.update(&(bits.get_bit_count() as u64).to_le_bytes());
+        h.update(&bits.to_bytes().unwrap());
+        *h.finalize().as_bytes()
+    }
+
+    fn insert_corpus_hash(&mut self, bits: &IrBits) -> bool {
+        self.corpus_hashes.insert(Self::hash_bits(bits))
+    }
+
+    fn force_add_seed_bits(
+        &mut self,
+        bits: IrBits,
+        sink_ptr: Option<*mut (dyn CorpusSink + '_)>,
+    ) -> bool {
+        if !self.insert_corpus_hash(&bits) {
+            return false;
+        }
+        let features = self.evaluate_candidate_features(&bits);
+        let _ = self.apply_candidate_features(&features);
+
+        if let Some(sink_ptr) = sink_ptr {
+            let tuple_value = ir_value_from_bits_with_type(&bits, &self.args_tuple_type);
+            unsafe { &mut *sink_ptr }.on_new_sample(&tuple_value);
+        }
+
+        self.corpus.push(bits);
+        true
+    }
+
     fn mutate_flip_bit(&mut self, bits: IrBits) -> IrBits {
         if self.args_bit_count == 0 {
             return bits;
@@ -562,20 +885,33 @@ impl AutocovEngine {
         IrBits::from_lsb_is_0(&v)
     }
 
-    fn evaluate_candidate(&mut self, cand: &IrBits) -> Observations {
+    fn evaluate_candidate_features(&self, cand: &IrBits) -> CandidateFeatures {
         let args_tuple_value = ir_value_from_bits_with_type(cand, &self.args_tuple_type);
         let args = args_tuple_value.get_elements().unwrap();
-        let mut obs = MuxObserver::new(&mut self.mux_map, &mut self.path_map);
+        let mut obs = CollectingMuxObserver::new();
         let _ = xlsynth_pir::ir_eval::eval_fn_with_observer(&self.f, &args, Some(&mut obs));
         obs.finish()
+    }
+
+    fn apply_candidate_features(&mut self, features: &CandidateFeatures) -> Observations {
+        let mut mux_new = false;
+        for &idx in features.mux_indices.iter() {
+            mux_new |= self.mux_map.observe_index(idx);
+        }
+        let path_new = self.path_map.observe_index(features.path_index);
+        Observations { mux_new, path_new }
     }
 
     fn maybe_add_to_corpus(
         &mut self,
         cand: IrBits,
-        obs: Observations,
+        features: &CandidateFeatures,
         sink: Option<*mut (dyn CorpusSink + '_)>,
     ) -> bool {
+        if !self.insert_corpus_hash(&cand) {
+            return false;
+        }
+        let obs = self.apply_candidate_features(features);
         if !obs.mux_new && !obs.path_new {
             return false;
         }
@@ -623,13 +959,11 @@ fn f(selidx: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) ->
         ]);
         let bits = ir_bits_from_value_with_type(&tuple, &engine.args_tuple_type);
 
-        let obs1 = engine.evaluate_candidate(&bits);
-        assert!(obs1.mux_new || obs1.path_new);
-        assert!(engine.maybe_add_to_corpus(bits.clone(), obs1, None));
+        let f1 = engine.evaluate_candidate_features(&bits);
+        assert!(engine.maybe_add_to_corpus(bits.clone(), &f1, None));
 
-        let obs2 = engine.evaluate_candidate(&bits);
-        assert!(!obs2.mux_new && !obs2.path_new);
-        assert!(!engine.maybe_add_to_corpus(bits, obs2, None));
+        let f2 = engine.evaluate_candidate_features(&bits);
+        assert!(!engine.maybe_add_to_corpus(bits, &f2, None));
     }
 
     #[test]
@@ -644,10 +978,7 @@ fn f(selidx: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) ->
             select_kind: MuxSelectKind::CaseIndex,
             selected_index: 2,
         };
-        assert_ne!(
-            MuxObserver::mux_feature_hash(&a),
-            MuxObserver::mux_feature_hash(&b)
-        );
+        assert_ne!(mux_feature_hash(&a), mux_feature_hash(&b));
     }
 
     #[test]
@@ -679,5 +1010,54 @@ fn f(x: bits[16] id=1) -> bits[16] {
         assert_eq!(c.get_bit_count(), engine.args_bit_count);
         let d = engine.xor_mix(base.clone(), base);
         assert_eq!(d.get_bit_count(), engine.args_bit_count);
+    }
+
+    #[test]
+    fn parallel_matches_single_threaded_report() {
+        let ir_text = r#"package test
+
+fn f(selidx: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) -> bits[8] {
+  ret s: bits[8] = sel(selidx, cases=[a, b], default=d, id=10)
+}
+"#;
+        let cfg = AutocovConfig {
+            seed: 0,
+            max_iters: Some(200),
+        };
+        let mut s1 = AutocovEngine::from_ir_text(ir_text, None, "f", cfg.clone()).unwrap();
+        let mut s2 = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
+        let r1 = s1.run();
+        let r2 = s2.run_parallel_with_sinks(2, None, None, None);
+        assert_eq!(r1.iters, r2.iters);
+        assert_eq!(r1.corpus_len, r2.corpus_len);
+        assert_eq!(r1.mux_features_set, r2.mux_features_set);
+        assert_eq!(r1.path_features_set, r2.path_features_set);
+    }
+
+    #[test]
+    fn structured_seed_count_matches_closed_form_when_enabled() {
+        let ir_text = r#"package test
+
+fn f(x: bits[4] id=1) -> bits[4] {
+  ret y: bits[4] = identity(x, id=2)
+}
+"#;
+        let mut engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(1),
+            },
+        )
+        .unwrap();
+
+        let n = engine.args_bit_count;
+        assert_eq!(n, 4);
+        let added = engine.seed_structured_corpus(/* two_hot_max_bits= */ 64, None);
+        let expected = 2 + n + (n * (n - 1) / 2);
+        assert_eq!(added, expected);
+        assert_eq!(engine.corpus.len(), expected);
     }
 }

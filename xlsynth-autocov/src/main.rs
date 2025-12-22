@@ -45,6 +45,21 @@ struct Args {
     /// Disable printing the full mux-space summary at startup.
     #[arg(long, default_value_t = false)]
     no_mux_space: bool,
+
+    /// Number of worker threads to use for candidate evaluation.
+    ///
+    /// If not provided, defaults to `std::thread::available_parallelism()`.
+    #[arg(long)]
+    threads: Option<usize>,
+
+    /// Seed the corpus with structured bit patterns: all-zeros, all-ones, all
+    /// one-hot, and all two-hot (subject to --seed-two-hot-max-bits).
+    #[arg(long, default_value_t = true)]
+    seed_structured: bool,
+
+    /// Upper bound on bit-width for generating all two-hot seeds (quadratic).
+    #[arg(long, default_value_t = 4096)]
+    seed_two_hot_max_bits: usize,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -129,6 +144,15 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut sink = FileSink { w: &mut w };
+
+    if args.seed_structured {
+        let added = engine.seed_structured_corpus(args.seed_two_hot_max_bits, Some(&mut sink));
+        eprintln!(
+            "seed_structured added={} two_hot_max_bits={}",
+            added, args.seed_two_hot_max_bits
+        );
+        sink.w.flush()?;
+    }
     struct StderrProgressSink {
         start: Instant,
         last_report: Instant,
@@ -177,11 +201,23 @@ fn main() -> anyhow::Result<()> {
         last_report: now,
         last_report_iters: 0,
     };
-    let report = engine.run_with_sinks(
-        Some(&mut sink),
-        Some(&mut progress),
-        Some(args.progress_every),
-    );
+    let threads = args
+        .threads
+        .unwrap_or_else(|| std::thread::available_parallelism().unwrap().get());
+    let report = if threads <= 1 {
+        engine.run_with_sinks(
+            Some(&mut sink),
+            Some(&mut progress),
+            Some(args.progress_every),
+        )
+    } else {
+        engine.run_parallel_with_sinks(
+            threads,
+            Some(&mut sink),
+            Some(&mut progress),
+            Some(args.progress_every),
+        )
+    };
     w.flush()?;
     println!(
         "iters={} corpus_len={} mux_features_set={} path_features_set={}",
