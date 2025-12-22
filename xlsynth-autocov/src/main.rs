@@ -153,6 +153,26 @@ fn main() -> anyhow::Result<()> {
         );
         sink.w.flush()?;
     }
+
+    // Report unseen mux outcomes after replay + structured seeding, before fuzzing.
+    {
+        let r = engine.get_mux_outcome_report();
+        eprintln!(
+            "mux_outcomes_summary total_possible={} total_missing={}",
+            r.total_possible, r.total_missing
+        );
+        for e in r.entries.iter() {
+            let kind = match e.kind {
+                xlsynth_autocov::MuxNodeKind::Sel => "sel",
+                xlsynth_autocov::MuxNodeKind::PrioritySel => "priority_sel",
+                xlsynth_autocov::MuxNodeKind::OneHotSel => "one_hot_sel",
+            };
+            eprintln!(
+                "mux_outcomes node_id={} kind={} observed={}/{} missing={:?}",
+                e.node_text_id, kind, e.observed_count, e.possible_count, e.missing
+            );
+        }
+    }
     struct StderrProgressSink {
         start: Instant,
         last_report: Instant,
@@ -170,21 +190,27 @@ fn main() -> anyhow::Result<()> {
 
             if p.last_iter_added {
                 eprintln!(
-                    "new_coverage iters={} corpus_len={} mux_features_set={} path_features_set={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
+                    "new_coverage iters={} corpus_len={} mux_features_set={} path_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
                     p.iters,
                     p.corpus_len,
                     p.mux_features_set,
                     p.path_features_set,
+                    p.mux_outcomes_observed,
+                    p.mux_outcomes_possible,
+                    p.mux_outcomes_missing,
                     total_sps,
                     interval_sps
                 );
             } else {
                 eprintln!(
-                    "progress iters={} corpus_len={} mux_features_set={} path_features_set={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
+                    "progress iters={} corpus_len={} mux_features_set={} path_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
                     p.iters,
                     p.corpus_len,
                     p.mux_features_set,
                     p.path_features_set,
+                    p.mux_outcomes_observed,
+                    p.mux_outcomes_possible,
+                    p.mux_outcomes_missing,
                     total_sps,
                     interval_sps
                 );
@@ -219,9 +245,24 @@ fn main() -> anyhow::Result<()> {
         )
     };
     w.flush()?;
+
+    // Report unseen mux outcomes at end of run.
+    {
+        let r = engine.get_mux_outcome_report();
+        eprintln!(
+            "mux_outcomes_summary_end total_possible={} total_missing={}",
+            r.total_possible, r.total_missing
+        );
+    }
     println!(
-        "iters={} corpus_len={} mux_features_set={} path_features_set={}",
-        report.iters, report.corpus_len, report.mux_features_set, report.path_features_set
+        "iters={} corpus_len={} mux_features_set={} path_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={}",
+        report.iters,
+        report.corpus_len,
+        report.mux_features_set,
+        report.path_features_set,
+        report.mux_outcomes_observed,
+        report.mux_outcomes_possible,
+        report.mux_outcomes_missing
     );
 
     Ok(())

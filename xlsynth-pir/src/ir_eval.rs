@@ -677,7 +677,8 @@ pub enum FnEvalResult {
 pub enum SelectKind {
     CaseIndex,
     Default,
-    NoCaseSelected,
+    NoBitsSet,
+    MultiBitsSet,
 }
 
 /// Observed selection decision for select-like nodes (`sel`, `priority_sel`,
@@ -786,6 +787,7 @@ fn observe_select_like_node(
             let sel_w = sel_bits.get_bit_count();
 
             let mut any = false;
+            let mut in_range_set_count: usize = 0;
             for (i, _case_ref) in cases.iter().enumerate() {
                 let bit_set = if i < sel_w {
                     sel_bits.get_bit(i).expect("selector bit in range")
@@ -794,6 +796,7 @@ fn observe_select_like_node(
                 };
                 if bit_set {
                     any = true;
+                    in_range_set_count += 1;
                     observer.on_select(SelectEvent {
                         node_ref: nr,
                         node_text_id: node.text_id,
@@ -806,7 +809,14 @@ fn observe_select_like_node(
                 observer.on_select(SelectEvent {
                     node_ref: nr,
                     node_text_id: node.text_id,
-                    select_kind: SelectKind::NoCaseSelected,
+                    select_kind: SelectKind::NoBitsSet,
+                    selected_index: usize::MAX,
+                });
+            } else if in_range_set_count >= 2 {
+                observer.on_select(SelectEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    select_kind: SelectKind::MultiBitsSet,
                     selected_index: usize::MAX,
                 });
             }
@@ -1787,6 +1797,7 @@ fn f(selidx: bits[2] id=1, prio: bits[2] id=2, oh: bits[3] id=3, a: bits[8] id=4
             (11, SelectKind::CaseIndex, 1),
             (12, SelectKind::CaseIndex, 0),
             (12, SelectKind::CaseIndex, 2),
+            (12, SelectKind::MultiBitsSet, usize::MAX),
         ];
         assert_eq!(got, want);
     }

@@ -32,6 +32,25 @@ pub struct AutocovReport {
     pub corpus_len: usize,
     pub mux_features_set: usize,
     pub path_features_set: usize,
+    pub mux_outcomes_observed: usize,
+    pub mux_outcomes_possible: usize,
+    pub mux_outcomes_missing: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MuxOutcomeReportEntry {
+    pub node_text_id: usize,
+    pub kind: MuxNodeKind,
+    pub observed_count: usize,
+    pub possible_count: usize,
+    pub missing: Vec<MuxOutcomeId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MuxOutcomeReport {
+    pub entries: Vec<MuxOutcomeReportEntry>,
+    pub total_missing: usize,
+    pub total_possible: usize,
 }
 
 pub trait CorpusSink {
@@ -44,6 +63,9 @@ pub struct AutocovProgress {
     pub corpus_len: usize,
     pub mux_features_set: usize,
     pub path_features_set: usize,
+    pub mux_outcomes_observed: usize,
+    pub mux_outcomes_possible: usize,
+    pub mux_outcomes_missing: usize,
     pub last_iter_added: bool,
 }
 
@@ -116,11 +138,104 @@ pub struct MuxSpaceSummary {
     pub log10_path_space_upper_bound: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MuxOutcomeId {
+    /// Case index selected (for `sel`/`priority_sel`, or per-bit for
+    /// `one_hot_sel`).
+    CaseIndex(usize),
+    /// Default selected (`sel` out-of-range, or `priority_sel` no bits set).
+    Default,
+    /// `one_hot_sel`: no in-range selector bits set.
+    NoBitsSet,
+    /// `one_hot_sel`: two or more in-range selector bits set.
+    MultiBitsSet,
+}
+
+#[derive(Debug, Clone)]
+pub struct MuxOutcomeSpace {
+    pub node_text_id: usize,
+    pub kind: MuxNodeKind,
+    pub reachable_case_count: usize,
+    pub has_default: bool,
+    pub has_no_bits_set: bool,
+    pub has_multi_bits_set: bool,
+}
+
+impl MuxOutcomeSpace {
+    pub fn outcome_count(&self) -> usize {
+        self.reachable_case_count
+            + (self.has_default as usize)
+            + (self.has_no_bits_set as usize)
+            + (self.has_multi_bits_set as usize)
+    }
+
+    pub fn outcome_to_index(&self, o: MuxOutcomeId) -> Option<usize> {
+        match o {
+            MuxOutcomeId::CaseIndex(i) => {
+                if i < self.reachable_case_count {
+                    Some(i)
+                } else {
+                    None
+                }
+            }
+            MuxOutcomeId::Default => {
+                if self.has_default {
+                    Some(self.reachable_case_count)
+                } else {
+                    None
+                }
+            }
+            MuxOutcomeId::NoBitsSet => {
+                if self.has_no_bits_set {
+                    Some(self.reachable_case_count + (self.has_default as usize))
+                } else {
+                    None
+                }
+            }
+            MuxOutcomeId::MultiBitsSet => {
+                if self.has_multi_bits_set {
+                    Some(
+                        self.reachable_case_count
+                            + (self.has_default as usize)
+                            + (self.has_no_bits_set as usize),
+                    )
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    pub fn index_to_outcome(&self, idx: usize) -> Option<MuxOutcomeId> {
+        if idx < self.reachable_case_count {
+            return Some(MuxOutcomeId::CaseIndex(idx));
+        }
+        let mut cur = self.reachable_case_count;
+        if self.has_default {
+            if idx == cur {
+                return Some(MuxOutcomeId::Default);
+            }
+            cur += 1;
+        }
+        if self.has_no_bits_set {
+            if idx == cur {
+                return Some(MuxOutcomeId::NoBitsSet);
+            }
+            cur += 1;
+        }
+        if self.has_multi_bits_set && idx == cur {
+            return Some(MuxOutcomeId::MultiBitsSet);
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MuxSelectKind {
     CaseIndex,
     Default,
-    NoCaseSelected,
+    NoBitsSet,
+    MultiBitsSet,
 }
 
 impl From<SelectKind> for MuxSelectKind {
@@ -128,7 +243,8 @@ impl From<SelectKind> for MuxSelectKind {
         match value {
             SelectKind::CaseIndex => MuxSelectKind::CaseIndex,
             SelectKind::Default => MuxSelectKind::Default,
-            SelectKind::NoCaseSelected => MuxSelectKind::NoCaseSelected,
+            SelectKind::NoBitsSet => MuxSelectKind::NoBitsSet,
+            SelectKind::MultiBitsSet => MuxSelectKind::MultiBitsSet,
         }
     }
 }
@@ -180,6 +296,7 @@ struct Observations {
 struct CandidateFeatures {
     mux_indices: Vec<usize>,
     path_index: usize,
+    mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
 
 fn mux_feature_hash(f: &MuxFeature) -> blake3::Hash {
@@ -189,7 +306,8 @@ fn mux_feature_hash(f: &MuxFeature) -> blake3::Hash {
     hasher.update(&[match f.select_kind {
         MuxSelectKind::CaseIndex => 0,
         MuxSelectKind::Default => 1,
-        MuxSelectKind::NoCaseSelected => 2,
+        MuxSelectKind::NoBitsSet => 2,
+        MuxSelectKind::MultiBitsSet => 3,
     }]);
     hasher.update(&f.selected_index.to_le_bytes());
     hasher.finalize()
@@ -204,6 +322,7 @@ fn hash_mux_feature(f: &MuxFeature) -> usize {
 struct CollectingMuxObserver {
     mux_indices: Vec<usize>,
     path_hasher: Hasher,
+    mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
 
 impl CollectingMuxObserver {
@@ -213,6 +332,7 @@ impl CollectingMuxObserver {
         Self {
             mux_indices: Vec::new(),
             path_hasher,
+            mux_outcomes: Vec::new(),
         }
     }
 
@@ -223,6 +343,7 @@ impl CollectingMuxObserver {
         CandidateFeatures {
             mux_indices: self.mux_indices,
             path_index,
+            mux_outcomes: self.mux_outcomes,
         }
     }
 }
@@ -244,12 +365,22 @@ impl EvalObserver for CollectingMuxObserver {
         let idx = hash_mux_feature(&feature);
         self.mux_indices.push(idx);
 
+        // Map the event into a node-local mux outcome.
+        let outcome = match ev.select_kind {
+            SelectKind::CaseIndex => MuxOutcomeId::CaseIndex(ev.selected_index),
+            SelectKind::Default => MuxOutcomeId::Default,
+            SelectKind::NoBitsSet => MuxOutcomeId::NoBitsSet,
+            SelectKind::MultiBitsSet => MuxOutcomeId::MultiBitsSet,
+        };
+        self.mux_outcomes.push((ev.node_text_id, outcome));
+
         // Path hash is the concatenation of the mux features in observation order.
         self.path_hasher.update(&feature.node_id.to_le_bytes());
         self.path_hasher.update(&[match feature.select_kind {
             MuxSelectKind::CaseIndex => 0,
             MuxSelectKind::Default => 1,
-            MuxSelectKind::NoCaseSelected => 2,
+            MuxSelectKind::NoBitsSet => 2,
+            MuxSelectKind::MultiBitsSet => 3,
         }]);
         self.path_hasher
             .update(&feature.selected_index.to_le_bytes());
@@ -269,6 +400,11 @@ pub struct AutocovEngine {
 
     corpus: Vec<IrBits>,
     corpus_hashes: BTreeSet<[u8; 32]>,
+
+    mux_outcome_spaces: BTreeMap<usize, MuxOutcomeSpace>,
+    mux_outcome_observed: BTreeMap<usize, Vec<bool>>,
+    mux_outcomes_possible_total: usize,
+    mux_outcomes_observed_total: usize,
 }
 
 impl AutocovEngine {
@@ -306,7 +442,7 @@ impl AutocovEngine {
         let args_bit_count = args_tuple_type.bit_count();
 
         let stop = Arc::new(AtomicBool::new(false));
-        Ok(Self {
+        let mut engine = Self {
             f,
             args_tuple_type,
             args_bit_count,
@@ -317,7 +453,102 @@ impl AutocovEngine {
             path_map: FeatureMap64k::new(),
             corpus: Vec::new(),
             corpus_hashes: BTreeSet::new(),
-        })
+            mux_outcome_spaces: BTreeMap::new(),
+            mux_outcome_observed: BTreeMap::new(),
+            mux_outcomes_possible_total: 0,
+            mux_outcomes_observed_total: 0,
+        };
+        engine.mux_outcome_spaces = engine.compute_mux_outcome_spaces();
+        engine.mux_outcome_observed = engine
+            .mux_outcome_spaces
+            .iter()
+            .map(|(&node_id, space)| (node_id, vec![false; space.outcome_count()]))
+            .collect();
+        engine.mux_outcomes_possible_total = engine
+            .mux_outcome_spaces
+            .values()
+            .map(|s| s.outcome_count())
+            .sum();
+        Ok(engine)
+    }
+
+    fn compute_mux_outcome_spaces(&self) -> BTreeMap<usize, MuxOutcomeSpace> {
+        let mut out: BTreeMap<usize, MuxOutcomeSpace> = BTreeMap::new();
+        for nr in self.f.node_refs() {
+            let n = self.f.get_node(nr);
+            match &n.payload {
+                ir::NodePayload::Sel {
+                    selector,
+                    cases,
+                    default: _,
+                } => {
+                    let selector_w = match self.f.get_node_ty(*selector) {
+                        ir::Type::Bits(w) => *w,
+                        _ => 0,
+                    };
+                    let space: usize = if selector_w >= (usize::BITS as usize) {
+                        usize::MAX
+                    } else {
+                        1usize << selector_w
+                    };
+                    let reachable_case_count = std::cmp::min(cases.len(), space);
+                    let has_default = space > cases.len();
+                    out.insert(
+                        n.text_id,
+                        MuxOutcomeSpace {
+                            node_text_id: n.text_id,
+                            kind: MuxNodeKind::Sel,
+                            reachable_case_count,
+                            has_default,
+                            has_no_bits_set: false,
+                            has_multi_bits_set: false,
+                        },
+                    );
+                }
+                ir::NodePayload::PrioritySel {
+                    selector,
+                    cases,
+                    default: _,
+                } => {
+                    let selector_w = match self.f.get_node_ty(*selector) {
+                        ir::Type::Bits(w) => *w,
+                        _ => 0,
+                    };
+                    let reachable_case_count = std::cmp::min(cases.len(), selector_w);
+                    out.insert(
+                        n.text_id,
+                        MuxOutcomeSpace {
+                            node_text_id: n.text_id,
+                            kind: MuxNodeKind::PrioritySel,
+                            reachable_case_count,
+                            has_default: true,
+                            has_no_bits_set: false,
+                            has_multi_bits_set: false,
+                        },
+                    );
+                }
+                ir::NodePayload::OneHotSel { selector, cases } => {
+                    let selector_w = match self.f.get_node_ty(*selector) {
+                        ir::Type::Bits(w) => *w,
+                        _ => 0,
+                    };
+                    let reachable_case_count = std::cmp::min(cases.len(), selector_w);
+                    out.insert(
+                        n.text_id,
+                        MuxOutcomeSpace {
+                            node_text_id: n.text_id,
+                            kind: MuxNodeKind::OneHotSel,
+                            reachable_case_count,
+                            has_default: false,
+                            has_no_bits_set: true,
+                            has_multi_bits_set: reachable_case_count >= 2,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     pub fn set_stop_flag(&mut self, stop: Arc<AtomicBool>) {
@@ -455,6 +686,48 @@ impl AutocovEngine {
         }
     }
 
+    pub fn get_mux_outcome_report(&self) -> MuxOutcomeReport {
+        let mut entries: Vec<MuxOutcomeReportEntry> = Vec::new();
+        let mut total_missing: usize = 0;
+        let mut total_possible: usize = 0;
+
+        for (&node_id, space) in self.mux_outcome_spaces.iter() {
+            let possible_count = space.outcome_count();
+            total_possible += possible_count;
+
+            let observed_bits = self
+                .mux_outcome_observed
+                .get(&node_id)
+                .cloned()
+                .unwrap_or_else(|| vec![false; possible_count]);
+            let observed_count = observed_bits.iter().filter(|&&b| b).count();
+
+            let mut missing: Vec<MuxOutcomeId> = Vec::new();
+            for i in 0..possible_count {
+                if !observed_bits[i] {
+                    if let Some(o) = space.index_to_outcome(i) {
+                        missing.push(o);
+                    }
+                }
+            }
+            total_missing += missing.len();
+            entries.push(MuxOutcomeReportEntry {
+                node_text_id: node_id,
+                kind: space.kind,
+                observed_count,
+                possible_count,
+                missing,
+            });
+        }
+
+        entries.sort_by_key(|e| e.node_text_id);
+        MuxOutcomeReport {
+            entries,
+            total_missing,
+            total_possible,
+        }
+    }
+
     pub fn run(&mut self) -> AutocovReport {
         self.run_with_sink(None)
     }
@@ -496,11 +769,17 @@ impl AutocovEngine {
                     || progress_every_iters
                         .is_some_and(|every| every > 0 && ((iters + 1) % every == 0));
                 if should_report {
+                    let mux_outcomes_observed = self.mux_outcomes_observed_total;
+                    let mux_outcomes_possible = self.mux_outcomes_possible_total;
+                    let mux_outcomes_missing = mux_outcomes_possible - mux_outcomes_observed;
                     let p = AutocovProgress {
                         iters: iters + 1,
                         corpus_len: self.corpus.len(),
                         mux_features_set: self.mux_map.set_count(),
                         path_features_set: self.path_map.set_count(),
+                        mux_outcomes_observed,
+                        mux_outcomes_possible,
+                        mux_outcomes_missing,
                         last_iter_added: added,
                     };
                     // Safety: caller holds exclusive mutable access for duration of run.
@@ -511,11 +790,17 @@ impl AutocovEngine {
             iters += 1;
         }
 
+        let mux_outcomes_observed = self.mux_outcomes_observed_total;
+        let mux_outcomes_possible = self.mux_outcomes_possible_total;
+        let mux_outcomes_missing = mux_outcomes_possible - mux_outcomes_observed;
         AutocovReport {
             iters,
             corpus_len: self.corpus.len(),
             mux_features_set: self.mux_map.set_count(),
             path_features_set: self.path_map.set_count(),
+            mux_outcomes_observed,
+            mux_outcomes_possible,
+            mux_outcomes_missing,
         }
     }
 
@@ -659,11 +944,17 @@ impl AutocovEngine {
                         || progress_every_iters
                             .is_some_and(|every| every > 0 && ((seq_next_apply + 1) % every == 0));
                     if should_report {
+                        let mux_outcomes_observed = self.mux_outcomes_observed_total;
+                        let mux_outcomes_possible = self.mux_outcomes_possible_total;
+                        let mux_outcomes_missing = mux_outcomes_possible - mux_outcomes_observed;
                         let p = AutocovProgress {
                             iters: seq_next_apply + 1,
                             corpus_len: self.corpus.len(),
                             mux_features_set: self.mux_map.set_count(),
                             path_features_set: self.path_map.set_count(),
+                            mux_outcomes_observed,
+                            mux_outcomes_possible,
+                            mux_outcomes_missing,
                             last_iter_added: added,
                         };
                         unsafe { &mut *p_ptr }.on_progress(p);
@@ -693,11 +984,17 @@ impl AutocovEngine {
             let _ = h.join();
         }
 
+        let mux_outcomes_observed = self.mux_outcomes_observed_total;
+        let mux_outcomes_possible = self.mux_outcomes_possible_total;
+        let mux_outcomes_missing = mux_outcomes_possible - mux_outcomes_observed;
         AutocovReport {
             iters: seq_next_apply,
             corpus_len: self.corpus.len(),
             mux_features_set: self.mux_map.set_count(),
             path_features_set: self.path_map.set_count(),
+            mux_outcomes_observed,
+            mux_outcomes_possible,
+            mux_outcomes_missing,
         }
     }
 
@@ -899,6 +1196,27 @@ impl AutocovEngine {
             mux_new |= self.mux_map.observe_index(idx);
         }
         let path_new = self.path_map.observe_index(features.path_index);
+
+        // Record mux outcome observations (per-node).
+        for &(node_id, outcome) in features.mux_outcomes.iter() {
+            let space = match self.mux_outcome_spaces.get(&node_id) {
+                Some(s) => s,
+                None => continue,
+            };
+            let idx = match space.outcome_to_index(outcome) {
+                Some(i) => i,
+                None => continue,
+            };
+            if let Some(bits) = self.mux_outcome_observed.get_mut(&node_id) {
+                if idx < bits.len() {
+                    if !bits[idx] {
+                        bits[idx] = true;
+                        self.mux_outcomes_observed_total += 1;
+                    }
+                }
+            }
+        }
+
         Observations { mux_new, path_new }
     }
 
@@ -931,6 +1249,7 @@ impl AutocovEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlsynth::IrValue;
 
     #[test]
     fn first_candidate_produces_new_features() {
@@ -1059,5 +1378,59 @@ fn f(x: bits[4] id=1) -> bits[4] {
         let expected = 2 + n + (n * (n - 1) / 2);
         assert_eq!(added, expected);
         assert_eq!(engine.corpus.len(), expected);
+    }
+
+    #[test]
+    fn one_hot_sel_missing_includes_multi_bits_set_until_observed() {
+        let ir_text = r#"package test
+
+fn f(oh: bits[3] id=1, a: bits[8] id=2, b: bits[8] id=3, c: bits[8] id=4) -> bits[8] {
+  ret o: bits[8] = one_hot_sel(oh, cases=[a, b, c], id=10)
+}
+"#;
+        let mut engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+
+        // Seed with a single-bit selector (no MultiBitsSet).
+        let t1 = IrValue::make_tuple(&[
+            IrValue::make_ubits(3, 0b001).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+            IrValue::make_ubits(8, 3).unwrap(),
+        ]);
+        engine.add_corpus_sample_from_arg_tuple(&t1).unwrap();
+
+        let r1 = engine.get_mux_outcome_report();
+        let e1 = r1
+            .entries
+            .iter()
+            .find(|e| e.node_text_id == 10)
+            .expect("node 10 present");
+        assert!(e1.missing.contains(&MuxOutcomeId::MultiBitsSet));
+
+        // Now seed with a multi-bit selector (should observe MultiBitsSet).
+        let t2 = IrValue::make_tuple(&[
+            IrValue::make_ubits(3, 0b101).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+            IrValue::make_ubits(8, 3).unwrap(),
+        ]);
+        engine.add_corpus_sample_from_arg_tuple(&t2).unwrap();
+
+        let r2 = engine.get_mux_outcome_report();
+        let e2 = r2
+            .entries
+            .iter()
+            .find(|e| e.node_text_id == 10)
+            .expect("node 10 present");
+        assert!(!e2.missing.contains(&MuxOutcomeId::MultiBitsSet));
     }
 }
