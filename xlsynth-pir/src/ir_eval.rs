@@ -252,10 +252,17 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             ref indices,
             assumed_in_bounds: _,
         } => {
+            // XLS semantics: out-of-bounds indices are clamped to the maximum in-bounds
+            // index for the respective dimension. Note: this helper does not
+            // surface `assumed_in_bounds` errors (those are handled in
+            // `eval_fn_with_observer`, which can return Failure).
             let mut value = env.get(&array).unwrap().clone();
             for idx_ref in indices {
                 let idx = env.get(idx_ref).unwrap().to_u64().unwrap() as usize;
-                value = value.get_element(idx).unwrap();
+                let count = value.get_element_count().unwrap();
+                assert!(count > 0, "ArrayIndex: empty array not supported");
+                let clamped = if idx >= count { count - 1 } else { idx };
+                value = value.get_element(clamped).unwrap();
             }
             value
         }
@@ -1055,6 +1062,40 @@ pub fn eval_fn_with_observer(
                 }
                 let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
+            }
+            P::ArrayIndex {
+                array,
+                indices,
+                assumed_in_bounds,
+            } => {
+                // XLS semantics: out-of-bounds indices are clamped to the maximum in-bounds
+                // index for the respective dimension. If `assumed_in_bounds` is
+                // true, any OOB index is considered a sample failure and we
+                // return Failure.
+                let mut value = env.get(array).expect("array must be evaluated").clone();
+                for idx_ref in indices.iter() {
+                    let idx = env
+                        .get(idx_ref)
+                        .expect("index must be evaluated")
+                        .to_bits()
+                        .unwrap()
+                        .to_u64()
+                        .unwrap() as usize;
+                    let count = value.get_element_count().expect("array must have elements");
+                    assert!(count > 0, "ArrayIndex: empty array not supported");
+                    if idx >= count {
+                        if *assumed_in_bounds {
+                            return FnEvalResult::Failure(FnEvalFailure {
+                                assertion_failures,
+                                trace_messages,
+                            });
+                        }
+                        value = value.get_element(count - 1).unwrap();
+                    } else {
+                        value = value.get_element(idx).unwrap();
+                    }
+                }
+                value
             }
             P::ArrayUpdate {
                 array,
@@ -2175,6 +2216,60 @@ fn f(a: bits[3][2][2] id=1, v: bits[3] id=2, i: bits[32] id=3, j: bits[32] id=4)
                 assert_eq!(got, expected);
             }
             other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_index_clamps_oob_when_not_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=false, id=3)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 11).unwrap(),
+            IrValue::make_ubits(8, 12).unwrap(),
+            IrValue::make_ubits(8, 13).unwrap(),
+        ])
+        .unwrap();
+        let args = vec![arr, IrValue::make_ubits(3, 7).unwrap()];
+        let r = eval_fn_with_observer(&f, &args, None);
+        match r {
+            FnEvalResult::Success(s) => {
+                assert_eq!(s.value, IrValue::make_ubits(8, 13).unwrap());
+            }
+            FnEvalResult::Failure(_) => panic!("expected success"),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_index_oob_failure_when_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=3)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 11).unwrap(),
+            IrValue::make_ubits(8, 12).unwrap(),
+            IrValue::make_ubits(8, 13).unwrap(),
+        ])
+        .unwrap();
+        let args = vec![arr, IrValue::make_ubits(3, 7).unwrap()];
+        let r = eval_fn_with_observer(&f, &args, None);
+        match r {
+            FnEvalResult::Success(_) => panic!("expected failure"),
+            FnEvalResult::Failure(_f) => {}
         }
     }
 }
