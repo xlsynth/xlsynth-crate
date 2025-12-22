@@ -68,6 +68,16 @@ pub fn ir_value_from_bits_with_type(bits: &IrBits, ty: &ir::Type) -> IrValue {
     }
 }
 
+/// Flattens `value` into a single `IrBits`, using `ty` to define and validate
+/// the shape.
+///
+/// This is the (checked) inverse of [`ir_value_from_bits_with_type`]: the
+/// produced `IrBits` will round-trip via `ir_value_from_bits_with_type(&bits,
+/// ty)` when `value` conforms to `ty`.
+///
+/// For composite types, elements are concatenated in order (tuple element order
+/// and array index order) into a flat bit-vector where bit index 0 is the
+/// overall LSb (matching `IrBits` APIs).
 pub fn ir_bits_from_value_with_type(value: &IrValue, ty: &ir::Type) -> IrBits {
     match ty {
         ir::Type::Bits(width) => {

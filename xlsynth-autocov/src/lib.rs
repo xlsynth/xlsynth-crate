@@ -33,6 +33,61 @@ pub trait CorpusSink {
     fn on_new_sample(&mut self, tuple_value: &IrValue);
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AutocovProgress {
+    pub iters: u64,
+    pub corpus_len: usize,
+    pub mux_features_set: usize,
+    pub path_features_set: usize,
+    pub last_iter_added: bool,
+}
+
+pub trait ProgressSink {
+    fn on_progress(&mut self, p: AutocovProgress);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MuxNodeKind {
+    Sel,
+    PrioritySel,
+    OneHotSel,
+}
+
+#[derive(Debug, Clone)]
+pub struct MuxNodeSpace {
+    pub node_text_id: usize,
+    pub kind: MuxNodeKind,
+    pub cases_len: usize,
+    pub has_default: bool,
+}
+
+impl MuxNodeSpace {
+    pub fn feature_possibilities(&self) -> usize {
+        match self.kind {
+            // CaseIndex(i) for each case, plus Default.
+            MuxNodeKind::Sel | MuxNodeKind::PrioritySel => self.cases_len + 1,
+            // CaseIndex(i) for each case, plus NoCaseSelected.
+            MuxNodeKind::OneHotSel => self.cases_len + 1,
+        }
+    }
+
+    pub fn log10_path_possibilities_upper_bound(&self) -> f64 {
+        match self.kind {
+            // One event per select: CaseIndex(i) or Default.
+            MuxNodeKind::Sel | MuxNodeKind::PrioritySel => (self.cases_len as f64 + 1.0).log10(),
+            // A subset of cases may be selected.
+            MuxNodeKind::OneHotSel => (self.cases_len as f64) * std::f64::consts::LOG10_2,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MuxSpaceSummary {
+    pub muxes: Vec<MuxNodeSpace>,
+    pub total_mux_feature_possibilities: usize,
+    pub log10_path_space_upper_bound: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MuxSelectKind {
     CaseIndex,
@@ -261,6 +316,63 @@ impl AutocovEngine {
         Ok(())
     }
 
+    pub fn get_mux_space_summary(&self) -> MuxSpaceSummary {
+        let mut muxes: Vec<MuxNodeSpace> = Vec::new();
+        for nr in self.f.node_refs() {
+            let n = self.f.get_node(nr);
+            match &n.payload {
+                ir::NodePayload::Sel {
+                    selector: _,
+                    cases,
+                    default,
+                } => {
+                    muxes.push(MuxNodeSpace {
+                        node_text_id: n.text_id,
+                        kind: MuxNodeKind::Sel,
+                        cases_len: cases.len(),
+                        has_default: default.is_some(),
+                    });
+                }
+                ir::NodePayload::PrioritySel {
+                    selector: _,
+                    cases,
+                    default,
+                } => {
+                    muxes.push(MuxNodeSpace {
+                        node_text_id: n.text_id,
+                        kind: MuxNodeKind::PrioritySel,
+                        cases_len: cases.len(),
+                        has_default: default.is_some(),
+                    });
+                }
+                ir::NodePayload::OneHotSel { selector: _, cases } => {
+                    muxes.push(MuxNodeSpace {
+                        node_text_id: n.text_id,
+                        kind: MuxNodeKind::OneHotSel,
+                        cases_len: cases.len(),
+                        has_default: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        muxes.sort_by_key(|m| m.node_text_id);
+
+        let total_mux_feature_possibilities: usize =
+            muxes.iter().map(|m| m.feature_possibilities()).sum();
+        let log10_path_space_upper_bound: f64 = muxes
+            .iter()
+            .map(|m| m.log10_path_possibilities_upper_bound())
+            .sum();
+
+        MuxSpaceSummary {
+            muxes,
+            total_mux_feature_possibilities,
+            log10_path_space_upper_bound,
+        }
+    }
+
     pub fn run(&mut self) -> AutocovReport {
         self.run_with_sink(None)
     }
@@ -269,8 +381,19 @@ impl AutocovEngine {
         &mut self,
         sink: Option<&'a mut (dyn CorpusSink + 'a)>,
     ) -> AutocovReport {
+        self.run_with_sinks(sink, None, None)
+    }
+
+    pub fn run_with_sinks<'a>(
+        &mut self,
+        sink: Option<&'a mut (dyn CorpusSink + 'a)>,
+        progress: Option<&'a mut (dyn ProgressSink + 'a)>,
+        progress_every_iters: Option<u64>,
+    ) -> AutocovReport {
         let sink_ptr: Option<*mut (dyn CorpusSink + 'a)> =
             sink.map(|s| s as *mut (dyn CorpusSink + 'a));
+        let progress_ptr: Option<*mut (dyn ProgressSink + 'a)> =
+            progress.map(|p| p as *mut (dyn ProgressSink + 'a));
         let mut iters: u64 = 0;
         loop {
             if self.stop.load(Ordering::Relaxed) {
@@ -284,7 +407,24 @@ impl AutocovEngine {
 
             let cand = self.generate_proposal();
             let obs = self.evaluate_candidate(&cand);
-            let _added = self.maybe_add_to_corpus(cand, obs, sink_ptr);
+            let added = self.maybe_add_to_corpus(cand, obs, sink_ptr);
+
+            if let Some(p_ptr) = progress_ptr {
+                let should_report = added
+                    || progress_every_iters
+                        .is_some_and(|every| every > 0 && ((iters + 1) % every == 0));
+                if should_report {
+                    let p = AutocovProgress {
+                        iters: iters + 1,
+                        corpus_len: self.corpus.len(),
+                        mux_features_set: self.mux_map.set_count(),
+                        path_features_set: self.path_map.set_count(),
+                        last_iter_added: added,
+                    };
+                    // Safety: caller holds exclusive mutable access for duration of run.
+                    unsafe { &mut *p_ptr }.on_progress(p);
+                }
+            }
 
             iters += 1;
         }
@@ -302,17 +442,37 @@ impl AutocovEngine {
             return self.random_bits(self.args_bit_count);
         }
 
-        let which = (self.rng.next_u64() % 3) as u8;
-        match which {
-            0 => {
+        // Mutation/crossover strategy mix (single-threaded, deterministic via PRNG).
+        //
+        // Rationale:
+        // - Single-bit flip is good for local edge conditions.
+        // - Multi-bit "havoc" helps jump between regions.
+        // - Sub-slice crossover helps preserve "good" chunks.
+        // - XOR mixing is often effective when conditions depend on parity-like
+        //   structure.
+        // - Occasional full-random prevents corpus lock-in.
+        let roll = (self.rng.next_u64() % 100) as u8;
+        match roll {
+            // 10%: fully random resample
+            0..=9 => self.random_bits(self.args_bit_count),
+            // 30%: multi-bit havoc
+            10..=39 => {
                 let parent = self.pick_parent().clone();
-                self.mutate_flip_bit(parent)
+                self.mutate_havoc(parent)
             }
-            1 => {
+            // 25%: arbitrary subslice crossover
+            40..=64 => {
                 let a = self.pick_parent().clone();
                 let b = self.pick_parent().clone();
-                self.crossover(a, b)
+                self.crossover_subslice(a, b)
             }
+            // 20%: XOR-mix
+            65..=84 => {
+                let a = self.pick_parent().clone();
+                let b = self.pick_parent().clone();
+                self.xor_mix(a, b)
+            }
+            // 15%: single-bit flip
             _ => {
                 let parent = self.pick_parent().clone();
                 self.mutate_flip_bit(parent)
@@ -339,32 +499,65 @@ impl AutocovEngine {
         IrBits::from_lsb_is_0(&bits)
     }
 
+    fn bits_to_vec_lsb_is_0(&self, bits: &IrBits) -> Vec<bool> {
+        let mut v: Vec<bool> = Vec::with_capacity(self.args_bit_count);
+        for i in 0..self.args_bit_count {
+            v.push(bits.get_bit(i).unwrap());
+        }
+        v
+    }
+
     fn mutate_flip_bit(&mut self, bits: IrBits) -> IrBits {
         if self.args_bit_count == 0 {
             return bits;
         }
         let i = (self.rng.next_u64() as usize) % self.args_bit_count;
-        let mut v: Vec<bool> = Vec::with_capacity(self.args_bit_count);
-        for j in 0..self.args_bit_count {
-            v.push(bits.get_bit(j).unwrap());
-        }
+        let mut v = self.bits_to_vec_lsb_is_0(&bits);
         v[i] = !v[i];
         IrBits::from_lsb_is_0(&v)
     }
 
-    fn crossover(&mut self, a: IrBits, b: IrBits) -> IrBits {
+    fn mutate_havoc(&mut self, bits: IrBits) -> IrBits {
+        if self.args_bit_count == 0 {
+            return bits;
+        }
+        let mut v = self.bits_to_vec_lsb_is_0(&bits);
+        // Choose a small-ish number of flips; cap keeps it efficient.
+        let max_flips = std::cmp::min(self.args_bit_count, 64);
+        let flips = 1 + ((self.rng.next_u64() as usize) % max_flips);
+        let mut seen: Vec<usize> = Vec::with_capacity(flips);
+        // Best-effort distinct indices; duplicates are harmless but less effective.
+        for _ in 0..flips {
+            let idx = (self.rng.next_u64() as usize) % self.args_bit_count;
+            if !seen.contains(&idx) {
+                seen.push(idx);
+                v[idx] = !v[idx];
+            }
+        }
+        IrBits::from_lsb_is_0(&v)
+    }
+
+    fn crossover_subslice(&mut self, a: IrBits, b: IrBits) -> IrBits {
         if self.args_bit_count == 0 {
             return a;
         }
-        let cut = (self.rng.next_u64() as usize) % self.args_bit_count;
+        let mut v = self.bits_to_vec_lsb_is_0(&a);
+        let start = (self.rng.next_u64() as usize) % self.args_bit_count;
+        let max_len = self.args_bit_count - start;
+        let len = 1 + ((self.rng.next_u64() as usize) % max_len);
+        for i in start..start + len {
+            v[i] = b.get_bit(i).unwrap();
+        }
+        IrBits::from_lsb_is_0(&v)
+    }
+
+    fn xor_mix(&mut self, a: IrBits, b: IrBits) -> IrBits {
+        if self.args_bit_count == 0 {
+            return a;
+        }
         let mut v: Vec<bool> = Vec::with_capacity(self.args_bit_count);
         for i in 0..self.args_bit_count {
-            let bit = if i < cut {
-                a.get_bit(i).unwrap()
-            } else {
-                b.get_bit(i).unwrap()
-            };
-            v.push(bit);
+            v.push(a.get_bit(i).unwrap() ^ b.get_bit(i).unwrap());
         }
         IrBits::from_lsb_is_0(&v)
     }
@@ -397,9 +590,6 @@ impl AutocovEngine {
         self.corpus.push(cand);
         true
     }
-
-    // Note: flattening for corpus input uses
-    // `xlsynth_pir::ir_value_utils::ir_bits_from_value_with_type`.
 }
 
 #[cfg(test)]
@@ -458,5 +648,36 @@ fn f(selidx: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) ->
             MuxObserver::mux_feature_hash(&a),
             MuxObserver::mux_feature_hash(&b)
         );
+    }
+
+    #[test]
+    fn mutations_preserve_bit_count() {
+        let ir_text = r#"package test
+
+fn f(x: bits[16] id=1) -> bits[16] {
+  ret y: bits[16] = identity(x, id=2)
+}
+"#;
+        let mut engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(1),
+            },
+        )
+        .unwrap();
+        let base = engine.random_bits(engine.args_bit_count);
+        assert_eq!(base.get_bit_count(), engine.args_bit_count);
+
+        let a = engine.mutate_flip_bit(base.clone());
+        assert_eq!(a.get_bit_count(), engine.args_bit_count);
+        let b = engine.mutate_havoc(base.clone());
+        assert_eq!(b.get_bit_count(), engine.args_bit_count);
+        let c = engine.crossover_subslice(base.clone(), base.clone());
+        assert_eq!(c.get_bit_count(), engine.args_bit_count);
+        let d = engine.xor_mix(base.clone(), base);
+        assert_eq!(d.get_bit_count(), engine.args_bit_count);
     }
 }
