@@ -15,7 +15,8 @@ use rand::{RngCore, SeedableRng};
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval::{
-    BoolNodeEvent, CornerEvent, CornerKind, EvalObserver, FailureEvent, SelectEvent, SelectKind,
+    BoolNodeEvent, CornerEvent, CornerKind, EvalObserver, FailureEvent, FnEvalResult, SelectEvent,
+    SelectKind,
 };
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
@@ -58,6 +59,18 @@ pub struct MuxOutcomeReport {
     pub entries: Vec<MuxOutcomeReportEntry>,
     pub total_missing: usize,
     pub total_possible: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CandidateObservation {
+    pub ok: bool,
+    pub mux_indices: Vec<usize>,
+    pub path_index: usize,
+    pub bools_index: usize,
+    pub corner_indices: Vec<usize>,
+    pub compare_distance_indices: Vec<usize>,
+    pub failure_indices: Vec<usize>,
+    pub mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
 
 pub trait CorpusSink {
@@ -505,6 +518,10 @@ pub struct AutocovEngine {
 }
 
 impl AutocovEngine {
+    pub fn args_bit_count(&self) -> usize {
+        self.args_bit_count
+    }
+
     pub fn corpus_len(&self) -> usize {
         self.corpus.len()
     }
@@ -531,6 +548,61 @@ impl AutocovEngine {
 
     pub fn failure_features_set(&self) -> usize {
         self.failure_map.set_count()
+    }
+
+    pub fn mux_outcomes_observed(&self) -> usize {
+        self.mux_outcomes_observed_total
+    }
+
+    pub fn mux_outcomes_possible(&self) -> usize {
+        self.mux_outcomes_possible_total
+    }
+
+    pub fn mux_outcomes_missing(&self) -> usize {
+        self.mux_outcomes_possible_total - self.mux_outcomes_observed_total
+    }
+
+    /// Observes a candidate by running the interpreter and updating all feature
+    /// maps.
+    ///
+    /// This does not mutate the corpus (no dedupe/corpus growth logic). Returns
+    /// true when the evaluation succeeded, false when it returned
+    /// `FnEvalResult::Failure`.
+    pub fn observe_candidate(&mut self, cand: &IrBits) -> bool {
+        let obs = self.evaluate_observation(cand);
+        self.apply_observation(&obs);
+        obs.ok
+    }
+
+    pub fn evaluate_observation(&self, cand: &IrBits) -> CandidateObservation {
+        let args_tuple_value = ir_value_from_bits_with_type(cand, &self.args_tuple_type);
+        let args = args_tuple_value.get_elements().unwrap();
+        let mut obs = CollectingMuxObserver::new();
+        let r = xlsynth_pir::ir_eval::eval_fn_with_observer(&self.f, &args, Some(&mut obs));
+        let features = obs.finish();
+        CandidateObservation {
+            ok: matches!(r, FnEvalResult::Success(_)),
+            mux_indices: features.mux_indices,
+            path_index: features.path_index,
+            bools_index: features.bools_index,
+            corner_indices: features.corner_indices,
+            compare_distance_indices: features.compare_distance_indices,
+            failure_indices: features.failure_indices,
+            mux_outcomes: features.mux_outcomes,
+        }
+    }
+
+    pub fn apply_observation(&mut self, obs: &CandidateObservation) {
+        let features = CandidateFeatures {
+            mux_indices: obs.mux_indices.clone(),
+            path_index: obs.path_index,
+            bools_index: obs.bools_index,
+            corner_indices: obs.corner_indices.clone(),
+            compare_distance_indices: obs.compare_distance_indices.clone(),
+            failure_indices: obs.failure_indices.clone(),
+            mux_outcomes: obs.mux_outcomes.clone(),
+        };
+        let _ = self.apply_candidate_features(&features);
     }
 
     pub fn from_ir_path(
@@ -1742,5 +1814,128 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
         let _ = engine.apply_candidate_features(&f1);
 
         assert_eq!(engine.compare_distance_map.set_count(), 2);
+    }
+
+    #[test]
+    fn exhaustive_style_observation_2bit_space_is_deterministic() {
+        let ir_text = r#"package test
+
+fn f(x: bits[2] id=1) -> bits[2] {
+  ret z: bits[2] = identity(x, id=2)
+}
+"#;
+        let cfg = AutocovConfig {
+            seed: 0,
+            max_iters: Some(0),
+        };
+        let mut a = AutocovEngine::from_ir_text(ir_text, None, "f", cfg.clone()).unwrap();
+        let mut b = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
+
+        // Enumerate all 2^2 candidates.
+        for ctr in 0u8..4u8 {
+            let bits = IrBits::from_lsb_is_0(&[(ctr & 1) != 0, (ctr & 2) != 0]);
+            let _ = a.observe_candidate(&bits);
+            let _ = b.observe_candidate(&bits);
+        }
+
+        assert_eq!(a.mux_features_set(), b.mux_features_set());
+        assert_eq!(a.path_features_set(), b.path_features_set());
+        assert_eq!(a.bools_features_set(), b.bools_features_set());
+        assert_eq!(a.corner_features_set(), b.corner_features_set());
+        assert_eq!(
+            a.compare_distance_features_set(),
+            b.compare_distance_features_set()
+        );
+        assert_eq!(a.failure_features_set(), b.failure_features_set());
+        assert_eq!(a.mux_outcomes_observed(), b.mux_outcomes_observed());
+    }
+
+    #[test]
+    fn exhaustive_parallel_matches_single_thread_metrics() {
+        let ir_text = r#"package test
+
+fn f(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
+  ret t: bits[1] = eq(x, y, id=10)
+}
+"#;
+        let cfg = AutocovConfig {
+            seed: 0,
+            max_iters: Some(0),
+        };
+        let mut single = AutocovEngine::from_ir_text(ir_text, None, "f", cfg.clone()).unwrap();
+        let mut parallel = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
+
+        // Single-thread: observe all candidates.
+        for ctr in 0u16..(1u16 << 8) {
+            let bits = IrBits::from_lsb_is_0(&[
+                (ctr & 0x01) != 0,
+                (ctr & 0x02) != 0,
+                (ctr & 0x04) != 0,
+                (ctr & 0x08) != 0,
+                (ctr & 0x10) != 0,
+                (ctr & 0x20) != 0,
+                (ctr & 0x40) != 0,
+                (ctr & 0x80) != 0,
+            ]);
+            let _ = single.observe_candidate(&bits);
+        }
+
+        // Parallel-style: evaluate observations on two independent evaluators and apply
+        // to a single accumulating engine in arbitrary order.
+        let eval_a = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+        let eval_b = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+        for ctr in 0u16..(1u16 << 8) {
+            let bits = IrBits::from_lsb_is_0(&[
+                (ctr & 0x01) != 0,
+                (ctr & 0x02) != 0,
+                (ctr & 0x04) != 0,
+                (ctr & 0x08) != 0,
+                (ctr & 0x10) != 0,
+                (ctr & 0x20) != 0,
+                (ctr & 0x40) != 0,
+                (ctr & 0x80) != 0,
+            ]);
+            let obs = if (ctr & 1) == 0 {
+                eval_a.evaluate_observation(&bits)
+            } else {
+                eval_b.evaluate_observation(&bits)
+            };
+            parallel.apply_observation(&obs);
+        }
+
+        assert_eq!(single.mux_features_set(), parallel.mux_features_set());
+        assert_eq!(single.path_features_set(), parallel.path_features_set());
+        assert_eq!(single.bools_features_set(), parallel.bools_features_set());
+        assert_eq!(single.corner_features_set(), parallel.corner_features_set());
+        assert_eq!(
+            single.compare_distance_features_set(),
+            parallel.compare_distance_features_set()
+        );
+        assert_eq!(
+            single.failure_features_set(),
+            parallel.failure_features_set()
+        );
+        assert_eq!(
+            single.mux_outcomes_observed(),
+            parallel.mux_outcomes_observed()
+        );
     }
 }
