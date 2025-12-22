@@ -14,7 +14,9 @@ use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_eval::{BoolNodeEvent, EvalObserver, SelectEvent, SelectKind};
+use xlsynth_pir::ir_eval::{
+    BoolNodeEvent, CornerEvent, EvalObserver, FailureEvent, SelectEvent, SelectKind,
+};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
 
@@ -34,6 +36,8 @@ pub struct AutocovReport {
     pub mux_features_set: usize,
     pub path_features_set: usize,
     pub bools_features_set: usize,
+    pub corner_features_set: usize,
+    pub failure_features_set: usize,
     pub mux_outcomes_observed: usize,
     pub mux_outcomes_possible: usize,
     pub mux_outcomes_missing: usize,
@@ -66,6 +70,8 @@ pub struct AutocovProgress {
     pub mux_features_set: usize,
     pub path_features_set: usize,
     pub bools_features_set: usize,
+    pub corner_features_set: usize,
+    pub failure_features_set: usize,
     pub mux_outcomes_observed: usize,
     pub mux_outcomes_possible: usize,
     pub mux_outcomes_missing: usize,
@@ -297,6 +303,8 @@ struct Observations {
     mux_new: bool,
     path_new: bool,
     bools_new: bool,
+    corner_new: bool,
+    failure_new: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +312,8 @@ struct CandidateFeatures {
     mux_indices: Vec<usize>,
     path_index: usize,
     bools_index: usize,
+    corner_indices: Vec<usize>,
+    failure_indices: Vec<usize>,
     mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
 
@@ -326,11 +336,35 @@ fn hash_mux_feature(f: &MuxFeature) -> usize {
     u16::from_le_bytes([h.as_bytes()[0], h.as_bytes()[1]]) as usize
 }
 
+fn hash_corner_event(ev: &CornerEvent) -> usize {
+    let mut hasher = Hasher::new();
+    hasher.update(b"xlsynth-autocov:corner");
+    let node_id_u32 = u32::try_from(ev.node_text_id).unwrap_or(u32::MAX);
+    hasher.update(&node_id_u32.to_le_bytes());
+    hasher.update(&[ev.kind as u8]);
+    hasher.update(&[ev.tag]);
+    let h = hasher.finalize();
+    u16::from_le_bytes([h.as_bytes()[0], h.as_bytes()[1]]) as usize
+}
+
+fn hash_failure_event(ev: &FailureEvent) -> usize {
+    let mut hasher = Hasher::new();
+    hasher.update(b"xlsynth-autocov:failure");
+    let node_id_u32 = u32::try_from(ev.node_text_id).unwrap_or(u32::MAX);
+    hasher.update(&node_id_u32.to_le_bytes());
+    hasher.update(&[ev.kind as u8]);
+    hasher.update(&[ev.tag]);
+    let h = hasher.finalize();
+    u16::from_le_bytes([h.as_bytes()[0], h.as_bytes()[1]]) as usize
+}
+
 #[derive(Debug)]
 struct CollectingMuxObserver {
     mux_indices: Vec<usize>,
     path_hasher: Hasher,
     bools_hasher: Hasher,
+    corner_indices: Vec<usize>,
+    failure_indices: Vec<usize>,
     mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
 
@@ -344,6 +378,8 @@ impl CollectingMuxObserver {
             mux_indices: Vec::new(),
             path_hasher,
             bools_hasher,
+            corner_indices: Vec::new(),
+            failure_indices: Vec::new(),
             mux_outcomes: Vec::new(),
         }
     }
@@ -359,6 +395,8 @@ impl CollectingMuxObserver {
             mux_indices: self.mux_indices,
             path_index,
             bools_index,
+            corner_indices: self.corner_indices,
+            failure_indices: self.failure_indices,
             mux_outcomes: self.mux_outcomes,
         }
     }
@@ -407,6 +445,16 @@ impl EvalObserver for CollectingMuxObserver {
         self.bools_hasher.update(&node_id_u32.to_le_bytes());
         self.bools_hasher.update(&[if ev.value { 1 } else { 0 }]);
     }
+
+    fn on_corner_event(&mut self, ev: CornerEvent) {
+        let idx = hash_corner_event(&ev);
+        self.corner_indices.push(idx);
+    }
+
+    fn on_failure_event(&mut self, ev: FailureEvent) {
+        let idx = hash_failure_event(&ev);
+        self.failure_indices.push(idx);
+    }
 }
 
 pub struct AutocovEngine {
@@ -420,6 +468,8 @@ pub struct AutocovEngine {
     mux_map: FeatureMap64k,
     path_map: FeatureMap64k,
     bools_map: FeatureMap64k,
+    corner_map: FeatureMap64k,
+    failure_map: FeatureMap64k,
 
     corpus: Vec<IrBits>,
     corpus_hashes: BTreeSet<[u8; 32]>,
@@ -475,6 +525,8 @@ impl AutocovEngine {
             mux_map: FeatureMap64k::new(),
             path_map: FeatureMap64k::new(),
             bools_map: FeatureMap64k::new(),
+            corner_map: FeatureMap64k::new(),
+            failure_map: FeatureMap64k::new(),
             corpus: Vec::new(),
             corpus_hashes: BTreeSet::new(),
             mux_outcome_spaces: BTreeMap::new(),
@@ -802,6 +854,8 @@ impl AutocovEngine {
                         mux_features_set: self.mux_map.set_count(),
                         path_features_set: self.path_map.set_count(),
                         bools_features_set: self.bools_map.set_count(),
+                        corner_features_set: self.corner_map.set_count(),
+                        failure_features_set: self.failure_map.set_count(),
                         mux_outcomes_observed,
                         mux_outcomes_possible,
                         mux_outcomes_missing,
@@ -824,6 +878,8 @@ impl AutocovEngine {
             mux_features_set: self.mux_map.set_count(),
             path_features_set: self.path_map.set_count(),
             bools_features_set: self.bools_map.set_count(),
+            corner_features_set: self.corner_map.set_count(),
+            failure_features_set: self.failure_map.set_count(),
             mux_outcomes_observed,
             mux_outcomes_possible,
             mux_outcomes_missing,
@@ -979,6 +1035,8 @@ impl AutocovEngine {
                             mux_features_set: self.mux_map.set_count(),
                             path_features_set: self.path_map.set_count(),
                             bools_features_set: self.bools_map.set_count(),
+                            corner_features_set: self.corner_map.set_count(),
+                            failure_features_set: self.failure_map.set_count(),
                             mux_outcomes_observed,
                             mux_outcomes_possible,
                             mux_outcomes_missing,
@@ -1020,6 +1078,8 @@ impl AutocovEngine {
             mux_features_set: self.mux_map.set_count(),
             path_features_set: self.path_map.set_count(),
             bools_features_set: self.bools_map.set_count(),
+            corner_features_set: self.corner_map.set_count(),
+            failure_features_set: self.failure_map.set_count(),
             mux_outcomes_observed,
             mux_outcomes_possible,
             mux_outcomes_missing,
@@ -1225,6 +1285,14 @@ impl AutocovEngine {
         }
         let path_new = self.path_map.observe_index(features.path_index);
         let bools_new = self.bools_map.observe_index(features.bools_index);
+        let mut corner_new = false;
+        for &idx in features.corner_indices.iter() {
+            corner_new |= self.corner_map.observe_index(idx);
+        }
+        let mut failure_new = false;
+        for &idx in features.failure_indices.iter() {
+            failure_new |= self.failure_map.observe_index(idx);
+        }
 
         // Record mux outcome observations (per-node).
         for &(node_id, outcome) in features.mux_outcomes.iter() {
@@ -1250,6 +1318,8 @@ impl AutocovEngine {
             mux_new,
             path_new,
             bools_new,
+            corner_new,
+            failure_new,
         }
     }
 
@@ -1263,7 +1333,7 @@ impl AutocovEngine {
             return false;
         }
         let obs = self.apply_candidate_features(features);
-        if !obs.mux_new && !obs.path_new && !obs.bools_new {
+        if !obs.mux_new && !obs.path_new && !obs.bools_new && !obs.corner_new && !obs.failure_new {
             return false;
         }
         if let Some(sink_ptr) = sink {
@@ -1500,5 +1570,65 @@ fn f(x: bits[2] id=1) -> bits[1] {
         let _ = engine.apply_candidate_features(&f1);
         assert_ne!(f0.bools_index, f1.bools_index);
         assert_eq!(engine.bools_map.set_count(), 2);
+    }
+
+    #[test]
+    fn corner_and_failure_maps_set_bits_on_new_events() {
+        // Corner coverage: add rhs == 0 should set a bit in the corner map.
+        let ir_corner = r#"package test
+
+fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret z: bits[8] = add(x, y, id=10)
+}
+"#;
+        let mut corner_engine = AutocovEngine::from_ir_text(
+            ir_corner,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+        let t_corner = IrValue::make_tuple(&[
+            IrValue::make_ubits(8, 7).unwrap(),
+            IrValue::make_ubits(8, 0).unwrap(),
+        ]);
+        let b_corner = ir_bits_from_value_with_type(&t_corner, &corner_engine.args_tuple_type);
+        let f_corner = corner_engine.evaluate_candidate_features(&b_corner);
+        let _ = corner_engine.apply_candidate_features(&f_corner);
+        assert_eq!(corner_engine.corner_map.set_count(), 1);
+
+        // Failure coverage: array_index OOB with assumed_in_bounds=true should set a
+        // bit in the failure map.
+        let ir_fail = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=11)
+}
+"#;
+        let mut fail_engine = AutocovEngine::from_ir_text(
+            ir_fail,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+        let arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 11).unwrap(),
+            IrValue::make_ubits(8, 12).unwrap(),
+            IrValue::make_ubits(8, 13).unwrap(),
+        ])
+        .unwrap();
+        let t_fail = IrValue::make_tuple(&[arr, IrValue::make_ubits(3, 7).unwrap()]);
+        let b_fail = ir_bits_from_value_with_type(&t_fail, &fail_engine.args_tuple_type);
+        let f_fail = fail_engine.evaluate_candidate_features(&b_fail);
+        assert!(fail_engine.maybe_add_to_corpus(b_fail.clone(), &f_fail, None));
+        assert_eq!(fail_engine.failure_map.set_count(), 1);
     }
 }

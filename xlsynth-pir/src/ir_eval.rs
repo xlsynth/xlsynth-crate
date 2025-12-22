@@ -708,10 +708,165 @@ pub struct BoolNodeEvent {
     pub value: bool,
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CornerKind {
+    Add = 0,
+    Neg = 1,
+    SignExt = 2,
+    DynamicBitSlice = 3,
+    ArrayIndex = 4,
+    Shift = 5,
+    Shra = 6,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FailureKind {
+    BitSliceOob = 0,
+    DynamicBitSliceOob = 1,
+    BitSliceUpdateOob = 2,
+    ArrayUpdateOobAssumedInBounds = 3,
+    ArrayIndexOobAssumedInBounds = 4,
+    AssertTriggered = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CornerEvent {
+    pub node_ref: ir::NodeRef,
+    pub node_text_id: usize,
+    pub kind: CornerKind,
+    pub tag: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FailureEvent {
+    pub node_ref: ir::NodeRef,
+    pub node_text_id: usize,
+    pub kind: FailureKind,
+    pub tag: u8,
+}
+
 pub trait EvalObserver {
     fn on_select(&mut self, ev: SelectEvent);
 
     fn on_bool_node(&mut self, _ev: BoolNodeEvent) {}
+
+    fn on_corner_event(&mut self, _ev: CornerEvent) {}
+
+    fn on_failure_event(&mut self, _ev: FailureEvent) {}
+}
+
+fn observe_corner_like_node(
+    nr: ir::NodeRef,
+    node: &ir::Node,
+    env: &HashMap<ir::NodeRef, IrValue>,
+    observer: &mut dyn EvalObserver,
+) {
+    match &node.payload {
+        ir::NodePayload::Binop(ir::Binop::Add, _lhs, rhs) => {
+            let rhs_bits = env.get(rhs).unwrap().to_bits().unwrap();
+            let mut is_zero = true;
+            for i in 0..rhs_bits.get_bit_count() {
+                if rhs_bits.get_bit(i).unwrap() {
+                    is_zero = false;
+                    break;
+                }
+            }
+            if is_zero {
+                observer.on_corner_event(CornerEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    kind: CornerKind::Add,
+                    tag: 0, // RhsIsZero
+                });
+            }
+        }
+        ir::NodePayload::Unop(ir::Unop::Neg, operand) => {
+            let bits = env.get(operand).unwrap().to_bits().unwrap();
+            let w = bits.get_bit_count();
+            if w > 0 {
+                let msb = bits.get_bit(w - 1).unwrap();
+                if msb {
+                    let mut all_lower_zero = true;
+                    for i in 0..(w - 1) {
+                        if bits.get_bit(i).unwrap() {
+                            all_lower_zero = false;
+                            break;
+                        }
+                    }
+                    if all_lower_zero {
+                        observer.on_corner_event(CornerEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: CornerKind::Neg,
+                            tag: 0, // OperandIsMinSigned
+                        });
+                    }
+                }
+            }
+        }
+        ir::NodePayload::SignExt { arg, new_bit_count } => {
+            let arg_bits = env.get(arg).unwrap().to_bits().unwrap();
+            let old_w = arg_bits.get_bit_count();
+            if *new_bit_count > old_w && old_w > 0 {
+                let msb = arg_bits.get_bit(old_w - 1).unwrap();
+                if !msb {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::SignExt,
+                        tag: 0, // MsbIsZero
+                    });
+                }
+            }
+        }
+        ir::NodePayload::Binop(binop, lhs, rhs)
+            if matches!(binop, ir::Binop::Shll | ir::Binop::Shrl) =>
+        {
+            let lhs_bits = env.get(lhs).unwrap().to_bits().unwrap();
+            let rhs_bits = env.get(rhs).unwrap().to_bits().unwrap();
+            let shift: i64 = rhs_bits.to_u64().unwrap().try_into().unwrap();
+            let lhs_w = lhs_bits.get_bit_count() as i64;
+            if shift == 0 {
+                observer.on_corner_event(CornerEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    kind: CornerKind::Shift,
+                    tag: 0, // AmtIsZero
+                });
+            }
+            let tag = if shift < lhs_w { 1 } else { 2 }; // AmtLtWidth vs AmtGeWidth
+            observer.on_corner_event(CornerEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                kind: CornerKind::Shift,
+                tag,
+            });
+        }
+        ir::NodePayload::Binop(ir::Binop::Shra, lhs, rhs) => {
+            let lhs_bits = env.get(lhs).unwrap().to_bits().unwrap();
+            let rhs_bits = env.get(rhs).unwrap().to_bits().unwrap();
+            let shift: i64 = rhs_bits.to_u64().unwrap().try_into().unwrap();
+            let lhs_w = lhs_bits.get_bit_count() as i64;
+            let amt_lt = shift < lhs_w;
+            let msb_is_zero = if lhs_w <= 0 {
+                true
+            } else {
+                !lhs_bits.get_bit((lhs_w - 1) as usize).unwrap()
+            };
+            // Tags:
+            // 0: Msb0_AmtLt, 1: Msb0_AmtGe, 2: Msb1_AmtLt, 3: Msb1_AmtGe
+            let tag = (if msb_is_zero { 0 } else { 2 }) + (if amt_lt { 0 } else { 1 });
+            observer.on_corner_event(CornerEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                kind: CornerKind::Shra,
+                tag,
+            });
+        }
+        _ => {}
+    }
 }
 
 fn observe_select_like_node(
@@ -894,6 +1049,14 @@ pub fn eval_fn_with_observer(
                     .to_bool()
                     .expect("activate must be bits[1]");
                 if active {
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.on_failure_event(FailureEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: FailureKind::AssertTriggered,
+                            tag: 0,
+                        });
+                    }
                     assertion_failures.push(AssertionFailure {
                         message: message.clone(),
                         label: label.clone(),
@@ -972,6 +1135,14 @@ pub fn eval_fn_with_observer(
                     .unwrap();
                 let bit_count = arg_bits.get_bit_count();
                 if start + width > bit_count {
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.on_failure_event(FailureEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: FailureKind::BitSliceOob,
+                            tag: 0,
+                        });
+                    }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
@@ -995,9 +1166,31 @@ pub fn eval_fn_with_observer(
                 let start_u = start_bits.to_u64().unwrap() as usize;
                 let bit_count = arg_bits.get_bit_count();
                 if start_u + *width > bit_count {
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.on_corner_event(CornerEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: CornerKind::DynamicBitSlice,
+                            tag: 1, // OutOfBounds
+                        });
+                        observer.on_failure_event(FailureEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: FailureKind::DynamicBitSliceOob,
+                            tag: 0,
+                        });
+                    }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
+                    });
+                }
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::DynamicBitSlice,
+                        tag: 0, // InBounds
                     });
                 }
                 let r = arg_bits.width_slice(start_u as i64, *width as i64);
@@ -1028,6 +1221,14 @@ pub fn eval_fn_with_observer(
                 let arg_w = arg_bits.get_bit_count();
                 let upd_w = upd_bits.get_bit_count();
                 if start_u + upd_w > arg_w {
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.on_failure_event(FailureEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: FailureKind::BitSliceUpdateOob,
+                            tag: 0,
+                        });
+                    }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
@@ -1073,6 +1274,7 @@ pub fn eval_fn_with_observer(
                 // true, any OOB index is considered a sample failure and we
                 // return Failure.
                 let mut value = env.get(array).expect("array must be evaluated").clone();
+                let mut clamped_any = false;
                 for idx_ref in indices.iter() {
                     let idx = env
                         .get(idx_ref)
@@ -1085,15 +1287,32 @@ pub fn eval_fn_with_observer(
                     assert!(count > 0, "ArrayIndex: empty array not supported");
                     if idx >= count {
                         if *assumed_in_bounds {
+                            if let Some(observer) = observer.as_deref_mut() {
+                                observer.on_failure_event(FailureEvent {
+                                    node_ref: nr,
+                                    node_text_id: node.text_id,
+                                    kind: FailureKind::ArrayIndexOobAssumedInBounds,
+                                    tag: 0,
+                                });
+                            }
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
                                 trace_messages,
                             });
                         }
+                        clamped_any = true;
                         value = value.get_element(count - 1).unwrap();
                     } else {
                         value = value.get_element(idx).unwrap();
                     }
+                }
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::ArrayIndex,
+                        tag: if clamped_any { 1 } else { 0 }, // Clamped vs InBounds
+                    });
                 }
                 value
             }
@@ -1152,6 +1371,14 @@ pub fn eval_fn_with_observer(
                     Some(updated) => updated,
                     None => {
                         if *assumed_in_bounds {
+                            if let Some(observer) = observer.as_deref_mut() {
+                                observer.on_failure_event(FailureEvent {
+                                    node_ref: nr,
+                                    node_text_id: node.text_id,
+                                    kind: FailureKind::ArrayUpdateOobAssumedInBounds,
+                                    tag: 0,
+                                });
+                            }
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
                                 trace_messages,
@@ -1166,6 +1393,7 @@ pub fn eval_fn_with_observer(
             _ => {
                 if let Some(obs) = observer.as_deref_mut() {
                     observe_select_like_node(nr, node, &env, obs);
+                    observe_corner_like_node(nr, node, &env, obs);
                 }
                 eval_pure(node, &env)
             }
@@ -1290,6 +1518,24 @@ mod tests {
 
         fn on_bool_node(&mut self, ev: BoolNodeEvent) {
             self.bool_events.push((ev.node_text_id, ev.value));
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingCornerFailureObserver {
+        corner_events: Vec<(usize, CornerKind, u8)>,
+        failure_events: Vec<(usize, FailureKind)>,
+    }
+
+    impl EvalObserver for RecordingCornerFailureObserver {
+        fn on_select(&mut self, _ev: SelectEvent) {}
+
+        fn on_corner_event(&mut self, ev: CornerEvent) {
+            self.corner_events.push((ev.node_text_id, ev.kind, ev.tag));
+        }
+
+        fn on_failure_event(&mut self, ev: FailureEvent) {
+            self.failure_events.push((ev.node_text_id, ev.kind));
         }
     }
 
@@ -2271,5 +2517,151 @@ fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
             FnEvalResult::Success(_) => panic!("expected failure"),
             FnEvalResult::Failure(_f) => {}
         }
+    }
+
+    #[test]
+    fn test_corner_add_rhs_is_zero_emits_event() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret z: bits[8] = add(x, y, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![
+            IrValue::make_ubits(8, 7).unwrap(),
+            IrValue::make_ubits(8, 0).unwrap(),
+        ];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::Add, 0)]);
+    }
+
+    #[test]
+    fn test_corner_neg_min_signed_emits_event() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1) -> bits[8] {
+  ret z: bits[8] = neg(x, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![IrValue::make_ubits(8, 0x80).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::Neg, 0)]);
+    }
+
+    #[test]
+    fn test_corner_sign_ext_msb_zero_emits_event() {
+        let ir_text = r#"package test
+
+fn f(x: bits[4] id=1) -> bits[8] {
+  ret z: bits[8] = sign_ext(x, new_bit_count=8, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![IrValue::make_ubits(4, 0b0011).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::SignExt, 0)]);
+    }
+
+    #[test]
+    fn test_corner_dynamic_bit_slice_in_bounds_vs_oob() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, s: bits[3] id=2) -> bits[4] {
+  ret z: bits[4] = dynamic_bit_slice(x, s, width=4, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+
+        // In bounds: start=2, width=4, arg_width=8
+        let args_in = vec![
+            IrValue::make_ubits(8, 0b1111_0000).unwrap(),
+            IrValue::make_ubits(3, 2).unwrap(),
+        ];
+        let mut obs_in = RecordingCornerFailureObserver::default();
+        let r_in = eval_fn_with_observer(&f, &args_in, Some(&mut obs_in));
+        assert!(matches!(r_in, FnEvalResult::Success(_)));
+        assert_eq!(
+            obs_in.corner_events,
+            vec![(10, CornerKind::DynamicBitSlice, 0)]
+        );
+        assert!(obs_in.failure_events.is_empty());
+
+        // OOB: start=6, width=4, arg_width=8
+        let args_oob = vec![
+            IrValue::make_ubits(8, 0b1111_0000).unwrap(),
+            IrValue::make_ubits(3, 6).unwrap(),
+        ];
+        let mut obs_oob = RecordingCornerFailureObserver::default();
+        let r_oob = eval_fn_with_observer(&f, &args_oob, Some(&mut obs_oob));
+        assert!(matches!(r_oob, FnEvalResult::Failure(_)));
+        assert_eq!(
+            obs_oob.corner_events,
+            vec![(10, CornerKind::DynamicBitSlice, 1)]
+        );
+        assert_eq!(
+            obs_oob.failure_events,
+            vec![(10, FailureKind::DynamicBitSliceOob)]
+        );
+    }
+
+    #[test]
+    fn test_corner_array_index_clamped_and_failure_when_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=false, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 11).unwrap(),
+            IrValue::make_ubits(8, 12).unwrap(),
+            IrValue::make_ubits(8, 13).unwrap(),
+        ])
+        .unwrap();
+        let args = vec![arr.clone(), IrValue::make_ubits(3, 7).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::ArrayIndex, 1)]);
+        assert!(obs.failure_events.is_empty());
+
+        let ir_text_assumed = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text_assumed);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![arr, IrValue::make_ubits(3, 7).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Failure(_)));
+        assert!(obs.corner_events.is_empty());
+        assert_eq!(
+            obs.failure_events,
+            vec![(10, FailureKind::ArrayIndexOobAssumedInBounds)]
+        );
     }
 }
