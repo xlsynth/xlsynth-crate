@@ -15,7 +15,7 @@ use rand::{RngCore, SeedableRng};
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval::{
-    BoolNodeEvent, CornerEvent, EvalObserver, FailureEvent, SelectEvent, SelectKind,
+    BoolNodeEvent, CornerEvent, CornerKind, EvalObserver, FailureEvent, SelectEvent, SelectKind,
 };
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
@@ -37,6 +37,7 @@ pub struct AutocovReport {
     pub path_features_set: usize,
     pub bools_features_set: usize,
     pub corner_features_set: usize,
+    pub compare_distance_features_set: usize,
     pub failure_features_set: usize,
     pub mux_outcomes_observed: usize,
     pub mux_outcomes_possible: usize,
@@ -71,6 +72,7 @@ pub struct AutocovProgress {
     pub path_features_set: usize,
     pub bools_features_set: usize,
     pub corner_features_set: usize,
+    pub compare_distance_features_set: usize,
     pub failure_features_set: usize,
     pub mux_outcomes_observed: usize,
     pub mux_outcomes_possible: usize,
@@ -304,6 +306,7 @@ struct Observations {
     path_new: bool,
     bools_new: bool,
     corner_new: bool,
+    compare_distance_new: bool,
     failure_new: bool,
 }
 
@@ -313,6 +316,7 @@ struct CandidateFeatures {
     path_index: usize,
     bools_index: usize,
     corner_indices: Vec<usize>,
+    compare_distance_indices: Vec<usize>,
     failure_indices: Vec<usize>,
     mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
@@ -347,6 +351,17 @@ fn hash_corner_event(ev: &CornerEvent) -> usize {
     u16::from_le_bytes([h.as_bytes()[0], h.as_bytes()[1]]) as usize
 }
 
+fn hash_compare_distance_event(ev: &CornerEvent) -> usize {
+    debug_assert!(ev.kind == CornerKind::CompareDistance);
+    let mut hasher = Hasher::new();
+    hasher.update(b"xlsynth-autocov:compare-distance");
+    let node_id_u32 = u32::try_from(ev.node_text_id).unwrap_or(u32::MAX);
+    hasher.update(&node_id_u32.to_le_bytes());
+    hasher.update(&[ev.tag]);
+    let h = hasher.finalize();
+    u16::from_le_bytes([h.as_bytes()[0], h.as_bytes()[1]]) as usize
+}
+
 fn hash_failure_event(ev: &FailureEvent) -> usize {
     let mut hasher = Hasher::new();
     hasher.update(b"xlsynth-autocov:failure");
@@ -364,6 +379,7 @@ struct CollectingMuxObserver {
     path_hasher: Hasher,
     bools_hasher: Hasher,
     corner_indices: Vec<usize>,
+    compare_distance_indices: Vec<usize>,
     failure_indices: Vec<usize>,
     mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
@@ -379,6 +395,7 @@ impl CollectingMuxObserver {
             path_hasher,
             bools_hasher,
             corner_indices: Vec::new(),
+            compare_distance_indices: Vec::new(),
             failure_indices: Vec::new(),
             mux_outcomes: Vec::new(),
         }
@@ -396,6 +413,7 @@ impl CollectingMuxObserver {
             path_index,
             bools_index,
             corner_indices: self.corner_indices,
+            compare_distance_indices: self.compare_distance_indices,
             failure_indices: self.failure_indices,
             mux_outcomes: self.mux_outcomes,
         }
@@ -447,8 +465,13 @@ impl EvalObserver for CollectingMuxObserver {
     }
 
     fn on_corner_event(&mut self, ev: CornerEvent) {
-        let idx = hash_corner_event(&ev);
-        self.corner_indices.push(idx);
+        if ev.kind == CornerKind::CompareDistance {
+            let idx = hash_compare_distance_event(&ev);
+            self.compare_distance_indices.push(idx);
+        } else {
+            let idx = hash_corner_event(&ev);
+            self.corner_indices.push(idx);
+        }
     }
 
     fn on_failure_event(&mut self, ev: FailureEvent) {
@@ -469,6 +492,7 @@ pub struct AutocovEngine {
     path_map: FeatureMap64k,
     bools_map: FeatureMap64k,
     corner_map: FeatureMap64k,
+    compare_distance_map: FeatureMap64k,
     failure_map: FeatureMap64k,
 
     corpus: Vec<IrBits>,
@@ -481,6 +505,34 @@ pub struct AutocovEngine {
 }
 
 impl AutocovEngine {
+    pub fn corpus_len(&self) -> usize {
+        self.corpus.len()
+    }
+
+    pub fn mux_features_set(&self) -> usize {
+        self.mux_map.set_count()
+    }
+
+    pub fn path_features_set(&self) -> usize {
+        self.path_map.set_count()
+    }
+
+    pub fn bools_features_set(&self) -> usize {
+        self.bools_map.set_count()
+    }
+
+    pub fn corner_features_set(&self) -> usize {
+        self.corner_map.set_count()
+    }
+
+    pub fn compare_distance_features_set(&self) -> usize {
+        self.compare_distance_map.set_count()
+    }
+
+    pub fn failure_features_set(&self) -> usize {
+        self.failure_map.set_count()
+    }
+
     pub fn from_ir_path(
         ir_file: &Path,
         entry_fn: &str,
@@ -526,6 +578,7 @@ impl AutocovEngine {
             path_map: FeatureMap64k::new(),
             bools_map: FeatureMap64k::new(),
             corner_map: FeatureMap64k::new(),
+            compare_distance_map: FeatureMap64k::new(),
             failure_map: FeatureMap64k::new(),
             corpus: Vec::new(),
             corpus_hashes: BTreeSet::new(),
@@ -855,6 +908,7 @@ impl AutocovEngine {
                         path_features_set: self.path_map.set_count(),
                         bools_features_set: self.bools_map.set_count(),
                         corner_features_set: self.corner_map.set_count(),
+                        compare_distance_features_set: self.compare_distance_map.set_count(),
                         failure_features_set: self.failure_map.set_count(),
                         mux_outcomes_observed,
                         mux_outcomes_possible,
@@ -879,6 +933,7 @@ impl AutocovEngine {
             path_features_set: self.path_map.set_count(),
             bools_features_set: self.bools_map.set_count(),
             corner_features_set: self.corner_map.set_count(),
+            compare_distance_features_set: self.compare_distance_map.set_count(),
             failure_features_set: self.failure_map.set_count(),
             mux_outcomes_observed,
             mux_outcomes_possible,
@@ -1036,6 +1091,7 @@ impl AutocovEngine {
                             path_features_set: self.path_map.set_count(),
                             bools_features_set: self.bools_map.set_count(),
                             corner_features_set: self.corner_map.set_count(),
+                            compare_distance_features_set: self.compare_distance_map.set_count(),
                             failure_features_set: self.failure_map.set_count(),
                             mux_outcomes_observed,
                             mux_outcomes_possible,
@@ -1079,6 +1135,7 @@ impl AutocovEngine {
             path_features_set: self.path_map.set_count(),
             bools_features_set: self.bools_map.set_count(),
             corner_features_set: self.corner_map.set_count(),
+            compare_distance_features_set: self.compare_distance_map.set_count(),
             failure_features_set: self.failure_map.set_count(),
             mux_outcomes_observed,
             mux_outcomes_possible,
@@ -1289,6 +1346,10 @@ impl AutocovEngine {
         for &idx in features.corner_indices.iter() {
             corner_new |= self.corner_map.observe_index(idx);
         }
+        let mut compare_distance_new = false;
+        for &idx in features.compare_distance_indices.iter() {
+            compare_distance_new |= self.compare_distance_map.observe_index(idx);
+        }
         let mut failure_new = false;
         for &idx in features.failure_indices.iter() {
             failure_new |= self.failure_map.observe_index(idx);
@@ -1319,6 +1380,7 @@ impl AutocovEngine {
             path_new,
             bools_new,
             corner_new,
+            compare_distance_new,
             failure_new,
         }
     }
@@ -1333,7 +1395,13 @@ impl AutocovEngine {
             return false;
         }
         let obs = self.apply_candidate_features(features);
-        if !obs.mux_new && !obs.path_new && !obs.bools_new && !obs.corner_new && !obs.failure_new {
+        if !obs.mux_new
+            && !obs.path_new
+            && !obs.bools_new
+            && !obs.corner_new
+            && !obs.compare_distance_new
+            && !obs.failure_new
+        {
             return false;
         }
         if let Some(sink_ptr) = sink {
@@ -1630,5 +1698,49 @@ fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
         let f_fail = fail_engine.evaluate_candidate_features(&b_fail);
         assert!(fail_engine.maybe_add_to_corpus(b_fail.clone(), &f_fail, None));
         assert_eq!(fail_engine.failure_map.set_count(), 1);
+    }
+
+    #[test]
+    fn compare_distance_buckets_set_distinct_corner_indices() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
+  ret t: bits[1] = eq(x, y, id=10)
+}
+"#;
+        let mut engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+
+        let t0 = IrValue::make_tuple(&[
+            IrValue::make_ubits(8, 0xAA).unwrap(),
+            IrValue::make_ubits(8, 0xAA).unwrap(),
+        ]);
+        let b0 = ir_bits_from_value_with_type(&t0, &engine.args_tuple_type);
+        let f0 = engine.evaluate_candidate_features(&b0);
+        assert_eq!(f0.compare_distance_indices.len(), 1);
+        let _ = engine.apply_candidate_features(&f0);
+
+        let t1 = IrValue::make_tuple(&[
+            IrValue::make_ubits(8, 0xAA).unwrap(),
+            IrValue::make_ubits(8, 0xAB).unwrap(),
+        ]);
+        let b1 = ir_bits_from_value_with_type(&t1, &engine.args_tuple_type);
+        let f1 = engine.evaluate_candidate_features(&b1);
+        assert_eq!(f1.compare_distance_indices.len(), 1);
+        assert_ne!(
+            f0.compare_distance_indices[0],
+            f1.compare_distance_indices[0]
+        );
+        let _ = engine.apply_candidate_features(&f1);
+
+        assert_eq!(engine.compare_distance_map.set_count(), 2);
     }
 }

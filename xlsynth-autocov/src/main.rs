@@ -111,7 +111,11 @@ fn main() -> anyhow::Result<()> {
 
     // Load existing corpus file (if any).
     if let Ok(f) = std::fs::File::open(&args.corpus_file) {
+        eprintln!("corpus_replay_begin path={}", args.corpus_file.display());
         let rdr = BufReader::new(f);
+        let replay_start = Instant::now();
+        let mut replay_last = replay_start;
+        let mut replay_lines: u64 = 0;
         for line in rdr.lines() {
             let line = line?;
             let line = line.trim();
@@ -122,7 +126,40 @@ fn main() -> anyhow::Result<()> {
             engine
                 .add_corpus_sample_from_arg_tuple(&v)
                 .map_err(|e| anyhow::anyhow!(e))?;
+            replay_lines += 1;
+            if replay_lines % 10_000 == 0 {
+                let now = Instant::now();
+                let total_s = now.duration_since(replay_start).as_secs_f64().max(1e-9);
+                let interval_s = now.duration_since(replay_last).as_secs_f64().max(1e-9);
+                let total_rate = (replay_lines as f64) / total_s;
+                let interval_rate = 10_000f64 / interval_s;
+                eprintln!(
+                    "corpus_replay progress lines={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} compare_distance_features_set={} failure_features_set={} lines_per_sec={:.1} interval_lines_per_sec={:.1}",
+                    replay_lines,
+                    engine.corpus_len(),
+                    engine.mux_features_set(),
+                    engine.path_features_set(),
+                    engine.bools_features_set(),
+                    engine.corner_features_set(),
+                    engine.compare_distance_features_set(),
+                    engine.failure_features_set(),
+                    total_rate,
+                    interval_rate
+                );
+                replay_last = now;
+            }
         }
+        let replay_total_s = Instant::now()
+            .duration_since(replay_start)
+            .as_secs_f64()
+            .max(1e-9);
+        eprintln!(
+            "corpus_replay_end lines={} corpus_len={} seconds={:.3} lines_per_sec={:.1}",
+            replay_lines,
+            engine.corpus_len(),
+            replay_total_s,
+            (replay_lines as f64) / replay_total_s
+        );
     }
 
     // Open for append (create if missing).
@@ -190,13 +227,14 @@ fn main() -> anyhow::Result<()> {
 
             if p.last_iter_added {
                 eprintln!(
-                    "new_coverage iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
+                    "new_coverage iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} compare_distance_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
                     p.iters,
                     p.corpus_len,
                     p.mux_features_set,
                     p.path_features_set,
                     p.bools_features_set,
                     p.corner_features_set,
+                    p.compare_distance_features_set,
                     p.failure_features_set,
                     p.mux_outcomes_observed,
                     p.mux_outcomes_possible,
@@ -206,13 +244,14 @@ fn main() -> anyhow::Result<()> {
                 );
             } else {
                 eprintln!(
-                    "progress iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
+                    "progress iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} compare_distance_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
                     p.iters,
                     p.corpus_len,
                     p.mux_features_set,
                     p.path_features_set,
                     p.bools_features_set,
                     p.corner_features_set,
+                    p.compare_distance_features_set,
                     p.failure_features_set,
                     p.mux_outcomes_observed,
                     p.mux_outcomes_possible,
@@ -261,13 +300,14 @@ fn main() -> anyhow::Result<()> {
         );
     }
     println!(
-        "iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={}",
+        "iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} compare_distance_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={}",
         report.iters,
         report.corpus_len,
         report.mux_features_set,
         report.path_features_set,
         report.bools_features_set,
         report.corner_features_set,
+        report.compare_distance_features_set,
         report.failure_features_set,
         report.mux_outcomes_observed,
         report.mux_outcomes_possible,

@@ -718,6 +718,7 @@ pub enum CornerKind {
     ArrayIndex = 4,
     Shift = 5,
     Shra = 6,
+    CompareDistance = 7,
 }
 
 #[repr(u8)]
@@ -763,7 +764,50 @@ fn observe_corner_like_node(
     env: &HashMap<ir::NodeRef, IrValue>,
     observer: &mut dyn EvalObserver,
 ) {
+    fn bucket_xor_popcount(d: usize) -> u8 {
+        match d {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 3,
+            4 => 4,
+            5..=8 => 5,
+            9..=16 => 6,
+            _ => 7,
+        }
+    }
+
     match &node.payload {
+        ir::NodePayload::Binop(binop, lhs, rhs)
+            if matches!(binop, ir::Binop::Eq | ir::Binop::Ne) =>
+        {
+            let lhs_bits = match env.get(lhs).unwrap().to_bits() {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let rhs_bits = match env.get(rhs).unwrap().to_bits() {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let w = lhs_bits.get_bit_count();
+            if w != rhs_bits.get_bit_count() {
+                return;
+            }
+            let mut d: usize = 0;
+            for i in 0..w {
+                let a = lhs_bits.get_bit(i).unwrap();
+                let b = rhs_bits.get_bit(i).unwrap();
+                if a ^ b {
+                    d += 1;
+                }
+            }
+            observer.on_corner_event(CornerEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                kind: CornerKind::CompareDistance,
+                tag: bucket_xor_popcount(d),
+            });
+        }
         ir::NodePayload::Binop(ir::Binop::Add, _lhs, rhs) => {
             let rhs_bits = env.get(rhs).unwrap().to_bits().unwrap();
             let mut is_zero = true;
@@ -2574,6 +2618,64 @@ fn f(x: bits[4] id=1) -> bits[8] {
         let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
         assert!(matches!(r, FnEvalResult::Success(_)));
         assert_eq!(obs.corner_events, vec![(10, CornerKind::SignExt, 0)]);
+    }
+
+    #[test]
+    fn test_corner_compare_distance_buckets_xor_popcount() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
+  ret t: bits[1] = eq(x, y, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+
+        let mut obs0 = RecordingCornerFailureObserver::default();
+        let r0 = eval_fn_with_observer(
+            &f,
+            &[
+                IrValue::make_ubits(8, 0xAA).unwrap(),
+                IrValue::make_ubits(8, 0xAA).unwrap(),
+            ],
+            Some(&mut obs0),
+        );
+        assert!(matches!(r0, FnEvalResult::Success(_)));
+        assert_eq!(
+            obs0.corner_events,
+            vec![(10, CornerKind::CompareDistance, 0)]
+        );
+
+        let mut obs1 = RecordingCornerFailureObserver::default();
+        let r1 = eval_fn_with_observer(
+            &f,
+            &[
+                IrValue::make_ubits(8, 0xAA).unwrap(),
+                IrValue::make_ubits(8, 0xAB).unwrap(),
+            ],
+            Some(&mut obs1),
+        );
+        assert!(matches!(r1, FnEvalResult::Success(_)));
+        assert_eq!(
+            obs1.corner_events,
+            vec![(10, CornerKind::CompareDistance, 1)]
+        );
+
+        let mut obs5 = RecordingCornerFailureObserver::default();
+        let r5 = eval_fn_with_observer(
+            &f,
+            &[
+                IrValue::make_ubits(8, 0).unwrap(),
+                IrValue::make_ubits(8, 0b0001_1111).unwrap(),
+            ],
+            Some(&mut obs5),
+        );
+        assert!(matches!(r5, FnEvalResult::Success(_)));
+        assert_eq!(
+            obs5.corner_events,
+            vec![(10, CornerKind::CompareDistance, 5)]
+        );
     }
 
     #[test]
