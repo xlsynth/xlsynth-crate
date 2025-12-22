@@ -14,11 +14,12 @@ use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_eval::{EvalObserver, SelectEvent, SelectKind};
+use xlsynth_pir::ir_eval::{BoolNodeEvent, EvalObserver, SelectEvent, SelectKind};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
 
 pub const FEATURE_MAP_SIZE: usize = 65_536;
+const FEATURE_MAP_BYTES: usize = FEATURE_MAP_SIZE / 8;
 
 #[derive(Debug, Clone)]
 pub struct AutocovConfig {
@@ -32,6 +33,7 @@ pub struct AutocovReport {
     pub corpus_len: usize,
     pub mux_features_set: usize,
     pub path_features_set: usize,
+    pub bools_features_set: usize,
     pub mux_outcomes_observed: usize,
     pub mux_outcomes_possible: usize,
     pub mux_outcomes_missing: usize,
@@ -63,6 +65,7 @@ pub struct AutocovProgress {
     pub corpus_len: usize,
     pub mux_features_set: usize,
     pub path_features_set: usize,
+    pub bools_features_set: usize,
     pub mux_outcomes_observed: usize,
     pub mux_outcomes_possible: usize,
     pub mux_outcomes_missing: usize,
@@ -258,22 +261,25 @@ pub struct MuxFeature {
 
 #[derive(Debug, Clone)]
 struct FeatureMap64k {
-    bytes: [u8; FEATURE_MAP_SIZE],
+    bytes: [u8; FEATURE_MAP_BYTES],
     set_count: usize,
 }
 
 impl FeatureMap64k {
     fn new() -> Self {
         Self {
-            bytes: [0u8; FEATURE_MAP_SIZE],
+            bytes: [0u8; FEATURE_MAP_BYTES],
             set_count: 0,
         }
     }
 
     fn observe_index(&mut self, idx: usize) -> bool {
-        let slot = &mut self.bytes[idx];
-        if *slot == 0 {
-            *slot = 1;
+        let byte_idx = idx >> 3;
+        let bit_idx = idx & 7;
+        let mask: u8 = 1u8 << bit_idx;
+        let slot = &mut self.bytes[byte_idx];
+        if (*slot & mask) == 0 {
+            *slot |= mask;
             self.set_count += 1;
             true
         } else {
@@ -290,12 +296,14 @@ impl FeatureMap64k {
 struct Observations {
     mux_new: bool,
     path_new: bool,
+    bools_new: bool,
 }
 
 #[derive(Debug, Clone)]
 struct CandidateFeatures {
     mux_indices: Vec<usize>,
     path_index: usize,
+    bools_index: usize,
     mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
 
@@ -322,6 +330,7 @@ fn hash_mux_feature(f: &MuxFeature) -> usize {
 struct CollectingMuxObserver {
     mux_indices: Vec<usize>,
     path_hasher: Hasher,
+    bools_hasher: Hasher,
     mux_outcomes: Vec<(usize, MuxOutcomeId)>,
 }
 
@@ -329,9 +338,12 @@ impl CollectingMuxObserver {
     fn new() -> Self {
         let mut path_hasher = Hasher::new();
         path_hasher.update(b"xlsynth-autocov:path");
+        let mut bools_hasher = Hasher::new();
+        bools_hasher.update(b"xlsynth-autocov:bools");
         Self {
             mux_indices: Vec::new(),
             path_hasher,
+            bools_hasher,
             mux_outcomes: Vec::new(),
         }
     }
@@ -340,9 +352,13 @@ impl CollectingMuxObserver {
         let path_hash = self.path_hasher.finalize();
         let path_index =
             u16::from_le_bytes([path_hash.as_bytes()[0], path_hash.as_bytes()[1]]) as usize;
+        let bools_hash = self.bools_hasher.finalize();
+        let bools_index =
+            u16::from_le_bytes([bools_hash.as_bytes()[0], bools_hash.as_bytes()[1]]) as usize;
         CandidateFeatures {
             mux_indices: self.mux_indices,
             path_index,
+            bools_index,
             mux_outcomes: self.mux_outcomes,
         }
     }
@@ -385,6 +401,12 @@ impl EvalObserver for CollectingMuxObserver {
         self.path_hasher
             .update(&feature.selected_index.to_le_bytes());
     }
+
+    fn on_bool_node(&mut self, ev: BoolNodeEvent) {
+        let node_id_u32 = u32::try_from(ev.node_text_id).unwrap_or(u32::MAX);
+        self.bools_hasher.update(&node_id_u32.to_le_bytes());
+        self.bools_hasher.update(&[if ev.value { 1 } else { 0 }]);
+    }
 }
 
 pub struct AutocovEngine {
@@ -397,6 +419,7 @@ pub struct AutocovEngine {
 
     mux_map: FeatureMap64k,
     path_map: FeatureMap64k,
+    bools_map: FeatureMap64k,
 
     corpus: Vec<IrBits>,
     corpus_hashes: BTreeSet<[u8; 32]>,
@@ -451,6 +474,7 @@ impl AutocovEngine {
             stop,
             mux_map: FeatureMap64k::new(),
             path_map: FeatureMap64k::new(),
+            bools_map: FeatureMap64k::new(),
             corpus: Vec::new(),
             corpus_hashes: BTreeSet::new(),
             mux_outcome_spaces: BTreeMap::new(),
@@ -777,6 +801,7 @@ impl AutocovEngine {
                         corpus_len: self.corpus.len(),
                         mux_features_set: self.mux_map.set_count(),
                         path_features_set: self.path_map.set_count(),
+                        bools_features_set: self.bools_map.set_count(),
                         mux_outcomes_observed,
                         mux_outcomes_possible,
                         mux_outcomes_missing,
@@ -798,6 +823,7 @@ impl AutocovEngine {
             corpus_len: self.corpus.len(),
             mux_features_set: self.mux_map.set_count(),
             path_features_set: self.path_map.set_count(),
+            bools_features_set: self.bools_map.set_count(),
             mux_outcomes_observed,
             mux_outcomes_possible,
             mux_outcomes_missing,
@@ -952,6 +978,7 @@ impl AutocovEngine {
                             corpus_len: self.corpus.len(),
                             mux_features_set: self.mux_map.set_count(),
                             path_features_set: self.path_map.set_count(),
+                            bools_features_set: self.bools_map.set_count(),
                             mux_outcomes_observed,
                             mux_outcomes_possible,
                             mux_outcomes_missing,
@@ -992,6 +1019,7 @@ impl AutocovEngine {
             corpus_len: self.corpus.len(),
             mux_features_set: self.mux_map.set_count(),
             path_features_set: self.path_map.set_count(),
+            bools_features_set: self.bools_map.set_count(),
             mux_outcomes_observed,
             mux_outcomes_possible,
             mux_outcomes_missing,
@@ -1196,6 +1224,7 @@ impl AutocovEngine {
             mux_new |= self.mux_map.observe_index(idx);
         }
         let path_new = self.path_map.observe_index(features.path_index);
+        let bools_new = self.bools_map.observe_index(features.bools_index);
 
         // Record mux outcome observations (per-node).
         for &(node_id, outcome) in features.mux_outcomes.iter() {
@@ -1217,7 +1246,11 @@ impl AutocovEngine {
             }
         }
 
-        Observations { mux_new, path_new }
+        Observations {
+            mux_new,
+            path_new,
+            bools_new,
+        }
     }
 
     fn maybe_add_to_corpus(
@@ -1230,7 +1263,7 @@ impl AutocovEngine {
             return false;
         }
         let obs = self.apply_candidate_features(features);
-        if !obs.mux_new && !obs.path_new {
+        if !obs.mux_new && !obs.path_new && !obs.bools_new {
             return false;
         }
         if let Some(sink_ptr) = sink {
@@ -1432,5 +1465,40 @@ fn f(oh: bits[3] id=1, a: bits[8] id=2, b: bits[8] id=3, c: bits[8] id=4) -> bit
             .find(|e| e.node_text_id == 10)
             .expect("node 10 present");
         assert!(!e2.missing.contains(&MuxOutcomeId::MultiBitsSet));
+    }
+
+    #[test]
+    fn bools_hash_index_changes_when_a_computed_bool_changes() {
+        let ir_text = r#"package test
+
+fn f(x: bits[2] id=1) -> bits[1] {
+  c0: bits[2] = literal(value=0, id=9)
+  ret z: bits[1] = eq(x, c0, id=10)
+}
+"#;
+        let mut engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+
+        let t0 = IrValue::make_tuple(&[IrValue::make_ubits(2, 0).unwrap()]);
+        let b0 = ir_bits_from_value_with_type(&t0, &engine.args_tuple_type);
+        let f0 = engine.evaluate_candidate_features(&b0);
+        let _ = engine.apply_candidate_features(&f0);
+        let set_after_first = engine.bools_map.set_count();
+        assert_eq!(set_after_first, 1);
+
+        let t1 = IrValue::make_tuple(&[IrValue::make_ubits(2, 1).unwrap()]);
+        let b1 = ir_bits_from_value_with_type(&t1, &engine.args_tuple_type);
+        let f1 = engine.evaluate_candidate_features(&b1);
+        let _ = engine.apply_candidate_features(&f1);
+        assert_ne!(f0.bools_index, f1.bools_index);
+        assert_eq!(engine.bools_map.set_count(), 2);
     }
 }

@@ -190,11 +190,12 @@ fn main() -> anyhow::Result<()> {
 
             if p.last_iter_added {
                 eprintln!(
-                    "new_coverage iters={} corpus_len={} mux_features_set={} path_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
+                    "new_coverage iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
                     p.iters,
                     p.corpus_len,
                     p.mux_features_set,
                     p.path_features_set,
+                    p.bools_features_set,
                     p.mux_outcomes_observed,
                     p.mux_outcomes_possible,
                     p.mux_outcomes_missing,
@@ -203,11 +204,12 @@ fn main() -> anyhow::Result<()> {
                 );
             } else {
                 eprintln!(
-                    "progress iters={} corpus_len={} mux_features_set={} path_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
+                    "progress iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
                     p.iters,
                     p.corpus_len,
                     p.mux_features_set,
                     p.path_features_set,
+                    p.bools_features_set,
                     p.mux_outcomes_observed,
                     p.mux_outcomes_possible,
                     p.mux_outcomes_missing,
@@ -255,11 +257,12 @@ fn main() -> anyhow::Result<()> {
         );
     }
     println!(
-        "iters={} corpus_len={} mux_features_set={} path_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={}",
+        "iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={}",
         report.iters,
         report.corpus_len,
         report.mux_features_set,
         report.path_features_set,
+        report.bools_features_set,
         report.mux_outcomes_observed,
         report.mux_outcomes_possible,
         report.mux_outcomes_missing

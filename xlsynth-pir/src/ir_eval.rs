@@ -694,8 +694,17 @@ pub struct SelectEvent {
     pub selected_index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BoolNodeEvent {
+    pub node_ref: ir::NodeRef,
+    pub node_text_id: usize,
+    pub value: bool,
+}
+
 pub trait EvalObserver {
     fn on_select(&mut self, ev: SelectEvent);
+
+    fn on_bool_node(&mut self, _ev: BoolNodeEvent) {}
 }
 
 fn observe_select_like_node(
@@ -1160,6 +1169,19 @@ pub fn eval_fn_with_observer(
         // Verify the computed value conforms to the node's annotated type, include node
         // context.
         assert_value_conforms_to_type(&node.ty, &coerced, node);
+        if let Some(observer) = observer.as_deref_mut() {
+            let is_bool_node = matches!(node.ty, ir::Type::Bits(1));
+            let is_param = matches!(node.payload, ir::NodePayload::GetParam(_));
+            if is_bool_node && !is_param {
+                observer.on_bool_node(BoolNodeEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    value: coerced
+                        .to_bool()
+                        .expect("bits[1] nodes must be convertible to bool"),
+                });
+            }
+        }
         env.insert(nr, coerced);
     }
 
@@ -1207,6 +1229,26 @@ mod tests {
     impl EvalObserver for RecordingObserver {
         fn on_select(&mut self, ev: SelectEvent) {
             self.events.push(ev);
+        }
+    }
+
+    struct RecordingBoolObserver {
+        bool_events: Vec<(usize, bool)>,
+    }
+
+    impl RecordingBoolObserver {
+        fn new() -> Self {
+            Self {
+                bool_events: Vec::new(),
+            }
+        }
+    }
+
+    impl EvalObserver for RecordingBoolObserver {
+        fn on_select(&mut self, _ev: SelectEvent) {}
+
+        fn on_bool_node(&mut self, ev: BoolNodeEvent) {
+            self.bool_events.push((ev.node_text_id, ev.value));
         }
     }
 
@@ -1800,6 +1842,32 @@ fn f(selidx: bits[2] id=1, prio: bits[2] id=2, oh: bits[3] id=3, a: bits[8] id=4
             (12, SelectKind::MultiBitsSet, usize::MAX),
         ];
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_bool_node_observer_excludes_params_and_is_in_topo_order() {
+        let ir_text = r#"package test
+
+fn f(x: bits[2] id=1, y: bits[2] id=2) -> bits[1] {
+  t: bits[1] = eq(x, y, id=10)
+  ret n: bits[1] = not(t, id=11)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![
+            IrValue::make_ubits(2, 1).unwrap(),
+            IrValue::make_ubits(2, 1).unwrap(),
+        ];
+
+        let mut obs = RecordingBoolObserver::new();
+        let _ = eval_fn_with_observer(&f, &args, Some(&mut obs));
+
+        // Only computed bits[1] nodes (excluding GetParam) should be observed, in topo
+        // order: eq first, then not.
+        let want = vec![(10, true), (11, false)];
+        assert_eq!(obs.bool_events, want);
     }
 
     #[test]
