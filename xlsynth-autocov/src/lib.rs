@@ -61,6 +61,12 @@ pub struct MuxOutcomeReport {
     pub total_possible: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct BitConstant {
+    bit_count: usize,
+    value_u64: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CandidateObservation {
     pub ok: bool,
@@ -501,6 +507,9 @@ pub struct AutocovEngine {
     max_iters: Option<u64>,
     stop: Arc<AtomicBool>,
 
+    input_slices_by_width: BTreeMap<usize, Vec<usize>>,
+    bit_constant_dict: Vec<BitConstant>,
+
     mux_map: FeatureMap64k,
     path_map: FeatureMap64k,
     bools_map: FeatureMap64k,
@@ -646,6 +655,8 @@ impl AutocovEngine {
             rng: StdRng::seed_from_u64(cfg.seed),
             max_iters: cfg.max_iters,
             stop,
+            input_slices_by_width: BTreeMap::new(),
+            bit_constant_dict: Vec::new(),
             mux_map: FeatureMap64k::new(),
             path_map: FeatureMap64k::new(),
             bools_map: FeatureMap64k::new(),
@@ -670,7 +681,62 @@ impl AutocovEngine {
             .values()
             .map(|s| s.outcome_count())
             .sum();
+        engine.input_slices_by_width = engine.compute_input_slices_by_width();
+        engine.bit_constant_dict = engine.compute_bit_constant_dict();
         Ok(engine)
+    }
+
+    fn compute_input_slices_by_width(&self) -> BTreeMap<usize, Vec<usize>> {
+        let mut out: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let ir::Type::Tuple(types) = &self.args_tuple_type else {
+            return out;
+        };
+        for (i, ty) in types.iter().enumerate() {
+            let ir::Type::Bits(w) = ty.as_ref() else {
+                continue;
+            };
+            if *w == 0 || *w > 64 {
+                continue;
+            }
+            let sl = self
+                .args_tuple_type
+                .tuple_get_flat_bit_slice_for_index(i)
+                .expect("args_tuple_type is a tuple");
+            out.entry(*w).or_default().push(sl.start);
+        }
+        for starts in out.values_mut() {
+            starts.sort();
+        }
+        out
+    }
+
+    fn compute_bit_constant_dict(&self) -> Vec<BitConstant> {
+        let mut set: BTreeSet<BitConstant> = BTreeSet::new();
+        for nr in self.f.node_refs() {
+            let n = self.f.get_node(nr);
+            let ir::NodePayload::Literal(v) = &n.payload else {
+                continue;
+            };
+            let bits = match v.to_bits() {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let w = bits.get_bit_count();
+            if w == 0 || w > 64 {
+                continue;
+            }
+            let value_u64 = match bits.to_u64() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if self.input_slices_by_width.contains_key(&w) {
+                set.insert(BitConstant {
+                    bit_count: w,
+                    value_u64,
+                });
+            }
+        }
+        set.into_iter().collect()
     }
 
     fn compute_mux_outcome_spaces(&self) -> BTreeMap<usize, MuxOutcomeSpace> {
@@ -1233,24 +1299,29 @@ impl AutocovEngine {
         match roll {
             // 10%: fully random resample
             0..=9 => self.random_bits(self.args_bit_count),
-            // 30%: multi-bit havoc
-            10..=39 => {
+            // 10%: dictionary overwrite (IR literal constants -> input slices)
+            10..=19 => {
+                let parent = self.pick_parent().clone();
+                self.mutate_dictionary_overwrite(parent)
+            }
+            // 25%: multi-bit havoc
+            20..=44 => {
                 let parent = self.pick_parent().clone();
                 self.mutate_havoc(parent)
             }
             // 25%: arbitrary subslice crossover
-            40..=64 => {
+            45..=69 => {
                 let a = self.pick_parent().clone();
                 let b = self.pick_parent().clone();
                 self.crossover_subslice(a, b)
             }
             // 20%: XOR-mix
-            65..=84 => {
+            70..=89 => {
                 let a = self.pick_parent().clone();
                 let b = self.pick_parent().clone();
                 self.xor_mix(a, b)
             }
-            // 15%: single-bit flip
+            // 10%: single-bit flip
             _ => {
                 let parent = self.pick_parent().clone();
                 self.mutate_flip_bit(parent)
@@ -1369,6 +1440,53 @@ impl AutocovEngine {
             if !seen.contains(&idx) {
                 seen.push(idx);
                 v[idx] = !v[idx];
+            }
+        }
+        IrBits::from_lsb_is_0(&v)
+    }
+
+    fn mutate_dictionary_overwrite(&mut self, bits: IrBits) -> IrBits {
+        if self.args_bit_count == 0 {
+            return bits;
+        }
+        if self.bit_constant_dict.is_empty() {
+            return self.mutate_havoc(bits);
+        }
+        let mut v = self.bits_to_vec_lsb_is_0(&bits);
+
+        // Choose a width present in both the input layout and the dictionary.
+        let c_idx = (self.rng.next_u64() as usize) % self.bit_constant_dict.len();
+        let w = self.bit_constant_dict[c_idx].bit_count;
+        let starts = match self.input_slices_by_width.get(&w) {
+            Some(s) if !s.is_empty() => s,
+            _ => return self.mutate_havoc(bits),
+        };
+
+        // Collect all dictionary values of this width.
+        let mut values: Vec<u64> = Vec::new();
+        for c in &self.bit_constant_dict {
+            if c.bit_count == w {
+                values.push(c.value_u64);
+            }
+        }
+        if values.is_empty() {
+            return self.mutate_havoc(bits);
+        }
+
+        // Overwrite up to 4 distinct slices at this width. This makes it plausible to
+        // satisfy multiple independent predicates in a single proposal (classic
+        // "magic bytes").
+        let overwrite_count = std::cmp::min(4, starts.len());
+        let mut idxs: Vec<usize> = (0..starts.len()).collect();
+        for i in 0..overwrite_count {
+            let j = i + ((self.rng.next_u64() as usize) % (starts.len() - i));
+            idxs.swap(i, j);
+        }
+        for i in 0..overwrite_count {
+            let start = starts[idxs[i]];
+            let value = values[(self.rng.next_u64() as usize) % values.len()];
+            for bit in 0..w {
+                v[start + bit] = ((value >> bit) & 1) != 0;
             }
         }
         IrBits::from_lsb_is_0(&v)
@@ -1936,6 +2054,110 @@ fn f(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
         assert_eq!(
             single.mux_outcomes_observed(),
             parallel.mux_outcomes_observed()
+        );
+    }
+
+    #[test]
+    fn case_study_finds_xls_bang_tuple_in_corpus() {
+        // The intent is to exercise "classic" magic-byte comparisons and ensure the
+        // coverage guidance (especially compare-distance + bools hashing) can
+        // find the satisfying input.
+        let ir_text = r#"package test
+
+fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3, d: bits[8] id=4) -> bits[1] {
+  x: bits[8] = literal(value=0x58, id=10)
+  l: bits[8] = literal(value=0x4c, id=11)
+  s: bits[8] = literal(value=0x53, id=12)
+  bang: bits[8] = literal(value=0x21, id=13)
+  eq_a: bits[1] = eq(a, x, id=20)
+  eq_b: bits[1] = eq(b, l, id=21)
+  eq_c: bits[1] = eq(c, s, id=22)
+  eq_d: bits[1] = eq(d, bang, id=23)
+  ab: bits[1] = and(eq_a, eq_b, id=30)
+  cd: bits[1] = and(eq_c, eq_d, id=31)
+  ret r: bits[1] = and(ab, cd, id=32)
+}
+"#;
+
+        let cfg = AutocovConfig {
+            seed: 0,
+            max_iters: Some(10_000),
+        };
+        let mut engine = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
+        assert_eq!(
+            engine.input_slices_by_width.get(&8).map(Vec::len),
+            Some(4),
+            "expected four 8-bit input slices (one per u8 param)"
+        );
+        let dict8: Vec<u64> = engine
+            .bit_constant_dict
+            .iter()
+            .filter(|c| c.bit_count == 8)
+            .map(|c| c.value_u64)
+            .collect();
+        assert!(
+            dict8.contains(&(b'X' as u64))
+                && dict8.contains(&(b'L' as u64))
+                && dict8.contains(&(b'S' as u64))
+                && dict8.contains(&(b'!' as u64)),
+            "expected dictionary to contain X/L/S/! literals; got dict8={:?}",
+            dict8
+        );
+        let _ = engine.seed_structured_corpus(/* two_hot_max_bits= */ 64, None);
+        let mut first_hit_iter: Option<u64> = None;
+        let max_iters = engine.max_iters.unwrap();
+        for iter in 0..max_iters {
+            let cand = engine.generate_proposal();
+            let features = engine.evaluate_candidate_features(&cand);
+            let added = engine.maybe_add_to_corpus(cand, &features, None);
+            if !added {
+                continue;
+            }
+
+            // Check whether the newly-added candidate is the satisfying tuple.
+            let last = engine.corpus.last().unwrap();
+            let tuple = ir_value_from_bits_with_type(last, &engine.args_tuple_type);
+            let elems = tuple.get_elements().unwrap();
+            assert_eq!(elems.len(), 4);
+            let av = elems[0].to_bits().unwrap().to_u64().unwrap() as u8;
+            let bv = elems[1].to_bits().unwrap().to_u64().unwrap() as u8;
+            let cv = elems[2].to_bits().unwrap().to_u64().unwrap() as u8;
+            let dv = elems[3].to_bits().unwrap().to_u64().unwrap() as u8;
+            if (av, bv, cv, dv) == (b'X', b'L', b'S', b'!') {
+                first_hit_iter = Some(iter + 1);
+                break;
+            }
+        }
+
+        fn corpus_contains_tuple(engine: &AutocovEngine, a: u8, b: u8, c: u8, d: u8) -> bool {
+            for bits in &engine.corpus {
+                let tuple = ir_value_from_bits_with_type(bits, &engine.args_tuple_type);
+                let elems = tuple.get_elements().unwrap();
+                assert_eq!(elems.len(), 4);
+                let av = elems[0].to_bits().unwrap().to_u64().unwrap() as u8;
+                let bv = elems[1].to_bits().unwrap().to_u64().unwrap() as u8;
+                let cv = elems[2].to_bits().unwrap().to_u64().unwrap() as u8;
+                let dv = elems[3].to_bits().unwrap().to_u64().unwrap() as u8;
+                if (av, bv, cv, dv) == (a, b, c, d) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        // Note: stdout is captured by default; use `cargo test -- --nocapture` to see
+        // this.
+        println!(
+            "case_study first_hit_iter={:?} corpus_len={}",
+            first_hit_iter,
+            engine.corpus.len()
+        );
+
+        assert!(
+            corpus_contains_tuple(&engine, b'X', b'L', b'S', b'!'),
+            "did not find expected tuple in corpus after iters={} corpus_len={}",
+            engine.max_iters.unwrap(),
+            engine.corpus.len()
         );
     }
 }
