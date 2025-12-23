@@ -13,11 +13,9 @@ use blake3::Hasher;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use xlsynth::{IrBits, IrValue};
+use xlsynth_pir::corners::{CornerEvent, CornerKind, FailureEvent};
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_eval::{
-    BoolNodeEvent, CornerEvent, CornerKind, EvalObserver, FailureEvent, FnEvalResult, SelectEvent,
-    SelectKind,
-};
+use xlsynth_pir::ir_eval::{BoolNodeEvent, EvalObserver, FnEvalResult, SelectEvent, SelectKind};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
 
