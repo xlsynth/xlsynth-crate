@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,99 @@ use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bi
 
 pub const FEATURE_MAP_SIZE: usize = 65_536;
 const FEATURE_MAP_BYTES: usize = FEATURE_MAP_SIZE / 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CornerEventId {
+    pub node_text_id: usize,
+    pub kind: CornerKind,
+    pub tag: u8,
+}
+
+pub fn corner_tag_description(kind: CornerKind, tag: u8) -> String {
+    match kind {
+        CornerKind::Add => match tag {
+            0 => "add lhs is zero".to_string(),
+            1 => "add rhs is zero".to_string(),
+            _ => panic!("Add defines tags {{0,1}}; got {}", tag),
+        },
+        CornerKind::Neg => match tag {
+            0 => "neg operand is min signed (e.g. 0x80..00)".to_string(),
+            1 => "neg operand msb is one (negative)".to_string(),
+            _ => panic!("Neg defines tags {{0,1}}; got {}", tag),
+        },
+        CornerKind::SignExt => {
+            assert_eq!(tag, 0, "SignExt only defines tag=0");
+            "sign_ext: msb is zero (extending with zeros)".to_string()
+        }
+        CornerKind::DynamicBitSlice => match tag {
+            0 => "dynamic_bit_slice in-bounds".to_string(),
+            1 => "dynamic_bit_slice out-of-bounds".to_string(),
+            _ => panic!("DynamicBitSlice defines tags {{0,1}}; got {}", tag),
+        },
+        CornerKind::ArrayIndex => match tag {
+            0 => "array_index in-bounds".to_string(),
+            1 => "array_index clamped (index out-of-bounds)".to_string(),
+            _ => panic!("ArrayIndex defines tags {{0,1}}; got {}", tag),
+        },
+        CornerKind::Shift => match tag {
+            0 => "shift amount is zero".to_string(),
+            1 => "shift amount < lhs bit width".to_string(),
+            2 => "shift amount >= lhs bit width".to_string(),
+            _ => panic!("Shift defines tags {{0,1,2}}; got {}", tag),
+        },
+        CornerKind::Shra => match tag {
+            0 => "shra: msb=0 and shift amount < width".to_string(),
+            1 => "shra: msb=0 and shift amount >= width".to_string(),
+            2 => "shra: msb=1 and shift amount < width".to_string(),
+            3 => "shra: msb=1 and shift amount >= width".to_string(),
+            _ => panic!("Shra defines tags 0..=3; got {}", tag),
+        },
+        CornerKind::CompareDistance => match tag {
+            0 => "eq/ne compare distance: xor-popcount == 0 (equal)".to_string(),
+            1 => "eq/ne compare distance: xor-popcount == 1".to_string(),
+            2 => "eq/ne compare distance: xor-popcount == 2".to_string(),
+            3 => "eq/ne compare distance: xor-popcount == 3".to_string(),
+            4 => "eq/ne compare distance: xor-popcount == 4".to_string(),
+            5 => "eq/ne compare distance: xor-popcount in 5..=8".to_string(),
+            6 => "eq/ne compare distance: xor-popcount in 9..=16".to_string(),
+            7 => "eq/ne compare distance: xor-popcount >= 17".to_string(),
+            _ => panic!("CompareDistance defines tags 0..=7; got {}", tag),
+        },
+    }
+}
+
+fn max_value_for_bit_width(w: usize) -> Option<u128> {
+    if w >= 128 {
+        return None;
+    }
+    if w == 0 {
+        return Some(0);
+    }
+    Some((1u128 << w) - 1u128)
+}
+
+fn bit_width_if_bits(ty: &ir::Type) -> Option<usize> {
+    match ty {
+        ir::Type::Bits(w) => Some(*w),
+        _ => None,
+    }
+}
+
+impl PartialOrd for CornerEventId {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CornerEventId {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        (self.node_text_id, self.kind as u8, self.tag).cmp(&(
+            other.node_text_id,
+            other.kind as u8,
+            other.tag,
+        ))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AutocovConfig {
@@ -529,6 +623,23 @@ impl AutocovEngine {
         self.args_bit_count
     }
 
+    pub fn bits_from_arg_tuple(&self, tuple_value: &IrValue) -> Result<IrBits, String> {
+        let elems = tuple_value
+            .get_elements()
+            .map_err(|e| format!("corpus value is not a tuple: {}", e))?;
+        if elems.len() != self.f.params.len() {
+            return Err(format!(
+                "corpus tuple has {} elements but function has {} params",
+                elems.len(),
+                self.f.params.len()
+            ));
+        }
+        Ok(ir_bits_from_value_with_type(
+            tuple_value,
+            &self.args_tuple_type,
+        ))
+    }
+
     pub fn corpus_len(&self) -> usize {
         self.corpus.len()
     }
@@ -597,6 +708,233 @@ impl AutocovEngine {
             failure_indices: features.failure_indices,
             mux_outcomes: features.mux_outcomes,
         }
+    }
+
+    pub fn evaluate_corner_events(&self, cand: &IrBits) -> (bool, BTreeSet<CornerEventId>) {
+        #[derive(Debug)]
+        struct CornerOnlyObserver {
+            events: BTreeSet<CornerEventId>,
+        }
+
+        impl EvalObserver for CornerOnlyObserver {
+            fn on_select(&mut self, _ev: SelectEvent) {}
+
+            fn on_corner_event(&mut self, ev: CornerEvent) {
+                self.events.insert(CornerEventId {
+                    node_text_id: ev.node_text_id,
+                    kind: ev.kind,
+                    tag: ev.tag,
+                });
+            }
+
+            fn on_failure_event(&mut self, _ev: FailureEvent) {}
+        }
+
+        let args_tuple_value = ir_value_from_bits_with_type(cand, &self.args_tuple_type);
+        let args = args_tuple_value.get_elements().unwrap();
+        let mut obs = CornerOnlyObserver {
+            events: BTreeSet::new(),
+        };
+        let r = xlsynth_pir::ir_eval::eval_fn_with_observer(&self.f, &args, Some(&mut obs));
+        let ok = matches!(r, FnEvalResult::Success(_));
+        (ok, obs.events)
+    }
+
+    pub fn corner_event_domain(&self) -> BTreeSet<CornerEventId> {
+        let mut out: BTreeSet<CornerEventId> = BTreeSet::new();
+        for nr in self.f.node_refs() {
+            let n = self.f.get_node(nr);
+            match &n.payload {
+                ir::NodePayload::Binop(ir::Binop::Add, lhs, rhs) => {
+                    let lhs_is_lit =
+                        matches!(self.f.get_node(*lhs).payload, ir::NodePayload::Literal(_));
+                    let rhs_is_lit =
+                        matches!(self.f.get_node(*rhs).payload, ir::NodePayload::Literal(_));
+                    if !lhs_is_lit {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Add,
+                            tag: 0, // LhsIsZero
+                        });
+                    }
+                    if !rhs_is_lit {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Add,
+                            tag: 1, // RhsIsZero
+                        });
+                    }
+                }
+                ir::NodePayload::Unop(ir::Unop::Neg, operand) => {
+                    // OperandIsMinSigned only makes sense for non-empty bit vectors.
+                    let w = bit_width_if_bits(self.f.get_node_ty(*operand)).unwrap_or(0);
+                    let operand_is_lit = matches!(
+                        self.f.get_node(*operand).payload,
+                        ir::NodePayload::Literal(_)
+                    );
+                    if w > 0 && !operand_is_lit {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Neg,
+                            tag: 1, // OperandMsbIsOne
+                        });
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Neg,
+                            tag: 0,
+                        });
+                    }
+                }
+                ir::NodePayload::SignExt { arg, new_bit_count } => {
+                    let old_w = match self.f.get_node_ty(*arg) {
+                        ir::Type::Bits(w) => *w,
+                        _ => 0,
+                    };
+                    if *new_bit_count > old_w && old_w > 0 {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::SignExt,
+                            tag: 0,
+                        });
+                    }
+                }
+                ir::NodePayload::Binop(binop, lhs, rhs)
+                    if matches!(binop, ir::Binop::Eq | ir::Binop::Ne) =>
+                {
+                    // Only include compare-distance buckets reachable for this operand width.
+                    let lhs_w = bit_width_if_bits(self.f.get_node_ty(*lhs)).unwrap_or(0);
+                    let rhs_w = bit_width_if_bits(self.f.get_node_ty(*rhs)).unwrap_or(0);
+                    if lhs_w == 0 || lhs_w != rhs_w {
+                        continue;
+                    }
+                    let mut tags: BTreeSet<u8> = BTreeSet::new();
+                    for d in 0..=lhs_w {
+                        tags.insert(xlsynth_pir::corners::bucket_xor_popcount(d));
+                    }
+                    for tag in tags {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::CompareDistance,
+                            tag,
+                        });
+                    }
+                }
+                ir::NodePayload::Binop(binop, lhs, rhs)
+                    if matches!(binop, ir::Binop::Shll | ir::Binop::Shrl) =>
+                {
+                    let lhs_w = bit_width_if_bits(self.f.get_node_ty(*lhs)).unwrap_or(0);
+                    let rhs_w = bit_width_if_bits(self.f.get_node_ty(*rhs)).unwrap_or(0);
+
+                    // AmtIsZero is always reachable (including rhs_w==0 where amt==0).
+                    out.insert(CornerEventId {
+                        node_text_id: n.text_id,
+                        kind: CornerKind::Shift,
+                        tag: 0,
+                    });
+                    if lhs_w > 0 {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Shift,
+                            tag: 1, // AmtLtWidth
+                        });
+                    }
+                    // AmtGeWidth is reachable only if the selector can represent a value >= lhs_w.
+                    if let Some(max_amt) = max_value_for_bit_width(rhs_w) {
+                        if max_amt >= (lhs_w as u128) {
+                            out.insert(CornerEventId {
+                                node_text_id: n.text_id,
+                                kind: CornerKind::Shift,
+                                tag: 2, // AmtGeWidth
+                            });
+                        }
+                    } else {
+                        // Conservative: huge rhs can represent >= lhs_w.
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Shift,
+                            tag: 2,
+                        });
+                    }
+                }
+                ir::NodePayload::Binop(ir::Binop::Shra, lhs, rhs) => {
+                    let lhs_w = bit_width_if_bits(self.f.get_node_ty(*lhs)).unwrap_or(0);
+                    let rhs_w = bit_width_if_bits(self.f.get_node_ty(*rhs)).unwrap_or(0);
+                    if lhs_w == 0 {
+                        continue;
+                    }
+
+                    // msb can be 0 or 1 in general, so include both msb branches.
+                    let can_amt_lt = true; // amt==0 exists, and 0 < lhs_w holds since lhs_w>0
+                    let can_amt_ge = match max_value_for_bit_width(rhs_w) {
+                        Some(max_amt) => max_amt >= (lhs_w as u128),
+                        None => true,
+                    };
+
+                    if can_amt_lt {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Shra,
+                            tag: 0, // Msb0_AmtLt
+                        });
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Shra,
+                            tag: 2, // Msb1_AmtLt
+                        });
+                    }
+                    if can_amt_ge {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Shra,
+                            tag: 1, // Msb0_AmtGe
+                        });
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::Shra,
+                            tag: 3, // Msb1_AmtGe
+                        });
+                    }
+                }
+                ir::NodePayload::DynamicBitSlice {
+                    arg: _,
+                    start: _,
+                    width: _,
+                } => {
+                    for tag in [0u8, 1u8] {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::DynamicBitSlice,
+                            tag,
+                        });
+                    }
+                }
+                ir::NodePayload::ArrayIndex {
+                    array: _,
+                    indices: _,
+                    assumed_in_bounds: _,
+                } => {
+                    for tag in [0u8, 1u8] {
+                        out.insert(CornerEventId {
+                            node_text_id: n.text_id,
+                            kind: CornerKind::ArrayIndex,
+                            tag,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    pub fn node_to_string_by_text_id(&self, node_text_id: usize) -> Option<String> {
+        for nr in self.f.node_refs() {
+            let n = self.f.get_node(nr);
+            if n.text_id == node_text_id {
+                return n.to_string(&self.f);
+            }
+        }
+        None
     }
 
     pub fn apply_observation(&mut self, obs: &CandidateObservation) {
@@ -1930,6 +2268,118 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
         let _ = engine.apply_candidate_features(&f1);
 
         assert_eq!(engine.compare_distance_map.set_count(), 2);
+    }
+
+    #[test]
+    fn corner_event_domain_enumerates_expected_tags() {
+        // IR includes one instance of each corner-like node kind.
+        let ir_text = r#"package test
+
+fn f(
+  x: bits[8] id=1,
+  y: bits[8] id=2,
+  shamt: bits[8] id=3,
+  start: bits[8] id=4,
+  arr: bits[8][4] id=5
+) -> bits[8] {
+  add0: bits[8] = add(x, y, id=10)
+  neg0: bits[8] = neg(x, id=11)
+  sx0: bits[16] = sign_ext(x, new_bit_count=16, id=12)
+  cd0: bits[1] = eq(x, y, id=13)
+  sh0: bits[8] = shll(x, shamt, id=14)
+  shra0: bits[8] = shra(x, shamt, id=15)
+  dbs0: bits[3] = dynamic_bit_slice(x, start, width=3, id=16)
+  ai0: bits[8] = array_index(arr, indices=[start], assumed_in_bounds=false, id=17)
+  ret r: bits[8] = identity(add0, id=18)
+}
+"#;
+        let engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+
+        let domain = engine.corner_event_domain();
+
+        let has = |node_text_id: usize, kind: CornerKind, tag: u8| -> bool {
+            domain.contains(&CornerEventId {
+                node_text_id,
+                kind,
+                tag,
+            })
+        };
+
+        assert!(has(10, CornerKind::Add, 0));
+        assert!(has(10, CornerKind::Add, 1));
+        assert!(has(11, CornerKind::Neg, 1));
+        assert!(has(11, CornerKind::Neg, 0));
+        assert!(has(12, CornerKind::SignExt, 0));
+
+        // 8-bit compare can only reach xor-popcount 0..=8, which maps to buckets 0..=5.
+        for tag in 0u8..=5u8 {
+            assert!(has(13, CornerKind::CompareDistance, tag));
+        }
+        for tag in [0u8, 1u8, 2u8] {
+            assert!(has(14, CornerKind::Shift, tag));
+        }
+        for tag in 0u8..=3u8 {
+            assert!(has(15, CornerKind::Shra, tag));
+        }
+        for tag in [0u8, 1u8] {
+            assert!(has(16, CornerKind::DynamicBitSlice, tag));
+            assert!(has(17, CornerKind::ArrayIndex, tag));
+        }
+    }
+
+    #[test]
+    fn compare_distance_domain_does_not_include_unreachable_buckets_for_small_widths() {
+        // For an 8-bit compare, xor-popcount is in 0..=8, which only reaches buckets
+        // 0..=5.
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
+  ret t: bits[1] = eq(x, y, id=10)
+}
+"#;
+        let engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+            },
+        )
+        .unwrap();
+
+        let domain = engine.corner_event_domain();
+        for tag in 0u8..=5u8 {
+            assert!(
+                domain.contains(&CornerEventId {
+                    node_text_id: 10,
+                    kind: CornerKind::CompareDistance,
+                    tag
+                }),
+                "expected tag {} to be present for 8-bit compare",
+                tag
+            );
+        }
+        for tag in [6u8, 7u8] {
+            assert!(
+                !domain.contains(&CornerEventId {
+                    node_text_id: 10,
+                    kind: CornerKind::CompareDistance,
+                    tag
+                }),
+                "did not expect tag {} to be present for 8-bit compare",
+                tag
+            );
+        }
     }
 
     #[test]

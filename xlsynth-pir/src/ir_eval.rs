@@ -721,6 +721,7 @@ pub trait EvalObserver {
 }
 
 fn observe_corner_like_node(
+    f: &ir::Fn,
     nr: ir::NodeRef,
     node: &ir::Node,
     env: &HashMap<ir::NodeRef, IrValue>,
@@ -757,30 +758,69 @@ fn observe_corner_like_node(
                 tag: bucket_xor_popcount(d),
             });
         }
-        ir::NodePayload::Binop(ir::Binop::Add, _lhs, rhs) => {
-            let rhs_bits = env.get(rhs).unwrap().to_bits().unwrap();
-            let mut is_zero = true;
-            for i in 0..rhs_bits.get_bit_count() {
-                if rhs_bits.get_bit(i).unwrap() {
-                    is_zero = false;
-                    break;
+        ir::NodePayload::Binop(ir::Binop::Add, lhs, rhs) => {
+            fn is_literal_operand(f: &ir::Fn, r: ir::NodeRef) -> bool {
+                matches!(f.get_node(r).payload, ir::NodePayload::Literal(_))
+            }
+            fn is_zero_value(v: &IrValue) -> bool {
+                let bits = v.to_bits().unwrap();
+                for i in 0..bits.get_bit_count() {
+                    if bits.get_bit(i).unwrap() {
+                        return false;
+                    }
+                }
+                true
+            }
+
+            // Add corners: treat lhs==0 and rhs==0 as separate coverpoints.
+            //
+            // If an operand is a literal, suppress the corresponding coverpoint,
+            // because it cannot vary across samples and would be misleading to
+            // report as "missed" for the corpus.
+            if !is_literal_operand(f, *lhs) {
+                if is_zero_value(env.get(lhs).unwrap()) {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::Add,
+                        tag: 0, // LhsIsZero
+                    });
                 }
             }
-            if is_zero {
-                observer.on_corner_event(CornerEvent {
-                    node_ref: nr,
-                    node_text_id: node.text_id,
-                    kind: CornerKind::Add,
-                    tag: 0, // RhsIsZero
-                });
+            if !is_literal_operand(f, *rhs) {
+                if is_zero_value(env.get(rhs).unwrap()) {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::Add,
+                        tag: 1, // RhsIsZero
+                    });
+                }
             }
         }
         ir::NodePayload::Unop(ir::Unop::Neg, operand) => {
+            fn is_literal_operand(f: &ir::Fn, r: ir::NodeRef) -> bool {
+                matches!(f.get_node(r).payload, ir::NodePayload::Literal(_))
+            }
+
+            // If the operand is a literal, suppress these coverpoints because the
+            // operand cannot vary across samples.
+            if is_literal_operand(f, *operand) {
+                return;
+            }
+
             let bits = env.get(operand).unwrap().to_bits().unwrap();
             let w = bits.get_bit_count();
             if w > 0 {
                 let msb = bits.get_bit(w - 1).unwrap();
                 if msb {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::Neg,
+                        tag: 1, // OperandMsbIsOne
+                    });
+
                     let mut all_lower_zero = true;
                     for i in 0..(w - 1) {
                         if bits.get_bit(i).unwrap() {
@@ -1386,7 +1426,7 @@ pub fn eval_fn_with_observer(
             _ => {
                 if let Some(obs) = observer.as_deref_mut() {
                     observe_select_like_node(nr, node, &env, obs);
-                    observe_corner_like_node(nr, node, &env, obs);
+                    observe_corner_like_node(f, nr, node, &env, obs);
                 }
                 eval_pure(node, &env)
             }
@@ -2530,7 +2570,7 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
         let mut obs = RecordingCornerFailureObserver::default();
         let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
         assert!(matches!(r, FnEvalResult::Success(_)));
-        assert_eq!(obs.corner_events, vec![(10, CornerKind::Add, 0)]);
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::Add, 1)]);
     }
 
     #[test]
@@ -2548,7 +2588,28 @@ fn f(x: bits[8] id=1) -> bits[8] {
         let mut obs = RecordingCornerFailureObserver::default();
         let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
         assert!(matches!(r, FnEvalResult::Success(_)));
-        assert_eq!(obs.corner_events, vec![(10, CornerKind::Neg, 0)]);
+        assert_eq!(
+            obs.corner_events,
+            vec![(10, CornerKind::Neg, 1), (10, CornerKind::Neg, 0)]
+        );
+    }
+
+    #[test]
+    fn test_corner_neg_msb_one_emits_event_without_min_signed() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1) -> bits[8] {
+  ret z: bits[8] = neg(x, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![IrValue::make_ubits(8, 0x81).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::Neg, 1)]);
     }
 
     #[test]
