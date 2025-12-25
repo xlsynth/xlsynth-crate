@@ -226,8 +226,13 @@ fn main() -> anyhow::Result<()> {
             let interval_sps = (delta_iters as f64) / interval_secs;
 
             if p.last_iter_added {
+                let new_cov = p
+                    .new_coverage
+                    .map(|c| format!("[{}]", c.kind_names().join(",")))
+                    .unwrap_or_else(|| "[]".to_string());
                 eprintln!(
-                    "new_coverage iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} compare_distance_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
+                    "new_coverage {} iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} compare_distance_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={} samples_per_sec={:.1} interval_samples_per_sec={:.1}",
+                    new_cov,
                     p.iters,
                     p.corpus_len,
                     p.mux_features_set,

@@ -100,11 +100,13 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let domain: BTreeSet<xlsynth_autocov::CornerEventId> = engine.corner_event_domain();
+    let bool_domain: BTreeSet<xlsynth_autocov::BoolEventId> = engine.bool_event_domain();
     if domain.is_empty() {
         eprintln!("corner_domain_empty (no corner-like nodes found)");
     }
 
     let mut observed_any: BTreeSet<xlsynth_autocov::CornerEventId> = BTreeSet::new();
+    let mut bool_observed_any: BTreeSet<xlsynth_autocov::BoolEventId> = BTreeSet::new();
     let mut samples_total: usize = 0;
     let mut samples_ok: usize = 0;
     let mut samples_failed: usize = 0;
@@ -127,6 +129,8 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("corpus parse error at line {}: {}", lineno + 1, e))?;
             let (ok, events) = engine.evaluate_corner_events(&bits);
             observed_any.extend(events);
+            let (_ok2, bool_events) = engine.evaluate_bool_events(&bits);
+            bool_observed_any.extend(bool_events);
             samples_total += 1;
             if ok {
                 samples_ok += 1;
@@ -151,6 +155,8 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("{}: {}", p.display(), e))?;
             let (ok, events) = engine.evaluate_corner_events(&bits);
             observed_any.extend(events);
+            let (_ok2, bool_events) = engine.evaluate_bool_events(&bits);
+            bool_observed_any.extend(bool_events);
             samples_total += 1;
             if ok {
                 samples_ok += 1;
@@ -162,15 +168,22 @@ fn main() -> anyhow::Result<()> {
 
     let never_observed: Vec<xlsynth_autocov::CornerEventId> =
         domain.difference(&observed_any).copied().collect();
+    let bool_never_observed: Vec<xlsynth_autocov::BoolEventId> = bool_domain
+        .difference(&bool_observed_any)
+        .copied()
+        .collect();
 
     println!(
-        "samples_total={} samples_ok={} samples_failed={} corner_domain={} corner_observed_any={} corner_never_observed={}",
+        "samples_total={} samples_ok={} samples_failed={} corner_domain={} corner_observed_any={} corner_never_observed={} bool_domain={} bool_observed_any={} bool_never_observed={}",
         samples_total,
         samples_ok,
         samples_failed,
         domain.len(),
         observed_any.len(),
-        never_observed.len()
+        never_observed.len(),
+        bool_domain.len(),
+        bool_observed_any.len(),
+        bool_never_observed.len()
     );
     for ev in never_observed {
         if args.explain {
@@ -194,6 +207,17 @@ fn main() -> anyhow::Result<()> {
                 ev.tag
             );
         }
+    }
+    for ev in bool_never_observed {
+        let node_str = engine
+            .node_to_string_by_text_id(ev.node_text_id)
+            .unwrap_or_else(|| "<node not found>".to_string());
+        println!(
+            "bool_never_observed node_id={} value={} node=\"{}\"",
+            ev.node_text_id,
+            xlsynth_autocov::bool_value_description(ev.value),
+            node_str
+        );
     }
 
     Ok(())
