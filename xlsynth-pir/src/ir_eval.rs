@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
+use crate::corners::bucket_xor_popcount;
+use crate::corners::{CornerEvent, CornerKind, FailureEvent, FailureKind};
 use crate::ir;
+use crate::ir::NodePayload as P;
 use crate::ir_utils::get_topological;
 use xlsynth::{IrBits, IrValue};
 
@@ -60,6 +63,59 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     let r = lhs_bits.umul(&rhs_bits);
                     IrValue::from_bits(&r)
+                }
+                ir::Binop::Uge => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.uge(&rhs_bits))
+                }
+                ir::Binop::Ugt => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.ugt(&rhs_bits))
+                }
+                ir::Binop::Ult => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.ult(&rhs_bits))
+                }
+                ir::Binop::Ule => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.ule(&rhs_bits))
+                }
+                ir::Binop::Sgt => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.sgt(&rhs_bits))
+                }
+                ir::Binop::Sge => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.sge(&rhs_bits))
+                }
+                ir::Binop::Slt => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.slt(&rhs_bits))
+                }
+                ir::Binop::Sle => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    IrValue::bool(lhs_bits.sle(&rhs_bits))
+                }
+                ir::Binop::Gate => {
+                    // XLS `gate`: when predicate is false, returns all-zero value.
+                    // Predicate is expected to be bits[1].
+                    let pred = lhs_value.to_bool().expect("gate predicate must be bits[1]");
+                    if pred {
+                        rhs_value.clone()
+                    } else {
+                        let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                        let zeros: Vec<bool> = vec![false; rhs_bits.get_bit_count()];
+                        let out = IrBits::from_lsb_is_0(&zeros);
+                        IrValue::from_bits(&out)
+                    }
                 }
                 _ => panic!("Unsupported binop: {:?}", binop),
             }
@@ -198,10 +254,17 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             ref indices,
             assumed_in_bounds: _,
         } => {
+            // XLS semantics: out-of-bounds indices are clamped to the maximum in-bounds
+            // index for the respective dimension. Note: this helper does not
+            // surface `assumed_in_bounds` errors (those are handled in
+            // `eval_fn_with_observer`, which can return Failure).
             let mut value = env.get(&array).unwrap().clone();
             for idx_ref in indices {
                 let idx = env.get(idx_ref).unwrap().to_u64().unwrap() as usize;
-                value = value.get_element(idx).unwrap();
+                let count = value.get_element_count().unwrap();
+                assert!(count > 0, "ArrayIndex: empty array not supported");
+                let clamped = if idx >= count { count - 1 } else { idx };
+                value = value.get_element(clamped).unwrap();
             }
             value
         }
@@ -330,7 +393,22 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     let r = acc.not();
                     IrValue::from_bits(&r)
                 }
-                ir::NaryOp::Concat => panic!("Unsupported nary op: concat"),
+                ir::NaryOp::Concat => {
+                    // XLS concat semantics: concat(x0, x1, ..., xn-1) places x0 in the MSBs and
+                    // xn-1 in the LSBs.
+                    //
+                    // Our `IrBits` is indexed with LSB at bit 0, so we build the output bits
+                    // vector by appending operands in reverse order.
+                    let mut out: Vec<bool> = Vec::new();
+                    for operand in operands.iter().rev() {
+                        let bits: IrBits = env.get(operand).unwrap().to_bits().unwrap();
+                        for i in 0..bits.get_bit_count() {
+                            out.push(bits.get_bit(i).unwrap());
+                        }
+                    }
+                    let out_bits = IrBits::from_lsb_is_0(&out);
+                    IrValue::from_bits(&out_bits)
+                }
             }
         }
         ir::NodePayload::PrioritySel {
@@ -604,6 +682,313 @@ pub enum FnEvalResult {
     Failure(FnEvalFailure),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SelectKind {
+    CaseIndex,
+    Default,
+    NoBitsSet,
+    MultiBitsSet,
+}
+
+/// Observed selection decision for select-like nodes (`sel`, `priority_sel`,
+/// `one_hot_sel`).
+///
+/// `selected_index` is meaningful only for `CaseIndex`; for other kinds it is
+/// set to `usize::MAX` as a sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectEvent {
+    pub node_ref: ir::NodeRef,
+    pub node_text_id: usize,
+    pub select_kind: SelectKind,
+    pub selected_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BoolNodeEvent {
+    pub node_ref: ir::NodeRef,
+    pub node_text_id: usize,
+    pub value: bool,
+}
+
+pub trait EvalObserver {
+    fn on_select(&mut self, ev: SelectEvent);
+
+    fn on_bool_node(&mut self, _ev: BoolNodeEvent) {}
+
+    fn on_corner_event(&mut self, _ev: CornerEvent) {}
+
+    fn on_failure_event(&mut self, _ev: FailureEvent) {}
+}
+
+fn observe_corner_like_node(
+    nr: ir::NodeRef,
+    node: &ir::Node,
+    env: &HashMap<ir::NodeRef, IrValue>,
+    observer: &mut dyn EvalObserver,
+) {
+    match &node.payload {
+        ir::NodePayload::Binop(binop, lhs, rhs)
+            if matches!(binop, ir::Binop::Eq | ir::Binop::Ne) =>
+        {
+            let lhs_bits = match env.get(lhs).unwrap().to_bits() {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let rhs_bits = match env.get(rhs).unwrap().to_bits() {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let w = lhs_bits.get_bit_count();
+            if w != rhs_bits.get_bit_count() {
+                return;
+            }
+            let mut d: usize = 0;
+            for i in 0..w {
+                let a = lhs_bits.get_bit(i).unwrap();
+                let b = rhs_bits.get_bit(i).unwrap();
+                if a ^ b {
+                    d += 1;
+                }
+            }
+            observer.on_corner_event(CornerEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                kind: CornerKind::CompareDistance,
+                tag: bucket_xor_popcount(d),
+            });
+        }
+        ir::NodePayload::Binop(ir::Binop::Add, _lhs, rhs) => {
+            let rhs_bits = env.get(rhs).unwrap().to_bits().unwrap();
+            let mut is_zero = true;
+            for i in 0..rhs_bits.get_bit_count() {
+                if rhs_bits.get_bit(i).unwrap() {
+                    is_zero = false;
+                    break;
+                }
+            }
+            if is_zero {
+                observer.on_corner_event(CornerEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    kind: CornerKind::Add,
+                    tag: 0, // RhsIsZero
+                });
+            }
+        }
+        ir::NodePayload::Unop(ir::Unop::Neg, operand) => {
+            let bits = env.get(operand).unwrap().to_bits().unwrap();
+            let w = bits.get_bit_count();
+            if w > 0 {
+                let msb = bits.get_bit(w - 1).unwrap();
+                if msb {
+                    let mut all_lower_zero = true;
+                    for i in 0..(w - 1) {
+                        if bits.get_bit(i).unwrap() {
+                            all_lower_zero = false;
+                            break;
+                        }
+                    }
+                    if all_lower_zero {
+                        observer.on_corner_event(CornerEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: CornerKind::Neg,
+                            tag: 0, // OperandIsMinSigned
+                        });
+                    }
+                }
+            }
+        }
+        ir::NodePayload::SignExt { arg, new_bit_count } => {
+            let arg_bits = env.get(arg).unwrap().to_bits().unwrap();
+            let old_w = arg_bits.get_bit_count();
+            if *new_bit_count > old_w && old_w > 0 {
+                let msb = arg_bits.get_bit(old_w - 1).unwrap();
+                if !msb {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::SignExt,
+                        tag: 0, // MsbIsZero
+                    });
+                }
+            }
+        }
+        ir::NodePayload::Binop(binop, lhs, rhs)
+            if matches!(binop, ir::Binop::Shll | ir::Binop::Shrl) =>
+        {
+            let lhs_bits = env.get(lhs).unwrap().to_bits().unwrap();
+            let rhs_bits = env.get(rhs).unwrap().to_bits().unwrap();
+            let shift: i64 = rhs_bits.to_u64().unwrap().try_into().unwrap();
+            let lhs_w = lhs_bits.get_bit_count() as i64;
+            if shift == 0 {
+                observer.on_corner_event(CornerEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    kind: CornerKind::Shift,
+                    tag: 0, // AmtIsZero
+                });
+            }
+            let tag = if shift < lhs_w { 1 } else { 2 }; // AmtLtWidth vs AmtGeWidth
+            observer.on_corner_event(CornerEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                kind: CornerKind::Shift,
+                tag,
+            });
+        }
+        ir::NodePayload::Binop(ir::Binop::Shra, lhs, rhs) => {
+            let lhs_bits = env.get(lhs).unwrap().to_bits().unwrap();
+            let rhs_bits = env.get(rhs).unwrap().to_bits().unwrap();
+            let shift: i64 = rhs_bits.to_u64().unwrap().try_into().unwrap();
+            let lhs_w = lhs_bits.get_bit_count() as i64;
+            let amt_lt = shift < lhs_w;
+            let msb_is_zero = if lhs_w <= 0 {
+                true
+            } else {
+                !lhs_bits.get_bit((lhs_w - 1) as usize).unwrap()
+            };
+            // Tags:
+            // 0: Msb0_AmtLt, 1: Msb0_AmtGe, 2: Msb1_AmtLt, 3: Msb1_AmtGe
+            let tag = (if msb_is_zero { 0 } else { 2 }) + (if amt_lt { 0 } else { 1 });
+            observer.on_corner_event(CornerEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                kind: CornerKind::Shra,
+                tag,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn observe_select_like_node(
+    nr: ir::NodeRef,
+    node: &ir::Node,
+    env: &HashMap<ir::NodeRef, IrValue>,
+    observer: &mut dyn EvalObserver,
+) {
+    match &node.payload {
+        P::Sel {
+            selector,
+            cases,
+            default,
+        } => {
+            assert!(!cases.is_empty(), "Sel must have at least one case");
+            let sel_bits: IrBits = env
+                .get(selector)
+                .expect("Sel selector must be evaluated")
+                .to_bits()
+                .expect("Sel selector must be bits");
+            let sel_w = sel_bits.get_bit_count();
+
+            let mut chosen = SelectEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                select_kind: if default.is_some() {
+                    SelectKind::Default
+                } else {
+                    // No explicit default: XLS semantics use the last case as an implicit default.
+                    SelectKind::Default
+                },
+                selected_index: usize::MAX,
+            };
+
+            // Iterate cases in reverse and select when selector == index.
+            for (i, _case_ref) in cases.iter().enumerate().rev() {
+                let idx_bits = if sel_w == 0 {
+                    IrBits::make_ubits(0, 0).unwrap()
+                } else {
+                    IrBits::make_ubits(sel_w, i as u64).unwrap()
+                };
+                if sel_bits.equals(&idx_bits) {
+                    chosen.select_kind = SelectKind::CaseIndex;
+                    chosen.selected_index = i;
+                }
+            }
+            observer.on_select(chosen);
+        }
+        P::PrioritySel {
+            selector,
+            cases,
+            default,
+        } => {
+            // `eval_pure` requires a default arm; keep the same invariant here.
+            default.expect("PrioritySel requires a default value");
+            let sel_bits: IrBits = env
+                .get(selector)
+                .expect("PrioritySel selector must be evaluated")
+                .to_bits()
+                .expect("PrioritySel selector must be bits");
+            let sel_w = sel_bits.get_bit_count();
+
+            let mut chosen = SelectEvent {
+                node_ref: nr,
+                node_text_id: node.text_id,
+                select_kind: SelectKind::Default,
+                selected_index: usize::MAX,
+            };
+
+            // Highest index has lowest priority; index 0 has highest priority.
+            for (idx, _case_ref) in cases.iter().enumerate().rev() {
+                if idx < sel_w {
+                    let bit_set = sel_bits.get_bit(idx).expect("selector bit in range");
+                    if bit_set {
+                        chosen.select_kind = SelectKind::CaseIndex;
+                        chosen.selected_index = idx;
+                    }
+                }
+            }
+            observer.on_select(chosen);
+        }
+        P::OneHotSel { selector, cases } => {
+            assert!(!cases.is_empty(), "OneHotSel must have at least one case");
+            let sel_bits: IrBits = env
+                .get(selector)
+                .expect("OneHotSel selector must be evaluated")
+                .to_bits()
+                .expect("OneHotSel selector must be bits");
+            let sel_w = sel_bits.get_bit_count();
+
+            let mut any = false;
+            let mut in_range_set_count: usize = 0;
+            for (i, _case_ref) in cases.iter().enumerate() {
+                let bit_set = if i < sel_w {
+                    sel_bits.get_bit(i).expect("selector bit in range")
+                } else {
+                    false
+                };
+                if bit_set {
+                    any = true;
+                    in_range_set_count += 1;
+                    observer.on_select(SelectEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        select_kind: SelectKind::CaseIndex,
+                        selected_index: i,
+                    });
+                }
+            }
+            if !any {
+                observer.on_select(SelectEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    select_kind: SelectKind::NoBitsSet,
+                    selected_index: usize::MAX,
+                });
+            } else if in_range_set_count >= 2 {
+                observer.on_select(SelectEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    select_kind: SelectKind::MultiBitsSet,
+                    selected_index: usize::MAX,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Evaluates an IR function by visiting nodes in topological order.
 ///
 /// - Produces `TraceMessage`s for `trace` nodes whose `activated` predicate is
@@ -611,7 +996,11 @@ pub enum FnEvalResult {
 /// - Records `AssertionFailure`s for `assert` nodes whose `activate` predicate
 ///   is true.
 /// - Returns the value of the function's return node on success.
-pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
+pub fn eval_fn_with_observer(
+    f: &ir::Fn,
+    args: &[IrValue],
+    mut observer: Option<&mut dyn EvalObserver>,
+) -> FnEvalResult {
     assert_eq!(
         args.len(),
         f.params.len(),
@@ -631,7 +1020,6 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
 
     for nr in get_topological(f) {
         let node = f.get_node(nr);
-        use ir::NodePayload as P;
         let value: IrValue = match &node.payload {
             P::Nil => {
                 // Reserved zero node: produce the unit tuple value.
@@ -654,6 +1042,14 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                     .to_bool()
                     .expect("activate must be bits[1]");
                 if active {
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.on_failure_event(FailureEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: FailureKind::AssertTriggered,
+                            tag: 0,
+                        });
+                    }
                     assertion_failures.push(AssertionFailure {
                         message: message.clone(),
                         label: label.clone(),
@@ -732,6 +1128,14 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                     .unwrap();
                 let bit_count = arg_bits.get_bit_count();
                 if start + width > bit_count {
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.on_failure_event(FailureEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: FailureKind::BitSliceOob,
+                            tag: 0,
+                        });
+                    }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
@@ -755,9 +1159,31 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                 let start_u = start_bits.to_u64().unwrap() as usize;
                 let bit_count = arg_bits.get_bit_count();
                 if start_u + *width > bit_count {
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.on_corner_event(CornerEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: CornerKind::DynamicBitSlice,
+                            tag: 1, // OutOfBounds
+                        });
+                        observer.on_failure_event(FailureEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: FailureKind::DynamicBitSliceOob,
+                            tag: 0,
+                        });
+                    }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
+                    });
+                }
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::DynamicBitSlice,
+                        tag: 0, // InBounds
                     });
                 }
                 let r = arg_bits.width_slice(start_u as i64, *width as i64);
@@ -788,6 +1214,14 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                 let arg_w = arg_bits.get_bit_count();
                 let upd_w = upd_bits.get_bit_count();
                 if start_u + upd_w > arg_w {
+                    if let Some(observer) = observer.as_deref_mut() {
+                        observer.on_failure_event(FailureEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: FailureKind::BitSliceUpdateOob,
+                            tag: 0,
+                        });
+                    }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
@@ -822,6 +1256,58 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                 }
                 let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
+            }
+            P::ArrayIndex {
+                array,
+                indices,
+                assumed_in_bounds,
+            } => {
+                // XLS semantics: out-of-bounds indices are clamped to the maximum in-bounds
+                // index for the respective dimension. If `assumed_in_bounds` is
+                // true, any OOB index is considered a sample failure and we
+                // return Failure.
+                let mut value = env.get(array).expect("array must be evaluated").clone();
+                let mut clamped_any = false;
+                for idx_ref in indices.iter() {
+                    let idx = env
+                        .get(idx_ref)
+                        .expect("index must be evaluated")
+                        .to_bits()
+                        .unwrap()
+                        .to_u64()
+                        .unwrap() as usize;
+                    let count = value.get_element_count().expect("array must have elements");
+                    assert!(count > 0, "ArrayIndex: empty array not supported");
+                    if idx >= count {
+                        if *assumed_in_bounds {
+                            if let Some(observer) = observer.as_deref_mut() {
+                                observer.on_failure_event(FailureEvent {
+                                    node_ref: nr,
+                                    node_text_id: node.text_id,
+                                    kind: FailureKind::ArrayIndexOobAssumedInBounds,
+                                    tag: 0,
+                                });
+                            }
+                            return FnEvalResult::Failure(FnEvalFailure {
+                                assertion_failures,
+                                trace_messages,
+                            });
+                        }
+                        clamped_any = true;
+                        value = value.get_element(count - 1).unwrap();
+                    } else {
+                        value = value.get_element(idx).unwrap();
+                    }
+                }
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer.on_corner_event(CornerEvent {
+                        node_ref: nr,
+                        node_text_id: node.text_id,
+                        kind: CornerKind::ArrayIndex,
+                        tag: if clamped_any { 1 } else { 0 }, // Clamped vs InBounds
+                    });
+                }
+                value
             }
             P::ArrayUpdate {
                 array,
@@ -878,6 +1364,14 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                     Some(updated) => updated,
                     None => {
                         if *assumed_in_bounds {
+                            if let Some(observer) = observer.as_deref_mut() {
+                                observer.on_failure_event(FailureEvent {
+                                    node_ref: nr,
+                                    node_text_id: node.text_id,
+                                    kind: FailureKind::ArrayUpdateOobAssumedInBounds,
+                                    tag: 0,
+                                });
+                            }
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
                                 trace_messages,
@@ -889,7 +1383,13 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
                     }
                 }
             }
-            _ => eval_pure(node, &env),
+            _ => {
+                if let Some(obs) = observer.as_deref_mut() {
+                    observe_select_like_node(nr, node, &env, obs);
+                    observe_corner_like_node(nr, node, &env, obs);
+                }
+                eval_pure(node, &env)
+            }
         };
         // Coerce only for specific nodes where a wider internal computation is
         // permitted by semantics but the annotated type narrows (e.g. smul/umul,
@@ -931,6 +1431,19 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
         // Verify the computed value conforms to the node's annotated type, include node
         // context.
         assert_value_conforms_to_type(&node.ty, &coerced, node);
+        if let Some(observer) = observer.as_deref_mut() {
+            let is_bool_node = matches!(node.ty, ir::Type::Bits(1));
+            let is_param = matches!(node.payload, ir::NodePayload::GetParam(_));
+            if is_bool_node && !is_param {
+                observer.on_bool_node(BoolNodeEvent {
+                    node_ref: nr,
+                    node_text_id: node.text_id,
+                    value: coerced
+                        .to_bool()
+                        .expect("bits[1] nodes must be convertible to bool"),
+                });
+            }
+        }
         env.insert(nr, coerced);
     }
 
@@ -955,11 +1468,69 @@ pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
     }
 }
 
+pub fn eval_fn(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
+    eval_fn_with_observer(f, args, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ir_parser::Parser;
     use maplit::hashmap;
+
+    struct RecordingObserver {
+        events: Vec<SelectEvent>,
+    }
+
+    impl RecordingObserver {
+        fn new() -> Self {
+            Self { events: Vec::new() }
+        }
+    }
+
+    impl EvalObserver for RecordingObserver {
+        fn on_select(&mut self, ev: SelectEvent) {
+            self.events.push(ev);
+        }
+    }
+
+    struct RecordingBoolObserver {
+        bool_events: Vec<(usize, bool)>,
+    }
+
+    impl RecordingBoolObserver {
+        fn new() -> Self {
+            Self {
+                bool_events: Vec::new(),
+            }
+        }
+    }
+
+    impl EvalObserver for RecordingBoolObserver {
+        fn on_select(&mut self, _ev: SelectEvent) {}
+
+        fn on_bool_node(&mut self, ev: BoolNodeEvent) {
+            self.bool_events.push((ev.node_text_id, ev.value));
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingCornerFailureObserver {
+        corner_events: Vec<(usize, CornerKind, u8)>,
+        failure_events: Vec<(usize, FailureKind)>,
+    }
+
+    impl EvalObserver for RecordingCornerFailureObserver {
+        fn on_select(&mut self, _ev: SelectEvent) {}
+
+        fn on_corner_event(&mut self, ev: CornerEvent) {
+            self.corner_events.push((ev.node_text_id, ev.kind, ev.tag));
+        }
+
+        fn on_failure_event(&mut self, ev: FailureEvent) {
+            self.failure_events.push((ev.node_text_id, ev.kind));
+        }
+    }
 
     #[test]
     fn test_eval_pure_literal() {
@@ -1202,6 +1773,27 @@ mod tests {
         };
         let v: IrValue = eval_pure(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1111).unwrap());
+    }
+
+    #[test]
+    fn test_eval_pure_nary_concat_places_first_operand_in_msbs() {
+        // concat(a, b) where a=0b10 (2 bits) and b=0b01 (2 bits) => 0b1001.
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => IrValue::make_ubits(2, 0b10).unwrap(),
+            ir::NodeRef { index: 2 } => IrValue::make_ubits(2, 0b01).unwrap(),
+        );
+        let n = ir::Node {
+            text_id: 8,
+            name: None,
+            ty: ir::Type::Bits(4),
+            payload: ir::NodePayload::Nary(
+                ir::NaryOp::Concat,
+                vec![ir::NodeRef { index: 1 }, ir::NodeRef { index: 2 }],
+            ),
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, IrValue::make_ubits(4, 0b1001).unwrap());
     }
 
     #[test]
@@ -1451,6 +2043,111 @@ fn f(x: bits[1] id=1) -> bits[1] {
             }
             other => panic!("unexpected result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_eval_fn_with_observer_none_matches_eval_fn() {
+        let ir_text = r#"package test
+
+fn f(selidx: bits[2] id=1, prio: bits[2] id=2, oh: bits[3] id=3, a: bits[8] id=4, b: bits[8] id=5, c: bits[8] id=6, d: bits[8] id=7) -> (bits[8], bits[8], bits[8]) {
+  s: bits[8] = sel(selidx, cases=[a, b, c], default=d, id=10)
+  p: bits[8] = priority_sel(prio, cases=[a, b], default=d, id=11)
+  o: bits[8] = one_hot_sel(oh, cases=[a, b, c], id=12)
+  ret t: (bits[8], bits[8], bits[8]) = tuple(s, p, o, id=13)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        let args = [
+            IrValue::make_ubits(2, 1).unwrap(),     // selidx -> case 1
+            IrValue::make_ubits(2, 2).unwrap(),     // prio bit1 set -> case 1
+            IrValue::make_ubits(3, 0b101).unwrap(), // onehot bits 0 and 2 set
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 20).unwrap(),
+            IrValue::make_ubits(8, 30).unwrap(),
+            IrValue::make_ubits(8, 40).unwrap(),
+        ];
+
+        let r0 = eval_fn(&f, &args);
+        let r1 = eval_fn_with_observer(&f, &args, None);
+        assert_eq!(r0, r1);
+    }
+
+    #[test]
+    fn test_select_observer_emits_expected_events() {
+        let ir_text = r#"package test
+
+fn f(selidx: bits[2] id=1, prio: bits[2] id=2, oh: bits[3] id=3, a: bits[8] id=4, b: bits[8] id=5, c: bits[8] id=6, d: bits[8] id=7) -> (bits[8], bits[8], bits[8]) {
+  s: bits[8] = sel(selidx, cases=[a, b, c], default=d, id=10)
+  p: bits[8] = priority_sel(prio, cases=[a, b], default=d, id=11)
+  o: bits[8] = one_hot_sel(oh, cases=[a, b, c], id=12)
+  ret t: (bits[8], bits[8], bits[8]) = tuple(s, p, o, id=13)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+
+        let args = [
+            IrValue::make_ubits(2, 1).unwrap(),     // selidx -> case 1
+            IrValue::make_ubits(2, 2).unwrap(),     // prio bit1 set -> case 1
+            IrValue::make_ubits(3, 0b101).unwrap(), // onehot bits 0 and 2 set
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 20).unwrap(),
+            IrValue::make_ubits(8, 30).unwrap(),
+            IrValue::make_ubits(8, 40).unwrap(),
+        ];
+
+        let mut obs = RecordingObserver::new();
+        let _ = eval_fn_with_observer(&f, &args, Some(&mut obs));
+
+        let got: Vec<(usize, SelectKind, usize)> = obs
+            .events
+            .iter()
+            .map(|e| (e.node_text_id, e.select_kind, e.selected_index))
+            .collect();
+        let want: Vec<(usize, SelectKind, usize)> = vec![
+            (10, SelectKind::CaseIndex, 1),
+            (11, SelectKind::CaseIndex, 1),
+            (12, SelectKind::CaseIndex, 0),
+            (12, SelectKind::CaseIndex, 2),
+            (12, SelectKind::MultiBitsSet, usize::MAX),
+        ];
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_bool_node_observer_excludes_params_and_is_in_topo_order() {
+        let ir_text = r#"package test
+
+fn f(x: bits[2] id=1, y: bits[2] id=2) -> bits[1] {
+  t: bits[1] = eq(x, y, id=10)
+  ret n: bits[1] = not(t, id=11)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![
+            IrValue::make_ubits(2, 1).unwrap(),
+            IrValue::make_ubits(2, 1).unwrap(),
+        ];
+
+        let mut obs = RecordingBoolObserver::new();
+        let _ = eval_fn_with_observer(&f, &args, Some(&mut obs));
+
+        // Only computed bits[1] nodes (excluding GetParam) should be observed, in topo
+        // order: eq first, then not.
+        let want = vec![(10, true), (11, false)];
+        assert_eq!(obs.bool_events, want);
     }
 
     #[test]
@@ -1759,5 +2456,263 @@ fn f(a: bits[3][2][2] id=1, v: bits[3] id=2, i: bits[32] id=3, j: bits[32] id=4)
             }
             other => panic!("unexpected result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_eval_fn_array_index_clamps_oob_when_not_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=false, id=3)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 11).unwrap(),
+            IrValue::make_ubits(8, 12).unwrap(),
+            IrValue::make_ubits(8, 13).unwrap(),
+        ])
+        .unwrap();
+        let args = vec![arr, IrValue::make_ubits(3, 7).unwrap()];
+        let r = eval_fn_with_observer(&f, &args, None);
+        match r {
+            FnEvalResult::Success(s) => {
+                assert_eq!(s.value, IrValue::make_ubits(8, 13).unwrap());
+            }
+            FnEvalResult::Failure(_) => panic!("expected success"),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_array_index_oob_failure_when_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=3)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 11).unwrap(),
+            IrValue::make_ubits(8, 12).unwrap(),
+            IrValue::make_ubits(8, 13).unwrap(),
+        ])
+        .unwrap();
+        let args = vec![arr, IrValue::make_ubits(3, 7).unwrap()];
+        let r = eval_fn_with_observer(&f, &args, None);
+        match r {
+            FnEvalResult::Success(_) => panic!("expected failure"),
+            FnEvalResult::Failure(_f) => {}
+        }
+    }
+
+    #[test]
+    fn test_corner_add_rhs_is_zero_emits_event() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret z: bits[8] = add(x, y, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![
+            IrValue::make_ubits(8, 7).unwrap(),
+            IrValue::make_ubits(8, 0).unwrap(),
+        ];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::Add, 0)]);
+    }
+
+    #[test]
+    fn test_corner_neg_min_signed_emits_event() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1) -> bits[8] {
+  ret z: bits[8] = neg(x, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![IrValue::make_ubits(8, 0x80).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::Neg, 0)]);
+    }
+
+    #[test]
+    fn test_corner_sign_ext_msb_zero_emits_event() {
+        let ir_text = r#"package test
+
+fn f(x: bits[4] id=1) -> bits[8] {
+  ret z: bits[8] = sign_ext(x, new_bit_count=8, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![IrValue::make_ubits(4, 0b0011).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::SignExt, 0)]);
+    }
+
+    #[test]
+    fn test_corner_compare_distance_buckets_xor_popcount() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
+  ret t: bits[1] = eq(x, y, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+
+        let mut obs0 = RecordingCornerFailureObserver::default();
+        let r0 = eval_fn_with_observer(
+            &f,
+            &[
+                IrValue::make_ubits(8, 0xAA).unwrap(),
+                IrValue::make_ubits(8, 0xAA).unwrap(),
+            ],
+            Some(&mut obs0),
+        );
+        assert!(matches!(r0, FnEvalResult::Success(_)));
+        assert_eq!(
+            obs0.corner_events,
+            vec![(10, CornerKind::CompareDistance, 0)]
+        );
+
+        let mut obs1 = RecordingCornerFailureObserver::default();
+        let r1 = eval_fn_with_observer(
+            &f,
+            &[
+                IrValue::make_ubits(8, 0xAA).unwrap(),
+                IrValue::make_ubits(8, 0xAB).unwrap(),
+            ],
+            Some(&mut obs1),
+        );
+        assert!(matches!(r1, FnEvalResult::Success(_)));
+        assert_eq!(
+            obs1.corner_events,
+            vec![(10, CornerKind::CompareDistance, 1)]
+        );
+
+        let mut obs5 = RecordingCornerFailureObserver::default();
+        let r5 = eval_fn_with_observer(
+            &f,
+            &[
+                IrValue::make_ubits(8, 0).unwrap(),
+                IrValue::make_ubits(8, 0b0001_1111).unwrap(),
+            ],
+            Some(&mut obs5),
+        );
+        assert!(matches!(r5, FnEvalResult::Success(_)));
+        assert_eq!(
+            obs5.corner_events,
+            vec![(10, CornerKind::CompareDistance, 5)]
+        );
+    }
+
+    #[test]
+    fn test_corner_dynamic_bit_slice_in_bounds_vs_oob() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, s: bits[3] id=2) -> bits[4] {
+  ret z: bits[4] = dynamic_bit_slice(x, s, width=4, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+
+        // In bounds: start=2, width=4, arg_width=8
+        let args_in = vec![
+            IrValue::make_ubits(8, 0b1111_0000).unwrap(),
+            IrValue::make_ubits(3, 2).unwrap(),
+        ];
+        let mut obs_in = RecordingCornerFailureObserver::default();
+        let r_in = eval_fn_with_observer(&f, &args_in, Some(&mut obs_in));
+        assert!(matches!(r_in, FnEvalResult::Success(_)));
+        assert_eq!(
+            obs_in.corner_events,
+            vec![(10, CornerKind::DynamicBitSlice, 0)]
+        );
+        assert!(obs_in.failure_events.is_empty());
+
+        // OOB: start=6, width=4, arg_width=8
+        let args_oob = vec![
+            IrValue::make_ubits(8, 0b1111_0000).unwrap(),
+            IrValue::make_ubits(3, 6).unwrap(),
+        ];
+        let mut obs_oob = RecordingCornerFailureObserver::default();
+        let r_oob = eval_fn_with_observer(&f, &args_oob, Some(&mut obs_oob));
+        assert!(matches!(r_oob, FnEvalResult::Failure(_)));
+        assert_eq!(
+            obs_oob.corner_events,
+            vec![(10, CornerKind::DynamicBitSlice, 1)]
+        );
+        assert_eq!(
+            obs_oob.failure_events,
+            vec![(10, FailureKind::DynamicBitSliceOob)]
+        );
+    }
+
+    #[test]
+    fn test_corner_array_index_clamped_and_failure_when_assumed() {
+        let ir_text = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=false, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let arr = IrValue::make_array(&[
+            IrValue::make_ubits(8, 10).unwrap(),
+            IrValue::make_ubits(8, 11).unwrap(),
+            IrValue::make_ubits(8, 12).unwrap(),
+            IrValue::make_ubits(8, 13).unwrap(),
+        ])
+        .unwrap();
+        let args = vec![arr.clone(), IrValue::make_ubits(3, 7).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::ArrayIndex, 1)]);
+        assert!(obs.failure_events.is_empty());
+
+        let ir_text_assumed = r#"package test
+
+fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
+  ret out: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=10)
+}
+"#;
+        let mut parser = Parser::new(ir_text_assumed);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap().clone();
+        let args = vec![arr, IrValue::make_ubits(3, 7).unwrap()];
+        let mut obs = RecordingCornerFailureObserver::default();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Failure(_)));
+        assert!(obs.corner_events.is_empty());
+        assert_eq!(
+            obs.failure_events,
+            vec![(10, FailureKind::ArrayIndexOobAssumedInBounds)]
+        );
     }
 }

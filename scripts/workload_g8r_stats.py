@@ -25,6 +25,9 @@ Usage:
   python scripts/workload_g8r_stats.py --workload bf16_add --out-dir /tmp/bf16stats
   python scripts/workload_g8r_stats.py --workload bf16_mul --out-dir /tmp/bf16stats
   python scripts/workload_g8r_stats.py --workload clzt_10  --out-dir /tmp/clztstats
+  # If the driver is not at target/release/xlsynth-driver (e.g. macOS target triple),
+  # pass an explicit path:
+  python scripts/workload_g8r_stats.py --bin target/aarch64-apple-darwin/release/xlsynth-driver --workload bf16_add --out-dir /tmp/bf16stats
   # If --workload is omitted, prints a summary table for all known workloads:
   #   workload nodes depth
 """
@@ -47,19 +50,37 @@ def _repo_root() -> Path:
 
 def _resolve_xlsynth_driver(repo_root: Path) -> Path:
     # Prefer a locally built release driver; fall back to debug if present.
-    candidates = [
-        repo_root / "target" / "release" / "xlsynth-driver",
-        # repo_root / "target" / "debug" / "xlsynth-driver",
-    ]
+    #
+    # On macOS, cargo often places artifacts under target/<triple>/release/.
+    target_dir = repo_root / "target"
+    candidates = [target_dir / "release" / "xlsynth-driver"]
+    if target_dir.is_dir():
+        candidates.extend(sorted(target_dir.glob("*/release/xlsynth-driver")))
+        # candidates.extend(sorted(target_dir.glob("*/debug/xlsynth-driver")))
+    # candidates.append(target_dir / "debug" / "xlsynth-driver")
     for cand in candidates:
         if cand.is_file() and os.access(cand, os.X_OK):
             return cand
     raise FileNotFoundError(
         "xlsynth-driver not found. Expected at:\n"
         f"  {candidates[0]}\n"
+        "Or under a target triple directory, e.g.:\n"
+        f"  {repo_root / 'target' / '<triple>' / 'release' / 'xlsynth-driver'}\n"
+        "Or pass an explicit path via --bin.\n"
         "Please build it first, e.g.:\n"
         "  cargo build -p xlsynth-driver --release"
     )
+
+
+def _resolve_xlsynth_driver_from_arg(bin_arg: str) -> Path:
+    p = Path(bin_arg).expanduser()
+    if not p.is_absolute():
+        p = (_repo_root() / p).resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"--bin does not exist or is not a file: {p}")
+    if not os.access(p, os.X_OK):
+        raise FileNotFoundError(f"--bin is not executable: {p}")
+    return p
 
 
 def _run_cmd(
@@ -212,6 +233,11 @@ def main() -> int:
         description="Generate g8r stats bundle for BF16 workloads."
     )
     parser.add_argument(
+        "--bin",
+        required=False,
+        help="Path to the xlsynth-driver executable to use (overrides auto-discovery).",
+    )
+    parser.add_argument(
         "--workload",
         required=False,
         choices=list(KNOWN_WORKLOADS),
@@ -228,7 +254,10 @@ def main() -> int:
 
     # Resolve and require a locally built xlsynth-driver binary.
     try:
-        driver = _resolve_xlsynth_driver(repo)
+        if args.bin:
+            driver = _resolve_xlsynth_driver_from_arg(args.bin)
+        else:
+            driver = _resolve_xlsynth_driver(repo)
     except FileNotFoundError as e:
         sys.stderr.write(f"error: {e}\n")
         return 1

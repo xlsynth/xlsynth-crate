@@ -16,8 +16,8 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
 
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // 1) Generate an XLS IR function via C++ bindings. Filter out comparison binops
-    //    we don't currently support in the pure evaluator.
+    // 1) Generate an XLS IR function via C++ bindings. Filter out ops we don't currently
+    //    support in the pure evaluator.
     let filtered_ops: Vec<FuzzOp> = with
         .sample
         .ops
@@ -25,22 +25,12 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
         .cloned()
         .filter(|op| match op {
             FuzzOp::Binop(kind, _, _) => match kind {
-                // Filter comparisons (not all supported in pure evaluator yet)
-                FuzzBinop::Ugt
-                | FuzzBinop::Uge
-                | FuzzBinop::Ult
-                | FuzzBinop::Ule
-                | FuzzBinop::Sgt
-                | FuzzBinop::Sge
-                | FuzzBinop::Slt
-                | FuzzBinop::Sle
-                // Filter division/modulus (not supported yet)
+                // Filter division/modulus (not supported yet).
                 | FuzzBinop::Udiv
                 | FuzzBinop::Sdiv
                 | FuzzBinop::Umod
                 | FuzzBinop::Smod
-                // Filter concat (N-ary; not handled in pure evaluator yet)
-                | FuzzBinop::Concat => false,
+                => false,
                 _ => true,
             },
             FuzzOp::Unop(kind, _) => match kind {

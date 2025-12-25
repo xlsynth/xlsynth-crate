@@ -1,0 +1,24 @@
+[package]
+name = "xlsynth-autocov"
+version = "0.24.0"
+edition = "2024"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "Coverage-guided corpus growth for XLS IR functions"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth"
+homepage = "https://github.com/xlsynth/xlsynth-crate"
+
+[dependencies]
+xlsynth = { path = "../xlsynth", version = "0.24.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.24.0" }
+blake3 = "1.5"
+rand = "0.8"
+log = "0.4"
+ctrlc = "3.4.7"
+clap = { version = "4.5.21", features = ["derive"] }
+anyhow = "1.0"
+
+[lib]
+name = "xlsynth_autocov"
+path = "src/lib.rs"
