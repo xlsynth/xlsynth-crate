@@ -3,7 +3,11 @@
 use std::collections::HashMap;
 
 use crate::corners::bucket_xor_popcount;
-use crate::corners::{CornerEvent, CornerKind, FailureEvent, FailureKind};
+use crate::corners::{
+    AddCornerTag, ArrayIndexCornerTag, CompareDistanceCornerTag, CornerEvent, CornerKind,
+    DynamicBitSliceCornerTag, FailureEvent, FailureKind, NegCornerTag, ShiftCornerTag,
+    ShraCornerTag, SignExtCornerTag,
+};
 use crate::ir;
 use crate::ir::NodePayload as P;
 use crate::ir_utils::get_topological;
@@ -755,7 +759,9 @@ fn observe_corner_like_node(
                 node_ref: nr,
                 node_text_id: node.text_id,
                 kind: CornerKind::CompareDistance,
-                tag: bucket_xor_popcount(d),
+                tag: CompareDistanceCornerTag::try_from(bucket_xor_popcount(d))
+                    .expect("bucket_xor_popcount must be 0..=7")
+                    .into(),
             });
         }
         ir::NodePayload::Binop(ir::Binop::Add, lhs, rhs) => {
@@ -783,7 +789,7 @@ fn observe_corner_like_node(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::Add,
-                        tag: 0, // LhsIsZero
+                        tag: AddCornerTag::LhsIsZero.into(),
                     });
                 }
             }
@@ -793,7 +799,7 @@ fn observe_corner_like_node(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::Add,
-                        tag: 1, // RhsIsZero
+                        tag: AddCornerTag::RhsIsZero.into(),
                     });
                 }
             }
@@ -818,7 +824,7 @@ fn observe_corner_like_node(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::Neg,
-                        tag: 1, // OperandMsbIsOne
+                        tag: NegCornerTag::OperandMsbIsOne.into(),
                     });
 
                     let mut all_lower_zero = true;
@@ -833,7 +839,7 @@ fn observe_corner_like_node(
                             node_ref: nr,
                             node_text_id: node.text_id,
                             kind: CornerKind::Neg,
-                            tag: 0, // OperandIsMinSigned
+                            tag: NegCornerTag::OperandIsMinSigned.into(),
                         });
                     }
                 }
@@ -849,7 +855,7 @@ fn observe_corner_like_node(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::SignExt,
-                        tag: 0, // MsbIsZero
+                        tag: SignExtCornerTag::MsbIsZero.into(),
                     });
                 }
             }
@@ -866,10 +872,14 @@ fn observe_corner_like_node(
                     node_ref: nr,
                     node_text_id: node.text_id,
                     kind: CornerKind::Shift,
-                    tag: 0, // AmtIsZero
+                    tag: ShiftCornerTag::AmtIsZero.into(),
                 });
             }
-            let tag = if shift < lhs_w { 1 } else { 2 }; // AmtLtWidth vs AmtGeWidth
+            let tag: u8 = if shift < lhs_w {
+                ShiftCornerTag::AmtLtWidth.into()
+            } else {
+                ShiftCornerTag::AmtGeWidth.into()
+            };
             observer.on_corner_event(CornerEvent {
                 node_ref: nr,
                 node_text_id: node.text_id,
@@ -888,9 +898,12 @@ fn observe_corner_like_node(
             } else {
                 !lhs_bits.get_bit((lhs_w - 1) as usize).unwrap()
             };
-            // Tags:
-            // 0: Msb0_AmtLt, 1: Msb0_AmtGe, 2: Msb1_AmtLt, 3: Msb1_AmtGe
-            let tag = (if msb_is_zero { 0 } else { 2 }) + (if amt_lt { 0 } else { 1 });
+            let tag: u8 = match (msb_is_zero, amt_lt) {
+                (true, true) => ShraCornerTag::Msb0AmtLt.into(),
+                (true, false) => ShraCornerTag::Msb0AmtGe.into(),
+                (false, true) => ShraCornerTag::Msb1AmtLt.into(),
+                (false, false) => ShraCornerTag::Msb1AmtGe.into(),
+            };
             observer.on_corner_event(CornerEvent {
                 node_ref: nr,
                 node_text_id: node.text_id,
@@ -1204,7 +1217,7 @@ pub fn eval_fn_with_observer(
                             node_ref: nr,
                             node_text_id: node.text_id,
                             kind: CornerKind::DynamicBitSlice,
-                            tag: 1, // OutOfBounds
+                            tag: DynamicBitSliceCornerTag::OutOfBounds.into(),
                         });
                         observer.on_failure_event(FailureEvent {
                             node_ref: nr,
@@ -1223,7 +1236,7 @@ pub fn eval_fn_with_observer(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::DynamicBitSlice,
-                        tag: 0, // InBounds
+                        tag: DynamicBitSliceCornerTag::InBounds.into(),
                     });
                 }
                 let r = arg_bits.width_slice(start_u as i64, *width as i64);
@@ -1344,7 +1357,11 @@ pub fn eval_fn_with_observer(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::ArrayIndex,
-                        tag: if clamped_any { 1 } else { 0 }, // Clamped vs InBounds
+                        tag: if clamped_any {
+                            ArrayIndexCornerTag::Clamped.into()
+                        } else {
+                            ArrayIndexCornerTag::InBounds.into()
+                        },
                     });
                 }
                 value

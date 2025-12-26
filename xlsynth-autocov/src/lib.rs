@@ -14,7 +14,11 @@ use blake3::Hasher;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use xlsynth::{IrBits, IrValue};
-use xlsynth_pir::corners::{CornerEvent, CornerKind, FailureEvent};
+use xlsynth_pir::corners::{
+    AddCornerTag, ArrayIndexCornerTag, CompareDistanceCornerTag, CornerEvent, CornerKind,
+    CornerTag, DynamicBitSliceCornerTag, FailureEvent, NegCornerTag, ShiftCornerTag, ShraCornerTag,
+    SignExtCornerTag, corner_tag_from_kind_and_u8,
+};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval::{BoolNodeEvent, EvalObserver, FnEvalResult, SelectEvent, SelectKind};
 use xlsynth_pir::ir_parser::Parser;
@@ -48,56 +52,77 @@ impl Ord for BoolEventId {
     }
 }
 
-pub fn corner_tag_description(kind: CornerKind, tag: u8) -> String {
+pub fn corner_tag_description(kind: CornerKind, tag: u8) -> &'static str {
     match kind {
-        CornerKind::Add => match tag {
-            0 => "add lhs is zero".to_string(),
-            1 => "add rhs is zero".to_string(),
-            _ => panic!("Add defines tags {{0,1}}; got {}", tag),
-        },
-        CornerKind::Neg => match tag {
-            0 => "neg operand is min signed (e.g. 0x80..00)".to_string(),
-            1 => "neg operand msb is one (negative)".to_string(),
-            _ => panic!("Neg defines tags {{0,1}}; got {}", tag),
-        },
-        CornerKind::SignExt => {
-            assert_eq!(tag, 0, "SignExt only defines tag=0");
-            "sign_ext: msb is zero (extending with zeros)".to_string()
+        CornerKind::Add
+        | CornerKind::Neg
+        | CornerKind::Shift
+        | CornerKind::SignExt
+        | CornerKind::DynamicBitSlice
+        | CornerKind::ArrayIndex
+        | CornerKind::Shra
+        | CornerKind::CompareDistance => {
+            let tag = corner_tag_from_kind_and_u8(kind, tag)
+                .unwrap_or_else(|| panic!("invalid corner tag: kind={:?} tag={}", kind, tag));
+            match tag {
+                CornerTag::Add(AddCornerTag::LhsIsZero) => "add lhs is zero",
+                CornerTag::Add(AddCornerTag::RhsIsZero) => "add rhs is zero",
+                CornerTag::Neg(NegCornerTag::OperandIsMinSigned) => {
+                    "neg operand is min signed (e.g. 0x80..00)"
+                }
+                CornerTag::Neg(NegCornerTag::OperandMsbIsOne) => {
+                    "neg operand msb is one (negative)"
+                }
+                CornerTag::Shift(ShiftCornerTag::AmtIsZero) => "shift amount is zero",
+                CornerTag::Shift(ShiftCornerTag::AmtLtWidth) => "shift amount < lhs bit width",
+                CornerTag::Shift(ShiftCornerTag::AmtGeWidth) => "shift amount >= lhs bit width",
+                CornerTag::SignExt(SignExtCornerTag::MsbIsZero) => {
+                    "sign_ext: msb is zero (extending with zeros)"
+                }
+                CornerTag::DynamicBitSlice(DynamicBitSliceCornerTag::InBounds) => {
+                    "dynamic_bit_slice in-bounds"
+                }
+                CornerTag::DynamicBitSlice(DynamicBitSliceCornerTag::OutOfBounds) => {
+                    "dynamic_bit_slice out-of-bounds"
+                }
+                CornerTag::ArrayIndex(ArrayIndexCornerTag::InBounds) => "array_index in-bounds",
+                CornerTag::ArrayIndex(ArrayIndexCornerTag::Clamped) => {
+                    "array_index clamped (index out-of-bounds)"
+                }
+                CornerTag::Shra(ShraCornerTag::Msb0AmtLt) => "shra: msb=0 and shift amount < width",
+                CornerTag::Shra(ShraCornerTag::Msb0AmtGe) => {
+                    "shra: msb=0 and shift amount >= width"
+                }
+                CornerTag::Shra(ShraCornerTag::Msb1AmtLt) => "shra: msb=1 and shift amount < width",
+                CornerTag::Shra(ShraCornerTag::Msb1AmtGe) => {
+                    "shra: msb=1 and shift amount >= width"
+                }
+                CornerTag::CompareDistance(CompareDistanceCornerTag::XorPopcount0) => {
+                    "eq/ne compare distance: xor-popcount == 0 (equal)"
+                }
+                CornerTag::CompareDistance(CompareDistanceCornerTag::XorPopcount1) => {
+                    "eq/ne compare distance: xor-popcount == 1"
+                }
+                CornerTag::CompareDistance(CompareDistanceCornerTag::XorPopcount2) => {
+                    "eq/ne compare distance: xor-popcount == 2"
+                }
+                CornerTag::CompareDistance(CompareDistanceCornerTag::XorPopcount3) => {
+                    "eq/ne compare distance: xor-popcount == 3"
+                }
+                CornerTag::CompareDistance(CompareDistanceCornerTag::XorPopcount4) => {
+                    "eq/ne compare distance: xor-popcount == 4"
+                }
+                CornerTag::CompareDistance(CompareDistanceCornerTag::XorPopcount5To8) => {
+                    "eq/ne compare distance: xor-popcount in 5..=8"
+                }
+                CornerTag::CompareDistance(CompareDistanceCornerTag::XorPopcount9To16) => {
+                    "eq/ne compare distance: xor-popcount in 9..=16"
+                }
+                CornerTag::CompareDistance(CompareDistanceCornerTag::XorPopcount17Plus) => {
+                    "eq/ne compare distance: xor-popcount >= 17"
+                }
+            }
         }
-        CornerKind::DynamicBitSlice => match tag {
-            0 => "dynamic_bit_slice in-bounds".to_string(),
-            1 => "dynamic_bit_slice out-of-bounds".to_string(),
-            _ => panic!("DynamicBitSlice defines tags {{0,1}}; got {}", tag),
-        },
-        CornerKind::ArrayIndex => match tag {
-            0 => "array_index in-bounds".to_string(),
-            1 => "array_index clamped (index out-of-bounds)".to_string(),
-            _ => panic!("ArrayIndex defines tags {{0,1}}; got {}", tag),
-        },
-        CornerKind::Shift => match tag {
-            0 => "shift amount is zero".to_string(),
-            1 => "shift amount < lhs bit width".to_string(),
-            2 => "shift amount >= lhs bit width".to_string(),
-            _ => panic!("Shift defines tags {{0,1,2}}; got {}", tag),
-        },
-        CornerKind::Shra => match tag {
-            0 => "shra: msb=0 and shift amount < width".to_string(),
-            1 => "shra: msb=0 and shift amount >= width".to_string(),
-            2 => "shra: msb=1 and shift amount < width".to_string(),
-            3 => "shra: msb=1 and shift amount >= width".to_string(),
-            _ => panic!("Shra defines tags 0..=3; got {}", tag),
-        },
-        CornerKind::CompareDistance => match tag {
-            0 => "eq/ne compare distance: xor-popcount == 0 (equal)".to_string(),
-            1 => "eq/ne compare distance: xor-popcount == 1".to_string(),
-            2 => "eq/ne compare distance: xor-popcount == 2".to_string(),
-            3 => "eq/ne compare distance: xor-popcount == 3".to_string(),
-            4 => "eq/ne compare distance: xor-popcount == 4".to_string(),
-            5 => "eq/ne compare distance: xor-popcount in 5..=8".to_string(),
-            6 => "eq/ne compare distance: xor-popcount in 9..=16".to_string(),
-            7 => "eq/ne compare distance: xor-popcount >= 17".to_string(),
-            _ => panic!("CompareDistance defines tags 0..=7; got {}", tag),
-        },
     }
 }
 
@@ -866,14 +891,14 @@ impl AutocovEngine {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Add,
-                            tag: 0, // LhsIsZero
+                            tag: AddCornerTag::LhsIsZero.into(),
                         });
                     }
                     if !rhs_is_lit {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Add,
-                            tag: 1, // RhsIsZero
+                            tag: AddCornerTag::RhsIsZero.into(),
                         });
                     }
                 }
@@ -888,12 +913,12 @@ impl AutocovEngine {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Neg,
-                            tag: 1, // OperandMsbIsOne
+                            tag: NegCornerTag::OperandMsbIsOne.into(),
                         });
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Neg,
-                            tag: 0,
+                            tag: NegCornerTag::OperandIsMinSigned.into(),
                         });
                     }
                 }
@@ -941,13 +966,13 @@ impl AutocovEngine {
                     out.insert(CornerEventId {
                         node_text_id: n.text_id,
                         kind: CornerKind::Shift,
-                        tag: 0,
+                        tag: ShiftCornerTag::AmtIsZero.into(),
                     });
                     if lhs_w > 0 {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Shift,
-                            tag: 1, // AmtLtWidth
+                            tag: ShiftCornerTag::AmtLtWidth.into(),
                         });
                     }
                     // AmtGeWidth is reachable only if the selector can represent a value >= lhs_w.
@@ -956,7 +981,7 @@ impl AutocovEngine {
                             out.insert(CornerEventId {
                                 node_text_id: n.text_id,
                                 kind: CornerKind::Shift,
-                                tag: 2, // AmtGeWidth
+                                tag: ShiftCornerTag::AmtGeWidth.into(),
                             });
                         }
                     } else {
@@ -964,7 +989,7 @@ impl AutocovEngine {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Shift,
-                            tag: 2,
+                            tag: ShiftCornerTag::AmtGeWidth.into(),
                         });
                     }
                 }
@@ -986,24 +1011,24 @@ impl AutocovEngine {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Shra,
-                            tag: 0, // Msb0_AmtLt
+                            tag: ShraCornerTag::Msb0AmtLt.into(),
                         });
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Shra,
-                            tag: 2, // Msb1_AmtLt
+                            tag: ShraCornerTag::Msb1AmtLt.into(),
                         });
                     }
                     if can_amt_ge {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Shra,
-                            tag: 1, // Msb0_AmtGe
+                            tag: ShraCornerTag::Msb0AmtGe.into(),
                         });
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::Shra,
-                            tag: 3, // Msb1_AmtGe
+                            tag: ShraCornerTag::Msb1AmtGe.into(),
                         });
                     }
                 }
@@ -1012,7 +1037,10 @@ impl AutocovEngine {
                     start: _,
                     width: _,
                 } => {
-                    for tag in [0u8, 1u8] {
+                    for tag in [
+                        DynamicBitSliceCornerTag::InBounds.into(),
+                        DynamicBitSliceCornerTag::OutOfBounds.into(),
+                    ] {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::DynamicBitSlice,
@@ -1025,7 +1053,10 @@ impl AutocovEngine {
                     indices: _,
                     assumed_in_bounds: _,
                 } => {
-                    for tag in [0u8, 1u8] {
+                    for tag in [
+                        ArrayIndexCornerTag::InBounds.into(),
+                        ArrayIndexCornerTag::Clamped.into(),
+                    ] {
                         out.insert(CornerEventId {
                             node_text_id: n.text_id,
                             kind: CornerKind::ArrayIndex,
@@ -2436,20 +2467,48 @@ fn f(
         assert!(has(10, CornerKind::Add, 1));
         assert!(has(11, CornerKind::Neg, 1));
         assert!(has(11, CornerKind::Neg, 0));
-        assert!(has(12, CornerKind::SignExt, 0));
+        assert!(has(
+            12,
+            CornerKind::SignExt,
+            SignExtCornerTag::MsbIsZero.into()
+        ));
 
         // 8-bit compare can only reach xor-popcount 0..=8, which maps to buckets 0..=5.
-        for tag in 0u8..=5u8 {
+        for tag in [
+            CompareDistanceCornerTag::XorPopcount0.into(),
+            CompareDistanceCornerTag::XorPopcount1.into(),
+            CompareDistanceCornerTag::XorPopcount2.into(),
+            CompareDistanceCornerTag::XorPopcount3.into(),
+            CompareDistanceCornerTag::XorPopcount4.into(),
+            CompareDistanceCornerTag::XorPopcount5To8.into(),
+        ] {
             assert!(has(13, CornerKind::CompareDistance, tag));
         }
-        for tag in [0u8, 1u8, 2u8] {
+        for tag in [
+            ShiftCornerTag::AmtIsZero.into(),
+            ShiftCornerTag::AmtLtWidth.into(),
+            ShiftCornerTag::AmtGeWidth.into(),
+        ] {
             assert!(has(14, CornerKind::Shift, tag));
         }
-        for tag in 0u8..=3u8 {
+        for tag in [
+            ShraCornerTag::Msb0AmtLt.into(),
+            ShraCornerTag::Msb0AmtGe.into(),
+            ShraCornerTag::Msb1AmtLt.into(),
+            ShraCornerTag::Msb1AmtGe.into(),
+        ] {
             assert!(has(15, CornerKind::Shra, tag));
         }
-        for tag in [0u8, 1u8] {
+        for tag in [
+            DynamicBitSliceCornerTag::InBounds.into(),
+            DynamicBitSliceCornerTag::OutOfBounds.into(),
+        ] {
             assert!(has(16, CornerKind::DynamicBitSlice, tag));
+        }
+        for tag in [
+            ArrayIndexCornerTag::InBounds.into(),
+            ArrayIndexCornerTag::Clamped.into(),
+        ] {
             assert!(has(17, CornerKind::ArrayIndex, tag));
         }
     }

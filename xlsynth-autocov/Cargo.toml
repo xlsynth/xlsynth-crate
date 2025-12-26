@@ -12,6 +12,7 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 [dependencies]
 xlsynth = { path = "../xlsynth", version = "0.24.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.24.0" }
+xlsynth-prover = { path = "../xlsynth-prover", version = "0.24.0", features = ["with-easy-smt"] }
 blake3 = "1.5"
 rand = "0.8"
 log = "0.4"

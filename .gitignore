@@ -1,6 +1,7 @@
 *.swp
 target/
 .vscode
+.cursor
 xlsynth-g8r/fuzz/Cargo.lock
 xlsynth-g8r/fuzz/corpus/
 xlsynth-g8r/fuzz/artifacts/
