@@ -39,6 +39,25 @@ pub enum DidConverge {
     No,
 }
 
+// NB Direct impl of Into to avoid import issues with From not being in the same
+// file as the struct definition.
+impl Into<crate::result_proto::DidConverge> for DidConverge {
+    fn into(self) -> crate::result_proto::DidConverge {
+        match self {
+            Self::Yes(val) => crate::result_proto::DidConverge {
+                result: Some(crate::result_proto::did_converge::Result::Yes(
+                    crate::result_proto::did_converge::Yes { count: val as u64 },
+                )),
+            },
+            Self::No => crate::result_proto::DidConverge {
+                result: Some(crate::result_proto::did_converge::Result::No(
+                    crate::result_proto::did_converge::No {},
+                )),
+            },
+        }
+    }
+}
+
 // Add struct to record stats for each fraig iteration
 #[derive(Debug, serde::Serialize)]
 pub struct FraigIterationStat {
@@ -46,6 +65,17 @@ pub struct FraigIterationStat {
     pub counterexample_count: usize,
     pub proposed_equiv_classes: usize,
     pub replacements_count: usize,
+}
+
+impl Into<crate::result_proto::FraigIterationStat> for FraigIterationStat {
+    fn into(self) -> crate::result_proto::FraigIterationStat {
+        crate::result_proto::FraigIterationStat {
+            gate_count: self.gate_count as u64,
+            counterexample_count: self.counterexample_count as u64,
+            proposed_equiv_classes: self.proposed_equiv_classes as u64,
+            replacements_count: self.replacements_count as u64,
+        }
+    }
 }
 
 pub fn fraig_optimize(

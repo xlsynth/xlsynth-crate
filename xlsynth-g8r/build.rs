@@ -5,7 +5,8 @@ fn main() {
     let descriptor_path = std::path::Path::new(&out_dir).join("liberty.bin");
     prost_build::Config::new()
         .file_descriptor_set_path(&descriptor_path)
-        .compile_protos(&["proto/liberty.proto"], &["proto"])
+        .compile_protos(&["proto/liberty.proto", "proto/result.proto"], &["proto"])
         .expect("Failed to compile proto");
     println!("cargo:rerun-if-changed=proto/liberty.proto");
+    println!("cargo:rerun-if-changed=proto/result.proto");
 }
