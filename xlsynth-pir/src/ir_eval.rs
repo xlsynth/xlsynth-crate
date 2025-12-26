@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use crate::corners::bucket_xor_popcount;
-use crate::corners::{CornerEvent, CornerKind, FailureEvent, FailureKind};
+use crate::corners::{
+    AddCornerTag, CornerEvent, CornerKind, FailureEvent, FailureKind, NegCornerTag, ShiftCornerTag,
+};
 use crate::ir;
 use crate::ir::NodePayload as P;
 use crate::ir_utils::get_topological;
@@ -783,7 +785,7 @@ fn observe_corner_like_node(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::Add,
-                        tag: 0, // LhsIsZero
+                        tag: AddCornerTag::LhsIsZero.into(),
                     });
                 }
             }
@@ -793,7 +795,7 @@ fn observe_corner_like_node(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::Add,
-                        tag: 1, // RhsIsZero
+                        tag: AddCornerTag::RhsIsZero.into(),
                     });
                 }
             }
@@ -818,7 +820,7 @@ fn observe_corner_like_node(
                         node_ref: nr,
                         node_text_id: node.text_id,
                         kind: CornerKind::Neg,
-                        tag: 1, // OperandMsbIsOne
+                        tag: NegCornerTag::OperandMsbIsOne.into(),
                     });
 
                     let mut all_lower_zero = true;
@@ -833,7 +835,7 @@ fn observe_corner_like_node(
                             node_ref: nr,
                             node_text_id: node.text_id,
                             kind: CornerKind::Neg,
-                            tag: 0, // OperandIsMinSigned
+                            tag: NegCornerTag::OperandIsMinSigned.into(),
                         });
                     }
                 }
@@ -866,10 +868,14 @@ fn observe_corner_like_node(
                     node_ref: nr,
                     node_text_id: node.text_id,
                     kind: CornerKind::Shift,
-                    tag: 0, // AmtIsZero
+                    tag: ShiftCornerTag::AmtIsZero.into(),
                 });
             }
-            let tag = if shift < lhs_w { 1 } else { 2 }; // AmtLtWidth vs AmtGeWidth
+            let tag: u8 = if shift < lhs_w {
+                ShiftCornerTag::AmtLtWidth.into()
+            } else {
+                ShiftCornerTag::AmtGeWidth.into()
+            };
             observer.on_corner_event(CornerEvent {
                 node_ref: nr,
                 node_text_id: node.text_id,

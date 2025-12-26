@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 use xlsynth::IrValue;
-use xlsynth_pir::corners::CornerKind;
+use xlsynth_pir::corners::{
+    AddCornerTag, CornerKind, CornerTag, NegCornerTag, ShiftCornerTag, corner_tag_from_kind_and_u8,
+};
 use xlsynth_pir::ir;
 
 use crate::solver::{BitVec, Response, Solver};
@@ -134,16 +136,18 @@ impl<'a, S: Solver> CornerProverSession<'a, S> {
                 let ir::NodePayload::Binop(ir::Binop::Add, lhs, rhs) = &n.payload else {
                     return Err(format!("node {} is not add", q.node_text_id));
                 };
-                match q.tag {
-                    0 => {
+                let tag = corner_tag_from_kind_and_u8(CornerKind::Add, q.tag)
+                    .ok_or_else(|| format!("invalid Add tag {}", q.tag))?;
+                match tag {
+                    CornerTag::Add(AddCornerTag::LhsIsZero) => {
                         let lhs_bv = self.term_for_ref(*lhs)?.bitvec.clone();
                         Ok(self.solver.is_zero(&lhs_bv))
                     }
-                    1 => {
+                    CornerTag::Add(AddCornerTag::RhsIsZero) => {
                         let rhs_bv = self.term_for_ref(*rhs)?.bitvec.clone();
                         Ok(self.solver.is_zero(&rhs_bv))
                     }
-                    _ => Err(format!("Add: unknown tag {}", q.tag)),
+                    _ => Err(format!("unexpected Add tag variant for tag={}", q.tag)),
                 }
             }
             CornerKind::Neg => {
@@ -151,14 +155,18 @@ impl<'a, S: Solver> CornerProverSession<'a, S> {
                     return Err(format!("node {} is not neg", q.node_text_id));
                 };
                 let op_bv = self.term_for_ref(*operand)?.bitvec.clone();
-                match q.tag {
-                    0 => Ok(self.solver.is_signed_min_value(&op_bv)),
-                    1 => {
+                let tag = corner_tag_from_kind_and_u8(CornerKind::Neg, q.tag)
+                    .ok_or_else(|| format!("invalid Neg tag {}", q.tag))?;
+                match tag {
+                    CornerTag::Neg(NegCornerTag::OperandIsMinSigned) => {
+                        Ok(self.solver.is_signed_min_value(&op_bv))
+                    }
+                    CornerTag::Neg(NegCornerTag::OperandMsbIsOne) => {
                         let sign = self.solver.sign_bit(&op_bv);
                         let one = self.solver.one(1);
                         Ok(self.solver.eq(&sign, &one))
                     }
-                    _ => Err(format!("Neg: unknown tag {}", q.tag)),
+                    _ => Err(format!("unexpected Neg tag variant for tag={}", q.tag)),
                 }
             }
             CornerKind::Shift => {
@@ -173,11 +181,17 @@ impl<'a, S: Solver> CornerProverSession<'a, S> {
                 let lhs_w = lhs_bv.get_width();
                 let rhs_w = rhs_bv.get_width();
                 let width_const: BitVec<S::Term> = self.solver.numerical_u128(rhs_w, lhs_w as u128);
-                match q.tag {
-                    0 => Ok(self.solver.is_zero(&rhs_bv)),
-                    1 => Ok(self.solver.ult(&rhs_bv, &width_const)),
-                    2 => Ok(self.solver.uge(&rhs_bv, &width_const)),
-                    _ => Err(format!("Shift: unknown tag {}", q.tag)),
+                let tag = corner_tag_from_kind_and_u8(CornerKind::Shift, q.tag)
+                    .ok_or_else(|| format!("invalid Shift tag {}", q.tag))?;
+                match tag {
+                    CornerTag::Shift(ShiftCornerTag::AmtIsZero) => Ok(self.solver.is_zero(&rhs_bv)),
+                    CornerTag::Shift(ShiftCornerTag::AmtLtWidth) => {
+                        Ok(self.solver.ult(&rhs_bv, &width_const))
+                    }
+                    CornerTag::Shift(ShiftCornerTag::AmtGeWidth) => {
+                        Ok(self.solver.uge(&rhs_bv, &width_const))
+                    }
+                    _ => Err(format!("unexpected Shift tag variant for tag={}", q.tag)),
                 }
             }
             _ => Err(format!("unsupported corner kind in MVP: {:?}", q.kind)),
