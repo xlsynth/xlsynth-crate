@@ -137,11 +137,17 @@ fn main() -> anyhow::Result<()> {
     }
 
     #[derive(Default, Clone)]
+    struct OutcomeBest {
+        pass_best: Option<BestSample>,
+        fail_best: Option<BestSample>,
+        pass_count: usize,
+        fail_count: usize,
+    }
+
+    #[derive(Default, Clone)]
     struct BoolBestSamples {
-        false_best: Option<BestSample>,
-        true_best: Option<BestSample>,
-        false_count: usize,
-        true_count: usize,
+        false_outcome: OutcomeBest,
+        true_outcome: OutcomeBest,
     }
 
     let mut bool_best_by_node: BTreeMap<usize, BoolBestSamples> = BTreeMap::new();
@@ -176,7 +182,7 @@ fn main() -> anyhow::Result<()> {
             observed_any.extend(events);
             let (_ok2, bool_events) = engine.evaluate_bool_events(&bits);
             bool_observed_any.extend(bool_events.iter().copied());
-            if args.show_bools && ok {
+            if args.show_bools {
                 let sample_idx = samples_total;
                 let complexity = sample_complexity.expect("show_bools implies complexity computed");
                 let value_str = v.to_string();
@@ -187,36 +193,28 @@ fn main() -> anyhow::Result<()> {
                     let ent = bool_best_by_node
                         .entry(ev.node_text_id)
                         .or_insert_with(BoolBestSamples::default);
-                    if ev.value {
-                        ent.true_count += 1;
-                        let should_replace = match &ent.true_best {
-                            None => true,
-                            Some(cur) => {
-                                (complexity, sample_idx) < (cur.complexity, cur.sample_idx)
-                            }
-                        };
-                        if should_replace {
-                            ent.true_best = Some(BestSample {
-                                complexity,
-                                sample_idx,
-                                value_str: value_str.clone(),
-                            });
-                        }
+                    let outcome = if ev.value {
+                        &mut ent.true_outcome
                     } else {
-                        ent.false_count += 1;
-                        let should_replace = match &ent.false_best {
-                            None => true,
-                            Some(cur) => {
-                                (complexity, sample_idx) < (cur.complexity, cur.sample_idx)
-                            }
-                        };
-                        if should_replace {
-                            ent.false_best = Some(BestSample {
-                                complexity,
-                                sample_idx,
-                                value_str: value_str.clone(),
-                            });
-                        }
+                        &mut ent.false_outcome
+                    };
+
+                    let (count_ref, best_ref) = if ok {
+                        (&mut outcome.pass_count, &mut outcome.pass_best)
+                    } else {
+                        (&mut outcome.fail_count, &mut outcome.fail_best)
+                    };
+                    *count_ref += 1;
+                    let should_replace = match best_ref {
+                        None => true,
+                        Some(cur) => (complexity, sample_idx) < (cur.complexity, cur.sample_idx),
+                    };
+                    if should_replace {
+                        *best_ref = Some(BestSample {
+                            complexity,
+                            sample_idx,
+                            value_str: value_str.clone(),
+                        });
                     }
                 }
             }
@@ -251,7 +249,7 @@ fn main() -> anyhow::Result<()> {
             observed_any.extend(events);
             let (_ok2, bool_events) = engine.evaluate_bool_events(&bits);
             bool_observed_any.extend(bool_events.iter().copied());
-            if args.show_bools && ok {
+            if args.show_bools {
                 let sample_idx = samples_total;
                 let complexity = sample_complexity.expect("show_bools implies complexity computed");
                 let value_str = v.to_string();
@@ -262,36 +260,28 @@ fn main() -> anyhow::Result<()> {
                     let ent = bool_best_by_node
                         .entry(ev.node_text_id)
                         .or_insert_with(BoolBestSamples::default);
-                    if ev.value {
-                        ent.true_count += 1;
-                        let should_replace = match &ent.true_best {
-                            None => true,
-                            Some(cur) => {
-                                (complexity, sample_idx) < (cur.complexity, cur.sample_idx)
-                            }
-                        };
-                        if should_replace {
-                            ent.true_best = Some(BestSample {
-                                complexity,
-                                sample_idx,
-                                value_str: value_str.clone(),
-                            });
-                        }
+                    let outcome = if ev.value {
+                        &mut ent.true_outcome
                     } else {
-                        ent.false_count += 1;
-                        let should_replace = match &ent.false_best {
-                            None => true,
-                            Some(cur) => {
-                                (complexity, sample_idx) < (cur.complexity, cur.sample_idx)
-                            }
-                        };
-                        if should_replace {
-                            ent.false_best = Some(BestSample {
-                                complexity,
-                                sample_idx,
-                                value_str: value_str.clone(),
-                            });
-                        }
+                        &mut ent.false_outcome
+                    };
+
+                    let (count_ref, best_ref) = if ok {
+                        (&mut outcome.pass_count, &mut outcome.pass_best)
+                    } else {
+                        (&mut outcome.fail_count, &mut outcome.fail_best)
+                    };
+                    *count_ref += 1;
+                    let should_replace = match best_ref {
+                        None => true,
+                        Some(cur) => (complexity, sample_idx) < (cur.complexity, cur.sample_idx),
+                    };
+                    if should_replace {
+                        *best_ref = Some(BestSample {
+                            complexity,
+                            sample_idx,
+                            value_str: value_str.clone(),
+                        });
                     }
                 }
             }
@@ -359,6 +349,24 @@ fn main() -> anyhow::Result<()> {
     }
 
     if args.show_bools {
+        fn fmt_witness(best: &Option<BestSample>, count: usize) -> String {
+            match best.as_ref() {
+                None => "(none)".to_string(),
+                Some(b) => {
+                    if count > 1 {
+                        format!(
+                            "{} @ corpus:{} ... {} more",
+                            b.value_str,
+                            b.sample_idx,
+                            count - 1
+                        )
+                    } else {
+                        format!("{} @ corpus:{}", b.value_str, b.sample_idx)
+                    }
+                }
+            }
+        }
+
         for node_text_id in bool_nodes.iter().copied() {
             let node_str = engine
                 .node_to_string_by_text_id(node_text_id)
@@ -368,28 +376,28 @@ fn main() -> anyhow::Result<()> {
                 .cloned()
                 .unwrap_or_default();
             println!("{}:", node_str);
-            let false_line = match ent.false_best.as_ref() {
-                None => "(none)".to_string(),
-                Some(b) => {
-                    if ent.false_count > 1 {
-                        format!("{}, ... {} more", b.value_str, ent.false_count - 1)
-                    } else {
-                        b.value_str.clone()
-                    }
-                }
-            };
-            let true_line = match ent.true_best.as_ref() {
-                None => "(none)".to_string(),
-                Some(b) => {
-                    if ent.true_count > 1 {
-                        format!("{}, ... {} more", b.value_str, ent.true_count - 1)
-                    } else {
-                        b.value_str.clone()
-                    }
-                }
-            };
-            println!("  false: {}", false_line);
-            println!("  true: {}", true_line);
+            println!("  false:");
+            println!(
+                "    passes: {}",
+                fmt_witness(&ent.false_outcome.pass_best, ent.false_outcome.pass_count)
+            );
+            if ent.false_outcome.fail_count > 0 {
+                println!(
+                    "    failures: {}",
+                    fmt_witness(&ent.false_outcome.fail_best, ent.false_outcome.fail_count)
+                );
+            }
+            println!("  true:");
+            println!(
+                "    passes: {}",
+                fmt_witness(&ent.true_outcome.pass_best, ent.true_outcome.pass_count)
+            );
+            if ent.true_outcome.fail_count > 0 {
+                println!(
+                    "    failures: {}",
+                    fmt_witness(&ent.true_outcome.fail_best, ent.true_outcome.fail_count)
+                );
+            }
         }
     }
 
