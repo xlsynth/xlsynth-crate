@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,11 @@ struct Args {
     /// This runs after printing `corner_never_observed ...` lines.
     #[arg(long, default_value_t = true)]
     prove: bool,
+
+    /// Show, for each bool node, which corpus samples demonstrate `false` vs
+    /// `true`.
+    #[arg(long, default_value_t = false)]
+    show_bools: bool,
 }
 
 fn corner_kind_str(k: xlsynth_pir::corners::CornerKind) -> &'static str {
@@ -112,6 +118,7 @@ fn main() -> anyhow::Result<()> {
 
     let domain: BTreeSet<xlsynth_autocov::CornerEventId> = engine.corner_event_domain();
     let bool_domain: BTreeSet<xlsynth_autocov::BoolEventId> = engine.bool_event_domain();
+    let bool_nodes: BTreeSet<usize> = bool_domain.iter().map(|e| e.node_text_id).collect();
     if domain.is_empty() {
         eprintln!("corner_domain_empty (no corner-like nodes found)");
     }
@@ -121,6 +128,28 @@ fn main() -> anyhow::Result<()> {
     let mut samples_total: usize = 0;
     let mut samples_ok: usize = 0;
     let mut samples_failed: usize = 0;
+
+    #[derive(Clone)]
+    struct BestSample {
+        complexity: u64,
+        sample_idx: usize,
+        value_str: String,
+    }
+
+    #[derive(Default, Clone)]
+    struct BoolBestSamples {
+        false_best: Option<BestSample>,
+        true_best: Option<BestSample>,
+        false_count: usize,
+        true_count: usize,
+    }
+
+    let mut bool_best_by_node: BTreeMap<usize, BoolBestSamples> = BTreeMap::new();
+    if args.show_bools {
+        for &node_text_id in bool_nodes.iter() {
+            bool_best_by_node.insert(node_text_id, BoolBestSamples::default());
+        }
+    }
 
     if let Some(corpus_file) = corpus_file {
         let f = std::fs::File::open(corpus_file)?;
@@ -135,13 +164,62 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
             let v = xlsynth::IrValue::parse_typed(t)?;
+            let sample_complexity = if args.show_bools {
+                Some(xlsynth_autocov::irvalue_complexity_key(&v))
+            } else {
+                None
+            };
             let bits = engine
                 .bits_from_arg_tuple(&v)
                 .map_err(|e| anyhow::anyhow!("corpus parse error at line {}: {}", lineno + 1, e))?;
             let (ok, events) = engine.evaluate_corner_events(&bits);
             observed_any.extend(events);
             let (_ok2, bool_events) = engine.evaluate_bool_events(&bits);
-            bool_observed_any.extend(bool_events);
+            bool_observed_any.extend(bool_events.iter().copied());
+            if args.show_bools && ok {
+                let sample_idx = samples_total;
+                let complexity = sample_complexity.expect("show_bools implies complexity computed");
+                let value_str = v.to_string();
+                for ev in bool_events.iter() {
+                    if !bool_nodes.contains(&ev.node_text_id) {
+                        continue;
+                    }
+                    let ent = bool_best_by_node
+                        .entry(ev.node_text_id)
+                        .or_insert_with(BoolBestSamples::default);
+                    if ev.value {
+                        ent.true_count += 1;
+                        let should_replace = match &ent.true_best {
+                            None => true,
+                            Some(cur) => {
+                                (complexity, sample_idx) < (cur.complexity, cur.sample_idx)
+                            }
+                        };
+                        if should_replace {
+                            ent.true_best = Some(BestSample {
+                                complexity,
+                                sample_idx,
+                                value_str: value_str.clone(),
+                            });
+                        }
+                    } else {
+                        ent.false_count += 1;
+                        let should_replace = match &ent.false_best {
+                            None => true,
+                            Some(cur) => {
+                                (complexity, sample_idx) < (cur.complexity, cur.sample_idx)
+                            }
+                        };
+                        if should_replace {
+                            ent.false_best = Some(BestSample {
+                                complexity,
+                                sample_idx,
+                                value_str: value_str.clone(),
+                            });
+                        }
+                    }
+                }
+            }
             samples_total += 1;
             if ok {
                 samples_ok += 1;
@@ -161,13 +239,62 @@ fn main() -> anyhow::Result<()> {
             let line = first_non_empty_trimmed_line(&s)
                 .map_err(|e| anyhow::anyhow!("{}: {}", p.display(), e))?;
             let v = xlsynth::IrValue::parse_typed(line)?;
+            let sample_complexity = if args.show_bools {
+                Some(xlsynth_autocov::irvalue_complexity_key(&v))
+            } else {
+                None
+            };
             let bits = engine
                 .bits_from_arg_tuple(&v)
                 .map_err(|e| anyhow::anyhow!("{}: {}", p.display(), e))?;
             let (ok, events) = engine.evaluate_corner_events(&bits);
             observed_any.extend(events);
             let (_ok2, bool_events) = engine.evaluate_bool_events(&bits);
-            bool_observed_any.extend(bool_events);
+            bool_observed_any.extend(bool_events.iter().copied());
+            if args.show_bools && ok {
+                let sample_idx = samples_total;
+                let complexity = sample_complexity.expect("show_bools implies complexity computed");
+                let value_str = v.to_string();
+                for ev in bool_events.iter() {
+                    if !bool_nodes.contains(&ev.node_text_id) {
+                        continue;
+                    }
+                    let ent = bool_best_by_node
+                        .entry(ev.node_text_id)
+                        .or_insert_with(BoolBestSamples::default);
+                    if ev.value {
+                        ent.true_count += 1;
+                        let should_replace = match &ent.true_best {
+                            None => true,
+                            Some(cur) => {
+                                (complexity, sample_idx) < (cur.complexity, cur.sample_idx)
+                            }
+                        };
+                        if should_replace {
+                            ent.true_best = Some(BestSample {
+                                complexity,
+                                sample_idx,
+                                value_str: value_str.clone(),
+                            });
+                        }
+                    } else {
+                        ent.false_count += 1;
+                        let should_replace = match &ent.false_best {
+                            None => true,
+                            Some(cur) => {
+                                (complexity, sample_idx) < (cur.complexity, cur.sample_idx)
+                            }
+                        };
+                        if should_replace {
+                            ent.false_best = Some(BestSample {
+                                complexity,
+                                sample_idx,
+                                value_str: value_str.clone(),
+                            });
+                        }
+                    }
+                }
+            }
             samples_total += 1;
             if ok {
                 samples_ok += 1;
@@ -229,6 +356,41 @@ fn main() -> anyhow::Result<()> {
             xlsynth_autocov::bool_value_description(ev.value),
             node_str
         );
+    }
+
+    if args.show_bools {
+        for node_text_id in bool_nodes.iter().copied() {
+            let node_str = engine
+                .node_to_string_by_text_id(node_text_id)
+                .unwrap_or_else(|| format!("bool_node_id={}", node_text_id));
+            let ent = bool_best_by_node
+                .get(&node_text_id)
+                .cloned()
+                .unwrap_or_default();
+            println!("{}:", node_str);
+            let false_line = match ent.false_best.as_ref() {
+                None => "(none)".to_string(),
+                Some(b) => {
+                    if ent.false_count > 1 {
+                        format!("{}, ... {} more", b.value_str, ent.false_count - 1)
+                    } else {
+                        b.value_str.clone()
+                    }
+                }
+            };
+            let true_line = match ent.true_best.as_ref() {
+                None => "(none)".to_string(),
+                Some(b) => {
+                    if ent.true_count > 1 {
+                        format!("{}, ... {} more", b.value_str, ent.true_count - 1)
+                    } else {
+                        b.value_str.clone()
+                    }
+                }
+            };
+            println!("  false: {}", false_line);
+            println!("  true: {}", true_line);
+        }
     }
 
     if args.prove && !never_observed.is_empty() {
