@@ -130,6 +130,39 @@ pub fn bool_value_description(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
 
+fn irbits_popcount(bits: &IrBits) -> u64 {
+    let mut ones: u64 = 0;
+    for i in 0..bits.get_bit_count() {
+        if bits.get_bit(i).unwrap_or(false) {
+            ones += 1;
+        }
+    }
+    ones
+}
+
+fn irvalue_flat_popcount(value: &IrValue) -> u64 {
+    if let Ok(bits) = value.to_bits() {
+        return irbits_popcount(&bits);
+    }
+    if let Ok(elems) = value.get_elements() {
+        let mut ones: u64 = 0;
+        for e in elems.iter() {
+            ones += irvalue_flat_popcount(e);
+        }
+        return ones;
+    }
+    0
+}
+
+/// Returns a simple "complexity" key for an `IrValue` suitable for sorting.
+///
+/// Currently this is just the flat popcount (total number of 1 bits) across all
+/// bits leaves, which tends to surface "simpler" samples first for a fixed
+/// tuple type.
+pub fn irvalue_complexity_key(value: &IrValue) -> u64 {
+    irvalue_flat_popcount(value)
+}
+
 fn max_value_for_bit_width(w: usize) -> Option<u128> {
     if w >= 128 {
         return None;
