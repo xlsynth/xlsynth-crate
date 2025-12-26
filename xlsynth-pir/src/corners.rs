@@ -121,6 +121,11 @@ pub enum CornerTag {
     Add(AddCornerTag),
     Neg(NegCornerTag),
     Shift(ShiftCornerTag),
+    SignExt(SignExtCornerTag),
+    DynamicBitSlice(DynamicBitSliceCornerTag),
+    ArrayIndex(ArrayIndexCornerTag),
+    Shra(ShraCornerTag),
+    CompareDistance(CompareDistanceCornerTag),
 }
 
 pub fn corner_tag_from_kind_and_u8(kind: CornerKind, tag: u8) -> Option<CornerTag> {
@@ -128,7 +133,17 @@ pub fn corner_tag_from_kind_and_u8(kind: CornerKind, tag: u8) -> Option<CornerTa
         CornerKind::Add => AddCornerTag::try_from(tag).ok().map(CornerTag::Add),
         CornerKind::Neg => NegCornerTag::try_from(tag).ok().map(CornerTag::Neg),
         CornerKind::Shift => ShiftCornerTag::try_from(tag).ok().map(CornerTag::Shift),
-        _ => None,
+        CornerKind::SignExt => SignExtCornerTag::try_from(tag).ok().map(CornerTag::SignExt),
+        CornerKind::DynamicBitSlice => DynamicBitSliceCornerTag::try_from(tag)
+            .ok()
+            .map(CornerTag::DynamicBitSlice),
+        CornerKind::ArrayIndex => ArrayIndexCornerTag::try_from(tag)
+            .ok()
+            .map(CornerTag::ArrayIndex),
+        CornerKind::Shra => ShraCornerTag::try_from(tag).ok().map(CornerTag::Shra),
+        CornerKind::CompareDistance => CompareDistanceCornerTag::try_from(tag)
+            .ok()
+            .map(CornerTag::CompareDistance),
     }
 }
 
@@ -137,6 +152,145 @@ pub fn corner_tag_to_u8(tag: CornerTag) -> u8 {
         CornerTag::Add(t) => t.into(),
         CornerTag::Neg(t) => t.into(),
         CornerTag::Shift(t) => t.into(),
+        CornerTag::SignExt(t) => t.into(),
+        CornerTag::DynamicBitSlice(t) => t.into(),
+        CornerTag::ArrayIndex(t) => t.into(),
+        CornerTag::Shra(t) => t.into(),
+        CornerTag::CompareDistance(t) => t.into(),
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SignExtCornerTag {
+    MsbIsZero = 0,
+}
+
+impl TryFrom<u8> for SignExtCornerTag {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(SignExtCornerTag::MsbIsZero),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<SignExtCornerTag> for u8 {
+    fn from(value: SignExtCornerTag) -> Self {
+        value as u8
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DynamicBitSliceCornerTag {
+    InBounds = 0,
+    OutOfBounds = 1,
+}
+
+impl TryFrom<u8> for DynamicBitSliceCornerTag {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(DynamicBitSliceCornerTag::InBounds),
+            1 => Ok(DynamicBitSliceCornerTag::OutOfBounds),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<DynamicBitSliceCornerTag> for u8 {
+    fn from(value: DynamicBitSliceCornerTag) -> Self {
+        value as u8
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayIndexCornerTag {
+    InBounds = 0,
+    Clamped = 1,
+}
+
+impl TryFrom<u8> for ArrayIndexCornerTag {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ArrayIndexCornerTag::InBounds),
+            1 => Ok(ArrayIndexCornerTag::Clamped),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<ArrayIndexCornerTag> for u8 {
+    fn from(value: ArrayIndexCornerTag) -> Self {
+        value as u8
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShraCornerTag {
+    Msb0AmtLt = 0,
+    Msb0AmtGe = 1,
+    Msb1AmtLt = 2,
+    Msb1AmtGe = 3,
+}
+
+impl TryFrom<u8> for ShraCornerTag {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ShraCornerTag::Msb0AmtLt),
+            1 => Ok(ShraCornerTag::Msb0AmtGe),
+            2 => Ok(ShraCornerTag::Msb1AmtLt),
+            3 => Ok(ShraCornerTag::Msb1AmtGe),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<ShraCornerTag> for u8 {
+    fn from(value: ShraCornerTag) -> Self {
+        value as u8
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompareDistanceCornerTag {
+    XorPopcount0 = 0,
+    XorPopcount1 = 1,
+    XorPopcount2 = 2,
+    XorPopcount3 = 3,
+    XorPopcount4 = 4,
+    XorPopcount5To8 = 5,
+    XorPopcount9To16 = 6,
+    XorPopcount17Plus = 7,
+}
+
+impl TryFrom<u8> for CompareDistanceCornerTag {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(CompareDistanceCornerTag::XorPopcount0),
+            1 => Ok(CompareDistanceCornerTag::XorPopcount1),
+            2 => Ok(CompareDistanceCornerTag::XorPopcount2),
+            3 => Ok(CompareDistanceCornerTag::XorPopcount3),
+            4 => Ok(CompareDistanceCornerTag::XorPopcount4),
+            5 => Ok(CompareDistanceCornerTag::XorPopcount5To8),
+            6 => Ok(CompareDistanceCornerTag::XorPopcount9To16),
+            7 => Ok(CompareDistanceCornerTag::XorPopcount17Plus),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<CompareDistanceCornerTag> for u8 {
+    fn from(value: CompareDistanceCornerTag) -> Self {
+        value as u8
     }
 }
 
