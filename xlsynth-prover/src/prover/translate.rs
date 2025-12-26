@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use xlsynth::IrValue;
 
-use super::types::{Assertion, FnInputs, IrTypedBitVec, ProverFn, SmtFn, UfRegistry};
+use super::types::{
+    Assertion, FnInputs, IrTypedBitVec, ProverFn, SmtFn, SmtFnWithNodeTerms, UfRegistry,
+};
 use crate::solver::{BitVec, Solver};
 use xlsynth_pir::{
     ir::{self, NaryOp, NodePayload, NodeRef, Unop},
@@ -116,12 +119,15 @@ pub fn get_fn_inputs<'a, S: Solver>(
     FnInputs { prover_fn, inputs }
 }
 
-pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
+fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
     solver: &mut S,
     inputs: &'inputs FnInputs<'ir, S::Term>,
     uf_map: &HashMap<String, String>,
     uf_registry: &UfRegistry<S>,
-) -> SmtFn<'ir, S::Term> {
+) -> (
+    HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>>,
+    Vec<Assertion<'ir, S::Term>>,
+) {
     let topo = get_topological(inputs.prover_fn.fn_ref);
     let mut env: HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>> = HashMap::new();
     let mut assertions = Vec::new();
@@ -939,15 +945,27 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
         };
         env.insert(nr, exp);
     }
+    (env, assertions)
+}
+
+pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
+    solver: &mut S,
+    inputs: &'inputs FnInputs<'ir, S::Term>,
+    uf_map: &HashMap<String, String>,
+    uf_registry: &UfRegistry<S>,
+) -> SmtFn<'ir, S::Term> {
+    let (mut env, assertions) = compute_smt_env_and_assertions(solver, inputs, uf_map, uf_registry);
+
     let ret = inputs.prover_fn.fn_ref.ret_node_ref.unwrap();
-    // Collect inputs in the same order as they are declared in the IR function
+
+    // Collect inputs in the same order as they are declared in the IR function.
     let mut ordered_inputs: Vec<IrTypedBitVec<'ir, S::Term>> = Vec::new();
     for param in inputs.params() {
-        if let Some(bv) = inputs.inputs.get(&param.name) {
-            ordered_inputs.push(bv.clone());
-        } else {
-            panic!("Param {} not found in inputs map", param.name);
-        }
+        let bv = inputs
+            .inputs
+            .get(&param.name)
+            .unwrap_or_else(|| panic!("Param {} not found in inputs map", param.name));
+        ordered_inputs.push(bv.clone());
     }
 
     SmtFn {
@@ -956,4 +974,39 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
         output: env.remove(&ret).unwrap(),
         assertions,
     }
+}
+
+pub fn ir_to_smt_with_node_terms<'ir, 'inputs, S: Solver>(
+    solver: &mut S,
+    inputs: &'inputs FnInputs<'ir, S::Term>,
+    uf_map: &HashMap<String, String>,
+    uf_registry: &UfRegistry<S>,
+) -> SmtFnWithNodeTerms<'ir, S::Term> {
+    let (mut env, assertions) = compute_smt_env_and_assertions(solver, inputs, uf_map, uf_registry);
+
+    let mut node_terms: BTreeMap<usize, IrTypedBitVec<'ir, S::Term>> = BTreeMap::new();
+    for (nr, tbv) in env.iter() {
+        let text_id = inputs.prover_fn.fn_ref.nodes[nr.index].text_id;
+        node_terms.insert(text_id, tbv.clone());
+    }
+
+    let ret = inputs.prover_fn.fn_ref.ret_node_ref.unwrap();
+
+    // Collect inputs in the same order as they are declared in the IR function.
+    let mut ordered_inputs: Vec<IrTypedBitVec<'ir, S::Term>> = Vec::new();
+    for param in inputs.params() {
+        let bv = inputs
+            .inputs
+            .get(&param.name)
+            .unwrap_or_else(|| panic!("Param {} not found in inputs map", param.name));
+        ordered_inputs.push(bv.clone());
+    }
+
+    let smt_fn = SmtFn {
+        fn_ref: inputs.prover_fn.fn_ref,
+        inputs: ordered_inputs,
+        output: env.remove(&ret).unwrap(),
+        assertions,
+    };
+    SmtFnWithNodeTerms { smt_fn, node_terms }
 }

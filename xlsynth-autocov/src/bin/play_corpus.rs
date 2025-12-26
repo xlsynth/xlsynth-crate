@@ -3,6 +3,11 @@
 use std::collections::BTreeSet;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use xlsynth_prover::prover::corner_prover::{
+    CornerOrResult, CornerProver, CornerProverOptions, CornerQuery,
+};
 
 use clap::Parser;
 
@@ -37,6 +42,12 @@ struct Args {
     /// Emit a human-oriented explanation for each never-observed corner event.
     #[arg(long, default_value_t = true)]
     explain: bool,
+
+    /// Prove never-observed corners reachable/unreachable using an SMT solver.
+    ///
+    /// This runs after printing `corner_never_observed ...` lines.
+    #[arg(long, default_value_t = true)]
+    prove: bool,
 }
 
 fn corner_kind_str(k: xlsynth_pir::corners::CornerKind) -> &'static str {
@@ -185,7 +196,7 @@ fn main() -> anyhow::Result<()> {
         bool_observed_any.len(),
         bool_never_observed.len()
     );
-    for ev in never_observed {
+    for ev in never_observed.iter().copied() {
         if args.explain {
             let node_str = engine
                 .node_to_string_by_text_id(ev.node_text_id)
@@ -218,6 +229,88 @@ fn main() -> anyhow::Result<()> {
             xlsynth_autocov::bool_value_description(ev.value),
             node_str
         );
+    }
+
+    if args.prove && !never_observed.is_empty() {
+        let ir_text = std::fs::read_to_string(&args.ir_file)?;
+        let mut parser = xlsynth_pir::ir_parser::Parser::new(&ir_text);
+        let pkg = parser
+            .parse_and_validate_package()
+            .map_err(|e| anyhow::anyhow!("PIR parse: {}", e))?;
+        let f = pkg
+            .get_fn(&args.entry_fn)
+            .ok_or_else(|| anyhow::anyhow!("function not found: {}", args.entry_fn))?;
+
+        let mut prover = CornerProver::new_auto(&pkg, f, CornerProverOptions::default())
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let mut remaining: BTreeSet<xlsynth_autocov::CornerEventId> =
+            never_observed.iter().copied().collect();
+
+        while !remaining.is_empty() {
+            let qs: Vec<CornerQuery> = remaining
+                .iter()
+                .map(|ev| CornerQuery {
+                    node_text_id: ev.node_text_id,
+                    kind: ev.kind,
+                    tag: ev.tag,
+                })
+                .collect();
+
+            let prove_start = Instant::now();
+            let prove_r = prover.solve_any(&qs).map_err(|e| anyhow::anyhow!(e))?;
+            let prove_seconds = prove_start.elapsed().as_secs_f64();
+            match prove_r {
+                CornerOrResult::Unsat => {
+                    for ev in remaining.iter() {
+                        println!(
+                            "corner_prove node_id={} kind={} tag={} status=unreachable proven_seconds={:.3}",
+                            ev.node_text_id,
+                            corner_kind_str(ev.kind),
+                            ev.tag,
+                            prove_seconds
+                        );
+                    }
+                    break;
+                }
+                CornerOrResult::Unknown { message } => {
+                    return Err(anyhow::anyhow!("corner_prove unknown: {}", message));
+                }
+                CornerOrResult::Sat { witness } => {
+                    let bits = engine.bits_from_arg_tuple(&witness).map_err(|e| {
+                        anyhow::anyhow!("witness not convertible to arg tuple: {}", e)
+                    })?;
+                    let (ok, observed) = engine.evaluate_corner_events(&bits);
+                    if !ok {
+                        return Err(anyhow::anyhow!(
+                            "corner_prove: SAT witness caused evaluation failure; witness={}",
+                            witness
+                        ));
+                    }
+                    let hit: Vec<xlsynth_autocov::CornerEventId> =
+                        observed.intersection(&remaining).copied().collect();
+                    if hit.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "corner_prove: SAT witness did not satisfy any remaining corner; witness={}",
+                            witness
+                        ));
+                    }
+                    for ev in hit.iter() {
+                        println!(
+                            "corner_prove node_id={} kind={} tag={} status=reachable witness=\"{}\" proven_seconds={:.3}",
+                            ev.node_text_id,
+                            corner_kind_str(ev.kind),
+                            ev.tag,
+                            witness,
+                            prove_seconds
+                        );
+                    }
+                    for ev in hit {
+                        remaining.remove(&ev);
+                    }
+                }
+            }
+        }
     }
 
     Ok(())

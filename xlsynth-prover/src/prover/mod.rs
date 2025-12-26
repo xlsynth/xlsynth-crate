@@ -5,6 +5,7 @@ use std::{collections::HashMap, fmt, path::Path};
 use serde::{Deserialize, Serialize};
 
 pub mod assertion_filter;
+pub mod corner_prover;
 pub mod enum_in_bound;
 pub mod external_prover;
 pub mod ir_equiv;

@@ -2,7 +2,7 @@
 
 use crate::solver::Uf;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, collections::HashMap, fmt, str::FromStr, time::Duration};
 use xlsynth::IrValue;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -181,6 +181,12 @@ pub struct SmtFn<'a, R> {
     pub inputs: Vec<IrTypedBitVec<'a, R>>,
     pub output: IrTypedBitVec<'a, R>,
     pub assertions: Vec<Assertion<'a, R>>,
+}
+
+pub struct SmtFnWithNodeTerms<'a, R> {
+    pub smt_fn: SmtFn<'a, R>,
+    /// Deterministic mapping from `node.text_id` to the SMT term for that node.
+    pub node_terms: BTreeMap<usize, IrTypedBitVec<'a, R>>,
 }
 
 /// Semantics for handling `assert` statements when checking functional
