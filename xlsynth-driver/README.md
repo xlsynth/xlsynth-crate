@@ -529,6 +529,9 @@ Evaluates a DSLX function for each input tuple in a `.irvals` file and prints on
   - `--dslx_top <NAME>` – the entry function to evaluate.
 - `--input_ir_path <PATH>` – path to a file with one typed IR tuple per line. Unary functions require a 1‑tuple like `(bits[32]:42)`.
   - `--eval_mode <interp|jit|pir-interp>` – backend mode (default `interp`).
+- When using `--eval_mode=pir-interp`:
+  - `--pir_dump_node_values` – dump intermediate PIR node values (in topological evaluation order) to stdout immediately before the final output line for each sample. Each dump line is:
+    - `pir_node_value node_text_id=<ID> value=<TYPED_IR_VALUE>`
 - Search paths (optional): `--dslx_path <P1;P2;...>` and `--dslx_stdlib_path <PATH>`.
 
 Example:
