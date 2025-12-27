@@ -14,6 +14,7 @@ pub fn handle_dslx_fn_eval(matches: &clap::ArgMatches, _config: &Option<Toolchai
         .get_one::<String>("input_ir_path")
         .expect("input_ir_path required");
     let eval_mode = matches.get_one::<String>("eval_mode").map(|s| s.as_str());
+    let pir_dump_node_values = matches.get_flag("pir_dump_node_values");
 
     let dslx_paths = get_dslx_paths(matches, _config);
 
@@ -46,14 +47,17 @@ pub fn handle_dslx_fn_eval(matches: &clap::ArgMatches, _config: &Option<Toolchai
     };
 
     let dslx_file = std::path::Path::new(dslx_path);
+    let mut stdout = std::io::stdout().lock();
     match crate::fn_eval::evaluate_dslx_function_over_ir_values(
-        dslx_file, top_fn, &lines, mode, &opts,
+        dslx_file,
+        top_fn,
+        &lines,
+        mode,
+        &opts,
+        pir_dump_node_values,
+        &mut stdout,
     ) {
-        Ok(outputs) => {
-            for o in outputs {
-                println!("{}", o);
-            }
-        }
+        Ok(()) => {}
         Err(e) => {
             let msg = e.to_string();
             if matches!(eval_mode, Some(s) if s == "pir-interp") {
