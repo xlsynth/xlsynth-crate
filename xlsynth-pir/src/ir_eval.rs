@@ -1376,6 +1376,35 @@ fn eval_fn_impl<'a>(
                 let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
             }
+            P::Encode { arg } => {
+                // XLS `encode`: converts a bits-typed argument (commonly one-hot) into a
+                // compact bits value (the selected index). The output width is taken from
+                // the node's annotated type.
+                let arg_bits = env
+                    .get(arg)
+                    .expect("arg must be evaluated")
+                    .to_bits()
+                    .unwrap();
+                let in_w = arg_bits.get_bit_count();
+                let expected_w = match node.ty {
+                    ir::Type::Bits(w) => w,
+                    _ => 0,
+                };
+                if expected_w == 0 {
+                    IrValue::make_ubits(0, 0).expect("make ubits[0]")
+                } else {
+                    let mut chosen: usize = 0;
+                    // Choose the highest set bit index (MSB priority) if any bits are set;
+                    // otherwise return 0.
+                    for i in (0..in_w).rev() {
+                        if arg_bits.get_bit(i).unwrap() {
+                            chosen = i;
+                            break;
+                        }
+                    }
+                    IrValue::make_ubits(expected_w, chosen as u64).expect("make encoded ubits")
+                }
+            }
             P::ArrayIndex {
                 array,
                 indices,
@@ -2387,6 +2416,48 @@ fn f(x: bits[8] id=10) -> bits[8] {
                 assert_eq!(success.trace_messages, want);
             }
             other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_encode_matches_xlsynth_interpreter() {
+        // Note: package-level validation requires ids to be unique across functions, so
+        // we keep a single function here.
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1) -> bits[3] {
+  ret encode.2: bits[3] = encode(x, id=2)
+}
+"#;
+
+        // Parse via xlsynth (reference) and PIR.
+        let xls_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).expect("xls parse");
+        let xls_f = xls_pkg.get_function("f").expect("xls f");
+
+        let mut pir_parser = Parser::new(ir_text);
+        let pir_pkg = pir_parser
+            .parse_and_validate_package()
+            .expect("pir parse+validate");
+        let pir_f = pir_pkg.get_fn("f").expect("pir f");
+
+        // A handful of inputs, including zero, one-hot, and multi-hot.
+        let inputs: Vec<IrValue> = vec![
+            IrValue::make_ubits(8, 0).unwrap(),
+            IrValue::make_ubits(8, 1).unwrap(),           // bit 0
+            IrValue::make_ubits(8, 1 << 3).unwrap(),      // bit 3
+            IrValue::make_ubits(8, 1 << 7).unwrap(),      // bit 7
+            IrValue::make_ubits(8, 0b1010).unwrap(),      // bits 1 and 3
+            IrValue::make_ubits(8, 0b1000_1000).unwrap(), // bits 3 and 7
+        ];
+
+        for x in inputs {
+            let args = vec![x.clone()];
+            let xls_got = xls_f.interpret(&args).expect("xls interpret");
+            let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
+                FnEvalResult::Success(s) => s.value,
+                other => panic!("expected success, got {:?}", other),
+            };
+            assert_eq!(pir_got, xls_got, "x={}", x);
         }
     }
 

@@ -33,11 +33,6 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
                 => false,
                 _ => true,
             },
-            FuzzOp::Unop(kind, _) => match kind {
-                // Filter Encode until implemented in pure evaluator
-                FuzzUnop::Encode => false,
-                _ => true,
-            },
             _ => true,
         })
         .collect();
