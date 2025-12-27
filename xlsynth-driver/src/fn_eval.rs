@@ -191,9 +191,14 @@ impl DslxFnEvaluator {
 
                 let eval_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     if let Some(observer) = maybe_observer.as_mut() {
-                        xlsynth_pir::ir_eval::eval_fn_with_observer(&pir_fn, args, Some(observer))
+                        xlsynth_pir::ir_eval::eval_fn_in_package_with_observer(
+                            pir_pkg,
+                            &pir_fn,
+                            args,
+                            Some(observer),
+                        )
                     } else {
-                        xlsynth_pir::ir_eval::eval_fn(&pir_fn, args)
+                        xlsynth_pir::ir_eval::eval_fn_in_package(pir_pkg, &pir_fn, args)
                     }
                 }));
                 match eval_result {
