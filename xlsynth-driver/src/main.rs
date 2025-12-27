@@ -479,6 +479,14 @@ fn main() {
                         .value_name("MODE")
                         .help("Evaluation backend: interp|jit|pir-interp (default interp)")
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("pir_dump_node_values")
+                        .long("pir_dump_node_values")
+                        .help(
+                            "When using --eval_mode=pir-interp, dump all intermediate PIR node values to stdout",
+                        )
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(

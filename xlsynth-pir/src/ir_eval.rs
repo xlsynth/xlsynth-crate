@@ -719,6 +719,8 @@ pub trait EvalObserver {
 
     fn on_bool_node(&mut self, _ev: BoolNodeEvent) {}
 
+    fn on_node_value(&mut self, _node_ref: ir::NodeRef, _node_text_id: usize, _value: &IrValue) {}
+
     fn on_corner_event(&mut self, _ev: CornerEvent) {}
 
     fn on_failure_event(&mut self, _ev: FailureEvent) {}
@@ -1489,8 +1491,12 @@ pub fn eval_fn_with_observer(
         // context.
         assert_value_conforms_to_type(&node.ty, &coerced, node);
         if let Some(observer) = observer.as_deref_mut() {
-            let is_bool_node = matches!(node.ty, ir::Type::Bits(1));
             let is_param = matches!(node.payload, ir::NodePayload::GetParam(_));
+            let is_nil = matches!(node.payload, ir::NodePayload::Nil);
+            if !is_param && !is_nil {
+                observer.on_node_value(nr, node.text_id, &coerced);
+            }
+            let is_bool_node = matches!(node.ty, ir::Type::Bits(1));
             if is_bool_node && !is_param {
                 observer.on_bool_node(BoolNodeEvent {
                     node_ref: nr,
@@ -1568,6 +1574,25 @@ mod tests {
 
         fn on_bool_node(&mut self, ev: BoolNodeEvent) {
             self.bool_events.push((ev.node_text_id, ev.value));
+        }
+    }
+
+    struct RecordingNodeValueObserver {
+        lines: Vec<String>,
+    }
+
+    impl RecordingNodeValueObserver {
+        fn new() -> Self {
+            Self { lines: Vec::new() }
+        }
+    }
+
+    impl EvalObserver for RecordingNodeValueObserver {
+        fn on_select(&mut self, _ev: SelectEvent) {}
+
+        fn on_node_value(&mut self, _node_ref: ir::NodeRef, node_text_id: usize, value: &IrValue) {
+            self.lines
+                .push(format!("node_text_id={} value={}", node_text_id, value));
         }
     }
 
@@ -2205,6 +2230,31 @@ fn f(x: bits[2] id=1, y: bits[2] id=2) -> bits[1] {
         // order: eq first, then not.
         let want = vec![(10, true), (11, false)];
         assert_eq!(obs.bool_events, want);
+    }
+
+    #[test]
+    fn test_node_value_observer_excludes_params_and_is_in_topo_order() {
+        let ir_text = r#"package test
+
+fn f(x: bits[32] id=1) -> bits[32] {
+  literal.2: bits[32] = literal(value=1, id=2)
+  ret add.3: bits[32] = add(x, literal.2, id=3)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f").clone();
+        let args = vec![IrValue::make_ubits(32, 2).unwrap()];
+
+        let mut obs = RecordingNodeValueObserver::new();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+
+        // Only computed nodes (excluding GetParam) should be observed, in topo order:
+        // literal first, then add.
+        let got = obs.lines.join("\n") + "\n";
+        let want = "node_text_id=2 value=bits[32]:1\nnode_text_id=3 value=bits[32]:3\n";
+        assert_eq!(got, want);
     }
 
     #[test]
