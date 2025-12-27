@@ -2215,11 +2215,6 @@ extern "C" {
     ) -> *mut CVastStatementBlock;
 
     pub fn xls_vast_generate_loop_get_genvar(loop_: *mut CVastGenerateLoop) -> *mut CVastLogicRef;
-
-    pub fn xls_vast_generate_loop_add_statement(
-        loop_: *mut CVastGenerateLoop,
-        statement: *mut CVastStatement,
-    );
     pub fn xls_vast_generate_loop_add_generate_loop(
         loop_: *mut CVastGenerateLoop,
         genvar_name: *const std::os::raw::c_char,
