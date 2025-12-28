@@ -967,11 +967,6 @@ impl GenerateLoop {
         }
     }
 
-    pub fn add_statement(&mut self, stmt: VastStatement) {
-        let _locked = self.parent.lock().unwrap();
-        unsafe { sys::xls_vast_generate_loop_add_statement(self.inner, stmt.inner) }
-    }
-
     pub fn add_generate_loop(
         &mut self,
         genvar_name: &str,

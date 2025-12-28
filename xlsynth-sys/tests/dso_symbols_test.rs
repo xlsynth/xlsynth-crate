@@ -146,4 +146,29 @@ fn all_dso_xls_symbols_are_bound_in_sys() {
         report.push('\n');
         panic!("{}", report);
     }
+
+    // Also check the inverse: symbols declared in Rust externs must exist in the
+    // DSO.
+    //
+    // This catches situations where we accidentally add a binding that is not
+    // present in the pinned/shipped DSO (which may only fail to link in builds
+    // that force dead-code retention, like `cargo fuzz` with `-Clink-dead-code`).
+    let bound_but_missing_in_dso: Vec<&String> = binding_names
+        .iter()
+        .filter(|name| !dso_symbols.contains(*name))
+        .collect();
+
+    if !bound_but_missing_in_dso.is_empty() {
+        let mut report = String::new();
+        report.push_str("Bound xls_* symbols missing from DSO (present in Rust externs, absent in DSO exports):\n");
+        for name in &bound_but_missing_in_dso {
+            report.push_str("  ");
+            report.push_str(name);
+            report.push('\n');
+        }
+        report.push_str("\nDSO path: ");
+        report.push_str(&dso_path.display().to_string());
+        report.push('\n');
+        panic!("{}", report);
+    }
 }
