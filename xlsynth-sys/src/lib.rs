@@ -1327,10 +1327,6 @@ extern "C" {
         type_info: *mut CDslxTypeInfo,
         member: *mut CDslxStructMember,
     ) -> *mut CDslxType;
-    pub fn xls_dslx_type_info_get_type_type_alias(
-        type_info: *mut CDslxTypeInfo,
-        node: *mut CDslxTypeAlias,
-    ) -> *mut CDslxType;
     pub fn xls_dslx_type_info_get_type_constant_def(
         type_info: *mut CDslxTypeInfo,
         node: *mut CDslxConstantDef,
@@ -2172,19 +2168,6 @@ extern "C" {
     pub fn xls_vast_statement_block_add_inline_text(
         block: *mut CVastStatementBlock,
         text: *const std::os::raw::c_char,
-    ) -> *mut CVastStatement;
-    pub fn xls_vast_statement_block_add_generate_loop(
-        block: *mut CVastStatementBlock,
-        genvar_name: *const std::os::raw::c_char,
-        init: *mut CVastExpression,
-        limit: *mut CVastExpression,
-        label: *const std::os::raw::c_char,
-    ) -> *mut CVastGenerateLoop;
-
-    pub fn xls_vast_statement_block_add_continuous_assignment(
-        block: *mut CVastStatementBlock,
-        lhs: *mut CVastExpression,
-        rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
 
     // Conditional (if / else-if / else)
