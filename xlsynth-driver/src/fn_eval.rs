@@ -5,7 +5,6 @@
 //! Core logic lives here; the CLI subcommand should be a thin shim over this
 //! API.
 
-use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 use std::io::Write;
@@ -189,36 +188,29 @@ impl DslxFnEvaluator {
                     None
                 };
 
-                let eval_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    if let Some(observer) = maybe_observer.as_mut() {
-                        xlsynth_pir::ir_eval::eval_fn_in_package_with_observer(
-                            pir_pkg,
-                            &pir_fn,
-                            args,
-                            Some(observer),
-                        )
-                    } else {
-                        xlsynth_pir::ir_eval::eval_fn_in_package(pir_pkg, &pir_fn, args)
+                let result = if let Some(observer) = maybe_observer.as_mut() {
+                    xlsynth_pir::ir_eval::eval_fn_in_package_with_observer(
+                        pir_pkg,
+                        &pir_fn,
+                        args,
+                        Some(observer),
+                    )
+                } else {
+                    xlsynth_pir::ir_eval::eval_fn_in_package(pir_pkg, &pir_fn, args)
+                };
+                match result {
+                    xlsynth_pir::ir_eval::FnEvalResult::Success(s) => Ok(s.value),
+                    xlsynth_pir::ir_eval::FnEvalResult::Failure(f) => {
+                        let labels: Vec<String> = f
+                            .assertion_failures
+                            .iter()
+                            .map(|a| format!("{}: {}", a.label, a.message))
+                            .collect();
+                        Err(anyhow::anyhow!(format!(
+                            "assertion failure(s): {}",
+                            labels.join("; ")
+                        )))
                     }
-                }));
-                match eval_result {
-                    Ok(result) => match result {
-                        xlsynth_pir::ir_eval::FnEvalResult::Success(s) => Ok(s.value),
-                        xlsynth_pir::ir_eval::FnEvalResult::Failure(f) => {
-                            let labels: Vec<String> = f
-                                .assertion_failures
-                                .iter()
-                                .map(|a| format!("{}: {}", a.label, a.message))
-                                .collect();
-                            Err(anyhow::anyhow!(format!(
-                                "assertion failure(s): {}",
-                                labels.join("; ")
-                            )))
-                        }
-                    },
-                    Err(_payload) => Err(anyhow::anyhow!(
-                        "assertion failure(s): pir-interp panic while evaluating function"
-                    )),
                 }
             }
         }

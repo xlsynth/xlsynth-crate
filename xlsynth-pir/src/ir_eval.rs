@@ -2468,6 +2468,41 @@ fn f(x: bits[8] id=1) -> bits[3] {
     }
 
     #[test]
+    fn test_encode_after_umul_matches_xlsynth_interpreter() {
+        // This is the minimal CI-discovered shape: `umul` feeding into `encode`.
+        //
+        // Pick x=6 so umul(x,x) == 36 == 0b100100, which has bits set at indices 5 and
+        // 2. XLS encode semantics (and xlsynth interpreter behavior) ORs those
+        // indices: 5|2 == 7.
+        let ir_text = r#"package test
+
+fn f(x: bits[6] id=1) -> bits[3] {
+  umul.2: bits[6] = umul(x, x, id=2)
+  ret encode.3: bits[3] = encode(umul.2, id=3)
+}
+"#;
+
+        let xls_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).expect("xls parse");
+        let xls_f = xls_pkg.get_function("f").expect("xls f");
+
+        let mut pir_parser = Parser::new(ir_text);
+        let pir_pkg = pir_parser
+            .parse_and_validate_package()
+            .expect("pir parse+validate");
+        let pir_f = pir_pkg.get_fn("f").expect("pir f");
+
+        let args = vec![IrValue::make_ubits(6, 6).unwrap()];
+        let xls_got = xls_f.interpret(&args).expect("xls interpret");
+        let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
+            FnEvalResult::Success(s) => s.value,
+            other => panic!("expected success, got {:?}", other),
+        };
+        let want = IrValue::make_ubits(3, 7).unwrap();
+        assert_eq!(pir_got, xls_got, "x={}", args[0]);
+        assert_eq!(pir_got, want, "x={}", args[0]);
+    }
+
+    #[test]
     fn test_eval_fn_oob_bit_slice_early_fail() {
         // OOB static bit_slice: start=3, width=1 on a bits[3] value.
         let ir_text = r#"package test
