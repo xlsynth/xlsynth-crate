@@ -1,11 +1,49 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use anyhow::Context;
 use clap::Parser;
+use clap::ValueEnum;
 use xlsynth_prover::prover::SolverChoice;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum SolverArg {
+    /// Let the library select an appropriate prover based on available
+    /// features.
+    Auto,
+    /// Use the external XLS tool-chain binaries (configured via tool_path or
+    /// environment).
+    Toolchain,
+    #[cfg(feature = "has-easy-smt")]
+    Z3Binary,
+    #[cfg(feature = "has-easy-smt")]
+    BitwuzlaBinary,
+    #[cfg(feature = "has-easy-smt")]
+    BoolectorBinary,
+    #[cfg(feature = "has-bitwuzla")]
+    Bitwuzla,
+    #[cfg(feature = "has-boolector")]
+    Boolector,
+}
+
+fn solver_choice_from_arg(arg: SolverArg) -> SolverChoice {
+    match arg {
+        SolverArg::Auto => SolverChoice::Auto,
+        SolverArg::Toolchain => SolverChoice::Toolchain,
+        #[cfg(feature = "has-easy-smt")]
+        SolverArg::Z3Binary => SolverChoice::Z3Binary,
+        #[cfg(feature = "has-easy-smt")]
+        SolverArg::BitwuzlaBinary => SolverChoice::BitwuzlaBinary,
+        #[cfg(feature = "has-easy-smt")]
+        SolverArg::BoolectorBinary => SolverChoice::BoolectorBinary,
+        #[cfg(feature = "has-bitwuzla")]
+        SolverArg::Bitwuzla => SolverChoice::Bitwuzla,
+        #[cfg(feature = "has-boolector")]
+        SolverArg::Boolector => SolverChoice::Boolector,
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "xlsynth-autocov-relevant")]
@@ -28,9 +66,9 @@ struct Args {
     /// Solver selection for equivalence checking.
     ///
     /// Values match `xlsynth-prover`'s `SolverChoice` strings (e.g. `auto`,
-    /// `toolchain`, `z3-binary` when enabled).
-    #[arg(long, default_value = "auto")]
-    solver: String,
+    /// `toolchain`, `bitwuzla` when enabled).
+    #[arg(long, value_enum, default_value_t = SolverArg::Auto)]
+    solver: SolverArg,
 
     /// Optional toolchain path (used only with `--solver toolchain`).
     #[arg(long)]
@@ -43,7 +81,10 @@ fn main() -> anyhow::Result<()> {
     let ir_text = std::fs::read_to_string(&args.ir_file)
         .with_context(|| format!("reading ir file: {}", args.ir_file.display()))?;
 
-    let solver = SolverChoice::from_str(&args.solver).map_err(|e| anyhow::anyhow!(e))?;
+    let solver = solver_choice_from_arg(args.solver);
+    if args.tool_path.is_some() && solver != SolverChoice::Toolchain {
+        anyhow::bail!("--tool-path is only valid with --solver toolchain");
+    }
 
     let r = xlsynth_autocov::relevant_from_ir_text(
         &ir_text,
@@ -81,5 +122,28 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "has-bitwuzla")]
+    fn test_solver_arg_accepts_bitwuzla_when_enabled() {
+        let args = Args::try_parse_from([
+            "xlsynth-autocov-relevant",
+            "--ir-file",
+            "p.ir",
+            "--entry-fn",
+            "f",
+            "--node-text-id",
+            "0",
+            "--solver",
+            "bitwuzla",
+        ])
+        .expect("args should parse");
+        assert_eq!(args.solver, SolverArg::Bitwuzla);
     }
 }
