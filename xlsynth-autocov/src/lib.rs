@@ -130,6 +130,36 @@ pub fn bool_value_description(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
 
+pub fn clone_fn_with_stuck_at_bool_node(
+    f: &ir::Fn,
+    node_text_id: usize,
+    stuck_value: bool,
+) -> Result<ir::Fn, String> {
+    let mut nf = f.clone();
+
+    let idx = nf
+        .nodes
+        .iter()
+        .position(|n| n.text_id == node_text_id)
+        .ok_or_else(|| format!("node_text_id not found: {}", node_text_id))?;
+    let node_ty = nf
+        .nodes
+        .get(idx)
+        .expect("idx from position must be in range")
+        .ty
+        .clone();
+    if node_ty != ir::Type::Bits(1) {
+        return Err(format!(
+            "node_text_id {} is not bits[1]; ty={:?}",
+            node_text_id, node_ty
+        ));
+    }
+
+    let lit = IrValue::make_ubits(1, if stuck_value { 1 } else { 0 }).map_err(|e| e.to_string())?;
+    nf.nodes[idx].payload = ir::NodePayload::Literal(lit);
+    Ok(nf)
+}
+
 fn irbits_popcount(bits: &IrBits) -> u64 {
     let mut ones: u64 = 0;
     for i in 0..bits.get_bit_count() {
@@ -2121,6 +2151,51 @@ impl AutocovEngine {
 mod tests {
     use super::*;
     use xlsynth::IrValue;
+
+    #[test]
+    fn clone_fn_with_stuck_at_bool_node_replaces_payload_with_literal() {
+        let ir_text = r#"package test
+
+fn f(x: bits[2] id=1) -> bits[1] {
+  c0: bits[2] = literal(value=0, id=9)
+  ret z: bits[1] = eq(x, c0, id=10)
+}
+"#;
+        let mut parser = xlsynth_pir::ir_parser::Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+
+        let stuck0 = clone_fn_with_stuck_at_bool_node(f, /* node_text_id= */ 10, false).unwrap();
+        let stuck1 = clone_fn_with_stuck_at_bool_node(f, /* node_text_id= */ 10, true).unwrap();
+
+        fn get_node_by_text_id<'a>(
+            fun: &'a xlsynth_pir::ir::Fn,
+            node_text_id: usize,
+        ) -> &'a xlsynth_pir::ir::Node {
+            fun.nodes
+                .iter()
+                .find(|n| n.text_id == node_text_id)
+                .unwrap_or_else(|| panic!("node_text_id={} present", node_text_id))
+        }
+
+        let n0 = get_node_by_text_id(&stuck0, 10);
+        assert_eq!(n0.ty, xlsynth_pir::ir::Type::Bits(1));
+        match &n0.payload {
+            xlsynth_pir::ir::NodePayload::Literal(v) => {
+                assert_eq!(v.to_bool().unwrap(), false);
+            }
+            other => panic!("expected literal payload, got: {:?}", other),
+        }
+
+        let n1 = get_node_by_text_id(&stuck1, 10);
+        assert_eq!(n1.ty, xlsynth_pir::ir::Type::Bits(1));
+        match &n1.payload {
+            xlsynth_pir::ir::NodePayload::Literal(v) => {
+                assert_eq!(v.to_bool().unwrap(), true);
+            }
+            other => panic!("expected literal payload, got: {:?}", other),
+        }
+    }
 
     #[test]
     fn first_candidate_produces_new_features() {
