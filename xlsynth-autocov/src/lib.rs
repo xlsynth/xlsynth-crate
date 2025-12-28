@@ -20,9 +20,14 @@ use xlsynth_pir::corners::{
     SignExtCornerTag, corner_tag_from_kind_and_u8,
 };
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_eval::{BoolNodeEvent, EvalObserver, FnEvalResult, SelectEvent, SelectKind};
+use xlsynth_pir::ir_eval::{
+    BoolNodeEvent, EvalObserver, FnEvalResult, SelectEvent, SelectKind, eval_fn_with_observer,
+};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
+use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
+use xlsynth_prover::prover::SolverChoice;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult};
 
 pub const FEATURE_MAP_SIZE: usize = 65_536;
 const FEATURE_MAP_BYTES: usize = FEATURE_MAP_SIZE / 8;
@@ -128,6 +133,200 @@ pub fn corner_tag_description(kind: CornerKind, tag: u8) -> &'static str {
 
 pub fn bool_value_description(value: bool) -> &'static str {
     if value { "true" } else { "false" }
+}
+
+#[derive(Debug, Clone)]
+pub enum RelevanceCheckMethod {
+    /// Prove stuck-at-0 vs stuck-at-1 equivalence using the SMT-based IR
+    /// equivalence engine.
+    Prove {
+        solver: SolverChoice,
+        tool_path: Option<PathBuf>,
+    },
+    /// Exhaustively compare stuck-at-0 vs stuck-at-1 over a small input space.
+    ///
+    /// This currently supports only functions whose params are all `bits[N]`.
+    ExhaustiveBitsParams { max_total_arg_bits: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct RelevanceResult {
+    pub relevant: bool,
+    pub detail: RelevanceDetail,
+}
+
+#[derive(Debug, Clone)]
+pub enum RelevanceDetail {
+    ProvedEquivalent,
+    DisprovedEquivalent { equiv: EquivResult },
+    ExhaustiveEquivalent,
+    ExhaustiveNotEquivalent { counterexample_args: Vec<IrValue> },
+}
+
+fn equiv_same(lhs: &FnEvalResult, rhs: &FnEvalResult) -> bool {
+    match (lhs, rhs) {
+        (FnEvalResult::Success(l), FnEvalResult::Success(r)) => l.value == r.value,
+        (FnEvalResult::Failure(_), FnEvalResult::Failure(_)) => true,
+        _ => false,
+    }
+}
+
+pub fn relevant_in_pkg(
+    pkg: &ir::Package,
+    entry_fn: &str,
+    node_text_id: usize,
+    method: RelevanceCheckMethod,
+) -> Result<RelevanceResult, String> {
+    let f = pkg
+        .get_fn(entry_fn)
+        .ok_or_else(|| format!("function not found: {}", entry_fn))?;
+
+    let node = f
+        .nodes
+        .iter()
+        .find(|n| n.text_id == node_text_id)
+        .ok_or_else(|| format!("node_text_id not found: {}", node_text_id))?;
+    if node.ty != ir::Type::Bits(1) {
+        return Err(format!(
+            "node_text_id {} is not bits[1]; ty={:?}",
+            node_text_id, node.ty
+        ));
+    }
+
+    let stuck0 = clone_fn_with_stuck_at_bool_node(f, node_text_id, false)?;
+    let stuck1 = clone_fn_with_stuck_at_bool_node(f, node_text_id, true)?;
+
+    match method {
+        RelevanceCheckMethod::Prove { solver, tool_path } => {
+            fn replace_fn_by_name(
+                pkg: &mut ir::Package,
+                fn_name: &str,
+                new_fn: ir::Fn,
+            ) -> Result<(), String> {
+                for member in pkg.members.iter_mut() {
+                    match member {
+                        ir::PackageMember::Function(f) if f.name == fn_name => {
+                            *f = new_fn;
+                            return Ok(());
+                        }
+                        ir::PackageMember::Block { func, .. } if func.name == fn_name => {
+                            *func = new_fn;
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+                Err(format!(
+                    "function not found in package members: {}",
+                    fn_name
+                ))
+            }
+
+            let mut pkg0 = pkg.clone();
+            let mut pkg1 = pkg.clone();
+            replace_fn_by_name(&mut pkg0, entry_fn, stuck0)?;
+            replace_fn_by_name(&mut pkg1, entry_fn, stuck1)?;
+
+            let lhs_text = pkg0.to_string();
+            let rhs_text = pkg1.to_string();
+
+            let request = IrEquivRequest {
+                lhs: IrModule::new(&lhs_text).with_top(Some(entry_fn)),
+                rhs: IrModule::new(&rhs_text).with_top(Some(entry_fn)),
+                drop_params: &[],
+                flatten_aggregates: false,
+                parallelism: EquivParallelism::SingleThreaded,
+                assertion_semantics: AssertionSemantics::Same,
+                assert_label_filter: None,
+                solver: Some(solver),
+                tool_path: tool_path.as_deref(),
+            };
+            let report = run_ir_equiv(&request)?;
+            match report.result {
+                EquivResult::Proved => Ok(RelevanceResult {
+                    relevant: false,
+                    detail: RelevanceDetail::ProvedEquivalent,
+                }),
+                other @ (EquivResult::Disproved { .. } | EquivResult::ToolchainDisproved(_)) => {
+                    Ok(RelevanceResult {
+                        relevant: true,
+                        detail: RelevanceDetail::DisprovedEquivalent { equiv: other },
+                    })
+                }
+                EquivResult::Error(msg) => Err(msg),
+            }
+        }
+        RelevanceCheckMethod::ExhaustiveBitsParams { max_total_arg_bits } => {
+            let mut total_bits: usize = 0;
+            let mut widths: Vec<usize> = Vec::with_capacity(f.params.len());
+            for p in f.params.iter() {
+                let ir::Type::Bits(w) = p.ty else {
+                    return Err(format!(
+                        "exhaustive relevance requires bits[N] params only; saw param {}: {:?}",
+                        p.name, p.ty
+                    ));
+                };
+                total_bits = total_bits.saturating_add(w);
+                widths.push(w);
+            }
+            if total_bits > max_total_arg_bits {
+                return Err(format!(
+                    "refusing exhaustive relevance: total_arg_bits={} exceeds max_total_arg_bits={}",
+                    total_bits, max_total_arg_bits
+                ));
+            }
+            if total_bits >= 128 {
+                return Err(format!(
+                    "refusing exhaustive relevance: total_arg_bits={} too large for u128 counter",
+                    total_bits
+                ));
+            }
+
+            let total: u128 = 1u128 << total_bits;
+            for ctr in 0u128..total {
+                let mut args: Vec<IrValue> = Vec::with_capacity(widths.len());
+                let mut offset: usize = 0;
+                for &w in widths.iter() {
+                    let mask: u128 = if w == 0 { 0 } else { (1u128 << w) - 1u128 };
+                    let v = (ctr >> offset) & mask;
+                    let v_u64: u64 = v
+                        .try_into()
+                        .map_err(|_| format!("param value too large for u64: width={}", w))?;
+                    args.push(IrValue::make_ubits(w, v_u64).map_err(|e| e.to_string())?);
+                    offset += w;
+                }
+
+                let r0 = eval_fn_with_observer(&stuck0, &args, None);
+                let r1 = eval_fn_with_observer(&stuck1, &args, None);
+                if !equiv_same(&r0, &r1) {
+                    return Ok(RelevanceResult {
+                        relevant: true,
+                        detail: RelevanceDetail::ExhaustiveNotEquivalent {
+                            counterexample_args: args,
+                        },
+                    });
+                }
+            }
+
+            Ok(RelevanceResult {
+                relevant: false,
+                detail: RelevanceDetail::ExhaustiveEquivalent,
+            })
+        }
+    }
+}
+
+pub fn relevant_from_ir_text(
+    ir_text: &str,
+    entry_fn: &str,
+    node_text_id: usize,
+    method: RelevanceCheckMethod,
+) -> Result<RelevanceResult, String> {
+    let mut parser = Parser::new(ir_text);
+    let pkg = parser
+        .parse_and_validate_package()
+        .map_err(|e| format!("PIR parse: {}", e))?;
+    relevant_in_pkg(&pkg, entry_fn, node_text_id, method)
 }
 
 pub fn clone_fn_with_stuck_at_bool_node(
@@ -2195,6 +2394,51 @@ fn f(x: bits[2] id=1) -> bits[1] {
             }
             other => panic!("expected literal payload, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn relevance_end_to_end_exhaustive_for_irrelevant_and_relevant_bool_nodes() {
+        // Two boolean nodes:
+        // - `b_irrel`: used as a selector, but both cases are identical, so it is
+        //   irrelevant.
+        // - `b_rel`: used as a selector with different cases, so it is relevant.
+        let ir_text = r#"package test
+
+fn f(x: bits[2] id=1) -> (bits[8], bits[8]) {
+  b_irrel: bits[1] = eq(x, x, id=10)
+  c0: bits[2] = literal(value=0, id=11)
+  b_rel: bits[1] = eq(x, c0, id=12)
+  a: bits[8] = literal(value=7, id=20)
+  c: bits[8] = literal(value=9, id=21)
+  y_irrel: bits[8] = sel(b_irrel, cases=[a, a], default=a, id=30)
+  y_rel: bits[8] = sel(b_rel, cases=[a, c], default=a, id=31)
+  ret t: (bits[8], bits[8]) = tuple(y_irrel, y_rel, id=40)
+}
+"#;
+        let mut parser = xlsynth_pir::ir_parser::Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+
+        let r_irrel = relevant_in_pkg(
+            &pkg,
+            "f",
+            /* node_text_id= */ 10,
+            RelevanceCheckMethod::ExhaustiveBitsParams {
+                max_total_arg_bits: 8,
+            },
+        )
+        .unwrap();
+        assert!(!r_irrel.relevant, "expected b_irrel to be irrelevant");
+
+        let r_rel = relevant_in_pkg(
+            &pkg,
+            "f",
+            /* node_text_id= */ 12,
+            RelevanceCheckMethod::ExhaustiveBitsParams {
+                max_total_arg_bits: 8,
+            },
+        )
+        .unwrap();
+        assert!(r_rel.relevant, "expected b_rel to be relevant");
     }
 
     #[test]
