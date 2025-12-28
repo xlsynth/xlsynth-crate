@@ -12,13 +12,30 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 [dependencies]
 xlsynth = { path = "../xlsynth", version = "0.24.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.24.0" }
-xlsynth-prover = { path = "../xlsynth-prover", version = "0.24.0", features = ["with-easy-smt"] }
+xlsynth-prover = { path = "../xlsynth-prover", version = "0.24.0" }
 blake3 = "1.5"
 rand = "0.8"
 log = "0.4"
 ctrlc = "3.4.7"
 clap = { version = "4.5.21", features = ["derive"] }
 anyhow = "1.0"
+
+[features]
+default = []
+has-boolector = ["xlsynth-prover/has-boolector"]
+has-easy-smt = ["xlsynth-prover/has-easy-smt"]
+has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]
+# Enables easy-smt support (external solver binaries like z3/bitwuzla/boolector).
+with-easy-smt = ["xlsynth-prover/with-easy-smt", "has-easy-smt"]
+# Enables boolector support, defaulting to system linking.
+with-boolector-system = ["xlsynth-prover/with-boolector-system", "has-boolector"]
+# Enables boolector support AND builds it from source.
+with-boolector-built = ["xlsynth-prover/with-boolector-built", "has-boolector"]
+with-boolector-binary-test = ["xlsynth-prover/with-easy-smt", "with-easy-smt"]
+with-bitwuzla-binary-test = ["xlsynth-prover/with-easy-smt", "with-easy-smt"]
+with-z3-binary-test = ["xlsynth-prover/with-easy-smt", "with-easy-smt"]
+with-bitwuzla-system = ["xlsynth-prover/with-bitwuzla-system", "has-bitwuzla"]
+with-bitwuzla-built = ["xlsynth-prover/with-bitwuzla-built", "has-bitwuzla"]
 
 [lib]
 name = "xlsynth_autocov"

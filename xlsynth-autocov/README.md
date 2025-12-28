@@ -39,6 +39,21 @@ cargo run -p xlsynth-autocov --bin relevant -- \
   --tool-path /path/to/xls/tools
 ```
 
+To use the native Bitwuzla backend, build with the corresponding feature and
+select it via `--solver bitwuzla`:
+
+```bash
+cargo run -p xlsynth-autocov --features with-bitwuzla-built --bin relevant -- \
+  --ir-file path/to/package.ir \
+  --entry-fn f \
+  --node-text-id 123 \
+  --solver bitwuzla
+```
+
+Solver availability is feature-gated (mirroring `xlsynth-driver`); run
+`xlsynth-autocov-relevant --help` to see the available `--solver` values for
+your build.
+
 Output is a single line like:
 
 - `relevant_result node_text_id=123 relevant=false`
