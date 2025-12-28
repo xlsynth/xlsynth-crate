@@ -719,6 +719,8 @@ pub trait EvalObserver {
 
     fn on_bool_node(&mut self, _ev: BoolNodeEvent) {}
 
+    fn on_node_value(&mut self, _node_ref: ir::NodeRef, _node_text_id: usize, _value: &IrValue) {}
+
     fn on_corner_event(&mut self, _ev: CornerEvent) {}
 
     fn on_failure_event(&mut self, _ev: FailureEvent) {}
@@ -1052,7 +1054,31 @@ fn observe_select_like_node(
 pub fn eval_fn_with_observer(
     f: &ir::Fn,
     args: &[IrValue],
-    mut observer: Option<&mut dyn EvalObserver>,
+    observer: Option<&mut dyn EvalObserver>,
+) -> FnEvalResult {
+    let observer = observer.map(|o| o as *mut (dyn EvalObserver + '_));
+    eval_fn_impl(None, f, args, observer)
+}
+
+pub fn eval_fn_in_package(pkg: &ir::Package, f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
+    eval_fn_impl(Some(pkg), f, args, None)
+}
+
+pub fn eval_fn_in_package_with_observer(
+    pkg: &ir::Package,
+    f: &ir::Fn,
+    args: &[IrValue],
+    observer: Option<&mut dyn EvalObserver>,
+) -> FnEvalResult {
+    let observer = observer.map(|o| o as *mut (dyn EvalObserver + '_));
+    eval_fn_impl(Some(pkg), f, args, observer)
+}
+
+fn eval_fn_impl<'a>(
+    pkg: Option<&ir::Package>,
+    f: &ir::Fn,
+    args: &[IrValue],
+    observer: Option<*mut (dyn EvalObserver + 'a)>,
 ) -> FnEvalResult {
     assert_eq!(
         args.len(),
@@ -1095,13 +1121,15 @@ pub fn eval_fn_with_observer(
                     .to_bool()
                     .expect("activate must be bits[1]");
                 if active {
-                    if let Some(observer) = observer.as_deref_mut() {
-                        observer.on_failure_event(FailureEvent {
-                            node_ref: nr,
-                            node_text_id: node.text_id,
-                            kind: FailureKind::AssertTriggered,
-                            tag: 0,
-                        });
+                    if let Some(observer) = observer {
+                        unsafe {
+                            (&mut *observer).on_failure_event(FailureEvent {
+                                node_ref: nr,
+                                node_text_id: node.text_id,
+                                kind: FailureKind::AssertTriggered,
+                                tag: 0,
+                            });
+                        }
                     }
                     assertion_failures.push(AssertionFailure {
                         message: message.clone(),
@@ -1172,6 +1200,36 @@ pub fn eval_fn_with_observer(
                 // Tokens have no payload; produce a fresh token value.
                 IrValue::make_token()
             }
+            P::Invoke { to_apply, operands } => {
+                let pkg = pkg.expect("Invoke requires package context for callee resolution");
+                let callee = pkg
+                    .get_fn(to_apply)
+                    .expect("Invoke callee must exist in package");
+                let callee_args: Vec<IrValue> = operands
+                    .iter()
+                    .map(|r| {
+                        env.get(r)
+                            .expect("invoke operand must be evaluated")
+                            .clone()
+                    })
+                    .collect();
+
+                let callee_result = eval_fn_impl(Some(pkg), callee, &callee_args, observer);
+                match callee_result {
+                    FnEvalResult::Success(success) => {
+                        trace_messages.extend(success.trace_messages);
+                        success.value
+                    }
+                    FnEvalResult::Failure(fail) => {
+                        assertion_failures.extend(fail.assertion_failures);
+                        trace_messages.extend(fail.trace_messages);
+                        return FnEvalResult::Failure(FnEvalFailure {
+                            assertion_failures,
+                            trace_messages,
+                        });
+                    }
+                }
+            }
             P::BitSlice { arg, start, width } => {
                 // Guard against OOB; return Failure instead of panicking.
                 let arg_bits = env
@@ -1181,13 +1239,15 @@ pub fn eval_fn_with_observer(
                     .unwrap();
                 let bit_count = arg_bits.get_bit_count();
                 if start + width > bit_count {
-                    if let Some(observer) = observer.as_deref_mut() {
-                        observer.on_failure_event(FailureEvent {
-                            node_ref: nr,
-                            node_text_id: node.text_id,
-                            kind: FailureKind::BitSliceOob,
-                            tag: 0,
-                        });
+                    if let Some(observer) = observer {
+                        unsafe {
+                            (&mut *observer).on_failure_event(FailureEvent {
+                                node_ref: nr,
+                                node_text_id: node.text_id,
+                                kind: FailureKind::BitSliceOob,
+                                tag: 0,
+                            });
+                        }
                     }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
@@ -1212,32 +1272,36 @@ pub fn eval_fn_with_observer(
                 let start_u = start_bits.to_u64().unwrap() as usize;
                 let bit_count = arg_bits.get_bit_count();
                 if start_u + *width > bit_count {
-                    if let Some(observer) = observer.as_deref_mut() {
-                        observer.on_corner_event(CornerEvent {
-                            node_ref: nr,
-                            node_text_id: node.text_id,
-                            kind: CornerKind::DynamicBitSlice,
-                            tag: DynamicBitSliceCornerTag::OutOfBounds.into(),
-                        });
-                        observer.on_failure_event(FailureEvent {
-                            node_ref: nr,
-                            node_text_id: node.text_id,
-                            kind: FailureKind::DynamicBitSliceOob,
-                            tag: 0,
-                        });
+                    if let Some(observer) = observer {
+                        unsafe {
+                            (&mut *observer).on_corner_event(CornerEvent {
+                                node_ref: nr,
+                                node_text_id: node.text_id,
+                                kind: CornerKind::DynamicBitSlice,
+                                tag: DynamicBitSliceCornerTag::OutOfBounds.into(),
+                            });
+                            (&mut *observer).on_failure_event(FailureEvent {
+                                node_ref: nr,
+                                node_text_id: node.text_id,
+                                kind: FailureKind::DynamicBitSliceOob,
+                                tag: 0,
+                            });
+                        }
                     }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
                     });
                 }
-                if let Some(observer) = observer.as_deref_mut() {
-                    observer.on_corner_event(CornerEvent {
-                        node_ref: nr,
-                        node_text_id: node.text_id,
-                        kind: CornerKind::DynamicBitSlice,
-                        tag: DynamicBitSliceCornerTag::InBounds.into(),
-                    });
+                if let Some(observer) = observer {
+                    unsafe {
+                        (&mut *observer).on_corner_event(CornerEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: CornerKind::DynamicBitSlice,
+                            tag: DynamicBitSliceCornerTag::InBounds.into(),
+                        });
+                    }
                 }
                 let r = arg_bits.width_slice(start_u as i64, *width as i64);
                 IrValue::from_bits(&r)
@@ -1267,13 +1331,15 @@ pub fn eval_fn_with_observer(
                 let arg_w = arg_bits.get_bit_count();
                 let upd_w = upd_bits.get_bit_count();
                 if start_u + upd_w > arg_w {
-                    if let Some(observer) = observer.as_deref_mut() {
-                        observer.on_failure_event(FailureEvent {
-                            node_ref: nr,
-                            node_text_id: node.text_id,
-                            kind: FailureKind::BitSliceUpdateOob,
-                            tag: 0,
-                        });
+                    if let Some(observer) = observer {
+                        unsafe {
+                            (&mut *observer).on_failure_event(FailureEvent {
+                                node_ref: nr,
+                                node_text_id: node.text_id,
+                                kind: FailureKind::BitSliceUpdateOob,
+                                tag: 0,
+                            });
+                        }
                     }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
@@ -1310,6 +1376,36 @@ pub fn eval_fn_with_observer(
                 let out_bits = IrBits::from_lsb_is_0(&outs);
                 IrValue::from_bits(&out_bits)
             }
+            P::Encode { arg } => {
+                // XLS `encode`: converts a bits-typed argument (commonly one-hot) into a
+                // compact bits value (the selected index). The output width is taken from
+                // the node's annotated type.
+                let arg_bits = env
+                    .get(arg)
+                    .expect("arg must be evaluated")
+                    .to_bits()
+                    .unwrap();
+                let in_w = arg_bits.get_bit_count();
+                let expected_w = match node.ty {
+                    ir::Type::Bits(w) => w,
+                    _ => 0,
+                };
+                if expected_w == 0 {
+                    IrValue::make_ubits(0, 0).expect("make ubits[0]")
+                } else {
+                    // XLS encode semantics: bitwise-OR together the indices of all set bits.
+                    //
+                    // Example: for a 6-bit input, indices 5 (0b101) and 2 (0b010) set yields
+                    // output 0b111 (7) in bits[3].
+                    let mut encoded: u64 = 0;
+                    for i in 0..in_w {
+                        if arg_bits.get_bit(i).unwrap() {
+                            encoded |= i as u64;
+                        }
+                    }
+                    IrValue::make_ubits(expected_w, encoded).expect("make encoded ubits")
+                }
+            }
             P::ArrayIndex {
                 array,
                 indices,
@@ -1333,13 +1429,15 @@ pub fn eval_fn_with_observer(
                     assert!(count > 0, "ArrayIndex: empty array not supported");
                     if idx >= count {
                         if *assumed_in_bounds {
-                            if let Some(observer) = observer.as_deref_mut() {
-                                observer.on_failure_event(FailureEvent {
-                                    node_ref: nr,
-                                    node_text_id: node.text_id,
-                                    kind: FailureKind::ArrayIndexOobAssumedInBounds,
-                                    tag: 0,
-                                });
+                            if let Some(observer) = observer {
+                                unsafe {
+                                    (&mut *observer).on_failure_event(FailureEvent {
+                                        node_ref: nr,
+                                        node_text_id: node.text_id,
+                                        kind: FailureKind::ArrayIndexOobAssumedInBounds,
+                                        tag: 0,
+                                    });
+                                }
                             }
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
@@ -1352,17 +1450,19 @@ pub fn eval_fn_with_observer(
                         value = value.get_element(idx).unwrap();
                     }
                 }
-                if let Some(observer) = observer.as_deref_mut() {
-                    observer.on_corner_event(CornerEvent {
-                        node_ref: nr,
-                        node_text_id: node.text_id,
-                        kind: CornerKind::ArrayIndex,
-                        tag: if clamped_any {
-                            ArrayIndexCornerTag::Clamped.into()
-                        } else {
-                            ArrayIndexCornerTag::InBounds.into()
-                        },
-                    });
+                if let Some(observer) = observer {
+                    unsafe {
+                        (&mut *observer).on_corner_event(CornerEvent {
+                            node_ref: nr,
+                            node_text_id: node.text_id,
+                            kind: CornerKind::ArrayIndex,
+                            tag: if clamped_any {
+                                ArrayIndexCornerTag::Clamped.into()
+                            } else {
+                                ArrayIndexCornerTag::InBounds.into()
+                            },
+                        });
+                    }
                 }
                 value
             }
@@ -1421,13 +1521,15 @@ pub fn eval_fn_with_observer(
                     Some(updated) => updated,
                     None => {
                         if *assumed_in_bounds {
-                            if let Some(observer) = observer.as_deref_mut() {
-                                observer.on_failure_event(FailureEvent {
-                                    node_ref: nr,
-                                    node_text_id: node.text_id,
-                                    kind: FailureKind::ArrayUpdateOobAssumedInBounds,
-                                    tag: 0,
-                                });
+                            if let Some(observer) = observer {
+                                unsafe {
+                                    (&mut *observer).on_failure_event(FailureEvent {
+                                        node_ref: nr,
+                                        node_text_id: node.text_id,
+                                        kind: FailureKind::ArrayUpdateOobAssumedInBounds,
+                                        tag: 0,
+                                    });
+                                }
                             }
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
@@ -1441,9 +1543,11 @@ pub fn eval_fn_with_observer(
                 }
             }
             _ => {
-                if let Some(obs) = observer.as_deref_mut() {
-                    observe_select_like_node(nr, node, &env, obs);
-                    observe_corner_like_node(f, nr, node, &env, obs);
+                if let Some(observer) = observer {
+                    unsafe {
+                        observe_select_like_node(nr, node, &env, &mut *observer);
+                        observe_corner_like_node(f, nr, node, &env, &mut *observer);
+                    }
                 }
                 eval_pure(node, &env)
             }
@@ -1488,9 +1592,14 @@ pub fn eval_fn_with_observer(
         // Verify the computed value conforms to the node's annotated type, include node
         // context.
         assert_value_conforms_to_type(&node.ty, &coerced, node);
-        if let Some(observer) = observer.as_deref_mut() {
-            let is_bool_node = matches!(node.ty, ir::Type::Bits(1));
+        if let Some(observer) = observer {
+            let observer = unsafe { &mut *observer };
             let is_param = matches!(node.payload, ir::NodePayload::GetParam(_));
+            let is_nil = matches!(node.payload, ir::NodePayload::Nil);
+            if !is_param && !is_nil {
+                observer.on_node_value(nr, node.text_id, &coerced);
+            }
+            let is_bool_node = matches!(node.ty, ir::Type::Bits(1));
             if is_bool_node && !is_param {
                 observer.on_bool_node(BoolNodeEvent {
                     node_ref: nr,
@@ -1568,6 +1677,25 @@ mod tests {
 
         fn on_bool_node(&mut self, ev: BoolNodeEvent) {
             self.bool_events.push((ev.node_text_id, ev.value));
+        }
+    }
+
+    struct RecordingNodeValueObserver {
+        lines: Vec<String>,
+    }
+
+    impl RecordingNodeValueObserver {
+        fn new() -> Self {
+            Self { lines: Vec::new() }
+        }
+    }
+
+    impl EvalObserver for RecordingNodeValueObserver {
+        fn on_select(&mut self, _ev: SelectEvent) {}
+
+        fn on_node_value(&mut self, _node_ref: ir::NodeRef, node_text_id: usize, value: &IrValue) {
+            self.lines
+                .push(format!("node_text_id={} value={}", node_text_id, value));
         }
     }
 
@@ -2205,6 +2333,173 @@ fn f(x: bits[2] id=1, y: bits[2] id=2) -> bits[1] {
         // order: eq first, then not.
         let want = vec![(10, true), (11, false)];
         assert_eq!(obs.bool_events, want);
+    }
+
+    #[test]
+    fn test_node_value_observer_excludes_params_and_is_in_topo_order() {
+        let ir_text = r#"package test
+
+fn f(x: bits[32] id=1) -> bits[32] {
+  literal.2: bits[32] = literal(value=1, id=2)
+  ret add.3: bits[32] = add(x, literal.2, id=3)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f").clone();
+        let args = vec![IrValue::make_ubits(32, 2).unwrap()];
+
+        let mut obs = RecordingNodeValueObserver::new();
+        let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
+        assert!(matches!(r, FnEvalResult::Success(_)));
+
+        // Only computed nodes (excluding GetParam) should be observed, in topo order:
+        // literal first, then add.
+        let got = obs.lines.join("\n") + "\n";
+        let want = "node_text_id=2 value=bits[32]:1\nnode_text_id=3 value=bits[32]:3\n";
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_invoke_success() {
+        let ir_text = r#"package test
+
+fn g(x: bits[8] id=1) -> bits[8] {
+  literal.2: bits[8] = literal(value=1, id=2)
+  ret add.3: bits[8] = add(x, literal.2, id=3)
+}
+
+fn f(x: bits[8] id=10) -> bits[8] {
+  ret invoke.11: bits[8] = invoke(x, to_apply=g, id=11)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f");
+        let args = vec![IrValue::make_ubits(8, 5).unwrap()];
+        let res = eval_fn_in_package(&pkg, f, &args);
+        match res {
+            FnEvalResult::Success(success) => {
+                assert_eq!(success.value, IrValue::make_ubits(8, 6).unwrap());
+                assert!(success.trace_messages.is_empty());
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_invoke_propagates_trace() {
+        let ir_text = r#"package test
+
+fn g(x: bits[8] id=1) -> bits[8] {
+  t: token = after_all(id=2)
+  literal.3: bits[1] = literal(value=1, id=3)
+  trace.4: token = trace(t, literal.3, format="in g x={}", data_operands=[x], id=4)
+  ret identity.5: bits[8] = identity(x, id=5)
+}
+
+fn f(x: bits[8] id=10) -> bits[8] {
+  ret invoke.11: bits[8] = invoke(x, to_apply=g, id=11)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f");
+        let args = vec![IrValue::make_ubits(8, 7).unwrap()];
+        let res = eval_fn_in_package(&pkg, f, &args);
+        match res {
+            FnEvalResult::Success(success) => {
+                assert_eq!(success.value, IrValue::make_ubits(8, 7).unwrap());
+                let want = vec![TraceMessage {
+                    message: "in g x=bits[8]:7".to_string(),
+                    verbosity: 0,
+                }];
+                assert_eq!(success.trace_messages, want);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_encode_matches_xlsynth_interpreter() {
+        // Note: package-level validation requires ids to be unique across functions, so
+        // we keep a single function here.
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1) -> bits[3] {
+  ret encode.2: bits[3] = encode(x, id=2)
+}
+"#;
+
+        // Parse via xlsynth (reference) and PIR.
+        let xls_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).expect("xls parse");
+        let xls_f = xls_pkg.get_function("f").expect("xls f");
+
+        let mut pir_parser = Parser::new(ir_text);
+        let pir_pkg = pir_parser
+            .parse_and_validate_package()
+            .expect("pir parse+validate");
+        let pir_f = pir_pkg.get_fn("f").expect("pir f");
+
+        // A handful of inputs, including zero, one-hot, and multi-hot.
+        //
+        // XLS encode behavior: bitwise-OR the indices of all set bits.
+        let cases: &[(u64, u64)] = &[
+            (0, 0),
+            (1, 0),           // bit 0 -> 0
+            (1 << 3, 3),      // bit 3 -> 3
+            (1 << 7, 7),      // bit 7 -> 7
+            (0b1010, 3),      // bits 1 and 3 -> 1|3=3
+            (0b1000_1000, 7), // bits 3 and 7 -> 3|7=7
+        ];
+
+        for (x, want) in cases {
+            let x = IrValue::make_ubits(8, *x).unwrap();
+            let want_v = IrValue::make_ubits(3, *want).unwrap();
+            let args = vec![x.clone()];
+            let xls_got = xls_f.interpret(&args).expect("xls interpret");
+            let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
+                FnEvalResult::Success(s) => s.value,
+                other => panic!("expected success, got {:?}", other),
+            };
+            assert_eq!(pir_got, xls_got, "x={}", x);
+            assert_eq!(pir_got, want_v, "x={}", x);
+        }
+    }
+
+    #[test]
+    fn test_encode_after_umul_matches_xlsynth_interpreter() {
+        // This is the minimal CI-discovered shape: `umul` feeding into `encode`.
+        //
+        // Pick x=6 so umul(x,x) == 36 == 0b100100, which has bits set at indices 5 and
+        // 2. XLS encode semantics (and xlsynth interpreter behavior) ORs those
+        // indices: 5|2 == 7.
+        let ir_text = r#"package test
+
+fn f(x: bits[6] id=1) -> bits[3] {
+  umul.2: bits[6] = umul(x, x, id=2)
+  ret encode.3: bits[3] = encode(umul.2, id=3)
+}
+"#;
+
+        let xls_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).expect("xls parse");
+        let xls_f = xls_pkg.get_function("f").expect("xls f");
+
+        let mut pir_parser = Parser::new(ir_text);
+        let pir_pkg = pir_parser
+            .parse_and_validate_package()
+            .expect("pir parse+validate");
+        let pir_f = pir_pkg.get_fn("f").expect("pir f");
+
+        let args = vec![IrValue::make_ubits(6, 6).unwrap()];
+        let xls_got = xls_f.interpret(&args).expect("xls interpret");
+        let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
+            FnEvalResult::Success(s) => s.value,
+            other => panic!("expected success, got {:?}", other),
+        };
+        let want = IrValue::make_ubits(3, 7).unwrap();
+        assert_eq!(pir_got, xls_got, "x={}", args[0]);
+        assert_eq!(pir_got, want, "x={}", args[0]);
     }
 
     #[test]

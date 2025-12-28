@@ -4,7 +4,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
-use xlsynth_pir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzSampleWithArgs, FuzzUnop, generate_ir_fn};
+use xlsynth_pir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzSampleWithArgs, generate_ir_fn};
 use xlsynth_pir::{ir, ir_parser};
 
 fuzz_target!(|with: FuzzSampleWithArgs| {
@@ -31,11 +31,6 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
                 | FuzzBinop::Umod
                 | FuzzBinop::Smod
                 => false,
-                _ => true,
-            },
-            FuzzOp::Unop(kind, _) => match kind {
-                // Filter Encode until implemented in pure evaluator
-                FuzzUnop::Encode => false,
                 _ => true,
             },
             _ => true,

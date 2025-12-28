@@ -7,6 +7,30 @@
 
 use std::path::Path;
 
+use std::io::Write;
+
+struct DumpNodeValuesObserver<'a> {
+    out: &'a mut dyn Write,
+}
+
+impl xlsynth_pir::ir_eval::EvalObserver for DumpNodeValuesObserver<'_> {
+    fn on_select(&mut self, _ev: xlsynth_pir::ir_eval::SelectEvent) {}
+
+    fn on_node_value(
+        &mut self,
+        _node_ref: xlsynth_pir::ir::NodeRef,
+        node_text_id: usize,
+        value: &xlsynth::IrValue,
+    ) {
+        writeln!(
+            self.out,
+            "pir_node_value node_text_id={} value={}",
+            node_text_id, value
+        )
+        .expect("write pir_node_value line");
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvalMode {
     Interp,
@@ -133,6 +157,8 @@ impl DslxFnEvaluator {
         pkg: &xlsynth::IrPackage,
         func: &xlsynth::IrFunction,
         is_itok: bool,
+        pir_dump_node_values: bool,
+        out: &mut dyn Write,
     ) -> anyhow::Result<xlsynth::IrValue> {
         match self {
             DslxFnEvaluator::Interp => {
@@ -155,24 +181,36 @@ impl DslxFnEvaluator {
                 let pir_fn = pir_pkg
                     .get_fn(fn_name)
                     .ok_or_else(|| anyhow::anyhow!("PIR function lookup failed"))?;
-                match std::panic::catch_unwind(|| xlsynth_pir::ir_eval::eval_fn(&pir_fn, args)) {
-                    Ok(result) => match result {
-                        xlsynth_pir::ir_eval::FnEvalResult::Success(s) => Ok(s.value),
-                        xlsynth_pir::ir_eval::FnEvalResult::Failure(f) => {
-                            let labels: Vec<String> = f
-                                .assertion_failures
-                                .iter()
-                                .map(|a| format!("{}: {}", a.label, a.message))
-                                .collect();
-                            Err(anyhow::anyhow!(format!(
-                                "assertion failure(s): {}",
-                                labels.join("; ")
-                            )))
-                        }
-                    },
-                    Err(_payload) => Err(anyhow::anyhow!(
-                        "assertion failure(s): pir-interp panic while evaluating function"
-                    )),
+
+                let mut maybe_observer = if pir_dump_node_values {
+                    Some(DumpNodeValuesObserver { out })
+                } else {
+                    None
+                };
+
+                let result = if let Some(observer) = maybe_observer.as_mut() {
+                    xlsynth_pir::ir_eval::eval_fn_in_package_with_observer(
+                        pir_pkg,
+                        &pir_fn,
+                        args,
+                        Some(observer),
+                    )
+                } else {
+                    xlsynth_pir::ir_eval::eval_fn_in_package(pir_pkg, &pir_fn, args)
+                };
+                match result {
+                    xlsynth_pir::ir_eval::FnEvalResult::Success(s) => Ok(s.value),
+                    xlsynth_pir::ir_eval::FnEvalResult::Failure(f) => {
+                        let labels: Vec<String> = f
+                            .assertion_failures
+                            .iter()
+                            .map(|a| format!("{}: {}", a.label, a.message))
+                            .collect();
+                        Err(anyhow::anyhow!(format!(
+                            "assertion failure(s): {}",
+                            labels.join("; ")
+                        )))
+                    }
                 }
             }
         }
@@ -252,7 +290,9 @@ pub fn evaluate_dslx_function_over_ir_values(
     input_values_ir_text: &[String],
     mode: EvalMode,
     opts: &DslxFnEvalOptions,
-) -> anyhow::Result<Vec<String>> {
+    pir_dump_node_values: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     // Read DSLX source.
     let dslx_src =
         std::fs::read_to_string(dslx_file).map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -292,8 +332,13 @@ pub fn evaluate_dslx_function_over_ir_values(
     // Build an evaluator instance that encapsulates backend state.
     let evaluator = DslxFnEvaluator::new(mode, &pkg, &func)?;
 
-    // Parse each line as a tuple value; evaluate; stringify result.
-    let mut outputs: Vec<String> = Vec::with_capacity(input_values_ir_text.len());
+    if pir_dump_node_values && mode != EvalMode::PirInterp {
+        return Err(anyhow::anyhow!(
+            "--pir_dump_node_values is only supported with --eval_mode=pir-interp"
+        ));
+    }
+
+    // Parse each line as a tuple value; evaluate; write outputs.
     for (lineno, line) in input_values_ir_text.iter().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -315,10 +360,11 @@ pub fn evaluate_dslx_function_over_ir_values(
 
         let args = build_args_for_call(&pkg, &func, &tuple_val, requires_itok)?;
 
-        let out_val = evaluator.run(&args, &pkg, &func, requires_itok)?;
+        let out_val =
+            evaluator.run(&args, &pkg, &func, requires_itok, pir_dump_node_values, out)?;
 
-        outputs.push(out_val.to_string());
+        writeln!(out, "{}", out_val).expect("write output value");
     }
 
-    Ok(outputs)
+    Ok(())
 }
