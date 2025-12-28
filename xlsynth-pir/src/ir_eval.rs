@@ -1393,16 +1393,17 @@ fn eval_fn_impl<'a>(
                 if expected_w == 0 {
                     IrValue::make_ubits(0, 0).expect("make ubits[0]")
                 } else {
-                    let mut chosen: usize = 0;
-                    // Choose the highest set bit index (MSB priority) if any bits are set;
-                    // otherwise return 0.
-                    for i in (0..in_w).rev() {
+                    // XLS encode semantics: bitwise-OR together the indices of all set bits.
+                    //
+                    // Example: for a 6-bit input, indices 5 (0b101) and 2 (0b010) set yields
+                    // output 0b111 (7) in bits[3].
+                    let mut encoded: u64 = 0;
+                    for i in 0..in_w {
                         if arg_bits.get_bit(i).unwrap() {
-                            chosen = i;
-                            break;
+                            encoded |= i as u64;
                         }
                     }
-                    IrValue::make_ubits(expected_w, chosen as u64).expect("make encoded ubits")
+                    IrValue::make_ubits(expected_w, encoded).expect("make encoded ubits")
                 }
             }
             P::ArrayIndex {
@@ -2441,16 +2442,20 @@ fn f(x: bits[8] id=1) -> bits[3] {
         let pir_f = pir_pkg.get_fn("f").expect("pir f");
 
         // A handful of inputs, including zero, one-hot, and multi-hot.
-        let inputs: Vec<IrValue> = vec![
-            IrValue::make_ubits(8, 0).unwrap(),
-            IrValue::make_ubits(8, 1).unwrap(),           // bit 0
-            IrValue::make_ubits(8, 1 << 3).unwrap(),      // bit 3
-            IrValue::make_ubits(8, 1 << 7).unwrap(),      // bit 7
-            IrValue::make_ubits(8, 0b1010).unwrap(),      // bits 1 and 3
-            IrValue::make_ubits(8, 0b1000_1000).unwrap(), // bits 3 and 7
+        //
+        // XLS encode behavior: bitwise-OR the indices of all set bits.
+        let cases: &[(u64, u64)] = &[
+            (0, 0),
+            (1, 0),           // bit 0 -> 0
+            (1 << 3, 3),      // bit 3 -> 3
+            (1 << 7, 7),      // bit 7 -> 7
+            (0b1010, 3),      // bits 1 and 3 -> 1|3=3
+            (0b1000_1000, 7), // bits 3 and 7 -> 3|7=7
         ];
 
-        for x in inputs {
+        for (x, want) in cases {
+            let x = IrValue::make_ubits(8, *x).unwrap();
+            let want_v = IrValue::make_ubits(3, *want).unwrap();
             let args = vec![x.clone()];
             let xls_got = xls_f.interpret(&args).expect("xls interpret");
             let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
@@ -2458,6 +2463,7 @@ fn f(x: bits[8] id=1) -> bits[3] {
                 other => panic!("expected success, got {:?}", other),
             };
             assert_eq!(pir_got, xls_got, "x={}", x);
+            assert_eq!(pir_got, want_v, "x={}", x);
         }
     }
 

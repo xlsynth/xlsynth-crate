@@ -4,7 +4,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
-use xlsynth_pir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzSampleWithArgs, FuzzUnop, generate_ir_fn};
+use xlsynth_pir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzSampleWithArgs, generate_ir_fn};
 use xlsynth_pir::{ir, ir_parser};
 
 fuzz_target!(|with: FuzzSampleWithArgs| {
