@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package g8r_results;
+
+message DidConverge {
+  message Yes {
+    uint64 count = 1;
+  }
+  message No {}
+  oneof result {
+    Yes yes = 1;
+    No no = 2;
+  }
+}
+
+message ToggleStats {
+  // The number of toggles at all gate outputs, where a gate is an AND2 node
+  // in the graph.
+  uint64 gate_output_toggles = 1;
+
+  // The number of toggles at all gate inputs, where a gate is an AND2 node
+  // in the graph.
+  uint64 gate_input_toggles = 2;
+
+  // The number of toggles in the raw batch input vectors (primary inputs).
+  uint64 primary_input_toggles = 3;
+
+  // The number of toggles at the circuit's output pins only.
+  uint64 primary_output_toggles = 4;
+}
+
+message FraigIterationStat {
+  uint64 gate_count = 1;
+  uint64 counterexample_count = 2;
+  uint64 proposed_equiv_classes = 3;
+  uint64 replacements_count = 4;
+}
+
+message Ir2GatesSummaryStats {
+  uint64 live_nodes = 1;
+  uint64 deepest_path = 2;
+  map<uint64, uint64> fanout_histogram = 3;
+  optional ToggleStats toggle_stats = 4;
+  optional uint64 toggle_transitions = 5;
+  double logical_effort_deepest_path_min_delay = 6;
+  optional double graph_logical_effort_worst_case_delay = 7;
+  optional DidConverge fraig_did_converge = 8;
+  repeated FraigIterationStat fraig_iteration_stats = 9;
+}

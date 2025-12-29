@@ -17,6 +17,9 @@ pub mod verilog_version;
 pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
 }
+pub mod result_proto {
+    include!(concat!(env!("OUT_DIR"), "/g8r_results.rs"));
+}
 pub mod mcmc_logic;
 pub mod netlist;
 pub mod process_ir_path;

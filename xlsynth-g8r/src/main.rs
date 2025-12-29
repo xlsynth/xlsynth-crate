@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fs;
+
 use clap::Parser;
+use prost::Message;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path::{Options, process_ir_path};
+use xlsynth_g8r::result_proto;
 
 /// Simple program to parse an XLS IR file and emit a Verilog netlist.
 #[derive(Parser, Debug)]
@@ -61,6 +65,10 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     graph_logical_effort_beta2: f64,
 
+    #[arg(long)]
+    #[arg(action = clap::ArgAction::Set)]
+    result_proto: Option<String>,
+
     /// The path to the XLS IR file.
     input: String,
 }
@@ -86,5 +94,10 @@ fn main() {
         fraig_sim_samples: args.fraig_sim_samples,
     };
     let input_path = std::path::Path::new(&args.input);
-    process_ir_path(input_path, &options);
+    let stats = process_ir_path(input_path, &options);
+    if let Some(file_name) = args.result_proto {
+        let out: result_proto::Ir2GatesSummaryStats = stats.into();
+        let data = out.encode_to_vec();
+        fs::write(file_name, data).expect("Could not write");
+    }
 }
