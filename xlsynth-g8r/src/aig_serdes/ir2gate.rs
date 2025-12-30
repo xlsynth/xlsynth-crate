@@ -232,7 +232,13 @@ fn gatify_array_slice(
     } else {
         e_const
     };
-    let start_scaled = gatify_umul(&start_ext, &e_ext, start_scaled_w, gb);
+    let start_scaled = gatify_umul(
+        &start_ext,
+        &e_ext,
+        start_scaled_w,
+        AdderMapping::default(),
+        gb,
+    );
 
     // 4) Shift right by start_scaled and take low (width * e_bits) bits.
     let shifted = gatify_barrel_shifter(
@@ -326,10 +332,13 @@ fn gatify_mul(
     rhs_bits: &AigBitVector,
     output_bit_count: usize,
     signedness: Signedness,
+    mul_adder_mapping: AdderMapping,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
     match signedness {
-        Signedness::Unsigned => gatify_umul(lhs_bits, rhs_bits, output_bit_count, gb),
+        Signedness::Unsigned => {
+            gatify_umul(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
+        }
         Signedness::Signed => {
             // Pre-sign-extend operands to the final output width.
             let lhs_ext = if lhs_bits.get_bit_count() < output_bit_count {
@@ -342,7 +351,7 @@ fn gatify_mul(
             } else {
                 rhs_bits.clone()
             };
-            gatify_umul(&lhs_ext, &rhs_ext, output_bit_count, gb)
+            gatify_umul(&lhs_ext, &rhs_ext, output_bit_count, mul_adder_mapping, gb)
         }
     }
 }
@@ -365,6 +374,7 @@ fn gatify_umul(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
     output_bit_count: usize,
+    mul_adder_mapping: AdderMapping,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
     let lhs_bit_count = lhs_bits.get_bit_count();
@@ -406,7 +416,8 @@ fn gatify_umul(
     // Sum all partial products using ripple-carry addition
     let mut result = partial_products[0].clone();
     for pp in partial_products.iter().skip(1) {
-        let (_carry, sum) = gatify_add_ripple_carry(&result, pp, gb.get_false(), None, gb);
+        let (_carry, sum) =
+            gatify_add_with_mapping(mul_adder_mapping, &result, pp, gb.get_false(), None, gb);
         result = sum;
     }
     result
@@ -1838,11 +1849,13 @@ fn gatify_node(
             } else {
                 Signedness::Unsigned
             };
+            let mul_adder_mapping = options.mul_adder_mapping.unwrap_or(options.adder_mapping);
             let gates = gatify_mul(
                 &lhs_bits,
                 &rhs_bits,
                 output_bit_count,
                 signedness,
+                mul_adder_mapping,
                 g8_builder,
             );
             env.add(node_ref, GateOrVec::BitVector(gates));
@@ -2059,6 +2072,7 @@ pub struct GatifyOptions {
     pub hash: bool,
     pub check_equivalence: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
+    pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
 }
 
 // Type alias for the lowering map
@@ -2214,6 +2228,7 @@ mod tests {
                 hash: false,
                 check_equivalence: false,
                 adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
             },
         )
         .unwrap();
@@ -2246,6 +2261,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 check_equivalence: false, // Not needed for this map check
                 hash: true,
                 adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
             },
         )
         .unwrap();

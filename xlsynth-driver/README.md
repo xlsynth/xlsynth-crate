@@ -501,6 +501,9 @@ Supported flags include the common gate-optimization controls:
 - `--hash` – hash-cons the gate representation (default `true`).
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
   topology.
+- `--mul-adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – optional override
+  for the adder topology used inside multipliers. If not set, inherits
+  `--adder-mapping`.
 - `--fraig` – run fraig optimization (default `true`).
 - `--emit-independent-op-stats` – if `true`, also compute an independent-op cost
   model by gatifying each IR node in isolation (direct operands treated as

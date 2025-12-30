@@ -30,6 +30,7 @@ fn ir2gates(
     fold: bool,
     hash: bool,
     adder_mapping: AdderMapping,
+    mul_adder_mapping: Option<AdderMapping>,
     fraig: bool,
     emit_independent_op_stats: bool,
     toggle_sample_count: usize,
@@ -47,6 +48,7 @@ fn ir2gates(
         fold,
         hash,
         adder_mapping,
+        mul_adder_mapping,
         fraig,
         emit_independent_op_stats,
         quiet,
@@ -97,6 +99,15 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("brent-kung") => AdderMapping::BrentKung,
         Some("kogge-stone") => AdderMapping::KoggeStone,
         _ => AdderMapping::default(),
+    };
+    let mul_adder_mapping = match matches
+        .get_one::<String>("mul_adder_mapping")
+        .map(|s| s.as_str())
+    {
+        Some("ripple-carry") => Some(AdderMapping::RippleCarry),
+        Some("brent-kung") => Some(AdderMapping::BrentKung),
+        Some("kogge-stone") => Some(AdderMapping::KoggeStone),
+        _ => None,
     };
     let fraig = match matches.get_one::<String>("fraig").map(|s| s.as_str()) {
         Some("true") => true,
@@ -186,6 +197,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         fold,
         hash,
         adder_mapping,
+        mul_adder_mapping,
         fraig,
         emit_independent_op_stats,
         toggle_sample_count,
@@ -240,6 +252,7 @@ fn ir_to_gatefn_with_stats(
             fold,
             hash,
             adder_mapping: AdderMapping::default(),
+            mul_adder_mapping: None,
             check_equivalence: false,
         },
     )

@@ -74,6 +74,7 @@ fn main() {
         fold: args.fold,
         hash: args.hash,
         adder_mapping: AdderMapping::default(),
+        mul_adder_mapping: None,
         fraig: args.fraig,
         emit_independent_op_stats: false,
         emit_netlist: args.emit_netlist,

@@ -40,6 +40,7 @@ fn do_test_ir_conversion_with_top(
             check_equivalence: false,
             hash: opt == Opt::Yes,
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
+            mul_adder_mapping: None,
         },
     )
     .unwrap();
@@ -74,6 +75,7 @@ fn do_test_ir_conversion_no_equiv(ir_package_text: &str, opt: Opt) {
             check_equivalence: false,
             hash: opt == Opt::Yes,
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
+            mul_adder_mapping: None,
         },
     )
     .unwrap();

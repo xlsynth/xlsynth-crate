@@ -95,6 +95,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
             fold: true,
             hash: true,
             adder_mapping: AdderMapping::default(),
+            mul_adder_mapping: None,
             fraig: true,
             emit_independent_op_stats: false,
             fraig_max_iterations: None,

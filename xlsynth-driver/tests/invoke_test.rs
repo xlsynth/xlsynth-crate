@@ -2038,6 +2038,77 @@ fn test_ir2gates_quiet_json_output_independent_op_stats() {
 }
 
 #[test]
+fn test_ir2gates_mul_adder_mapping_override_affects_umul_depth() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package sample
+
+top fn main(a: bits[8] id=1, b: bits[8] id=2) -> bits[16] {
+  ret umul.3: bits[16] = umul(a, b, id=3)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("main.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    fn get_umul_depth(command_path: &str, ir_path: &std::path::Path, extra_args: &[&str]) -> u64 {
+        let mut command = std::process::Command::new(command_path);
+        command
+            .arg("ir2gates")
+            .arg(ir_path.to_str().unwrap())
+            .arg("--quiet=true")
+            .arg("--fraig=false")
+            .arg("--emit-independent-op-stats=true");
+        for arg in extra_args {
+            command.arg(arg);
+        }
+        if let Ok(rust_log) = std::env::var("RUST_LOG") {
+            command.env("RUST_LOG", rust_log);
+        }
+        let ir2gates_output = command.output().unwrap();
+        assert!(
+            ir2gates_output.status.success(),
+            "ir2gates failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&ir2gates_output.stdout),
+            String::from_utf8_lossy(&ir2gates_output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&ir2gates_output.stdout);
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
+
+        let per_node = json["independent_op_stats"]["per_node"]
+            .as_array()
+            .expect("expected independent_op_stats.per_node to be an array");
+        let expected_op = "umul(bits[8], bits[8]) -> bits[16]";
+        let entry = per_node
+            .iter()
+            .find(|e| e["op"].as_str() == Some(expected_op))
+            .unwrap_or_else(|| panic!("could not find per-node entry with op {}", expected_op));
+        entry["deepest_path"]
+            .as_u64()
+            .expect("expected per-node deepest_path to be a u64")
+    }
+
+    let default_depth = get_umul_depth(command_path, &ir_path, &[]);
+    let ripple_depth = get_umul_depth(
+        command_path,
+        &ir_path,
+        &["--mul-adder-mapping=ripple-carry"],
+    );
+
+    assert!(
+        ripple_depth > default_depth,
+        "expected ripple-carry multiplier depth ({}) to be greater than default multiplier depth ({})",
+        ripple_depth,
+        default_depth
+    );
+}
+
+#[test]
 fn test_ir2gates_output_json_file() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dslx = "fn main(a: u32, b: u32) -> u32 { a & b }";
