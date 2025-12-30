@@ -59,7 +59,7 @@ fn ir2gates(
         fraig_max_iterations,
         fraig_sim_samples,
     };
-    let stats = process_ir_path::process_ir_path(input_file, &options);
+    let stats = process_ir_path::process_ir_path_for_cli(input_file, &options);
     if quiet {
         serde_json::to_writer(std::io::stdout(), &stats).unwrap();
         println!();

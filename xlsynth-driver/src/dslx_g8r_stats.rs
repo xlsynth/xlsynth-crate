@@ -8,7 +8,7 @@ use crate::tools::{run_ir_converter_main, run_opt_main};
 use tempfile::NamedTempFile;
 use xlsynth::DslxConvertOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_g8r::process_ir_path::{process_ir_path, Options as G8rOptions};
+use xlsynth_g8r::process_ir_path::{process_ir_path_for_cli, Options as G8rOptions};
 
 pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("dslx_input_file").unwrap();
@@ -88,7 +88,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
     let temp_ir = NamedTempFile::new().unwrap();
     std::fs::write(temp_ir.path(), &ir_text).unwrap();
 
-    let stats = process_ir_path(
+    let stats = process_ir_path_for_cli(
         temp_ir.path(),
         &G8rOptions {
             check_equivalence: false,

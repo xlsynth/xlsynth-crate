@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_g8r::process_ir_path::{Options, process_ir_path};
+use xlsynth_g8r::process_ir_path::{Options, process_ir_path_for_cli};
 
 /// Simple program to parse an XLS IR file and emit a Verilog netlist.
 #[derive(Parser, Debug)]
@@ -87,5 +87,5 @@ fn main() {
         fraig_sim_samples: args.fraig_sim_samples,
     };
     let input_path = std::path::Path::new(&args.input);
-    process_ir_path(input_path, &options);
+    process_ir_path_for_cli(input_path, &options);
 }
