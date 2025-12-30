@@ -233,13 +233,7 @@ fn gatify_array_slice(
     } else {
         e_const
     };
-    let start_scaled = gatify_umul(
-        &start_ext,
-        &e_ext,
-        start_scaled_w,
-        mul_adder_mapping,
-        gb,
-    );
+    let start_scaled = gatify_umul(&start_ext, &e_ext, start_scaled_w, mul_adder_mapping, gb);
 
     // 4) Shift right by start_scaled and take low (width * e_bits) bits.
     let shifted = gatify_barrel_shifter(
@@ -1269,9 +1263,7 @@ fn gatify_node(
             };
             let array_bits = env.get_bit_vector(*array).unwrap();
             let start_bits = env.get_bit_vector(*start).unwrap();
-            let mul_adder_mapping = options
-                .mul_adder_mapping
-                .unwrap_or(options.adder_mapping);
+            let mul_adder_mapping = options.mul_adder_mapping.unwrap_or(options.adder_mapping);
             let result = gatify_array_slice(
                 g8_builder,
                 array_ty,
