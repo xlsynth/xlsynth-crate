@@ -1185,6 +1185,811 @@ fn flatten_literal_to_bits(
     }
 }
 
+fn gatify_node(
+    f: &ir::Fn,
+    node_ref: ir::NodeRef,
+    node: &ir::Node,
+    g8_builder: &mut GateBuilder,
+    env: &mut GateEnv,
+    options: &GatifyOptions,
+    param_id_to_node_ref: &HashMap<ParamId, ir::NodeRef>,
+) {
+    let payload = &node.payload;
+    match payload {
+        ir::NodePayload::GetParam(param_id) => {
+            if env.contains(node_ref) {
+                return; // Already inserted above.
+            }
+            // Look up the original parameter node_ref by its ParamId
+            let pr = param_id_to_node_ref
+                .get(param_id)
+                .expect("ParamId not found in mapping");
+            let entry = env.get_bit_vector(*pr).unwrap();
+            env.add(node_ref, GateOrVec::BitVector(entry));
+        }
+        ir::NodePayload::ArrayIndex {
+            array,
+            indices,
+            assumed_in_bounds,
+        } => {
+            assert!(
+                !indices.is_empty(),
+                "Array index must have at least one index"
+            );
+
+            let mut array_ty = match f.get_node_ty(*array) {
+                ir::Type::Array(array_ty_data) => array_ty_data,
+                other => panic!("Expected array type for array_index, got {:?}", other),
+            };
+            let mut array_bits = env.get_bit_vector(*array).unwrap();
+
+            for (i, index_node) in indices.iter().enumerate() {
+                let index_bits = env.get_bit_vector(*index_node).unwrap();
+                array_bits = gatify_array_index(
+                    g8_builder,
+                    array_ty,
+                    &array_bits,
+                    &index_bits,
+                    *assumed_in_bounds,
+                );
+                if i + 1 < indices.len() {
+                    array_ty = match array_ty.element_type.as_ref() {
+                        ir::Type::Array(next_ty) => next_ty,
+                        other => panic!(
+                            "Expected array type for index dimension {}, got {:?}",
+                            i + 1,
+                            other
+                        ),
+                    };
+                }
+            }
+
+            env.add(node_ref, GateOrVec::BitVector(array_bits));
+        }
+        ir::NodePayload::ArraySlice {
+            array,
+            start,
+            width,
+        } => {
+            let array_ty = match f.get_node_ty(*array) {
+                ir::Type::Array(array_ty_data) => array_ty_data,
+                other => panic!("Expected array type for array_slice, got {:?}", other),
+            };
+            let array_bits = env.get_bit_vector(*array).unwrap();
+            let start_bits = env.get_bit_vector(*start).unwrap();
+            let result = gatify_array_slice(
+                g8_builder,
+                array_ty,
+                &array_bits,
+                &start_bits,
+                *width,
+                node.text_id,
+            );
+            env.add(node_ref, GateOrVec::BitVector(result));
+        }
+        ir::NodePayload::ArrayUpdate {
+            array,
+            value,
+            indices,
+            assumed_in_bounds: _,
+        } => {
+            assert!(
+                !indices.is_empty(),
+                "Array update must have at least one index",
+            );
+            let array_ty = match f.get_node_ty(*array) {
+                ir::Type::Array(array_ty_data) => array_ty_data,
+                other => panic!("Expected array type for array_update, got {:?}", other),
+            };
+
+            let array_bits = env.get_bit_vector(*array).unwrap();
+            let value_bits = env.get_bit_vector(*value).unwrap();
+            let index_bits: Vec<AigBitVector> = indices
+                .iter()
+                .map(|i| env.get_bit_vector(*i).unwrap())
+                .collect();
+
+            let result_bits =
+                gatify_array_update(g8_builder, array_ty, &array_bits, &value_bits, &index_bits);
+
+            env.add(node_ref, GateOrVec::BitVector(result_bits));
+        }
+        ir::NodePayload::Array(members) => {
+            // Similar to Tuple: flatten all members into a bit vector.
+            // Arrays are conceptually homogeneous, but in bit flattening, we just
+            // concatenate all elements.
+            let mut lsb_to_msb = Vec::new();
+            for member in members.iter().rev() {
+                let member_bits = env
+                    .get_bit_vector(*member)
+                    .expect("array element should be present");
+                lsb_to_msb.extend(member_bits.iter_lsb_to_msb().cloned());
+            }
+            let bit_vector = AigBitVector::from_lsb_is_index_0(&lsb_to_msb);
+            env.add(node_ref, GateOrVec::BitVector(bit_vector));
+        }
+        ir::NodePayload::TupleIndex { tuple, index } => {
+            // We have to figure out what bit range the index indicates from the original
+            // tuple's flat bits.
+            let tuple_bits = env.get_bit_vector(*tuple).unwrap();
+            let tuple_ty = f.get_node_ty(*tuple);
+            let StartAndLimit { start, limit } =
+                tuple_ty.tuple_get_flat_bit_slice_for_index(*index).unwrap();
+            let member_bits = tuple_bits
+                .iter_lsb_to_msb()
+                .skip(start)
+                .take(limit - start)
+                .cloned()
+                .collect::<Vec<_>>();
+            let bit_vector = AigBitVector::from_lsb_is_index_0(&member_bits);
+            env.add(node_ref, GateOrVec::BitVector(bit_vector));
+        }
+        ir::NodePayload::Tuple(args) => {
+            // Tuples, similar to arrays, need to answer the question: "which member is
+            // least significant when flattened?"
+            //
+            // When we perform: `tuple(a, b, c)` does `a` go in the lower bits or does `c`?
+            //
+            // For concat we have `concat(a, b, c)` place `a` in the upper bits such that
+            // the result is: `a_msb, ..., a_lsb, b_msb, ..., b_lsb, c_msb,
+            // ..., c_lsb`. So we take the same approach for tuples -- we
+            // iterate the arguments in reverse order to make sure c's lsb
+            // comes first and build from lsb to msb.
+
+            let mut lsb_to_msb = Vec::new();
+            for arg in args.iter().rev() {
+                let arg_gates = env
+                    .get_bit_vector(*arg)
+                    .expect("tuple arg should be present");
+                lsb_to_msb.extend(arg_gates.iter_lsb_to_msb().cloned());
+            }
+            let bit_vector = AigBitVector::from_lsb_is_index_0(&lsb_to_msb);
+            env.add(node_ref, GateOrVec::BitVector(bit_vector));
+        }
+        ir::NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } => {
+            // Note: sel is basically an array index into the cases where we pick default if
+            // the selector value is OOB.
+            let selector_bits = env
+                .get_bit_vector(*selector)
+                .expect("selector should be present");
+            let cases: Vec<AigBitVector> = cases
+                .iter()
+                .map(|c| env.get_bit_vector(*c).expect("case should be present"))
+                .collect::<Vec<AigBitVector>>();
+            let default_bits =
+                default.map(|d| env.get_bit_vector(d).expect("default should be present"));
+
+            let gates = gatify_sel(g8_builder, &selector_bits, &cases, default_bits);
+
+            // Tag the result bits
+            for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(gate.node, format!("sel_{}_output_bit_{}", node.text_id, i));
+            }
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Literal(literal) => {
+            let bit_vector = flatten_literal_to_bits(literal, &node.ty, g8_builder);
+            env.add(node_ref, GateOrVec::BitVector(bit_vector));
+        }
+
+        // -- unary operations
+        ir::NodePayload::Unop(ir::Unop::Not, arg) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("unop arg should be present");
+            let gates: AigBitVector = g8_builder.add_not_vec(&arg_gates);
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Unop(ir::Unop::Neg, arg) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("unop arg should be present");
+            let not_arg = g8_builder.add_not_vec(&arg_gates);
+            let zero = g8_builder
+                .add_literal(&xlsynth::IrBits::make_ubits(arg_gates.get_bit_count(), 0).unwrap());
+            let neg_tag = format!("neg_{}", node.text_id);
+            let (_, result) = gatify_add_with_mapping(
+                options.adder_mapping,
+                &not_arg,
+                &zero,
+                g8_builder.get_true(),
+                Some(&neg_tag),
+                g8_builder,
+            );
+            env.add(node_ref, GateOrVec::BitVector(result));
+        }
+        ir::NodePayload::Unop(ir::Unop::Identity, arg) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("unop arg should be present");
+            env.add(node_ref, GateOrVec::BitVector(arg_gates));
+        }
+        ir::NodePayload::Unop(ir::Unop::Reverse, arg) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("unop arg should be present");
+            let result_gates: Vec<AigOperand> = arg_gates
+                .iter_lsb_to_msb()
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>();
+            env.add(
+                node_ref,
+                GateOrVec::BitVector(AigBitVector::from_lsb_is_index_0(&result_gates)),
+            );
+        }
+
+        // -- bitwise reductions
+        ir::NodePayload::Unop(ir::Unop::OrReduce, arg) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("unop arg should be present");
+            let gate: AigOperand = g8_builder.add_or_reduce(&arg_gates, ReductionKind::Tree);
+            g8_builder.add_tag(gate.node, format!("or_reduce_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Unop(ir::Unop::AndReduce, arg) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("unop arg should be present");
+            let gate: AigOperand = g8_builder.add_and_reduce(&arg_gates, ReductionKind::Tree);
+            g8_builder.add_tag(gate.node, format!("and_reduce_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Unop(ir::Unop::XorReduce, arg) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("unop arg should be present");
+            let gate: AigOperand = g8_builder.add_xor_reduce(&arg_gates, ReductionKind::Tree);
+            g8_builder.add_tag(gate.node, format!("xor_reduce_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+
+        // -- binary operations
+        ir::NodePayload::Binop(ir::Binop::Eq, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("eq lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("eq rhs should be present");
+            assert_eq!(a_bits.get_bit_count(), b_bits.get_bit_count());
+            let gate: AigOperand = g8_builder.add_eq_vec(&a_bits, &b_bits, ReductionKind::Tree);
+            g8_builder.add_tag(gate.node, format!("eq_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Binop(ir::Binop::Ne, a, b) => {
+            let a_gate_refs = env.get_bit_vector(*a).expect("ne lhs should be present");
+            let b_gate_refs = env.get_bit_vector(*b).expect("ne rhs should be present");
+            log::debug!(
+                "ne lhs bits[{}] rhs bits[{}]",
+                a_gate_refs.get_bit_count(),
+                b_gate_refs.get_bit_count()
+            );
+            let gate: AigOperand =
+                g8_builder.add_ne_vec(&a_gate_refs, &b_gate_refs, ReductionKind::Tree);
+            g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Binop(ir::Binop::Ult, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("ult lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("ult rhs should be present");
+            let gate: AigOperand =
+                gatify_ult_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
+            g8_builder.add_tag(gate.node, format!("ult_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Binop(ir::Binop::Ugt, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("ugt lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("ugt rhs should be present");
+            let gate: AigOperand =
+                gatify_ugt_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
+            g8_builder.add_tag(gate.node, format!("ugt_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Binop(ir::Binop::Uge, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("uge lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("uge rhs should be present");
+            let gate: AigOperand =
+                gatify_uge_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
+            g8_builder.add_tag(gate.node, format!("uge_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Binop(ir::Binop::Ule, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("ule lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("ule rhs should be present");
+            let gate = gatify_ule_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
+            g8_builder.add_tag(gate.node, format!("ule_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+
+        // signed comparisons
+        ir::NodePayload::Binop(ir::Binop::Sgt, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("sgt lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("sgt rhs should be present");
+            let gate = gatify_scmp(
+                g8_builder,
+                node.text_id,
+                &a_bits,
+                &b_bits,
+                options.adder_mapping,
+                CmpKind::Gt,
+                false,
+            );
+            g8_builder.add_tag(gate.node, format!("sgt_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Binop(ir::Binop::Sge, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("sge lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("sge rhs should be present");
+            let gate = gatify_scmp(
+                g8_builder,
+                node.text_id,
+                &a_bits,
+                &b_bits,
+                options.adder_mapping,
+                CmpKind::Gt,
+                true,
+            );
+            g8_builder.add_tag(gate.node, format!("sge_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Binop(ir::Binop::Slt, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("slt lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("slt rhs should be present");
+            let gate = gatify_scmp(
+                g8_builder,
+                node.text_id,
+                &a_bits,
+                &b_bits,
+                options.adder_mapping,
+                CmpKind::Lt,
+                false,
+            );
+            g8_builder.add_tag(gate.node, format!("slt_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+        ir::NodePayload::Binop(ir::Binop::Sle, a, b) => {
+            let a_bits = env.get_bit_vector(*a).expect("sle lhs should be present");
+            let b_bits = env.get_bit_vector(*b).expect("sle rhs should be present");
+            let gate = gatify_scmp(
+                g8_builder,
+                node.text_id,
+                &a_bits,
+                &b_bits,
+                options.adder_mapping,
+                CmpKind::Lt,
+                true,
+            );
+            g8_builder.add_tag(gate.node, format!("sle_{}", node.text_id));
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
+
+        // -- nary operations
+        ir::NodePayload::Nary(ir::NaryOp::And, args) => {
+            let arg_gates: Vec<AigBitVector> = args
+                .iter()
+                .map(|arg| env.get_bit_vector(*arg).expect("and arg should be present"))
+                .collect();
+            let gates: AigBitVector =
+                g8_builder.add_and_vec_nary(arg_gates.as_slice(), ReductionKind::Tree);
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Nary(ir::NaryOp::Nor, args) => {
+            let arg_gates: Vec<AigBitVector> = args
+                .iter()
+                .map(|arg| env.get_bit_vector(*arg).expect("nor arg should be present"))
+                .collect();
+            let gates: AigBitVector = g8_builder.add_or_vec_nary(&arg_gates, ReductionKind::Tree);
+            let gates = g8_builder.add_not_vec(&gates);
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Nary(ir::NaryOp::Or, args) => {
+            let arg_gates: Vec<AigBitVector> = args
+                .iter()
+                .map(|arg| env.get_bit_vector(*arg).expect("or arg should be present"))
+                .collect();
+            let gates: AigBitVector = g8_builder.add_or_vec_nary(&arg_gates, ReductionKind::Tree);
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Nary(ir::NaryOp::Xor, args) => {
+            let arg_gates: Vec<AigBitVector> = args
+                .iter()
+                .map(|arg| env.get_bit_vector(*arg).expect("xor arg should be present"))
+                .collect();
+            let gates: AigBitVector = g8_builder.add_xor_vec_nary(&arg_gates, ReductionKind::Tree);
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Nary(ir::NaryOp::Nand, args) => {
+            let arg_gates: Vec<AigBitVector> = args
+                .iter()
+                .map(|arg| {
+                    env.get_bit_vector(*arg)
+                        .expect("nand arg should be present")
+                })
+                .collect();
+            let gates: AigBitVector = g8_builder.add_and_vec_nary(&arg_gates, ReductionKind::Tree);
+            let gates = g8_builder.add_not_vec(&gates);
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Nary(ir::NaryOp::Concat, args) => {
+            let arg_bits: Vec<AigBitVector> = args
+                .iter()
+                .map(|arg| {
+                    env.get_bit_vector(*arg)
+                        .expect("concat arg should be present")
+                })
+                .collect();
+
+            let bits = gatify_concat(&arg_bits);
+
+            let output_bit_count = node.ty.bit_count();
+            assert_eq!(bits.get_bit_count(), output_bit_count);
+            for (i, bit) in bits.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    bit.node,
+                    format!("concat_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(bits));
+        }
+        ir::NodePayload::PrioritySel {
+            selector,
+            cases,
+            default,
+        } => {
+            let output_bit_count = node.ty.bit_count();
+            let selector_bits = env
+                .get_bit_vector(*selector)
+                .expect("selector should be present");
+            let cases: Vec<AigBitVector> = cases
+                .iter()
+                .map(|c| env.get_bit_vector(*c).expect("case should be present"))
+                .collect::<Vec<AigBitVector>>();
+            let default_bits =
+                default.map(|d| env.get_bit_vector(d).expect("default should be present"));
+
+            let gates = gatify_priority_sel(
+                g8_builder,
+                output_bit_count,
+                selector_bits,
+                cases.as_slice(),
+                default_bits,
+            );
+            // Tag the result.
+            for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    gate.node,
+                    format!("priority_sel_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::OneHotSel { selector, cases } => {
+            let selector_bits = env
+                .get_bit_vector(*selector)
+                .expect("selector should be present");
+            let cases: Vec<AigBitVector> = cases
+                .iter()
+                .map(|c| env.get_bit_vector(*c).expect("case should be present"))
+                .collect::<Vec<AigBitVector>>();
+            let gates = gatify_one_hot_select(g8_builder, &selector_bits, &cases);
+            // Tag the result.
+            for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    gate.node,
+                    format!("one_hot_select_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Binop(ir::Binop::Add, a, b) => {
+            let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
+            let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
+            assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
+            let add_tag = format!("add_{}", node.text_id);
+            let (_c_out, gates) = gatify_add_with_mapping(
+                options.adder_mapping,
+                &a_gate_refs,
+                &b_gate_refs,
+                g8_builder.get_false(),
+                Some(&add_tag),
+                g8_builder,
+            );
+            assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Binop(ir::Binop::Sub, a, b) => {
+            let a_gate_refs = env.get_bit_vector(*a).expect("sub lhs should be present");
+            let b_gate_refs = env.get_bit_vector(*b).expect("sub rhs should be present");
+            assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
+            let b_complement = g8_builder.add_not_vec(&b_gate_refs);
+            let sub_tag = format!("sub_{}", node.text_id);
+            let (_c_out, gates) = gatify_add_with_mapping(
+                options.adder_mapping,
+                &a_gate_refs,
+                &b_complement,
+                g8_builder.get_true(),
+                Some(&sub_tag),
+                g8_builder,
+            );
+            let output_bit_count = node.ty.bit_count();
+            assert_eq!(gates.get_bit_count(), output_bit_count);
+            for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(gate.node, format!("sub_{}_output_bit_{}", node.text_id, i));
+            }
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::BitSlice { arg, start, width } => {
+            let value_gates = env
+                .get_bit_vector(*arg)
+                .expect("bit_slice value should be present");
+            let slice_gates = value_gates.get_lsb_slice(*start, *width);
+            assert_eq!(slice_gates.get_bit_count(), *width);
+            env.add(node_ref, GateOrVec::BitVector(slice_gates));
+        }
+        ir::NodePayload::ZeroExt { arg, new_bit_count } => {
+            let arg_bits = env
+                .get_bit_vector(*arg)
+                .expect("zero_ext value should be present");
+            let result_bits = gatify_zero_ext(*new_bit_count, &arg_bits);
+            env.add(node_ref, GateOrVec::BitVector(result_bits));
+        }
+        ir::NodePayload::SignExt { arg, new_bit_count } => {
+            let arg_bits = env
+                .get_bit_vector(*arg)
+                .expect("sign_ext value should be present");
+            let result_bits = gatify_sign_ext(g8_builder, node.text_id, *new_bit_count, &arg_bits);
+            env.add(node_ref, GateOrVec::BitVector(result_bits));
+        }
+        ir::NodePayload::Decode { arg, width } => {
+            assert_eq!(*width, node.ty.bit_count());
+            let input_bits = env
+                .get_bit_vector(*arg)
+                .expect("decode arg should be present");
+            let bits = gatify_decode(g8_builder, *width, &input_bits);
+            assert_eq!(bits.get_bit_count(), *width);
+            for (i, bit) in bits.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    bit.node,
+                    format!("decode_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(bits));
+        }
+        ir::NodePayload::Encode { arg } => {
+            log::debug!("gatifying encode; ty: {}", node.ty);
+            let arg_bits = env
+                .get_bit_vector(*arg)
+                .expect("encode arg should be present");
+            let result_bits = gatify_encode(g8_builder, node.ty.bit_count(), &arg_bits);
+            assert_eq!(result_bits.get_bit_count(), node.ty.bit_count());
+            for (i, gate) in result_bits.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    gate.node,
+                    format!("encode_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(result_bits));
+        }
+        ir::NodePayload::Binop(ir::Binop::Shrl, arg, amount) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("shrl arg should be present");
+            let amount_gates = env
+                .get_bit_vector(*amount)
+                .expect("shrl amount should be present");
+            let result_gates = gatify_barrel_shifter(
+                &arg_gates,
+                &amount_gates,
+                Direction::Right,
+                &format!("shrl_{}", node.text_id),
+                g8_builder,
+            );
+            env.add(node_ref, GateOrVec::BitVector(result_gates));
+        }
+        ir::NodePayload::Binop(ir::Binop::Shra, arg, amount) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("shra arg should be present");
+            let amount_gates = env
+                .get_bit_vector(*amount)
+                .expect("shra amount should be present");
+
+            let result = gatify_shra(g8_builder, &arg_gates, &amount_gates, node.text_id);
+            env.add(node_ref, GateOrVec::BitVector(result));
+        }
+        ir::NodePayload::Binop(ir::Binop::Shll, arg, amount) => {
+            let arg_gates = env
+                .get_bit_vector(*arg)
+                .expect("shll arg should be present");
+            let amount_gates = env
+                .get_bit_vector(*amount)
+                .expect("shll amount should be present");
+            let result_gates = gatify_barrel_shifter(
+                &arg_gates,
+                &amount_gates,
+                Direction::Left,
+                &format!("shll_{}", node.text_id),
+                g8_builder,
+            );
+            env.add(node_ref, GateOrVec::BitVector(result_gates));
+        }
+        ir::NodePayload::OneHot { arg, lsb_prio } => {
+            let bits = env
+                .get_bit_vector(*arg)
+                .expect("one_hot arg should be present");
+            let bit_vector = gatify_one_hot(g8_builder, &bits, *lsb_prio);
+            for (lsb_i, gate) in bit_vector.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    gate.node,
+                    format!("one_hot_{}_output_bit_{}", node.text_id, lsb_i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(bit_vector));
+        }
+        ir::NodePayload::Binop(ir::Binop::Umul | ir::Binop::Smul, lhs, rhs) => {
+            let output_bit_count = node.ty.bit_count();
+            let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
+            let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
+            let signedness = if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smul, ..))
+            {
+                Signedness::Signed
+            } else {
+                Signedness::Unsigned
+            };
+            let gates = gatify_mul(
+                &lhs_bits,
+                &rhs_bits,
+                output_bit_count,
+                signedness,
+                g8_builder,
+            );
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Binop(ir::Binop::Udiv | ir::Binop::Sdiv, lhs, rhs) => {
+            let lhs_bits = env.get_bit_vector(*lhs).expect("div lhs should be present");
+            let rhs_bits = env.get_bit_vector(*rhs).expect("div rhs should be present");
+            let signedness = if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Sdiv, ..))
+            {
+                Signedness::Signed
+            } else {
+                Signedness::Unsigned
+            };
+            let gates = gatify_div(&lhs_bits, &rhs_bits, signedness, g8_builder);
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Binop(ir::Binop::Umod | ir::Binop::Smod, lhs, rhs) => {
+            let lhs_bits = env.get_bit_vector(*lhs).expect("mod lhs should be present");
+            let rhs_bits = env.get_bit_vector(*rhs).expect("mod rhs should be present");
+            let signedness = if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smod, ..))
+            {
+                Signedness::Signed
+            } else {
+                Signedness::Unsigned
+            };
+            let gates = gatify_mod(&lhs_bits, &rhs_bits, signedness, g8_builder);
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Assert { .. }
+        | ir::NodePayload::AfterAll(..)
+        | ir::NodePayload::Trace { .. }
+        | ir::NodePayload::Nil => {
+            // These IR nodes manipulate tokens or have no semantic
+            // representation in gates. Map them to a zero-width bit
+            // vector so any subsequent references (e.g. via tuples) have
+            // a placeholder value.
+            env.add(node_ref, GateOrVec::BitVector(AigBitVector::zeros(0)));
+        }
+        ir::NodePayload::DynamicBitSlice { arg, start, width } => {
+            let arg_bits = env
+                .get_bit_vector(*arg)
+                .expect("DynamicBitSlice arg should be present");
+            let start_bits = env
+                .get_bit_vector(*start)
+                .expect("DynamicBitSlice start should be present");
+            let shifted_bits = gatify_barrel_shifter(
+                &arg_bits,
+                &start_bits,
+                Direction::Right,
+                &format!("dynamic_bit_slice_shift_{}", node.text_id),
+                g8_builder,
+            );
+            // After shifting right by 'start', the desired bits are the LSBs.
+            let result_bits = shifted_bits.get_lsb_slice(0, *width);
+            assert_eq!(result_bits.get_bit_count(), *width);
+            env.add(node_ref, GateOrVec::BitVector(result_bits));
+        }
+        ir::NodePayload::BitSliceUpdate {
+            arg,
+            start,
+            update_value,
+        } => {
+            let arg_bits = env
+                .get_bit_vector(*arg)
+                .expect("BitSliceUpdate arg should be present");
+            let start_bits = env
+                .get_bit_vector(*start)
+                .expect("BitSliceUpdate start should be present");
+            let update_bits = env
+                .get_bit_vector(*update_value)
+                .expect("BitSliceUpdate value should be present");
+
+            let arg_width = arg_bits.get_bit_count();
+            let update_width = update_bits.get_bit_count();
+
+            // Effective number of bits that can be written into `arg_bits`.
+            // Any portion of `update_bits` that would extend beyond the
+            // destination width is silently truncated (mirrors XLS
+            // semantics).
+            let effective_update_width = std::cmp::min(update_width, arg_width);
+
+            // -----------------------------------------------------------------
+            // Build the write mask (ones shifted by `start`).
+            // -----------------------------------------------------------------
+            let ones_effective =
+                g8_builder.replicate(g8_builder.get_true(), effective_update_width);
+
+            // Extend the mask to the full destination width by prepending zeros
+            // (MSBs) so the LSbs align with the slice we intend to write.
+            let zeros_high_count = arg_width - effective_update_width;
+            let ones_ext = if zeros_high_count == 0 {
+                ones_effective.clone()
+            } else {
+                let zeros = AigBitVector::zeros(zeros_high_count);
+                AigBitVector::concat(zeros, ones_effective)
+            };
+
+            let mask = gatify_barrel_shifter(
+                &ones_ext,
+                &start_bits,
+                Direction::Left,
+                &format!("bit_slice_update_mask_{}", node.text_id),
+                g8_builder,
+            );
+
+            // -----------------------------------------------------------------
+            // Prepare the update value (truncate or zero-extend to dest width),
+            // then shift it into position.
+            // -----------------------------------------------------------------
+            let update_trim = if update_width > effective_update_width {
+                // Take only the LSbs that fit into the destination.
+                update_bits.get_lsb_slice(0, effective_update_width)
+            } else {
+                update_bits.clone()
+            };
+
+            let update_ext = if zeros_high_count == 0 {
+                update_trim.clone()
+            } else {
+                let zeros = AigBitVector::zeros(zeros_high_count);
+                AigBitVector::concat(zeros, update_trim)
+            };
+
+            let update_shifted = gatify_barrel_shifter(
+                &update_ext,
+                &start_bits,
+                Direction::Left,
+                &format!("bit_slice_update_value_{}", node.text_id),
+                g8_builder,
+            );
+
+            // -----------------------------------------------------------------
+            // Combine original value with the updated slice.
+            // -----------------------------------------------------------------
+            let mask_not = g8_builder.add_not_vec(&mask);
+            let cleared = g8_builder.add_and_vec(&arg_bits, &mask_not);
+            let inserted = g8_builder.add_and_vec(&update_shifted, &mask);
+            let result_bits = g8_builder.add_or_vec(&cleared, &inserted);
+
+            env.add(node_ref, GateOrVec::BitVector(result_bits));
+        }
+        _ => {
+            todo!("Unsupported node payload {:?}", payload);
+        }
+    }
+}
+
 /// Converts the contents of the given IR function to our "g8" representation
 /// which has gates and vectors of gates.
 fn gatify_internal(
@@ -1212,817 +2017,21 @@ fn gatify_internal(
 
     for node_ref in ir_utils::get_topological(f) {
         let node = &f.get_node(node_ref);
-        let payload = &node.payload;
         log::debug!(
             "Gatifying node {:?} type: {:?} payload: {:?}",
             node_ref,
             node.ty,
-            payload
+            node.payload
         );
-        match payload {
-            ir::NodePayload::GetParam(param_id) => {
-                if env.contains(node_ref) {
-                    continue; // Already inserted above.
-                }
-                // Look up the original parameter node_ref by its ParamId
-                let pr = param_id_to_node_ref
-                    .get(param_id)
-                    .expect("ParamId not found in mapping");
-                let entry = env.get_bit_vector(*pr).unwrap();
-                env.add(node_ref, GateOrVec::BitVector(entry));
-            }
-            ir::NodePayload::ArrayIndex {
-                array,
-                indices,
-                assumed_in_bounds,
-            } => {
-                assert!(
-                    !indices.is_empty(),
-                    "Array index must have at least one index"
-                );
-
-                let mut array_ty = match f.get_node_ty(*array) {
-                    ir::Type::Array(array_ty_data) => array_ty_data,
-                    other => panic!("Expected array type for array_index, got {:?}", other),
-                };
-                let mut array_bits = env.get_bit_vector(*array).unwrap();
-
-                for (i, index_node) in indices.iter().enumerate() {
-                    let index_bits = env.get_bit_vector(*index_node).unwrap();
-                    array_bits = gatify_array_index(
-                        g8_builder,
-                        array_ty,
-                        &array_bits,
-                        &index_bits,
-                        *assumed_in_bounds,
-                    );
-                    if i + 1 < indices.len() {
-                        array_ty = match array_ty.element_type.as_ref() {
-                            ir::Type::Array(next_ty) => next_ty,
-                            other => panic!(
-                                "Expected array type for index dimension {}, got {:?}",
-                                i + 1,
-                                other
-                            ),
-                        };
-                    }
-                }
-
-                env.add(node_ref, GateOrVec::BitVector(array_bits));
-            }
-            ir::NodePayload::ArraySlice {
-                array,
-                start,
-                width,
-            } => {
-                let array_ty = match f.get_node_ty(*array) {
-                    ir::Type::Array(array_ty_data) => array_ty_data,
-                    other => panic!("Expected array type for array_slice, got {:?}", other),
-                };
-                let array_bits = env.get_bit_vector(*array).unwrap();
-                let start_bits = env.get_bit_vector(*start).unwrap();
-                let result = gatify_array_slice(
-                    g8_builder,
-                    array_ty,
-                    &array_bits,
-                    &start_bits,
-                    *width,
-                    node.text_id,
-                );
-                env.add(node_ref, GateOrVec::BitVector(result));
-            }
-            ir::NodePayload::ArrayUpdate {
-                array,
-                value,
-                indices,
-                assumed_in_bounds: _,
-            } => {
-                assert!(
-                    !indices.is_empty(),
-                    "Array update must have at least one index",
-                );
-                let array_ty = match f.get_node_ty(*array) {
-                    ir::Type::Array(array_ty_data) => array_ty_data,
-                    other => panic!("Expected array type for array_update, got {:?}", other),
-                };
-
-                let array_bits = env.get_bit_vector(*array).unwrap();
-                let value_bits = env.get_bit_vector(*value).unwrap();
-                let index_bits: Vec<AigBitVector> = indices
-                    .iter()
-                    .map(|i| env.get_bit_vector(*i).unwrap())
-                    .collect();
-
-                let result_bits = gatify_array_update(
-                    g8_builder,
-                    array_ty,
-                    &array_bits,
-                    &value_bits,
-                    &index_bits,
-                );
-
-                env.add(node_ref, GateOrVec::BitVector(result_bits));
-            }
-            ir::NodePayload::Array(members) => {
-                // Similar to Tuple: flatten all members into a bit vector.
-                // Arrays are conceptually homogeneous, but in bit flattening, we just
-                // concatenate all elements.
-                let mut lsb_to_msb = Vec::new();
-                for member in members.iter().rev() {
-                    let member_bits = env
-                        .get_bit_vector(*member)
-                        .expect("array element should be present");
-                    lsb_to_msb.extend(member_bits.iter_lsb_to_msb().cloned());
-                }
-                let bit_vector = AigBitVector::from_lsb_is_index_0(&lsb_to_msb);
-                env.add(node_ref, GateOrVec::BitVector(bit_vector));
-            }
-            ir::NodePayload::TupleIndex { tuple, index } => {
-                // We have to figure out what bit range the index indicates from the original
-                // tuple's flat bits.
-                let tuple_bits = env.get_bit_vector(*tuple).unwrap();
-                let tuple_ty = f.get_node_ty(*tuple);
-                let StartAndLimit { start, limit } =
-                    tuple_ty.tuple_get_flat_bit_slice_for_index(*index).unwrap();
-                let member_bits = tuple_bits
-                    .iter_lsb_to_msb()
-                    .skip(start)
-                    .take(limit - start)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let bit_vector = AigBitVector::from_lsb_is_index_0(&member_bits);
-                env.add(node_ref, GateOrVec::BitVector(bit_vector));
-            }
-            ir::NodePayload::Tuple(args) => {
-                // Tuples, similar to arrays, need to answer the question: "which member is
-                // least significant when flattened?"
-                //
-                // When we perform: `tuple(a, b, c)` does `a` go in the lower bits or does `c`?
-                //
-                // For concat we have `concat(a, b, c)` place `a` in the upper bits such that
-                // the result is: `a_msb, ..., a_lsb, b_msb, ..., b_lsb, c_msb,
-                // ..., c_lsb`. So we take the same approach for tuples -- we
-                // iterate the arguments in reverse order to make sure c's lsb
-                // comes first and build from lsb to msb.
-
-                let mut lsb_to_msb = Vec::new();
-                for arg in args.iter().rev() {
-                    let arg_gates = env
-                        .get_bit_vector(*arg)
-                        .expect("tuple arg should be present");
-                    lsb_to_msb.extend(arg_gates.iter_lsb_to_msb().cloned());
-                }
-                let bit_vector = AigBitVector::from_lsb_is_index_0(&lsb_to_msb);
-                env.add(node_ref, GateOrVec::BitVector(bit_vector));
-            }
-            ir::NodePayload::Sel {
-                selector,
-                cases,
-                default,
-            } => {
-                // Note: sel is basically an array index into the cases where we pick default if
-                // the selector value is OOB.
-                let selector_bits = env
-                    .get_bit_vector(*selector)
-                    .expect("selector should be present");
-                let cases: Vec<AigBitVector> = cases
-                    .iter()
-                    .map(|c| env.get_bit_vector(*c).expect("case should be present"))
-                    .collect::<Vec<AigBitVector>>();
-                let default_bits =
-                    default.map(|d| env.get_bit_vector(d).expect("default should be present"));
-
-                let gates = gatify_sel(g8_builder, &selector_bits, &cases, default_bits);
-
-                // Tag the result bits
-                for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(gate.node, format!("sel_{}_output_bit_{}", node.text_id, i));
-                }
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Literal(literal) => {
-                let bit_vector = flatten_literal_to_bits(literal, &node.ty, g8_builder);
-                env.add(node_ref, GateOrVec::BitVector(bit_vector));
-            }
-
-            // -- unary operations
-            ir::NodePayload::Unop(ir::Unop::Not, arg) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("unop arg should be present");
-                let gates: AigBitVector = g8_builder.add_not_vec(&arg_gates);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Unop(ir::Unop::Neg, arg) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("unop arg should be present");
-                let not_arg = g8_builder.add_not_vec(&arg_gates);
-                let zero = g8_builder.add_literal(
-                    &xlsynth::IrBits::make_ubits(arg_gates.get_bit_count(), 0).unwrap(),
-                );
-                let neg_tag = format!("neg_{}", node.text_id);
-                let (_, result) = gatify_add_with_mapping(
-                    options.adder_mapping,
-                    &not_arg,
-                    &zero,
-                    g8_builder.get_true(),
-                    Some(&neg_tag),
-                    g8_builder,
-                );
-                env.add(node_ref, GateOrVec::BitVector(result));
-            }
-            ir::NodePayload::Unop(ir::Unop::Identity, arg) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("unop arg should be present");
-                env.add(node_ref, GateOrVec::BitVector(arg_gates));
-            }
-            ir::NodePayload::Unop(ir::Unop::Reverse, arg) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("unop arg should be present");
-                let result_gates: Vec<AigOperand> = arg_gates
-                    .iter_lsb_to_msb()
-                    .rev()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                env.add(
-                    node_ref,
-                    GateOrVec::BitVector(AigBitVector::from_lsb_is_index_0(&result_gates)),
-                );
-            }
-
-            // -- bitwise reductions
-            ir::NodePayload::Unop(ir::Unop::OrReduce, arg) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("unop arg should be present");
-                let gate: AigOperand = g8_builder.add_or_reduce(&arg_gates, ReductionKind::Tree);
-                g8_builder.add_tag(gate.node, format!("or_reduce_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Unop(ir::Unop::AndReduce, arg) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("unop arg should be present");
-                let gate: AigOperand = g8_builder.add_and_reduce(&arg_gates, ReductionKind::Tree);
-                g8_builder.add_tag(gate.node, format!("and_reduce_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Unop(ir::Unop::XorReduce, arg) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("unop arg should be present");
-                let gate: AigOperand = g8_builder.add_xor_reduce(&arg_gates, ReductionKind::Tree);
-                g8_builder.add_tag(gate.node, format!("xor_reduce_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-
-            // -- binary operations
-            ir::NodePayload::Binop(ir::Binop::Eq, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("eq lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("eq rhs should be present");
-                assert_eq!(a_bits.get_bit_count(), b_bits.get_bit_count());
-                let gate: AigOperand = g8_builder.add_eq_vec(&a_bits, &b_bits, ReductionKind::Tree);
-                g8_builder.add_tag(gate.node, format!("eq_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Binop(ir::Binop::Ne, a, b) => {
-                let a_gate_refs = env.get_bit_vector(*a).expect("ne lhs should be present");
-                let b_gate_refs = env.get_bit_vector(*b).expect("ne rhs should be present");
-                log::debug!(
-                    "ne lhs bits[{}] rhs bits[{}]",
-                    a_gate_refs.get_bit_count(),
-                    b_gate_refs.get_bit_count()
-                );
-                let gate: AigOperand =
-                    g8_builder.add_ne_vec(&a_gate_refs, &b_gate_refs, ReductionKind::Tree);
-                g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Binop(ir::Binop::Ult, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("ult lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("ult rhs should be present");
-                let gate: AigOperand =
-                    gatify_ult_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
-                g8_builder.add_tag(gate.node, format!("ult_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Binop(ir::Binop::Ugt, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("ugt lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("ugt rhs should be present");
-                let gate: AigOperand =
-                    gatify_ugt_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
-                g8_builder.add_tag(gate.node, format!("ugt_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Binop(ir::Binop::Uge, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("uge lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("uge rhs should be present");
-                let gate: AigOperand =
-                    gatify_uge_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
-                g8_builder.add_tag(gate.node, format!("uge_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Binop(ir::Binop::Ule, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("ule lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("ule rhs should be present");
-                let gate = gatify_ule_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
-                g8_builder.add_tag(gate.node, format!("ule_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-
-            // signed comparisons
-            ir::NodePayload::Binop(ir::Binop::Sgt, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("sgt lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("sgt rhs should be present");
-                let gate = gatify_scmp(
-                    g8_builder,
-                    node.text_id,
-                    &a_bits,
-                    &b_bits,
-                    options.adder_mapping,
-                    CmpKind::Gt,
-                    false,
-                );
-                g8_builder.add_tag(gate.node, format!("sgt_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Binop(ir::Binop::Sge, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("sge lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("sge rhs should be present");
-                let gate = gatify_scmp(
-                    g8_builder,
-                    node.text_id,
-                    &a_bits,
-                    &b_bits,
-                    options.adder_mapping,
-                    CmpKind::Gt,
-                    true,
-                );
-                g8_builder.add_tag(gate.node, format!("sge_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Binop(ir::Binop::Slt, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("slt lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("slt rhs should be present");
-                let gate = gatify_scmp(
-                    g8_builder,
-                    node.text_id,
-                    &a_bits,
-                    &b_bits,
-                    options.adder_mapping,
-                    CmpKind::Lt,
-                    false,
-                );
-                g8_builder.add_tag(gate.node, format!("slt_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-            ir::NodePayload::Binop(ir::Binop::Sle, a, b) => {
-                let a_bits = env.get_bit_vector(*a).expect("sle lhs should be present");
-                let b_bits = env.get_bit_vector(*b).expect("sle rhs should be present");
-                let gate = gatify_scmp(
-                    g8_builder,
-                    node.text_id,
-                    &a_bits,
-                    &b_bits,
-                    options.adder_mapping,
-                    CmpKind::Lt,
-                    true,
-                );
-                g8_builder.add_tag(gate.node, format!("sle_{}", node.text_id));
-                env.add(node_ref, GateOrVec::Gate(gate));
-            }
-
-            // -- nary operations
-            ir::NodePayload::Nary(ir::NaryOp::And, args) => {
-                let arg_gates: Vec<AigBitVector> = args
-                    .iter()
-                    .map(|arg| env.get_bit_vector(*arg).expect("and arg should be present"))
-                    .collect();
-                let gates: AigBitVector =
-                    g8_builder.add_and_vec_nary(arg_gates.as_slice(), ReductionKind::Tree);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Nary(ir::NaryOp::Nor, args) => {
-                let arg_gates: Vec<AigBitVector> = args
-                    .iter()
-                    .map(|arg| env.get_bit_vector(*arg).expect("nor arg should be present"))
-                    .collect();
-                let gates: AigBitVector =
-                    g8_builder.add_or_vec_nary(&arg_gates, ReductionKind::Tree);
-                let gates = g8_builder.add_not_vec(&gates);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Nary(ir::NaryOp::Or, args) => {
-                let arg_gates: Vec<AigBitVector> = args
-                    .iter()
-                    .map(|arg| env.get_bit_vector(*arg).expect("or arg should be present"))
-                    .collect();
-                let gates: AigBitVector =
-                    g8_builder.add_or_vec_nary(&arg_gates, ReductionKind::Tree);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Nary(ir::NaryOp::Xor, args) => {
-                let arg_gates: Vec<AigBitVector> = args
-                    .iter()
-                    .map(|arg| env.get_bit_vector(*arg).expect("xor arg should be present"))
-                    .collect();
-                let gates: AigBitVector =
-                    g8_builder.add_xor_vec_nary(&arg_gates, ReductionKind::Tree);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Nary(ir::NaryOp::Nand, args) => {
-                let arg_gates: Vec<AigBitVector> = args
-                    .iter()
-                    .map(|arg| {
-                        env.get_bit_vector(*arg)
-                            .expect("nand arg should be present")
-                    })
-                    .collect();
-                let gates: AigBitVector =
-                    g8_builder.add_and_vec_nary(&arg_gates, ReductionKind::Tree);
-                let gates = g8_builder.add_not_vec(&gates);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Nary(ir::NaryOp::Concat, args) => {
-                let arg_bits: Vec<AigBitVector> = args
-                    .iter()
-                    .map(|arg| {
-                        env.get_bit_vector(*arg)
-                            .expect("concat arg should be present")
-                    })
-                    .collect();
-
-                let bits = gatify_concat(&arg_bits);
-
-                let output_bit_count = node.ty.bit_count();
-                assert_eq!(bits.get_bit_count(), output_bit_count);
-                for (i, bit) in bits.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(
-                        bit.node,
-                        format!("concat_{}_output_bit_{}", node.text_id, i),
-                    );
-                }
-                env.add(node_ref, GateOrVec::BitVector(bits));
-            }
-            ir::NodePayload::PrioritySel {
-                selector,
-                cases,
-                default,
-            } => {
-                let output_bit_count = node.ty.bit_count();
-                let selector_bits = env
-                    .get_bit_vector(*selector)
-                    .expect("selector should be present");
-                let cases: Vec<AigBitVector> = cases
-                    .iter()
-                    .map(|c| env.get_bit_vector(*c).expect("case should be present"))
-                    .collect::<Vec<AigBitVector>>();
-                let default_bits =
-                    default.map(|d| env.get_bit_vector(d).expect("default should be present"));
-
-                let gates = gatify_priority_sel(
-                    g8_builder,
-                    output_bit_count,
-                    selector_bits,
-                    cases.as_slice(),
-                    default_bits,
-                );
-                // Tag the result.
-                for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(
-                        gate.node,
-                        format!("priority_sel_{}_output_bit_{}", node.text_id, i),
-                    );
-                }
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::OneHotSel { selector, cases } => {
-                let selector_bits = env
-                    .get_bit_vector(*selector)
-                    .expect("selector should be present");
-                let cases: Vec<AigBitVector> = cases
-                    .iter()
-                    .map(|c| env.get_bit_vector(*c).expect("case should be present"))
-                    .collect::<Vec<AigBitVector>>();
-                let gates = gatify_one_hot_select(g8_builder, &selector_bits, &cases);
-                // Tag the result.
-                for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(
-                        gate.node,
-                        format!("one_hot_select_{}_output_bit_{}", node.text_id, i),
-                    );
-                }
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Binop(ir::Binop::Add, a, b) => {
-                let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
-                let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
-                assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
-                let add_tag = format!("add_{}", node.text_id);
-                let (_c_out, gates) = gatify_add_with_mapping(
-                    options.adder_mapping,
-                    &a_gate_refs,
-                    &b_gate_refs,
-                    g8_builder.get_false(),
-                    Some(&add_tag),
-                    g8_builder,
-                );
-                assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Binop(ir::Binop::Sub, a, b) => {
-                let a_gate_refs = env.get_bit_vector(*a).expect("sub lhs should be present");
-                let b_gate_refs = env.get_bit_vector(*b).expect("sub rhs should be present");
-                assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
-                let b_complement = g8_builder.add_not_vec(&b_gate_refs);
-                let sub_tag = format!("sub_{}", node.text_id);
-                let (_c_out, gates) = gatify_add_with_mapping(
-                    options.adder_mapping,
-                    &a_gate_refs,
-                    &b_complement,
-                    g8_builder.get_true(),
-                    Some(&sub_tag),
-                    g8_builder,
-                );
-                let output_bit_count = node.ty.bit_count();
-                assert_eq!(gates.get_bit_count(), output_bit_count);
-                for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(gate.node, format!("sub_{}_output_bit_{}", node.text_id, i));
-                }
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::BitSlice { arg, start, width } => {
-                let value_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("bit_slice value should be present");
-                let slice_gates = value_gates.get_lsb_slice(*start, *width);
-                assert_eq!(slice_gates.get_bit_count(), *width);
-                env.add(node_ref, GateOrVec::BitVector(slice_gates));
-            }
-            ir::NodePayload::ZeroExt { arg, new_bit_count } => {
-                let arg_bits = env
-                    .get_bit_vector(*arg)
-                    .expect("zero_ext value should be present");
-                let result_bits = gatify_zero_ext(*new_bit_count, &arg_bits);
-                env.add(node_ref, GateOrVec::BitVector(result_bits));
-            }
-            ir::NodePayload::SignExt { arg, new_bit_count } => {
-                let arg_bits = env
-                    .get_bit_vector(*arg)
-                    .expect("sign_ext value should be present");
-                let result_bits =
-                    gatify_sign_ext(g8_builder, node.text_id, *new_bit_count, &arg_bits);
-                env.add(node_ref, GateOrVec::BitVector(result_bits));
-            }
-            ir::NodePayload::Decode { arg, width } => {
-                assert_eq!(*width, node.ty.bit_count());
-                let input_bits = env
-                    .get_bit_vector(*arg)
-                    .expect("decode arg should be present");
-                let bits = gatify_decode(g8_builder, *width, &input_bits);
-                assert_eq!(bits.get_bit_count(), *width);
-                for (i, bit) in bits.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(
-                        bit.node,
-                        format!("decode_{}_output_bit_{}", node.text_id, i),
-                    );
-                }
-                env.add(node_ref, GateOrVec::BitVector(bits));
-            }
-            ir::NodePayload::Encode { arg } => {
-                log::debug!("gatifying encode; ty: {}", node.ty);
-                let arg_bits = env
-                    .get_bit_vector(*arg)
-                    .expect("encode arg should be present");
-                let result_bits = gatify_encode(g8_builder, node.ty.bit_count(), &arg_bits);
-                assert_eq!(result_bits.get_bit_count(), node.ty.bit_count());
-                for (i, gate) in result_bits.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(
-                        gate.node,
-                        format!("encode_{}_output_bit_{}", node.text_id, i),
-                    );
-                }
-                env.add(node_ref, GateOrVec::BitVector(result_bits));
-            }
-            ir::NodePayload::Binop(ir::Binop::Shrl, arg, amount) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("shrl arg should be present");
-                let amount_gates = env
-                    .get_bit_vector(*amount)
-                    .expect("shrl amount should be present");
-                let result_gates = gatify_barrel_shifter(
-                    &arg_gates,
-                    &amount_gates,
-                    Direction::Right,
-                    &format!("shrl_{}", node.text_id),
-                    g8_builder,
-                );
-                env.add(node_ref, GateOrVec::BitVector(result_gates));
-            }
-            ir::NodePayload::Binop(ir::Binop::Shra, arg, amount) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("shra arg should be present");
-                let amount_gates = env
-                    .get_bit_vector(*amount)
-                    .expect("shra amount should be present");
-
-                let result = gatify_shra(g8_builder, &arg_gates, &amount_gates, node.text_id);
-                env.add(node_ref, GateOrVec::BitVector(result));
-            }
-            ir::NodePayload::Binop(ir::Binop::Shll, arg, amount) => {
-                let arg_gates = env
-                    .get_bit_vector(*arg)
-                    .expect("shll arg should be present");
-                let amount_gates = env
-                    .get_bit_vector(*amount)
-                    .expect("shll amount should be present");
-                let result_gates = gatify_barrel_shifter(
-                    &arg_gates,
-                    &amount_gates,
-                    Direction::Left,
-                    &format!("shll_{}", node.text_id),
-                    g8_builder,
-                );
-                env.add(node_ref, GateOrVec::BitVector(result_gates));
-            }
-            ir::NodePayload::OneHot { arg, lsb_prio } => {
-                let bits = env
-                    .get_bit_vector(*arg)
-                    .expect("one_hot arg should be present");
-                let bit_vector = gatify_one_hot(g8_builder, &bits, *lsb_prio);
-                for (lsb_i, gate) in bit_vector.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(
-                        gate.node,
-                        format!("one_hot_{}_output_bit_{}", node.text_id, lsb_i),
-                    );
-                }
-                env.add(node_ref, GateOrVec::BitVector(bit_vector));
-            }
-            ir::NodePayload::Binop(ir::Binop::Umul | ir::Binop::Smul, lhs, rhs) => {
-                let output_bit_count = node.ty.bit_count();
-                let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
-                let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
-                let signedness =
-                    if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smul, ..)) {
-                        Signedness::Signed
-                    } else {
-                        Signedness::Unsigned
-                    };
-                let gates = gatify_mul(
-                    &lhs_bits,
-                    &rhs_bits,
-                    output_bit_count,
-                    signedness,
-                    g8_builder,
-                );
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Binop(ir::Binop::Udiv | ir::Binop::Sdiv, lhs, rhs) => {
-                let lhs_bits = env.get_bit_vector(*lhs).expect("div lhs should be present");
-                let rhs_bits = env.get_bit_vector(*rhs).expect("div rhs should be present");
-                let signedness =
-                    if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Sdiv, ..)) {
-                        Signedness::Signed
-                    } else {
-                        Signedness::Unsigned
-                    };
-                let gates = gatify_div(&lhs_bits, &rhs_bits, signedness, g8_builder);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Binop(ir::Binop::Umod | ir::Binop::Smod, lhs, rhs) => {
-                let lhs_bits = env.get_bit_vector(*lhs).expect("mod lhs should be present");
-                let rhs_bits = env.get_bit_vector(*rhs).expect("mod rhs should be present");
-                let signedness =
-                    if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smod, ..)) {
-                        Signedness::Signed
-                    } else {
-                        Signedness::Unsigned
-                    };
-                let gates = gatify_mod(&lhs_bits, &rhs_bits, signedness, g8_builder);
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-            ir::NodePayload::Assert { .. }
-            | ir::NodePayload::AfterAll(..)
-            | ir::NodePayload::Trace { .. }
-            | ir::NodePayload::Nil => {
-                // These IR nodes manipulate tokens or have no semantic
-                // representation in gates. Map them to a zero-width bit
-                // vector so any subsequent references (e.g. via tuples) have
-                // a placeholder value.
-                env.add(node_ref, GateOrVec::BitVector(AigBitVector::zeros(0)));
-            }
-            ir::NodePayload::DynamicBitSlice { arg, start, width } => {
-                let arg_bits = env
-                    .get_bit_vector(*arg)
-                    .expect("DynamicBitSlice arg should be present");
-                let start_bits = env
-                    .get_bit_vector(*start)
-                    .expect("DynamicBitSlice start should be present");
-                let shifted_bits = gatify_barrel_shifter(
-                    &arg_bits,
-                    &start_bits,
-                    Direction::Right,
-                    &format!("dynamic_bit_slice_shift_{}", node.text_id),
-                    g8_builder,
-                );
-                // After shifting right by 'start', the desired bits are the LSBs.
-                let result_bits = shifted_bits.get_lsb_slice(0, *width);
-                assert_eq!(result_bits.get_bit_count(), *width);
-                env.add(node_ref, GateOrVec::BitVector(result_bits));
-            }
-            ir::NodePayload::BitSliceUpdate {
-                arg,
-                start,
-                update_value,
-            } => {
-                let arg_bits = env
-                    .get_bit_vector(*arg)
-                    .expect("BitSliceUpdate arg should be present");
-                let start_bits = env
-                    .get_bit_vector(*start)
-                    .expect("BitSliceUpdate start should be present");
-                let update_bits = env
-                    .get_bit_vector(*update_value)
-                    .expect("BitSliceUpdate value should be present");
-
-                let arg_width = arg_bits.get_bit_count();
-                let update_width = update_bits.get_bit_count();
-
-                // Effective number of bits that can be written into `arg_bits`.
-                // Any portion of `update_bits` that would extend beyond the
-                // destination width is silently truncated (mirrors XLS
-                // semantics).
-                let effective_update_width = std::cmp::min(update_width, arg_width);
-
-                // -----------------------------------------------------------------
-                // Build the write mask (ones shifted by `start`).
-                // -----------------------------------------------------------------
-                let ones_effective =
-                    g8_builder.replicate(g8_builder.get_true(), effective_update_width);
-
-                // Extend the mask to the full destination width by prepending zeros
-                // (MSBs) so the LSbs align with the slice we intend to write.
-                let zeros_high_count = arg_width - effective_update_width;
-                let ones_ext = if zeros_high_count == 0 {
-                    ones_effective.clone()
-                } else {
-                    let zeros = AigBitVector::zeros(zeros_high_count);
-                    AigBitVector::concat(zeros, ones_effective)
-                };
-
-                let mask = gatify_barrel_shifter(
-                    &ones_ext,
-                    &start_bits,
-                    Direction::Left,
-                    &format!("bit_slice_update_mask_{}", node.text_id),
-                    g8_builder,
-                );
-
-                // -----------------------------------------------------------------
-                // Prepare the update value (truncate or zero-extend to dest width),
-                // then shift it into position.
-                // -----------------------------------------------------------------
-                let update_trim = if update_width > effective_update_width {
-                    // Take only the LSbs that fit into the destination.
-                    update_bits.get_lsb_slice(0, effective_update_width)
-                } else {
-                    update_bits.clone()
-                };
-
-                let update_ext = if zeros_high_count == 0 {
-                    update_trim.clone()
-                } else {
-                    let zeros = AigBitVector::zeros(zeros_high_count);
-                    AigBitVector::concat(zeros, update_trim)
-                };
-
-                let update_shifted = gatify_barrel_shifter(
-                    &update_ext,
-                    &start_bits,
-                    Direction::Left,
-                    &format!("bit_slice_update_value_{}", node.text_id),
-                    g8_builder,
-                );
-
-                // -----------------------------------------------------------------
-                // Combine original value with the updated slice.
-                // -----------------------------------------------------------------
-                let mask_not = g8_builder.add_not_vec(&mask);
-                let cleared = g8_builder.add_and_vec(&arg_bits, &mask_not);
-                let inserted = g8_builder.add_and_vec(&update_shifted, &mask);
-                let result_bits = g8_builder.add_or_vec(&cleared, &inserted);
-
-                env.add(node_ref, GateOrVec::BitVector(result_bits));
-            }
-            _ => {
-                todo!("Unsupported node payload {:?}", payload);
-            }
-        }
+        gatify_node(
+            f,
+            node_ref,
+            node,
+            g8_builder,
+            env,
+            options,
+            &param_id_to_node_ref,
+        );
     }
     // Resolve the outputs and place them into the builder.
     let ret_node_ref = match f.ret_node_ref {
@@ -2099,6 +2108,90 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String
         gate_fn,
         lowering_map,
     })
+}
+
+pub fn gatify_node_as_fn(
+    f: &ir::Fn,
+    node_ref: ir::NodeRef,
+    options: &GatifyOptions,
+) -> Result<GateFn, String> {
+    let node = f.get_node(node_ref);
+    let mut g8_builder = GateBuilder::new(
+        format!("{}_node_{}", f.name, node.text_id),
+        GateBuilderOptions {
+            fold: options.fold,
+            hash: options.hash,
+        },
+    );
+    let mut env = GateEnv::new();
+
+    // Precompute a map from parameter id to its NodeRef in f.nodes. This is used
+    // when lowering GetParam nodes.
+    let mut param_id_to_node_ref: HashMap<ParamId, ir::NodeRef> = HashMap::new();
+    for (i, param) in f.params.iter().enumerate() {
+        let param_ref = ir::NodeRef { index: i + 1 };
+        assert!(
+            f.nodes[i + 1].payload == ir::NodePayload::GetParam(param.id),
+            "expected param node at index {}",
+            i + 1
+        );
+        param_id_to_node_ref.insert(param.id, param_ref);
+    }
+
+    // Seed the direct operands of this node as independent GateFn inputs.
+    let operands: Vec<ir::NodeRef> = ir_utils::operands(&node.payload);
+    for (i, operand_ref) in operands.iter().enumerate() {
+        if env.contains(*operand_ref) {
+            continue;
+        }
+        let operand_ty = f.get_node_ty(*operand_ref);
+        let width = operand_ty.bit_count();
+        let input_bits = g8_builder.add_input(format!("op{}_n{}", i, operand_ref.index), width);
+        env.add(*operand_ref, GateOrVec::BitVector(input_bits));
+    }
+
+    // Lower the node into env/builder and emit it as the single output.
+    match &node.payload {
+        ir::NodePayload::GetParam(param_id) => {
+            let param = f
+                .params
+                .iter()
+                .find(|p| p.id == *param_id)
+                .ok_or_else(|| format!("GetParam refers to missing ParamId {:?}", param_id))?;
+            let bits = g8_builder.add_input(param.name.clone(), param.ty.bit_count());
+            g8_builder.add_output("output_value".to_string(), bits);
+            return Ok(g8_builder.build());
+        }
+        ir::NodePayload::Literal(literal) => {
+            let bits = flatten_literal_to_bits(literal, &node.ty, &mut g8_builder);
+            g8_builder.add_output("output_value".to_string(), bits);
+            return Ok(g8_builder.build());
+        }
+        ir::NodePayload::Nil
+        | ir::NodePayload::Assert { .. }
+        | ir::NodePayload::AfterAll(..)
+        | ir::NodePayload::Trace { .. } => {
+            g8_builder.add_output(
+                "output_value".to_string(),
+                AigBitVector::zeros(node.ty.bit_count()),
+            );
+            return Ok(g8_builder.build());
+        }
+        _ => {}
+    }
+
+    gatify_node(
+        f,
+        node_ref,
+        node,
+        &mut g8_builder,
+        &mut env,
+        options,
+        &param_id_to_node_ref,
+    );
+    let output_bits = env.get_bit_vector(node_ref)?;
+    g8_builder.add_output("output_value".to_string(), output_bits);
+    Ok(g8_builder.build())
 }
 
 #[cfg(test)]

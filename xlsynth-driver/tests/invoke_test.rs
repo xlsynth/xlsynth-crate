@@ -1931,6 +1931,113 @@ fn test_ir2gates_quiet_json_output_no_toggle() {
 }
 
 #[test]
+fn test_ir2gates_quiet_json_output_independent_op_stats() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let dslx = "fn main(a: u32, b: u32) -> u32 { a & b }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("main.x");
+    let ir_path = temp_dir.path().join("main.ir");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    // dslx2ir
+    let dslx2ir_output = std::process::Command::new(command_path)
+        .arg("dslx2ir")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .output()
+        .unwrap();
+    assert!(dslx2ir_output.status.success());
+    std::fs::write(&ir_path, &dslx2ir_output.stdout).unwrap();
+
+    // ir2gates --quiet with independent-op stats
+    let mut command = std::process::Command::new(command_path);
+    command
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--quiet=true")
+        .arg("--fraig=false")
+        .arg("--emit-independent-op-stats=true");
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        command.env("RUST_LOG", rust_log);
+    }
+    let ir2gates_output = command.output().unwrap();
+    assert!(
+        ir2gates_output.status.success(),
+        "ir2gates failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ir2gates_output.stdout),
+        String::from_utf8_lossy(&ir2gates_output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&ir2gates_output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("Output is not valid JSON");
+
+    let ind = &json["independent_op_stats"];
+    assert!(ind.is_object(), "independent_op_stats should be present");
+    for key in [
+        "independent_sum_live_nodes",
+        "independent_sum_deepest_path",
+        "independent_max_live_nodes",
+        "independent_max_deepest_path",
+        "independent_critical_path_depth",
+        "independent_included_node_count",
+    ] {
+        assert!(ind[key].is_number(), "{} should be a number", key);
+    }
+
+    let max_depth = ind["independent_max_deepest_path"].as_u64().unwrap();
+    let crit_depth = ind["independent_critical_path_depth"].as_u64().unwrap();
+    let sum_depth = ind["independent_sum_deepest_path"].as_u64().unwrap();
+    assert!(
+        crit_depth >= max_depth,
+        "critical depth should be at least max per-node depth"
+    );
+    assert!(
+        crit_depth <= sum_depth,
+        "critical depth should be at most sum of per-node depths"
+    );
+
+    let per_node = ind["per_node"].as_array().unwrap();
+    assert!(!per_node.is_empty(), "per_node should be non-empty");
+    assert_eq!(
+        ind["independent_included_node_count"].as_u64().unwrap() as usize,
+        per_node.len()
+    );
+
+    for entry in per_node.iter() {
+        assert!(entry["node_index"].is_number());
+        assert!(entry["text_id"].is_number());
+        assert!(entry["live_nodes"].is_number());
+        assert!(entry["deepest_path"].is_number());
+        let op = entry["op"].as_str().unwrap().to_lowercase();
+        for banned in [
+            "getparam",
+            "literal",
+            "nil",
+            "not(",
+            "identity",
+            "tuple",
+            "tuple_index",
+            "array",
+            "concat",
+            "bit_slice",
+            "zero_ext",
+            "sign_ext",
+        ] {
+            assert!(
+                !op.contains(banned),
+                "excluded payload kind should not appear in per_node list: {}",
+                banned
+            );
+        }
+    }
+}
+
+#[test]
 fn test_ir2gates_output_json_file() {
     let _ = env_logger::builder().is_test(true).try_init();
     let dslx = "fn main(a: u32, b: u32) -> u32 { a & b }";

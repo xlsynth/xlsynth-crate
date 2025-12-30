@@ -31,6 +31,7 @@ fn ir2gates(
     hash: bool,
     adder_mapping: AdderMapping,
     fraig: bool,
+    emit_independent_op_stats: bool,
     toggle_sample_count: usize,
     toggle_sample_seed: u64,
     compute_graph_logical_effort: bool,
@@ -47,6 +48,7 @@ fn ir2gates(
         hash,
         adder_mapping,
         fraig,
+        emit_independent_op_stats,
         quiet,
         emit_netlist: false,
         toggle_sample_count,
@@ -57,7 +59,7 @@ fn ir2gates(
         fraig_max_iterations,
         fraig_sim_samples,
     };
-    let stats = process_ir_path::process_ir_path(input_file, &options);
+    let stats = process_ir_path::process_ir_path_for_cli(input_file, &options);
     if quiet {
         serde_json::to_writer(std::io::stdout(), &stats).unwrap();
         println!();
@@ -100,6 +102,14 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("true") => true,
         Some("false") => false,
         _ => true, // default for fraig is true
+    };
+    let emit_independent_op_stats = match matches
+        .get_one::<String>("emit-independent-op-stats")
+        .map(|s| s.as_str())
+    {
+        Some("true") => true,
+        Some("false") => false,
+        _ => false,
     };
     let toggle_sample_count = matches
         .get_one::<String>("toggle_sample_count")
@@ -177,6 +187,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         hash,
         adder_mapping,
         fraig,
+        emit_independent_op_stats,
         toggle_sample_count,
         toggle_sample_seed,
         compute_graph_logical_effort,
@@ -325,6 +336,7 @@ fn ir_to_gatefn_with_stats(
         graph_logical_effort_worst_case_delay,
         fraig_did_converge,
         fraig_iteration_stats,
+        independent_op_stats: None,
     };
 
     (gate_fn, summary_stats)

@@ -1010,7 +1010,11 @@ fn main() {
                         .help("Write the JSON summary to PATH")
                         .action(clap::ArgAction::Set),
                 )
-                .add_ir2g8r_flags(),
+                .add_ir2g8r_flags()
+                .add_bool_arg(
+                    "emit-independent-op-stats",
+                    "Emit independent-op (per-node) GateFn stats; can be expensive",
+                ),
         )
         .subcommand(
             clap::Command::new("ir2g8r")
