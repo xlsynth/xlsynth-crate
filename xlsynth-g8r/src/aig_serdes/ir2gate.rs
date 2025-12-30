@@ -182,6 +182,7 @@ fn gatify_array_slice(
     start_bits: &AigBitVector,
     width: usize,
     text_id: usize,
+    mul_adder_mapping: AdderMapping,
 ) -> AigBitVector {
     let e_bits = array_ty.element_type.bit_count();
     let n_elems = array_ty.element_count;
@@ -236,7 +237,7 @@ fn gatify_array_slice(
         &start_ext,
         &e_ext,
         start_scaled_w,
-        AdderMapping::default(),
+        mul_adder_mapping,
         gb,
     );
 
@@ -1268,6 +1269,9 @@ fn gatify_node(
             };
             let array_bits = env.get_bit_vector(*array).unwrap();
             let start_bits = env.get_bit_vector(*start).unwrap();
+            let mul_adder_mapping = options
+                .mul_adder_mapping
+                .unwrap_or(options.adder_mapping);
             let result = gatify_array_slice(
                 g8_builder,
                 array_ty,
@@ -1275,6 +1279,7 @@ fn gatify_node(
                 &start_bits,
                 *width,
                 node.text_id,
+                mul_adder_mapping,
             );
             env.add(node_ref, GateOrVec::BitVector(result));
         }
