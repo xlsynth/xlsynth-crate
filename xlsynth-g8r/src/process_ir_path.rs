@@ -108,6 +108,7 @@ pub struct Options {
     pub fold: bool,
     pub hash: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
+    pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub fraig: bool,
     pub emit_independent_op_stats: bool,
 
@@ -166,6 +167,7 @@ pub fn process_ir_path_for_cli(
             fold: options.fold,
             hash: options.hash,
             adder_mapping: options.adder_mapping,
+            mul_adder_mapping: options.mul_adder_mapping,
             check_equivalence: false, // Check is done below if requested
         },
     )
@@ -177,6 +179,7 @@ pub fn process_ir_path_for_cli(
             fold: options.fold,
             hash: options.hash,
             adder_mapping: options.adder_mapping,
+            mul_adder_mapping: options.mul_adder_mapping,
             check_equivalence: false,
         };
         let mut per_node: Vec<IndependentOpEntry> = Vec::new();

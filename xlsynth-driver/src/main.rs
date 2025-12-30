@@ -295,6 +295,16 @@ impl AppExt for clap::Command {
                     .default_value(DEFAULT_ADDER_MAPPING.as_str())
                     .action(clap::ArgAction::Set),
             )
+            .arg(
+                clap::Arg::new("mul_adder_mapping")
+                    .long("mul-adder-mapping")
+                    .value_name("ADDER_MAPPING")
+                    .help(
+                        "Optional override for the adder mapping strategy used inside multipliers. If not set, inherits --adder-mapping.",
+                    )
+                    .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
+                    .action(clap::ArgAction::Set),
+            )
             .add_bool_arg("fraig", "Run fraig optimization")
             .arg(
                 clap::Arg::new("fraig_max_iterations")
