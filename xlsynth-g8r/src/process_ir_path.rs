@@ -23,6 +23,7 @@ use crate::check_equivalence;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_utils;
 
 #[derive(Debug, serde::Serialize)]
 pub struct Ir2GatesSummaryStats {
@@ -35,6 +36,68 @@ pub struct Ir2GatesSummaryStats {
     pub graph_logical_effort_worst_case_delay: Option<f64>,
     pub fraig_did_converge: Option<DidConverge>,
     pub fraig_iteration_stats: Option<Vec<FraigIterationStat>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub independent_op_stats: Option<IndependentOpStats>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct IndependentOpEntry {
+    pub node_index: usize,
+    pub text_id: usize,
+    pub op: String,
+    pub live_nodes: usize,
+    pub deepest_path: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct IndependentOpStats {
+    pub independent_sum_live_nodes: usize,
+    pub independent_sum_deepest_path: usize,
+    pub independent_max_live_nodes: usize,
+    pub independent_max_deepest_path: usize,
+    pub independent_critical_path_depth: usize,
+    pub independent_included_node_count: usize,
+    pub per_node: Vec<IndependentOpEntry>,
+}
+
+fn independent_live_nodes_excluding_params(g: &gate::GateFn) -> usize {
+    let id_to_use_count = get_id_to_use_count(g);
+    id_to_use_count
+        .keys()
+        .filter(|r| !matches!(g.gates[r.id], gate::AigNode::Input { .. }))
+        .count()
+}
+
+fn independent_deepest_path_excluding_params(g: &gate::GateFn) -> usize {
+    // We want a depth metric that matches the AIG mental model: NOT is free and
+    // inputs are not logic levels. We therefore count only AND nodes along the
+    // deepest path.
+    let id_to_use_count = get_id_to_use_count(g);
+    let live_nodes: Vec<gate::AigRef> = id_to_use_count.keys().cloned().collect();
+    let depth_stats = get_gate_depth(g, &live_nodes);
+    depth_stats
+        .deepest_path
+        .iter()
+        .filter(|r| matches!(g.gates[r.id], gate::AigNode::And2 { .. }))
+        .count()
+}
+
+fn should_skip_independent_op_stats(payload: &ir::NodePayload) -> bool {
+    match payload {
+        ir::NodePayload::GetParam(_) => true,
+        ir::NodePayload::Literal(_) => true,
+        ir::NodePayload::Nil => true,
+        ir::NodePayload::Unop(ir::Unop::Not, _) => true,
+        ir::NodePayload::Unop(ir::Unop::Identity, _) => true,
+        ir::NodePayload::Tuple(_) => true,
+        ir::NodePayload::TupleIndex { .. } => true,
+        ir::NodePayload::Array(_) => true,
+        ir::NodePayload::Nary(ir::NaryOp::Concat, _) => true,
+        ir::NodePayload::BitSlice { .. } => true,
+        ir::NodePayload::ZeroExt { .. } => true,
+        ir::NodePayload::SignExt { .. } => true,
+        _ => false,
+    }
 }
 
 pub struct Options {
@@ -43,6 +106,7 @@ pub struct Options {
     pub hash: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub fraig: bool,
+    pub emit_independent_op_stats: bool,
 
     /// If not set, we fraig to convergence.
     pub fraig_max_iterations: Option<usize>,
@@ -101,6 +165,89 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     )
     .unwrap();
     let mut gate_fn = gatify_output.gate_fn;
+
+    let independent_op_stats = if options.emit_independent_op_stats {
+        let gatify_options = ir2gate::GatifyOptions {
+            fold: options.fold,
+            hash: options.hash,
+            adder_mapping: options.adder_mapping,
+            check_equivalence: false,
+        };
+        let mut per_node: Vec<IndependentOpEntry> = Vec::new();
+        let mut cost_by_node_index: Vec<usize> = vec![0; ir_top.nodes.len()];
+        let mut independent_sum_live_nodes: usize = 0;
+        let mut independent_sum_deepest_path: usize = 0;
+        let mut independent_max_live_nodes: usize = 0;
+        let mut independent_max_deepest_path: usize = 0;
+        let mut independent_included_node_count: usize = 0;
+
+        for (node_index, node) in ir_top.nodes.iter().enumerate() {
+            if should_skip_independent_op_stats(&node.payload) {
+                continue;
+            }
+            let node_ref = ir::NodeRef { index: node_index };
+            let node_gate_fn = ir2gate::gatify_node_as_fn(&ir_top, node_ref, &gatify_options)
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "Failed to gatify node {} (text_id={}): {}",
+                        node_index, node.text_id, e
+                    );
+                    std::process::exit(1);
+                });
+            let live_nodes = independent_live_nodes_excluding_params(&node_gate_fn);
+            let deepest_path = independent_deepest_path_excluding_params(&node_gate_fn);
+            cost_by_node_index[node_index] = deepest_path;
+            independent_sum_live_nodes += live_nodes;
+            independent_sum_deepest_path += deepest_path;
+            independent_max_live_nodes = std::cmp::max(independent_max_live_nodes, live_nodes);
+            independent_max_deepest_path =
+                std::cmp::max(independent_max_deepest_path, deepest_path);
+            independent_included_node_count += 1;
+
+            per_node.push(IndependentOpEntry {
+                node_index,
+                text_id: node.text_id,
+                op: node.to_signature_string(&ir_top),
+                live_nodes,
+                deepest_path,
+            });
+        }
+
+        // Sort most expensive first for readability.
+        // Deterministic tie-breaks are important for stable output.
+        per_node.sort_by(|a, b| {
+            b.live_nodes
+                .cmp(&a.live_nodes)
+                .then_with(|| b.deepest_path.cmp(&a.deepest_path))
+                .then_with(|| a.node_index.cmp(&b.node_index))
+        });
+
+        let independent_critical_path_depth = match ir_top.ret_node_ref {
+            Some(ret_node_ref) => {
+                let mut dp: Vec<usize> = vec![0; ir_top.nodes.len()];
+                for nr in ir_utils::get_topological(&ir_top) {
+                    let node = ir_top.get_node(nr);
+                    let deps = ir_utils::operands(&node.payload);
+                    let max_dep = deps.into_iter().map(|d| dp[d.index]).max().unwrap_or(0);
+                    dp[nr.index] = cost_by_node_index[nr.index] + max_dep;
+                }
+                dp[ret_node_ref.index]
+            }
+            None => 0,
+        };
+
+        Some(IndependentOpStats {
+            independent_sum_live_nodes,
+            independent_sum_deepest_path,
+            independent_max_live_nodes,
+            independent_max_deepest_path,
+            independent_critical_path_depth,
+            independent_included_node_count,
+            per_node,
+        })
+    } else {
+        None
+    };
 
     // Map each gate reference back to the IR node positions, if available.
     let mut gate_to_sources: HashMap<usize, Vec<String>> = HashMap::new();
@@ -251,6 +398,7 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
         graph_logical_effort_worst_case_delay,
         fraig_did_converge,
         fraig_iteration_stats,
+        independent_op_stats,
     };
 
     if options.quiet {
@@ -323,6 +471,41 @@ pub fn process_ir_path(ir_path: &std::path::Path, options: &Options) -> Ir2Gates
     }
 
     println!("== Live node count: {}", live_nodes.len());
+
+    if let Some(ind_stats) = summary_stats.independent_op_stats.as_ref() {
+        println!("== Independent-op aggregates (direct operands treated as inputs):");
+        println!(
+            "  independent_sum_live_nodes: {}",
+            ind_stats.independent_sum_live_nodes
+        );
+        println!(
+            "  independent_sum_deepest_path: {}",
+            ind_stats.independent_sum_deepest_path
+        );
+        println!(
+            "  independent_max_live_nodes: {}",
+            ind_stats.independent_max_live_nodes
+        );
+        println!(
+            "  independent_max_deepest_path: {}",
+            ind_stats.independent_max_deepest_path
+        );
+        println!(
+            "  independent_critical_path_depth: {}",
+            ind_stats.independent_critical_path_depth
+        );
+        println!(
+            "  independent_included_node_count: {}",
+            ind_stats.independent_included_node_count
+        );
+        println!("== Independent-op per-node stats:");
+        for entry in ind_stats.per_node.iter() {
+            println!(
+                "  node {} (text_id={}): live_nodes={} deepest_path={} op={}",
+                entry.node_index, entry.text_id, entry.live_nodes, entry.deepest_path, entry.op
+            );
+        }
+    }
 
     let structure_to_count = find_structures::find_structures(&gate_fn);
     let mut sorted_structures = structure_to_count

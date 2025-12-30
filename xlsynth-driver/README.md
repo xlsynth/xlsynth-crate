@@ -502,6 +502,13 @@ Supported flags include the common gate-optimization controls:
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
   topology.
 - `--fraig` – run fraig optimization (default `true`).
+- `--emit-independent-op-stats` – if `true`, also compute an independent-op cost
+  model by gatifying each IR node in isolation (direct operands treated as
+  inputs) and emitting `independent_op_stats` in the JSON output (and a
+  corresponding text section when not quiet). This can be expensive on large IRs.
+  The independent-op model skips IR node kinds that are typically zero-cost
+  reshapes: `GetParam`, `Literal`, `Nil`, `Unop(Not)`, `Unop(Identity)`, `Tuple`,
+  `TupleIndex`, `Array`, `Concat`, `BitSlice`, `ZeroExt`, and `SignExt`.
 - `--fraig-max-iterations=<N>` – maximum FRAIG iterations.
 - `--fraig-sim-samples=<N>` – number of random samples for FRAIG.
 - `--toggle-sample-count=<N>` – if non-zero, generate `N` random samples and
