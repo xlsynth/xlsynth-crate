@@ -132,7 +132,10 @@ pub struct Options {
 }
 
 /// Command line entry point (e.g. it exits the process on error).
-pub fn process_ir_path_for_cli(ir_path: &std::path::Path, options: &Options) -> Ir2GatesSummaryStats {
+pub fn process_ir_path_for_cli(
+    ir_path: &std::path::Path,
+    options: &Options,
+) -> Ir2GatesSummaryStats {
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
@@ -189,7 +192,8 @@ pub fn process_ir_path_for_cli(ir_path: &std::path::Path, options: &Options) -> 
                 continue;
             }
             let node_ref = ir::NodeRef { index: node_index };
-            let node_gate_fn = match ir2gate::gatify_node_as_fn(&ir_top, node_ref, &gatify_options) {
+            let node_gate_fn = match ir2gate::gatify_node_as_fn(&ir_top, node_ref, &gatify_options)
+            {
                 Ok(node_gate_fn) => node_gate_fn,
                 Err(e) => {
                     // Not a sample failure: some IR nodes are not currently representable as
