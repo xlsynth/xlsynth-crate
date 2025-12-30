@@ -93,6 +93,9 @@ fn should_skip_independent_op_stats(payload: &ir::NodePayload) -> bool {
         ir::NodePayload::TupleIndex { .. } => true,
         ir::NodePayload::Array(_) => true,
         ir::NodePayload::Nary(ir::NaryOp::Concat, _) => true,
+        ir::NodePayload::Invoke { .. } => true,
+        ir::NodePayload::Cover { .. } => true,
+        ir::NodePayload::CountedFor { .. } => true,
         ir::NodePayload::BitSlice { .. } => true,
         ir::NodePayload::ZeroExt { .. } => true,
         ir::NodePayload::SignExt { .. } => true,
@@ -129,10 +132,7 @@ pub struct Options {
 }
 
 /// Command line entry point (e.g. it exits the process on error).
-pub fn process_ir_path_for_cli(
-    ir_path: &std::path::Path,
-    options: &Options,
-) -> Ir2GatesSummaryStats {
+pub fn process_ir_path_for_cli(ir_path: &std::path::Path, options: &Options) -> Ir2GatesSummaryStats {
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
@@ -189,14 +189,21 @@ pub fn process_ir_path_for_cli(
                 continue;
             }
             let node_ref = ir::NodeRef { index: node_index };
-            let node_gate_fn = ir2gate::gatify_node_as_fn(&ir_top, node_ref, &gatify_options)
-                .unwrap_or_else(|e| {
-                    eprintln!(
-                        "Failed to gatify node {} (text_id={}): {}",
-                        node_index, node.text_id, e
+            let node_gate_fn = match ir2gate::gatify_node_as_fn(&ir_top, node_ref, &gatify_options) {
+                Ok(node_gate_fn) => node_gate_fn,
+                Err(e) => {
+                    // Not a sample failure: some IR nodes are not currently representable as
+                    // standalone independent-op GateFns (e.g. Invoke/CountedFor/Cover). We skip
+                    // them for this reporting mode instead of crashing.
+                    log::debug!(
+                        "Skipping independent-op stats for node {} (text_id={}): {}",
+                        node_index,
+                        node.text_id,
+                        e
                     );
-                    std::process::exit(1);
-                });
+                    continue;
+                }
+            };
             let live_nodes = independent_live_nodes_excluding_params(&node_gate_fn);
             let deepest_path = independent_deepest_path_excluding_params(&node_gate_fn);
             cost_by_node_index[node_index] = deepest_path;

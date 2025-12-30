@@ -508,7 +508,8 @@ Supported flags include the common gate-optimization controls:
   corresponding text section when not quiet). This can be expensive on large IRs.
   The independent-op model skips IR node kinds that are typically zero-cost
   reshapes: `GetParam`, `Literal`, `Nil`, `Unop(Not)`, `Unop(Identity)`, `Tuple`,
-  `TupleIndex`, `Array`, `Concat`, `BitSlice`, `ZeroExt`, and `SignExt`.
+  `TupleIndex`, `Array`, `Concat`, `Invoke`, `Cover`, `CountedFor`, `BitSlice`,
+  `ZeroExt`, and `SignExt`.
 - `--fraig-max-iterations=<N>` – maximum FRAIG iterations.
 - `--fraig-sim-samples=<N>` – number of random samples for FRAIG.
 - `--toggle-sample-count=<N>` – if non-zero, generate `N` random samples and
