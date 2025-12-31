@@ -5,6 +5,7 @@
 //! Functionality that is purely related to the XLS IR, i.e. parsing,
 //! representing, querying/manipulating, etc.
 
+pub mod bool_cones;
 pub mod corners;
 pub mod dce;
 pub mod edit_distance;

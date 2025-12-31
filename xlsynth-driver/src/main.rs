@@ -63,6 +63,7 @@ mod ir_bool_cones;
 mod ir_equiv;
 mod ir_equiv_blocks;
 mod ir_fn_eval;
+mod ir_fn_extract_bool_cones;
 mod ir_fn_to_block;
 mod ir_ged;
 mod ir_localized_eco;
@@ -647,6 +648,43 @@ fn main() {
                         .index(1),
                 )
                 .add_ir_top_arg(true),
+        )
+        .subcommand(
+            clap::Command::new("ir-fn-extract-bool-cones")
+                .about("Extracts content-addressed boolean cones from an IR function")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(true)
+                .arg(
+                    Arg::new("out_dir")
+                        .long("out-dir")
+                        .value_name("PATH")
+                        .help("Output directory for extracted cones")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_depth")
+                        .long("max-depth")
+                        .value_name("N")
+                        .help("Exclusive maximum cone depth")
+                        .required(true)
+                        .value_parser(clap::value_parser!(usize))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_params")
+                        .long("max-params")
+                        .value_name("N")
+                        .help("Exclusive maximum number of boundary parameters")
+                        .required(true)
+                        .value_parser(clap::value_parser!(usize))
+                        .action(ArgAction::Set),
+                ),
         )
         .subcommand(
             clap::Command::new("ir2delayinfo")
@@ -1883,6 +1921,9 @@ fn main() {
         }
         Some(("ir-fn-to-block", subm)) => {
             ir_fn_to_block::handle_ir_fn_to_block(subm, &config);
+        }
+        Some(("ir-fn-extract-bool-cones", subm)) => {
+            ir_fn_extract_bool_cones::handle_ir_fn_extract_bool_cones(subm, &config);
         }
         Some(("ir-structural-similarity", subm)) => {
             ir_structural_similarity::handle_ir_structural_similarity(subm, &config);

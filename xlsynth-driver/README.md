@@ -401,6 +401,46 @@ xlsynth-driver --toolchain=$HOME/xlsynth-toolchain.toml \
   ir-fn-to-block my_pkg.ir --top my_main > my_main.block.ir
 ```
 
+### `ir-fn-extract-bool-cones`
+
+Extracts transitive fan-in cones for all `bits[1]`-typed nodes in a selected IR function and writes each qualifying cone into `--out-dir` as a standalone XLS IR package containing a single `top fn cone(...) -> bits[1]`.
+
+Filtering:
+
+- Depth filter: only cones with **depth < `--max-depth`** are emitted, where depth is computed as:
+  - `GetParam` / `literal` have depth 0
+  - all other ops have depth `1 + max(operand_depth)`
+- Param filter: only cones with **param_count < `--max-params`** are emitted, where param_count is the number of distinct `ParamId`s referenced by the cone (i.e., boundary params when cutting traversal at `GetParam`).
+
+Performance:
+
+- The extractor **early-aborts** per root as soon as it can prove the cone cannot satisfy the depth/param limits.
+- Cones containing unsupported operations that would require importing additional package members (e.g. `invoke`, `counted_for`) are **skipped** so extraction can continue over large corpora.
+
+Flags:
+
+- `<ir_input_file>` – path to the package IR file.
+- `--top <NAME>` – name of the IR function to analyze.
+- `--out-dir <PATH>` – output directory where extracted cones are written.
+- `--max-depth <N>` – exclusive maximum depth.
+- `--max-params <N>` – exclusive maximum boundary-param count.
+
+Output:
+
+- One file per unique cone: `--out-dir/<sha256>.ir`, where `<sha256>` is the SHA-256 hex digest of the emitted IR text.
+- The command prints a single summary line on stdout:
+  - `roots=<N> extracted_unique=<N> pruned_by_depth=<N> pruned_by_params=<N> skipped_unsupported=<N>`
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-extract-bool-cones my_pkg.ir \
+  --top my_main \
+  --out-dir cones_out \
+  --max-depth 8 \
+  --max-params 6
+```
+
 ### `ir2delayinfo`
 
 Runs the `delay_info_main` tool for a given IR entry point and delay model.
