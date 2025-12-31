@@ -3,6 +3,8 @@
 //! Tests for invoking the xlsynth-driver CLI and its subcommands as a
 //! subprocess.
 
+use sha2::Digest;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
@@ -3400,6 +3402,124 @@ fn test_ir_fn_eval() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[32]:3\n");
+}
+
+#[test]
+fn test_ir_fn_extract_bool_cones_smoke() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    const IR: &str = r#"package cone_test
+
+top fn main(a: bits[1], b: bits[1], x: bits[8]) -> bits[8] {
+  lit_true: bits[1] = literal(value=1, id=100)
+  and_ab: bits[1] = and(a, b, id=101)
+  not_and: bits[1] = not(and_ab, id=102)
+  deep: bits[1] = and(not_and, b, id=103)
+  ret x: bits[8] = identity(x, id=104)
+}
+
+"#;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ir_path = dir.path().join("cone_test.ir");
+    std::fs::write(&ir_path, IR).unwrap();
+
+    let out_dir = dir.path().join("cones_out");
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("ir-fn-extract-bool-cones")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--out-dir")
+        .arg(out_dir.to_str().unwrap())
+        .arg("--max-depth")
+        .arg("3")
+        .arg("--max-params")
+        .arg("3")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "roots=6 extracted_unique=5 pruned_by_depth=1 pruned_by_params=0 skipped_unsupported=0\n"
+    );
+
+    let expected_texts: BTreeSet<String> = BTreeSet::from([
+        // Cone for param a.
+        r#"package bool_cone_pkg
+
+top fn cone(a: bits[1] id=1) -> bits[1] {
+  ret a: bits[1] = param(name=a, id=1)
+}
+
+"#
+        .to_string(),
+        // Cone for param b.
+        r#"package bool_cone_pkg
+
+top fn cone(b: bits[1] id=1) -> bits[1] {
+  ret b: bits[1] = param(name=b, id=1)
+}
+
+"#
+        .to_string(),
+        // Cone for literal.
+        r#"package bool_cone_pkg
+
+top fn cone() -> bits[1] {
+  ret literal.1: bits[1] = literal(value=1, id=1)
+}
+
+"#
+        .to_string(),
+        // Cone for and(a,b).
+        r#"package bool_cone_pkg
+
+top fn cone(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+
+"#
+        .to_string(),
+        // Cone for not(and(a,b)).
+        r#"package bool_cone_pkg
+
+top fn cone(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  and.3: bits[1] = and(a, b, id=3)
+  ret not.4: bits[1] = not(and.3, id=4)
+}
+
+"#
+        .to_string(),
+    ]);
+
+    let mut got_texts: BTreeSet<String> = BTreeSet::new();
+    let mut got_filenames: BTreeSet<String> = BTreeSet::new();
+    for entry in std::fs::read_dir(&out_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        assert!(path.is_file(), "expected file: {}", path.display());
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let contents = std::fs::read_to_string(&path).unwrap();
+
+        let digest = sha2::Sha256::digest(contents.as_bytes());
+        let expected_filename = format!("{digest:x}.ir");
+        assert_eq!(filename, expected_filename);
+
+        got_filenames.insert(filename);
+        got_texts.insert(contents);
+    }
+
+    assert_eq!(got_texts, expected_texts);
+    assert_eq!(got_filenames.len(), expected_texts.len());
 }
 
 // Add tests for type inference v2 slice bounds behavior
