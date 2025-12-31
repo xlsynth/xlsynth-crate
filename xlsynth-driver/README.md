@@ -407,10 +407,10 @@ Extracts transitive fan-in cones for all `bits[1]`-typed nodes in a selected IR 
 
 Filtering:
 
-- Depth filter: only cones with **depth < `--max-depth`** are emitted, where depth is computed as:
+- Depth filter: only cones with **depth \< `--max-depth`** are emitted, where depth is computed as:
   - `GetParam` / `literal` have depth 0
   - all other ops have depth `1 + max(operand_depth)`
-- Param filter: only cones with **param_count < `--max-params`** are emitted, where param_count is the number of distinct `ParamId`s referenced by the cone (i.e., boundary params when cutting traversal at `GetParam`).
+- Param filter: only cones with **param_count \< `--max-params`** are emitted, where param_count is the number of distinct `ParamId`s referenced by the cone (i.e., boundary params when cutting traversal at `GetParam`).
 
 Performance:
 
