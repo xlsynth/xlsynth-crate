@@ -74,11 +74,12 @@ pub fn handle_ir_fn_extract_bool_cones(
     }
 
     println!(
-        "roots={} extracted_unique={} pruned_by_depth={} pruned_by_params={} skipped_unsupported={}",
+        "roots={} extracted_unique={} pruned_by_depth={} pruned_by_params={} skipped_unsupported={} skipped_trivial={}",
         stats.roots,
         stats.extracted_unique,
         stats.pruned_by_depth,
         stats.pruned_by_params,
-        stats.skipped_unsupported
+        stats.skipped_unsupported,
+        stats.skipped_trivial
     );
 }

@@ -3449,46 +3449,10 @@ top fn main(a: bits[1], b: bits[1], x: bits[8]) -> bits[8] {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "roots=6 extracted_unique=5 pruned_by_depth=1 pruned_by_params=0 skipped_unsupported=0\n"
+        "roots=6 extracted_unique=1 pruned_by_depth=1 pruned_by_params=0 skipped_unsupported=0 skipped_trivial=4\n"
     );
 
     let expected_texts: BTreeSet<String> = BTreeSet::from([
-        // Cone for param a.
-        r#"package bool_cone_pkg
-
-top fn cone(a: bits[1] id=1) -> bits[1] {
-  ret a: bits[1] = param(name=a, id=1)
-}
-
-"#
-        .to_string(),
-        // Cone for param b.
-        r#"package bool_cone_pkg
-
-top fn cone(b: bits[1] id=1) -> bits[1] {
-  ret b: bits[1] = param(name=b, id=1)
-}
-
-"#
-        .to_string(),
-        // Cone for literal.
-        r#"package bool_cone_pkg
-
-top fn cone() -> bits[1] {
-  ret literal.1: bits[1] = literal(value=1, id=1)
-}
-
-"#
-        .to_string(),
-        // Cone for and(a,b).
-        r#"package bool_cone_pkg
-
-top fn cone(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
-  ret and.3: bits[1] = and(a, b, id=3)
-}
-
-"#
-        .to_string(),
         // Cone for not(and(a,b)).
         r#"package bool_cone_pkg
 
