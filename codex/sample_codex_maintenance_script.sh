@@ -19,7 +19,7 @@ detect_platform() {
 }
 
 required_xls_tag() {
-  /usr/bin/python3 scripts/get_required_xls_release_tag.py
+  /usr/bin/python3 "${repo_root}/scripts/get_required_xls_release_tag.py"
 }
 
 platform="$(detect_platform)"
@@ -31,7 +31,7 @@ echo "==> Fetching XLS artifacts (tag: ${tag}, platform: ${platform})"
 # This downloads:
 # - libxls DSO (decompressed if the release asset is gzipped)
 # - dslx_stdlib.tar.gz and unpacks it to "${tools_dir}/xls/dslx/stdlib"
-/usr/bin/python3 scripts/download_release.py -p "${platform}" -o "${tools_dir}" -d -v "${tag}"
+/usr/bin/python3 "${repo_root}/scripts/download_release.py" -p "${platform}" -o "${tools_dir}" -d -v "${tag}"
 
 dso_path="$(ls "${tools_dir}"/libxls-*.so 2>/dev/null | head -n 1 || true)"
 if [ -z "${dso_path}" ] || [ ! -f "${dso_path}" ]; then
