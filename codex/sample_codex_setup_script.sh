@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
 echo "==> Installing system prerequisites"
 sudo apt-get update -y
 sudo apt-get install -y wget curl unzip gnupg cmake build-essential python3-pip pkg-config valgrind iverilog
@@ -51,6 +54,6 @@ wget -O /usr/lib/libboolector.so https://github.com/xlsynth/boolector-build/rele
 # Note: originally I thought that the maintenance script was always run by codex web after setup,
 # but it seems as though the maintenance script /only/ runs when the setup has been cached.
 echo "✅ Base setup complete — running maintenance script..."
-./codex/sample_codex_maintenance_script.sh
+"${repo_root}/codex/sample_codex_maintenance_script.sh"
 
 echo "✅ Maintenance script complete"
