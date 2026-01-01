@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rand::distributions::Distribution;
 use rand::distributions::WeightedIndex;
 use rand::prelude::{Rng, SeedableRng, SliceRandom};
 use rand_pcg::Pcg64Mcg;
+
+use xlsynth_mcmc::Best as SharedBest;
+use xlsynth_mcmc::McmcIterationOutput as SharedMcmcIterationOutput;
+use xlsynth_mcmc::McmcOptions as SharedMcmcOptions;
+use xlsynth_mcmc::McmcStats as SharedMcmcStats;
+use xlsynth_mcmc::metropolis_accept;
 
 // Imports from the xlsynth_g8r crate
 use crate::aig::gate::GateFn;
@@ -39,9 +44,8 @@ use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
+use xlsynth_mcmc::MIN_TEMPERATURE_RATIO;
 use xlsynth_pir::ir_parser;
-
-const MIN_TEMPERATURE_RATIO: f64 = 0.00001;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
 const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 10;
 
@@ -78,100 +82,19 @@ pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> bool {
     }
 }
 
-/// Holds MCMC iteration statistics.
-#[derive(Debug)]
-pub struct McmcStats {
-    pub accepted_overall: usize,
-    pub rejected_apply_fail: usize,
-    pub rejected_candidate_fail: usize,
-    pub rejected_oracle: usize,
-    pub rejected_metro: usize,
-    pub oracle_verified: usize,
-    pub total_oracle_time_micros: u128,
-    pub accepted_edits_by_kind: HashMap<TransformKind, usize>,
-    pub rejected_sim_fail: usize,
-    pub total_sim_time_micros: u128,
-}
-
-impl Default for McmcStats {
-    fn default() -> Self {
-        McmcStats {
-            accepted_overall: 0,
-            rejected_apply_fail: 0,
-            rejected_candidate_fail: 0,
-            rejected_oracle: 0,
-            rejected_metro: 0,
-            oracle_verified: 0,
-            total_oracle_time_micros: 0,
-            accepted_edits_by_kind: HashMap::new(),
-            rejected_sim_fail: 0,
-            total_sim_time_micros: 0,
-        }
-    }
-}
-
-/// Shared best-so-far candidate across threads.
-pub struct Best {
-    pub cost: AtomicUsize,
-    pub gate: Mutex<GateFn>,
-}
-
-impl Best {
-    pub fn new(initial_cost: usize, gate: GateFn) -> Self {
-        Self {
-            cost: AtomicUsize::new(initial_cost),
-            gate: Mutex::new(gate),
-        }
-    }
-
-    pub fn try_update(&self, new_cost: usize, new_gate: GateFn) {
-        let mut current = self.cost.load(Ordering::SeqCst);
-        while new_cost < current {
-            match self
-                .cost
-                .compare_exchange(current, new_cost, Ordering::SeqCst, Ordering::SeqCst)
-            {
-                Ok(_) => {
-                    let mut g = self.gate.lock().unwrap();
-                    *g = new_gate;
-                    return;
-                }
-                Err(v) => current = v,
-            }
-        }
-    }
-
-    pub fn get(&self) -> GateFn {
-        self.gate.lock().unwrap().clone()
-    }
-}
+/// Type aliases specializing the generic MCMC helpers from `xlsynth-mcmc` to
+/// the `xlsynth-g8r` AIG world.
+pub type McmcStats = SharedMcmcStats<TransformKind>;
+pub type Best = SharedBest<GateFn>;
+pub type IterationOutcomeDetails = xlsynth_mcmc::IterationOutcomeDetails<TransformKind>;
+pub type McmcIterationOutput = SharedMcmcIterationOutput<GateFn, Cost, TransformKind>;
+pub type McmcOptions = SharedMcmcOptions;
 
 /// Context for an MCMC iteration, holding shared resources.
 pub struct McmcContext<'a> {
     pub rng: &'a mut Pcg64Mcg,
     pub all_transforms: Vec<Box<dyn crate::transforms::transform_trait::Transform>>,
     pub weights: Vec<f64>,
-}
-
-/// Details of what occurred during a single MCMC iteration attempt.
-pub enum IterationOutcomeDetails {
-    CandidateFailure,
-    ApplyFailure,
-    SimFailure,
-    OracleFailure,
-    MetropolisReject,
-    Accepted { kind: TransformKind },
-}
-
-/// Output of a single MCMC iteration.
-pub struct McmcIterationOutput {
-    pub output_gfn: GateFn, // The GateFn to be used as current_gfn for the next iteration
-    pub output_cost: Cost,  // Cost of output_gfn
-    pub best_gfn_updated: bool,
-    pub outcome: IterationOutcomeDetails,
-    pub transform_always_equivalent: bool,
-    pub transform: Option<TransformKind>,
-    pub oracle_time_micros: u128, // Time spent in oracle, 0 if not run
 }
 
 /// Objective used to evaluate cost improvements.
@@ -212,9 +135,9 @@ pub fn mcmc_iteration(
     if context.all_transforms.is_empty() {
         // No transforms available to apply
         return McmcIterationOutput {
-            output_gfn: current_gfn,
+            output_state: current_gfn,
             output_cost: current_cost,
-            best_gfn_updated: false,
+            best_updated: false,
             outcome: IterationOutcomeDetails::CandidateFailure, /* Or a new outcome? For now,
                                                                  * CandidateFailure */
             oracle_time_micros: 0,
@@ -245,9 +168,9 @@ pub fn mcmc_iteration(
 
     if candidate_locations.is_empty() {
         return McmcIterationOutput {
-            output_gfn: current_gfn,
+            output_state: current_gfn,
             output_cost: current_cost,
-            best_gfn_updated: false,
+            best_updated: false,
             outcome: IterationOutcomeDetails::CandidateFailure,
             oracle_time_micros: 0,
             transform_always_equivalent: true,
@@ -282,9 +205,9 @@ pub fn mcmc_iteration(
                 let sim_time_micros = sim_start.elapsed().as_micros();
                 if !sim_equiv {
                     return McmcIterationOutput {
-                        output_gfn: current_gfn,
+                        output_state: current_gfn,
                         output_cost: current_cost,
-                        best_gfn_updated: false,
+                        best_updated: false,
                         outcome: IterationOutcomeDetails::SimFailure,
                         oracle_time_micros: sim_time_micros,
                         transform_always_equivalent: chosen_transform.always_equivalent(),
@@ -312,9 +235,9 @@ pub fn mcmc_iteration(
 
             if !is_equiv {
                 McmcIterationOutput {
-                    output_gfn: current_gfn,
+                    output_state: current_gfn,
                     output_cost: current_cost,
-                    best_gfn_updated: false,
+                    best_updated: false,
                     outcome: IterationOutcomeDetails::OracleFailure,
                     oracle_time_micros,
                     transform_always_equivalent: chosen_transform.always_equivalent(),
@@ -328,20 +251,18 @@ pub fn mcmc_iteration(
 
                 let curr_metric = objective.metric(&current_cost) as f64;
                 let new_metric = objective.metric(&new_candidate_cost) as f64;
-                let better = new_metric < curr_metric;
-                let accept_prob = ((curr_metric - new_metric) / temp).exp();
-                let metropolis = context.rng.r#gen::<f64>() < accept_prob;
+                let accept = metropolis_accept(curr_metric, new_metric, temp, context.rng);
 
-                if better || metropolis {
+                if accept {
                     if new_candidate_cost < *best_cost {
                         *best_gfn = candidate_gfn_dce.clone();
                         *best_cost = new_candidate_cost;
                         iteration_best_gfn_updated = true;
                     }
                     McmcIterationOutput {
-                        output_gfn: candidate_gfn_dce,
+                        output_state: candidate_gfn_dce,
                         output_cost: new_candidate_cost,
-                        best_gfn_updated: iteration_best_gfn_updated,
+                        best_updated: iteration_best_gfn_updated,
                         outcome: IterationOutcomeDetails::Accepted {
                             kind: current_transform_kind,
                         },
@@ -351,9 +272,9 @@ pub fn mcmc_iteration(
                     }
                 } else {
                     McmcIterationOutput {
-                        output_gfn: current_gfn,
+                        output_state: current_gfn,
                         output_cost: current_cost,
-                        best_gfn_updated: false,
+                        best_updated: false,
                         outcome: IterationOutcomeDetails::MetropolisReject,
                         oracle_time_micros,
                         transform_always_equivalent: chosen_transform.always_equivalent(),
@@ -369,9 +290,9 @@ pub fn mcmc_iteration(
                 e
             );
             McmcIterationOutput {
-                output_gfn: current_gfn,
+                output_state: current_gfn,
                 output_cost: current_cost,
-                best_gfn_updated: false,
+                best_updated: false,
                 outcome: IterationOutcomeDetails::ApplyFailure,
                 oracle_time_micros: 0,
                 transform_always_equivalent: true,
@@ -573,49 +494,17 @@ pub fn mcmc(
         );
 
         // Update current_gfn and baseline outputs depending on acceptance.
-        current_gfn = iteration_output.output_gfn;
+        current_gfn = iteration_output.output_state.clone();
         current_cost = iteration_output.output_cost;
-        stats.total_oracle_time_micros += iteration_output.oracle_time_micros;
+        stats.update_for_iteration(
+            &iteration_output,
+            paranoid,
+            options.start_iteration + iterations_count,
+        );
 
-        match iteration_output.outcome {
-            IterationOutcomeDetails::Accepted { kind } => {
-                stats.accepted_overall += 1;
-                *stats.accepted_edits_by_kind.entry(kind).or_insert(0) += 1;
-                if iteration_output.oracle_time_micros > 0 {
-                    stats.oracle_verified += 1;
-                }
-            }
-            IterationOutcomeDetails::CandidateFailure => {
-                stats.rejected_candidate_fail += 1;
-            }
-            IterationOutcomeDetails::ApplyFailure => {
-                stats.rejected_apply_fail += 1;
-            }
-            IterationOutcomeDetails::SimFailure => {
-                stats.rejected_sim_fail += 1;
-                stats.total_sim_time_micros += iteration_output.oracle_time_micros;
-            }
-            IterationOutcomeDetails::OracleFailure => {
-                stats.rejected_oracle += 1;
-                // oracle_time_micros > 0 when this outcome occurs
-                if paranoid && iteration_output.transform_always_equivalent {
-                    panic!(
-                        "[mcmc] equivalence failure for always-equivalent transform at iteration {}; transform: {:?} should always be equivalent",
-                        iterations_count, iteration_output.transform
-                    );
-                }
-            }
-            IterationOutcomeDetails::MetropolisReject => {
-                stats.rejected_metro += 1;
-                if iteration_output.oracle_time_micros > 0 {
-                    stats.oracle_verified += 1;
-                }
-            }
-        }
-
-        if iteration_output.best_gfn_updated {
+        if iteration_output.best_updated {
             if let Some(ref b) = shared_best {
-                b.try_update(objective.metric(&best_cost) as usize, best_gfn.clone());
+                let _ = b.try_update(objective.metric(&best_cost) as usize, best_gfn.clone());
             }
         }
 
@@ -941,20 +830,6 @@ pub fn build_transform_weights<
         .iter()
         .map(|t| weight_for_kind(t.kind(), objective))
         .collect()
-}
-
-#[derive(Clone, Debug)]
-pub struct McmcOptions {
-    pub sat_reset_interval: u64,
-    pub initial_temperature: f64,
-    /// If this mcmc() invocation is part of a longer run that was previously
-    /// paused (e.g. for replica exchange), `start_iteration` allows the caller
-    /// to indicate how many iterations have already been executed so that the
-    /// human-readable logs continue with a global index.
-    pub start_iteration: u64,
-    /// Total planned iterations for the *entire* run (across segments). If
-    /// `None`, temperature remains constant (no cooling).
-    pub total_iters: Option<u64>,
 }
 
 fn write_checkpoint(

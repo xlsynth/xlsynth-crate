@@ -2008,7 +2008,7 @@ fn gatify_internal(
     env: &mut GateEnv,
     options: &GatifyOptions,
 ) {
-    log::info!("gatify_internal; f.name: {}", f.name);
+    log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
 
     // Precompute a map from parameter text_id to its NodeRef in f.nodes.

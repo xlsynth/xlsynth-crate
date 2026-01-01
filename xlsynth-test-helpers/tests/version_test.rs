@@ -54,10 +54,26 @@ fn get_latest_patch_versions(
         })?;
         transfer.perform()?;
     }
+    let http_code = easy.response_code()?;
+    if http_code == 404 {
+        // First-time publish case: the crate is not yet present on crates.io, so
+        // there are no released versions to compare against.
+        return Ok(BTreeMap::new());
+    }
+    if http_code != 200 {
+        return Err(Box::new(std::io::Error::other(format!(
+            "Unexpected HTTP status {http_code} from crates.io for {crate_name}"
+        ))));
+    }
+
     let response: serde_json::Value = serde_json::from_slice(&data)?;
     log::trace!("Response: {response:?}");
     let versions = response["versions"].as_array().ok_or_else(|| {
-        std::io::Error::other("Failed to parse versions array from crates.io response")
+        // If crates.io changes response shape (or we hit some proxy), surface
+        // the full response to help debug CI issues.
+        std::io::Error::other(format!(
+            "Failed to parse versions array from crates.io response for {crate_name}; response={response:?}"
+        ))
     })?;
 
     let mut mm_to_patch: BTreeMap<(u64, u64), u64> = BTreeMap::new();
@@ -152,6 +168,19 @@ fn test_xlsynth_driver_crate_version() {
 }
 
 #[test]
+fn test_xlsynth_mcmc_crate_version() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    if std::env::var("CARGO_NET_OFFLINE").is_ok() {
+        eprintln!("CARGO_NET_OFFLINE set - skipping network dependent test");
+        return;
+    }
+    let workspace_root = get_workspace_root();
+    let workspace_path = workspace_root.join("xlsynth-mcmc");
+    validate_local_version_is_latest_patch_version("xlsynth-mcmc", workspace_path.as_path())
+        .unwrap();
+}
+
+#[test]
 fn test_crate_versions_are_equal() {
     let _ = env_logger::builder().is_test(true).try_init();
     let workspace_root = get_workspace_root();
@@ -159,6 +188,7 @@ fn test_crate_versions_are_equal() {
         workspace_root.join("xlsynth"),
         workspace_root.join("xlsynth-sys"),
         workspace_root.join("xlsynth-driver"),
+        workspace_root.join("xlsynth-mcmc"),
     ];
     let mut local_versions = vec![];
     for dir in released_crate_dirs {
