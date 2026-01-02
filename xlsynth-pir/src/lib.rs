@@ -11,6 +11,7 @@ pub mod edit_distance;
 pub mod fuzz_utils;
 pub mod greedy_matching_ged;
 pub mod ir;
+pub mod ir_bool_cones;
 pub mod ir_deduce;
 pub mod ir_eval;
 pub mod ir_fuzz;

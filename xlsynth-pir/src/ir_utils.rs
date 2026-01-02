@@ -5,6 +5,121 @@
 use crate::ir::{Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrivialFnBody {
+    /// Return value does not depend on any parameter.
+    Constant,
+    /// Return value depends on exactly one parameter and uses only structural
+    /// (zero-cost) operations such as bit slicing / tuple indexing /
+    /// extensions.
+    SingleParamStructural { param_name: String },
+    /// Return value is a single boolean gate operation (e.g. not/and/or/xor)
+    /// applied to structural expressions over parameters/literals.
+    SingleBoolGate { op: String, param_count: usize },
+}
+
+fn is_structural_payload(payload: &NodePayload) -> bool {
+    match payload {
+        NodePayload::Nil => true,
+        NodePayload::GetParam(_) => true,
+        NodePayload::Literal(_) => true,
+        NodePayload::Tuple(_) => true,
+        NodePayload::Array(_) => true,
+        NodePayload::ArraySlice { .. } => true,
+        NodePayload::TupleIndex { .. } => true,
+        NodePayload::Unop(op, _) => {
+            matches!(op, crate::ir::Unop::Identity | crate::ir::Unop::Reverse)
+        }
+        NodePayload::SignExt { .. } => true,
+        NodePayload::ZeroExt { .. } => true,
+        NodePayload::BitSlice { .. } => true,
+        NodePayload::DynamicBitSlice { .. } => true,
+        // Everything else is potentially semantically interesting (boolean logic,
+        // arithmetic, selects, asserts/traces, invokes, etc.).
+        _ => false,
+    }
+}
+
+fn bool_gate_op_string(payload: &NodePayload) -> Option<String> {
+    match payload {
+        NodePayload::Unop(crate::ir::Unop::Not, _) => Some("not".to_string()),
+        NodePayload::Nary(op, _nodes) => match op {
+            crate::ir::NaryOp::And => Some("and".to_string()),
+            crate::ir::NaryOp::Or => Some("or".to_string()),
+            crate::ir::NaryOp::Xor => Some("xor".to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Classifies whether `f` is a "trivial" function body we typically don't care
+/// about when mining cones / samples.
+///
+/// Current definition (intentionally conservative):
+/// - The return value is derived using only structural operations (no boolean
+///   logic, no arithmetic, no selects).
+/// - If it depends on no parameters => `Constant`.
+/// - If it depends on exactly one parameter => `SingleParamStructural`.
+/// - Otherwise => not considered trivial (returns `None`).
+pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
+    let ret = f.ret_node_ref?;
+
+    let mut stack: Vec<NodeRef> = vec![ret];
+    let mut visited: HashSet<NodeRef> = HashSet::new();
+    let mut used_param_node_refs: HashSet<NodeRef> = HashSet::new();
+    let mut gate_ops: Vec<String> = Vec::new();
+
+    while let Some(nr) = stack.pop() {
+        if !visited.insert(nr) {
+            continue;
+        }
+        let node = f.get_node(nr);
+        if let Some(op) = bool_gate_op_string(&node.payload) {
+            gate_ops.push(op);
+        } else if !is_structural_payload(&node.payload) {
+            return None;
+        }
+        if matches!(node.payload, NodePayload::GetParam(_)) {
+            used_param_node_refs.insert(nr);
+        }
+        for dep in operands(&node.payload) {
+            stack.push(dep);
+        }
+    }
+
+    // Allow either:
+    // - purely structural (gate_ops empty), or
+    // - exactly one boolean gate op node in the body.
+    if gate_ops.len() > 1 {
+        return None;
+    }
+
+    if gate_ops.len() == 1 {
+        let param_count = used_param_node_refs.len();
+        return Some(TrivialFnBody::SingleBoolGate {
+            op: gate_ops[0].clone(),
+            param_count,
+        });
+    }
+
+    // Purely structural (no boolean gate ops).
+    if used_param_node_refs.is_empty() {
+        return Some(TrivialFnBody::Constant);
+    }
+    if used_param_node_refs.len() == 1 {
+        let nr = *used_param_node_refs.iter().next().unwrap();
+        let param_name = f
+            .get_node(nr)
+            .name
+            .clone()
+            .unwrap_or_else(|| "param".to_string());
+        return Some(TrivialFnBody::SingleParamStructural { param_name });
+    }
+
+    None
+}
+
 /// Returns the list of operands for the provided node.
 pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     use NodePayload::*;
@@ -779,6 +894,95 @@ mod tests {
         assert!(param_node_ref_by_name(&f, "missing").is_none());
         assert!(param_type_by_index(&f, 2).is_none());
         assert!(param_type_by_name(&f, "missing").is_none());
+    }
+
+    #[test]
+    fn classify_trivial_fn_body_constant() {
+        let f = parse_fn(
+            r#"fn f() -> bits[1] {
+  ret literal.1: bits[1] = literal(value=1, id=1)
+}"#,
+        );
+        assert_eq!(classify_trivial_fn_body(&f), Some(TrivialFnBody::Constant));
+    }
+
+    #[test]
+    fn classify_trivial_fn_body_single_param_bit_slice_is_trivial() {
+        let f = parse_fn(
+            r#"fn f(x: bits[8] id=1) -> bits[1] {
+  ret bit_slice.2: bits[1] = bit_slice(x, start=0, width=1, id=2)
+}"#,
+        );
+        assert_eq!(
+            classify_trivial_fn_body(&f),
+            Some(TrivialFnBody::SingleParamStructural {
+                param_name: "x".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn classify_trivial_fn_body_not_is_not_trivial() {
+        let f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  ret not.2: bits[1] = not(x, id=2)
+}"#,
+        );
+        assert_eq!(
+            classify_trivial_fn_body(&f),
+            Some(TrivialFnBody::SingleBoolGate {
+                op: "not".to_string(),
+                param_count: 1
+            })
+        );
+    }
+
+    #[test]
+    fn classify_trivial_fn_body_and_is_trivial_single_gate() {
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        assert_eq!(
+            classify_trivial_fn_body(&f),
+            Some(TrivialFnBody::SingleBoolGate {
+                op: "and".to_string(),
+                param_count: 2
+            })
+        );
+    }
+
+    #[test]
+    fn classify_trivial_fn_body_or_is_trivial_single_gate() {
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret or.3: bits[1] = or(a, b, id=3)
+}"#,
+        );
+        assert_eq!(
+            classify_trivial_fn_body(&f),
+            Some(TrivialFnBody::SingleBoolGate {
+                op: "or".to_string(),
+                param_count: 2
+            })
+        );
+    }
+
+    #[test]
+    fn classify_trivial_fn_body_xor_is_trivial_single_gate() {
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret xor.3: bits[1] = xor(a, b, id=3)
+}"#,
+        );
+        assert_eq!(
+            classify_trivial_fn_body(&f),
+            Some(TrivialFnBody::SingleBoolGate {
+                op: "xor".to_string(),
+                param_count: 2
+            })
+        );
     }
 }
 
