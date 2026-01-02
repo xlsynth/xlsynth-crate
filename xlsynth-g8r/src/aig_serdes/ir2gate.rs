@@ -4,6 +4,7 @@
 //! `gatify`.
 
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
+use crate::aig_serdes::prep_for_gatify::prep_for_gatify;
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use std::collections::HashMap;
@@ -2082,7 +2083,9 @@ pub struct GatifyOutput {
     pub lowering_map: IrToGateMap,
 }
 
-pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
+pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
+    let prepared_fn = prep_for_gatify(orig_fn);
+    let f = &prepared_fn;
     let mut g8_builder = GateBuilder::new(
         f.name.clone(),
         GateBuilderOptions {
@@ -2112,7 +2115,7 @@ pub fn gatify(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String
     // function and the gate function that we converted it to.
     if options.check_equivalence {
         log::info!("checking equivalence of IR function and gate function...");
-        check_equivalence::validate_same_fn(f, &gate_fn)?;
+        check_equivalence::validate_same_fn(orig_fn, &gate_fn)?;
     }
     // Construct and return the GatifyOutput struct
     Ok(GatifyOutput {
@@ -2126,6 +2129,8 @@ pub fn gatify_node_as_fn(
     node_ref: ir::NodeRef,
     options: &GatifyOptions,
 ) -> Result<GateFn, String> {
+    let prepared_fn = prep_for_gatify(f);
+    let f = &prepared_fn;
     let node = f.get_node(node_ref);
     let mut g8_builder = GateBuilder::new(
         format!("{}_node_{}", f.name, node.text_id),

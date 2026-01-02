@@ -7,3 +7,4 @@ pub mod gate2ir;
 pub mod gate_parser;
 pub mod ir2gate;
 pub mod load_aiger;
+pub mod prep_for_gatify;
