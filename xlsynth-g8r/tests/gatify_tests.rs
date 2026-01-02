@@ -81,6 +81,27 @@ fn do_test_ir_conversion_no_equiv(ir_package_text: &str, opt: Opt) {
     .unwrap();
 }
 
+/// Same as `do_test_ir_conversion_no_equiv` but returns `SummaryStats` for
+/// microbenchmark-style "sweep" tests.
+fn do_test_ir_conversion_no_equiv_with_stats(ir_package_text: &str, opt: Opt) -> SummaryStats {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let mut parser = ir_parser::Parser::new(&ir_package_text);
+    let ir_package = parser.parse_and_validate_package().unwrap();
+    let ir_fn = ir_package.get_top_fn().unwrap();
+    let gatify_output = gatify(
+        &ir_fn,
+        GatifyOptions {
+            fold: opt == Opt::Yes,
+            check_equivalence: false,
+            hash: opt == Opt::Yes,
+            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
+            mul_adder_mapping: None,
+        },
+    )
+    .unwrap();
+    get_summary_stats(&gatify_output.gate_fn)
+}
+
 #[test_case(1, Opt::No; "bit_count=1, fold=false")]
 #[test_case(1, Opt::Yes; "bit_count=1, fold=true")]
 #[test_case(2, Opt::No; "bit_count=2, fold=false")]
@@ -814,6 +835,66 @@ fn test_gatify_ule() {
             key
         );
     }
+}
+
+fn make_priority_sel_ir_text(output_bit_count: usize, operand_count: usize) -> String {
+    assert!(
+        (2..=5).contains(&operand_count),
+        "expected operand_count in 2..=5, got {}",
+        operand_count
+    );
+
+    let mut package = xlsynth::IrPackage::new("sample")
+        .expect("should be able to create an IR package for the sweep test");
+    let function_name = format!("do_priority_sel_{}_ops", operand_count);
+    let mut fb =
+        xlsynth::FnBuilder::new(&mut package, &function_name, /* should_verify= */ true);
+
+    let selector_type = package.get_bits_type(operand_count as u64);
+    let output_type = package.get_bits_type(output_bit_count as u64);
+
+    let selector = fb.param("sel", &selector_type);
+
+    let mut cases: Vec<xlsynth::BValue> = Vec::with_capacity(operand_count);
+    for i in 0..operand_count {
+        cases.push(fb.param(&format!("a{}", i), &output_type));
+    }
+    let default_value = fb.param("default_value", &output_type);
+
+    let result = fb.priority_select(&selector, &cases, &default_value, Some("result"));
+    let _ = fb
+        .build_with_return_value(&result)
+        .expect("should be able to build priority select function for sweep test");
+    package
+        .set_top_by_name(&function_name)
+        .expect("should be able to mark the sweep function as top");
+    package.to_string()
+}
+
+#[test]
+fn test_priority_sel_gate_count_sweep_8b() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let output_bit_count = 8usize;
+    let operand_counts = [2usize, 3, 4, 5];
+
+    let mut got = Vec::new();
+    for &operand_count in &operand_counts {
+        let ir_text = make_priority_sel_ir_text(output_bit_count, operand_count);
+        let stats = do_test_ir_conversion_no_equiv_with_stats(&ir_text, Opt::Yes);
+        got.push((operand_count, stats.live_nodes));
+    }
+
+    // This is a "microbenchmark sweep" style test: we lock in the expected gate
+    // counts for this lowering so we can notice regressions and improvements.
+    #[rustfmt::skip]
+    let want: &[(usize, usize)] = &[
+        (2, 68),
+        (3, 95),
+        (4, 122),
+        (5, 149),
+    ];
+    assert_eq!(got, want);
 }
 
 /// Tests that we can convert the bf16 multiplier in the DSLX standard library.
