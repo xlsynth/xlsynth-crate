@@ -897,6 +897,30 @@ fn test_priority_sel_gate_count_sweep_8b() {
     assert_eq!(got, want);
 }
 
+#[test]
+fn test_priority_sel_gate_count_sweep_1b() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let output_bit_count = 1usize;
+    let operand_counts = [2usize, 3, 4, 5];
+
+    let mut got = Vec::new();
+    for &operand_count in &operand_counts {
+        let ir_text = make_priority_sel_ir_text(output_bit_count, operand_count);
+        let stats = do_test_ir_conversion_no_equiv_with_stats(&ir_text, Opt::Yes);
+        got.push((operand_count, stats.live_nodes));
+    }
+
+    #[rustfmt::skip]
+    let want: &[(usize, usize)] = &[
+        (2, 11),
+        (3, 16),
+        (4, 21),
+        (5, 26),
+    ];
+    assert_eq!(got, want);
+}
+
 /// Tests that we can convert the bf16 multiplier in the DSLX standard library.
 ///
 /// Ignored as it takes a significant amount of time to run.
