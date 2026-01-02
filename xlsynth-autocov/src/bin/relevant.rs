@@ -127,8 +127,6 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     #[cfg(feature = "has-bitwuzla")]
     fn test_solver_arg_accepts_bitwuzla_when_enabled() {

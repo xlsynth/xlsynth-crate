@@ -2484,7 +2484,15 @@ pub mod test_utils {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "with-bitwuzla-binary-test",
+        feature = "with-boolector-binary-test",
+        feature = "with-z3-binary-test",
+        feature = "with-bitwuzla-built"
+    )
+))]
 macro_rules! test_with_solver {
     ($mod_ident:ident, $solver_type:ty, $solver_config:expr) => {
         #[cfg(test)]
