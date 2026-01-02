@@ -75,11 +75,7 @@ pub fn compute_logical_effort_min_delay(gate_fn: &GateFn, options: &Options) -> 
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        assert_within,
-        gate_builder::{GateBuilder, GateBuilderOptions},
-        test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample},
-    };
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     use super::*;
 

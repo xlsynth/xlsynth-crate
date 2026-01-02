@@ -1,17 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 use xlsynth::IrValue;
-use xlsynth_pir::corners::{
-    AddCornerTag, CornerKind, CornerTag, NegCornerTag, ShiftCornerTag, corner_tag_from_kind_and_u8,
-};
+use xlsynth_pir::corners::CornerKind;
 use xlsynth_pir::ir;
 
+#[cfg(any(
+    feature = "has-bitwuzla",
+    feature = "has-boolector",
+    feature = "has-easy-smt"
+))]
+use xlsynth_pir::corners::{
+    AddCornerTag, CornerTag, NegCornerTag, ShiftCornerTag, corner_tag_from_kind_and_u8,
+};
+
+#[cfg(any(
+    feature = "has-bitwuzla",
+    feature = "has-boolector",
+    feature = "has-easy-smt"
+))]
+use std::collections::BTreeMap;
+
+#[cfg(any(
+    feature = "has-bitwuzla",
+    feature = "has-boolector",
+    feature = "has-easy-smt"
+))]
 use crate::solver::{BitVec, Response, Solver};
 
+#[cfg(any(
+    feature = "has-bitwuzla",
+    feature = "has-boolector",
+    feature = "has-easy-smt"
+))]
 use super::translate::{get_fn_inputs, ir_to_smt_with_node_terms};
+#[cfg(any(
+    feature = "has-bitwuzla",
+    feature = "has-boolector",
+    feature = "has-easy-smt"
+))]
 use super::types::{Assertion, IrTypedBitVec, ProverFn, SmtFnWithNodeTerms, UfRegistry};
 
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +83,11 @@ pub enum CornerOrResult {
     Unknown { message: String },
 }
 
+#[cfg(any(
+    feature = "has-bitwuzla",
+    feature = "has-boolector",
+    feature = "has-easy-smt"
+))]
 pub struct CornerProverSession<'a, S: Solver> {
     solver: S,
     f: &'a ir::Fn,
@@ -62,6 +95,11 @@ pub struct CornerProverSession<'a, S: Solver> {
     smt: SmtFnWithNodeTerms<'a, S::Term>,
 }
 
+#[cfg(any(
+    feature = "has-bitwuzla",
+    feature = "has-boolector",
+    feature = "has-easy-smt"
+))]
 fn mk_pass_flag<S: Solver>(
     solver: &mut S,
     assertions: &[Assertion<'_, S::Term>],
@@ -79,6 +117,11 @@ fn mk_pass_flag<S: Solver>(
     acc_opt.expect("acc populated")
 }
 
+#[cfg(any(
+    feature = "has-bitwuzla",
+    feature = "has-boolector",
+    feature = "has-easy-smt"
+))]
 impl<'a, S: Solver> CornerProverSession<'a, S> {
     fn new(
         cfg: &S::Config,
@@ -253,6 +296,13 @@ pub enum CornerProver<'a> {
     NoSolver(PhantomData<&'a ()>),
 }
 
+#[cfg(all(
+    feature = "has-easy-smt",
+    not(feature = "has-bitwuzla"),
+    not(feature = "has-boolector")
+))]
+use crate::solver::easy_smt::EasySmtConfig;
+
 impl<'a> CornerProver<'a> {
     pub fn new_auto(
         pkg: &'a ir::Package,
@@ -277,8 +327,6 @@ impl<'a> CornerProver<'a> {
             not(feature = "has-boolector")
         ))]
         {
-            use crate::solver::easy_smt::EasySmtConfig;
-
             // Try a few common binaries.
             let candidates = [
                 EasySmtConfig::z3(),

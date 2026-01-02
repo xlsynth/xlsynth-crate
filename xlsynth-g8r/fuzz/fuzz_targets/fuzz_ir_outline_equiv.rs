@@ -5,9 +5,9 @@ use libfuzzer_sys::fuzz_target;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-#[cfg(feature = "has-bitwuzla")]
+#[cfg(any(feature = "with-bitwuzla-system", feature = "with-bitwuzla-built"))]
 use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
-#[cfg(feature = "has-boolector")]
+#[cfg(any(feature = "with-boolector-system", feature = "with-boolector-built"))]
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};

@@ -421,17 +421,12 @@ pub fn validate_equivalence_classes(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::time::Instant;
 
     use rand::SeedableRng;
 
     use crate::{
-        aig::gate::GateFn,
         propose_equiv::{EquivNode, propose_equivalence_classes},
-        test_utils::{
-            Opt, load_bf16_add_sample, load_bf16_mul_sample, setup_graph_with_redundancies,
-            setup_partially_equiv_graph,
-        },
+        test_utils::{setup_graph_with_redundancies, setup_partially_equiv_graph},
     };
 
     use super::validate_equivalence_classes;

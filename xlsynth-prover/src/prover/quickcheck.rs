@@ -398,7 +398,15 @@ pub fn discover_quickcheck_tests(
     Ok(tests)
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "with-bitwuzla-binary-test",
+        feature = "with-boolector-binary-test",
+        feature = "with-z3-binary-test",
+        feature = "with-bitwuzla-built"
+    )
+))]
 mod test_utils {
     use super::*;
     use crate::prover::types::{ParamDomains, ProverFn};
@@ -697,7 +705,15 @@ mod test_utils {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "with-bitwuzla-binary-test",
+        feature = "with-boolector-binary-test",
+        feature = "with-z3-binary-test",
+        feature = "with-bitwuzla-built"
+    )
+))]
 macro_rules! quickcheck_test_with_solver {
     ($mod_ident:ident, $solver_type:ty, $solver_config:expr) => {
         #[cfg(test)]
