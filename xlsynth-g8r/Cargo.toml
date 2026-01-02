@@ -76,10 +76,6 @@ name = "try-parse-liberty"
 path = "src/liberty/try_parse.rs"
 
 [[bin]]
-name = "check-ir-equivalence"
-path = "src/bin/check-ir-equivalence.rs"
-
-[[bin]]
 name = "mcmc-driver"
 path = "src/bin/mcmc-driver.rs"
 

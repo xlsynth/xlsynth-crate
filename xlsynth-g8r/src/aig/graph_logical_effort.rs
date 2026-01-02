@@ -249,11 +249,7 @@ pub fn analyze_graph_logical_effort(
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        assert_within,
-        gate_builder::{GateBuilder, GateBuilderOptions},
-        test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample},
-    };
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 
     use super::*;
 

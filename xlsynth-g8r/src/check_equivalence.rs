@@ -230,7 +230,6 @@ pub fn prove_same_gate_fn_via_ir(lhs: &GateFn, rhs: &GateFn) -> Result<(), Strin
 mod tests {
     use crate::{
         aig::gate::AigBitVector,
-        aig_serdes::gate2ir,
         gate_builder::{GateBuilder, GateBuilderOptions},
     };
     use xlsynth_pir::ir_parser;
