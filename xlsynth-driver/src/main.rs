@@ -59,6 +59,7 @@ mod ir2delayinfo;
 mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
+mod ir_bool_cones;
 mod ir_equiv;
 mod ir_equiv_blocks;
 mod ir_fn_eval;
@@ -1352,6 +1353,60 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("ir-bool-cones")
+                .about("Extracts all k-feasible boolean cones (cuts with frontier <= K) feeding bits[1] nodes and writes them to an output directory")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false)
+                .arg(
+                    clap::Arg::new("k")
+                        .long("k")
+                        .value_name("N")
+                        .help("Maximum frontier size (K) for cuts; literals do not count toward K; tuples/arrays count by shape (e.g. a 3-tuple leaf costs 3)")
+                        .required(true)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_dir")
+                        .long("output_dir")
+                        .value_name("DIR")
+                        .help("Directory to write extracted cone packages as ${sha256}.ir")
+                        .required(true)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("max_cuts_per_node")
+                        .long("max_cuts_per_node")
+                        .value_name("N")
+                        .help("Safety cap: maximum number of cuts retained per IR node during enumeration")
+                        .default_value("2048")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("max_cones")
+                        .long("max_cones")
+                        .value_name("N")
+                        .help("Optional cap: stop after emitting N cones (0 means no cap)")
+                        .default_value("0")
+                        .action(clap::ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "emit_pos_data",
+                    "Whether to retain position metadata (pos=...) and file_number table in emitted cones",
+                )
+                .arg(
+                    clap::Arg::new("manifest_jsonl")
+                        .long("manifest_jsonl")
+                        .value_name("PATH")
+                        .help("Optional path for JSONL manifest output (default: <output_dir>/manifest.jsonl)")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("run-verilog-pipeline")
                 .about("Runs a SystemVerilog pipeline via iverilog with a single input value")
                 .long_about("Runs a SystemVerilog pipeline simulation using iverilog.\n\nUsage: xlsynth-driver run-verilog-pipeline <SV_PATH> [INPUT_VALUE]\n  SV_PATH: Path to SystemVerilog file (or '-' for stdin)\n  INPUT_VALUE: XLS IR typed value (e.g., 'bits[32]:5', 'tuple(bits[8]:1, bits[16]:2)')\n               If not provided, zero values will be used and displayed.")
@@ -1875,6 +1930,9 @@ fn main() {
         }
         Some(("ir-strip-pos-data", subm)) => {
             ir_strip_pos_data::handle_ir_strip_pos_data(subm, &config);
+        }
+        Some(("ir-bool-cones", subm)) => {
+            ir_bool_cones::handle_ir_bool_cones(subm, &config);
         }
         Some(("ir-fn-eval", subm)) => {
             ir_fn_eval::handle_ir_fn_eval(subm, &config);

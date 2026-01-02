@@ -596,6 +596,39 @@ Example:
 xlsynth-driver ir-strip-pos-data input.ir > input.nopos.ir
 ```
 
+### `ir-bool-cones`: extract boolean cones via k-feasible cuts
+
+Extracts cones feeding every `bits[1]`-typed node in a selected IR function by enumerating all cuts whose **frontier size ≤ K**, then writing each extracted cone as a standalone IR package to an output directory.
+
+- The output directory is populated with files named by SHA-256 of the emitted package text: `${sha256}.ir`.
+- **Literals do not count** toward the frontier size `K` (they are embedded as constants in the extracted cone).
+- **Aggregate frontier values** (tuples/arrays) count by shape: e.g. an N-element tuple leaf contributes cost N (recursively through nested aggregates).
+- Deterministic ordering is used so repeated runs produce the same set of outputs (subject to any safety caps you set).
+
+Required flags:
+
+- `--k <N>`: maximum frontier size.
+- `--output_dir <DIR>`: directory to write `${sha256}.ir` packages and a manifest.
+
+Optional flags:
+
+- `--top <NAME>`: select the IR function to analyze (defaults to the package `top` or first function).
+- `--max_cuts_per_node <N>`: safety cap on cut enumeration per IR node (default `2048`).
+- `--max_cones <N>`: optional cap on emitted cones (default `0`, meaning no cap).
+- `--emit_pos_data=<BOOL>`: retain `pos=...` metadata and `file_number` table in outputs (default `false`).
+- `--manifest_jsonl <PATH>`: write JSONL manifest here (default `<output_dir>/manifest.jsonl`).
+
+Example:
+
+```shell
+xlsynth-driver ir-bool-cones my_design.opt.ir \
+  --k 6 \
+  --output_dir ./bool_cones_out \
+  --max_cuts_per_node 512 \
+  --max_cones 500 \
+  --emit_pos_data=false
+```
+
 ### `g8r-equiv`
 
 Checks two GateFns for functional equivalence using the available engines. A

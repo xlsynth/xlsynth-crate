@@ -19,6 +19,7 @@ rand = "0.8"
 rand_pcg = "0.3.1"
 tempfile = "3.20"
 bitvec = "1.0.1"
+sha2 = "0.10"
 
 [dev-dependencies]
 maplit = "1.0.2"
