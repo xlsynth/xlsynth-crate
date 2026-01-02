@@ -125,10 +125,14 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(feature = "with-bitwuzla-system", feature = "with-bitwuzla-built")
+))]
 mod tests {
+    use super::*;
+
     #[test]
-    #[cfg(feature = "has-bitwuzla")]
     fn test_solver_arg_accepts_bitwuzla_when_enabled() {
         let args = Args::try_parse_from([
             "xlsynth-autocov-relevant",
