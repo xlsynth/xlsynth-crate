@@ -39,12 +39,12 @@ signal-hook = "0.3"
 flate2 = "1.0"
 comfy-table = "7.2"
 csv = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
 test-case = "3.3.1"
 pretty_assertions = "1.4.1"
-sha2 = "0.10"
 
 [build-dependencies]
 prost-build = "0.12"

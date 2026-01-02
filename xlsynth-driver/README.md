@@ -411,7 +411,9 @@ Filtering:
   - `GetParam` / `literal` have depth 0
   - all other ops have depth `1 + max(operand_depth)`
 - Param filter: only cones with **param_count \< `--max-params`** are emitted, where param_count is the number of distinct `ParamId`s referenced by the cone (i.e., boundary params when cutting traversal at `GetParam`).
-- Operation filter: only cones with **operation_count > 1** are emitted, where operation_count is the number of nodes in the cone that are neither `GetParam` nor `literal` (e.g., a single `not` is considered 1 operation and is skipped).
+- Trivial-cone filter (post-optimization): after extracting each cone, the command runs IR optimization on the cone package and only writes it out if:
+  - the optimized cone return node is **not** a `GetParam` or `literal` (i.e., cones that optimize to `ret param` or `ret literal` are skipped), and
+  - the optimized cone contains **more than one** nontrivial operation node (nodes that are neither `GetParam` nor `literal`).
 
 Performance:
 
@@ -430,7 +432,7 @@ Output:
 
 - One file per unique cone: `--out-dir/<sha256>.ir`, where `<sha256>` is the SHA-256 hex digest of the emitted IR text.
 - The command prints a single summary line on stdout:
-  - `roots=<N> extracted_unique=<N> pruned_by_depth=<N> pruned_by_params=<N> skipped_unsupported=<N> skipped_trivial=<N>`
+  - `roots=<N> extracted_unique_preopt=<N> emitted_unique=<N> pruned_by_depth=<N> pruned_by_params=<N> skipped_unsupported=<N> skipped_trivial=<N>`
 
 Example:
 

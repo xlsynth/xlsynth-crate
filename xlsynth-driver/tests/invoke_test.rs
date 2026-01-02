@@ -3449,21 +3449,10 @@ top fn main(a: bits[1], b: bits[1], x: bits[8]) -> bits[8] {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "roots=6 extracted_unique=1 pruned_by_depth=1 pruned_by_params=0 skipped_unsupported=0 skipped_trivial=4\n"
+        "roots=6 extracted_unique_preopt=5 emitted_unique=0 pruned_by_depth=1 pruned_by_params=0 skipped_unsupported=0 skipped_trivial=5\n"
     );
 
-    let expected_texts: BTreeSet<String> = BTreeSet::from([
-        // Cone for not(and(a,b)).
-        r#"package bool_cone_pkg
-
-top fn cone(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
-  and.3: bits[1] = and(a, b, id=3)
-  ret not.4: bits[1] = not(and.3, id=4)
-}
-
-"#
-        .to_string(),
-    ]);
+    let expected_texts: BTreeSet<String> = BTreeSet::new();
 
     let mut got_texts: BTreeSet<String> = BTreeSet::new();
     let mut got_filenames: BTreeSet<String> = BTreeSet::new();

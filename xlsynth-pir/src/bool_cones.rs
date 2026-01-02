@@ -29,7 +29,6 @@ pub struct ExtractedBoolCone {
     pub sha256_hex: String,
     pub depth: usize,
     pub param_count: usize,
-    pub operation_count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,7 +36,6 @@ pub struct BoolConeExtractStats {
     pub roots: usize,
     pub extracted_unique: usize,
     pub skipped_unsupported: usize,
-    pub skipped_trivial: usize,
     pub pruned_by_depth: usize,
     pub pruned_by_params: usize,
 }
@@ -46,7 +44,6 @@ pub struct BoolConeExtractStats {
 enum RootOutcome {
     Extracted,
     SkippedUnsupported,
-    SkippedTrivial,
     PrunedByDepth,
     PrunedByParams,
 }
@@ -157,23 +154,6 @@ impl<'a> ConeWalkState<'a> {
 fn sha256_hex_of_text(s: &str) -> String {
     let digest = sha2::Sha256::digest(s.as_bytes());
     format!("{digest:x}")
-}
-
-fn count_nontrivial_operations(f: &IrFn, region_nodes: &HashSet<usize>) -> usize {
-    region_nodes
-        .iter()
-        .copied()
-        .filter(|idx| {
-            let node = &f.nodes[*idx];
-            match &node.payload {
-                // `GetParam` is explicitly excluded from region_nodes by construction.
-                NodePayload::GetParam(_) => false,
-                // Literals are treated as leaves for depth purposes and are not counted as ops.
-                NodePayload::Literal(_) => false,
-                _ => true,
-            }
-        })
-        .count()
 }
 
 fn build_param_id_to_info_map(f: &IrFn) -> HashMap<usize, (String, Type)> {
@@ -350,17 +330,6 @@ fn attempt_extract_one_root(
         "param pruning should have occurred before extraction"
     );
 
-    // Require at least two nontrivial operations in the cone.
-    //
-    // This filters out degenerate cones like:
-    // - `ret p` (root is a param)
-    // - `ret literal`
-    // - single-op cones like `ret not(p)`
-    let operation_count = count_nontrivial_operations(f, &state.region_nodes);
-    if operation_count <= 1 {
-        return Ok((RootOutcome::SkippedTrivial, None));
-    }
-
     // Emit a canonical one-function package.
     let extracted_fn =
         extract_canonical_cone_fn(f, root, &state.region_nodes, &state.boundary_param_ids)?;
@@ -374,7 +343,6 @@ fn attempt_extract_one_root(
             sha256_hex,
             depth,
             param_count,
-            operation_count,
         }),
     ))
 }
@@ -412,7 +380,6 @@ pub fn extract_bool_cones_from_fn(
                 }
             }
             RootOutcome::SkippedUnsupported => stats.skipped_unsupported += 1,
-            RootOutcome::SkippedTrivial => stats.skipped_trivial += 1,
             RootOutcome::PrunedByDepth => stats.pruned_by_depth += 1,
             RootOutcome::PrunedByParams => stats.pruned_by_params += 1,
         }
