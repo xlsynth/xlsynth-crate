@@ -51,6 +51,7 @@ glob = "0.3"
 
 [features]
 default = []
+unstable-dslx-specialize = ["xlsynth-prover/unstable-dslx-specialize"]
 has-boolector = ["xlsynth-prover/has-boolector"]
 has-easy-smt = ["xlsynth-prover/has-easy-smt"]
 has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]

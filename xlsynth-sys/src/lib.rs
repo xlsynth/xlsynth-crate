@@ -770,6 +770,10 @@ extern "C" {
         p: *const CIrPackage,
         string_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_function_to_string(
+        f: *const CIrFunction,
+        string_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
     pub fn xls_package_get_top(p: *mut CIrPackage) -> *mut CIrFunctionBase;
     pub fn xls_package_set_top_by_name(
         p: *mut CIrPackage,

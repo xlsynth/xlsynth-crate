@@ -7530,6 +7530,7 @@ fn test_prover_first_with_timeout_and_success() {
 }
 
 #[test]
+#[cfg(feature = "unstable-dslx-specialize")]
 fn test_dslx_specialize_basic() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -7593,6 +7594,7 @@ fn call() -> bits[32] { helper(bits[32]:0x0) }
 }
 
 #[test]
+#[cfg(feature = "unstable-dslx-specialize")]
 fn test_dslx_specialize_parametric_top_binding() {
     let _ = env_logger::builder().is_test(true).try_init();
 
