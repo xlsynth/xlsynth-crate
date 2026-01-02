@@ -25,6 +25,19 @@ pub enum PirTransformKind {
     /// Constant-shift equality through add-with-literal (mod 2^w):
     ///   `eq(add(x, k), c) ↔ eq(x, c - k)` (and same for `ne`)
     EqNeAddLiteralShift,
+    /// Normalize subtraction via add+negation (two's complement) and reverse:
+    /// `sub(x, y) ↔ add(x, neg(y))`
+    SubToAddNeg,
+    /// Normalize negated subtraction into swapped subtraction and reverse:
+    /// `neg(sub(x, y)) ↔ sub(y, x)`
+    NegSubSwap,
+    /// Speculative arithmetic reshaping (always equivalent under modulo 2^w):
+    /// reassociate/rotate small `add`/`sub` trees to explore different shapes.
+    ReassociateAddSub,
+    /// Expand/contract an `add(bits[w])` into a low+high half adder with
+    /// explicit carry. This is a structure-changing move intended to affect
+    /// depth/product.
+    CarrySplitAdd,
     /// Distribute NOT over select (and reverse folding form):
     /// `not(sel(p, cases=[a, b])) ↔ sel(p, cases=[not(a), not(b)])`
     NotSelDistribute,
@@ -79,10 +92,16 @@ pub enum PirTransformKind {
     /// Fold nested bit_slices:
     /// `bit_slice(bit_slice(x, s1, w1), s2, w2) ↔ bit_slice(x, s1+s2, w2)`
     BitSliceBitSliceFold,
+    /// Normalize `and_reduce` via De Morgan and reverse:
+    /// `and_reduce(x) ↔ not(or_reduce(not(x)))`
+    AndReduceDeMorgan,
     /// Distribute bit_slice over concat (and reverse folding form):
     /// `bit_slice(concat(a,b), start=s, width=w) ↔ ...`
     /// (handle in-a / in-b / straddle cases)
     BitSliceConcatDistribute,
+    /// Normalize a constant left shift encoded as concat+bit_slice and reverse:
+    /// `concat(bit_slice(x, start=0, width=w-k), 0_k) ↔ shll(x, k)`
+    ConstShllConcatZeroFold,
     /// Lower small priority_sel to a sel-chain (reverse optional):
     /// for selector bits[M], cases len=M:
     /// `priority_sel(sel, cases=[c0..cM-1], default=d)`
@@ -105,6 +124,10 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::CloneMultiUserNode => write!(f, "CloneMultiUserNode"),
             PirTransformKind::EqSelDistribute => write!(f, "EqSelDistribute"),
             PirTransformKind::EqNeAddLiteralShift => write!(f, "EqNeAddLiteralShift"),
+            PirTransformKind::SubToAddNeg => write!(f, "SubToAddNeg"),
+            PirTransformKind::NegSubSwap => write!(f, "NegSubSwap"),
+            PirTransformKind::ReassociateAddSub => write!(f, "ReassociateAddSub"),
+            PirTransformKind::CarrySplitAdd => write!(f, "CarrySplitAdd"),
             PirTransformKind::NotSelDistribute => write!(f, "NotSelDistribute"),
             PirTransformKind::NegSelDistribute => write!(f, "NegSelDistribute"),
             PirTransformKind::BitSliceSelDistribute => write!(f, "BitSliceSelDistribute"),
@@ -122,7 +145,9 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::EqZeroOrReduce => write!(f, "EqZeroOrReduce"),
             PirTransformKind::NeZeroOrReduce => write!(f, "NeZeroOrReduce"),
             PirTransformKind::BitSliceBitSliceFold => write!(f, "BitSliceBitSliceFold"),
+            PirTransformKind::AndReduceDeMorgan => write!(f, "AndReduceDeMorgan"),
             PirTransformKind::BitSliceConcatDistribute => write!(f, "BitSliceConcatDistribute"),
+            PirTransformKind::ConstShllConcatZeroFold => write!(f, "ConstShllConcatZeroFold"),
             PirTransformKind::PrioritySelToSelChain => write!(f, "PrioritySelToSelChain"),
             PirTransformKind::RewireOperandToSameType => write!(f, "RewireOperandToSameType"),
         }
@@ -837,6 +862,749 @@ impl PirTransform for EqNeAddLiteralShiftTransform {
                 "EqNeAddLiteralShiftTransform: expected eq/ne binop payload at target location"
                     .to_string(),
             ),
+        }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
+}
+
+/// A semantics-preserving transform implementing:
+///
+/// `sub(x, y) ↔ add(x, neg(y))`
+#[derive(Debug)]
+pub struct SubToAddNegTransform;
+
+impl SubToAddNegTransform {
+    fn next_text_id(f: &IrFn) -> usize {
+        f.nodes
+            .iter()
+            .map(|n| n.text_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn bits_width(f: &IrFn, r: NodeRef) -> Option<usize> {
+        match f.get_node(r).ty {
+            Type::Bits(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn mk_neg_node(f: &mut IrFn, w: usize, arg: NodeRef) -> NodeRef {
+        let text_id = Self::next_text_id(f);
+        let new_index = f.nodes.len();
+        f.nodes.push(Node {
+            text_id,
+            name: None,
+            ty: Type::Bits(w),
+            payload: NodePayload::Unop(Unop::Neg, arg),
+            pos: None,
+        });
+        NodeRef { index: new_index }
+    }
+}
+
+impl PirTransform for SubToAddNegTransform {
+    fn kind(&self) -> PirTransformKind {
+        PirTransformKind::SubToAddNeg
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+        let mut out: Vec<TransformLocation> = Vec::new();
+        for nr in f.node_refs() {
+            match &f.get_node(nr).payload {
+                NodePayload::Binop(Binop::Sub, _, _) => out.push(TransformLocation::Node(nr)),
+                NodePayload::Binop(Binop::Add, a, b) => {
+                    if matches!(f.get_node(*a).payload, NodePayload::Unop(Unop::Neg, _))
+                        || matches!(f.get_node(*b).payload, NodePayload::Unop(Unop::Neg, _))
+                    {
+                        out.push(TransformLocation::Node(nr));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
+        let target_ref = match loc {
+            TransformLocation::Node(nr) => *nr,
+            TransformLocation::RewireOperand { .. } => {
+                return Err(
+                    "SubToAddNegTransform: expected TransformLocation::Node, got RewireOperand"
+                        .to_string(),
+                );
+            }
+        };
+
+        let w = Self::bits_width(f, target_ref)
+            .ok_or_else(|| "SubToAddNegTransform: output must be bits[w]".to_string())?;
+
+        let payload = f.get_node(target_ref).payload.clone();
+        match payload {
+            // sub(x, y) -> add(x, neg(y))
+            NodePayload::Binop(Binop::Sub, x, y) => {
+                if Self::bits_width(f, x) != Some(w) || Self::bits_width(f, y) != Some(w) {
+                    return Err("SubToAddNegTransform: operands must be bits[w]".to_string());
+                }
+                let neg_y = Self::mk_neg_node(f, w, y);
+                f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Add, x, neg_y);
+                Ok(())
+            }
+
+            // add(x, neg(y)) -> sub(x, y) (either arm)
+            NodePayload::Binop(Binop::Add, a, b) => {
+                let (x, y) = match (f.get_node(a).payload.clone(), f.get_node(b).payload.clone()) {
+                    (NodePayload::Unop(Unop::Neg, y), _) => (b, y),
+                    (_, NodePayload::Unop(Unop::Neg, y)) => (a, y),
+                    _ => {
+                        return Err("SubToAddNegTransform: expected add(x, neg(y))".to_string());
+                    }
+                };
+                if Self::bits_width(f, x) != Some(w) || Self::bits_width(f, y) != Some(w) {
+                    return Err("SubToAddNegTransform: operands must be bits[w]".to_string());
+                }
+                f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Sub, x, y);
+                Ok(())
+            }
+
+            _ => Err("SubToAddNegTransform: expected sub(..) or add(..)".to_string()),
+        }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
+}
+
+/// A semantics-preserving transform implementing:
+///
+/// `neg(sub(x, y)) ↔ sub(y, x)`
+#[derive(Debug)]
+pub struct NegSubSwapTransform;
+
+impl NegSubSwapTransform {
+    fn next_text_id(f: &IrFn) -> usize {
+        f.nodes
+            .iter()
+            .map(|n| n.text_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn bits_width(f: &IrFn, r: NodeRef) -> Option<usize> {
+        match f.get_node(r).ty {
+            Type::Bits(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn mk_sub_node(f: &mut IrFn, w: usize, x: NodeRef, y: NodeRef) -> NodeRef {
+        let text_id = Self::next_text_id(f);
+        let new_index = f.nodes.len();
+        f.nodes.push(Node {
+            text_id,
+            name: None,
+            ty: Type::Bits(w),
+            payload: NodePayload::Binop(Binop::Sub, x, y),
+            pos: None,
+        });
+        NodeRef { index: new_index }
+    }
+}
+
+impl PirTransform for NegSubSwapTransform {
+    fn kind(&self) -> PirTransformKind {
+        PirTransformKind::NegSubSwap
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+        let mut out: Vec<TransformLocation> = Vec::new();
+        for nr in f.node_refs() {
+            match &f.get_node(nr).payload {
+                NodePayload::Unop(Unop::Neg, arg) => {
+                    if matches!(
+                        f.get_node(*arg).payload,
+                        NodePayload::Binop(Binop::Sub, _, _)
+                    ) {
+                        out.push(TransformLocation::Node(nr));
+                    }
+                }
+                NodePayload::Binop(Binop::Sub, _, _) => out.push(TransformLocation::Node(nr)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
+        let target_ref = match loc {
+            TransformLocation::Node(nr) => *nr,
+            TransformLocation::RewireOperand { .. } => {
+                return Err(
+                    "NegSubSwapTransform: expected TransformLocation::Node, got RewireOperand"
+                        .to_string(),
+                );
+            }
+        };
+
+        let w = Self::bits_width(f, target_ref)
+            .ok_or_else(|| "NegSubSwapTransform: output must be bits[w]".to_string())?;
+
+        let payload = f.get_node(target_ref).payload.clone();
+        match payload {
+            // neg(sub(x, y)) -> sub(y, x)
+            NodePayload::Unop(Unop::Neg, arg) => {
+                let NodePayload::Binop(Binop::Sub, x, y) = f.get_node(arg).payload else {
+                    return Err("NegSubSwapTransform: expected neg(sub(..))".to_string());
+                };
+                if Self::bits_width(f, x) != Some(w) || Self::bits_width(f, y) != Some(w) {
+                    return Err("NegSubSwapTransform: operands must be bits[w]".to_string());
+                }
+                f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Sub, y, x);
+                Ok(())
+            }
+
+            // sub(y, x) -> neg(sub(x, y))
+            NodePayload::Binop(Binop::Sub, y, x) => {
+                if Self::bits_width(f, x) != Some(w) || Self::bits_width(f, y) != Some(w) {
+                    return Err("NegSubSwapTransform: operands must be bits[w]".to_string());
+                }
+                let inner_sub = Self::mk_sub_node(f, w, x, y);
+                f.get_node_mut(target_ref).payload = NodePayload::Unop(Unop::Neg, inner_sub);
+                Ok(())
+            }
+
+            _ => Err("NegSubSwapTransform: expected neg(sub(..)) or sub(..)".to_string()),
+        }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
+}
+
+/// A semantics-preserving transform implementing small arithmetic reshapes:
+///
+/// - `add(add(a,b),c) ↔ add(a,add(b,c))`
+/// - `sub(sub(a,b),c) ↔ sub(a,add(b,c))`
+/// - `sub(a,sub(b,c)) ↔ add(sub(a,b),c)`
+///
+/// These are not “obvious simplifications”; they change the tree shape to give
+/// MCMC more structural options, which is especially useful when optimizing
+/// g8r-nodes×depth.
+#[derive(Debug)]
+pub struct ReassociateAddSubTransform;
+
+impl ReassociateAddSubTransform {
+    fn next_text_id(f: &IrFn) -> usize {
+        f.nodes
+            .iter()
+            .map(|n| n.text_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn bits_width(f: &IrFn, r: NodeRef) -> Option<usize> {
+        match f.get_node(r).ty {
+            Type::Bits(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn mk_binop_bits_node(f: &mut IrFn, op: Binop, w: usize, a: NodeRef, b: NodeRef) -> NodeRef {
+        let text_id = Self::next_text_id(f);
+        let new_index = f.nodes.len();
+        f.nodes.push(Node {
+            text_id,
+            name: None,
+            ty: Type::Bits(w),
+            payload: NodePayload::Binop(op, a, b),
+            pos: None,
+        });
+        NodeRef { index: new_index }
+    }
+
+    fn is_bits_w(f: &IrFn, r: NodeRef, w: usize) -> bool {
+        Self::bits_width(f, r) == Some(w)
+    }
+}
+
+impl PirTransform for ReassociateAddSubTransform {
+    fn kind(&self) -> PirTransformKind {
+        PirTransformKind::ReassociateAddSub
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+        let mut out: Vec<TransformLocation> = Vec::new();
+        for nr in f.node_refs() {
+            match &f.get_node(nr).payload {
+                NodePayload::Binop(Binop::Add, a, b) => {
+                    if matches!(f.get_node(*a).payload, NodePayload::Binop(Binop::Add, _, _))
+                        || matches!(f.get_node(*b).payload, NodePayload::Binop(Binop::Add, _, _))
+                    {
+                        out.push(TransformLocation::Node(nr));
+                    }
+                }
+                NodePayload::Binop(Binop::Sub, a, b) => {
+                    if matches!(f.get_node(*a).payload, NodePayload::Binop(Binop::Sub, _, _))
+                        || matches!(f.get_node(*b).payload, NodePayload::Binop(Binop::Sub, _, _))
+                        || matches!(f.get_node(*b).payload, NodePayload::Binop(Binop::Add, _, _))
+                    {
+                        out.push(TransformLocation::Node(nr));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
+        let target_ref = match loc {
+            TransformLocation::Node(nr) => *nr,
+            TransformLocation::RewireOperand { .. } => {
+                return Err(
+                    "ReassociateAddSubTransform: expected TransformLocation::Node, got RewireOperand"
+                        .to_string(),
+                );
+            }
+        };
+
+        let w = Self::bits_width(f, target_ref)
+            .ok_or_else(|| "ReassociateAddSubTransform: output must be bits[w]".to_string())?;
+
+        let payload = f.get_node(target_ref).payload.clone();
+        match payload {
+            NodePayload::Binop(Binop::Add, a0, b0) => {
+                // add(add(a,b),c) -> add(a, add(b,c))
+                if let NodePayload::Binop(Binop::Add, a, b) = f.get_node(a0).payload {
+                    let c = b0;
+                    if !Self::is_bits_w(f, a, w)
+                        || !Self::is_bits_w(f, b, w)
+                        || !Self::is_bits_w(f, c, w)
+                    {
+                        return Err(
+                            "ReassociateAddSubTransform: operands must be bits[w]".to_string()
+                        );
+                    }
+                    let bc = Self::mk_binop_bits_node(f, Binop::Add, w, b, c);
+                    f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Add, a, bc);
+                    return Ok(());
+                }
+                // add(a, add(b,c)) -> add(add(a,b), c)
+                if let NodePayload::Binop(Binop::Add, b, c) = f.get_node(b0).payload {
+                    let a = a0;
+                    if !Self::is_bits_w(f, a, w)
+                        || !Self::is_bits_w(f, b, w)
+                        || !Self::is_bits_w(f, c, w)
+                    {
+                        return Err(
+                            "ReassociateAddSubTransform: operands must be bits[w]".to_string()
+                        );
+                    }
+                    let ab = Self::mk_binop_bits_node(f, Binop::Add, w, a, b);
+                    f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Add, ab, c);
+                    return Ok(());
+                }
+                // add(sub(a,b),c) -> sub(a, sub(b,c))
+                if let NodePayload::Binop(Binop::Sub, a, b) = f.get_node(a0).payload {
+                    let c = b0;
+                    if !Self::is_bits_w(f, a, w)
+                        || !Self::is_bits_w(f, b, w)
+                        || !Self::is_bits_w(f, c, w)
+                    {
+                        return Err(
+                            "ReassociateAddSubTransform: operands must be bits[w]".to_string()
+                        );
+                    }
+                    let bc = Self::mk_binop_bits_node(f, Binop::Sub, w, b, c);
+                    f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Sub, a, bc);
+                    return Ok(());
+                }
+                // add(a, sub(b,c)) -> sub(add(a,c), b)  (a + (b - c) = (a - c)
+                // + b etc.) Intentionally omitted for now; keep
+                // the rewrite set small and symmetric.
+            }
+            NodePayload::Binop(Binop::Sub, a0, b0) => {
+                // sub(sub(a,b),c) -> sub(a, add(b,c))
+                if let NodePayload::Binop(Binop::Sub, a, b) = f.get_node(a0).payload {
+                    let c = b0;
+                    if !Self::is_bits_w(f, a, w)
+                        || !Self::is_bits_w(f, b, w)
+                        || !Self::is_bits_w(f, c, w)
+                    {
+                        return Err(
+                            "ReassociateAddSubTransform: operands must be bits[w]".to_string()
+                        );
+                    }
+                    let bc = Self::mk_binop_bits_node(f, Binop::Add, w, b, c);
+                    f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Sub, a, bc);
+                    return Ok(());
+                }
+                // sub(a, add(b,c)) -> sub(sub(a,b), c)
+                if let NodePayload::Binop(Binop::Add, b, c) = f.get_node(b0).payload {
+                    let a = a0;
+                    if !Self::is_bits_w(f, a, w)
+                        || !Self::is_bits_w(f, b, w)
+                        || !Self::is_bits_w(f, c, w)
+                    {
+                        return Err(
+                            "ReassociateAddSubTransform: operands must be bits[w]".to_string()
+                        );
+                    }
+                    let ab = Self::mk_binop_bits_node(f, Binop::Sub, w, a, b);
+                    f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Sub, ab, c);
+                    return Ok(());
+                }
+                // sub(a, sub(b,c)) -> add(sub(a,b), c)
+                if let NodePayload::Binop(Binop::Sub, b, c) = f.get_node(b0).payload {
+                    let a = a0;
+                    if !Self::is_bits_w(f, a, w)
+                        || !Self::is_bits_w(f, b, w)
+                        || !Self::is_bits_w(f, c, w)
+                    {
+                        return Err(
+                            "ReassociateAddSubTransform: operands must be bits[w]".to_string()
+                        );
+                    }
+                    let ab = Self::mk_binop_bits_node(f, Binop::Sub, w, a, b);
+                    f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Add, ab, c);
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+
+        Err("ReassociateAddSubTransform: no matching reshape pattern at target".to_string())
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
+}
+
+/// A semantics-preserving transform implementing:
+///
+/// `add(x, y)` (bits[w]) ↔ `concat(sum_hi, sum_lo)` where:
+/// - sum_lo comes from adding the low k bits with one extra carry bit
+/// - sum_hi adds the high halves plus the carry-out from the low half
+///
+/// This is intentionally a structure-changing move aimed at g8r-nodes×depth.
+#[derive(Debug)]
+pub struct CarrySplitAddTransform;
+
+impl CarrySplitAddTransform {
+    fn next_text_id(f: &IrFn) -> usize {
+        f.nodes
+            .iter()
+            .map(|n| n.text_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn bits_width(f: &IrFn, r: NodeRef) -> Option<usize> {
+        match f.get_node(r).ty {
+            Type::Bits(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn mk_bit_slice_node(f: &mut IrFn, width: usize, arg: NodeRef, start: usize) -> NodeRef {
+        let text_id = Self::next_text_id(f);
+        let new_index = f.nodes.len();
+        f.nodes.push(Node {
+            text_id,
+            name: None,
+            ty: Type::Bits(width),
+            payload: NodePayload::BitSlice { arg, start, width },
+            pos: None,
+        });
+        NodeRef { index: new_index }
+    }
+
+    fn mk_zero_ext_node(f: &mut IrFn, new_bit_count: usize, arg: NodeRef) -> NodeRef {
+        let text_id = Self::next_text_id(f);
+        let new_index = f.nodes.len();
+        f.nodes.push(Node {
+            text_id,
+            name: None,
+            ty: Type::Bits(new_bit_count),
+            payload: NodePayload::ZeroExt { arg, new_bit_count },
+            pos: None,
+        });
+        NodeRef { index: new_index }
+    }
+
+    fn mk_binop_bits_node(f: &mut IrFn, op: Binop, w: usize, a: NodeRef, b: NodeRef) -> NodeRef {
+        let text_id = Self::next_text_id(f);
+        let new_index = f.nodes.len();
+        f.nodes.push(Node {
+            text_id,
+            name: None,
+            ty: Type::Bits(w),
+            payload: NodePayload::Binop(op, a, b),
+            pos: None,
+        });
+        NodeRef { index: new_index }
+    }
+
+    fn choose_k(w: usize) -> usize {
+        // A simple deterministic split point: lower half.
+        w / 2
+    }
+}
+
+impl PirTransform for CarrySplitAddTransform {
+    fn kind(&self) -> PirTransformKind {
+        PirTransformKind::CarrySplitAdd
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+        let mut out: Vec<TransformLocation> = Vec::new();
+        for nr in f.node_refs() {
+            match &f.get_node(nr).payload {
+                NodePayload::Binop(Binop::Add, _, _) => {
+                    if let Some(w) = Self::bits_width(f, nr) {
+                        if w >= 2 {
+                            out.push(TransformLocation::Node(nr));
+                        }
+                    }
+                }
+                NodePayload::Nary(NaryOp::Concat, ops) if ops.len() == 2 => {
+                    if matches!(
+                        f.get_node(ops[0]).payload,
+                        NodePayload::Binop(Binop::Add, _, _)
+                    ) || matches!(
+                        f.get_node(ops[0]).payload,
+                        NodePayload::Binop(Binop::Sub, _, _)
+                    ) || matches!(
+                        f.get_node(ops[0]).payload,
+                        NodePayload::Binop(Binop::Add, _, _)
+                    ) {
+                        out.push(TransformLocation::Node(nr));
+                    } else {
+                        out.push(TransformLocation::Node(nr));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
+        let target_ref = match loc {
+            TransformLocation::Node(nr) => *nr,
+            TransformLocation::RewireOperand { .. } => {
+                return Err(
+                    "CarrySplitAddTransform: expected TransformLocation::Node, got RewireOperand"
+                        .to_string(),
+                );
+            }
+        };
+
+        let w = Self::bits_width(f, target_ref)
+            .ok_or_else(|| "CarrySplitAddTransform: output must be bits[w]".to_string())?;
+        if w < 2 {
+            return Err("CarrySplitAddTransform: requires w >= 2".to_string());
+        }
+        let k = Self::choose_k(w);
+        if k == 0 || k >= w {
+            return Err("CarrySplitAddTransform: invalid split point".to_string());
+        }
+
+        let payload = f.get_node(target_ref).payload.clone();
+        match payload {
+            // Expand: add(x,y) -> concat(sum_hi,sum_lo) with explicit carry.
+            NodePayload::Binop(Binop::Add, x, y) => {
+                if Self::bits_width(f, x) != Some(w) || Self::bits_width(f, y) != Some(w) {
+                    return Err("CarrySplitAddTransform: operands must be bits[w]".to_string());
+                }
+
+                let hi_w = w - k;
+                let lo_w = k;
+
+                // Low half with extra carry bit.
+                let x_lo = Self::mk_bit_slice_node(f, lo_w, x, 0);
+                let y_lo = Self::mk_bit_slice_node(f, lo_w, y, 0);
+                let x_lo_ext = Self::mk_zero_ext_node(f, lo_w + 1, x_lo);
+                let y_lo_ext = Self::mk_zero_ext_node(f, lo_w + 1, y_lo);
+                let sum_lo_ext =
+                    Self::mk_binop_bits_node(f, Binop::Add, lo_w + 1, x_lo_ext, y_lo_ext);
+                let sum_lo = Self::mk_bit_slice_node(f, lo_w, sum_lo_ext, 0);
+                let carry = Self::mk_bit_slice_node(f, 1, sum_lo_ext, lo_w);
+
+                // High half and carry.
+                let x_hi = Self::mk_bit_slice_node(f, hi_w, x, lo_w);
+                let y_hi = Self::mk_bit_slice_node(f, hi_w, y, lo_w);
+                let sum_hi0 = Self::mk_binop_bits_node(f, Binop::Add, hi_w, x_hi, y_hi);
+                let carry_ext = Self::mk_zero_ext_node(f, hi_w, carry);
+                let sum_hi = Self::mk_binop_bits_node(f, Binop::Add, hi_w, sum_hi0, carry_ext);
+
+                // Concatenate (hi is more-significant bits).
+                f.get_node_mut(target_ref).payload =
+                    NodePayload::Nary(NaryOp::Concat, vec![sum_hi, sum_lo]);
+                Ok(())
+            }
+
+            // Fold: concat(sum_hi,sum_lo) matching our expansion pattern -> add(x,y).
+            NodePayload::Nary(NaryOp::Concat, ops) => {
+                if ops.len() != 2 {
+                    return Err(
+                        "CarrySplitAddTransform: only supports 2-operand concat".to_string()
+                    );
+                }
+                let sum_hi = ops[0];
+                let sum_lo = ops[1];
+
+                let hi_w = w - k;
+                let lo_w = k;
+
+                let NodePayload::BitSlice {
+                    arg: sum_lo_ext,
+                    start: lo_start,
+                    width: lo_width,
+                } = f.get_node(sum_lo).payload
+                else {
+                    return Err(
+                        "CarrySplitAddTransform: expected sum_lo to be bit_slice".to_string()
+                    );
+                };
+                if lo_start != 0 || lo_width != lo_w {
+                    return Err("CarrySplitAddTransform: sum_lo slice mismatch".to_string());
+                }
+                if Self::bits_width(f, sum_lo_ext) != Some(lo_w + 1) {
+                    return Err("CarrySplitAddTransform: expected sum_lo_ext bits[k+1]".to_string());
+                }
+                let NodePayload::Binop(Binop::Add, x_lo_ext, y_lo_ext) =
+                    f.get_node(sum_lo_ext).payload
+                else {
+                    return Err("CarrySplitAddTransform: expected sum_lo_ext to be add".to_string());
+                };
+                let NodePayload::ZeroExt {
+                    arg: x_lo,
+                    new_bit_count: xlo_n,
+                } = f.get_node(x_lo_ext).payload
+                else {
+                    return Err(
+                        "CarrySplitAddTransform: expected x_lo_ext to be zero_ext".to_string()
+                    );
+                };
+                let NodePayload::ZeroExt {
+                    arg: y_lo,
+                    new_bit_count: ylo_n,
+                } = f.get_node(y_lo_ext).payload
+                else {
+                    return Err(
+                        "CarrySplitAddTransform: expected y_lo_ext to be zero_ext".to_string()
+                    );
+                };
+                if xlo_n != lo_w + 1 || ylo_n != lo_w + 1 {
+                    return Err("CarrySplitAddTransform: low zero_ext width mismatch".to_string());
+                }
+                let NodePayload::BitSlice {
+                    arg: x,
+                    start: xlo_s,
+                    width: xlo_w,
+                } = f.get_node(x_lo).payload
+                else {
+                    return Err("CarrySplitAddTransform: expected x_lo to be bit_slice".to_string());
+                };
+                let NodePayload::BitSlice {
+                    arg: y,
+                    start: ylo_s,
+                    width: ylo_w,
+                } = f.get_node(y_lo).payload
+                else {
+                    return Err("CarrySplitAddTransform: expected y_lo to be bit_slice".to_string());
+                };
+                if xlo_s != 0 || ylo_s != 0 || xlo_w != lo_w || ylo_w != lo_w {
+                    return Err("CarrySplitAddTransform: low slice mismatch".to_string());
+                }
+                if Self::bits_width(f, x) != Some(w) || Self::bits_width(f, y) != Some(w) {
+                    return Err("CarrySplitAddTransform: x/y must be bits[w]".to_string());
+                }
+
+                // Carry must come from bit_slice(sum_lo_ext, start=k, width=1), and be
+                // zero-extended.
+                let NodePayload::Binop(Binop::Add, sum_hi0, carry_ext) = f.get_node(sum_hi).payload
+                else {
+                    return Err("CarrySplitAddTransform: expected sum_hi to be add".to_string());
+                };
+                if Self::bits_width(f, sum_hi0) != Some(hi_w)
+                    || Self::bits_width(f, carry_ext) != Some(hi_w)
+                {
+                    return Err(
+                        "CarrySplitAddTransform: sum_hi operands width mismatch".to_string()
+                    );
+                }
+                let NodePayload::ZeroExt {
+                    arg: carry,
+                    new_bit_count: carry_n,
+                } = f.get_node(carry_ext).payload
+                else {
+                    return Err(
+                        "CarrySplitAddTransform: expected carry_ext to be zero_ext".to_string()
+                    );
+                };
+                if carry_n != hi_w {
+                    return Err("CarrySplitAddTransform: carry_ext width mismatch".to_string());
+                }
+                let NodePayload::BitSlice {
+                    arg: carry_src,
+                    start: carry_s,
+                    width: carry_w,
+                } = f.get_node(carry).payload
+                else {
+                    return Err(
+                        "CarrySplitAddTransform: expected carry to be bit_slice".to_string()
+                    );
+                };
+                if carry_src != sum_lo_ext || carry_s != lo_w || carry_w != 1 {
+                    return Err("CarrySplitAddTransform: carry slice mismatch".to_string());
+                }
+
+                let NodePayload::Binop(Binop::Add, x_hi, y_hi) = f.get_node(sum_hi0).payload else {
+                    return Err("CarrySplitAddTransform: expected sum_hi0 to be add".to_string());
+                };
+                let NodePayload::BitSlice {
+                    arg: x2,
+                    start: xhi_s,
+                    width: xhi_w,
+                } = f.get_node(x_hi).payload
+                else {
+                    return Err("CarrySplitAddTransform: expected x_hi to be bit_slice".to_string());
+                };
+                let NodePayload::BitSlice {
+                    arg: y2,
+                    start: yhi_s,
+                    width: yhi_w,
+                } = f.get_node(y_hi).payload
+                else {
+                    return Err("CarrySplitAddTransform: expected y_hi to be bit_slice".to_string());
+                };
+                if x2 != x || y2 != y {
+                    return Err(
+                        "CarrySplitAddTransform: hi/lo slices must refer to same x/y".to_string(),
+                    );
+                }
+                if xhi_s != lo_w || yhi_s != lo_w || xhi_w != hi_w || yhi_w != hi_w {
+                    return Err("CarrySplitAddTransform: high slice mismatch".to_string());
+                }
+
+                f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Add, x, y);
+                Ok(())
+            }
+
+            _ => Err("CarrySplitAddTransform: expected add(..) or concat(..)".to_string()),
         }
     }
 
@@ -3702,6 +4470,389 @@ impl PirTransform for NeZeroOrReduceTransform {
 
 /// A semantics-preserving transform implementing:
 ///
+/// `and_reduce(x) ↔ not(or_reduce(not(x)))`
+#[derive(Debug)]
+pub struct AndReduceDeMorganTransform;
+
+impl AndReduceDeMorganTransform {
+    fn next_text_id(f: &IrFn) -> usize {
+        f.nodes
+            .iter()
+            .map(|n| n.text_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn bits_width(f: &IrFn, r: NodeRef) -> Option<usize> {
+        match f.get_node(r).ty {
+            Type::Bits(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn mk_unop_bits_node(f: &mut IrFn, op: Unop, w: usize, arg: NodeRef) -> NodeRef {
+        let text_id = Self::next_text_id(f);
+        let new_index = f.nodes.len();
+        f.nodes.push(Node {
+            text_id,
+            name: None,
+            ty: Type::Bits(w),
+            payload: NodePayload::Unop(op, arg),
+            pos: None,
+        });
+        NodeRef { index: new_index }
+    }
+}
+
+impl PirTransform for AndReduceDeMorganTransform {
+    fn kind(&self) -> PirTransformKind {
+        PirTransformKind::AndReduceDeMorgan
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+        let mut out: Vec<TransformLocation> = Vec::new();
+        for nr in f.node_refs() {
+            match &f.get_node(nr).payload {
+                NodePayload::Unop(Unop::AndReduce, _) => {
+                    out.push(TransformLocation::Node(nr));
+                }
+                NodePayload::Unop(Unop::Not, arg) => {
+                    let NodePayload::Unop(Unop::OrReduce, inner) = f.get_node(*arg).payload else {
+                        continue;
+                    };
+                    let NodePayload::Unop(Unop::Not, _) = f.get_node(inner).payload else {
+                        continue;
+                    };
+                    out.push(TransformLocation::Node(nr));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
+        let target_ref = match loc {
+            TransformLocation::Node(nr) => *nr,
+            TransformLocation::RewireOperand { .. } => {
+                return Err(
+                    "AndReduceDeMorganTransform: expected TransformLocation::Node, got RewireOperand"
+                        .to_string(),
+                );
+            }
+        };
+
+        if Self::bits_width(f, target_ref) != Some(1) {
+            return Err("AndReduceDeMorganTransform: output must be bits[1]".to_string());
+        }
+
+        let target_payload = f.get_node(target_ref).payload.clone();
+        match target_payload {
+            // and_reduce(x) -> not(or_reduce(not(x)))
+            NodePayload::Unop(Unop::AndReduce, x) => {
+                let w = Self::bits_width(f, x).ok_or_else(|| {
+                    "AndReduceDeMorganTransform: input must be bits[w]".to_string()
+                })?;
+                let not_x = Self::mk_unop_bits_node(f, Unop::Not, w, x);
+                let or_reduce = Self::mk_unop_bits_node(f, Unop::OrReduce, 1, not_x);
+                f.get_node_mut(target_ref).payload = NodePayload::Unop(Unop::Not, or_reduce);
+                Ok(())
+            }
+
+            // not(or_reduce(not(x))) -> and_reduce(x)
+            NodePayload::Unop(Unop::Not, arg) => {
+                let NodePayload::Unop(Unop::OrReduce, inner) = f.get_node(arg).payload else {
+                    return Err(
+                        "AndReduceDeMorganTransform: expected not(or_reduce(..))".to_string()
+                    );
+                };
+                let NodePayload::Unop(Unop::Not, x) = f.get_node(inner).payload else {
+                    return Err(
+                        "AndReduceDeMorganTransform: expected not(or_reduce(not(..)))".to_string(),
+                    );
+                };
+                if Self::bits_width(f, x).is_none() {
+                    return Err("AndReduceDeMorganTransform: x must be bits[w]".to_string());
+                }
+                f.get_node_mut(target_ref).payload = NodePayload::Unop(Unop::AndReduce, x);
+                Ok(())
+            }
+            _ => Err(
+                "AndReduceDeMorganTransform: expected and_reduce(..) or not(or_reduce(not(..)))"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
+}
+
+/// A semantics-preserving transform implementing:
+///
+/// `concat(bit_slice(x, start=0, width=w-k), 0_k) ↔ shll(x, k)`
+#[derive(Debug)]
+pub struct ConstShllConcatZeroFoldTransform;
+
+impl ConstShllConcatZeroFoldTransform {
+    fn next_text_id(f: &IrFn) -> usize {
+        f.nodes
+            .iter()
+            .map(|n| n.text_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn bits_width(f: &IrFn, r: NodeRef) -> Option<usize> {
+        match f.get_node(r).ty {
+            Type::Bits(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn mk_ubits_literal_node(f: &mut IrFn, w: usize, value: u64) -> NodeRef {
+        let text_id = Self::next_text_id(f);
+        let new_index = f.nodes.len();
+        let bits = IrBits::make_ubits(w, value).expect("make_ubits");
+        let value = IrValue::from_bits(&bits);
+        f.nodes.push(Node {
+            text_id,
+            name: None,
+            ty: Type::Bits(w),
+            payload: NodePayload::Literal(value),
+            pos: None,
+        });
+        NodeRef { index: new_index }
+    }
+
+    fn is_zero_literal_node(f: &IrFn, r: NodeRef, w: usize) -> bool {
+        let NodePayload::Literal(v) = &f.get_node(r).payload else {
+            return false;
+        };
+        let bits = IrBits::make_ubits(w, 0).expect("make_ubits");
+        let expected = IrValue::from_bits(&bits);
+        *v == expected
+    }
+
+    fn literal_u64_value(f: &IrFn, r: NodeRef) -> Option<u64> {
+        let NodePayload::Literal(v) = &f.get_node(r).payload else {
+            return None;
+        };
+        // This helper is only used for small shift constants in tests/transforms.
+        v.to_u64().ok()
+    }
+}
+
+impl PirTransform for ConstShllConcatZeroFoldTransform {
+    fn kind(&self) -> PirTransformKind {
+        PirTransformKind::ConstShllConcatZeroFold
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+        let mut out: Vec<TransformLocation> = Vec::new();
+        for nr in f.node_refs() {
+            match &f.get_node(nr).payload {
+                // concat(bit_slice(x, 0, w-k), 0_k) -> shll(x, k)
+                NodePayload::Nary(NaryOp::Concat, ops) if ops.len() == 2 => {
+                    let (a, b) = (ops[0], ops[1]);
+                    let w = match Self::bits_width(f, nr) {
+                        Some(w) => w,
+                        None => continue,
+                    };
+                    let (wa, wb) = match (Self::bits_width(f, a), Self::bits_width(f, b)) {
+                        (Some(wa), Some(wb)) => (wa, wb),
+                        _ => continue,
+                    };
+                    if wa + wb != w {
+                        continue;
+                    }
+                    if wb == 0 || wb >= w {
+                        continue;
+                    }
+                    if !Self::is_zero_literal_node(f, b, wb) {
+                        continue;
+                    }
+                    let NodePayload::BitSlice { arg, start, width } = f.get_node(a).payload else {
+                        continue;
+                    };
+                    if start != 0 || width != wa {
+                        continue;
+                    }
+                    if Self::bits_width(f, arg) != Some(w) {
+                        continue;
+                    }
+                    out.push(TransformLocation::Node(nr));
+                }
+
+                // shll(x, k) -> concat(bit_slice(x, 0, w-k), 0_k) for constant k
+                NodePayload::Binop(Binop::Shll, x, k) => {
+                    let w = match Self::bits_width(f, nr) {
+                        Some(w) => w,
+                        None => continue,
+                    };
+                    if Self::bits_width(f, *x) != Some(w) {
+                        continue;
+                    }
+                    let Some(k_u64) = Self::literal_u64_value(f, *k) else {
+                        continue;
+                    };
+                    let Ok(k_usize) = usize::try_from(k_u64) else {
+                        continue;
+                    };
+                    if k_usize == 0 || k_usize >= w {
+                        continue;
+                    }
+                    out.push(TransformLocation::Node(nr));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
+        let target_ref = match loc {
+            TransformLocation::Node(nr) => *nr,
+            TransformLocation::RewireOperand { .. } => {
+                return Err(
+                    "ConstShllConcatZeroFoldTransform: expected TransformLocation::Node, got RewireOperand"
+                        .to_string(),
+                );
+            }
+        };
+
+        let w = Self::bits_width(f, target_ref).ok_or_else(|| {
+            "ConstShllConcatZeroFoldTransform: output must be bits[w]".to_string()
+        })?;
+
+        let target_payload = f.get_node(target_ref).payload.clone();
+        match target_payload {
+            // concat(bit_slice(x, 0, w-k), 0_k) -> shll(x, k)
+            NodePayload::Nary(NaryOp::Concat, ops) => {
+                if ops.len() != 2 {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: only supports 2-operand concat"
+                            .to_string(),
+                    );
+                }
+                let a = ops[0];
+                let b = ops[1];
+                let (wa, wb) = match (Self::bits_width(f, a), Self::bits_width(f, b)) {
+                    (Some(wa), Some(wb)) => (wa, wb),
+                    _ => {
+                        return Err(
+                            "ConstShllConcatZeroFoldTransform: concat operands must be bits"
+                                .to_string(),
+                        );
+                    }
+                };
+                if wa + wb != w {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: concat widths must sum to output width"
+                            .to_string(),
+                    );
+                }
+                if wb == 0 || wb >= w {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: shift amount must be in (0, w)"
+                            .to_string(),
+                    );
+                }
+                if !Self::is_zero_literal_node(f, b, wb) {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: expected RHS concat operand to be 0_k"
+                            .to_string(),
+                    );
+                }
+                let NodePayload::BitSlice {
+                    arg: x,
+                    start,
+                    width,
+                } = f.get_node(a).payload
+                else {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: expected concat LHS to be bit_slice"
+                            .to_string(),
+                    );
+                };
+                if start != 0 || width != wa {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: expected bit_slice(x, start=0, width=w-k)"
+                            .to_string(),
+                    );
+                }
+                if Self::bits_width(f, x) != Some(w) {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: expected bit_slice arg bits[w]"
+                            .to_string(),
+                    );
+                }
+                let k_lit = Self::mk_ubits_literal_node(f, w, wb as u64);
+                f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Shll, x, k_lit);
+                Ok(())
+            }
+
+            // shll(x, k) -> concat(bit_slice(x, 0, w-k), 0_k)
+            NodePayload::Binop(Binop::Shll, x, k) => {
+                if Self::bits_width(f, x) != Some(w) {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: expected x to be bits[w]".to_string()
+                    );
+                }
+                let Some(k_u64) = Self::literal_u64_value(f, k) else {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: expected constant shift amount"
+                            .to_string(),
+                    );
+                };
+                let k_usize = usize::try_from(k_u64).map_err(|_| {
+                    "ConstShllConcatZeroFoldTransform: shift amount out of range".to_string()
+                })?;
+                if k_usize == 0 || k_usize >= w {
+                    return Err(
+                        "ConstShllConcatZeroFoldTransform: shift amount must be in (0, w)"
+                            .to_string(),
+                    );
+                }
+                let slice_w = w - k_usize;
+                let text_id = Self::next_text_id(f);
+                let slice_index = f.nodes.len();
+                f.nodes.push(Node {
+                    text_id,
+                    name: None,
+                    ty: Type::Bits(slice_w),
+                    payload: NodePayload::BitSlice {
+                        arg: x,
+                        start: 0,
+                        width: slice_w,
+                    },
+                    pos: None,
+                });
+                let slice_ref = NodeRef { index: slice_index };
+
+                let zero_ref = Self::mk_ubits_literal_node(f, k_usize, 0);
+
+                f.get_node_mut(target_ref).payload =
+                    NodePayload::Nary(NaryOp::Concat, vec![slice_ref, zero_ref]);
+                Ok(())
+            }
+
+            _ => Err(
+                "ConstShllConcatZeroFoldTransform: expected concat(...) or shll(...)".to_string(),
+            ),
+        }
+    }
+
+    fn always_equivalent(&self) -> bool {
+        true
+    }
+}
+
+/// A semantics-preserving transform implementing:
+///
 /// `bit_slice(bit_slice(x, s1, w1), s2, w2) ↔ bit_slice(x, s1+s2, w2)`
 #[derive(Debug)]
 pub struct BitSliceBitSliceFoldTransform;
@@ -4306,6 +5457,10 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(CloneMultiUserNodeTransform),
         Box::new(EqSelDistributeTransform),
         Box::new(EqNeAddLiteralShiftTransform),
+        Box::new(SubToAddNegTransform),
+        Box::new(NegSubSwapTransform),
+        Box::new(ReassociateAddSubTransform),
+        Box::new(CarrySplitAddTransform),
         Box::new(NotSelDistributeTransform),
         Box::new(NegSelDistributeTransform),
         Box::new(BitSliceSelDistributeTransform),
@@ -4322,8 +5477,10 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(NandNotAndFoldTransform),
         Box::new(EqZeroOrReduceTransform),
         Box::new(NeZeroOrReduceTransform),
+        Box::new(AndReduceDeMorganTransform),
         Box::new(BitSliceBitSliceFoldTransform),
         Box::new(BitSliceConcatDistributeTransform),
+        Box::new(ConstShllConcatZeroFoldTransform),
         Box::new(PrioritySelToSelChainTransform),
         Box::new(RewireOperandToSameTypeTransform),
     ]
@@ -4406,6 +5563,379 @@ mod tests {
         assert!(matches!(
             f.get_node(sel_ref).payload,
             NodePayload::Binop(Binop::Eq, _, _)
+        ));
+    }
+
+    #[test]
+    fn and_reduce_demorgan_folds_not_or_reduce_not() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> bits[1] {
+  not.10: bits[8] = not(x, id=10)
+  or_reduce.11: bits[1] = or_reduce(not.10, id=11)
+  ret not.12: bits[1] = not(or_reduce.11, id=12)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut ret_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if let NodePayload::Unop(Unop::Not, arg) = &f.get_node(nr).payload {
+                if matches!(
+                    f.get_node(*arg).payload,
+                    NodePayload::Unop(Unop::OrReduce, _)
+                ) {
+                    ret_ref = Some(nr);
+                }
+            }
+        }
+        let ret_ref = ret_ref.expect("expected not(or_reduce(..)) node");
+
+        let t = AndReduceDeMorganTransform;
+        t.apply(&mut f, &TransformLocation::Node(ret_ref))
+            .expect("apply");
+
+        match &f.get_node(ret_ref).payload {
+            NodePayload::Unop(Unop::AndReduce, arg) => {
+                assert!(matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)));
+            }
+            other => panic!("expected and_reduce after rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn and_reduce_demorgan_expands_and_reduce() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> bits[1] {
+  ret and_reduce.10: bits[1] = and_reduce(x, id=10)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut ret_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(
+                f.get_node(nr).payload,
+                NodePayload::Unop(Unop::AndReduce, _)
+            ) {
+                ret_ref = Some(nr);
+            }
+        }
+        let ret_ref = ret_ref.expect("expected and_reduce node");
+
+        let t = AndReduceDeMorganTransform;
+        t.apply(&mut f, &TransformLocation::Node(ret_ref))
+            .expect("apply");
+
+        let NodePayload::Unop(Unop::Not, or_ref) = &f.get_node(ret_ref).payload else {
+            panic!("expected not(...) after rewrite");
+        };
+        let NodePayload::Unop(Unop::OrReduce, not_ref) = &f.get_node(*or_ref).payload else {
+            panic!("expected or_reduce(...) after rewrite");
+        };
+        let NodePayload::Unop(Unop::Not, x_ref) = &f.get_node(*not_ref).payload else {
+            panic!("expected not(x) after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*x_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+    }
+
+    #[test]
+    fn const_shll_concat_zero_folds_concat_slice_zero() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> bits[8] {
+  bit_slice.10: bits[5] = bit_slice(x, start=0, width=5, id=10)
+  literal.11: bits[3] = literal(value=0, id=11)
+  ret concat.12: bits[8] = concat(bit_slice.10, literal.11, id=12)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut ret_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Nary(NaryOp::Concat, _)) {
+                ret_ref = Some(nr);
+            }
+        }
+        let ret_ref = ret_ref.expect("expected ret node");
+
+        let t = ConstShllConcatZeroFoldTransform;
+        t.apply(&mut f, &TransformLocation::Node(ret_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Shll, x_ref, k_ref) = &f.get_node(ret_ref).payload else {
+            panic!("expected shll after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*x_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+        let NodePayload::Literal(v) = &f.get_node(*k_ref).payload else {
+            panic!("expected literal shift amount");
+        };
+        let bits = IrBits::make_ubits(8, 3).expect("make_ubits");
+        let expected = IrValue::from_bits(&bits);
+        assert_eq!(*v, expected);
+    }
+
+    #[test]
+    fn const_shll_concat_zero_expands_shll_const() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> bits[8] {
+  literal.10: bits[8] = literal(value=3, id=10)
+  ret shll.11: bits[8] = shll(x, literal.10, id=11)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut ret_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(
+                f.get_node(nr).payload,
+                NodePayload::Binop(Binop::Shll, _, _)
+            ) {
+                ret_ref = Some(nr);
+            }
+        }
+        let ret_ref = ret_ref.expect("expected ret node");
+
+        let t = ConstShllConcatZeroFoldTransform;
+        t.apply(&mut f, &TransformLocation::Node(ret_ref))
+            .expect("apply");
+
+        let NodePayload::Nary(NaryOp::Concat, ops) = &f.get_node(ret_ref).payload else {
+            panic!("expected concat after rewrite");
+        };
+        assert_eq!(ops.len(), 2);
+        let NodePayload::BitSlice { arg, start, width } = &f.get_node(ops[0]).payload else {
+            panic!("expected bit_slice in concat");
+        };
+        assert!(matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)));
+        assert_eq!(*start, 0);
+        assert_eq!(*width, 5);
+        let NodePayload::Literal(v) = &f.get_node(ops[1]).payload else {
+            panic!("expected literal zero in concat");
+        };
+        let bits = IrBits::make_ubits(3, 0).expect("make_ubits");
+        let expected = IrValue::from_bits(&bits);
+        assert_eq!(*v, expected);
+    }
+
+    #[test]
+    fn sub_to_add_neg_expands_sub() {
+        let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret sub.10: bits[8] = sub(x, y, id=10)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut sub_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Sub, _, _)) {
+                sub_ref = Some(nr);
+            }
+        }
+        let sub_ref = sub_ref.expect("expected sub node");
+
+        let t = SubToAddNegTransform;
+        t.apply(&mut f, &TransformLocation::Node(sub_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Add, x_ref, neg_ref) = &f.get_node(sub_ref).payload else {
+            panic!("expected add after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*x_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+        let NodePayload::Unop(Unop::Neg, y_ref) = &f.get_node(*neg_ref).payload else {
+            panic!("expected neg(y) after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*y_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+    }
+
+    #[test]
+    fn sub_to_add_neg_folds_add_neg() {
+        let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  neg.10: bits[8] = neg(y, id=10)
+  ret add.11: bits[8] = add(x, neg.10, id=11)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut add_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Add, _, _)) {
+                add_ref = Some(nr);
+            }
+        }
+        let add_ref = add_ref.expect("expected add node");
+
+        let t = SubToAddNegTransform;
+        t.apply(&mut f, &TransformLocation::Node(add_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Sub, x_ref, y_ref) = &f.get_node(add_ref).payload else {
+            panic!("expected sub after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*x_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+        assert!(matches!(
+            f.get_node(*y_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+    }
+
+    #[test]
+    fn neg_sub_swap_folds_neg_sub_to_swapped_sub() {
+        let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  sub.10: bits[8] = sub(x, y, id=10)
+  ret neg.11: bits[8] = neg(sub.10, id=11)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut neg_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Unop(Unop::Neg, _)) {
+                neg_ref = Some(nr);
+            }
+        }
+        let neg_ref = neg_ref.expect("expected neg node");
+
+        let t = NegSubSwapTransform;
+        t.apply(&mut f, &TransformLocation::Node(neg_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Sub, y_ref, x_ref) = &f.get_node(neg_ref).payload else {
+            panic!("expected swapped sub after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*x_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+        assert!(matches!(
+            f.get_node(*y_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+    }
+
+    #[test]
+    fn neg_sub_swap_expands_sub_to_neg_sub_swapped() {
+        let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret sub.10: bits[8] = sub(x, y, id=10)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut sub_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Sub, _, _)) {
+                sub_ref = Some(nr);
+            }
+        }
+        let sub_ref = sub_ref.expect("expected sub node");
+
+        let t = NegSubSwapTransform;
+        t.apply(&mut f, &TransformLocation::Node(sub_ref))
+            .expect("apply");
+
+        let NodePayload::Unop(Unop::Neg, inner_sub_ref) = &f.get_node(sub_ref).payload else {
+            panic!("expected neg(sub(..)) after rewrite");
+        };
+        let NodePayload::Binop(Binop::Sub, y_ref, x_ref) = &f.get_node(*inner_sub_ref).payload
+        else {
+            panic!("expected inner sub after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*x_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+        assert!(matches!(
+            f.get_node(*y_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+    }
+
+    #[test]
+    fn reassociate_add_sub_reassociates_add_chain() {
+        let ir_text = r#"fn t(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
+  add.10: bits[8] = add(a, b, id=10)
+  ret add.11: bits[8] = add(add.10, c, id=11)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut add_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            let NodePayload::Binop(Binop::Add, lhs, rhs) = f.get_node(nr).payload else {
+                continue;
+            };
+            if matches!(
+                f.get_node(lhs).payload,
+                NodePayload::Binop(Binop::Add, _, _)
+            ) && matches!(f.get_node(rhs).payload, NodePayload::GetParam(_))
+            {
+                add_ref = Some(nr);
+            }
+        }
+        let add_ref = add_ref.expect("expected outer add node");
+
+        let t = ReassociateAddSubTransform;
+        t.apply(&mut f, &TransformLocation::Node(add_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Add, lhs, rhs) = &f.get_node(add_ref).payload else {
+            panic!("expected add after rewrite");
+        };
+        assert!(matches!(f.get_node(*lhs).payload, NodePayload::GetParam(_)));
+        let NodePayload::Binop(Binop::Add, rb, rc) = &f.get_node(*rhs).payload else {
+            panic!("expected nested add on rhs after rewrite");
+        };
+        assert!(matches!(f.get_node(*rb).payload, NodePayload::GetParam(_)));
+        assert!(matches!(f.get_node(*rc).payload, NodePayload::GetParam(_)));
+    }
+
+    #[test]
+    fn carry_split_add_expands_and_folds_round_trip() {
+        let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret add.10: bits[8] = add(x, y, id=10)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut add_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Add, _, _)) {
+                add_ref = Some(nr);
+            }
+        }
+        let add_ref = add_ref.expect("expected add node");
+
+        let t = CarrySplitAddTransform;
+        t.apply(&mut f, &TransformLocation::Node(add_ref))
+            .expect("expand");
+
+        let NodePayload::Nary(NaryOp::Concat, ops) = &f.get_node(add_ref).payload else {
+            panic!("expected concat after expansion");
+        };
+        assert_eq!(ops.len(), 2);
+
+        t.apply(&mut f, &TransformLocation::Node(add_ref))
+            .expect("fold");
+
+        let NodePayload::Binop(Binop::Add, x_ref, y_ref) = &f.get_node(add_ref).payload else {
+            panic!("expected add after fold");
+        };
+        assert!(matches!(
+            f.get_node(*x_ref).payload,
+            NodePayload::GetParam(_)
+        ));
+        assert!(matches!(
+            f.get_node(*y_ref).payload,
+            NodePayload::GetParam(_)
         ));
     }
 
