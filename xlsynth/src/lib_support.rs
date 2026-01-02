@@ -109,6 +109,20 @@ pub(crate) fn xls_package_to_string(p: *const CIrPackage) -> Result<String, Xlsy
     }
 }
 
+pub(crate) fn xls_function_to_string(f: *const CIrFunction) -> Result<String, XlsynthError> {
+    unsafe {
+        let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let success = xlsynth_sys::xls_function_to_string(f, &mut c_str_out);
+        if success {
+            Ok(c_str_to_rust(c_str_out))
+        } else {
+            Err(XlsynthError(
+                "Failed to convert XLS function to string via C API".to_string(),
+            ))
+        }
+    }
+}
+
 pub(crate) unsafe fn c_str_to_rust_no_dealloc(xls_c_str: *mut std::os::raw::c_char) -> String {
     if xls_c_str.is_null() {
         String::new()

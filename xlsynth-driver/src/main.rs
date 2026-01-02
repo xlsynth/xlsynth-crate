@@ -43,6 +43,7 @@ mod dslx_equiv;
 mod dslx_fn_eval;
 mod dslx_g8r_stats;
 mod dslx_show;
+#[cfg(feature = "unstable-dslx-specialize")]
 mod dslx_specialize;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
@@ -368,7 +369,7 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    let matches = clap::Command::new("xlsynth-driver")
+    let cmd = clap::Command::new("xlsynth-driver")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Command line driver for XLS/xlsynth capabilities")
         .arg(
@@ -563,11 +564,6 @@ fn main() {
                         .index(1)
                         .action(ArgAction::Set),
                 ),
-        )
-        .subcommand(
-            clap::Command::new("dslx-specialize")
-                .about("Specialize parametric DSLX functions reachable from a top function within the current module")
-                .add_dslx_input_args(true),
         )
         .subcommand(
             clap::Command::new("dslx2sv-types")
@@ -1782,7 +1778,20 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
         )
-        .get_matches();
+        ;
+
+    #[cfg(feature = "unstable-dslx-specialize")]
+    {
+        cmd = cmd.subcommand(
+            clap::Command::new("dslx-specialize")
+                .about(
+                    "Specialize parametric DSLX functions reachable from a top function within the current module",
+                )
+                .add_dslx_input_args(true),
+        );
+    }
+
+    let matches = cmd.get_matches();
 
     let mut toml_path: Option<String> = matches
         .get_one::<String>("toolchain")
@@ -1845,6 +1854,7 @@ fn main() {
         Some(("dslx2ir", subm)) => {
             dslx2ir::handle_dslx2ir(subm, &config);
         }
+        #[cfg(feature = "unstable-dslx-specialize")]
         Some(("dslx-specialize", subm)) => {
             dslx_specialize::handle_dslx_specialize(subm, &config);
         }
