@@ -154,7 +154,7 @@ fn run_dslx2pipeline_and_eco(
 #[test]
 fn test_dslx2pipeline_eco_basic() {
     let baseline_dslx = "fn main(x: u32) -> u32 { x + u32:1 }\n";
-    let modified_dslx = "fn main(x: u32) -> u32 { !x + u32:1 }\n";
+    let modified_dslx = "fn main(x: u32) -> u32 { -x + u32:1 }\n";
     let args = vec![
         "--pipeline_stages=1",
         "--delay_model=asap7",
@@ -180,7 +180,7 @@ fn test_dslx2pipeline_eco_basic() {
         "baseline Verilog from eco does not match non-ECO baseline Verilog"
     );
     assert!(
-        outputs.edits.contains("AddNode: not"),
+        outputs.edits.contains("AddNode: neg"),
         "edits should contain AddNode: {}",
         outputs.edits
     );
@@ -194,7 +194,7 @@ fn test_dslx2pipeline_eco_basic() {
 #[test]
 fn test_dslx2pipeline_eco_module_name() {
     let baseline_dslx = "fn main(x: u32) -> u32 { x + u32:1 }\n";
-    let modified_dslx = "fn main(x: u32) -> u32 { !x + u32:1 }\n";
+    let modified_dslx = "fn main(x: u32) -> u32 { -x + u32:1 }\n";
     let args = vec![
         "--pipeline_stages=1",
         "--delay_model=asap7",

@@ -369,7 +369,7 @@ fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    let mut cmd = clap::Command::new("xlsynth-driver")
+    let cmd = clap::Command::new("xlsynth-driver")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Command line driver for XLS/xlsynth capabilities")
         .arg(
