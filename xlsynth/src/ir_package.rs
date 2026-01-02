@@ -8,10 +8,10 @@ use crate::lib_support::{self, c_str_to_rust, xls_function_jit_run, xls_make_fun
 use crate::xlsynth_error::XlsynthError;
 use crate::{
     lib_support::{
-        xls_function_get_name, xls_function_get_type, xls_function_type_to_string,
-        xls_interpret_function, xls_package_free, xls_package_get_function,
-        xls_package_get_functions, xls_package_get_type_for_value, xls_package_to_string,
-        xls_parse_ir_package, xls_type_to_string,
+        xls_function_get_name, xls_function_get_type, xls_function_to_string,
+        xls_function_type_to_string, xls_interpret_function, xls_package_free,
+        xls_package_get_function, xls_package_get_functions, xls_package_get_type_for_value,
+        xls_package_to_string, xls_parse_ir_package, xls_type_to_string,
     },
     IrValue,
 };
@@ -227,6 +227,13 @@ impl IrFunction {
         xls_interpret_function(&package_read_guard, self.ptr, args)
     }
 
+    pub fn to_ir_string(&self) -> Result<String, XlsynthError> {
+        // We take a read guard to document that `self.ptr` is owned by the
+        // package and must not be used after the package is dropped.
+        let _package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        xls_function_to_string(self.ptr)
+    }
+
     pub fn get_name(&self) -> String {
         xls_function_get_name(self.ptr).unwrap()
     }
@@ -239,6 +246,12 @@ impl IrFunction {
     /// Returns the name of the `i`th parameter to this function.
     pub fn param_name(&self, index: usize) -> Result<String, XlsynthError> {
         lib_support::xls_function_get_param_name(self.ptr, index)
+    }
+}
+
+impl fmt::Display for IrFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_ir_string().unwrap())
     }
 }
 
@@ -315,6 +328,25 @@ mod tests {
             package.get_type_for_value(&want).unwrap().to_string(),
             "bits[32]".to_string()
         );
+    }
+
+    #[test]
+    fn test_ir_function_to_string() {
+        let ir = "package test\nfn plus_one(x: bits[32]) -> bits[32] {
+    literal.2: bits[32] = literal(value=1)
+    ret add.1: bits[32] = add(x, literal.2)
+}\n";
+        let package = IrPackage::parse_ir(ir, None).expect("parse success");
+        let f = package
+            .get_function("plus_one")
+            .expect("should find function");
+
+        let printed = f.to_ir_string().expect("stringify success");
+
+        // Note: this is a golden string for the XLS IR printer for a single
+        // function. It should be stable and deterministic.
+        let expected = "fn plus_one(x: bits[32] id=4) -> bits[32] {\n  literal.2: bits[32] = literal(value=1, id=2)\n  ret add.1: bits[32] = add(x, literal.2, id=1)\n}\n";
+        assert_eq!(printed, expected);
     }
 
     #[test]
