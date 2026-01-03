@@ -338,6 +338,12 @@ fn main() -> Result<()> {
                 let best_stats_path = output_dir_for_thread.join("best.stats.json");
                 if let Ok(stats_json) = serde_json::to_string_pretty(&best_stats) {
                     let _ = std::fs::write(&best_stats_path, stats_json.as_bytes());
+
+                    let best_stats_snapshot_path = output_dir_for_thread.join(format!(
+                        "best.c{:03}-i{:06}.stats.json",
+                        snapshot_msg.chain_no, snapshot_msg.global_iter
+                    ));
+                    let _ = std::fs::write(&best_stats_snapshot_path, stats_json.as_bytes());
                 }
             }
         }))
