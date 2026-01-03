@@ -10,6 +10,7 @@ use anyhow::Result;
 use clap::Parser;
 use clap::ValueEnum;
 use num_cpus;
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use tempfile::Builder;
 
@@ -22,7 +23,9 @@ use xlsynth_g8r::aig_serdes::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_mcmc::Best;
 use xlsynth_mcmc::multichain::ChainStrategy;
-use xlsynth_mcmc_pir::{Objective, RunOptions, cost, run_pir_mcmc_with_shared_best};
+use xlsynth_mcmc_pir::{
+    CheckpointKind, CheckpointMsg, Objective, RunOptions, cost, run_pir_mcmc_with_shared_best,
+};
 use xlsynth_pir::ir::{Package, PackageMember};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
@@ -228,7 +231,7 @@ fn main() -> Result<()> {
     // Optional checkpoint writer: overwrites best.* artifacts periodically so
     // users can inspect best-so-far while the run is still running.
     let (checkpoint_tx, checkpoint_rx) = if cli.checkpoint_iters > 0 {
-        let (tx, rx) = mpsc::channel::<u64>();
+        let (tx, rx) = mpsc::channel::<CheckpointMsg>();
         (Some(tx), Some(rx))
     } else {
         (None, None)
@@ -273,7 +276,14 @@ fn main() -> Result<()> {
             // Track last written metric to reduce redundant writes when multiple
             // chains hit the same checkpoint boundary.
             let mut last_written: Option<usize> = None;
-            while let Ok(_iter) = rx.recv() {
+            // Track the last "new global best" message so snapshots use the
+            // chain/iteration that actually produced the improvement, even if a
+            // later periodic tick triggers the write.
+            let mut last_best_update_msg: Option<CheckpointMsg> = None;
+            while let Ok(msg) = rx.recv() {
+                if msg.kind == CheckpointKind::GlobalBestUpdate {
+                    last_best_update_msg = Some(msg);
+                }
                 let cur_metric = best.cost.load(std::sync::atomic::Ordering::SeqCst);
                 if last_written == Some(cur_metric) {
                     continue;
@@ -303,6 +313,19 @@ fn main() -> Result<()> {
                     };
                 let best_opt_ir_path = output_dir_for_thread.join("best.opt.ir");
                 let _ = std::fs::write(&best_opt_ir_path, best_opt_ir_text.as_bytes());
+
+                // Also snapshot each new "best so far" optimized IR so users can
+                // inspect the trajectory of improvements over time.
+                //
+                // We prefer the chain/iter from the most recent GlobalBestUpdate
+                // message; if not available, fall back to the message that
+                // triggered this write.
+                let snapshot_msg = last_best_update_msg.unwrap_or(msg);
+                let best_opt_ir_snapshot_path = output_dir_for_thread.join(format!(
+                    "best.c{:03}-i{:06}.opt.ir",
+                    snapshot_msg.chain_no, snapshot_msg.global_iter
+                ));
+                let _ = std::fs::write(&best_opt_ir_snapshot_path, best_opt_ir_text.as_bytes());
 
                 let (best_g8r_text, best_stats) =
                     match gatify_ir_text_to_g8r_text_and_stats(&best_opt_ir_text) {
@@ -367,7 +390,6 @@ fn main() -> Result<()> {
         output_ir_path.display()
     );
     let mut f_ir = std::fs::File::create(&output_ir_path)?;
-    use std::io::Write as IoWrite;
     let pkg_text_out = emit_pkg_text_toposorted(&pkg)?;
     f_ir.write_all(pkg_text_out.as_bytes())?;
     println!(

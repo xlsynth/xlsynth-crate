@@ -235,6 +235,28 @@ pub struct RunOptions {
     pub enable_formal_oracle: bool,
 }
 
+/// Message sent from the PIR MCMC engine to an optional checkpoint writer.
+///
+/// This is used by the `pir-mcmc-driver` binary to keep on-disk best artifacts
+/// up-to-date during long runs and (optionally) to snapshot the improvement
+/// trajectory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointKind {
+    /// A periodic checkpoint tick (e.g. every N iterations).
+    Periodic,
+    /// A new global best was found.
+    GlobalBestUpdate,
+}
+
+/// A checkpoint writer notification, including the chain and iteration that
+/// triggered the event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckpointMsg {
+    pub chain_no: usize,
+    pub global_iter: u64,
+    pub kind: CheckpointKind,
+}
+
 /// Result of a PIR MCMC run.
 pub struct PirMcmcResult {
     pub best_fn: IrFn,
@@ -248,8 +270,9 @@ struct PirSegmentRunner {
     enable_formal_oracle: bool,
     progress_iters: u64,
     checkpoint_iters: u64,
-    checkpoint_tx: Option<Sender<u64>>,
+    checkpoint_tx: Option<Sender<CheckpointMsg>>,
     shared_best: Option<Arc<SharedBest<IrFn>>>,
+    baseline_metric: usize,
 }
 
 /// Performs a single iteration of the PIR MCMC process.
@@ -729,17 +752,28 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     let _ = shared_best.try_update(metric_usize, best_fn.clone());
                     let after = shared_best.cost.load(Ordering::SeqCst);
                     if after < before {
+                        let improvement_pct = if self.baseline_metric > 0 {
+                            ((self.baseline_metric as f64) - (after as f64)) * 100.0
+                                / (self.baseline_metric as f64)
+                        } else {
+                            0.0
+                        };
                         log::info!(
-                            "[pir-mcmc] GLOBAL BEST UPDATE c{:03}:i{:06} | metric {} -> {}",
+                            "[pir-mcmc] GLOBAL BEST UPDATE c{:03}:i{:06} | metric {} -> {} | improvement={:+.2}%",
                             params.chain_no,
                             global_iter,
                             before,
-                            after
+                            after,
+                            improvement_pct,
                         );
                         // Best-effort: if a checkpoint writer is active, trigger an
                         // immediate update so the monotone global best is visible on disk.
                         if let Some(ref tx) = self.checkpoint_tx {
-                            let _ = tx.send(global_iter);
+                            let _ = tx.send(CheckpointMsg {
+                                chain_no: params.chain_no,
+                                global_iter,
+                                kind: CheckpointKind::GlobalBestUpdate,
+                            });
                         }
                     }
                 }
@@ -748,7 +782,11 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             if self.checkpoint_iters > 0 && global_iter % self.checkpoint_iters == 0 {
                 if let Some(ref tx) = self.checkpoint_tx {
                     // Best-effort: if the receiver is gone, stop sending.
-                    let _ = tx.send(global_iter);
+                    let _ = tx.send(CheckpointMsg {
+                        chain_no: params.chain_no,
+                        global_iter,
+                        kind: CheckpointKind::Periodic,
+                    });
                 }
             }
 
@@ -808,8 +846,11 @@ pub fn run_pir_mcmc_with_shared_best(
     start_fn: IrFn,
     options: RunOptions,
     shared_best: Option<Arc<SharedBest<IrFn>>>,
-    checkpoint_tx: Option<Sender<u64>>,
+    checkpoint_tx: Option<Sender<CheckpointMsg>>,
 ) -> Result<PirMcmcResult> {
+    let initial_cost = cost(&start_fn, options.objective)?;
+    let initial_metric_u64 = options.objective.metric(&initial_cost);
+    let baseline_metric = usize::try_from(initial_metric_u64).unwrap_or(usize::MAX);
     let runner = PirSegmentRunner {
         objective: options.objective,
         initial_temperature: options.initial_temperature,
@@ -818,6 +859,7 @@ pub fn run_pir_mcmc_with_shared_best(
         checkpoint_iters: options.checkpoint_iters,
         checkpoint_tx,
         shared_best,
+        baseline_metric,
     };
 
     let objective = options.objective;
