@@ -100,7 +100,15 @@ fn gatify_priority_sel(
         selector_bits.get_bit_count(),
         cases.len()
     );
+    for case_bits in cases.iter() {
+        assert_eq!(
+            case_bits.get_bit_count(),
+            output_bit_count,
+            "all cases of the priority select must have the same bit count which is the same as the output bit count"
+        );
+    }
 
+    // Binary mux form we just emit as a single binary mux.
     if cases.len() == 1 && default_bits.is_some() {
         assert_eq!(selector_bits.get_bit_count(), 1);
         let selector = selector_bits.get_lsb(0);
@@ -112,22 +120,50 @@ fn gatify_priority_sel(
         );
     }
 
+    // For small output widths and a present default, a mux-chain version tends
+    // to have a better depth profile than the masking+OR form, and can also win
+    // on size at W=1 (see the table sweep unit test).
+    if output_bit_count <= 3 && default_bits.is_some() && !cases.is_empty() {
+        return gatify_priority_sel_mux_chain(gb, selector_bits, cases, default_bits.unwrap());
+    }
+
+    gatify_priority_sel_masking(gb, output_bit_count, selector_bits, cases, default_bits)
+}
+
+fn gatify_priority_sel_mux_chain(
+    gb: &mut GateBuilder,
+    selector_bits: AigBitVector,
+    cases: &[AigBitVector],
+    default_bits: AigBitVector,
+) -> AigBitVector {
+    // For selector bits s0..s{n-1} (LSB-first priority) and cases c0..c{n-1}:
+    //   result = mux(s0, c0, mux(s1, c1, ... mux(s{n-1}, c{n-1}, default)...))
+    let mut acc = default_bits;
+    for i in (0..cases.len()).rev() {
+        let s_i = selector_bits.get_lsb(i);
+        acc = gb.add_mux2_vec(s_i, &cases[i], &acc);
+    }
+    acc
+}
+
+fn gatify_priority_sel_masking(
+    gb: &mut GateBuilder,
+    output_bit_count: usize,
+    selector_bits: AigBitVector,
+    cases: &[AigBitVector],
+    default_bits: Option<AigBitVector>,
+) -> AigBitVector {
     let mut masked_cases = vec![];
     // As we process cases we track whether any prior case had been selected.
     let mut any_prior_selected = gb.get_false();
     for (i, case_bits) in cases.iter().enumerate() {
-        assert_eq!(
-            case_bits.get_bit_count(),
-            output_bit_count,
-            "all cases of the priority select must have the same bit count which is the same as the output bit count"
-        );
         let this_wants_selected = selector_bits.get_lsb(i).clone();
         let no_prior_selected = gb.add_not(any_prior_selected);
         let this_selected = gb.add_and_binary(this_wants_selected, no_prior_selected);
         any_prior_selected = gb.add_or_binary(any_prior_selected, this_selected);
 
         let mask = gb.replicate(this_selected, output_bit_count);
-        let masked = gb.add_and_vec(&mask, &case_bits);
+        let masked = gb.add_and_vec(&mask, case_bits);
         masked_cases.push(masked);
     }
 
@@ -2212,6 +2248,8 @@ pub fn gatify_node_as_fn(
 
 #[cfg(test)]
 mod tests {
+    use crate::aig::get_summary_stats::{SummaryStats, get_summary_stats};
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::ir2gate_utils::AdderMapping;
     use crate::{aig_serdes::ir2gate::GatifyOptions, aig_serdes::ir2gate::gatify};
     use xlsynth_pir::ir;
@@ -2311,6 +2349,240 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 "Bit {} negation flags should differ",
                 i
             );
+        }
+    }
+
+    fn get_1b_priority_sel_stats_for_impl(
+        operand_count: usize,
+        use_mux_chain: bool,
+    ) -> SummaryStats {
+        let mut gb = GateBuilder::new(
+            format!(
+                "prio_sel_{}_{}",
+                operand_count,
+                if use_mux_chain { "mux" } else { "mask" }
+            ),
+            GateBuilderOptions::opt(),
+        );
+        let selector_bits = gb.add_input("sel".to_string(), operand_count);
+        let mut cases = Vec::with_capacity(operand_count);
+        for i in 0..operand_count {
+            cases.push(gb.add_input(format!("a{}", i), 1));
+        }
+        let default_bits = gb.add_input("default_value".to_string(), 1);
+
+        let result = if use_mux_chain {
+            super::gatify_priority_sel_mux_chain(&mut gb, selector_bits, &cases, default_bits)
+        } else {
+            super::gatify_priority_sel_masking(
+                &mut gb,
+                /* output_bit_count= */ 1,
+                selector_bits,
+                &cases,
+                Some(default_bits),
+            )
+        };
+        gb.add_output("result".to_string(), result);
+        let gate_fn = gb.build();
+        get_summary_stats(&gate_fn)
+    }
+
+    /// TDD-ish “microbenchmark sweep” test: record the baseline W=1
+    /// priority_sel cost (mask+OR implementation) and assert the mux-chain
+    /// specialization is strictly cheaper.
+    #[test]
+    fn test_priority_sel_1b_mux_chain_is_cheaper_than_masking_sweep() {
+        #[rustfmt::skip]
+        let want_masking: &[(usize, usize)] = &[
+            (2, 12),
+            (3, 18),
+            (4, 24),
+            (5, 30),
+        ];
+        #[rustfmt::skip]
+        let want_mux_chain: &[(usize, usize)] = &[
+            (2, 11),
+            (3, 16),
+            (4, 21),
+            (5, 26),
+        ];
+
+        for &(operand_count, want_live_nodes) in want_masking {
+            let got =
+                get_1b_priority_sel_stats_for_impl(operand_count, /* use_mux_chain= */ false);
+            assert_eq!(
+                got.live_nodes, want_live_nodes,
+                "masking impl live_nodes mismatch for operand_count={}",
+                operand_count
+            );
+        }
+
+        for &(operand_count, want_live_nodes) in want_mux_chain {
+            let got =
+                get_1b_priority_sel_stats_for_impl(operand_count, /* use_mux_chain= */ true);
+            assert_eq!(
+                got.live_nodes, want_live_nodes,
+                "mux-chain impl live_nodes mismatch for operand_count={}",
+                operand_count
+            );
+        }
+
+        for operand_count in 2usize..=5 {
+            let masking =
+                get_1b_priority_sel_stats_for_impl(operand_count, /* use_mux_chain= */ false);
+            let mux =
+                get_1b_priority_sel_stats_for_impl(operand_count, /* use_mux_chain= */ true);
+            assert!(
+                mux.live_nodes < masking.live_nodes,
+                "expected mux-chain to be cheaper for operand_count={}; masking live_nodes={}, mux live_nodes={}",
+                operand_count,
+                masking.live_nodes,
+                mux.live_nodes
+            );
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct PrioSelSweepRow {
+        operand_count: usize,
+        masking_live_nodes: usize,
+        masking_deepest_path: usize,
+        mux_chain_live_nodes: usize,
+        mux_chain_deepest_path: usize,
+    }
+
+    fn get_priority_sel_stats_for_impl(
+        output_bit_count: usize,
+        operand_count: usize,
+        use_mux_chain: bool,
+    ) -> SummaryStats {
+        let mut gb = GateBuilder::new(
+            format!(
+                "prio_sel_w{}_n{}_{}",
+                output_bit_count,
+                operand_count,
+                if use_mux_chain { "mux" } else { "mask" }
+            ),
+            GateBuilderOptions::opt(),
+        );
+        let selector_bits = gb.add_input("sel".to_string(), operand_count);
+        let mut cases = Vec::with_capacity(operand_count);
+        for i in 0..operand_count {
+            cases.push(gb.add_input(format!("a{}", i), output_bit_count));
+        }
+        let default_bits = gb.add_input("default_value".to_string(), output_bit_count);
+
+        let result = if use_mux_chain {
+            // Hypothetical mux-chain lowering for comparison across widths:
+            // mux(s0, c0, mux(s1, c1, ... default))
+            let mut acc = default_bits;
+            for i in (0..cases.len()).rev() {
+                let s_i = selector_bits.get_lsb(i);
+                acc = gb.add_mux2_vec(s_i, &cases[i], &acc);
+            }
+            acc
+        } else {
+            super::gatify_priority_sel_masking(
+                &mut gb,
+                output_bit_count,
+                selector_bits,
+                &cases,
+                Some(default_bits),
+            )
+        };
+        gb.add_output("result".to_string(), result);
+        let gate_fn = gb.build();
+        get_summary_stats(&gate_fn)
+    }
+
+    /// “Table sweep” test: captures masking vs mux-chain AIG sizes as output
+    /// width increases (W=1..4) for small operand counts (2..5).
+    ///
+    /// This reflects the crossover behavior we care about when deciding whether
+    /// a mux-chain specialization is worthwhile beyond W=1.
+    #[test]
+    fn test_priority_sel_masking_vs_mux_chain_table_sweep_w1_to_w4() {
+        #[rustfmt::skip]
+        const WANT_W1: &[PrioSelSweepRow] = &[
+            PrioSelSweepRow { operand_count: 2, masking_live_nodes: 12, masking_deepest_path: 6, mux_chain_live_nodes: 11, mux_chain_deepest_path: 5 },
+            PrioSelSweepRow { operand_count: 3, masking_live_nodes: 18, masking_deepest_path: 8, mux_chain_live_nodes: 16, mux_chain_deepest_path: 7 },
+            PrioSelSweepRow { operand_count: 4, masking_live_nodes: 24, masking_deepest_path: 11, mux_chain_live_nodes: 21, mux_chain_deepest_path: 9 },
+            PrioSelSweepRow { operand_count: 5, masking_live_nodes: 30, masking_deepest_path: 13, mux_chain_live_nodes: 26, mux_chain_deepest_path: 11 },
+        ];
+        #[rustfmt::skip]
+        const WANT_W2: &[PrioSelSweepRow] = &[
+            PrioSelSweepRow { operand_count: 2, masking_live_nodes: 20, masking_deepest_path: 6, mux_chain_live_nodes: 20, mux_chain_deepest_path: 5 },
+            PrioSelSweepRow { operand_count: 3, masking_live_nodes: 29, masking_deepest_path: 8, mux_chain_live_nodes: 29, mux_chain_deepest_path: 7 },
+            PrioSelSweepRow { operand_count: 4, masking_live_nodes: 38, masking_deepest_path: 11, mux_chain_live_nodes: 38, mux_chain_deepest_path: 9 },
+            PrioSelSweepRow { operand_count: 5, masking_live_nodes: 47, masking_deepest_path: 13, mux_chain_live_nodes: 47, mux_chain_deepest_path: 11 },
+        ];
+        #[rustfmt::skip]
+        const WANT_W3: &[PrioSelSweepRow] = &[
+            PrioSelSweepRow { operand_count: 2, masking_live_nodes: 28, masking_deepest_path: 6, mux_chain_live_nodes: 29, mux_chain_deepest_path: 5 },
+            PrioSelSweepRow { operand_count: 3, masking_live_nodes: 40, masking_deepest_path: 8, mux_chain_live_nodes: 42, mux_chain_deepest_path: 7 },
+            PrioSelSweepRow { operand_count: 4, masking_live_nodes: 52, masking_deepest_path: 11, mux_chain_live_nodes: 55, mux_chain_deepest_path: 9 },
+            PrioSelSweepRow { operand_count: 5, masking_live_nodes: 64, masking_deepest_path: 13, mux_chain_live_nodes: 68, mux_chain_deepest_path: 11 },
+        ];
+        #[rustfmt::skip]
+        const WANT_W4: &[PrioSelSweepRow] = &[
+            PrioSelSweepRow { operand_count: 2, masking_live_nodes: 36, masking_deepest_path: 6, mux_chain_live_nodes: 38, mux_chain_deepest_path: 5 },
+            PrioSelSweepRow { operand_count: 3, masking_live_nodes: 51, masking_deepest_path: 8, mux_chain_live_nodes: 55, mux_chain_deepest_path: 7 },
+            PrioSelSweepRow { operand_count: 4, masking_live_nodes: 66, masking_deepest_path: 11, mux_chain_live_nodes: 72, mux_chain_deepest_path: 9 },
+            PrioSelSweepRow { operand_count: 5, masking_live_nodes: 81, masking_deepest_path: 13, mux_chain_live_nodes: 89, mux_chain_deepest_path: 11 },
+        ];
+        #[rustfmt::skip]
+        const WANT: &[(usize, &[PrioSelSweepRow])] = &[
+            (1, WANT_W1),
+            (2, WANT_W2),
+            (3, WANT_W3),
+            (4, WANT_W4),
+        ];
+
+        let mut computed: Vec<(usize, Vec<PrioSelSweepRow>)> = Vec::new();
+        for w in 1usize..=4 {
+            let mut rows: Vec<PrioSelSweepRow> = Vec::new();
+            for operand_count in 2usize..=5 {
+                let masking = get_priority_sel_stats_for_impl(
+                    w,
+                    operand_count,
+                    /* use_mux_chain= */ false,
+                );
+                let mux = get_priority_sel_stats_for_impl(
+                    w,
+                    operand_count,
+                    /* use_mux_chain= */ true,
+                );
+                rows.push(PrioSelSweepRow {
+                    operand_count,
+                    masking_live_nodes: masking.live_nodes,
+                    masking_deepest_path: masking.deepest_path,
+                    mux_chain_live_nodes: mux.live_nodes,
+                    mux_chain_deepest_path: mux.deepest_path,
+                });
+            }
+            computed.push((w, rows));
+        }
+
+        for &(w, want_rows) in WANT {
+            let got_rows = computed
+                .iter()
+                .find(|(got_w, _)| *got_w == w)
+                .unwrap()
+                .1
+                .as_slice();
+            assert_eq!(
+                got_rows.len(),
+                want_rows.len(),
+                "row count mismatch for W={}",
+                w
+            );
+            for (got, want) in got_rows.iter().zip(want_rows.iter()) {
+                assert_eq!(
+                    got, want,
+                    "priority_sel sweep mismatch for W={}, operand_count={}; computed tables: {:?}",
+                    w, want.operand_count, computed
+                );
+            }
         }
     }
 }
