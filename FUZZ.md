@@ -76,6 +76,15 @@ Primarily tests:
 - Transform engine correctness under random application
 - Cross-solver consistency for equivalence
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_cut_db_rewrite_equiv.rs
+
+Builds a random `GateFn`, runs the cut-db rewrite pass (`rewrite_gatefn_with_cut_db`) using the vendored 4-input cut database, and proves the rewritten graph is SAT-equivalent (Varisat) to the original. Panics on any semantic mismatch.
+
+Primarily tests:
+
+- Cut-db rewrite pass preserves semantics on arbitrary AIGs
+- Stability of cut enumeration + replacement instantiation under random graphs
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_bulk_replace.rs
 
 Exercises bulk replacement algorithms on internal IR/gate structures (see source for specifics) under random inputs, checking invariants and/or equivalence as implemented in the target.

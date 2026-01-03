@@ -42,6 +42,7 @@ atty = "0.2"
 bincode = "1.3"
 arbitrary = { version = "1.3", features = ["derive"] }
 bitvec = "1.0.1"
+rayon = "1.10.0"
 
 [dev-dependencies]
 anyhow = "1.0.86"
@@ -79,6 +80,10 @@ path = "src/liberty/try_parse.rs"
 name = "mcmc-driver"
 path = "src/bin/mcmc-driver.rs"
 
+[[bin]]
+name = "gen-cut-db"
+path = "src/bin/gen-cut-db.rs"
+
 [[bench]]
 name = "bf16_mul_gatesim_bench"
 harness = false
@@ -97,4 +102,12 @@ harness = false
 
 [[bench]]
 name = "netlist_parse_bench"
+harness = false
+
+[[bench]]
+name = "cut_db_load_bench"
+harness = false
+
+[[bench]]
+name = "ir2gates_mul_width_bench"
 harness = false
