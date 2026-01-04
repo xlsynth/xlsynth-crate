@@ -16,7 +16,7 @@ use xlsynth_g8r::aig::graph_logical_effort::{self, analyze_graph_logical_effort}
 use xlsynth_g8r::aig::logical_effort::compute_logical_effort_min_delay;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use xlsynth_g8r::aig_serdes::{emit_netlist, ir2gate};
+use xlsynth_g8r::aig_serdes::emit_netlist;
 use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{

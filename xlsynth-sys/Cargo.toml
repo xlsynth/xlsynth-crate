@@ -10,6 +10,9 @@ documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 links = "xlsynth"
 
+[lints]
+workspace = true
+
 [dependencies]
 libc = "0.2"
 

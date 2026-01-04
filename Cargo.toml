@@ -13,3 +13,6 @@ members = [
     "sample-usage",
 ]
 resolver = "2"
+
+[workspace.lints.rust]
+warnings = "deny"

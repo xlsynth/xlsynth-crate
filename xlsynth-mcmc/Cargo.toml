@@ -9,6 +9,9 @@ repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
+[lints]
+workspace = true
+
 [dependencies]
 rand = { version = "0.8.5", features = ["std"] }
 
