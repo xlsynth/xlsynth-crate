@@ -34,6 +34,7 @@
 //!     dslx2sv-types ../tests/structure_zoo.x
 //! ```
 
+mod aig_equiv;
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
@@ -1329,6 +1330,22 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("aig-equiv")
+                .about("Checks if two ASCII AIGER files are equivalent using available engines")
+                .arg(
+                    clap::Arg::new("lhs_aig_file")
+                        .help("The left-hand side AIGER file (.aag)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("rhs_aig_file")
+                        .help("The right-hand side AIGER file (.aag)")
+                        .required(true)
+                        .index(2),
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir-fn-eval")
                 .about("Interprets an IR function with the provided argument tuple")
                 .arg(
@@ -1949,6 +1966,9 @@ fn main() {
         }
         Some(("g8r-equiv", subm)) => {
             g8r_equiv::handle_g8r_equiv(subm, &config);
+        }
+        Some(("aig-equiv", subm)) => {
+            aig_equiv::handle_aig_equiv(subm, &config);
         }
         Some(("run-verilog-pipeline", subm)) => {
             run_verilog_pipeline::handle_run_verilog_pipeline(subm);

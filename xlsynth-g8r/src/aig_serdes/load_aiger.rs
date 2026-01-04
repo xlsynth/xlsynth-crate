@@ -13,6 +13,8 @@
 use crate::aig::{AigNode, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 /// Resulting `GateFn` together with the mapping from AIGER variable index to
 /// operand (useful for debugging / diagnostics).
@@ -20,6 +22,16 @@ use std::collections::HashMap;
 pub struct LoadAigerResult {
     pub gate_fn: GateFn,
     pub var_to_operand: HashMap<u32, AigOperand>,
+}
+
+/// Parses an ASCII-AIGER file from disk.
+pub fn load_aiger_from_path(
+    path: &Path,
+    opts: GateBuilderOptions,
+) -> Result<LoadAigerResult, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    load_aiger(&contents, opts)
 }
 
 /// Parses the provided ASCII-AIGER text (`src`) and yields a `GateFn` built

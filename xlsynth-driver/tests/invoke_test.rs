@@ -7,8 +7,10 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
 use xlsynth::IrBits;
-use xlsynth_g8r::aig::AigBitVector;
+use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn};
+use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
+use xlsynth_g8r::gate_fn_equiv_report::{EngineResult, EquivReport};
 
 use test_case::test_case;
 
@@ -23,6 +25,29 @@ fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
 tool_path = \"{}\"",
         toolchain_toml_contents, tool_path
     )
+}
+
+fn write_aiger_file(
+    temp_dir: &tempfile::TempDir,
+    file_name: &str,
+    gate_fn: &GateFn,
+) -> std::path::PathBuf {
+    let aiger = emit_aiger(gate_fn, true).expect("emit_aiger should succeed");
+    let path = temp_dir.path().join(file_name);
+    std::fs::write(&path, aiger).expect("failed to write aiger file");
+    path
+}
+
+fn two_input_gate_fn<F>(name: &str, make_output: F) -> GateFn
+where
+    F: Fn(AigOperand, AigOperand, &mut GateBuilder) -> AigOperand,
+{
+    let mut gb = GateBuilder::new(name.to_string(), GateBuilderOptions::no_opt());
+    let a = gb.add_input("a".to_string(), 1);
+    let b = gb.add_input("b".to_string(), 1);
+    let out_bit = make_output(*a.get_lsb(0), *b.get_lsb(0), &mut gb);
+    gb.add_output("out".to_string(), AigBitVector::from_bit(out_bit));
+    gb.build()
 }
 
 #[test]
@@ -7641,6 +7666,77 @@ fn call() -> bits[32] { helper(bits[32]:0x0) }
 
     // Top-level call should remain and invoke the specialized helper.
     assert!(stdout.contains("fn call"));
+}
+
+#[test]
+fn test_aig_equiv_reports_equivalent_designs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_gate = two_input_gate_fn("and_lhs", |a, b, gb| gb.add_and_binary(a, b));
+    let rhs_gate = two_input_gate_fn("and_rhs", |a, b, gb| gb.add_and_binary(b, a));
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs.aag", &lhs_gate);
+    let rhs_aag = write_aiger_file(&temp_dir, "rhs.aag", &rhs_gate);
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("aig-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_aag.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig-equiv failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: EquivReport =
+        serde_json::from_slice(&output.stdout).expect("valid JSON report expected");
+    assert!(
+        report.results.values().all(EngineResult::is_equiv),
+        "expected all engines to report equivalence: {:?}",
+        report
+    );
+}
+
+#[test]
+fn test_aig_equiv_reports_non_equivalent_designs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_gate = two_input_gate_fn("and_lhs", |a, b, gb| gb.add_and_binary(a, b));
+    let rhs_gate = two_input_gate_fn("or_rhs", |a, b, gb| gb.add_or_binary(a, b));
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs_not_equiv.aag", &lhs_gate);
+    let rhs_aag = write_aiger_file(&temp_dir, "rhs_not_equiv.aag", &rhs_gate);
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("aig-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_aag.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected aig-equiv to fail for inequivalent designs; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: EquivReport =
+        serde_json::from_slice(&output.stdout).expect("valid JSON report expected");
+    assert!(
+        report
+            .results
+            .values()
+            .any(|res| !matches!(res, EngineResult::Equiv)),
+        "expected at least one engine to report inequivalence: {:?}",
+        report
+    );
 }
 
 #[test]
