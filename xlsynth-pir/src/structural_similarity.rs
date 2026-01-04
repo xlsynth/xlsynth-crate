@@ -88,6 +88,14 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
                 child_hashes.push(hashes[b.index]);
                 child_depths.push(depths[b.index]);
             }
+            NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
+                child_hashes.push(hashes[lhs.index]);
+                child_depths.push(depths[lhs.index]);
+                child_hashes.push(hashes[rhs.index]);
+                child_depths.push(depths[rhs.index]);
+                child_hashes.push(hashes[c_in.index]);
+                child_depths.push(depths[c_in.index]);
+            }
             NodePayload::SignExt { arg, .. } | NodePayload::ZeroExt { arg, .. } => {
                 child_hashes.push(hashes[arg.index]);
                 child_depths.push(depths[arg.index]);

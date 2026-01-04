@@ -180,6 +180,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             start,
             update_value,
         } => vec![*arg, *start, *update_value],
+        ExtCarryOut { lhs, rhs, c_in } => vec![*lhs, *rhs, *c_in],
         Assert {
             token,
             activate,
@@ -311,6 +312,11 @@ fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
 }
 
 pub fn get_topological(f: &Fn) -> Vec<NodeRef> {
+    debug_assert!(
+        f.check_pir_layout_invariants().is_ok(),
+        "PIR layout invariants violated for function '{}'",
+        f.name
+    );
     topo_from_nodes(&f.nodes)
 }
 
@@ -372,23 +378,85 @@ pub fn param_type_by_name(f: &Fn, param_name: &str) -> Option<Type> {
 
 /// Compacts and reorders the nodes of a function in place.
 ///
-/// - Removes any nodes whose payload is `Nil`.
-/// - Reorders remaining nodes into a topological order (dependencies before
-///   users).
+/// PIR layout invariants:
+/// - Node index 0 is reserved for a `Nil` node.
+/// - Parameter nodes occupy indices `1..=f.params.len()` in parameter order.
+///
+/// This routine preserves those invariants while:
+/// - Removing any other nodes whose payload is `Nil`.
+/// - Reordering non-parameter body nodes into a topological order (dependencies
+///   before users).
 /// - Remaps all operand indices and the function's `ret_node_ref` to the new
 ///   indices.
 ///
 /// Returns `Err` if remapping encounters a reference to a removed (Nil) node.
 pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
+    let n = f.nodes.len();
+    if n == 0 {
+        return Ok(());
+    }
+
+    let param_count = f.params.len();
+    if n < 1 + param_count {
+        return Err(format!(
+            "compact_and_toposort_in_place: function '{}' has {} nodes but {} params (need at least {})",
+            f.name,
+            n,
+            param_count,
+            1 + param_count
+        ));
+    }
+
     // Determine a topological order over the current node set.
     let topo_all: Vec<NodeRef> = get_topological(f);
 
-    // Filter out Nil nodes (these will be removed).
+    // Keep reserved nil node at index 0.
     let mut kept_order: Vec<NodeRef> = Vec::with_capacity(topo_all.len());
-    for nr in topo_all.into_iter() {
-        if !matches!(f.get_node(nr).payload, NodePayload::Nil) {
-            kept_order.push(nr);
+    kept_order.push(NodeRef { index: 0 });
+
+    // Keep params at indices 1..=param_count in signature order.
+    for i in 0..param_count {
+        let nr = NodeRef { index: i + 1 };
+        match f.get_node(nr).payload {
+            NodePayload::GetParam(pid) => {
+                if pid != f.params[i].id {
+                    return Err(format!(
+                        "compact_and_toposort_in_place: param node at index {} has id={} but signature param '{}' has id={}",
+                        i + 1,
+                        pid.get_wrapped_id(),
+                        f.params[i].name,
+                        f.params[i].id.get_wrapped_id()
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "compact_and_toposort_in_place: expected GetParam at index {} for param '{}'",
+                    i + 1,
+                    f.params[i].name
+                ));
+            }
         }
+        kept_order.push(nr);
+    }
+
+    // Add remaining topo-sorted body nodes, excluding:
+    // - the reserved nil node (already added)
+    // - parameter nodes (already added)
+    // - any other Nil nodes (removed)
+    let mut already_kept: Vec<bool> = vec![false; n];
+    for nr in kept_order.iter().copied() {
+        already_kept[nr.index] = true;
+    }
+    for nr in topo_all.into_iter() {
+        if already_kept[nr.index] {
+            continue;
+        }
+        if matches!(f.get_node(nr).payload, NodePayload::Nil) {
+            continue;
+        }
+        kept_order.push(nr);
+        already_kept[nr.index] = true;
     }
 
     // Build old->new index mapping for remapping payloads.
@@ -647,6 +715,11 @@ where
             arg: map((0, *arg)),
             start: map((1, *start)),
             update_value: map((2, *update_value)),
+        },
+        NodePayload::ExtCarryOut { lhs, rhs, c_in } => NodePayload::ExtCarryOut {
+            lhs: map((0, *lhs)),
+            rhs: map((1, *rhs)),
+            c_in: map((2, *c_in)),
         },
         NodePayload::Assert {
             token,

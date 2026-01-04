@@ -26,6 +26,7 @@ use xlsynth_mcmc::multichain::ChainStrategy;
 use xlsynth_mcmc_pir::{
     CheckpointKind, CheckpointMsg, Objective, RunOptions, cost, run_pir_mcmc_with_shared_best,
 };
+use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::ir::{Package, PackageMember};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
@@ -99,7 +100,20 @@ struct CliArgs {
 }
 
 fn optimize_ir_text(ir_text: &str, top: &str) -> Result<String> {
-    let ir_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
+    // The CLI accepts PIR text which may contain extension ops (e.g.
+    // ext_carry_out), but upstream XLS does not. Desugar extensions before
+    // invoking upstream.
+    let lowered_ir_text = {
+        let mut p = xlsynth_pir::ir_parser::Parser::new(ir_text);
+        let mut pir_pkg = p
+            .parse_package()
+            .map_err(|e| anyhow::anyhow!("PIR parse_package failed: {:?}", e))?;
+        desugar_extensions::desugar_extensions_in_package(&mut pir_pkg)
+            .map_err(|e| anyhow::anyhow!("desugar_extensions_in_package failed: {}", e))?;
+        pir_pkg.to_string()
+    };
+
+    let ir_pkg = xlsynth::IrPackage::parse_ir(&lowered_ir_text, None)
         .map_err(|e| anyhow::anyhow!("IrPackage::parse_ir failed: {:?}", e))?;
     let optimized_ir_pkg = xlsynth::optimize_ir(&ir_pkg, top)
         .map_err(|e| anyhow::anyhow!("optimize_ir failed: {:?}", e))?;

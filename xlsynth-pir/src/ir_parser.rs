@@ -1003,6 +1003,28 @@ impl Parser {
                     maybe_id.unwrap(),
                 )
             }
+            "ext_carry_out" => {
+                let lhs = self.parse_node_ref(&node_env, "ext_carry_out lhs")?;
+                self.drop_or_error(",")?;
+                let rhs = self.parse_node_ref(&node_env, "ext_carry_out rhs")?;
+                self.drop_or_error(",")?;
+                let c_in = self.parse_node_ref(&node_env, "ext_carry_out c_in")?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for ext_carry_out; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::ExtCarryOut { lhs, rhs, c_in },
+                    maybe_id.unwrap(),
+                )
+            }
             "assert" => {
                 let token = self.parse_node_ref(&node_env, "assert token")?;
                 self.drop_or_error(",")?;

@@ -26,6 +26,13 @@ fuzz_target!(|ir_text: String| {
         // We skip to avoid harness-level panics. Documented in FUZZ.md.
         return;
     }
+    if ir_text.contains("ext_") {
+        // Early-return rationale: this fuzz target checks verification parity
+        // between PIR and upstream XLS IR. Upstream does not understand PIR
+        // extension ops (e.g. `ext_carry_out`), so such samples are outside the
+        // target's scope. Extension semantics are fuzzed/tested separately.
+        return;
+    }
 
     // First, require that PIR parses as a package; otherwise, skip the sample.
     let pkg = match xlsynth_pir::ir_parser::Parser::new(&ir_text).parse_package() {

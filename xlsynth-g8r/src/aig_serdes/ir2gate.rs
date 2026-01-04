@@ -12,6 +12,7 @@ use std::sync::Arc;
 use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
+use xlsynth_pir::ir_validate;
 
 use crate::ir2gate_utils::{
     AdderMapping, Direction, gatify_add_brent_kung, gatify_add_kogge_stone,
@@ -1656,6 +1657,35 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::Gate(gate));
         }
 
+        // -- extension operations
+        ir::NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
+            let lhs_bits = env.get_bit_vector(*lhs).expect("lhs should be present");
+            let rhs_bits = env.get_bit_vector(*rhs).expect("rhs should be present");
+            assert_eq!(
+                lhs_bits.get_bit_count(),
+                rhs_bits.get_bit_count(),
+                "ExtCarryOut requires equal-width operands"
+            );
+            let c_in_bits = env.get_bit_vector(*c_in).expect("c_in should be present");
+            let c_in_bit: AigOperand = c_in_bits
+                .clone()
+                .try_into()
+                .expect("ExtCarryOut c_in should be bits[1]");
+
+            let w = lhs_bits.get_bit_count();
+            let mut carry: AigOperand = c_in_bit;
+            for i in 0..w {
+                let a_i = *lhs_bits.get_lsb(i);
+                let b_i = *rhs_bits.get_lsb(i);
+                let g_i = g8_builder.add_and_binary(a_i, b_i);
+                let p_i = g8_builder.add_or_binary(a_i, b_i);
+                let p_and_c = g8_builder.add_and_binary(p_i, carry);
+                carry = g8_builder.add_or_binary(g_i, p_and_c);
+            }
+
+            env.add(node_ref, GateOrVec::Gate(carry));
+        }
+
         // -- binary operations
         ir::NodePayload::Binop(ir::Binop::Eq, a, b) => {
             let a_bits = env.get_bit_vector(*a).expect("eq lhs should be present");
@@ -2328,8 +2358,39 @@ pub struct GatifyOutput {
     pub lowering_map: IrToGateMap,
 }
 
+fn validate_fn_for_gatify(f: &ir::Fn) -> Result<(), String> {
+    // Validate the function in a minimal package context.
+    //
+    // This catches structural issues (operand bounds/order, return node/type,
+    // text-id uniqueness within the function, etc.) before and after
+    // `prep_for_gatify`.
+    let pkg = ir::Package {
+        name: "gatify_validate".to_string(),
+        file_table: ir::FileTable::new(),
+        members: vec![ir::PackageMember::Function(f.clone())],
+        top: Some((f.name.clone(), ir::MemberType::Function)),
+    };
+    ir_validate::validate_package(&pkg).map_err(|e| e.to_string())
+}
+
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
-    let prepared_fn = prep_for_gatify(orig_fn);
+    validate_fn_for_gatify(orig_fn)
+        .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
+
+    // `prep_for_gatify` may introduce many new nodes (e.g. lowering ext ops), so
+    // any `NodeRef { index }` values produced during gatification generally
+    // refer to the *prepared* function's node vector. Most consumers want to
+    // interpret the lowering map in terms of the original function, so we
+    // remap prepared nodes back to original nodes via stable `text_id`.
+    let mut orig_ref_by_text_id: HashMap<usize, ir::NodeRef> = HashMap::new();
+    for (idx, n) in orig_fn.nodes.iter().enumerate() {
+        orig_ref_by_text_id.insert(n.text_id, ir::NodeRef { index: idx });
+    }
+
+    let prepared_fn = prep_for_gatify(orig_fn, options.range_info.as_deref());
+    validate_fn_for_gatify(&prepared_fn)
+        .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
+
     let f = &prepared_fn;
     let mut g8_builder = GateBuilder::new(
         f.name.clone(),
@@ -2353,7 +2414,13 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
             GateOrVec::BitVector(bv) => bv,
             GateOrVec::Gate(gate_ref) => AigBitVector::from_bit(gate_ref),
         };
-        lowering_map.insert(node_ref, bit_vector);
+        let prepared_text_id = f.get_node(node_ref).text_id;
+        let Some(orig_node_ref) = orig_ref_by_text_id.get(&prepared_text_id).copied() else {
+            // Not a sample failure: many helper nodes (introduced during prep/lowering)
+            // do not exist in the original function, so we don't expose them here.
+            continue;
+        };
+        lowering_map.insert(orig_node_ref, bit_vector);
     }
 
     // If we're told we should do so, we check equivalence between the original IR
@@ -2374,9 +2441,31 @@ pub fn gatify_node_as_fn(
     node_ref: ir::NodeRef,
     options: &GatifyOptions,
 ) -> Result<GateFn, String> {
-    let prepared_fn = prep_for_gatify(f);
+    let target_text_id = f.get_node(node_ref).text_id;
+    validate_fn_for_gatify(f)
+        .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
+    let prepared_fn = prep_for_gatify(f, options.range_info.as_deref());
+    validate_fn_for_gatify(&prepared_fn)
+        .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
     let f = &prepared_fn;
-    let node = f.get_node(node_ref);
+    let prepared_node_ref: ir::NodeRef = f
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(idx, n)| {
+            if n.text_id == target_text_id {
+                Some(ir::NodeRef { index: idx })
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            format!(
+                "gatify_node_as_fn: could not find node with original text_id={} after prep",
+                target_text_id
+            )
+        })?;
+    let node = f.get_node(prepared_node_ref);
     let mut g8_builder = GateBuilder::new(
         format!("{}_node_{}", f.name, node.text_id),
         GateBuilderOptions {

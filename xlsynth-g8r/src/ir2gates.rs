@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aig_serdes::ir2gate;
+use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
@@ -53,7 +54,9 @@ pub fn ir2gates_from_ir_text(
         .ok_or_else(|| format!("PIR package has no function named '{top_fn_name}'"))?;
 
     // Parse with xlsynth for libxls analysis.
-    let mut xlsynth_package = xlsynth::IrPackage::parse_ir(ir_text, None)
+    let lowered_ir_text = desugar_extensions::emit_package_as_xls_ir_text(&pir_package)
+        .map_err(|e| format!("emit_package_as_xls_ir_text failed: {e}"))?;
+    let mut xlsynth_package = xlsynth::IrPackage::parse_ir(&lowered_ir_text, None)
         .map_err(|e| format!("xlsynth parse_ir failed: {e}"))?;
     xlsynth_package
         .set_top_by_name(&top_fn_name)

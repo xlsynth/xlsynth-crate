@@ -381,6 +381,16 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
+    /// Extended (non-upstream) op: carry-out bit of addition.
+    ///
+    /// Semantics: for `lhs, rhs: bits[w]` and `c_in: bits[1]`, returns
+    /// `bit_slice(zero_ext(lhs,w+1) + zero_ext(rhs,w+1) + zero_ext(c_in,w+1),
+    /// start=w, width=1)`.
+    ExtCarryOut {
+        lhs: NodeRef,
+        rhs: NodeRef,
+        c_in: NodeRef,
+    },
     Assert {
         token: NodeRef,
         activate: NodeRef,
@@ -463,6 +473,7 @@ impl NodePayload {
             NodePayload::DynamicBitSlice { .. } => "dynamic_bit_slice",
             NodePayload::BitSlice { .. } => "bit_slice",
             NodePayload::BitSliceUpdate { .. } => "bit_slice_update",
+            NodePayload::ExtCarryOut { .. } => "ext_carry_out",
             NodePayload::Assert { .. } => "assert",
             NodePayload::Trace { .. } => "trace",
             NodePayload::AfterAll(_) => "after_all",
@@ -598,6 +609,13 @@ impl NodePayload {
                 binop_to_operator(*op),
                 get_name(*lhs),
                 get_name(*rhs),
+                id
+            ),
+            NodePayload::ExtCarryOut { lhs, rhs, c_in } => format!(
+                "ext_carry_out({}, {}, {}, id={})",
+                get_name(*lhs),
+                get_name(*rhs),
+                get_name(*c_in),
                 id
             ),
             NodePayload::Unop(op, arg) => {
@@ -1022,6 +1040,55 @@ impl Fn {
 
     pub fn get_node_mut(&mut self, node_ref: NodeRef) -> &mut Node {
         &mut self.nodes[node_ref.index]
+    }
+
+    /// Checks PIR layout invariants:
+    /// - node index 0 is a reserved `Nil` node
+    /// - parameter nodes are at indices `1..=params.len()` in signature order,
+    ///   and the `GetParam` id matches the signature `ParamId`.
+    pub fn check_pir_layout_invariants(&self) -> Result<(), String> {
+        if self.nodes.is_empty() {
+            return Ok(());
+        }
+        if !matches!(self.nodes[0].payload, ir::NodePayload::Nil) {
+            return Err(format!(
+                "PIR layout invariant violated in '{}': node[0] must be Nil",
+                self.name
+            ));
+        }
+        let param_count = self.params.len();
+        if self.nodes.len() < 1 + param_count {
+            return Err(format!(
+                "PIR layout invariant violated in '{}': nodes.len()={} < 1+params.len()={}",
+                self.name,
+                self.nodes.len(),
+                1 + param_count
+            ));
+        }
+        for (i, p) in self.params.iter().enumerate() {
+            let node_idx = i + 1;
+            match self.nodes[node_idx].payload {
+                ir::NodePayload::GetParam(pid) => {
+                    if pid != p.id {
+                        return Err(format!(
+                            "PIR layout invariant violated in '{}': param node[{}] has id={} but signature param '{}' has id={}",
+                            self.name,
+                            node_idx,
+                            pid.get_wrapped_id(),
+                            p.name,
+                            p.id.get_wrapped_id()
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "PIR layout invariant violated in '{}': node[{}] must be GetParam for signature param '{}'",
+                        self.name, node_idx, p.name
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns a new Fn with the given parameter names dropped.

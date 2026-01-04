@@ -1030,6 +1030,13 @@ fn main() {
                         .help("Write the JSON summary to PATH")
                         .action(clap::ArgAction::Set),
                 )
+                .arg(
+                    clap::Arg::new("prepared_ir_out")
+                        .long("prepared-ir-out")
+                        .value_name("PATH")
+                        .help("Write the residual PIR after prep_for_gatify to PATH")
+                        .action(clap::ArgAction::Set),
+                )
                 .add_ir2g8r_flags()
                 .add_bool_arg(
                     "emit-independent-op-stats",

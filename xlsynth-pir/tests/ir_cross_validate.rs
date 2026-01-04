@@ -21,6 +21,13 @@ fn verify_with_xlsynth(ir_text: &str) -> bool {
 }
 
 fn assert_cross_validates_same(ir_text: &str) {
+    if ir_text.contains("ext_") {
+        // Early-return rationale: this test checks verification parity between
+        // PIR and upstream XLS. Upstream does not understand PIR extension ops
+        // (e.g. `ext_carry_out`). Extension behavior is covered by dedicated
+        // PIR-level tests.
+        return;
+    }
     let pir_ok = verify_with_pir(ir_text);
     let xls_ok = verify_with_xlsynth(ir_text);
     assert_eq!(

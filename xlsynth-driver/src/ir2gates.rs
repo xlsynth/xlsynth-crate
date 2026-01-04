@@ -50,6 +50,7 @@ fn ir2gates(
     fraig_max_iterations: Option<usize>,
     fraig_sim_samples: Option<usize>,
     output_json: Option<&std::path::Path>,
+    prepared_ir_out: Option<&std::path::Path>,
     cut_db: Option<std::sync::Arc<CutDb>>,
 ) {
     log::info!("ir2gates");
@@ -74,6 +75,7 @@ fn ir2gates(
         // Keep CLI runtime predictable in tests/CI: small bounded rewrite.
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+        prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
     };
     let stats = process_ir_path::process_ir_path_for_cli(input_file, &options);
     if quiet {
@@ -203,6 +205,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     };
 
     let output_json = matches.get_one::<String>("output_json");
+    let prepared_ir_out = matches.get_one::<String>("prepared_ir_out");
     let cut_db = Some(CutDb::load_default());
 
     let input_path = std::path::Path::new(input_file);
@@ -223,6 +226,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         fraig_max_iterations,
         fraig_sim_samples,
         output_json.map(|s| std::path::Path::new(s)),
+        prepared_ir_out.map(|s| std::path::Path::new(s)),
         cut_db,
     );
 }

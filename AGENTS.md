@@ -15,6 +15,13 @@
 
 This separation makes functionality testable without a CLI, keeps dependencies focused, and avoids duplication across binaries.
 
+## Keep the crate graph a DAG (including for tests)
+
+Try to keep the workspace crate dependency graph **acyclic**, even in `dev-dependencies`.
+
+- Prefer placing cross-crate integration / equivalence tests in a crate that already depends on both sides (often `xlsynth-prover`), rather than adding a `dev-dependency` from a lower-level crate back “up” the stack.
+- This keeps build times and feature selection more predictable and avoids subtle CI-only cycles.
+
 ## `pre-commit`
 
 All pull requests must be clean with respect to `pre-commit`.

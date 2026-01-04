@@ -15,8 +15,21 @@ use crate::math::ceil_log2;
 pub enum DeduceError {
     MissingOperand(&'static str),
     ExpectedTuple(Type),
-    TupleIndexOutOfBounds { index: usize, tuple_len: usize },
+    TupleIndexOutOfBounds {
+        index: usize,
+        tuple_len: usize,
+    },
     ExpectedBits(&'static str),
+    ExpectedBitsWidth {
+        ctx: &'static str,
+        expected: usize,
+        got: usize,
+    },
+    WidthMismatch {
+        ctx: &'static str,
+        lhs: usize,
+        rhs: usize,
+    },
     ExpectedArray(&'static str),
     ArrayEmpty,
     ArrayElementsNotSameType,
@@ -39,6 +52,20 @@ impl std::fmt::Display for DeduceError {
                 index, tuple_len
             ),
             DeduceError::ExpectedBits(ctx) => write!(f, "expected bits operand for {}", ctx),
+            DeduceError::ExpectedBitsWidth { ctx, expected, got } => {
+                write!(
+                    f,
+                    "expected bits[{}] for {}, got bits[{}]",
+                    expected, ctx, got
+                )
+            }
+            DeduceError::WidthMismatch { ctx, lhs, rhs } => {
+                write!(
+                    f,
+                    "width mismatch for {}: lhs bits[{}] vs rhs bits[{}]",
+                    ctx, lhs, rhs
+                )
+            }
             DeduceError::ExpectedArray(ctx) => write!(f, "expected array operand for {}", ctx),
             DeduceError::ArrayEmpty => {
                 write!(f, "cannot deduce array type from empty element list")
@@ -308,6 +335,38 @@ where
                 .get(0)
                 .ok_or(DeduceError::MissingOperand("bit_slice_update.arg"))?;
             Ok(Some(arg_ty.clone()))
+        }
+        NodePayload::ExtCarryOut { .. } => {
+            let lhs_ty = operand_types
+                .get(0)
+                .ok_or(DeduceError::MissingOperand("ext_carry_out.lhs"))?;
+            let rhs_ty = operand_types
+                .get(1)
+                .ok_or(DeduceError::MissingOperand("ext_carry_out.rhs"))?;
+            let c_in_ty = operand_types
+                .get(2)
+                .ok_or(DeduceError::MissingOperand("ext_carry_out.c_in"))?;
+
+            let (lw, rw) = match (lhs_ty, rhs_ty) {
+                (Type::Bits(lw), Type::Bits(rw)) => (*lw, *rw),
+                _ => return Err(DeduceError::ExpectedBits("ext_carry_out.lhs/rhs")),
+            };
+            if lw != rw {
+                return Err(DeduceError::WidthMismatch {
+                    ctx: "ext_carry_out",
+                    lhs: lw,
+                    rhs: rw,
+                });
+            }
+            match c_in_ty {
+                Type::Bits(1) => Ok(Some(Type::Bits(1))),
+                Type::Bits(got) => Err(DeduceError::ExpectedBitsWidth {
+                    ctx: "ext_carry_out.c_in",
+                    expected: 1,
+                    got: *got,
+                }),
+                _ => Err(DeduceError::ExpectedBits("ext_carry_out.c_in")),
+            }
         }
 
         NodePayload::Assert { .. } | NodePayload::Trace { .. } | NodePayload::AfterAll(_) => {

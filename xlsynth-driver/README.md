@@ -522,6 +522,7 @@ Supported flags include the common gate-optimization controls:
 
 - `--fold` – fold the gate representation (default `true`).
 - `--hash` – hash-cons the gate representation (default `true`).
+- `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
   topology.
 - `--mul-adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – optional override
