@@ -15,7 +15,6 @@ pub mod dslx_stitch_pipeline;
 pub mod gate_builder;
 pub mod ir2gate_utils;
 pub mod ir2gates;
-pub mod ir_range_info;
 pub mod liberty;
 pub mod verilog_version;
 pub mod liberty_proto {

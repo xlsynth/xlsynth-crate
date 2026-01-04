@@ -60,6 +60,7 @@ mod ir2delayinfo;
 mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
+mod ir_annotate_ranges;
 mod ir_bool_cones;
 mod ir_equiv;
 mod ir_equiv_blocks;
@@ -1000,6 +1001,17 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("ir-annotate-ranges")
+                .about("Reads an IR package and emits it with per-node range/known-bits annotations")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false),
+        )
+        .subcommand(
             clap::Command::new("ir2gates")
                 .about("Converts IR to GateFn and emits it to stdout as JSON")
                 .arg(
@@ -1902,6 +1914,9 @@ fn main() {
         }
         Some(("ir-round-trip", subm)) => {
             ir_round_trip::handle_ir_round_trip(subm);
+        }
+        Some(("ir-annotate-ranges", subm)) => {
+            ir_annotate_ranges::handle_ir_annotate_ranges(subm, &config);
         }
         Some(("ir2gates", subm)) => {
             ir2gates::handle_ir2gates(subm, &config);

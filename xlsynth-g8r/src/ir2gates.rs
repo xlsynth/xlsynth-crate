@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aig_serdes::ir2gate;
-use crate::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_range_info::IrRangeInfo;
 
 pub struct Ir2GatesOptions {
     pub fold: bool,

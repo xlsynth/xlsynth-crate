@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use xlsynth::{Interval, IrAnalysis, IrBits, KnownBits};
-use xlsynth_pir::ir;
+
+use crate::ir;
 
 pub struct NodeRangeInfo {
     pub known_bits: Option<KnownBits>,
