@@ -5,9 +5,9 @@ use std::sync::Arc;
 use xlsynth_g8r::aig::get_summary_stats::get_summary_stats;
 use xlsynth_g8r::aig_serdes::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_range_info::IrRangeInfo;
 
 fn build_pir_fn_and_range_info(ir_text: &str, top: &str) -> (ir::Fn, Arc<IrRangeInfo>) {
     let mut pir_parser = ir_parser::Parser::new(ir_text);

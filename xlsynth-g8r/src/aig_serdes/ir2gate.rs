@@ -7,10 +7,10 @@ use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::aig_serdes::prep_for_gatify::prep_for_gatify;
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-use crate::ir_range_info::IrRangeInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
+use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 
 use crate::ir2gate_utils::{

@@ -1137,6 +1137,62 @@ impl std::fmt::Display for Fn {
     }
 }
 
+fn append_emitted_node_line(
+    out: &mut String,
+    func: &Fn,
+    node_ref: NodeRef,
+    comment: Option<String>,
+) {
+    let node = func.get_node(node_ref);
+    let is_ret = if let Some(ret_node_ref) = func.ret_node_ref {
+        ret_node_ref == node_ref
+    } else {
+        false
+    };
+
+    match &node.payload {
+        NodePayload::GetParam(pid) if is_ret => {
+            let name = node
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("<unnamed>");
+            let mut line = String::new();
+            line.push_str("  ret ");
+            line.push_str(&format!(
+                "{}: {} = param(name={}, id={})",
+                name,
+                node.ty,
+                name,
+                pid.get_wrapped_id()
+            ));
+            if let Some(comment) = comment {
+                line.push_str("  // ");
+                line.push_str(&comment);
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+        _ => {
+            let Some(node_str) = node.to_string(func) else {
+                return;
+            };
+            let mut line = String::new();
+            line.push_str("  ");
+            if is_ret {
+                line.push_str("ret ");
+            }
+            line.push_str(&node_str);
+            if let Some(comment) = comment {
+                line.push_str("  // ");
+                line.push_str(&comment);
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+}
+
 /// Emits a function as text, including outer/inner attributes and body.
 pub fn emit_fn(func: &Fn, is_top: bool) -> String {
     let mut out = String::new();
@@ -1169,45 +1225,113 @@ pub fn emit_fn(func: &Fn, is_top: bool) -> String {
         out.push('\n');
     }
 
-    // Body nodes
-    for (i, node) in func.nodes.iter().enumerate() {
+    // Body nodes.
+    for (i, _node) in func.nodes.iter().enumerate() {
         let node_ref = NodeRef { index: i };
-        let ret_prefix = if let Some(ret_node_ref) = func.ret_node_ref
-            && ret_node_ref == node_ref
-        {
-            "ret "
-        } else {
-            ""
-        };
-        match &node.payload {
-            NodePayload::GetParam(pid) if ret_prefix == "ret " => {
-                let name = node
-                    .name
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("<unnamed>");
-                out.push_str("  ");
-                out.push_str(ret_prefix);
-                out.push_str(&format!(
-                    "{}: {} = param(name={}, id={})\n",
-                    name,
-                    node.ty,
-                    name,
-                    pid.get_wrapped_id()
-                ));
-            }
-            _ => {
-                if let Some(node_str) = node.to_string(func) {
-                    out.push_str("  ");
-                    out.push_str(ret_prefix);
-                    out.push_str(&node_str);
-                    out.push('\n');
-                }
-            }
-        }
+        append_emitted_node_line(&mut out, func, node_ref, None);
     }
 
     out.push('}');
+    out
+}
+
+/// Emits a function as text, including outer/inner attributes and body,
+/// allowing an optional end-of-line comment per node.
+///
+/// The comment is produced by `comment_fn` given the function and the node ref.
+pub fn emit_fn_with_node_comments_full<F>(func: &Fn, is_top: bool, mut comment_fn: F) -> String
+where
+    F: FnMut(&Fn, NodeRef) -> Option<String>,
+{
+    let mut out = String::new();
+    // Outer attributes first.
+    for attr in &func.outer_attrs {
+        out.push_str(attr);
+        out.push('\n');
+    }
+
+    // Signature line.
+    let params_str = func
+        .params
+        .iter()
+        .map(|p| format!("{}: {} id={}", p.name, p.ty, p.id.get_wrapped_id()))
+        .collect::<Vec<String>>()
+        .join(", ");
+    let return_type_str = func.ret_ty.to_string();
+    if is_top {
+        out.push_str("top ");
+    }
+    out.push_str(&format!(
+        "fn {}({}) -> {} {{\n",
+        func.name, params_str, return_type_str
+    ));
+
+    // Inner attributes after signature.
+    for attr in &func.inner_attrs {
+        out.push_str("  ");
+        out.push_str(attr);
+        out.push('\n');
+    }
+
+    // Body nodes.
+    for (i, _node) in func.nodes.iter().enumerate() {
+        let node_ref = NodeRef { index: i };
+        let comment = comment_fn(func, node_ref);
+        append_emitted_node_line(&mut out, func, node_ref, comment);
+    }
+
+    out.push('}');
+    out
+}
+
+/// Emits a package as text, allowing a targeted override of function emission.
+///
+/// If `override_fn` returns `Some(text)` for a given function member, that text
+/// is used; otherwise the package uses the default function/block emission.
+pub fn emit_package_with_fn_override<F>(pkg: &Package, mut override_fn: F) -> String
+where
+    F: FnMut(&Fn, bool) -> Option<String>,
+{
+    let mut out = String::new();
+    out.push_str(&format!("package {}\n\n", pkg.name));
+
+    let mut sorted_file_ids = pkg.file_table.id_to_path.keys().collect::<Vec<_>>();
+    sorted_file_ids.sort();
+    for file_id in sorted_file_ids {
+        let path = pkg.file_table.id_to_path[file_id].as_str();
+        out.push_str(&format!("file_number {} \"{}\"\n", file_id, path));
+    }
+    if !pkg.file_table.id_to_path.is_empty() {
+        out.push('\n');
+    }
+
+    for (i, member) in pkg.members.iter().enumerate() {
+        match member {
+            PackageMember::Function(func) => {
+                let is_top = match &pkg.top {
+                    Some((top_name, MemberType::Function)) => func.name == top_name.as_str(),
+                    _ => false,
+                };
+                let func_text = override_fn(func, is_top).unwrap_or_else(|| emit_fn(func, is_top));
+                out.push_str(&func_text);
+            }
+            PackageMember::Block { func, port_info } => {
+                let is_top = match &pkg.top {
+                    Some((top_name, MemberType::Block)) => func.name == top_name.as_str(),
+                    _ => false,
+                };
+                // Emit as a block using helper from the parser module.
+                let block_text = ir_parser::emit_fn_as_block(func, None, Some(port_info), is_top);
+                out.push_str(&block_text);
+            }
+        }
+        if i < pkg.members.len().saturating_sub(1) {
+            out.push_str("\n\n");
+        } else {
+            out.push('\n');
+        }
+    }
+
     out
 }
 
@@ -1230,51 +1354,10 @@ where
         func.name, params_str, return_type_str
     ));
 
-    for (i, node) in func.nodes.iter().enumerate() {
+    for (i, _node) in func.nodes.iter().enumerate() {
         let node_ref = NodeRef { index: i };
-        let ret_prefix = if let Some(ret_node_ref) = func.ret_node_ref
-            && ret_node_ref == node_ref
-        {
-            "ret "
-        } else {
-            ""
-        };
-        match &node.payload {
-            NodePayload::GetParam(pid) if ret_prefix == "ret " => {
-                let name = node
-                    .name
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("<unnamed>");
-                let line = format!(
-                    "{}: {} = param(name={}, id={})",
-                    name,
-                    node.ty,
-                    name,
-                    pid.get_wrapped_id()
-                );
-                out.push_str("  ");
-                out.push_str(ret_prefix);
-                out.push_str(&line);
-                if let Some(comment) = comment_fn(func, node_ref) {
-                    out.push_str("  // ");
-                    out.push_str(&comment);
-                }
-                out.push('\n');
-            }
-            _ => {
-                if let Some(node_str) = node.to_string(func) {
-                    out.push_str("  ");
-                    out.push_str(ret_prefix);
-                    out.push_str(&node_str);
-                    if let Some(comment) = comment_fn(func, node_ref) {
-                        out.push_str("  // ");
-                        out.push_str(&comment);
-                    }
-                    out.push('\n');
-                }
-            }
-        }
+        let comment = comment_fn(func, node_ref);
+        append_emitted_node_line(&mut out, func, node_ref, comment);
     }
     out.push('}');
     out
@@ -1558,46 +1641,13 @@ impl Package {
 
 impl std::fmt::Display for Package {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "package {}\n\n", self.name)?;
-
-        let mut sorted_file_ids = self.file_table.id_to_path.keys().collect::<Vec<_>>();
-        sorted_file_ids.sort();
-        for file_id in sorted_file_ids {
-            let path = self.file_table.id_to_path[file_id].as_str();
-            write!(f, "file_number {} \"{}\"\n", file_id, path)?;
-        }
-        if !self.file_table.id_to_path.is_empty() {
-            write!(f, "\n")?;
-        }
-
-        for (i, member) in self.members.iter().enumerate() {
-            match member {
-                PackageMember::Function(func) => {
-                    let is_top = match &self.top {
-                        Some((top_name, MemberType::Function)) => func.name == top_name.as_str(),
-                        _ => false,
-                    };
-                    let func_text = emit_fn(func, is_top);
-                    write!(f, "{}", func_text)?;
-                }
-                PackageMember::Block { func, port_info } => {
-                    let is_top = match &self.top {
-                        Some((top_name, MemberType::Block)) => func.name == top_name.as_str(),
-                        _ => false,
-                    };
-                    // Emit as a block using helper from the parser module.
-                    let block_text =
-                        ir_parser::emit_fn_as_block(func, None, Some(port_info), is_top);
-                    write!(f, "{}", block_text)?;
-                }
-            }
-            if i < self.members.len() - 1 {
-                write!(f, "\n\n")?;
-            } else {
-                write!(f, "\n")?;
-            }
-        }
-        Ok(())
+        // Delegate to the canonical package emitter so we don't duplicate the
+        // `file_number`/member formatting logic in multiple places.
+        write!(
+            f,
+            "{}",
+            emit_package_with_fn_override(self, |_func, _is_top| None)
+        )
     }
 }
 

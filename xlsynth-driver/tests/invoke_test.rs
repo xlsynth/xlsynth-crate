@@ -1692,6 +1692,42 @@ dslx_stdlib_path = "{}"
 }
 
 #[test]
+fn test_ir_annotate_ranges_smoke() {
+    let ir_text = r#"package sample
+
+top fn main(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
+  literal.3: bits[4] = literal(value=0xf, id=3)
+  add.4: bits[4] = add(x, y, id=4)
+  ret and.5: bits[4] = and(add.4, literal.3, id=5)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-annotate-ranges")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        stdout.contains("// range:") && stdout.contains("known_bits: 0b"),
+        "expected range and known_bits comments in output; stdout:\n{}",
+        stdout
+    );
+}
+
+#[test]
 fn test_dslx_add_sub_opt_ir2gates_pipeline() {
     let _ = env_logger::try_init();
     let dslx = "

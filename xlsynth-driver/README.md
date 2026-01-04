@@ -239,6 +239,27 @@ Example:
 xlsynth-driver ir-round-trip my_pkg.ir --strip-pos-attrs=true > my_pkg.nopos.ir
 ```
 
+### `ir-annotate-ranges`
+
+Reads an IR *package* and re-emits it to stdout, adding per-node end-of-line comments for the (selected) top function showing:
+
+- `range: [...]` – interval set from libxls range analysis
+- `known_bits: 0b...` – known-bits mask/value rendered as binary with `X` for unknown bits
+
+Positional arguments:
+
+- `<ir_input_file>`
+
+Optional flags:
+
+- `--top <TOP>` – function name to treat as top (otherwise uses the package top function).
+
+Example:
+
+```shell
+xlsynth-driver ir-annotate-ranges my_pkg.ir --top=main > my_pkg.ra.ir
+```
+
 ### `version`
 
 Prints the driver version string to **stdout**.
