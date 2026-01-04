@@ -435,6 +435,15 @@ pub fn gatify_one_hot_select(
 }
 
 pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag(gb, bits, lsb_prio, /* value_cannot_be_zero= */ false)
+}
+
+pub fn gatify_one_hot_with_nonzero_flag(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+    value_cannot_be_zero: bool,
+) -> AigBitVector {
     let mut gates = Vec::new();
 
     // Implementation note: instead of chaining all the "no prior bit" computations
@@ -461,8 +470,15 @@ pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool)
     if !lsb_prio {
         gates.reverse();
     }
-    let no_prior_bit = gb.add_and_nary(&prior_bits_inverted, ReductionKind::Tree);
-    gates.push(no_prior_bit);
+    if value_cannot_be_zero {
+        // If the input value is provably nonzero, then "none of the input bits were
+        // set" is provably false. Emit it as a literal zero instead of building
+        // an AND tree.
+        gates.push(gb.get_false());
+    } else {
+        let no_prior_bit = gb.add_and_nary(&prior_bits_inverted, ReductionKind::Tree);
+        gates.push(no_prior_bit);
+    }
     AigBitVector::from_lsb_is_index_0(&gates)
 }
 
@@ -515,6 +531,25 @@ mod tests {
         carry_select_builder.add_output("c_out".to_string(), AigBitVector::from_bit(c_out));
         carry_select_builder.add_output("results".to_string(), results);
         carry_select_builder.build()
+    }
+
+    #[test]
+    fn test_gatify_one_hot_nonzero_sets_is_zero_bit_literal_false() {
+        let mut builder =
+            GateBuilder::new("one_hot_nonzero".to_string(), GateBuilderOptions::no_opt());
+        let arg: AigBitVector = builder.add_input("arg".to_string(), 8);
+
+        let one_hot = gatify_one_hot_with_nonzero_flag(
+            &mut builder,
+            &arg,
+            /* lsb_prio= */ true,
+            /* value_cannot_be_zero= */ true,
+        );
+
+        // The output is N+1 bits; the final bit indicates "input was zero".
+        // When the input is provably nonzero, this bit must be a literal 0.
+        assert_eq!(one_hot.get_bit_count(), 9);
+        assert_eq!(*one_hot.get_lsb(8), builder.get_false());
     }
 
     fn make_kogge_stone(bits: usize) -> gate::GateFn {

@@ -136,6 +136,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
             check_equivalence: false,
             adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
             mul_adder_mapping: None,
+            range_info: None,
         },
     )
     .unwrap();
@@ -183,6 +184,7 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
             check_equivalence: false,
             adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
             mul_adder_mapping: None,
+            range_info: None,
         },
     )
     .unwrap();

@@ -13,8 +13,8 @@ use std::{
 };
 
 use xlsynth_sys::{
-    CIrBValue, CIrBits, CIrFunction, CIrFunctionJit, CIrFunctionType, CIrPackage, CIrType,
-    CIrValue, CScheduleAndCodegenResult, CTraceMessage, XlsFormatPreference,
+    CIrAnalysis, CIrBValue, CIrBits, CIrFunction, CIrFunctionJit, CIrFunctionType, CIrIntervalSet,
+    CIrPackage, CIrType, CIrValue, CScheduleAndCodegenResult, CTraceMessage, XlsFormatPreference,
 };
 
 use crate::{
@@ -340,6 +340,81 @@ pub(crate) fn xls_parse_ir_package(
         filename: filename.map(|s| s.to_string()),
     };
     Ok(package)
+}
+
+pub(crate) fn xls_ir_analysis_create_from_package(
+    p: *mut CIrPackage,
+) -> Result<*mut CIrAnalysis, XlsynthError> {
+    let mut out: *mut CIrAnalysis = std::ptr::null_mut();
+    xls_ffi_call!(xlsynth_sys::xls_ir_analysis_create_from_package, p; out)?;
+    Ok(out)
+}
+
+pub(crate) fn xls_ir_analysis_get_known_bits_for_node_id(
+    a: *const CIrAnalysis,
+    node_id: i64,
+) -> Result<(IrBits, IrBits), XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut known_mask_out: *mut CIrBits = std::ptr::null_mut();
+        let mut known_value_out: *mut CIrBits = std::ptr::null_mut();
+        let success = xlsynth_sys::xls_ir_analysis_get_known_bits_for_node_id(
+            a,
+            node_id,
+            &mut error_out,
+            &mut known_mask_out,
+            &mut known_value_out,
+        );
+        if success {
+            Ok((
+                IrBits {
+                    ptr: known_mask_out,
+                },
+                IrBits {
+                    ptr: known_value_out,
+                },
+            ))
+        } else {
+            Err(XlsynthError(c_str_to_rust(error_out)))
+        }
+    }
+}
+
+pub(crate) fn xls_ir_analysis_get_intervals_for_node_id(
+    a: *const CIrAnalysis,
+    node_id: i64,
+) -> Result<*mut CIrIntervalSet, XlsynthError> {
+    let mut intervals_out: *mut CIrIntervalSet = std::ptr::null_mut();
+    xls_ffi_call!(
+        xlsynth_sys::xls_ir_analysis_get_intervals_for_node_id,
+        a,
+        node_id;
+        intervals_out
+    )?;
+    Ok(intervals_out)
+}
+
+pub(crate) fn xls_interval_set_get_interval_bounds(
+    s: *const CIrIntervalSet,
+    i: i64,
+) -> Result<(IrBits, IrBits), XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut lo_out: *mut CIrBits = std::ptr::null_mut();
+        let mut hi_out: *mut CIrBits = std::ptr::null_mut();
+        let success = xlsynth_sys::xls_interval_set_get_interval_bounds(
+            s,
+            i,
+            &mut error_out,
+            &mut lo_out,
+            &mut hi_out,
+        );
+        if success {
+            Ok((IrBits { ptr: lo_out }, IrBits { ptr: hi_out }))
+        } else {
+            Err(XlsynthError(c_str_to_rust(error_out)))
+        }
+    }
 }
 
 pub(crate) fn xls_package_new(name: &str) -> Result<crate::ir_package::IrPackage, XlsynthError> {

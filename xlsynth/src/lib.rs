@@ -2,6 +2,7 @@
 
 pub mod dslx;
 pub mod dslx_bridge;
+pub mod ir_analysis;
 pub mod ir_builder;
 pub mod ir_package;
 pub mod ir_value;
@@ -24,6 +25,7 @@ use lib_support::{
     xls_optimize_ir,
 };
 
+pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, KnownBits};
 pub use ir_builder::BValue;
 pub use ir_builder::FnBuilder;
 pub use ir_package::IrFunction;

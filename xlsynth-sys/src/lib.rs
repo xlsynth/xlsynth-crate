@@ -55,6 +55,17 @@ pub struct CIrFunctionType {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+// Protected C API for IR analysis.
+#[repr(C)]
+pub struct CIrAnalysis {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
+pub struct CIrIntervalSet {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
 // "VAST" is the "Verilog AST" API which
 #[repr(C)]
 pub struct CVastFile {
@@ -691,6 +702,44 @@ extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         xls_package_out: *mut *mut CIrPackage,
     ) -> bool;
+
+    // -- IR analysis APIs
+
+    pub fn xls_ir_analysis_create_from_package(
+        p: *mut CIrPackage,
+        error_out: *mut *mut std::os::raw::c_char,
+        out: *mut *mut CIrAnalysis,
+    ) -> bool;
+
+    pub fn xls_ir_analysis_free(a: *mut CIrAnalysis);
+
+    pub fn xls_ir_analysis_get_known_bits_for_node_id(
+        a: *const CIrAnalysis,
+        node_id: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        known_mask_out: *mut *mut CIrBits,
+        known_value_out: *mut *mut CIrBits,
+    ) -> bool;
+
+    pub fn xls_ir_analysis_get_intervals_for_node_id(
+        a: *const CIrAnalysis,
+        node_id: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        intervals_out: *mut *mut CIrIntervalSet,
+    ) -> bool;
+
+    pub fn xls_interval_set_get_interval_count(s: *const CIrIntervalSet) -> i64;
+
+    pub fn xls_interval_set_get_interval_bounds(
+        s: *const CIrIntervalSet,
+        i: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        lo_out: *mut *mut CIrBits,
+        hi_out: *mut *mut CIrBits,
+    ) -> bool;
+
+    pub fn xls_interval_set_free(s: *mut CIrIntervalSet);
+
     pub fn xls_type_to_string(
         t: *const CIrType,
         error_out: *mut *mut std::os::raw::c_char,

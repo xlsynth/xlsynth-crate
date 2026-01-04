@@ -9,6 +9,7 @@
 //! to indicate deduction is not presently implemented.
 
 use crate::ir::{ArrayTypeData, Binop, NaryOp, NodePayload, Type, Unop};
+use crate::math::ceil_log2;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeduceError {
@@ -411,17 +412,4 @@ where
             }
         }
     }
-}
-
-fn ceil_log2(n: usize) -> usize {
-    if n <= 1 {
-        return 0;
-    }
-    let mut v = n - 1;
-    let mut k = 0usize;
-    while v > 0 {
-        k += 1;
-        v >>= 1;
-    }
-    k
 }

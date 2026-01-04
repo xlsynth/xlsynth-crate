@@ -29,6 +29,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 check_equivalence: false, // Not needed for benchmark
                 adder_mapping: AdderMapping::default(),
                 mul_adder_mapping: None,
+                range_info: None,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -46,6 +47,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 check_equivalence: false, // Not needed for benchmark
                 adder_mapping: AdderMapping::default(),
                 mul_adder_mapping: None,
+                range_info: None,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -63,6 +65,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 check_equivalence: false, // Not needed for benchmark
                 adder_mapping: AdderMapping::default(),
                 mul_adder_mapping: None,
+                range_info: None,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
