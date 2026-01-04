@@ -658,6 +658,21 @@ Checks two GateFns for functional equivalence using the available engines. A
 JSON report is written to **stdout**. The command exits with a non-zero status
 if any engine finds a counter-example. Errors are printed to **stderr**.
 
+### `aig-equiv`
+
+Checks two **ASCII AIGER (`.aag`)** files for functional equivalence using the
+available engines. The files are parsed into GateFn form using
+`xlsynth-g8r`'s strict AIGER loader and then proven equivalent with the same
+engines as `g8r-equiv`. A JSON report is written to **stdout** and the command
+exits non-zero if any engine finds a counter-example. Errors are printed to
+**stderr**.
+
+Example:
+
+```shell
+xlsynth-driver aig-equiv lhs.aag rhs.aag
+```
+
 ### `dslx-equiv`
 
 Checks two DSLX functions for functional equivalence. By default it converts both to IR and uses the selected solver/toolchain to prove equivalence. Alternatively, you can provide a tactic script to drive a tactic-based prover flow.
