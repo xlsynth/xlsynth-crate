@@ -21,9 +21,9 @@ use crate::aig_serdes::emit_netlist;
 use crate::aig_serdes::ir2gate;
 use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
+use crate::ir2gates;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils;
 
 #[derive(Debug, serde::Serialize)]
@@ -152,19 +152,31 @@ pub fn process_ir_path_for_cli(
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
-    let mut parser = ir_parser::Parser::new(&file_content);
-    let ir_package = parser.parse_and_validate_package().unwrap_or_else(|err| {
-        eprintln!("Error encountered parsing XLS IR package: {:?}", err);
+    let ir2gates_output = ir2gates::ir2gates_from_ir_text(
+        &file_content,
+        None,
+        ir2gates::Ir2GatesOptions {
+            fold: options.fold,
+            hash: options.hash,
+            check_equivalence: false, // check is done below if requested
+            adder_mapping: options.adder_mapping,
+            mul_adder_mapping: options.mul_adder_mapping,
+        },
+    )
+    .unwrap_or_else(|err| {
+        eprintln!("Error encountered lowering IR to gates: {}", err);
         std::process::exit(1);
     });
 
-    let ir_top = match ir_package.get_top_fn() {
-        Some(ir_top) => ir_top,
-        None => {
-            eprintln!("No top module found in the IR package");
-            std::process::exit(1);
-        }
-    };
+    let ir2gates::Ir2GatesOutput {
+        pir_package: ir_package,
+        top_fn_name,
+        gatify_output,
+    } = ir2gates_output;
+
+    let ir_top = ir_package
+        .get_fn(&top_fn_name)
+        .expect("top fn should exist in pir_package");
 
     log::info!("IR top:\n{}", ir_top.to_string());
 
@@ -172,19 +184,8 @@ pub fn process_ir_path_for_cli(
         print_op_freqs(&ir_top);
     }
 
-    // Gatify the IR function
-    let gatify_output = ir2gate::gatify(
-        &ir_top,
-        ir2gate::GatifyOptions {
-            fold: options.fold,
-            hash: options.hash,
-            adder_mapping: options.adder_mapping,
-            mul_adder_mapping: options.mul_adder_mapping,
-            check_equivalence: false, // Check is done below if requested
-        },
-    )
-    .unwrap();
     let mut gate_fn = gatify_output.gate_fn;
+    let lowering_map = gatify_output.lowering_map;
 
     let independent_op_stats = if options.emit_independent_op_stats {
         let gatify_options = ir2gate::GatifyOptions {
@@ -193,6 +194,7 @@ pub fn process_ir_path_for_cli(
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             check_equivalence: false,
+            range_info: None,
         };
         let mut per_node: Vec<IndependentOpEntry> = Vec::new();
         let mut cost_by_node_index: Vec<usize> = vec![0; ir_top.nodes.len()];
@@ -280,7 +282,7 @@ pub fn process_ir_path_for_cli(
 
     // Map each gate reference back to the IR node positions, if available.
     let mut gate_to_sources: HashMap<usize, Vec<String>> = HashMap::new();
-    for (node_ref, bit_vec) in gatify_output.lowering_map.iter() {
+    for (node_ref, bit_vec) in lowering_map.iter() {
         if let Some(pos_data) = ir_top.get_node(*node_ref).pos.as_ref() {
             let sources: Vec<String> = pos_data
                 .iter()

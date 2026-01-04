@@ -6,13 +6,12 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use std::sync::Arc;
 use std::sync::OnceLock;
 use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
-use xlsynth_g8r::aig_serdes::ir2gate;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{
     CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_pir::ir_parser;
+use xlsynth_g8r::ir2gates;
 
 static CUT_DB: OnceLock<Arc<CutDb>> = OnceLock::new();
 
@@ -31,13 +30,11 @@ top fn main(a: bits[{w}] id=1, b: bits[{w}] id=2) -> bits[{ow}] {{\n\
 
 fn run_ir2gates_like_flow_for_umul(width: usize) {
     let ir_text = mul_ir_text(width);
-    let mut parser = ir_parser::Parser::new(&ir_text);
-    let ir_package = parser.parse_and_validate_package().unwrap();
-    let ir_top = ir_package.get_top_fn().unwrap();
 
-    let gatify_output = ir2gate::gatify(
-        black_box(&ir_top),
-        ir2gate::GatifyOptions {
+    let ir2gates_output = ir2gates::ir2gates_from_ir_text(
+        &ir_text,
+        None,
+        ir2gates::Ir2GatesOptions {
             fold: true,
             hash: true,
             check_equivalence: false,
@@ -46,7 +43,7 @@ fn run_ir2gates_like_flow_for_umul(width: usize) {
         },
     )
     .unwrap();
-    let gate_fn = gatify_output.gate_fn;
+    let gate_fn = ir2gates_output.gatify_output.gate_fn;
 
     // Use the same bounded cut-db rewrite settings as the CLI path.
     let db: &Arc<CutDb> = CUT_DB.get_or_init(CutDb::load_default);

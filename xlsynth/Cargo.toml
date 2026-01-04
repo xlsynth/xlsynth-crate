@@ -12,6 +12,9 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 # Specify the path to the top-level README.md
 readme = "../README.md"
 
+[lints]
+workspace = true
+
 [dependencies]
 xlsynth-sys = {path = "../xlsynth-sys", version = "0.25.0"}
 cargo_metadata = "0.18"

@@ -9,6 +9,9 @@ repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
+[lints]
+workspace = true
+
 [dependencies]
 xlsynth-mcmc = { path = "../xlsynth-mcmc", version = "0.25.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.25.0" }

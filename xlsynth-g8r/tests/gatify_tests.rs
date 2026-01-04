@@ -41,6 +41,7 @@ fn do_test_ir_conversion_with_top(
             hash: opt == Opt::Yes,
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
             mul_adder_mapping: None,
+            range_info: None,
         },
     )
     .unwrap();
@@ -76,6 +77,7 @@ fn do_test_ir_conversion_no_equiv(ir_package_text: &str, opt: Opt) {
             hash: opt == Opt::Yes,
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
             mul_adder_mapping: None,
+            range_info: None,
         },
     )
     .unwrap();
@@ -96,6 +98,7 @@ fn do_test_ir_conversion_no_equiv_with_stats(ir_package_text: &str, opt: Opt) ->
             hash: opt == Opt::Yes,
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
             mul_adder_mapping: None,
+            range_info: None,
         },
     )
     .unwrap();

@@ -3,6 +3,9 @@ name = "sample-usage"
 version = "0.25.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
 xlsynth = { path = "../xlsynth" }
 log = "0.4"

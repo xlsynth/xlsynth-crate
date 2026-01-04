@@ -138,6 +138,7 @@ fn gatify_ir_text_to_g8r_text_and_stats(ir_text: &str) -> Result<(String, Summar
         check_equivalence: false,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
+        range_info: None,
     };
     let gatify_output = ir2gate::gatify(top_fn, gatify_options)
         .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;

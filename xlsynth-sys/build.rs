@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.26.0";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.27.0";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
 
 fn xlsynth_release_tuple_from_tag(tag: &str) -> (u32, u32, u32, u32) {
@@ -508,6 +508,13 @@ fn download_stdlib_if_dne(url_base: &str, out_dir: &str) -> PathBuf {
 }
 
 fn main() {
+    // Ensure Cargo rebuilds this sys crate if caller-provided artifact paths
+    // change, since they affect link args and rpath settings.
+    println!("cargo:rerun-if-env-changed=DEV_XLS_DSO_WORKSPACE");
+    println!("cargo:rerun-if-env-changed=XLS_DSO_PATH");
+    println!("cargo:rerun-if-env-changed=DSLX_STDLIB_PATH");
+    println!("cargo:rerun-if-env-changed=CARGO_NET_OFFLINE");
+
     // Detect if building on docs.rs
     if std::env::var("DOCS_RS").is_ok() {
         println!("cargo:warning=Skipping dynamic library download on docs.rs");

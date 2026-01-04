@@ -10,6 +10,9 @@ repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
+[lints]
+workspace = true
+
 [dependencies]
 prost = "0.12"
 prost-types = "0.12"

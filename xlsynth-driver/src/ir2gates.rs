@@ -5,7 +5,6 @@
 use clap::ArgMatches;
 use rand_xoshiro::rand_core::SeedableRng;
 use xlsynth_g8r::aig::{self, fraig, logical_effort};
-use xlsynth_pir::ir_parser;
 
 use crate::toolchain_config::ToolchainConfig;
 use std::collections::HashMap;
@@ -17,7 +16,7 @@ use xlsynth_g8r::aig::graph_logical_effort::{self, analyze_graph_logical_effort}
 use xlsynth_g8r::aig::logical_effort::compute_logical_effort_min_delay;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use xlsynth_g8r::aig_serdes::{emit_netlist, ir2gate};
+use xlsynth_g8r::aig_serdes::emit_netlist;
 use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{
@@ -253,30 +252,23 @@ fn ir_to_gatefn_with_stats(
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&input_file)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", input_file.display(), err));
-    let mut parser = ir_parser::Parser::new(&file_content);
-    let ir_package = parser.parse_package().unwrap_or_else(|err| {
-        eprintln!("Error encountered parsing XLS IR package: {:?}", err);
-        std::process::exit(1);
-    });
-    let ir_top = match ir_package.get_top_fn() {
-        Some(ir_top) => ir_top,
-        None => {
-            eprintln!("No top module found in the IR package");
-            std::process::exit(1);
-        }
-    };
-    let gatify_output = ir2gate::gatify(
-        &ir_top,
-        ir2gate::GatifyOptions {
+    let ir2gates_output = xlsynth_g8r::ir2gates::ir2gates_from_ir_text(
+        &file_content,
+        None,
+        xlsynth_g8r::ir2gates::Ir2GatesOptions {
             fold,
             hash,
+            check_equivalence: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
-            check_equivalence: false,
         },
     )
-    .unwrap();
-    let mut gate_fn = gatify_output.gate_fn;
+    .unwrap_or_else(|err| {
+        eprintln!("Error encountered lowering IR to gates: {}", err);
+        std::process::exit(1);
+    });
+
+    let mut gate_fn = ir2gates_output.gatify_output.gate_fn;
     // Prepare to capture fraig statistics if fraig is enabled.
     let mut fraig_did_converge: Option<fraig::DidConverge> = None;
     let mut fraig_iteration_stats: Option<Vec<fraig::FraigIterationStat>> = None;

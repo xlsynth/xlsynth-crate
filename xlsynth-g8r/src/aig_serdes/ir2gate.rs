@@ -7,13 +7,16 @@ use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::aig_serdes::prep_for_gatify::prep_for_gatify;
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::ir_range_info::IrRangeInfo;
 use std::collections::HashMap;
+use std::sync::Arc;
 use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
 use xlsynth_pir::ir_utils;
 
 use crate::ir2gate_utils::{
     AdderMapping, Direction, gatify_add_brent_kung, gatify_add_kogge_stone,
     gatify_add_ripple_carry, gatify_barrel_shifter, gatify_one_hot, gatify_one_hot_select,
+    gatify_one_hot_with_nonzero_flag,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -22,6 +25,129 @@ use crate::gate_builder::ReductionKind;
 enum GateOrVec {
     Gate(AigOperand),
     BitVector(AigBitVector),
+}
+
+fn get_known_zero_bit_indices_for_selector(
+    options: &GatifyOptions,
+    f: &ir::Fn,
+    selector_node_ref: ir::NodeRef,
+) -> Vec<usize> {
+    let range_info = match options.range_info.as_ref() {
+        Some(ri) => ri,
+        None => return vec![],
+    };
+    let selector_text_id = f.get_node(selector_node_ref).text_id;
+    let info = match range_info.get(selector_text_id) {
+        Some(i) => i,
+        None => return vec![],
+    };
+    let known = match info.known_bits.as_ref() {
+        Some(k) => k,
+        None => return vec![],
+    };
+
+    let mask = &known.mask;
+    let value = &known.value;
+    let bit_count = mask.get_bit_count();
+    assert_eq!(
+        bit_count,
+        value.get_bit_count(),
+        "known mask/value bit count mismatch for selector text_id={}",
+        selector_text_id
+    );
+
+    let mut known_zero_bits: Vec<usize> = Vec::new();
+    for i in 0..bit_count {
+        let is_known = mask.get_bit(i).unwrap_or(false);
+        if !is_known {
+            continue;
+        }
+        let is_one = value.get_bit(i).unwrap_or(false);
+        if !is_one {
+            known_zero_bits.push(i);
+        }
+    }
+    known_zero_bits
+}
+
+fn get_impossible_in_bounds_sel_case_indices(
+    options: &GatifyOptions,
+    f: &ir::Fn,
+    selector_node_ref: ir::NodeRef,
+    cases_len: usize,
+) -> Vec<usize> {
+    let range_info = match options.range_info.as_ref() {
+        Some(ri) => ri,
+        None => return vec![],
+    };
+    let selector_text_id = f.get_node(selector_node_ref).text_id;
+    let info = match range_info.get(selector_text_id) {
+        Some(i) => i,
+        None => return vec![],
+    };
+    let intervals = match info.intervals.as_ref() {
+        Some(v) => v,
+        None => return vec![],
+    };
+
+    let selector_ty = f.get_node_ty(selector_node_ref);
+    let width = selector_ty.bit_count();
+
+    let mut impossible: Vec<usize> = Vec::new();
+    for i in 0..cases_len {
+        let value_bits = xlsynth::IrBits::make_ubits(width, i as u64).unwrap();
+        let mut possible = false;
+        for it in intervals {
+            if it.lo.ule(&value_bits) && value_bits.ule(&it.hi) {
+                possible = true;
+                break;
+            }
+        }
+        if !possible {
+            impossible.push(i);
+        }
+    }
+    impossible
+}
+
+fn maybe_warn_shift_amount_truncatable(
+    range_info: Option<&Arc<IrRangeInfo>>,
+    amount_text_id: usize,
+    shift_bound: usize,
+    amount_bits: &AigBitVector,
+) {
+    let range_info = match range_info {
+        Some(ri) => ri,
+        None => return,
+    };
+    if shift_bound == 0 {
+        return;
+    }
+    if !range_info.proves_ult(amount_text_id, shift_bound) {
+        return;
+    }
+    let max_effective_bits =
+        match range_info.effective_amount_bits_for_ult(amount_text_id, shift_bound) {
+            Some(v) => v,
+            None => return,
+        };
+    let required_bits = if shift_bound == 1 {
+        0
+    } else {
+        xlsynth_pir::math::ceil_log2(shift_bound)
+    };
+    let effective_bits = std::cmp::min(required_bits, max_effective_bits);
+    if effective_bits < amount_bits.get_bit_count() {
+        log::warn!(
+            "shift amount text_id={} is truncatable in consumer: shift_bound={} amount_bits={} effective_bits={} (max_effective_bits={} required_bits={}); expected upstream optimizer to slice",
+            amount_text_id,
+            shift_bound,
+            amount_bits.get_bit_count(),
+            effective_bits,
+            max_effective_bits,
+            required_bits
+        );
+    }
 }
 
 struct GateEnv {
@@ -217,6 +343,7 @@ fn gatify_array_slice(
     array_ty: &ir::ArrayTypeData,
     array_bits: &AigBitVector,
     start_bits: &AigBitVector,
+    assumed_start_in_bounds: bool,
     width: usize,
     text_id: usize,
     mul_adder_mapping: AdderMapping,
@@ -228,11 +355,15 @@ fn gatify_array_slice(
     // last element, even when the start index is larger than
     // (n_elems - 1 + width - 1).
     let start_w = start_bits.get_bit_count();
-    let last_idx_bits = gb.add_literal(
-        &xlsynth::IrBits::make_ubits(start_w, (n_elems.saturating_sub(1)) as u64).unwrap(),
-    );
-    let start_le_last = gatify_ule_via_bit_tests(gb, text_id, start_bits, &last_idx_bits);
-    let clamped_start_bits = gb.add_mux2_vec(&start_le_last, start_bits, &last_idx_bits);
+    let clamped_start_bits = if assumed_start_in_bounds {
+        start_bits.clone()
+    } else {
+        let last_idx_bits = gb.add_literal(
+            &xlsynth::IrBits::make_ubits(start_w, (n_elems.saturating_sub(1)) as u64).unwrap(),
+        );
+        let start_le_last = gatify_ule_via_bit_tests(gb, text_id, start_bits, &last_idx_bits);
+        gb.add_mux2_vec(&start_le_last, start_bits, &last_idx_bits)
+    };
 
     // 1) Build a padding prefix of (width-1) copies of the last element to emulate
     // XLS out-of-bounds semantics (select last element when OOB).
@@ -1268,12 +1399,15 @@ fn gatify_node(
 
             for (i, index_node) in indices.iter().enumerate() {
                 let index_bits = env.get_bit_vector(*index_node).unwrap();
+                let proven_in_bounds = options.range_info.as_ref().is_some_and(|ri| {
+                    ri.proves_ult(f.get_node(*index_node).text_id, array_ty.element_count)
+                });
                 array_bits = gatify_array_index(
                     g8_builder,
                     array_ty,
                     &array_bits,
                     &index_bits,
-                    *assumed_in_bounds,
+                    *assumed_in_bounds || proven_in_bounds,
                 );
                 if i + 1 < indices.len() {
                     array_ty = match array_ty.element_type.as_ref() {
@@ -1300,12 +1434,16 @@ fn gatify_node(
             };
             let array_bits = env.get_bit_vector(*array).unwrap();
             let start_bits = env.get_bit_vector(*start).unwrap();
+            let proven_start_in_bounds = options.range_info.as_ref().is_some_and(|ri| {
+                ri.proves_ult(f.get_node(*start).text_id, array_ty.element_count)
+            });
             let mul_adder_mapping = options.mul_adder_mapping.unwrap_or(options.adder_mapping);
             let result = gatify_array_slice(
                 g8_builder,
                 array_ty,
                 &array_bits,
                 &start_bits,
+                proven_start_in_bounds,
                 *width,
                 node.text_id,
                 mul_adder_mapping,
@@ -1398,6 +1536,30 @@ fn gatify_node(
         } => {
             // Note: sel is basically an array index into the cases where we pick default if
             // the selector value is OOB.
+            let impossible_case_indices =
+                get_impossible_in_bounds_sel_case_indices(options, f, *selector, cases.len());
+            if !impossible_case_indices.is_empty() {
+                let max_show = 16usize;
+                let shown: Vec<usize> = impossible_case_indices
+                    .iter()
+                    .copied()
+                    .take(max_show)
+                    .collect();
+                let suffix = if impossible_case_indices.len() > max_show {
+                    format!(" (showing first {max_show})")
+                } else {
+                    String::new()
+                };
+                log::warn!(
+                    "sel text_id={} has selector text_id={} with {} unreachable in-bounds case(s) out of {}: {:?}{}",
+                    node.text_id,
+                    f.get_node(*selector).text_id,
+                    impossible_case_indices.len(),
+                    cases.len(),
+                    shown,
+                    suffix
+                );
+            }
             let selector_bits = env
                 .get_bit_vector(*selector)
                 .expect("selector should be present");
@@ -1684,6 +1846,16 @@ fn gatify_node(
             default,
         } => {
             let output_bit_count = node.ty.bit_count();
+            let known_zero_bits = get_known_zero_bit_indices_for_selector(options, f, *selector);
+            if !known_zero_bits.is_empty() {
+                log::warn!(
+                    "priority_sel text_id={} has selector text_id={} with {} provably-zero bit(s): {:?}",
+                    node.text_id,
+                    f.get_node(*selector).text_id,
+                    known_zero_bits.len(),
+                    known_zero_bits
+                );
+            }
             let selector_bits = env
                 .get_bit_vector(*selector)
                 .expect("selector should be present");
@@ -1711,6 +1883,16 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
         ir::NodePayload::OneHotSel { selector, cases } => {
+            let known_zero_bits = get_known_zero_bit_indices_for_selector(options, f, *selector);
+            if !known_zero_bits.is_empty() {
+                log::warn!(
+                    "one_hot_sel text_id={} has selector text_id={} with {} provably-zero bit(s): {:?}",
+                    node.text_id,
+                    f.get_node(*selector).text_id,
+                    known_zero_bits.len(),
+                    known_zero_bits
+                );
+            }
             let selector_bits = env
                 .get_bit_vector(*selector)
                 .expect("selector should be present");
@@ -1824,6 +2006,12 @@ fn gatify_node(
             let amount_gates = env
                 .get_bit_vector(*amount)
                 .expect("shrl amount should be present");
+            maybe_warn_shift_amount_truncatable(
+                options.range_info.as_ref(),
+                f.get_node(*amount).text_id,
+                arg_gates.get_bit_count(),
+                &amount_gates,
+            );
             let result_gates = gatify_barrel_shifter(
                 &arg_gates,
                 &amount_gates,
@@ -1841,6 +2029,12 @@ fn gatify_node(
                 .get_bit_vector(*amount)
                 .expect("shra amount should be present");
 
+            maybe_warn_shift_amount_truncatable(
+                options.range_info.as_ref(),
+                f.get_node(*amount).text_id,
+                arg_gates.get_bit_count(),
+                &amount_gates,
+            );
             let result = gatify_shra(g8_builder, &arg_gates, &amount_gates, node.text_id);
             env.add(node_ref, GateOrVec::BitVector(result));
         }
@@ -1851,6 +2045,12 @@ fn gatify_node(
             let amount_gates = env
                 .get_bit_vector(*amount)
                 .expect("shll amount should be present");
+            maybe_warn_shift_amount_truncatable(
+                options.range_info.as_ref(),
+                f.get_node(*amount).text_id,
+                arg_gates.get_bit_count(),
+                &amount_gates,
+            );
             let result_gates = gatify_barrel_shifter(
                 &arg_gates,
                 &amount_gates,
@@ -1864,7 +2064,15 @@ fn gatify_node(
             let bits = env
                 .get_bit_vector(*arg)
                 .expect("one_hot arg should be present");
-            let bit_vector = gatify_one_hot(g8_builder, &bits, *lsb_prio);
+            let proven_nonzero = options
+                .range_info
+                .as_ref()
+                .is_some_and(|ri| ri.proves_nonzero(f.get_node(*arg).text_id));
+            let bit_vector = if proven_nonzero {
+                gatify_one_hot_with_nonzero_flag(g8_builder, &bits, *lsb_prio, true)
+            } else {
+                gatify_one_hot(g8_builder, &bits, *lsb_prio)
+            };
             for (lsb_i, gate) in bit_vector.iter_lsb_to_msb().enumerate() {
                 g8_builder.add_tag(
                     gate.node,
@@ -2107,6 +2315,7 @@ pub struct GatifyOptions {
     pub check_equivalence: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
+    pub range_info: Option<Arc<IrRangeInfo>>,
 }
 
 // Type alias for the lowering map
@@ -2269,6 +2478,7 @@ mod tests {
                 check_equivalence: false,
                 adder_mapping: AdderMapping::default(),
                 mul_adder_mapping: None,
+                range_info: None,
             },
         )
         .unwrap();
@@ -2302,6 +2512,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 hash: true,
                 adder_mapping: AdderMapping::default(),
                 mul_adder_mapping: None,
+                range_info: None,
             },
         )
         .unwrap();

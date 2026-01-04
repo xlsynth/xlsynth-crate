@@ -9,6 +9,9 @@ repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
+[lints]
+workspace = true
+
 [dependencies]
 slang-rs = "0.12.0"
 tempfile = "3.20"

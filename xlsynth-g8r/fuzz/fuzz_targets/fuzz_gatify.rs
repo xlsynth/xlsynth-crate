@@ -49,6 +49,7 @@ fuzz_target!(|sample: FuzzSample| {
             check_equivalence: true,
             adder_mapping: ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
+            range_info: None,
         },
     );
 
@@ -63,6 +64,7 @@ fuzz_target!(|sample: FuzzSample| {
             check_equivalence: true,
             adder_mapping: ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
+            range_info: None,
         },
     );
 

@@ -31,10 +31,17 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: benches-compile-xlsynth-g8r
+        name: benches compile (xlsynth-g8r)
+        description: Ensure xlsynth-g8r benchmark targets compile (no-run).
+        entry: cargo bench -p xlsynth-g8r --no-run
+        language: system
+        pass_filenames: false
+
       - id: clippy-xlsynth-sys
         name: clippy (xlsynth-sys)
         description: Run cargo clippy on xlsynth-sys with warnings as errors
-        entry: cargo clippy -p xlsynth-sys --no-deps -- -D warnings
+        entry: cargo clippy -p xlsynth-sys --no-deps
         language: system
         pass_filenames: false
 
@@ -64,7 +71,7 @@ repos:
       - id: clippy-core-crates
         name: clippy (xlsynth, xlsynth-test-helpers)
         description: Run cargo clippy on core crates with warnings as errors
-        entry: cargo clippy -p xlsynth -p xlsynth-test-helpers --all-targets --all-features -- -D warnings
+        entry: cargo clippy -p xlsynth -p xlsynth-test-helpers --all-targets --all-features
         language: system
         pass_filenames: false
 

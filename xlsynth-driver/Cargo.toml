@@ -10,6 +10,9 @@ repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
+[lints]
+workspace = true
+
 [dependencies]
 xlsynth = { path = "../xlsynth", version = "0.25.0" }
 xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.25.0" }
