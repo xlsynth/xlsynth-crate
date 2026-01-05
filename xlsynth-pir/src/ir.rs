@@ -455,6 +455,10 @@ pub enum NodePayload {
 }
 
 impl NodePayload {
+    pub fn is_extension_op(&self) -> bool {
+        matches!(self, NodePayload::ExtCarryOut { .. })
+    }
+
     pub fn get_operator(&self) -> &str {
         match self {
             NodePayload::Nil => "nil",

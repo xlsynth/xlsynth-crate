@@ -4,6 +4,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use std::sync::Once;
+use xlsynth_pir::ir;
 use xlsynth_pir::ir_verify_parity::{categorize_pir_error, categorize_xls_error_text, ErrorCategory};
 
 static INIT_LOGGER: Once = Once::new();
@@ -26,13 +27,6 @@ fuzz_target!(|ir_text: String| {
         // We skip to avoid harness-level panics. Documented in FUZZ.md.
         return;
     }
-    if ir_text.contains("ext_") {
-        // Early-return rationale: this fuzz target checks verification parity
-        // between PIR and upstream XLS IR. Upstream does not understand PIR
-        // extension ops (e.g. `ext_carry_out`), so such samples are outside the
-        // target's scope. Extension semantics are fuzzed/tested separately.
-        return;
-    }
 
     // First, require that PIR parses as a package; otherwise, skip the sample.
     let pkg = match xlsynth_pir::ir_parser::Parser::new(&ir_text).parse_package() {
@@ -42,6 +36,17 @@ fuzz_target!(|ir_text: String| {
             return;
         }
     };
+
+    if pkg.members.iter().any(|member| match member {
+        ir::PackageMember::Function(f) => f.nodes.iter().any(|n| n.payload.is_extension_op()),
+        ir::PackageMember::Block { func, .. } => func.nodes.iter().any(|n| n.payload.is_extension_op()),
+    }) {
+        // Early-return rationale: this fuzz target checks verification parity
+        // between PIR and upstream XLS IR. Upstream does not understand PIR
+        // extension ops (e.g. `ext_carry_out`), so such samples are outside the
+        // target's scope. Extension semantics are fuzzed/tested separately.
+        return;
+    }
 
     // PIR validate
     let pir_result: Result<(), ErrorCategory> = xlsynth_pir::ir_validate::validate_package(&pkg)

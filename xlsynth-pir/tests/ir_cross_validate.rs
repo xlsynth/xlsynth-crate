@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::IrPackage as XlsIrPackage;
+use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser as PirParser;
 use xlsynth_pir::ir_validate::{self};
 use xlsynth_pir::ir_verify_parity::{categorize_pir_error, categorize_xls_error_text};
@@ -20,8 +21,21 @@ fn verify_with_xlsynth(ir_text: &str) -> bool {
     }
 }
 
+fn ir_text_has_extension_ops(ir_text: &str) -> bool {
+    let mut p = PirParser::new(ir_text);
+    let Ok(pkg) = p.parse_package() else {
+        return false;
+    };
+    pkg.members.iter().any(|member| match member {
+        ir::PackageMember::Function(f) => f.nodes.iter().any(|n| n.payload.is_extension_op()),
+        ir::PackageMember::Block { func, .. } => {
+            func.nodes.iter().any(|n| n.payload.is_extension_op())
+        }
+    })
+}
+
 fn assert_cross_validates_same(ir_text: &str) {
-    if ir_text.contains("ext_") {
+    if ir_text_has_extension_ops(ir_text) {
         // Early-return rationale: this test checks verification parity between
         // PIR and upstream XLS. Upstream does not understand PIR extension ops
         // (e.g. `ext_carry_out`). Extension behavior is covered by dedicated
