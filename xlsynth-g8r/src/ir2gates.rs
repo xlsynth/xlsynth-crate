@@ -10,6 +10,7 @@ pub struct Ir2GatesOptions {
     pub fold: bool,
     pub hash: bool,
     pub check_equivalence: bool,
+    pub enable_rewrite_carry_out: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
 }
@@ -77,6 +78,7 @@ pub fn ir2gates_from_ir_text(
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             range_info: Some(range_info),
+            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
         },
     )?;
 

@@ -22,6 +22,15 @@ use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PrepForGatifyOptions {
+    /// When true, rewrite carry-out idioms like
+    /// `bit_slice(add(...), start=msb, width=1)` into `ext_carry_out`.
+    ///
+    /// Default is false because the rewrite is not always profitable.
+    pub enable_rewrite_carry_out: bool,
+}
+
 /// Returns per-node use counts for the provided function.
 fn get_use_counts(f: &ir::Fn) -> Vec<usize> {
     let mut use_counts = vec![0usize; f.nodes.len()];
@@ -481,10 +490,16 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
 /// - may mark dead nodes `Nil`
 /// - does **not** reindex/compact nodes and does **not** change the function
 ///   signature
-pub fn prep_for_gatify(f: &ir::Fn, range_info: Option<&IrRangeInfo>) -> ir::Fn {
+pub fn prep_for_gatify(
+    f: &ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+    options: PrepForGatifyOptions,
+) -> ir::Fn {
     let mut cloned = f.clone();
     combine_or_reduces(&mut cloned);
-    let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
+    if options.enable_rewrite_carry_out {
+        let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
+    }
     mark_dead_nodes_as_nil(&mut cloned);
     cloned
 }
@@ -511,7 +526,7 @@ fn f(x: bits[2], y: bits[3]) -> bits[1] {
         let pkg = parser.parse_and_validate_package().unwrap();
         let f = pkg.get_top_fn().unwrap();
 
-        let optimized = prep_for_gatify(f, None);
+        let optimized = prep_for_gatify(f, None, PrepForGatifyOptions::default());
 
         let expected = r#"fn f(x: bits[2] id=1, y: bits[3] id=2) -> bits[1] {
   x_any: bits[5] = concat(x, y, id=3)
@@ -546,7 +561,13 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
         let analysis = xlsynth_pkg.create_ir_analysis().unwrap();
         let range_info = IrRangeInfo::build_from_analysis(&analysis, f).unwrap();
 
-        let optimized = prep_for_gatify(f, Some(range_info.as_ref()));
+        let optimized = prep_for_gatify(
+            f,
+            Some(range_info.as_ref()),
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: true,
+            },
+        );
         let optimized_text = optimized.to_string();
         assert!(
             optimized_text.contains("ext_carry_out(") && !optimized_text.contains("add("),
@@ -599,7 +620,13 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
         let analysis = xlsynth_pkg.create_ir_analysis().unwrap();
         let range_info = IrRangeInfo::build_from_analysis(&analysis, pir_fn).unwrap();
 
-        let optimized = prep_for_gatify(pir_fn, Some(range_info.as_ref()));
+        let optimized = prep_for_gatify(
+            pir_fn,
+            Some(range_info.as_ref()),
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: true,
+            },
+        );
         let optimized_text = optimized.to_string();
         assert!(
             optimized_text.contains("ext_carry_out(") && !optimized_text.contains("add("),

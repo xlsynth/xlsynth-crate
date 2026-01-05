@@ -4,7 +4,7 @@
 //! `gatify`.
 
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
-use crate::aig_serdes::prep_for_gatify::prep_for_gatify;
+use crate::aig_serdes::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use std::collections::HashMap;
@@ -2346,6 +2346,7 @@ pub struct GatifyOptions {
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub range_info: Option<Arc<IrRangeInfo>>,
+    pub enable_rewrite_carry_out: bool,
 }
 
 // Type alias for the lowering map
@@ -2387,7 +2388,13 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         orig_ref_by_text_id.insert(n.text_id, ir::NodeRef { index: idx });
     }
 
-    let prepared_fn = prep_for_gatify(orig_fn, options.range_info.as_deref());
+    let prepared_fn = prep_for_gatify(
+        orig_fn,
+        options.range_info.as_deref(),
+        PrepForGatifyOptions {
+            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+        },
+    );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
 
@@ -2444,7 +2451,13 @@ pub fn gatify_node_as_fn(
     let target_text_id = f.get_node(node_ref).text_id;
     validate_fn_for_gatify(f)
         .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
-    let prepared_fn = prep_for_gatify(f, options.range_info.as_deref());
+    let prepared_fn = prep_for_gatify(
+        f,
+        options.range_info.as_deref(),
+        PrepForGatifyOptions {
+            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+        },
+    );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
     let f = &prepared_fn;
@@ -2568,6 +2581,7 @@ mod tests {
                 adder_mapping: AdderMapping::default(),
                 mul_adder_mapping: None,
                 range_info: None,
+                enable_rewrite_carry_out: false,
             },
         )
         .unwrap();
@@ -2602,6 +2616,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 adder_mapping: AdderMapping::default(),
                 mul_adder_mapping: None,
                 range_info: None,
+                enable_rewrite_carry_out: false,
             },
         )
         .unwrap();

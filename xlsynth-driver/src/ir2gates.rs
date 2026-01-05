@@ -38,6 +38,7 @@ fn ir2gates(
     quiet: bool,
     fold: bool,
     hash: bool,
+    enable_rewrite_carry_out: bool,
     adder_mapping: AdderMapping,
     mul_adder_mapping: Option<AdderMapping>,
     fraig: bool,
@@ -58,6 +59,7 @@ fn ir2gates(
         check_equivalence: false,
         fold,
         hash,
+        enable_rewrite_carry_out,
         adder_mapping,
         mul_adder_mapping,
         fraig,
@@ -154,6 +156,14 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("false") => false,
         _ => true, // default for compute_graph_logical_effort is true
     };
+    let enable_rewrite_carry_out = match matches
+        .get_one::<String>("enable-rewrite-carry-out")
+        .map(|s| s.as_str())
+    {
+        Some("true") => true,
+        Some("false") => false,
+        _ => false, // default is false
+    };
 
     let graph_logical_effort_beta1 = matches
         .get_one::<String>("graph_logical_effort_beta1")
@@ -214,6 +224,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         quiet,
         fold,
         hash,
+        enable_rewrite_carry_out,
         adder_mapping,
         mul_adder_mapping,
         fraig,
@@ -235,6 +246,7 @@ fn ir_to_gatefn_with_stats(
     input_file: &std::path::Path,
     fold: bool,
     hash: bool,
+    enable_rewrite_carry_out: bool,
     fraig: bool,
     toggle_sample_count: usize,
     toggle_sample_seed: u64,
@@ -263,6 +275,7 @@ fn ir_to_gatefn_with_stats(
             fold,
             hash,
             check_equivalence: false,
+            enable_rewrite_carry_out,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
         },
@@ -404,6 +417,14 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         Some("false") => false,
         _ => true,
     };
+    let enable_rewrite_carry_out = match matches
+        .get_one::<String>("enable-rewrite-carry-out")
+        .map(|s| s.as_str())
+    {
+        Some("true") => true,
+        Some("false") => false,
+        _ => false,
+    };
     let toggle_sample_count = matches
         .get_one::<String>("toggle_sample_count")
         .map(|s| s.parse::<usize>().unwrap_or(0))
@@ -469,6 +490,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         input_path,
         fold,
         hash,
+        enable_rewrite_carry_out,
         fraig,
         toggle_sample_count,
         toggle_sample_seed,

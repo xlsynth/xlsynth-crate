@@ -4,7 +4,7 @@ use std::cmp::min;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use crate::aig_serdes::prep_for_gatify::prep_for_gatify;
+use crate::aig_serdes::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
@@ -109,6 +109,7 @@ pub struct Options {
     pub check_equivalence: bool,
     pub fold: bool,
     pub hash: bool,
+    pub enable_rewrite_carry_out: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub fraig: bool,
@@ -164,6 +165,7 @@ pub fn process_ir_path_for_cli(
             fold: options.fold,
             hash: options.hash,
             check_equivalence: false, // check is done below if requested
+            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
         },
@@ -186,7 +188,13 @@ pub fn process_ir_path_for_cli(
     log::info!("IR top:\n{}", ir_top.to_string());
 
     if let Some(out_path) = options.prepared_ir_out.as_ref() {
-        let prepared_fn = prep_for_gatify(ir_top, None);
+        let prepared_fn = prep_for_gatify(
+            ir_top,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+            },
+        );
         let mut prepared_pkg = ir_package.clone();
         for member in prepared_pkg.members.iter_mut() {
             match member {
@@ -233,6 +241,7 @@ pub fn process_ir_path_for_cli(
             mul_adder_mapping: options.mul_adder_mapping,
             check_equivalence: false,
             range_info: None,
+            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
         };
         let mut per_node: Vec<IndependentOpEntry> = Vec::new();
         let mut cost_by_node_index: Vec<usize> = vec![0; ir_top.nodes.len()];

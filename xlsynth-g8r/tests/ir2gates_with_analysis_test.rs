@@ -24,6 +24,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
             fold: false,
             hash: false,
             check_equivalence: false,
+            enable_rewrite_carry_out: false,
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
         },
@@ -45,6 +46,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             range_info: None,
+            enable_rewrite_carry_out: false,
         },
     )
     .unwrap();

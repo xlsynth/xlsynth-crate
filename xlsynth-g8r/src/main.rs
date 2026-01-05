@@ -77,6 +77,7 @@ fn main() {
         check_equivalence: args.check_equivalence,
         fold: args.fold,
         hash: args.hash,
+        enable_rewrite_carry_out: false,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
         fraig: args.fraig,
