@@ -7,6 +7,7 @@
 
 pub mod corners;
 pub mod dce;
+pub mod desugar_extensions;
 pub mod edit_distance;
 pub mod fuzz_utils;
 pub mod greedy_matching_ged;

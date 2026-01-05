@@ -98,6 +98,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
             check_equivalence: false,
             fold: true,
             hash: true,
+            enable_rewrite_carry_out: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
             fraig: true,
@@ -114,6 +115,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
             cut_db: Some(CutDb::load_default()),
             cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
             cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+            prepared_ir_out: None,
         },
     );
 

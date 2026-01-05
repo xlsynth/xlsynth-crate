@@ -146,6 +146,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
   - `--stats-out <PATH>` – write a JSON summary of structural statistics.
   - `--netlist-out <PATH>` – write a human-readable gate-level netlist to a file.
 - The same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--toggle-sample-count`, …).
+  - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `false`.
 
 Example:
 
@@ -522,6 +523,8 @@ Supported flags include the common gate-optimization controls:
 
 - `--fold` – fold the gate representation (default `true`).
 - `--hash` – hash-cons the gate representation (default `true`).
+- `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `false`.
+- `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
   topology.
 - `--mul-adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – optional override

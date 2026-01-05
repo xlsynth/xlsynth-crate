@@ -124,6 +124,43 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 _ => panic!("Unsupported binop: {:?}", binop),
             }
         }
+        ir::NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
+            let lhs_bits: IrBits = env.get(&lhs).unwrap().to_bits().unwrap();
+            let rhs_bits: IrBits = env.get(&rhs).unwrap().to_bits().unwrap();
+            let w = lhs_bits.get_bit_count();
+            assert_eq!(
+                w,
+                rhs_bits.get_bit_count(),
+                "ExtCarryOut: lhs/rhs width mismatch"
+            );
+            let c_in_bool = env
+                .get(&c_in)
+                .unwrap()
+                .to_bool()
+                .expect("ExtCarryOut c_in must be bits[1]");
+
+            // Reference semantics:
+            //   carry = bit_slice(zero_ext(lhs,w+1)+zero_ext(rhs,w+1)+zero_ext(c_in,w+1),
+            // start=w, width=1)
+            let mut lhs_ext: Vec<bool> = Vec::with_capacity(w + 1);
+            let mut rhs_ext: Vec<bool> = Vec::with_capacity(w + 1);
+            for i in 0..w {
+                lhs_ext.push(lhs_bits.get_bit(i).unwrap());
+                rhs_ext.push(rhs_bits.get_bit(i).unwrap());
+            }
+            lhs_ext.push(false);
+            rhs_ext.push(false);
+            let lhs_w1 = IrBits::from_lsb_is_0(&lhs_ext);
+            let rhs_w1 = IrBits::from_lsb_is_0(&rhs_ext);
+            let sum_w1 = lhs_w1.add(&rhs_w1);
+            let c_in_w1 = {
+                let mut v: Vec<bool> = vec![false; w + 1];
+                v[0] = c_in_bool;
+                IrBits::from_lsb_is_0(&v)
+            };
+            let sum_w1_ci = sum_w1.add(&c_in_w1);
+            IrValue::bool(sum_w1_ci.get_bit(w).unwrap())
+        }
         ir::NodePayload::Unop(unop, ref operand) => {
             let operand_value: &IrValue = env.get(operand).unwrap();
             match unop {
@@ -1080,6 +1117,11 @@ fn eval_fn_impl<'a>(
     args: &[IrValue],
     observer: Option<*mut (dyn EvalObserver + 'a)>,
 ) -> FnEvalResult {
+    debug_assert!(
+        f.check_pir_layout_invariants().is_ok(),
+        "PIR layout invariants violated for function '{}'",
+        f.name
+    );
     assert_eq!(
         args.len(),
         f.params.len(),

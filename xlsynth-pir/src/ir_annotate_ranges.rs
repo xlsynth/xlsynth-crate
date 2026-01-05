@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use xlsynth::IrAnalysis;
 use xlsynth::ir_value::IrFormatPreference;
 
+use crate::desugar_extensions;
 use crate::ir;
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
@@ -86,9 +87,13 @@ pub fn annotate_ranges_in_package_ir_text(
 ) -> Result<String, String> {
     // Parse with PIR for formatting and to get stable node `text_id`s.
     let mut parser = ir_parser::Parser::new(ir_text);
-    let pir_package = parser
+    let mut pir_package = parser
         .parse_and_validate_package()
         .map_err(|e| format!("PIR parse/validate failed: {e}"))?;
+
+    // libxls does not understand PIR extensions; desugar before analysis.
+    desugar_extensions::desugar_extensions_in_package(&mut pir_package)
+        .map_err(|e| format!("desugar_extensions_in_package failed: {e}"))?;
 
     let top_fn_name: String = match top {
         Some(name) => name.to_string(),
@@ -105,7 +110,8 @@ pub fn annotate_ranges_in_package_ir_text(
         .ok_or_else(|| format!("PIR package has no function named '{top_fn_name}'"))?;
 
     // Parse with xlsynth for libxls analysis.
-    let mut xlsynth_package = xlsynth::IrPackage::parse_ir(ir_text, None)
+    let lowered_ir_text = pir_package.to_string();
+    let mut xlsynth_package = xlsynth::IrPackage::parse_ir(&lowered_ir_text, None)
         .map_err(|e| format!("xlsynth parse_ir failed: {e}"))?;
     xlsynth_package
         .set_top_by_name(&top_fn_name)

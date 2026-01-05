@@ -340,6 +340,41 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: rep,
                 }
             }
+            NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
+                let l = env.get(lhs).expect("ext_carry_out.lhs must be present");
+                let r = env.get(rhs).expect("ext_carry_out.rhs must be present");
+                let c = env.get(c_in).expect("ext_carry_out.c_in must be present");
+
+                let w = l.bitvec.get_width();
+                assert_eq!(
+                    w,
+                    r.bitvec.get_width(),
+                    "ext_carry_out requires lhs/rhs to have same width"
+                );
+                assert_eq!(
+                    c.bitvec.get_width(),
+                    1,
+                    "ext_carry_out requires c_in to be bits[1]"
+                );
+
+                // Reference semantics:
+                // carry = bit_slice(
+                //   zero_ext(lhs,w+1)+zero_ext(rhs,w+1)+zero_ext(c_in,w+1),
+                //   start=w, width=1
+                // )
+                let w1 = w.saturating_add(1);
+                let l1 = solver.zero_extend_to(&l.bitvec, w1);
+                let r1 = solver.zero_extend_to(&r.bitvec, w1);
+                let sum = solver.add(&l1, &r1);
+                let c1 = solver.zero_extend_to(&c.bitvec, w1);
+                let sum_ci = solver.add(&sum, &c1);
+                let carry = solver.slice(&sum_ci, w, 1);
+
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: carry,
+                }
+            }
             NodePayload::Unop(op, arg) => {
                 let a = env.get(&arg).unwrap().clone();
                 let rep = match op {

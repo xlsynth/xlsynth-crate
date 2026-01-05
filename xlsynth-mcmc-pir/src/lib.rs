@@ -37,6 +37,7 @@ use xlsynth_mcmc::McmcStats as SharedMcmcStats;
 use xlsynth_mcmc::metropolis_accept;
 use xlsynth_mcmc::multichain::{ChainRole, ChainStrategy, SegmentOutcome, SegmentRunParams};
 use xlsynth_mcmc::multichain::{SegmentRunner, run_multichain};
+use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::fuzz_utils::arbitrary_irbits;
 use xlsynth_pir::ir::Fn as IrFn;
 use xlsynth_pir::ir::Type as PirType;
@@ -113,6 +114,11 @@ fn optimize_pir_fn_via_xls(f: &IrFn) -> Result<IrFn> {
     compact_and_toposort_in_place(&mut fn_for_text)
         .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
 
+    // Upstream XLS IR does not understand PIR extension ops; desugar them before
+    // round-tripping through the XLS optimizer.
+    desugar_extensions::desugar_extensions_in_fn(&mut fn_for_text)
+        .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
+
     let pkg_text = format!("package pir_mcmc\n\n{}\n", fn_for_text);
 
     let ir_pkg = IrPackage::parse_ir(&pkg_text, None)
@@ -184,6 +190,7 @@ fn compute_g8r_stats_for_pir_fn_impl(f: &IrFn) -> Result<(usize, usize)> {
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
         range_info: None,
+        enable_rewrite_carry_out: false,
     };
     let gatify_output = ir2gate::gatify(&top_fn, gatify_options)
         .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;

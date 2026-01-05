@@ -62,6 +62,11 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
                 check(*a, &format!("node {} binop.lhs", i))?;
                 check(*b, &format!("node {} binop.rhs", i))?;
             }
+            NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
+                check(*lhs, &format!("node {} ext_carry_out.lhs", i))?;
+                check(*rhs, &format!("node {} ext_carry_out.rhs", i))?;
+                check(*c_in, &format!("node {} ext_carry_out.c_in", i))?;
+            }
             NodePayload::SignExt { arg, .. } | NodePayload::ZeroExt { arg, .. } => {
                 check(*arg, &format!("node {} ext.arg", i))?;
             }

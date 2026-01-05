@@ -290,6 +290,10 @@ impl AppExt for clap::Command {
         (self as clap::Command)
             .add_bool_arg("fold", "Fold the gate representation")
             .add_bool_arg("hash", "Hash the gate representation")
+            .add_bool_arg(
+                "enable-rewrite-carry-out",
+                "Enable carry-out rewrite in prep_for_gatify (introduces ext_carry_out)",
+            )
             .arg(
                 clap::Arg::new("adder_mapping")
                     .long("adder-mapping")
@@ -1028,6 +1032,13 @@ fn main() {
                         .long("output_json")
                         .value_name("PATH")
                         .help("Write the JSON summary to PATH")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("prepared_ir_out")
+                        .long("prepared-ir-out")
+                        .value_name("PATH")
+                        .help("Write the residual PIR after prep_for_gatify to PATH")
                         .action(clap::ArgAction::Set),
                 )
                 .add_ir2g8r_flags()

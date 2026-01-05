@@ -38,6 +38,7 @@ fn ir2gates(
     quiet: bool,
     fold: bool,
     hash: bool,
+    enable_rewrite_carry_out: bool,
     adder_mapping: AdderMapping,
     mul_adder_mapping: Option<AdderMapping>,
     fraig: bool,
@@ -50,6 +51,7 @@ fn ir2gates(
     fraig_max_iterations: Option<usize>,
     fraig_sim_samples: Option<usize>,
     output_json: Option<&std::path::Path>,
+    prepared_ir_out: Option<&std::path::Path>,
     cut_db: Option<std::sync::Arc<CutDb>>,
 ) {
     log::info!("ir2gates");
@@ -57,6 +59,7 @@ fn ir2gates(
         check_equivalence: false,
         fold,
         hash,
+        enable_rewrite_carry_out,
         adder_mapping,
         mul_adder_mapping,
         fraig,
@@ -74,6 +77,7 @@ fn ir2gates(
         // Keep CLI runtime predictable in tests/CI: small bounded rewrite.
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+        prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
     };
     let stats = process_ir_path::process_ir_path_for_cli(input_file, &options);
     if quiet {
@@ -152,6 +156,14 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("false") => false,
         _ => true, // default for compute_graph_logical_effort is true
     };
+    let enable_rewrite_carry_out = match matches
+        .get_one::<String>("enable-rewrite-carry-out")
+        .map(|s| s.as_str())
+    {
+        Some("true") => true,
+        Some("false") => false,
+        _ => false, // default is false
+    };
 
     let graph_logical_effort_beta1 = matches
         .get_one::<String>("graph_logical_effort_beta1")
@@ -203,6 +215,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     };
 
     let output_json = matches.get_one::<String>("output_json");
+    let prepared_ir_out = matches.get_one::<String>("prepared_ir_out");
     let cut_db = Some(CutDb::load_default());
 
     let input_path = std::path::Path::new(input_file);
@@ -211,6 +224,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         quiet,
         fold,
         hash,
+        enable_rewrite_carry_out,
         adder_mapping,
         mul_adder_mapping,
         fraig,
@@ -223,6 +237,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         fraig_max_iterations,
         fraig_sim_samples,
         output_json.map(|s| std::path::Path::new(s)),
+        prepared_ir_out.map(|s| std::path::Path::new(s)),
         cut_db,
     );
 }
@@ -231,6 +246,7 @@ fn ir_to_gatefn_with_stats(
     input_file: &std::path::Path,
     fold: bool,
     hash: bool,
+    enable_rewrite_carry_out: bool,
     fraig: bool,
     toggle_sample_count: usize,
     toggle_sample_seed: u64,
@@ -259,6 +275,7 @@ fn ir_to_gatefn_with_stats(
             fold,
             hash,
             check_equivalence: false,
+            enable_rewrite_carry_out,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
         },
@@ -400,6 +417,14 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         Some("false") => false,
         _ => true,
     };
+    let enable_rewrite_carry_out = match matches
+        .get_one::<String>("enable-rewrite-carry-out")
+        .map(|s| s.as_str())
+    {
+        Some("true") => true,
+        Some("false") => false,
+        _ => false,
+    };
     let toggle_sample_count = matches
         .get_one::<String>("toggle_sample_count")
         .map(|s| s.parse::<usize>().unwrap_or(0))
@@ -465,6 +490,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         input_path,
         fold,
         hash,
+        enable_rewrite_carry_out,
         fraig,
         toggle_sample_count,
         toggle_sample_seed,

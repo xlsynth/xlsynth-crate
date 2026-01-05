@@ -31,6 +31,7 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             range_info: None,
+            enable_rewrite_carry_out: false,
         },
     )
     .unwrap();

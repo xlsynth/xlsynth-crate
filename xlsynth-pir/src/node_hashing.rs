@@ -107,6 +107,7 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             start: _,
             update_value: _,
         } => {}
+        NodePayload::ExtCarryOut { .. } => {}
         NodePayload::Assert {
             token: _,
             activate: _,

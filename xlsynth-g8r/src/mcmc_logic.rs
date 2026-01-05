@@ -791,6 +791,7 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
                     adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
                     mul_adder_mapping: None,
                     range_info: None,
+                    enable_rewrite_carry_out: false,
                 };
                 let gatify_output = ir2gate::gatify(top_entity, gatify_options)
                     .map_err(|e| anyhow::anyhow!("Failed to gatify IR from '{}': {}", p_str, e))?;

@@ -137,6 +137,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
             adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
             mul_adder_mapping: None,
             range_info: None,
+            enable_rewrite_carry_out: false,
         },
     )
     .unwrap();
@@ -185,6 +186,7 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
             adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
             mul_adder_mapping: None,
             range_info: None,
+            enable_rewrite_carry_out: false,
         },
     )
     .unwrap();

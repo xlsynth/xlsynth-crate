@@ -1821,7 +1821,15 @@ mod tests {
                         }
                         let live_param_count = live_param_set.len();
                         let dead_param_count = top_fn.params.len() - live_param_count;
-                        let live_nodes = dce_f.nodes.len() - dead_param_count;
+                        // Exclude layout-only nodes from the live node count:
+                        // - node[0] is the reserved Nil node in PIR layout
+                        // - dead parameter GetParam nodes are preserved to satisfy PIR layout
+                        //   invariants but should not count as live graph work.
+                        assert!(
+                            dce_f.nodes.len() >= 1 + dead_param_count,
+                            "expected at least 1 (reserved Nil) + dead_param_count nodes"
+                        );
+                        let live_nodes = dce_f.nodes.len() - 1 - dead_param_count;
                         return Some(LivenessStats {
                             min_live_nodes: live_nodes,
                             max_live_nodes: live_nodes,

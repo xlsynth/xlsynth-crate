@@ -77,6 +77,7 @@ fn main() {
         check_equivalence: args.check_equivalence,
         fold: args.fold,
         hash: args.hash,
+        enable_rewrite_carry_out: false,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
         fraig: args.fraig,
@@ -93,6 +94,7 @@ fn main() {
         cut_db,
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+        prepared_ir_out: None,
     };
     let input_path = std::path::Path::new(&args.input);
     process_ir_path_for_cli(input_path, &options);
