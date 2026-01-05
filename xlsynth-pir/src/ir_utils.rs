@@ -464,6 +464,97 @@ pub fn compute_users(f: &Fn) -> HashMap<NodeRef, HashSet<NodeRef>> {
     users
 }
 
+/// Replaces the payload (and optionally the type) of `target` in `f`.
+///
+/// This leaves the node index and any users untouched; callers that want to
+/// redirect users to a different node should use `replace_node_with_ref`.
+pub fn replace_node_payload(
+    f: &mut Fn,
+    target: NodeRef,
+    new_payload: NodePayload,
+    new_type: Option<Type>,
+) -> Result<(), String> {
+    if target.index >= f.nodes.len() {
+        return Err(format!(
+            "replace_node_payload: target index {} out of bounds (len={})",
+            target.index,
+            f.nodes.len()
+        ));
+    }
+    for dep in operands(&new_payload) {
+        if dep.index >= f.nodes.len() {
+            return Err(format!(
+                "replace_node_payload: operand index {} out of bounds (len={})",
+                dep.index,
+                f.nodes.len()
+            ));
+        }
+    }
+    new_payload
+        .validate(f)
+        .map_err(|e| format!("replace_node_payload: {e}"))?;
+    f.nodes[target.index].payload = new_payload;
+    if let Some(ty) = new_type {
+        f.nodes[target.index].ty = ty;
+    }
+    Ok(())
+}
+
+/// Redirects all users of `target` (including `ret_node_ref`, if any) to
+/// `replacement`.
+///
+/// The replaced node's payload is set to `NodePayload::Nil` to allow callers
+/// to remove it later via `compact_and_toposort_in_place`.
+pub fn replace_node_with_ref(
+    f: &mut Fn,
+    target: NodeRef,
+    replacement: NodeRef,
+) -> Result<(), String> {
+    if target.index >= f.nodes.len() {
+        return Err(format!(
+            "replace_node_with_ref: target index {} out of bounds (len={})",
+            target.index,
+            f.nodes.len()
+        ));
+    }
+    if replacement.index >= f.nodes.len() {
+        return Err(format!(
+            "replace_node_with_ref: replacement index {} out of bounds (len={})",
+            replacement.index,
+            f.nodes.len()
+        ));
+    }
+    if target == replacement {
+        return Ok(());
+    }
+    let target_ty = f.get_node_ty(target);
+    let replacement_ty = f.get_node_ty(replacement);
+    if target_ty != replacement_ty {
+        return Err(format!(
+            "replace_node_with_ref: type mismatch (target {} vs replacement {})",
+            target_ty, replacement_ty
+        ));
+    }
+
+    if f.ret_node_ref == Some(target) {
+        f.ret_node_ref = Some(replacement);
+    }
+    for (idx, node) in f.nodes.iter_mut().enumerate() {
+        if idx == target.index {
+            continue;
+        }
+        node.payload =
+            remap_payload_with(
+                &node.payload,
+                |(_, nr)| {
+                    if nr == target { replacement } else { nr }
+                },
+            );
+    }
+    f.nodes[target.index].payload = NodePayload::Nil;
+    Ok(())
+}
+
 pub fn remap_payload_with<FMap>(payload: &NodePayload, mut map: FMap) -> NodePayload
 where
     // Map function takes the operand slot and the existing operand and returns the new operand.
@@ -704,7 +795,7 @@ pub fn sanitize_text_id_to_identifier_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{FileTable, PackageMember};
+    use crate::ir::{FileTable, NaryOp, PackageMember, Unop};
     use crate::ir_parser::Parser;
 
     fn parse_fn(ir: &str) -> Fn {
@@ -719,6 +810,20 @@ mod tests {
             })
             .next()
             .unwrap()
+    }
+
+    fn find_node_by_name(f: &Fn, name: &str) -> NodeRef {
+        f.nodes
+            .iter()
+            .enumerate()
+            .find_map(|(idx, node)| {
+                if node.name.as_deref() == Some(name) {
+                    Some(NodeRef { index: idx })
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("node named {name} not found"))
     }
 
     fn verify_topo_property(f: &Fn, order: &[NodeRef]) {
@@ -983,6 +1088,98 @@ mod tests {
                 param_count: 2
             })
         );
+    }
+
+    #[test]
+    fn replace_node_with_ref_redirects_users_and_nils_target() {
+        let mut f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  a: bits[1] = not(x, id=2)
+  ret and_node: bits[1] = and(a, x, id=3)
+}"#,
+        );
+        let a_ref = find_node_by_name(&f, "a");
+        let param_ref = find_node_by_name(&f, "x");
+        let ret_ref = find_node_by_name(&f, "and_node");
+
+        replace_node_with_ref(&mut f, a_ref, param_ref).expect("replace should succeed");
+
+        let NodePayload::Nary(NaryOp::And, operands) = &f.nodes[ret_ref.index].payload else {
+            panic!("unexpected payload {:?}", f.nodes[ret_ref.index].payload);
+        };
+        assert_eq!(
+            operands,
+            &vec![param_ref, param_ref],
+            "all users should point to the replacement"
+        );
+        assert!(matches!(f.nodes[a_ref.index].payload, NodePayload::Nil));
+        assert_eq!(f.ret_node_ref, Some(ret_ref));
+    }
+
+    #[test]
+    fn replace_node_with_ref_updates_ret() {
+        let mut f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  tmp: bits[1] = identity(x, id=2)
+  ret out: bits[1] = identity(tmp, id=3)
+}"#,
+        );
+        let param_ref = find_node_by_name(&f, "x");
+        let ret_ref = f.ret_node_ref.expect("ret node ref");
+
+        replace_node_with_ref(&mut f, ret_ref, param_ref).expect("replace should succeed");
+
+        assert_eq!(f.ret_node_ref, Some(param_ref));
+        assert!(matches!(f.nodes[ret_ref.index].payload, NodePayload::Nil));
+    }
+
+    #[test]
+    fn replace_node_with_ref_rejects_type_mismatch() {
+        let mut f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[2] id=2) -> bits[1] {
+  wide: bits[2] = identity(b, id=3)
+  ret out: bits[1] = identity(a, id=4)
+}"#,
+        );
+        let wide_ref = find_node_by_name(&f, "wide");
+        let out_ref = find_node_by_name(&f, "out");
+        let result = replace_node_with_ref(&mut f, out_ref, wide_ref);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replace_node_payload_updates_payload_and_type() {
+        let mut f = parse_fn(
+            r#"fn f(x: bits[2] id=1) -> bits[2] {
+  dead: bits[1] = bit_slice(x, start=0, width=1, id=2)
+  ret out: bits[2] = identity(x, id=3)
+}"#,
+        );
+        let dead_ref = find_node_by_name(&f, "dead");
+        let new_payload = NodePayload::GetParam(f.params[0].id);
+        replace_node_payload(&mut f, dead_ref, new_payload.clone(), Some(Type::Bits(2)))
+            .expect("payload replacement should succeed");
+
+        assert_eq!(f.nodes[dead_ref.index].payload, new_payload);
+        assert_eq!(f.nodes[dead_ref.index].ty, Type::Bits(2));
+    }
+
+    #[test]
+    fn replace_node_payload_rejects_invalid_operand() {
+        let mut f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  ret out: bits[1] = identity(x, id=2)
+}"#,
+        );
+        let out_ref = find_node_by_name(&f, "out");
+        let bogus_payload = NodePayload::Unop(
+            Unop::Identity,
+            NodeRef {
+                index: f.nodes.len() + 5,
+            },
+        );
+        let result = replace_node_payload(&mut f, out_ref, bogus_payload, None);
+        assert!(result.is_err());
     }
 }
 
