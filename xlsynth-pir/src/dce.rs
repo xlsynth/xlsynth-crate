@@ -3,7 +3,7 @@
 //! Dead-code elimination utilities for XLS IR functions.
 
 use crate::ir::{Fn, NodeRef};
-use crate::ir_utils::{operands, remap_payload_with};
+use crate::ir_utils::{compact_and_toposort_in_place, operands};
 
 /// Returns a list of nodes that are dead (unreachable from the function's
 /// return value by following operand edges).
@@ -75,55 +75,32 @@ pub fn remove_dead_nodes(f: &Fn) -> Fn {
             }
         }
     }
-    // Always keep GetParam nodes to satisfy validation rules.
-    for (i, node) in f.nodes.iter().enumerate() {
-        if matches!(node.payload, crate::ir::NodePayload::GetParam(_)) {
-            live[i] = true;
-        }
-    }
 
-    // Build mapping old index -> new index for live nodes.
-    let mut mapping: Vec<Option<usize>> = vec![None; n];
-    let mut next: usize = 0;
+    // Always keep layout-invariant nodes:
+    // - node[0] is reserved Nil
+    // - params occupy indices 1..=params.len() in signature order
+    //
+    // We mark dead body nodes as Nil, then use `compact_and_toposort_in_place`
+    // to remove those Nil nodes and remap indices while preserving the layout
+    // invariants.
+    let mut g: Fn = f.clone();
+    let param_count = g.params.len();
     for i in 0..n {
-        if live[i] {
-            mapping[i] = Some(next);
-            next += 1;
-        }
-    }
-
-    // Remap payloads using the mapping. Only live nodes are copied.
-    let mut new_nodes: Vec<crate::ir::Node> = Vec::with_capacity(next);
-    for (i, node) in f.nodes.iter().enumerate() {
-        if !live[i] {
+        if i == 0 || (1..=param_count).contains(&i) {
             continue;
         }
-        let remapped_payload = remap_payload_with(&node.payload, |(_, nr): (usize, NodeRef)| {
-            let ni = mapping[nr.index].expect("live node must not reference a dead operand");
-            NodeRef { index: ni }
-        });
-        new_nodes.push(crate::ir::Node {
-            text_id: node.text_id,
-            name: node.name.clone(),
-            ty: node.ty.clone(),
-            payload: remapped_payload,
-            pos: node.pos.clone(),
-        });
+        if !live[i] {
+            g.nodes[i].payload = crate::ir::NodePayload::Nil;
+        }
     }
 
-    // Remap return node.
-    let ret_old = f.ret_node_ref.unwrap().index;
-    let ret_new = mapping[ret_old].expect("return node must be live");
-
-    crate::ir::Fn {
-        name: f.name.clone(),
-        params: f.params.clone(),
-        ret_ty: f.ret_ty.clone(),
-        nodes: new_nodes,
-        ret_node_ref: Some(NodeRef { index: ret_new }),
-        outer_attrs: f.outer_attrs.clone(),
-        inner_attrs: f.inner_attrs.clone(),
-    }
+    compact_and_toposort_in_place(&mut g).expect("remove_dead_nodes: compaction failed");
+    debug_assert!(
+        g.check_pir_layout_invariants().is_ok(),
+        "remove_dead_nodes: PIR layout invariants violated for '{}'",
+        g.name
+    );
+    g
 }
 
 #[cfg(test)]
@@ -168,6 +145,7 @@ mod tests {
             "expected add.11 to be dead"
         );
         let g = remove_dead_nodes(&f);
+        g.check_pir_layout_invariants().unwrap();
         // Validate function still has GetParam for both a and b (even if b was dead)
         let mut seen_params = 0usize;
         for node in g.nodes.iter() {
