@@ -257,4 +257,18 @@ fn main(a: bits[8] id=1, b: bits[8] id=2) -> bits[1] {
             err
         );
     }
+
+    #[test]
+    fn parse_rejects_unicode_without_panicking() {
+        // NOTE: This is intentionally a Unicode whitespace (NBSP). The parser
+        // operates on byte offsets and should return an error, not panic due to
+        // slicing at invalid UTF-8 boundaries.
+        let query = format!("$anycmp({}x, _)", '\u{00A0}');
+        let err = parse_query(&query).unwrap_err();
+        assert!(
+            err.contains("expected placeholder"),
+            "unexpected error: {}",
+            err
+        );
+    }
 }

@@ -5,16 +5,14 @@
 use super::{MatcherExpr, MatcherKind, QueryExpr};
 
 pub struct QueryParser<'a> {
-    input: &'a str,
-    chars: Vec<char>,
-    pos: usize,
+    bytes: &'a [u8],
+    pos: usize, // byte offset
 }
 
 impl<'a> QueryParser<'a> {
     pub fn new(input: &'a str) -> Self {
         Self {
-            input,
-            chars: input.chars().collect(),
+            bytes: input.as_bytes(),
             pos: 0,
         }
     }
@@ -22,7 +20,7 @@ impl<'a> QueryParser<'a> {
     pub fn parse_expr(&mut self) -> Result<QueryExpr, String> {
         self.skip_ws();
         match self.peek() {
-            Some('$') => {
+            Some(b'$') => {
                 self.bump();
                 let ident = self.parse_ident("matcher name")?;
                 let kind = match ident.as_str() {
@@ -30,7 +28,7 @@ impl<'a> QueryParser<'a> {
                     "anymul" => MatcherKind::AnyMul,
                     _ => return Err(self.error(&format!("unknown matcher ${}", ident))),
                 };
-                let user_count = if self.peek() == Some('[') {
+                let user_count = if self.peek() == Some(b'[') {
                     Some(self.parse_user_constraint()?)
                 } else {
                     None
@@ -71,7 +69,7 @@ impl<'a> QueryParser<'a> {
     }
 
     pub fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(c) if c.is_whitespace()) {
+        while matches!(self.peek(), Some(c) if c.is_ascii_whitespace()) {
             self.bump();
         }
     }
@@ -79,7 +77,7 @@ impl<'a> QueryParser<'a> {
     fn parse_args(&mut self) -> Result<Vec<QueryExpr>, String> {
         let mut args = Vec::new();
         self.skip_ws();
-        if self.peek() == Some(')') {
+        if self.peek() == Some(b')') {
             return Ok(args);
         }
         loop {
@@ -87,10 +85,10 @@ impl<'a> QueryParser<'a> {
             args.push(expr);
             self.skip_ws();
             match self.peek() {
-                Some(',') => {
+                Some(b',') => {
                     self.bump();
                 }
-                Some(')') => break,
+                Some(b')') => break,
                 _ => return Err(self.error("expected ',' or ')'")),
             }
         }
@@ -102,7 +100,7 @@ impl<'a> QueryParser<'a> {
         self.skip_ws();
         let number = self.parse_number("user count")?;
         self.skip_ws();
-        if self.peek() != Some('u') {
+        if self.peek() != Some(b'u') {
             return Err(self.error("expected user count suffix 'u'"));
         }
         self.bump();
@@ -119,26 +117,31 @@ impl<'a> QueryParser<'a> {
         if start == self.pos {
             return Err(self.error(&format!("expected {}", ctx)));
         }
-        self.input[start..self.pos]
-            .parse::<usize>()
+        let s = std::str::from_utf8(&self.bytes[start..self.pos])
+            .expect("numeric slice must be valid UTF-8");
+        s.parse::<usize>()
             .map_err(|e| self.error(&format!("invalid {}: {}", ctx, e)))
     }
 
     fn parse_ident(&mut self, ctx: &str) -> Result<String, String> {
         self.skip_ws();
         let start = self.pos;
-        while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == '_') {
+        while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == b'_') {
             self.bump();
         }
         if start == self.pos {
             return Err(self.error(&format!("expected {}", ctx)));
         }
-        Ok(self.input[start..self.pos].to_string())
+        let s = std::str::from_utf8(&self.bytes[start..self.pos])
+            .expect("identifier slice must be valid UTF-8");
+        Ok(s.to_string())
     }
 
     fn expect(&mut self, ch: char) -> Result<(), String> {
+        assert!(ch.is_ascii(), "query parser only expects ASCII delimiters");
+        let b = ch as u8;
         self.skip_ws();
-        if self.peek() == Some(ch) {
+        if self.peek() == Some(b) {
             self.bump();
             Ok(())
         } else {
@@ -146,8 +149,8 @@ impl<'a> QueryParser<'a> {
         }
     }
 
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
     }
 
     fn bump(&mut self) {
