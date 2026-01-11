@@ -745,18 +745,21 @@ impl NodePayload {
                 activated,
                 format,
                 operands,
-            } => format!(
-                "trace({}, {}, {}, {}, id={})",
-                get_name(*token),
-                get_name(*activated),
-                format,
-                operands
+            } => {
+                let operands_str = operands
                     .iter()
                     .map(|n| get_name(*n))
                     .collect::<Vec<String>>()
-                    .join(", "),
-                id
-            ),
+                    .join(", ");
+                format!(
+                    "trace({}, {}, format={:?}, data_operands=[{}], id={})",
+                    get_name(*token),
+                    get_name(*activated),
+                    format,
+                    operands_str,
+                    id
+                )
+            }
             NodePayload::AfterAll(nodes) => {
                 if nodes.is_empty() {
                     format!("after_all(id={})", id)
@@ -857,7 +860,12 @@ impl NodePayload {
                 )
             }
             NodePayload::Cover { predicate, label } => {
-                format!("cover({}, {}, id={})", get_name(*predicate), label, id)
+                format!(
+                    "cover({}, label={:?}, id={})",
+                    get_name(*predicate),
+                    label,
+                    id
+                )
             }
             NodePayload::Decode { arg, width } => {
                 format!("decode({}, width={}, id={})", get_name(*arg), width, id)

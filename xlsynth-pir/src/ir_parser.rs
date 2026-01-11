@@ -2835,6 +2835,32 @@ top fn main(t: token id=1) -> token {
     }
 
     #[test]
+    fn test_roundtrip_via_xls_parser_with_trace_and_cover() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = r#"package test
+
+fn f(x: bits[1]) -> bits[1] {
+  literal.1: bits[1] = literal(value=1, id=1)
+  after_all.2: token = after_all(id=2)
+  trace.3: token = trace(after_all.2, x, format="x={}", data_operands=[x], id=3)
+  cover.4: () = cover(x, label="x_is_one", id=4)
+  ret literal.5: bits[1] = literal(value=1, id=5)
+}
+"#;
+
+        // Let the upstream (C++) parser+formatter canonicalize (param ids, node
+        // ordering, etc).
+        let cxx_pkg = xlsynth::IrPackage::parse_ir(input, None).expect("xls parse");
+        let formatted = cxx_pkg.to_string();
+
+        // Now ensure our parser accepts the canonical form and our formatter matches it
+        // exactly.
+        let mut parser = Parser::new(&formatted);
+        let pkg = parser.parse_package().expect("pir parse");
+        assert_eq!(pkg.to_string(), formatted);
+    }
+
+    #[test]
     fn test_parse_counted_for_node() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut node_env = IrNodeEnv::new();
