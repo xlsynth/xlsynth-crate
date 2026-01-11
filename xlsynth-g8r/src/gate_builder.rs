@@ -50,6 +50,18 @@ pub struct GateBuilder {
     pub hasher: Option<AigHasher>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalfAdderOutput {
+    pub sum: AigOperand,
+    pub carry: AigOperand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FullAdderOutput {
+    pub sum: AigOperand,
+    pub carry: AigOperand,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GateBuilderOptions {
     pub fold: bool,
@@ -221,6 +233,35 @@ impl GateBuilder {
             node: gate_ref,
             negated: false,
         }
+    }
+
+    /// Returns the 3-input majority function (aka the full-adder carry):
+    ///
+    /// \(maj(a, b, c) = (a \& b) | (a \& c) | (b \& c)\).
+    pub fn add_maj3(&mut self, a: AigOperand, b: AigOperand, c: AigOperand) -> AigOperand {
+        let ab = self.add_and_binary(a, b);
+        let ac = self.add_and_binary(a, c);
+        let bc = self.add_and_binary(b, c);
+        self.add_or_nary(&[ab, ac, bc], ReductionKind::Linear)
+    }
+
+    /// Emits a 1-bit half-adder.
+    pub fn add_half_adder(&mut self, a: AigOperand, b: AigOperand) -> HalfAdderOutput {
+        let sum = self.add_xor_binary(a, b);
+        let carry = self.add_and_binary(a, b);
+        HalfAdderOutput { sum, carry }
+    }
+
+    /// Emits a 1-bit full-adder.
+    pub fn add_full_adder(
+        &mut self,
+        a: AigOperand,
+        b: AigOperand,
+        c: AigOperand,
+    ) -> FullAdderOutput {
+        let sum = self.add_xor_nary(&[a, b, c], ReductionKind::Linear);
+        let carry = self.add_maj3(a, b, c);
+        FullAdderOutput { sum, carry }
     }
 
     pub fn add_and_binary_nn(&mut self, lhs: AigOperand, rhs: AigOperand) -> AigOperand {
@@ -767,6 +808,7 @@ impl GateBuilder {
 mod tests {
     use crate::{
         aig::get_summary_stats::{SummaryStats, get_summary_stats},
+        aig_sim::gate_sim,
         check_equivalence,
     };
 
@@ -774,6 +816,105 @@ mod tests {
 
     use pretty_assertions::assert_eq;
     use test_case::test_case;
+
+    fn eval_1bit_output(gate_fn: &GateFn, a: bool, b: bool, c: Option<bool>) -> bool {
+        let mut inputs = vec![IrBits::bool(a), IrBits::bool(b)];
+        if let Some(c) = c {
+            inputs.push(IrBits::bool(c));
+        }
+        let got = gate_sim::eval(gate_fn, &inputs, gate_sim::Collect::None);
+        assert_eq!(got.outputs.len(), 1);
+        got.outputs[0].get_bit(0).unwrap()
+    }
+
+    fn rust_maj3(a: bool, b: bool, c: bool) -> bool {
+        (a && b) || (a && c) || (b && c)
+    }
+
+    #[test]
+    fn test_add_maj3_truth_table() {
+        let mut builder = GateBuilder::new("maj3".to_string(), GateBuilderOptions::no_opt());
+        let a = builder.add_input("a".to_string(), 1);
+        let b = builder.add_input("b".to_string(), 1);
+        let c = builder.add_input("c".to_string(), 1);
+        let maj = builder.add_maj3(*a.get_lsb(0), *b.get_lsb(0), *c.get_lsb(0));
+        builder.add_output("maj".to_string(), AigBitVector::from_bit(maj));
+        let gate_fn = builder.build();
+
+        for aa in [false, true] {
+            for bb in [false, true] {
+                for cc in [false, true] {
+                    let got = eval_1bit_output(&gate_fn, aa, bb, Some(cc));
+                    let want = rust_maj3(aa, bb, cc);
+                    assert_eq!(got, want, "a={} b={} c={}", aa, bb, cc);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_add_half_adder_truth_table() {
+        let mut builder = GateBuilder::new("ha".to_string(), GateBuilderOptions::no_opt());
+        let a = builder.add_input("a".to_string(), 1);
+        let b = builder.add_input("b".to_string(), 1);
+        let out = builder.add_half_adder(*a.get_lsb(0), *b.get_lsb(0));
+        builder.add_output("sum".to_string(), AigBitVector::from_bit(out.sum));
+        builder.add_output("carry".to_string(), AigBitVector::from_bit(out.carry));
+        let gate_fn = builder.build();
+
+        for aa in [false, true] {
+            for bb in [false, true] {
+                let inputs = vec![IrBits::bool(aa), IrBits::bool(bb)];
+                let got = gate_sim::eval(&gate_fn, &inputs, gate_sim::Collect::None);
+                assert_eq!(got.outputs.len(), 2);
+                let got_sum = got.outputs[0].get_bit(0).unwrap();
+                let got_carry = got.outputs[1].get_bit(0).unwrap();
+                let want_sum = aa ^ bb;
+                let want_carry = aa && bb;
+                assert_eq!(
+                    (got_sum, got_carry),
+                    (want_sum, want_carry),
+                    "a={} b={}",
+                    aa,
+                    bb
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_add_full_adder_truth_table() {
+        let mut builder = GateBuilder::new("fa".to_string(), GateBuilderOptions::no_opt());
+        let a = builder.add_input("a".to_string(), 1);
+        let b = builder.add_input("b".to_string(), 1);
+        let c = builder.add_input("c".to_string(), 1);
+        let out = builder.add_full_adder(*a.get_lsb(0), *b.get_lsb(0), *c.get_lsb(0));
+        builder.add_output("sum".to_string(), AigBitVector::from_bit(out.sum));
+        builder.add_output("carry".to_string(), AigBitVector::from_bit(out.carry));
+        let gate_fn = builder.build();
+
+        for aa in [false, true] {
+            for bb in [false, true] {
+                for cc in [false, true] {
+                    let inputs = vec![IrBits::bool(aa), IrBits::bool(bb), IrBits::bool(cc)];
+                    let got = gate_sim::eval(&gate_fn, &inputs, gate_sim::Collect::None);
+                    assert_eq!(got.outputs.len(), 2);
+                    let got_sum = got.outputs[0].get_bit(0).unwrap();
+                    let got_carry = got.outputs[1].get_bit(0).unwrap();
+                    let want_sum = aa ^ bb ^ cc;
+                    let want_carry = rust_maj3(aa, bb, cc);
+                    assert_eq!(
+                        (got_sum, got_carry),
+                        (want_sum, want_carry),
+                        "a={} b={} c={}",
+                        aa,
+                        bb,
+                        cc
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_simple_and_to_string() {

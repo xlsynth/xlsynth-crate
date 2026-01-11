@@ -15,9 +15,9 @@ use xlsynth_pir::ir_utils;
 use xlsynth_pir::ir_validate;
 
 use crate::ir2gate_utils::{
-    AdderMapping, Direction, gatify_add_brent_kung, gatify_add_kogge_stone,
-    gatify_add_ripple_carry, gatify_barrel_shifter, gatify_one_hot, gatify_one_hot_select,
-    gatify_one_hot_with_nonzero_flag,
+    AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
+    gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter, gatify_one_hot,
+    gatify_one_hot_select, gatify_one_hot_with_nonzero_flag,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -588,13 +588,7 @@ fn gatify_umul(
     }
 
     // Sum all partial products using ripple-carry addition
-    let mut result = partial_products[0].clone();
-    for pp in partial_products.iter().skip(1) {
-        let (_carry, sum) =
-            gatify_add_with_mapping(mul_adder_mapping, &result, pp, gb.get_false(), None, gb);
-        result = sum;
-    }
-    result
+    array_add_with_carry_out(gb, &partial_products, None, mul_adder_mapping).sum
 }
 
 fn gatify_twos_complement(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
