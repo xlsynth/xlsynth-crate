@@ -111,5 +111,5 @@ fn test_bf16_mul_g8r_stats() {
     let depth_stats = get_gate_depth(gate_fn, &live_nodes);
     let max_depth = depth_stats.deepest_path.len();
 
-    assert_within!(max_depth as isize, 105 as isize, 10 as isize);
+    assert_within!(max_depth as isize, 94 as isize, 10 as isize);
 }
