@@ -309,6 +309,14 @@ mod tests {
 
     use super::*;
 
+    /// Verifies that formatting the parsed IR yields the exact original text.
+    fn round_trip_ir_text(ir_text: &str) -> String {
+        let package = IrPackage::parse_ir(ir_text, None).expect("parse success");
+        let printed = package.to_string();
+        assert_eq!(printed, ir_text);
+        printed
+    }
+
     #[test]
     fn test_ir_package_parse() {
         let ir =
@@ -455,5 +463,21 @@ mod tests {
             "unexpected error: {}",
             error
         );
+    }
+
+    #[test]
+    fn test_ir_round_trip_trace_and_cover_ops() {
+        let ir = r#"package test
+
+fn f(x: bits[1]) -> bits[1] {
+  literal.1: bits[1] = literal(value=1, id=1)
+  after_all.2: token = after_all(id=2)
+  trace.3: token = trace(after_all.2, x, format="x={}", data_operands=[x], id=3)
+  cover.4: token = cover(trace.3, x, label="x_is_one", id=4)
+  ret literal.5: bits[1] = literal(value=1, id=5)
+}
+"#;
+
+        round_trip_ir_text(ir);
     }
 }
