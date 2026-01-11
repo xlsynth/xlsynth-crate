@@ -39,6 +39,15 @@ impl<'a> QueryParser<'a> {
                 self.expect('(')?;
                 let args = self.parse_args()?;
                 self.expect(')')?;
+                let expected_arity = expected_arity(kind);
+                if args.len() != expected_arity {
+                    return Err(self.error(&format!(
+                        "matcher ${} expects {} arguments; got {}. Use '_' as a wildcard argument if needed",
+                        ident,
+                        expected_arity,
+                        args.len()
+                    )));
+                }
                 Ok(QueryExpr::Matcher(MatcherExpr {
                     kind,
                     user_count,
@@ -147,5 +156,11 @@ impl<'a> QueryParser<'a> {
 
     fn error(&self, msg: &str) -> String {
         format!("{} at byte {}", msg, self.pos)
+    }
+}
+
+fn expected_arity(kind: MatcherKind) -> usize {
+    match kind {
+        MatcherKind::AnyCmp | MatcherKind::AnyMul => 2,
     }
 }

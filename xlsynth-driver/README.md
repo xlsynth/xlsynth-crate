@@ -450,12 +450,14 @@ Query expression basics:
 - `$anycmp(...)` matches any comparison op (e.g., `eq`, `ugt`, `slt`).
 - `$anymul(...)` matches any multiply op (e.g., `umul`, `smul`, `umulp`, `smulp`).
 - Placeholders like `x` and `y` match any node (repeated placeholders must bind the same node).
+- The special placeholder `_` matches any node but does not create a binding (wildcard).
 - User-count constraints can be added as `[Nu]` (e.g., `[1u]` means exactly one user in the function).
+- `$anycmp` and `$anymul` are binary operators, so they always take two arguments. Use `_` for a wildcard position.
 
 Example:
 
 ```shell
-xlsynth-driver ir-query my_pkg.ir '$anycmp($anymul[1u](x, y))'
+xlsynth-driver ir-query my_pkg.ir '$anycmp($anymul[1u](x, y), _)'
 ```
 
 ### `ir-structural-similarity`

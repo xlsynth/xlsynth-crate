@@ -7809,7 +7809,7 @@ fn main(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
     let output = Command::new(driver)
         .arg("ir-query")
         .arg(ir_path.to_str().unwrap())
-        .arg("$anycmp($anymul[1u](x, y))")
+        .arg("$anycmp($anymul[1u](x, y), _)")
         .output()
         .unwrap();
 
