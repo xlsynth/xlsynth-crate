@@ -2,6 +2,7 @@
 
 use xlsynth_g8r::aig::get_summary_stats::get_summary_stats;
 use xlsynth_g8r::aig_serdes::ir2gate;
+use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
 use xlsynth_pir::ir_parser;
 
@@ -52,4 +53,88 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
     .unwrap();
     let base_stats = get_summary_stats(&base.gate_fn);
     assert_eq!(base_stats.live_nodes, 1573);
+}
+
+#[test]
+fn test_ir2gates_umul_ugt_levels_and_nodes() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let ir_text = "package sample
+
+top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
+  a: bits[32] = umul(y, x, id=4)
+  ret result: bits[1] = ugt(a, z, id=5)
+}
+";
+
+    let out = ir2gates::ir2gates_from_ir_text(
+        ir_text,
+        None,
+        ir2gates::Ir2GatesOptions {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            enable_rewrite_carry_out: false,
+            adder_mapping: AdderMapping::default(),
+            mul_adder_mapping: None,
+        },
+    )
+    .unwrap();
+
+    let got = get_summary_stats(&out.gatify_output.gate_fn);
+    // This is a "microbenchmark sweep" style test: lock in the expected gate
+    // count + depth so we can notice regressions and improvements.
+    assert_eq!(got.live_nodes, 2424);
+    assert_eq!(got.deepest_path, 90);
+}
+
+#[test]
+fn test_ir2gates_umul_commutes_for_stats() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text_xy = "package sample
+
+top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
+  a: bits[32] = umul(x, y, id=4)
+  ret result: bits[1] = ugt(a, z, id=5)
+}
+";
+    let ir_text_yx = "package sample
+
+top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
+  a: bits[32] = umul(y, x, id=4)
+  ret result: bits[1] = ugt(a, z, id=5)
+}
+";
+
+    let out_xy = ir2gates::ir2gates_from_ir_text(
+        ir_text_xy,
+        None,
+        ir2gates::Ir2GatesOptions {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            enable_rewrite_carry_out: false,
+            adder_mapping: AdderMapping::default(),
+            mul_adder_mapping: None,
+        },
+    )
+    .unwrap();
+
+    let out_yx = ir2gates::ir2gates_from_ir_text(
+        ir_text_yx,
+        None,
+        ir2gates::Ir2GatesOptions {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            enable_rewrite_carry_out: false,
+            adder_mapping: AdderMapping::default(),
+            mul_adder_mapping: None,
+        },
+    )
+    .unwrap();
+
+    let stats_xy = get_summary_stats(&out_xy.gatify_output.gate_fn);
+    let stats_yx = get_summary_stats(&out_yx.gatify_output.gate_fn);
+    assert_eq!(stats_xy, stats_yx);
 }

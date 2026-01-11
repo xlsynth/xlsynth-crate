@@ -552,13 +552,23 @@ fn gatify_umul(
         return AigBitVector::zeros(0);
     }
 
+    // Canonicalize operand order so gate count / depth is insensitive to the
+    // caller's operand order. We prefer using the narrower operand as the
+    // multiplier (the number of partial-product rows) since it generally leads
+    // to smaller and shallower circuits.
+    let (multiplicand_bits, multiplier_bits) = if rhs_bit_count <= lhs_bit_count {
+        (lhs_bits, rhs_bits)
+    } else {
+        (rhs_bits, lhs_bits)
+    };
+
     let mut partial_products = Vec::new();
 
-    // For each bit in the multiplier (rhs), generate a scaled partial product
-    for (i, rhs_bit) in rhs_bits.iter_lsb_to_msb().enumerate() {
+    // For each bit in the multiplier, generate a scaled partial product.
+    for (i, mul_bit) in multiplier_bits.iter_lsb_to_msb().enumerate() {
         let mut row = Vec::new();
-        for lhs_bit in lhs_bits.iter_lsb_to_msb() {
-            let pp = gb.add_and_binary(*lhs_bit, *rhs_bit);
+        for mcand_bit in multiplicand_bits.iter_lsb_to_msb() {
+            let pp = gb.add_and_binary(*mcand_bit, *mul_bit);
             row.push(pp);
         }
 
