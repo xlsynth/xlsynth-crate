@@ -69,6 +69,7 @@ mod ir_fn_eval;
 mod ir_fn_to_block;
 mod ir_ged;
 mod ir_localized_eco;
+mod ir_query;
 mod ir_round_trip;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
@@ -888,6 +889,27 @@ fn main() {
                         .help("The top-level entry point for the right-hand side IR"),
                 )
                 .add_bool_arg("json", "Output in JSON format"),
+        )
+        .subcommand(
+            clap::Command::new("ir-query")
+                .about("Matches an IR query expression against a top function")
+                .arg(
+                    Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("query")
+                        .help("The IR query expression")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("ir_top")
+                        .long("top")
+                        .help("Top-level function name (overrides package top)"),
+                ),
         )
         .subcommand(
             clap::Command::new("ir-structural-similarity")
@@ -1939,6 +1961,9 @@ fn main() {
         }
         Some(("ir-localized-eco", subm)) => {
             ir_localized_eco::handle_ir_localized_eco(subm, &config);
+        }
+        Some(("ir-query", subm)) => {
+            ir_query::handle_ir_query(subm, &config);
         }
         Some(("ir-round-trip", subm)) => {
             ir_round_trip::handle_ir_round_trip(subm);

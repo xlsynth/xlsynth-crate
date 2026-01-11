@@ -437,6 +437,29 @@ Computes the Graph-Edit-Distance between two IR functions. Without further
 flags a summary line like `Distance: N` is printed on **stdout**. With
 `--json=true` the result is emitted as JSON.
 
+### `ir-query`
+
+Matches a query expression against the top function of an IR package and prints each matching node on **stdout**.
+
+- Positional arguments: `<ir_input_file> <query>`
+- Optional:
+  - `--top <NAME>` – function name to treat as top (overrides the package top).
+
+Query expression basics:
+
+- `$anycmp(...)` matches any comparison op (e.g., `eq`, `ugt`, `slt`).
+- `$anymul(...)` matches any multiply op (e.g., `umul`, `smul`, `umulp`, `smulp`).
+- Placeholders like `x` and `y` match any node (repeated placeholders must bind the same node).
+- The special placeholder `_` matches any node but does not create a binding (wildcard).
+- User-count constraints can be added as `[Nu]` (e.g., `[1u]` means exactly one user in the function).
+- `$anycmp` and `$anymul` are binary operators, so they always take two arguments. Use `_` for a wildcard position.
+
+Example:
+
+```shell
+xlsynth-driver ir-query my_pkg.ir '$anycmp($anymul[1u](x, y), _)'
+```
+
 ### `ir-structural-similarity`
 
 Computes a structural similarity summary between two IR functions by hashing node structure per depth and comparing multisets.
