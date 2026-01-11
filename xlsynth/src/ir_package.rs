@@ -469,11 +469,11 @@ mod tests {
     fn test_ir_round_trip_trace_and_cover_ops() {
         let ir = r#"package test
 
-fn f(x: bits[1]) -> bits[1] {
-  literal.1: bits[1] = literal(value=1, id=1)
+fn f(x: bits[1] id=7) -> bits[1] {
   after_all.2: token = after_all(id=2)
+  literal.1: bits[1] = literal(value=1, id=1)
   trace.3: token = trace(after_all.2, x, format="x={}", data_operands=[x], id=3)
-  cover.4: token = cover(trace.3, x, label="x_is_one", id=4)
+  cover.4: () = cover(x, label="x_is_one", id=4)
   ret literal.5: bits[1] = literal(value=1, id=5)
 }
 "#;
