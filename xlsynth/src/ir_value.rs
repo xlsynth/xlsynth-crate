@@ -96,6 +96,10 @@ impl IrBits {
         xls_bits_make_sbits(bit_count, value)
     }
 
+    pub fn bool(value: bool) -> Self {
+        Self::make_ubits(1, u64::from(value)).unwrap()
+    }
+
     pub fn u32(value: u32) -> Self {
         // Unwrap should be ok since the u32 always fits.
         Self::make_ubits(32, value as u64).unwrap()

@@ -295,6 +295,157 @@ pub fn gatify_add_brent_kung(
     (c_out, AigBitVector::from_lsb_is_index_0(&sum))
 }
 
+#[derive(Debug, Clone)]
+pub struct ArrayAddResult {
+    pub sum: AigBitVector,
+    pub carry_out: AigOperand,
+}
+
+fn add_with_mapping(
+    adder_mapping: AdderMapping,
+    lhs: &AigBitVector,
+    rhs: &AigBitVector,
+    c_in: AigOperand,
+    gb: &mut GateBuilder,
+) -> (AigOperand, AigBitVector) {
+    match adder_mapping {
+        AdderMapping::RippleCarry => gatify_add_ripple_carry(lhs, rhs, c_in, None, gb),
+        AdderMapping::BrentKung => gatify_add_brent_kung(lhs, rhs, c_in, None, gb),
+        AdderMapping::KoggeStone => gatify_add_kogge_stone(lhs, rhs, c_in, None, gb),
+    }
+}
+
+fn widen_with_zero_msb(bit_vector: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
+    let mut operands: Vec<AigOperand> = bit_vector.iter_lsb_to_msb().cloned().collect();
+    operands.push(gb.get_false());
+    AigBitVector::from_lsb_is_index_0(&operands)
+}
+
+/// Returns `(sum, carry)` where both are the same width as the inputs.
+///
+/// `carry` is already shifted left by one (i.e. `carry[0] = 0` and `carry[i+1]`
+/// is the carry bit resulting from bit position `i`).
+fn compress_3_to_2(
+    gb: &mut GateBuilder,
+    a: &AigBitVector,
+    b: &AigBitVector,
+    c: &AigBitVector,
+) -> (AigBitVector, AigBitVector) {
+    assert_eq!(a.get_bit_count(), b.get_bit_count());
+    assert_eq!(a.get_bit_count(), c.get_bit_count());
+    let bit_count = a.get_bit_count();
+    assert!(bit_count > 0, "cannot compress 0-bit vectors");
+
+    let mut sum_bits: Vec<AigOperand> = Vec::with_capacity(bit_count);
+    let mut carry_bits: Vec<AigOperand> = Vec::with_capacity(bit_count);
+    carry_bits.push(gb.get_false());
+    for i in 0..bit_count {
+        let fa = gb.add_full_adder(*a.get_lsb(i), *b.get_lsb(i), *c.get_lsb(i));
+        sum_bits.push(fa.sum);
+        if i + 1 < bit_count {
+            carry_bits.push(fa.carry);
+        }
+    }
+    assert_eq!(sum_bits.len(), bit_count);
+    assert_eq!(carry_bits.len(), bit_count);
+    (
+        AigBitVector::from_lsb_is_index_0(&sum_bits),
+        AigBitVector::from_lsb_is_index_0(&carry_bits),
+    )
+}
+
+fn reduce_operands_to_two(
+    gb: &mut GateBuilder,
+    mut operands: Vec<AigBitVector>,
+) -> (AigBitVector, AigBitVector) {
+    assert!(!operands.is_empty(), "expected at least one operand");
+    let bit_count = operands[0].get_bit_count();
+    assert!(bit_count > 0, "cannot reduce 0-bit vectors");
+    for op in operands.iter() {
+        assert_eq!(op.get_bit_count(), bit_count, "operand width mismatch");
+    }
+
+    if operands.len() == 1 {
+        return (operands[0].clone(), AigBitVector::zeros(bit_count));
+    }
+
+    while operands.len() > 2 {
+        let mut next: Vec<AigBitVector> = Vec::new();
+        for chunk in operands.chunks(3) {
+            match chunk {
+                [a, b, c] => {
+                    let (sum, carry) = compress_3_to_2(gb, a, b, c);
+                    next.push(sum);
+                    next.push(carry);
+                }
+                [a, b] => {
+                    next.push(a.clone());
+                    next.push(b.clone());
+                }
+                [a] => {
+                    next.push(a.clone());
+                }
+                _ => unreachable!("chunks(3) gives 1..=3 items"),
+            }
+        }
+        operands = next;
+    }
+    assert_eq!(operands.len(), 2);
+    (operands[0].clone(), operands[1].clone())
+}
+
+/// Adds an array of `bits[N]` vectors, optionally with a 1-bit carry-in.
+///
+/// Returns `sum: bits[N]` and `carry_out`, where `carry_out` is the bit `N` of
+/// the full sum (i.e. the carry out of the most significant bit).
+pub fn array_add_with_carry_out(
+    gb: &mut GateBuilder,
+    operands: &[AigBitVector],
+    carry_in: Option<AigOperand>,
+    adder_mapping: AdderMapping,
+) -> ArrayAddResult {
+    assert!(
+        !operands.is_empty(),
+        "array_add expects at least one operand"
+    );
+    let bit_count = operands[0].get_bit_count();
+    assert!(bit_count > 0, "array_add does not support 0-bit operands");
+    for op in operands.iter() {
+        assert_eq!(op.get_bit_count(), bit_count, "operand width mismatch");
+    }
+
+    // We only care about:
+    // - the low `bit_count` result bits, and
+    // - the 1-bit carry-out at position `bit_count`.
+    // So we compute everything modulo 2^(bit_count+1).
+    let ext_width = bit_count + 1;
+    let ext_ops: Vec<AigBitVector> = operands
+        .iter()
+        .map(|op| widen_with_zero_msb(op, gb))
+        .collect();
+    for op in ext_ops.iter() {
+        assert_eq!(op.get_bit_count(), ext_width);
+    }
+
+    let (a, b) = reduce_operands_to_two(gb, ext_ops);
+    let c_in = carry_in.unwrap_or_else(|| gb.get_false());
+    let (_ignored, sum_ext) = add_with_mapping(adder_mapping, &a, &b, c_in, gb);
+    assert_eq!(sum_ext.get_bit_count(), ext_width);
+
+    let sum = sum_ext.get_lsb_slice(0, bit_count);
+    let carry_out = *sum_ext.get_lsb(bit_count);
+    ArrayAddResult { sum, carry_out }
+}
+
+/// Convenience wrapper that returns only the `bits[N]` sum.
+pub fn array_add(
+    gb: &mut GateBuilder,
+    operands: Vec<AigBitVector>,
+    carry_in: Option<AigOperand>,
+) -> AigBitVector {
+    array_add_with_carry_out(gb, &operands, carry_in, AdderMapping::default()).sum
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -487,6 +638,7 @@ mod tests {
     use crate::{
         aig::gate::AigBitVector,
         aig_serdes::ir2gate::{gatify_ule_via_adder, gatify_ule_via_bit_tests},
+        aig_sim::gate_sim,
         check_equivalence,
         gate_builder::GateBuilderOptions,
     };
@@ -494,6 +646,93 @@ mod tests {
     use super::*;
 
     use test_case::test_case;
+    use xlsynth::IrBits;
+
+    fn eval_array_add_case(
+        bit_count: usize,
+        operand_values: &[u64],
+        carry_in: Option<bool>,
+    ) -> (u64, bool) {
+        let mut gb = GateBuilder::new("array_add_test".to_string(), GateBuilderOptions::no_opt());
+        let mut operands = Vec::new();
+        for (i, _) in operand_values.iter().enumerate() {
+            operands.push(gb.add_input(format!("op_{}", i), bit_count));
+        }
+        let carry_in_op = carry_in.map(|_| gb.add_input("carry_in".to_string(), 1));
+        let carry_in_bit = carry_in_op.as_ref().map(|v| *v.get_lsb(0));
+
+        let res =
+            array_add_with_carry_out(&mut gb, &operands, carry_in_bit, AdderMapping::default());
+        gb.add_output("sum".to_string(), res.sum.clone());
+        gb.add_output(
+            "carry_out".to_string(),
+            AigBitVector::from_bit(res.carry_out),
+        );
+        let gate_fn = gb.build();
+
+        let mut inputs = Vec::new();
+        for &v in operand_values {
+            inputs.push(IrBits::make_ubits(bit_count, v).unwrap());
+        }
+        if let Some(ci) = carry_in {
+            inputs.push(IrBits::bool(ci));
+        }
+        let got = gate_sim::eval(&gate_fn, &inputs, gate_sim::Collect::None);
+        assert_eq!(got.outputs.len(), 2);
+        let got_sum = got.outputs[0].to_u64().unwrap();
+        let got_carry_out = got.outputs[1].get_bit(0).unwrap();
+        (got_sum, got_carry_out)
+    }
+
+    #[test]
+    fn test_array_add_exhaustive_3bit_3ops_no_carry_in() {
+        let bit_count = 3usize;
+        for a in 0u64..(1u64 << bit_count) {
+            for b in 0u64..(1u64 << bit_count) {
+                for c in 0u64..(1u64 << bit_count) {
+                    let (got_sum, got_c_out) = eval_array_add_case(bit_count, &[a, b, c], None);
+                    let total = a + b + c;
+                    let want_sum = total & ((1u64 << bit_count) - 1);
+                    let want_c_out = ((total >> bit_count) & 1) != 0;
+                    assert_eq!(
+                        (got_sum, got_c_out),
+                        (want_sum, want_c_out),
+                        "a={} b={} c={}",
+                        a,
+                        b,
+                        c
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_array_add_exhaustive_3bit_3ops_with_carry_in() {
+        let bit_count = 3usize;
+        for a in 0u64..(1u64 << bit_count) {
+            for b in 0u64..(1u64 << bit_count) {
+                for c in 0u64..(1u64 << bit_count) {
+                    for carry_in in [false, true] {
+                        let (got_sum, got_c_out) =
+                            eval_array_add_case(bit_count, &[a, b, c], Some(carry_in));
+                        let total = a + b + c + u64::from(carry_in);
+                        let want_sum = total & ((1u64 << bit_count) - 1);
+                        let want_c_out = ((total >> bit_count) & 1) != 0;
+                        assert_eq!(
+                            (got_sum, got_c_out),
+                            (want_sum, want_c_out),
+                            "a={} b={} c={} carry_in={}",
+                            a,
+                            b,
+                            c,
+                            carry_in
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn make_ripple_carry(bits: usize) -> gate::GateFn {
         let mut ripple_builder =
