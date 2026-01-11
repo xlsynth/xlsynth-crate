@@ -20,6 +20,7 @@ pub mod ir_fuzz;
 pub mod ir_node_env;
 pub mod ir_outline;
 pub mod ir_parser;
+pub mod ir_query;
 pub mod ir_range_info;
 pub mod ir_rebase_ids;
 pub mod ir_utils;

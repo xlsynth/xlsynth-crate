@@ -7789,3 +7789,41 @@ fn call<N: u32>(x: bits[N]) -> bits[N] { id(x) }
         stdout
     );
 }
+
+#[test]
+fn test_ir_query_anycmp_anymul_single_user() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+fn main(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
+  m: bits[8] = umul(x, y, id=3)
+  ret cmp: bits[1] = eq(m, x, id=4)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-query")
+        .arg(ir_path.to_str().unwrap())
+        .arg("$anycmp($anymul[1u](x, y))")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-query failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("cmp: bits[1] = eq("),
+        "unexpected ir-query output: {}",
+        stdout
+    );
+}
