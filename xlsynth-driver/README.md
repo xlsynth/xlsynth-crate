@@ -686,7 +686,7 @@ if any engine finds a counter-example. Errors are printed to **stderr**.
 
 ### `aig-equiv`
 
-Checks two **ASCII AIGER (`.aag`)** files for functional equivalence using the
+Checks two **AIGER (`.aag` or `.aig`)** files for functional equivalence using the
 available engines. The files are parsed into GateFn form using
 `xlsynth-g8r`'s strict AIGER loader and then proven equivalent with the same
 engines as `g8r-equiv`. A JSON report is written to **stdout** and the command
@@ -697,6 +697,12 @@ Example:
 
 ```shell
 xlsynth-driver aig-equiv lhs.aag rhs.aag
+```
+
+Binary AIGER is also accepted:
+
+```shell
+xlsynth-driver aig-equiv lhs.aig rhs.aig
 ```
 
 ### `dslx-equiv`

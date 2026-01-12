@@ -9,6 +9,7 @@ use std::process::Command;
 use xlsynth::IrBits;
 use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
+use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::gate_fn_equiv_report::{EngineResult, EquivReport};
 
@@ -35,6 +36,17 @@ fn write_aiger_file(
     let aiger = emit_aiger(gate_fn, true).expect("emit_aiger should succeed");
     let path = temp_dir.path().join(file_name);
     std::fs::write(&path, aiger).expect("failed to write aiger file");
+    path
+}
+
+fn write_aiger_binary_file(
+    temp_dir: &tempfile::TempDir,
+    file_name: &str,
+    gate_fn: &GateFn,
+) -> std::path::PathBuf {
+    let aiger = emit_aiger_binary(gate_fn, true).expect("emit_aiger_binary should succeed");
+    let path = temp_dir.path().join(file_name);
+    std::fs::write(&path, aiger).expect("failed to write binary aiger file");
     path
 }
 
@@ -7736,6 +7748,32 @@ fn test_aig_equiv_reports_non_equivalent_designs() {
             .any(|res| !matches!(res, EngineResult::Equiv)),
         "expected at least one engine to report inequivalence: {:?}",
         report
+    );
+}
+
+#[test]
+fn test_aig_equiv_accepts_binary_aiger() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_gate = two_input_gate_fn("and_lhs", |a, b, gb| gb.add_and_binary(a, b));
+    let rhs_gate = two_input_gate_fn("and_rhs", |a, b, gb| gb.add_and_binary(b, a));
+    let lhs_aig = write_aiger_binary_file(&temp_dir, "lhs.aig", &lhs_gate);
+    let rhs_aig = write_aiger_binary_file(&temp_dir, "rhs.aig", &rhs_gate);
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("aig-equiv")
+        .arg(lhs_aig.to_str().unwrap())
+        .arg(rhs_aig.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig-equiv failed on binary AIGER: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

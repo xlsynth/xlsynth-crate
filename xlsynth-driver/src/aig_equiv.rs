@@ -4,12 +4,12 @@ use std::path::Path;
 
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_g8r::aig::GateFn;
-use xlsynth_g8r::aig_serdes::load_aiger::load_aiger_from_path;
+use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gate_fn_equiv_report;
 
 fn load_aig_gate_fn(path: &Path) -> Result<GateFn, String> {
-    load_aiger_from_path(path, GateBuilderOptions::no_opt())
+    load_aiger_auto_from_path(path, GateBuilderOptions::no_opt())
         .map(|res| res.gate_fn)
         .map_err(|e| format!("failed to load {}: {}", path.display(), e))
 }
