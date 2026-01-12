@@ -449,15 +449,30 @@ Query expression basics:
 
 - `$anycmp(...)` matches any comparison op (e.g., `eq`, `ugt`, `slt`).
 - `$anymul(...)` matches any multiply op (e.g., `umul`, `smul`, `umulp`, `smulp`).
+- Concrete operator matchers like `add(...)`, `sub(...)`, `and(...)`, etc. match nodes with that exact IR operator name.
 - Placeholders like `x` and `y` match any node (repeated placeholders must bind the same node).
 - The special placeholder `_` matches any node but does not create a binding (wildcard).
 - User-count constraints can be added as `[Nu]` (e.g., `[1u]` means exactly one user in the function).
 - `$anycmp` and `$anymul` are binary operators, so they always take two arguments. Use `_` for a wildcard position.
+- `literal(L)` matches a `literal` node and binds `L` to the literal **value** (reusing `L` requires the same literal value, even if it is a different literal node).
+- `literal[pow2](L)` additionally constrains the literal to be a strict power-of-two bits value (exactly one bit set; `0` does not match).
 
 Example:
 
 ```shell
 xlsynth-driver ir-query my_pkg.ir '$anycmp($anymul[1u](x, y), _)'
+```
+
+Example: match subtraction of an addition with a repeated constant:
+
+```shell
+xlsynth-driver ir-query my_pkg.ir 'sub(add(x, literal(L)), literal(L))'
+```
+
+Example: find comparisons against a power-of-two constant:
+
+```shell
+xlsynth-driver ir-query my_pkg.ir '$anycmp(x, literal[pow2](L))'
 ```
 
 ### `ir-structural-similarity`

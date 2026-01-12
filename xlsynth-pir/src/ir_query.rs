@@ -5,6 +5,8 @@
 use crate::ir;
 use crate::ir_utils;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use xlsynth::IrValue;
 
 mod parser;
 
@@ -23,10 +25,45 @@ pub struct MatcherExpr {
     pub args: Vec<QueryExpr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatcherKind {
     AnyCmp,
     AnyMul,
+    OpName(String),
+    Literal { predicate: Option<LiteralPredicate> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiteralPredicate {
+    Pow2,
+}
+
+impl MatcherKind {
+    pub fn from_opname_and_predicate(
+        opname: &str,
+        predicate: Option<String>,
+    ) -> Result<Self, String> {
+        if opname == "literal" {
+            let predicate = match predicate.as_deref() {
+                None => None,
+                Some("pow2") => Some(LiteralPredicate::Pow2),
+                Some(other) => {
+                    return Err(format!(
+                        "unknown literal predicate [{}]; supported: [pow2]",
+                        other
+                    ));
+                }
+            };
+            Ok(MatcherKind::Literal { predicate })
+        } else if let Some(pred) = predicate {
+            Err(format!(
+                "unknown bracket clause [{}] for operator {}; only user-count constraints like [1u] are supported",
+                pred, opname
+            ))
+        } else {
+            Ok(MatcherKind::OpName(opname.to_string()))
+        }
+    }
 }
 
 /// Parses a query expression string into an AST.
@@ -54,14 +91,20 @@ pub fn find_matching_nodes(f: &ir::Fn, query: &QueryExpr) -> Vec<ir::NodeRef> {
     matches
 }
 
-type Bindings = HashMap<String, ir::NodeRef>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Binding {
+    Node(ir::NodeRef),
+    LiteralValue(IrValue),
+}
+
+type Bindings = HashMap<String, Binding>;
 
 /// Returns the set of binding environments that satisfy `expr` at `node_ref`,
 /// starting from `bindings`.
 fn match_solutions(
     expr: &QueryExpr,
     f: &ir::Fn,
-    users: &HashMap<ir::NodeRef, std::collections::HashSet<ir::NodeRef>>,
+    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
     node_ref: ir::NodeRef,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
@@ -72,16 +115,15 @@ fn match_solutions(
                 return vec![bindings.clone()];
             }
             match bindings.get(name) {
-                Some(existing) => {
-                    if *existing == node_ref {
+                Some(existing) => match existing {
+                    Binding::Node(existing_node_ref) if *existing_node_ref == node_ref => {
                         vec![bindings.clone()]
-                    } else {
-                        vec![]
                     }
-                }
+                    _ => vec![],
+                },
                 None => {
                     let mut out = bindings.clone();
-                    out.insert(name.clone(), node_ref);
+                    out.insert(name.clone(), Binding::Node(node_ref));
                     vec![out]
                 }
             }
@@ -97,8 +139,79 @@ fn match_solutions(
                     return vec![];
                 }
             }
+            if let MatcherKind::Literal { predicate } = matcher.kind {
+                return match_literal_solutions(predicate, &matcher.args, &node.payload, bindings);
+            }
             let operands = ir_utils::operands(&node.payload);
             match_args_solutions(&matcher.args, &operands, f, users, bindings)
+        }
+    }
+}
+
+fn match_literal_solutions(
+    predicate: Option<LiteralPredicate>,
+    args: &[QueryExpr],
+    payload: &ir::NodePayload,
+    bindings: &Bindings,
+) -> Vec<Bindings> {
+    let ir::NodePayload::Literal(value) = payload else {
+        return vec![];
+    };
+
+    if let Some(pred) = predicate {
+        if !literal_satisfies_predicate(pred, value) {
+            return vec![];
+        }
+    }
+
+    if args.len() != 1 {
+        return vec![];
+    }
+
+    let QueryExpr::Placeholder(name) = &args[0] else {
+        return vec![];
+    };
+
+    if name == "_" {
+        // Wildcard literal argument: match any literal value without binding.
+        return vec![bindings.clone()];
+    }
+
+    match bindings.get(name) {
+        Some(existing) => match existing {
+            Binding::LiteralValue(existing_value) if *existing_value == *value => {
+                vec![bindings.clone()]
+            }
+            _ => vec![],
+        },
+        None => {
+            let mut out = bindings.clone();
+            out.insert(name.clone(), Binding::LiteralValue(value.clone()));
+            vec![out]
+        }
+    }
+}
+
+fn literal_satisfies_predicate(pred: LiteralPredicate, value: &IrValue) -> bool {
+    match pred {
+        LiteralPredicate::Pow2 => {
+            // Strict power-of-two: exactly one bit set; zero does not match.
+            let Ok(bits) = value.to_bits() else {
+                return false;
+            };
+            let mut set_bits: usize = 0;
+            for i in 0..bits.get_bit_count() {
+                let Ok(bit) = bits.get_bit(i) else {
+                    return false;
+                };
+                if bit {
+                    set_bits += 1;
+                    if set_bits > 1 {
+                        return false;
+                    }
+                }
+            }
+            set_bits == 1
         }
     }
 }
@@ -108,7 +221,7 @@ fn match_args_solutions(
     args: &[QueryExpr],
     operands: &[ir::NodeRef],
     f: &ir::Fn,
-    users: &HashMap<ir::NodeRef, std::collections::HashSet<ir::NodeRef>>,
+    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
     if args.is_empty() {
@@ -164,6 +277,8 @@ fn matches_kind(kind: &MatcherKind, payload: &ir::NodePayload) -> bool {
             ),
             _ => false,
         },
+        MatcherKind::OpName(opname) => payload.get_operator() == opname,
+        MatcherKind::Literal { .. } => matches!(payload, ir::NodePayload::Literal(_)),
     }
 }
 
@@ -180,6 +295,19 @@ mod tests {
             panic!("expected matcher");
         };
         assert_eq!(matcher.kind, MatcherKind::AnyCmp);
+        assert_eq!(matcher.args.len(), 2);
+    }
+
+    /// Verifies the parser accepts concrete operator matchers like
+    /// `sub(add(...), ...)` as well as literal matchers with value binders
+    /// like `literal(L)`.
+    #[test]
+    fn parse_operator_and_literal_query() {
+        let query = parse_query("sub(add(x, literal(L)), literal(L))").unwrap();
+        let QueryExpr::Matcher(matcher) = query else {
+            panic!("expected matcher");
+        };
+        assert_eq!(matcher.kind, MatcherKind::OpName("sub".to_string()));
         assert_eq!(matcher.args.len(), 2);
     }
 
@@ -200,6 +328,52 @@ fn main(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "cmp");
+    }
+
+    /// Verifies `literal(L)` binds literal *values* (not node identity), so two
+    /// distinct literal nodes with the same value can satisfy a shared binder.
+    #[test]
+    fn find_matches_with_literal_value_binding() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> bits[8] {
+  literal.2: bits[8] = literal(value=5, id=2)
+  literal.3: bits[8] = literal(value=5, id=3)
+  add.4: bits[8] = add(x, literal.2, id=4)
+  ret out: bits[8] = sub(add.4, literal.3, id=5)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+        let query = parse_query("sub(add(x, literal(L)), literal(L))").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "out");
+    }
+
+    /// Verifies `literal[pow2](L)` enforces a strict power-of-two constraint:
+    /// exactly one bit set (so `0` does not match).
+    #[test]
+    fn find_matches_anycmp_with_literal_pow2_predicate() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> bits[1] {
+  pow2: bits[8] = literal(value=8, id=2)
+  non: bits[8] = literal(value=6, id=3)
+  cmp_pow2: bits[1] = eq(x, pow2, id=4)
+  ret cmp_non: bits[1] = eq(x, non, id=5)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+        let query = parse_query("$anycmp(x, literal[pow2](L))").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "cmp_pow2");
     }
 
     #[test]

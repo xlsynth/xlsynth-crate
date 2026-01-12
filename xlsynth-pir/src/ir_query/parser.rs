@@ -37,7 +37,7 @@ impl<'a> QueryParser<'a> {
                 self.expect('(')?;
                 let args = self.parse_args()?;
                 self.expect(')')?;
-                let expected_arity = expected_arity(kind);
+                let expected_arity = expected_arity(&kind);
                 if args.len() != expected_arity {
                     return Err(self.error(&format!(
                         "matcher ${} expects {} arguments; got {}. Use '_' as a wildcard argument if needed",
@@ -53,8 +53,39 @@ impl<'a> QueryParser<'a> {
                 }))
             }
             Some(_) => {
-                let ident = self.parse_ident("placeholder")?;
-                Ok(QueryExpr::Placeholder(ident))
+                let ident = self.parse_ident("placeholder or operator")?;
+                self.skip_ws();
+
+                // If an identifier is followed by a bracket clause and/or an argument
+                // list, interpret it as an operator matcher (e.g. `add(x, y)`).
+                //
+                // Otherwise it is a node placeholder binding (e.g. `x`, `y`, `_`).
+                if self.peek() != Some(b'[') && self.peek() != Some(b'(') {
+                    return Ok(QueryExpr::Placeholder(ident));
+                }
+
+                let mut user_count: Option<usize> = None;
+                let mut predicate: Option<String> = None;
+                if self.peek() == Some(b'[') {
+                    match self.parse_bracket_clause()? {
+                        BracketClause::UserCount(n) => user_count = Some(n),
+                        BracketClause::Ident(s) => predicate = Some(s),
+                    }
+                }
+
+                self.skip_ws();
+                self.expect('(')?;
+                let args = self.parse_args()?;
+                self.expect(')')?;
+
+                let kind = MatcherKind::from_opname_and_predicate(&ident, predicate)
+                    .map_err(|e| self.error(&e))?;
+
+                Ok(QueryExpr::Matcher(MatcherExpr {
+                    kind,
+                    user_count,
+                    args,
+                }))
             }
             None => Err(self.error("expected query expression")),
         }
@@ -107,6 +138,31 @@ impl<'a> QueryParser<'a> {
         self.skip_ws();
         self.expect(']')?;
         Ok(number)
+    }
+
+    fn parse_bracket_clause(&mut self) -> Result<BracketClause, String> {
+        self.expect('[')?;
+        self.skip_ws();
+        match self.peek() {
+            Some(c) if c.is_ascii_digit() => {
+                let number = self.parse_number("user count")?;
+                self.skip_ws();
+                if self.peek() != Some(b'u') {
+                    return Err(self.error("expected user count suffix 'u'"));
+                }
+                self.bump();
+                self.skip_ws();
+                self.expect(']')?;
+                Ok(BracketClause::UserCount(number))
+            }
+            Some(_) => {
+                let ident = self.parse_ident("bracket clause")?;
+                self.skip_ws();
+                self.expect(']')?;
+                Ok(BracketClause::Ident(ident))
+            }
+            None => Err(self.error("expected bracket clause")),
+        }
     }
 
     fn parse_number(&mut self, ctx: &str) -> Result<usize, String> {
@@ -162,8 +218,14 @@ impl<'a> QueryParser<'a> {
     }
 }
 
-fn expected_arity(kind: MatcherKind) -> usize {
+enum BracketClause {
+    UserCount(usize),
+    Ident(String),
+}
+
+fn expected_arity(kind: &MatcherKind) -> usize {
     match kind {
         MatcherKind::AnyCmp | MatcherKind::AnyMul => 2,
+        _ => 0,
     }
 }
