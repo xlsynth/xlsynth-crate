@@ -105,6 +105,32 @@ fn should_skip_independent_op_stats(payload: &ir::NodePayload) -> bool {
     }
 }
 
+impl Into<crate::result_proto::Ir2GatesSummaryStats> for Ir2GatesSummaryStats {
+    fn into(self) -> crate::result_proto::Ir2GatesSummaryStats {
+        crate::result_proto::Ir2GatesSummaryStats {
+            live_nodes: self.live_nodes as u64,
+            deepest_path: self.deepest_path as u64,
+            fanout_histogram: self
+                .fanout_histogram
+                .into_iter()
+                .map(|(k, v)| (k as u64, v as u64))
+                .collect(),
+            toggle_stats: self.toggle_stats.map(Into::into),
+            toggle_transitions: self.toggle_transitions.map(|x| x as u64),
+            logical_effort_deepest_path_min_delay: self.logical_effort_deepest_path_min_delay,
+            graph_logical_effort_worst_case_delay: self
+                .graph_logical_effort_worst_case_delay
+                .into(),
+            fraig_did_converge: self.fraig_did_converge.map(Into::into),
+            fraig_iteration_stats: self.fraig_iteration_stats.map_or(vec![], |x| {
+                x.into_iter()
+                    .map(|v| v.into())
+                    .collect::<Vec<crate::result_proto::FraigIterationStat>>()
+            }),
+        }
+    }
+}
+
 pub struct Options {
     pub check_equivalence: bool,
     pub fold: bool,
