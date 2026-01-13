@@ -183,6 +183,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
     // eprintln!("{got:#?}");
     #[rustfmt::skip]
     let want: &[CmpRow] = &[
+        // eq
         CmpRow { cmp: "eq", rhs: "param", live_nodes: 47, deepest_path: 6 },
         CmpRow { cmp: "eq", rhs: "0", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "eq", rhs: "all_ones", live_nodes: 15, deepest_path: 4 },
@@ -202,6 +203,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "eq", rhs: "pow2m1_6", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "eq", rhs: "pow2m1_7", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "eq", rhs: "pow2m1_8", live_nodes: 15, deepest_path: 4 },
+        // ne
         CmpRow { cmp: "ne", rhs: "param", live_nodes: 47, deepest_path: 6 },
         CmpRow { cmp: "ne", rhs: "0", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ne", rhs: "all_ones", live_nodes: 15, deepest_path: 4 },
@@ -221,6 +223,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "ne", rhs: "pow2m1_6", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ne", rhs: "pow2m1_7", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ne", rhs: "pow2m1_8", live_nodes: 15, deepest_path: 4 },
+        // ult
         CmpRow { cmp: "ult", rhs: "param", live_nodes: 63, deepest_path: 10 },
         CmpRow { cmp: "ult", rhs: "0", live_nodes: 1, deepest_path: 1 },
         CmpRow { cmp: "ult", rhs: "all_ones", live_nodes: 33, deepest_path: 8 },
@@ -240,6 +243,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "ult", rhs: "pow2m1_6", live_nodes: 30, deepest_path: 8 },
         CmpRow { cmp: "ult", rhs: "pow2m1_7", live_nodes: 32, deepest_path: 8 },
         CmpRow { cmp: "ult", rhs: "pow2m1_8", live_nodes: 33, deepest_path: 8 },
+        // ule
         CmpRow { cmp: "ule", rhs: "param", live_nodes: 69, deepest_path: 11 },
         CmpRow { cmp: "ule", rhs: "0", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ule", rhs: "all_ones", live_nodes: 37, deepest_path: 9 },
@@ -259,6 +263,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "ule", rhs: "pow2m1_6", live_nodes: 34, deepest_path: 9 },
         CmpRow { cmp: "ule", rhs: "pow2m1_7", live_nodes: 36, deepest_path: 9 },
         CmpRow { cmp: "ule", rhs: "pow2m1_8", live_nodes: 37, deepest_path: 9 },
+        // ugt
         CmpRow { cmp: "ugt", rhs: "param", live_nodes: 63, deepest_path: 10 },
         CmpRow { cmp: "ugt", rhs: "0", live_nodes: 33, deepest_path: 8 },
         CmpRow { cmp: "ugt", rhs: "all_ones", live_nodes: 1, deepest_path: 1 },
@@ -278,6 +283,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "ugt", rhs: "pow2m1_6", live_nodes: 4, deepest_path: 3 },
         CmpRow { cmp: "ugt", rhs: "pow2m1_7", live_nodes: 1, deepest_path: 1 },
         CmpRow { cmp: "ugt", rhs: "pow2m1_8", live_nodes: 1, deepest_path: 1 },
+        // uge
         CmpRow { cmp: "uge", rhs: "param", live_nodes: 69, deepest_path: 11 },
         CmpRow { cmp: "uge", rhs: "0", live_nodes: 37, deepest_path: 9 },
         CmpRow { cmp: "uge", rhs: "all_ones", live_nodes: 15, deepest_path: 4 },
@@ -297,6 +303,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "uge", rhs: "pow2m1_6", live_nodes: 18, deepest_path: 5 },
         CmpRow { cmp: "uge", rhs: "pow2m1_7", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "uge", rhs: "pow2m1_8", live_nodes: 15, deepest_path: 4 },
+        // slt
         CmpRow { cmp: "slt", rhs: "param", live_nodes: 59, deepest_path: 24 },
         CmpRow { cmp: "slt", rhs: "0", live_nodes: 4, deepest_path: 3 },
         CmpRow { cmp: "slt", rhs: "all_ones", live_nodes: 20, deepest_path: 11 },
@@ -316,6 +323,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "slt", rhs: "pow2m1_6", live_nodes: 22, deepest_path: 12 },
         CmpRow { cmp: "slt", rhs: "pow2m1_7", live_nodes: 20, deepest_path: 11 },
         CmpRow { cmp: "slt", rhs: "pow2m1_8", live_nodes: 20, deepest_path: 11 },
+        // sle
         CmpRow { cmp: "sle", rhs: "param", live_nodes: 81, deepest_path: 25 },
         CmpRow { cmp: "sle", rhs: "0", live_nodes: 19, deepest_path: 5 },
         CmpRow { cmp: "sle", rhs: "all_ones", live_nodes: 27, deepest_path: 12 },
@@ -335,6 +343,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "sle", rhs: "pow2m1_6", live_nodes: 29, deepest_path: 13 },
         CmpRow { cmp: "sle", rhs: "pow2m1_7", live_nodes: 27, deepest_path: 12 },
         CmpRow { cmp: "sle", rhs: "pow2m1_8", live_nodes: 27, deepest_path: 12 },
+        // sgt
         CmpRow { cmp: "sgt", rhs: "param", live_nodes: 81, deepest_path: 25 },
         CmpRow { cmp: "sgt", rhs: "0", live_nodes: 19, deepest_path: 5 },
         CmpRow { cmp: "sgt", rhs: "all_ones", live_nodes: 27, deepest_path: 12 },
@@ -354,6 +363,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "sgt", rhs: "pow2m1_6", live_nodes: 29, deepest_path: 13 },
         CmpRow { cmp: "sgt", rhs: "pow2m1_7", live_nodes: 27, deepest_path: 12 },
         CmpRow { cmp: "sgt", rhs: "pow2m1_8", live_nodes: 27, deepest_path: 12 },
+        // sge
         CmpRow { cmp: "sge", rhs: "param", live_nodes: 82, deepest_path: 26 },
         CmpRow { cmp: "sge", rhs: "0", live_nodes: 20, deepest_path: 6 },
         CmpRow { cmp: "sge", rhs: "all_ones", live_nodes: 28, deepest_path: 13 },
