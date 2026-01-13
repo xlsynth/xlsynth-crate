@@ -1159,28 +1159,41 @@ fn try_simplify_cmp_literal_rhs(
             } else if rhs_is_all_ones {
                 Some(gb.get_true())
             } else if let Some(k) = get_pow2_lsb_index(rhs_bits) {
-                // x <= (1<<k) iff upper bits above k are zero and (bit_k is 0 or low bits are
-                // zero).
-                //
-                // This captures the fact that with upper bits = 0, values are in [0, 2^(k+1)-1]
-                // and the only disallowed case is bit_k=1 with any lower bit set.
                 assert!(k < bit_count);
-                let upper = lhs_bits.get_lsb_slice(k + 1, bit_count.saturating_sub(k + 1));
-                let upper_is_zero = if upper.get_bit_count() == 0 {
-                    gb.get_true()
+                // For small k, the (upper==0) & (!bit_k | low==0) form is cheaper than building
+                // a full equality check. For larger k, this form adds extra
+                // reduction depth, so we use (lt | eq) instead.
+                if k <= 4 {
+                    // x <= (1<<k) iff upper bits above k are zero and (bit_k is 0 or low bits are
+                    // zero).
+                    //
+                    // This captures the fact that with upper bits = 0, values are in [0, 2^(k+1)-1]
+                    // and the only disallowed case is bit_k=1 with any lower bit set.
+                    let upper = lhs_bits.get_lsb_slice(k + 1, bit_count.saturating_sub(k + 1));
+                    let upper_is_zero = if upper.get_bit_count() == 0 {
+                        gb.get_true()
+                    } else {
+                        gb.add_ez(&upper, ReductionKind::Tree)
+                    };
+                    let bit_k = *lhs_bits.get_lsb(k);
+                    let low = lhs_bits.get_lsb_slice(0, k);
+                    let low_is_zero = if low.get_bit_count() == 0 {
+                        gb.get_true()
+                    } else {
+                        gb.add_ez(&low, ReductionKind::Tree)
+                    };
+                    let not_bit_k = gb.add_not(bit_k);
+                    let cond = gb.add_or_binary(not_bit_k, low_is_zero);
+                    Some(gb.add_and_binary(upper_is_zero, cond))
                 } else {
-                    gb.add_ez(&upper, ReductionKind::Tree)
-                };
-                let bit_k = *lhs_bits.get_lsb(k);
-                let low = lhs_bits.get_lsb_slice(0, k);
-                let low_is_zero = if low.get_bit_count() == 0 {
-                    gb.get_true()
-                } else {
-                    gb.add_ez(&low, ReductionKind::Tree)
-                };
-                let not_bit_k = gb.add_not(bit_k);
-                let cond = gb.add_or_binary(not_bit_k, low_is_zero);
-                Some(gb.add_and_binary(upper_is_zero, cond))
+                    // x <= (1<<k)  iff  (x < (1<<k)) OR (x == (1<<k))
+                    let lt = {
+                        let slice = lhs_bits.get_lsb_slice(k, bit_count - k);
+                        gb.add_ez(&slice, ReductionKind::Tree)
+                    };
+                    let eq = gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree);
+                    Some(gb.add_or_binary(lt, eq))
+                }
             } else if let Some(k) = get_pow2_minus1_k(rhs_bits) {
                 let slice = lhs_bits.get_lsb_slice(k, bit_count - k);
                 Some(gb.add_ez(&slice, ReductionKind::Tree))
@@ -1198,21 +1211,19 @@ fn try_simplify_cmp_literal_rhs(
                 // are non-zero).
                 assert!(k < bit_count);
                 let upper = lhs_bits.get_lsb_slice(k + 1, bit_count.saturating_sub(k + 1));
-                let upper_is_zero = if upper.get_bit_count() == 0 {
-                    gb.get_true()
+                let upper_is_nonzero = if upper.get_bit_count() == 0 {
+                    gb.get_false()
                 } else {
-                    gb.add_ez(&upper, ReductionKind::Tree)
+                    gb.add_or_reduce(&upper, ReductionKind::Tree)
                 };
-                let upper_is_nonzero = gb.add_not(upper_is_zero);
 
                 let bit_k = *lhs_bits.get_lsb(k);
                 let low = lhs_bits.get_lsb_slice(0, k);
-                let low_is_zero = if low.get_bit_count() == 0 {
-                    gb.get_true()
+                let low_is_nonzero = if low.get_bit_count() == 0 {
+                    gb.get_false()
                 } else {
-                    gb.add_ez(&low, ReductionKind::Tree)
+                    gb.add_or_reduce(&low, ReductionKind::Tree)
                 };
-                let low_is_nonzero = gb.add_not(low_is_zero);
                 let term2 = gb.add_and_binary(bit_k, low_is_nonzero);
                 Some(gb.add_or_binary(upper_is_nonzero, term2))
             } else if let Some(k) = get_pow2_minus1_k(rhs_bits) {
@@ -1263,7 +1274,6 @@ fn try_simplify_cmp_literal_rhs(
             } else if is_int_max(rhs_bits) {
                 Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
             } else if is_non_negative_signed(rhs_bits) {
-                let nonneg = gb.add_not(msb);
                 let u = try_simplify_cmp_literal_rhs(
                     gb,
                     ir::Binop::Ult,
@@ -1274,8 +1284,10 @@ fn try_simplify_cmp_literal_rhs(
                 .unwrap_or_else(|| {
                     gatify_ucmp_fallback(gb, 0, ir::Binop::Ult, lhs_bits, rhs_bits_vec)
                 });
-                let nonneg_and_u = gb.add_and_binary(nonneg, u);
-                Some(gb.add_or_binary(msb, nonneg_and_u))
+                // If rhs is non-negative, then for negative lhs (msb==1) the unsigned
+                // comparison is necessarily false, so we can drop the nonneg
+                // guard.
+                Some(gb.add_or_binary(msb, u))
             } else {
                 None
             }
@@ -1292,7 +1304,6 @@ fn try_simplify_cmp_literal_rhs(
             } else if is_int_max(rhs_bits) {
                 Some(gb.get_true())
             } else if is_non_negative_signed(rhs_bits) {
-                let nonneg = gb.add_not(msb);
                 let u = try_simplify_cmp_literal_rhs(
                     gb,
                     ir::Binop::Ule,
@@ -1303,8 +1314,10 @@ fn try_simplify_cmp_literal_rhs(
                 .unwrap_or_else(|| {
                     gatify_ucmp_fallback(gb, 0, ir::Binop::Ule, lhs_bits, rhs_bits_vec)
                 });
-                let nonneg_and_u = gb.add_and_binary(nonneg, u);
-                Some(gb.add_or_binary(msb, nonneg_and_u))
+                // If rhs is non-negative, then for negative lhs (msb==1) the unsigned
+                // comparison is necessarily false, so we can drop the nonneg
+                // guard.
+                Some(gb.add_or_binary(msb, u))
             } else {
                 None
             }
