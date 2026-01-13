@@ -2,7 +2,7 @@
 
 //! Parser for the lightweight IR query language.
 
-use super::{MatcherExpr, MatcherKind, QueryExpr};
+use super::{MatcherExpr, MatcherKind, NamedArg, NamedArgValue, QueryExpr};
 
 pub struct QueryParser<'a> {
     bytes: &'a [u8],
@@ -35,22 +35,30 @@ impl<'a> QueryParser<'a> {
                 };
                 self.skip_ws();
                 self.expect('(')?;
-                let args = self.parse_args()?;
+                let parsed_args = self.parse_args()?;
                 self.expect(')')?;
+                if !parsed_args.named_args.is_empty() {
+                    return Err(self.error("matchers do not support named arguments"));
+                }
                 let expected_arity = expected_arity(&kind);
-                if args.len() != expected_arity {
+                if parsed_args.args.len() != expected_arity {
                     return Err(self.error(&format!(
                         "matcher ${} expects {} arguments; got {}. Use '_' as a wildcard argument if needed",
                         ident,
                         expected_arity,
-                        args.len()
+                        parsed_args.args.len()
                     )));
                 }
                 Ok(QueryExpr::Matcher(MatcherExpr {
                     kind,
                     user_count,
-                    args,
+                    args: parsed_args.args,
+                    named_args: parsed_args.named_args,
                 }))
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let number = self.parse_u64("number")?;
+                Ok(QueryExpr::Number(number))
             }
             Some(_) => {
                 let ident = self.parse_ident("placeholder or operator")?;
@@ -75,7 +83,7 @@ impl<'a> QueryParser<'a> {
 
                 self.skip_ws();
                 self.expect('(')?;
-                let args = self.parse_args()?;
+                let parsed_args = self.parse_args()?;
                 self.expect(')')?;
 
                 let kind = MatcherKind::from_opname_and_predicate(&ident, predicate)
@@ -84,7 +92,8 @@ impl<'a> QueryParser<'a> {
                 Ok(QueryExpr::Matcher(MatcherExpr {
                     kind,
                     user_count,
-                    args,
+                    args: parsed_args.args,
+                    named_args: parsed_args.named_args,
                 }))
             }
             None => Err(self.error("expected query expression")),
@@ -105,15 +114,20 @@ impl<'a> QueryParser<'a> {
         }
     }
 
-    fn parse_args(&mut self) -> Result<Vec<QueryExpr>, String> {
+    fn parse_args(&mut self) -> Result<ParsedArgs, String> {
         let mut args = Vec::new();
+        let mut named_args = Vec::new();
         self.skip_ws();
         if self.peek() == Some(b')') {
-            return Ok(args);
+            return Ok(ParsedArgs { args, named_args });
         }
         loop {
-            let expr = self.parse_expr()?;
-            args.push(expr);
+            if let Some(named_arg) = self.parse_named_arg()? {
+                named_args.push(named_arg);
+            } else {
+                let expr = self.parse_expr()?;
+                args.push(expr);
+            }
             self.skip_ws();
             match self.peek() {
                 Some(b',') => {
@@ -123,7 +137,7 @@ impl<'a> QueryParser<'a> {
                 _ => return Err(self.error("expected ',' or ')'")),
             }
         }
-        Ok(args)
+        Ok(ParsedArgs { args, named_args })
     }
 
     fn parse_user_constraint(&mut self) -> Result<usize, String> {
@@ -179,6 +193,20 @@ impl<'a> QueryParser<'a> {
             .map_err(|e| self.error(&format!("invalid {}: {}", ctx, e)))
     }
 
+    fn parse_u64(&mut self, ctx: &str) -> Result<u64, String> {
+        let start = self.pos;
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+            self.bump();
+        }
+        if start == self.pos {
+            return Err(self.error(&format!("expected {}", ctx)));
+        }
+        let s = std::str::from_utf8(&self.bytes[start..self.pos])
+            .expect("numeric slice must be valid UTF-8");
+        s.parse::<u64>()
+            .map_err(|e| self.error(&format!("invalid {}: {}", ctx, e)))
+    }
+
     fn parse_ident(&mut self, ctx: &str) -> Result<String, String> {
         self.skip_ws();
         let start = self.pos;
@@ -216,11 +244,43 @@ impl<'a> QueryParser<'a> {
     fn error(&self, msg: &str) -> String {
         format!("{} at byte {}", msg, self.pos)
     }
+
+    fn parse_named_arg(&mut self) -> Result<Option<NamedArg>, String> {
+        self.skip_ws();
+        let start = self.pos;
+        match self.peek() {
+            Some(c) if c.is_ascii_alphabetic() || c == b'_' => {}
+            _ => return Ok(None),
+        }
+        let ident = self.parse_ident("named argument")?;
+        self.skip_ws();
+        if self.peek() != Some(b'=') {
+            self.pos = start;
+            return Ok(None);
+        }
+        self.bump();
+        self.skip_ws();
+        let value_ident = self.parse_ident("boolean literal")?;
+        let value = match value_ident.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => return Err(self.error("expected boolean literal")),
+        };
+        Ok(Some(NamedArg {
+            name: ident,
+            value: NamedArgValue::Bool(value),
+        }))
+    }
 }
 
 enum BracketClause {
     UserCount(usize),
     Ident(String),
+}
+
+struct ParsedArgs {
+    args: Vec<QueryExpr>,
+    named_args: Vec<NamedArg>,
 }
 
 fn expected_arity(kind: &MatcherKind) -> usize {
