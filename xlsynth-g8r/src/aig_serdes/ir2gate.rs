@@ -938,6 +938,362 @@ pub enum CmpKind {
     Gt,
 }
 
+fn literal_bits_if_bits_node(f: &ir::Fn, node_ref: ir::NodeRef) -> Option<xlsynth::IrBits> {
+    match &f.get_node(node_ref).payload {
+        ir::NodePayload::Literal(literal) => literal.to_bits().ok(),
+        _ => None,
+    }
+}
+
+fn is_all_zeros(bits: &xlsynth::IrBits) -> bool {
+    for i in 0..bits.get_bit_count() {
+        if bits.get_bit(i).unwrap() {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_all_ones(bits: &xlsynth::IrBits) -> bool {
+    for i in 0..bits.get_bit_count() {
+        if !bits.get_bit(i).unwrap() {
+            return false;
+        }
+    }
+    true
+}
+
+fn commute_cmp_binop(binop: ir::Binop) -> Option<ir::Binop> {
+    match binop {
+        ir::Binop::Eq => Some(ir::Binop::Eq),
+        ir::Binop::Ne => Some(ir::Binop::Ne),
+
+        ir::Binop::Ult => Some(ir::Binop::Ugt),
+        ir::Binop::Ule => Some(ir::Binop::Uge),
+        ir::Binop::Ugt => Some(ir::Binop::Ult),
+        ir::Binop::Uge => Some(ir::Binop::Ule),
+
+        ir::Binop::Slt => Some(ir::Binop::Sgt),
+        ir::Binop::Sle => Some(ir::Binop::Sge),
+        ir::Binop::Sgt => Some(ir::Binop::Slt),
+        ir::Binop::Sge => Some(ir::Binop::Sle),
+
+        _ => None,
+    }
+}
+
+struct NormalizedCmpLiteralRhs {
+    binop: ir::Binop,
+    lhs: ir::NodeRef,
+    rhs: ir::NodeRef, // literal node
+    rhs_bits: xlsynth::IrBits,
+}
+
+fn normalize_cmp_literal_rhs(
+    f: &ir::Fn,
+    binop: ir::Binop,
+    a: ir::NodeRef,
+    b: ir::NodeRef,
+) -> Option<NormalizedCmpLiteralRhs> {
+    let b_lit = literal_bits_if_bits_node(f, b);
+    let a_lit = literal_bits_if_bits_node(f, a);
+
+    match (a_lit, b_lit) {
+        (None, Some(rhs_bits)) => Some(NormalizedCmpLiteralRhs {
+            binop,
+            lhs: a,
+            rhs: b,
+            rhs_bits,
+        }),
+        (Some(rhs_bits), None) => {
+            let binop = commute_cmp_binop(binop)?;
+            Some(NormalizedCmpLiteralRhs {
+                binop,
+                lhs: b,
+                rhs: a,
+                rhs_bits,
+            })
+        }
+        // If both are literals, we expect folding to have handled it already.
+        (Some(_), Some(_)) => None,
+        (None, None) => None,
+    }
+}
+
+fn try_simplify_cmp_literal_rhs(
+    gb: &mut GateBuilder,
+    binop: ir::Binop,
+    lhs_bits: &AigBitVector,
+    rhs_bits_vec: &AigBitVector,
+    rhs_bits: &xlsynth::IrBits,
+) -> Option<AigOperand> {
+    assert_eq!(lhs_bits.get_bit_count(), rhs_bits_vec.get_bit_count());
+    if lhs_bits.get_bit_count() == 0 {
+        return None;
+    }
+    let bit_count = lhs_bits.get_bit_count();
+    assert_eq!(rhs_bits.get_bit_count(), bit_count);
+
+    let rhs_is_zero = is_all_zeros(rhs_bits);
+    let rhs_is_all_ones = is_all_ones(rhs_bits);
+
+    match binop {
+        // unsigned comparisons
+        ir::Binop::Ult => {
+            if rhs_is_zero {
+                Some(gb.get_false())
+            } else if rhs_is_all_ones {
+                Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else {
+                None
+            }
+        }
+        ir::Binop::Ule => {
+            if rhs_is_zero {
+                Some(gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else if rhs_is_all_ones {
+                Some(gb.get_true())
+            } else {
+                None
+            }
+        }
+        ir::Binop::Ugt => {
+            if rhs_is_zero {
+                Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else if rhs_is_all_ones {
+                Some(gb.get_false())
+            } else {
+                None
+            }
+        }
+        ir::Binop::Uge => {
+            if rhs_is_zero {
+                Some(gb.get_true())
+            } else if rhs_is_all_ones {
+                Some(gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else {
+                None
+            }
+        }
+
+        // signed comparisons
+        ir::Binop::Slt => {
+            let msb = *lhs_bits.get_msb(0);
+            if rhs_is_zero {
+                Some(msb)
+            } else if rhs_is_all_ones {
+                let eq = gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree);
+                let ne = gb.add_not(eq);
+                Some(gb.add_and_binary(msb, ne))
+            } else {
+                None
+            }
+        }
+        ir::Binop::Sle => {
+            let msb = *lhs_bits.get_msb(0);
+            if rhs_is_zero {
+                let eq = gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree);
+                Some(gb.add_or_binary(msb, eq))
+            } else if rhs_is_all_ones {
+                Some(msb)
+            } else {
+                None
+            }
+        }
+        ir::Binop::Sgt => {
+            let msb = *lhs_bits.get_msb(0);
+            if rhs_is_zero {
+                let eq0 = gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree);
+                let ne0 = gb.add_not(eq0);
+                let nonneg = gb.add_not(msb);
+                Some(gb.add_and_binary(nonneg, ne0))
+            } else if rhs_is_all_ones {
+                Some(gb.add_not(msb))
+            } else {
+                None
+            }
+        }
+        ir::Binop::Sge => {
+            let msb = *lhs_bits.get_msb(0);
+            if rhs_is_zero {
+                Some(gb.add_not(msb))
+            } else if rhs_is_all_ones {
+                let eq = gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree);
+                let nonneg = gb.add_not(msb);
+                Some(gb.add_or_binary(nonneg, eq))
+            } else {
+                None
+            }
+        }
+
+        _ => None,
+    }
+}
+
+fn gatify_ucmp_fallback(
+    gb: &mut GateBuilder,
+    text_id: usize,
+    binop: ir::Binop,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+) -> AigOperand {
+    match binop {
+        ir::Binop::Ult => gatify_ult_via_bit_tests(gb, text_id, lhs_bits, rhs_bits),
+        ir::Binop::Ule => gatify_ule_via_bit_tests(gb, text_id, lhs_bits, rhs_bits),
+        ir::Binop::Ugt => gatify_ugt_via_bit_tests(gb, text_id, lhs_bits, rhs_bits),
+        ir::Binop::Uge => gatify_uge_via_bit_tests(gb, text_id, lhs_bits, rhs_bits),
+        other => panic!("unexpected ucmp binop: {:?}", other),
+    }
+}
+
+fn gatify_scmp_fallback(
+    gb: &mut GateBuilder,
+    text_id: usize,
+    binop: ir::Binop,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+) -> AigOperand {
+    match binop {
+        ir::Binop::Slt => {
+            gatify_scmp_via_bit_tests(gb, text_id, lhs_bits, rhs_bits, CmpKind::Lt, false)
+        }
+        ir::Binop::Sle => {
+            gatify_scmp_via_bit_tests(gb, text_id, lhs_bits, rhs_bits, CmpKind::Lt, true)
+        }
+        ir::Binop::Sgt => {
+            gatify_scmp_via_bit_tests(gb, text_id, lhs_bits, rhs_bits, CmpKind::Gt, false)
+        }
+        ir::Binop::Sge => {
+            gatify_scmp_via_bit_tests(gb, text_id, lhs_bits, rhs_bits, CmpKind::Gt, true)
+        }
+        other => panic!("unexpected scmp binop: {:?}", other),
+    }
+}
+
+fn gatify_cmp_with_optional_literal_rhs(
+    f: &ir::Fn,
+    gb: &mut GateBuilder,
+    env: &GateEnv,
+    text_id: usize,
+    binop: ir::Binop,
+    a: ir::NodeRef,
+    b: ir::NodeRef,
+) -> AigOperand {
+    if let Some(n) = normalize_cmp_literal_rhs(f, binop, a, b) {
+        let lhs_bits = env
+            .get_bit_vector(n.lhs)
+            .expect("cmp lhs should be present (normalized)");
+        let rhs_bits_vec = env
+            .get_bit_vector(n.rhs)
+            .expect("cmp rhs should be present (normalized)");
+        if let Some(gate) =
+            try_simplify_cmp_literal_rhs(gb, n.binop, &lhs_bits, &rhs_bits_vec, &n.rhs_bits)
+        {
+            return gate;
+        }
+        match n.binop {
+            ir::Binop::Ult | ir::Binop::Ule | ir::Binop::Ugt | ir::Binop::Uge => {
+                return gatify_ucmp_fallback(gb, text_id, n.binop, &lhs_bits, &rhs_bits_vec);
+            }
+            ir::Binop::Slt | ir::Binop::Sle | ir::Binop::Sgt | ir::Binop::Sge => {
+                return gatify_scmp_fallback(gb, text_id, n.binop, &lhs_bits, &rhs_bits_vec);
+            }
+            other => panic!("unexpected normalized cmp binop: {:?}", other),
+        }
+    }
+
+    let lhs_bits = env.get_bit_vector(a).expect("cmp lhs should be present");
+    let rhs_bits = env.get_bit_vector(b).expect("cmp rhs should be present");
+    match binop {
+        ir::Binop::Ult | ir::Binop::Ule | ir::Binop::Ugt | ir::Binop::Uge => {
+            gatify_ucmp_fallback(gb, text_id, binop, &lhs_bits, &rhs_bits)
+        }
+        ir::Binop::Slt | ir::Binop::Sle | ir::Binop::Sgt | ir::Binop::Sge => {
+            gatify_scmp_fallback(gb, text_id, binop, &lhs_bits, &rhs_bits)
+        }
+        other => panic!("unexpected cmp binop: {:?}", other),
+    }
+}
+
+pub fn gatify_scmp_via_bit_tests(
+    gb: &mut GateBuilder,
+    text_id: usize,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    cmp_kind: CmpKind,
+    or_eq: bool,
+) -> AigOperand {
+    assert_eq!(
+        lhs_bits.get_bit_count(),
+        rhs_bits.get_bit_count(),
+        "scmp requires equal-width bit vectors"
+    );
+    assert!(
+        lhs_bits.get_bit_count() > 0,
+        "scmp requires non-zero-width bit vectors"
+    );
+    let bit_count = lhs_bits.get_bit_count();
+    if bit_count == 1 {
+        // Special-case 1-bit: In two's complement, 0 represents 0 and 1 represents -1.
+        // Thus, for a 1-bit comparison:
+        //   a < b is true if a = 1 and b = 0.
+        //   a > b is true if a = 0 and b = 1.
+        let a = *lhs_bits.get_lsb(0);
+        let b = *rhs_bits.get_lsb(0);
+        match cmp_kind {
+            CmpKind::Lt => {
+                let b_complement = gb.add_not(b);
+                let slt = gb.add_and_binary(a, b_complement);
+                if or_eq {
+                    let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+                    gb.add_or_binary(slt, eq)
+                } else {
+                    slt
+                }
+            }
+            CmpKind::Gt => {
+                let a_complement = gb.add_not(a);
+                let sgt = gb.add_and_binary(a_complement, b);
+                if or_eq {
+                    let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+                    gb.add_or_binary(sgt, eq)
+                } else {
+                    sgt
+                }
+            }
+        }
+    } else {
+        // Signed comparisons:
+        // - If signs differ, a < b iff a is negative.
+        // - If signs are the same, signed order matches unsigned order.
+        let a_msb = lhs_bits.get_msb(0);
+        let b_msb = rhs_bits.get_msb(0);
+        let sign_diff = gb.add_xor_binary(*a_msb, *b_msb);
+
+        let ult = gatify_ult_via_bit_tests(gb, text_id, lhs_bits, rhs_bits);
+        let term1 = gb.add_and_binary(sign_diff, *a_msb);
+        let not_sign_diff = gb.add_not(sign_diff);
+        let term2 = gb.add_and_binary(not_sign_diff, ult);
+        let lt = gb.add_or_binary(term1, term2);
+
+        let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+        match cmp_kind {
+            CmpKind::Lt => {
+                if or_eq {
+                    gb.add_or_binary(lt, eq)
+                } else {
+                    lt
+                }
+            }
+            CmpKind::Gt => {
+                let lt_or_eq = gb.add_or_binary(lt, eq);
+                let gt = gb.add_not(lt_or_eq);
+                if or_eq { gb.add_or_binary(gt, eq) } else { gt }
+            }
+        }
+    }
+}
+
 pub fn gatify_scmp(
     gb: &mut GateBuilder,
     text_id: usize,
@@ -1712,97 +2068,45 @@ fn gatify_node(
             g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
-        ir::NodePayload::Binop(ir::Binop::Ult, a, b) => {
-            let a_bits = env.get_bit_vector(*a).expect("ult lhs should be present");
-            let b_bits = env.get_bit_vector(*b).expect("ult rhs should be present");
-            let gate: AigOperand =
-                gatify_ult_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
-            g8_builder.add_tag(gate.node, format!("ult_{}", node.text_id));
-            env.add(node_ref, GateOrVec::Gate(gate));
-        }
-        ir::NodePayload::Binop(ir::Binop::Ugt, a, b) => {
-            let a_bits = env.get_bit_vector(*a).expect("ugt lhs should be present");
-            let b_bits = env.get_bit_vector(*b).expect("ugt rhs should be present");
-            let gate: AigOperand =
-                gatify_ugt_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
-            g8_builder.add_tag(gate.node, format!("ugt_{}", node.text_id));
-            env.add(node_ref, GateOrVec::Gate(gate));
-        }
-        ir::NodePayload::Binop(ir::Binop::Uge, a, b) => {
-            let a_bits = env.get_bit_vector(*a).expect("uge lhs should be present");
-            let b_bits = env.get_bit_vector(*b).expect("uge rhs should be present");
-            let gate: AigOperand =
-                gatify_uge_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
-            g8_builder.add_tag(gate.node, format!("uge_{}", node.text_id));
-            env.add(node_ref, GateOrVec::Gate(gate));
-        }
-        ir::NodePayload::Binop(ir::Binop::Ule, a, b) => {
-            let a_bits = env.get_bit_vector(*a).expect("ule lhs should be present");
-            let b_bits = env.get_bit_vector(*b).expect("ule rhs should be present");
-            let gate = gatify_ule_via_bit_tests(g8_builder, node.text_id, &a_bits, &b_bits);
-            g8_builder.add_tag(gate.node, format!("ule_{}", node.text_id));
+        ir::NodePayload::Binop(
+            binop @ (ir::Binop::Ult | ir::Binop::Ule | ir::Binop::Ugt | ir::Binop::Uge),
+            a,
+            b,
+        ) => {
+            let gate = gatify_cmp_with_optional_literal_rhs(
+                f,
+                g8_builder,
+                env,
+                node.text_id,
+                *binop,
+                *a,
+                *b,
+            );
+            g8_builder.add_tag(
+                gate.node,
+                format!("{}_{}", ir::binop_to_operator(*binop), node.text_id),
+            );
             env.add(node_ref, GateOrVec::Gate(gate));
         }
 
-        // signed comparisons
-        ir::NodePayload::Binop(ir::Binop::Sgt, a, b) => {
-            let a_bits = env.get_bit_vector(*a).expect("sgt lhs should be present");
-            let b_bits = env.get_bit_vector(*b).expect("sgt rhs should be present");
-            let gate = gatify_scmp(
+        ir::NodePayload::Binop(
+            binop @ (ir::Binop::Slt | ir::Binop::Sle | ir::Binop::Sgt | ir::Binop::Sge),
+            a,
+            b,
+        ) => {
+            let gate = gatify_cmp_with_optional_literal_rhs(
+                f,
                 g8_builder,
+                env,
                 node.text_id,
-                &a_bits,
-                &b_bits,
-                options.adder_mapping,
-                CmpKind::Gt,
-                false,
+                *binop,
+                *a,
+                *b,
             );
-            g8_builder.add_tag(gate.node, format!("sgt_{}", node.text_id));
-            env.add(node_ref, GateOrVec::Gate(gate));
-        }
-        ir::NodePayload::Binop(ir::Binop::Sge, a, b) => {
-            let a_bits = env.get_bit_vector(*a).expect("sge lhs should be present");
-            let b_bits = env.get_bit_vector(*b).expect("sge rhs should be present");
-            let gate = gatify_scmp(
-                g8_builder,
-                node.text_id,
-                &a_bits,
-                &b_bits,
-                options.adder_mapping,
-                CmpKind::Gt,
-                true,
+            g8_builder.add_tag(
+                gate.node,
+                format!("{}_{}", ir::binop_to_operator(*binop), node.text_id),
             );
-            g8_builder.add_tag(gate.node, format!("sge_{}", node.text_id));
-            env.add(node_ref, GateOrVec::Gate(gate));
-        }
-        ir::NodePayload::Binop(ir::Binop::Slt, a, b) => {
-            let a_bits = env.get_bit_vector(*a).expect("slt lhs should be present");
-            let b_bits = env.get_bit_vector(*b).expect("slt rhs should be present");
-            let gate = gatify_scmp(
-                g8_builder,
-                node.text_id,
-                &a_bits,
-                &b_bits,
-                options.adder_mapping,
-                CmpKind::Lt,
-                false,
-            );
-            g8_builder.add_tag(gate.node, format!("slt_{}", node.text_id));
-            env.add(node_ref, GateOrVec::Gate(gate));
-        }
-        ir::NodePayload::Binop(ir::Binop::Sle, a, b) => {
-            let a_bits = env.get_bit_vector(*a).expect("sle lhs should be present");
-            let b_bits = env.get_bit_vector(*b).expect("sle rhs should be present");
-            let gate = gatify_scmp(
-                g8_builder,
-                node.text_id,
-                &a_bits,
-                &b_bits,
-                options.adder_mapping,
-                CmpKind::Lt,
-                true,
-            );
-            g8_builder.add_tag(gate.node, format!("sle_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
 
