@@ -42,31 +42,28 @@ fn get_latest_patch_versions(
     crate_name: &str,
 ) -> Result<BTreeMap<(u64, u64), u64>, Box<dyn std::error::Error>> {
     let url = format!("https://crates.io/api/v1/crates/{crate_name}");
-    let mut data = Vec::new();
-    let mut easy = curl::easy::Easy::new();
-    easy.url(&url)?;
-    easy.useragent(USER_AGENT)?;
-    {
-        let mut transfer = easy.transfer();
-        transfer.write_function(|new_data| {
-            data.extend_from_slice(new_data);
-            Ok(new_data.len())
-        })?;
-        transfer.perform()?;
-    }
-    let http_code = easy.response_code()?;
-    if http_code == 404 {
-        // First-time publish case: the crate is not yet present on crates.io, so
-        // there are no released versions to compare against.
-        return Ok(BTreeMap::new());
-    }
-    if http_code != 200 {
-        return Err(Box::new(std::io::Error::other(format!(
-            "Unexpected HTTP status {http_code} from crates.io for {crate_name}"
-        ))));
-    }
+    let mut response = match ureq::get(&url).header("User-Agent", USER_AGENT).call() {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(404)) => {
+            // First-time publish case: the crate is not yet present on crates.io, so
+            // there are no released versions to compare against.
+            return Ok(BTreeMap::new());
+        }
+        Err(ureq::Error::StatusCode(status)) => {
+            return Err(Box::new(std::io::Error::other(format!(
+                "Unexpected HTTP status {status} from crates.io for {crate_name}"
+            ))));
+        }
+        Err(e) => {
+            return Err(Box::new(std::io::Error::other(format!(
+                "Failed to fetch crates.io metadata for {crate_name}: {e}"
+            ))));
+        }
+    };
+    let body_str = response.body_mut().read_to_string()?;
+    let data = body_str.as_bytes();
 
-    let response: serde_json::Value = serde_json::from_slice(&data)?;
+    let response: serde_json::Value = serde_json::from_slice(data)?;
     log::trace!("Response: {response:?}");
     let versions = response["versions"].as_array().ok_or_else(|| {
         // If crates.io changes response shape (or we hit some proxy), surface

@@ -25,6 +25,6 @@ pretty_assertions = "1.4.1"
 xlsynth-sys = { path = "../xlsynth-sys" }
 cargo_metadata = "0.18"
 toml = "0.5"
-curl = "0.4"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 serde_json = "1.0"
 semver = "1.0"
