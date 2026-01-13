@@ -862,6 +862,43 @@ pub fn gatify_ult_via_bit_tests(
     )
 }
 
+fn gatify_ult_and_eq_via_bit_tests(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+) -> (AigOperand, AigOperand) {
+    assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
+    let input_bit_count = lhs_bits.get_bit_count();
+    assert!(input_bit_count > 0);
+
+    // Compute the XNOR bits once so both lt and eq can share them.
+    let eq_bits = gb.add_xnor_vec(lhs_bits, rhs_bits);
+    let eq = gb.add_and_reduce(&eq_bits, ReductionKind::Tree);
+
+    let mut bit_tests = Vec::new();
+    for msb_i in 0..input_bit_count {
+        let eq_bits_slice = eq_bits.get_msbs(msb_i);
+        let prior_bits_equal = if eq_bits_slice.is_empty() {
+            assert_eq!(msb_i, 0);
+            gb.get_true()
+        } else {
+            gb.add_and_reduce(&eq_bits_slice, ReductionKind::Tree)
+        };
+        let lhs_bit = lhs_bits.get_msb(msb_i);
+        let rhs_bit = rhs_bits.get_msb(msb_i);
+
+        // rhs larger at this bit: (!lhs_bit) & rhs_bit.
+        let lhs_bit_unset = gb.add_not(*lhs_bit);
+        let rhs_bit_set = *rhs_bit;
+        let rhs_larger_this_bit = gb.add_and_binary(lhs_bit_unset, rhs_bit_set);
+
+        let bit = gb.add_and_binary(rhs_larger_this_bit, prior_bits_equal);
+        bit_tests.push(bit);
+    }
+    let lt = gb.add_or_nary(&bit_tests, ReductionKind::Tree);
+    (lt, eq)
+}
+
 /// This lowers a unsigned `lhs <= rhs` operator by testing bits in sequence (in
 /// lieu of using an adder like `gatify_ule_via_adder` above).
 pub fn gatify_ule_via_bit_tests(
@@ -963,6 +1000,71 @@ fn is_all_ones(bits: &xlsynth::IrBits) -> bool {
     true
 }
 
+fn get_pow2_lsb_index(bits: &xlsynth::IrBits) -> Option<usize> {
+    // Recognizes non-zero values with exactly one bit set.
+    let mut found: Option<usize> = None;
+    for i in 0..bits.get_bit_count() {
+        let bit = bits.get_bit(i).unwrap();
+        if bit {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(i);
+        }
+    }
+    found
+}
+
+fn get_pow2_minus1_k(bits: &xlsynth::IrBits) -> Option<usize> {
+    // Recognizes values of the form (1<<k)-1, i.e. k low bits are 1 and the rest
+    // are 0. k=0 => 0, k=bit_count => all ones.
+    let bit_count = bits.get_bit_count();
+    let mut k = 0usize;
+    while k < bit_count && bits.get_bit(k).unwrap() {
+        k += 1;
+    }
+    for i in k..bit_count {
+        if bits.get_bit(i).unwrap() {
+            return None;
+        }
+    }
+    Some(k)
+}
+
+fn is_int_min(bits: &xlsynth::IrBits) -> bool {
+    let bit_count = bits.get_bit_count();
+    assert!(bit_count > 0);
+    if !bits.get_bit(bit_count - 1).unwrap() {
+        return false;
+    }
+    for i in 0..(bit_count - 1) {
+        if bits.get_bit(i).unwrap() {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_int_max(bits: &xlsynth::IrBits) -> bool {
+    let bit_count = bits.get_bit_count();
+    assert!(bit_count > 0);
+    if bits.get_bit(bit_count - 1).unwrap() {
+        return false;
+    }
+    for i in 0..(bit_count - 1) {
+        if !bits.get_bit(i).unwrap() {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_non_negative_signed(bits: &xlsynth::IrBits) -> bool {
+    let bit_count = bits.get_bit_count();
+    assert!(bit_count > 0);
+    !bits.get_bit(bit_count - 1).unwrap()
+}
+
 fn commute_cmp_binop(binop: ir::Binop) -> Option<ir::Binop> {
     match binop {
         ir::Binop::Eq => Some(ir::Binop::Eq),
@@ -1044,6 +1146,9 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.get_false())
             } else if rhs_is_all_ones {
                 Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else if let Some(k) = get_pow2_lsb_index(rhs_bits) {
+                let slice = lhs_bits.get_lsb_slice(k, bit_count - k);
+                Some(gb.add_ez(&slice, ReductionKind::Tree))
             } else {
                 None
             }
@@ -1053,6 +1158,45 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
             } else if rhs_is_all_ones {
                 Some(gb.get_true())
+            } else if let Some(k) = get_pow2_lsb_index(rhs_bits) {
+                assert!(k < bit_count);
+                // For small k, the (upper==0) & (!bit_k | low==0) form is cheaper than building
+                // a full equality check. For larger k, this form adds extra
+                // reduction depth, so we use (lt | eq) instead.
+                if k <= 4 {
+                    // x <= (1<<k) iff upper bits above k are zero and (bit_k is 0 or low bits are
+                    // zero).
+                    //
+                    // This captures the fact that with upper bits = 0, values are in [0, 2^(k+1)-1]
+                    // and the only disallowed case is bit_k=1 with any lower bit set.
+                    let upper = lhs_bits.get_lsb_slice(k + 1, bit_count.saturating_sub(k + 1));
+                    let upper_is_zero = if upper.get_bit_count() == 0 {
+                        gb.get_true()
+                    } else {
+                        gb.add_ez(&upper, ReductionKind::Tree)
+                    };
+                    let bit_k = *lhs_bits.get_lsb(k);
+                    let low = lhs_bits.get_lsb_slice(0, k);
+                    let low_is_zero = if low.get_bit_count() == 0 {
+                        gb.get_true()
+                    } else {
+                        gb.add_ez(&low, ReductionKind::Tree)
+                    };
+                    let not_bit_k = gb.add_not(bit_k);
+                    let cond = gb.add_or_binary(not_bit_k, low_is_zero);
+                    Some(gb.add_and_binary(upper_is_zero, cond))
+                } else {
+                    // x <= (1<<k)  iff  (x < (1<<k)) OR (x == (1<<k))
+                    let lt = {
+                        let slice = lhs_bits.get_lsb_slice(k, bit_count - k);
+                        gb.add_ez(&slice, ReductionKind::Tree)
+                    };
+                    let eq = gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree);
+                    Some(gb.add_or_binary(lt, eq))
+                }
+            } else if let Some(k) = get_pow2_minus1_k(rhs_bits) {
+                let slice = lhs_bits.get_lsb_slice(k, bit_count - k);
+                Some(gb.add_ez(&slice, ReductionKind::Tree))
             } else {
                 None
             }
@@ -1062,6 +1206,30 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
             } else if rhs_is_all_ones {
                 Some(gb.get_false())
+            } else if let Some(k) = get_pow2_lsb_index(rhs_bits) {
+                // x > (1<<k) iff (upper bits above k are non-zero) OR (bit_k is 1 AND low bits
+                // are non-zero).
+                assert!(k < bit_count);
+                let upper = lhs_bits.get_lsb_slice(k + 1, bit_count.saturating_sub(k + 1));
+                let upper_is_nonzero = if upper.get_bit_count() == 0 {
+                    gb.get_false()
+                } else {
+                    gb.add_or_reduce(&upper, ReductionKind::Tree)
+                };
+
+                let bit_k = *lhs_bits.get_lsb(k);
+                let low = lhs_bits.get_lsb_slice(0, k);
+                let low_is_nonzero = if low.get_bit_count() == 0 {
+                    gb.get_false()
+                } else {
+                    gb.add_or_reduce(&low, ReductionKind::Tree)
+                };
+                let term2 = gb.add_and_binary(bit_k, low_is_nonzero);
+                Some(gb.add_or_binary(upper_is_nonzero, term2))
+            } else if let Some(k) = get_pow2_minus1_k(rhs_bits) {
+                let slice = lhs_bits.get_lsb_slice(k, bit_count - k);
+                let lt_pow2 = gb.add_ez(&slice, ReductionKind::Tree);
+                Some(gb.add_not(lt_pow2))
             } else {
                 None
             }
@@ -1071,6 +1239,22 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.get_true())
             } else if rhs_is_all_ones {
                 Some(gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else if let Some(k) = get_pow2_lsb_index(rhs_bits) {
+                let slice = lhs_bits.get_lsb_slice(k, bit_count - k);
+                let lt_pow2 = gb.add_ez(&slice, ReductionKind::Tree);
+                Some(gb.add_not(lt_pow2))
+            } else if let Some(k) = get_pow2_minus1_k(rhs_bits) {
+                // x >= (1<<k)-1  iff  (upper_bits != 0) OR (low_bits == all_ones)
+                //
+                // When k==0 => rhs==0, handled above. When k==bit_count => rhs==all_ones,
+                // handled above.
+                assert!(k > 0 && k < bit_count);
+                let upper = lhs_bits.get_lsb_slice(k, bit_count - k);
+                let upper_is_zero = gb.add_ez(&upper, ReductionKind::Tree);
+                let upper_is_nonzero = gb.add_not(upper_is_zero);
+                let low = lhs_bits.get_lsb_slice(0, k);
+                let low_is_all_ones = gb.add_and_reduce(&low, ReductionKind::Tree);
+                Some(gb.add_or_binary(upper_is_nonzero, low_is_all_ones))
             } else {
                 None
             }
@@ -1085,6 +1269,25 @@ fn try_simplify_cmp_literal_rhs(
                 let eq = gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree);
                 let ne = gb.add_not(eq);
                 Some(gb.add_and_binary(msb, ne))
+            } else if is_int_min(rhs_bits) {
+                Some(gb.get_false())
+            } else if is_int_max(rhs_bits) {
+                Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else if is_non_negative_signed(rhs_bits) {
+                let u = try_simplify_cmp_literal_rhs(
+                    gb,
+                    ir::Binop::Ult,
+                    lhs_bits,
+                    rhs_bits_vec,
+                    rhs_bits,
+                )
+                .unwrap_or_else(|| {
+                    gatify_ucmp_fallback(gb, 0, ir::Binop::Ult, lhs_bits, rhs_bits_vec)
+                });
+                // If rhs is non-negative, then for negative lhs (msb==1) the unsigned
+                // comparison is necessarily false, so we can drop the nonneg
+                // guard.
+                Some(gb.add_or_binary(msb, u))
             } else {
                 None
             }
@@ -1096,6 +1299,25 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.add_or_binary(msb, eq))
             } else if rhs_is_all_ones {
                 Some(msb)
+            } else if is_int_min(rhs_bits) {
+                Some(gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else if is_int_max(rhs_bits) {
+                Some(gb.get_true())
+            } else if is_non_negative_signed(rhs_bits) {
+                let u = try_simplify_cmp_literal_rhs(
+                    gb,
+                    ir::Binop::Ule,
+                    lhs_bits,
+                    rhs_bits_vec,
+                    rhs_bits,
+                )
+                .unwrap_or_else(|| {
+                    gatify_ucmp_fallback(gb, 0, ir::Binop::Ule, lhs_bits, rhs_bits_vec)
+                });
+                // If rhs is non-negative, then for negative lhs (msb==1) the unsigned
+                // comparison is necessarily false, so we can drop the nonneg
+                // guard.
+                Some(gb.add_or_binary(msb, u))
             } else {
                 None
             }
@@ -1109,6 +1331,23 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.add_and_binary(nonneg, ne0))
             } else if rhs_is_all_ones {
                 Some(gb.add_not(msb))
+            } else if is_int_min(rhs_bits) {
+                Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else if is_int_max(rhs_bits) {
+                Some(gb.get_false())
+            } else if is_non_negative_signed(rhs_bits) {
+                let nonneg = gb.add_not(msb);
+                let u = try_simplify_cmp_literal_rhs(
+                    gb,
+                    ir::Binop::Ugt,
+                    lhs_bits,
+                    rhs_bits_vec,
+                    rhs_bits,
+                )
+                .unwrap_or_else(|| {
+                    gatify_ucmp_fallback(gb, 0, ir::Binop::Ugt, lhs_bits, rhs_bits_vec)
+                });
+                Some(gb.add_and_binary(nonneg, u))
             } else {
                 None
             }
@@ -1121,6 +1360,23 @@ fn try_simplify_cmp_literal_rhs(
                 let eq = gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree);
                 let nonneg = gb.add_not(msb);
                 Some(gb.add_or_binary(nonneg, eq))
+            } else if is_int_min(rhs_bits) {
+                Some(gb.get_true())
+            } else if is_int_max(rhs_bits) {
+                Some(gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
+            } else if is_non_negative_signed(rhs_bits) {
+                let nonneg = gb.add_not(msb);
+                let u = try_simplify_cmp_literal_rhs(
+                    gb,
+                    ir::Binop::Uge,
+                    lhs_bits,
+                    rhs_bits_vec,
+                    rhs_bits,
+                )
+                .unwrap_or_else(|| {
+                    gatify_ucmp_fallback(gb, 0, ir::Binop::Uge, lhs_bits, rhs_bits_vec)
+                });
+                Some(gb.add_and_binary(nonneg, u))
             } else {
                 None
             }
@@ -1217,7 +1473,7 @@ fn gatify_cmp_with_optional_literal_rhs(
 
 pub fn gatify_scmp_via_bit_tests(
     gb: &mut GateBuilder,
-    text_id: usize,
+    _text_id: usize,
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
     cmp_kind: CmpKind,
@@ -1270,13 +1526,11 @@ pub fn gatify_scmp_via_bit_tests(
         let b_msb = rhs_bits.get_msb(0);
         let sign_diff = gb.add_xor_binary(*a_msb, *b_msb);
 
-        let ult = gatify_ult_via_bit_tests(gb, text_id, lhs_bits, rhs_bits);
+        let (ult, eq) = gatify_ult_and_eq_via_bit_tests(gb, lhs_bits, rhs_bits);
         let term1 = gb.add_and_binary(sign_diff, *a_msb);
         let not_sign_diff = gb.add_not(sign_diff);
         let term2 = gb.add_and_binary(not_sign_diff, ult);
         let lt = gb.add_or_binary(term1, term2);
-
-        let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
         match cmp_kind {
             CmpKind::Lt => {
                 if or_eq {
