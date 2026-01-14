@@ -451,6 +451,7 @@ Query expression basics:
 
 - `$anycmp(...)` matches any comparison op (e.g., `eq`, `ugt`, `slt`).
 - `$anymul(...)` matches any multiply op (e.g., `umul`, `smul`, `umulp`, `smulp`).
+- `$users(pattern)` matches any node that consumes a node matching `pattern`.
 - Concrete operator matchers like `add(...)`, `sub(...)`, `and(...)`, etc. match nodes with that exact IR operator name.
 - Placeholders like `x` and `y` match any node (repeated placeholders must bind the same node).
 - The special placeholder `_` matches any node but does not create a binding (wildcard).
@@ -488,6 +489,12 @@ Example: match the MSB of a negated value:
 
 ```shell
 xlsynth-driver ir-query my_pkg.ir 'msb(neg(x))'
+```
+
+Example: find all consumers of `encode(one_hot(x))`:
+
+```shell
+xlsynth-driver ir-query my_pkg.ir '$users(encode(one_hot(x)))'
 ```
 
 ### `ir-structural-similarity`
