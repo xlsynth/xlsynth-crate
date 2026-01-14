@@ -1232,3 +1232,104 @@ endmodule
 "#;
     assert_eq!(verilog, want);
 }
+
+#[test]
+fn test_array_parameters_with_def_and_assignment_pattern() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("top");
+
+    // Common scalar type: 1-bit element for several unpacked arrays.
+    let scalar = file.make_scalar_type();
+
+    // P0: parameter P0[2] = '{'0, '0};
+    let p0_type = file.make_unpacked_array_type(scalar.clone(), &[2]);
+    let p0_def = file.make_def("P0", DataKind::User, &p0_type);
+    let tick0 = file.make_unsized_zero_literal();
+    let p0_rhs = file.make_array_assignment_pattern(&[&tick0, &tick0]);
+    module.add_parameter_with_def(&p0_def, &p0_rhs);
+
+    // P1: parameter int P1[3] = '{1, 2, 3};
+    let p1_type = file.make_unpacked_array_type(scalar.clone(), &[3]);
+    let p1_def = file.make_def("P1", DataKind::Int, &p1_type);
+    let one = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
+    let two = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
+    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
+    let four = file.make_plain_literal(4, &IrFormatPreference::UnsignedDecimal);
+    let five = file.make_plain_literal(5, &IrFormatPreference::UnsignedDecimal);
+    let six = file.make_plain_literal(6, &IrFormatPreference::UnsignedDecimal);
+    let p1_rhs = file.make_array_assignment_pattern(&[&one, &two, &three]);
+    module.add_parameter_with_def(&p1_def, &p1_rhs);
+
+    // P2: parameter logic [7:0] P2[2] = '{8'h42, 8'h43};
+    let u8 = file.make_bit_vector_type(8, false);
+    let p2_type = file.make_unpacked_array_type(u8, &[2]);
+    let p2_def = file.make_def("P2", DataKind::Logic, &p2_type);
+    let lit_42 = file
+        .make_literal("bits[8]:0x42", &IrFormatPreference::Hex)
+        .unwrap();
+    let lit_43 = file
+        .make_literal("bits[8]:0x43", &IrFormatPreference::Hex)
+        .unwrap();
+    let p2_rhs = file.make_array_assignment_pattern(&[&lit_42, &lit_43]);
+    module.add_parameter_with_def(&p2_def, &p2_rhs);
+
+    // P3: parameter integer P3[1][4] = '{'{1, 2, 3, 4}};
+    let p3_type = file.make_unpacked_array_type(scalar.clone(), &[1, 4]);
+    let p3_def = file.make_def("P3", DataKind::Integer, &p3_type);
+    let inner_1234 = file.make_array_assignment_pattern(&[&one, &two, &three, &four]);
+    let p3_rhs = file.make_array_assignment_pattern(&[&inner_1234]);
+    module.add_parameter_with_def(&p3_def, &p3_rhs);
+
+    // P4: parameter int P4[2][3] = '{'{1, 2, 3}, '{4, 5, 6}};
+    let p4_type = file.make_unpacked_array_type(scalar, &[2, 3]);
+    let p4_def = file.make_def("P4", DataKind::Int, &p4_type);
+    let row_123 = file.make_array_assignment_pattern(&[&one, &two, &three]);
+    let row_456 = file.make_array_assignment_pattern(&[&four, &five, &six]);
+    let p4_rhs = file.make_array_assignment_pattern(&[&row_123, &row_456]);
+    module.add_parameter_with_def(&p4_def, &p4_rhs);
+
+    let verilog = file.emit();
+    let want = r#"module top;
+  parameter P0[2] = '{'0, '0};
+  parameter int P1[3] = '{1, 2, 3};
+  parameter logic [7:0] P2[2] = '{8'h42, 8'h43};
+  parameter integer P3[1][4] = '{'{1, 2, 3, 4}};
+  parameter int P4[2][3] = '{'{1, 2, 3}, '{4, 5, 6}};
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_index_unpacked_array_parameter() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("top");
+
+    // parameter P0[2] = '{'0, '1};
+    let scalar = file.make_scalar_type();
+    let p0_type = file.make_unpacked_array_type(scalar.clone(), &[2]);
+    let p0_def = file.make_def("P0", DataKind::User, &p0_type);
+    let tick0 = file.make_unsized_zero_literal();
+    let tick1 = file.make_unsized_one_literal();
+    let p0_rhs = file.make_array_assignment_pattern(&[&tick0, &tick1]);
+    let p0_param = module.add_parameter_with_def(&p0_def, &p0_rhs);
+
+    // wire w;
+    let w = module.add_wire("w", &scalar);
+
+    // assign w = P0[0];
+    let p0_indexable = p0_param.to_indexable_expr();
+    let p0_0 = file.make_index(&p0_indexable, 0);
+    let rhs = p0_0.to_expr();
+    let assign = file.make_continuous_assignment(&w.to_expr(), &rhs);
+    module.add_member_continuous_assignment(assign);
+
+    let verilog = file.emit();
+    let want = r#"module top;
+  parameter P0[2] = '{'0, '1};
+  wire w;
+  assign w = P0[0];
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}

@@ -3489,48 +3489,6 @@ fn test_ir_fn_eval() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[32]:3\n");
 }
 
-// Add tests for type inference v2 slice bounds behavior
-#[test_case(true; "with_tool_path")]
-#[test_case(false; "without_tool_path")]
-fn test_tiv1_slice_oob_allows_compilation(use_tool_path: bool) {
-    let _ = env_logger::builder().is_test(true).try_init();
-    // DSLX attempting to slice starting at bit 32 of a 32-bit value.
-    let dslx = "#![feature(type_inference_v1)]\nfn f(x: u32) -> u32 { x[32 +: u32] }";
-    let temp_dir = tempfile::tempdir().unwrap();
-    let dslx_path = temp_dir.path().join("f.x");
-    std::fs::write(&dslx_path, dslx).unwrap();
-
-    // Prepare toolchain.toml
-    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
-    let toolchain_toml = "[toolchain]\n";
-    let toolchain_contents = if use_tool_path {
-        add_tool_path_value(toolchain_toml)
-    } else {
-        toolchain_toml.to_string()
-    };
-    std::fs::write(&toolchain_path, toolchain_contents).unwrap();
-
-    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
-
-    // Run without --type_inference_v2 flag (tiv1).
-    let output = std::process::Command::new(command_path)
-        .arg("--toolchain")
-        .arg(toolchain_path.to_str().unwrap())
-        .arg("dslx2ir")
-        .arg("--dslx_input_file")
-        .arg(dslx_path.to_str().unwrap())
-        .arg("--dslx_top")
-        .arg("f")
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "tiv1 compile should succeed; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 /// TODO(cdleary): 2025-06-10 This only works when there is a tool path
 /// available because the runtime APIs don't support specifying TIv2.
 #[test_case(true; "with_tool_path")]

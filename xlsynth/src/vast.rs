@@ -1413,6 +1413,26 @@ impl VastFile {
         }
     }
 
+    pub fn make_unpacked_array_type(
+        &mut self,
+        element_type: VastDataType,
+        dimensions: &[i64],
+    ) -> VastDataType {
+        let locked = self.ptr.lock().unwrap();
+        let data_type = unsafe {
+            sys::xls_vast_verilog_file_make_unpacked_array_type(
+                locked.0,
+                element_type.inner,
+                dimensions.as_ptr(),
+                dimensions.len(),
+            )
+        };
+        VastDataType {
+            inner: data_type,
+            parent: self.ptr.clone(),
+        }
+    }
+
     pub fn make_slice(&mut self, indexable: &IndexableExpr, hi: i64, lo: i64) -> Slice {
         let locked = self.ptr.lock().unwrap();
         let inner =
@@ -1504,6 +1524,23 @@ impl VastFile {
             )
         };
         let inner = unsafe { sys::xls_vast_concat_as_expression(concat_ptr) };
+        Expr {
+            inner,
+            parent: self.ptr.clone(),
+        }
+    }
+
+    pub fn make_array_assignment_pattern(&mut self, elements: &[&Expr]) -> Expr {
+        let locked = self.ptr.lock().unwrap();
+        let mut element_ptrs: Vec<*mut sys::CVastExpression> =
+            elements.iter().map(|e| e.inner).collect();
+        let inner = unsafe {
+            sys::xls_vast_verilog_file_make_array_assignment_pattern(
+                locked.0,
+                element_ptrs.as_mut_ptr(),
+                element_ptrs.len(),
+            )
+        };
         Expr {
             inner,
             parent: self.ptr.clone(),
@@ -1856,6 +1893,15 @@ impl ParameterRef {
         let _locked = self.parent.lock().unwrap();
         let inner = unsafe { sys::xls_vast_parameter_ref_as_expression(self.inner) };
         Expr {
+            inner,
+            parent: self.parent.clone(),
+        }
+    }
+
+    pub fn to_indexable_expr(&self) -> IndexableExpr {
+        let _locked = self.parent.lock().unwrap();
+        let inner = unsafe { sys::xls_vast_parameter_ref_as_indexable_expression(self.inner) };
+        IndexableExpr {
             inner,
             parent: self.parent.clone(),
         }
