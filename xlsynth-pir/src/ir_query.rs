@@ -6,6 +6,7 @@ use crate::ir;
 use crate::ir_utils;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use xlsynth::IrBits;
 use xlsynth::IrValue;
 
 mod parser;
@@ -254,8 +255,14 @@ fn literal_matches_number(value: &IrValue, number: u64) -> bool {
     let Ok(bits) = value.to_bits() else {
         return false;
     };
+    let bit_count = bits.get_bit_count();
+
+    if bit_count == 0 {
+        return number == 0;
+    }
+
     if number == 0 {
-        for i in 0..bits.get_bit_count() {
+        for i in 0..bit_count {
             let Ok(bit) = bits.get_bit(i) else {
                 return false;
             };
@@ -265,10 +272,16 @@ fn literal_matches_number(value: &IrValue, number: u64) -> bool {
         }
         return true;
     }
-    if bits.get_bit_count() > 64 {
+
+    // Query numbers are widthless; treat them as an unsigned numeric value and
+    // match literals whose upper bits are all zero beyond the value's u64
+    // representation.
+    if bit_count < 64 && (number >> bit_count) != 0 {
         return false;
     }
-    value.to_u64().map(|v| v == number).unwrap_or(false)
+
+    let expected = IrBits::make_ubits(bit_count, number).unwrap();
+    bits.equals(&expected)
 }
 
 /// Matches the query arguments against a node's operands.
