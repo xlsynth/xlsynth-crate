@@ -32,6 +32,7 @@ pub struct MatcherExpr {
 pub enum MatcherKind {
     AnyCmp,
     AnyMul,
+    Users,
     Msb,
     OpName(String),
     Literal { predicate: Option<LiteralPredicate> },
@@ -164,6 +165,24 @@ fn match_solutions(
             _ => vec![],
         },
         QueryExpr::Matcher(matcher) => {
+            if matches!(matcher.kind, MatcherKind::Users) {
+                if matcher.args.len() != 1 {
+                    return vec![];
+                }
+                let node = f.get_node(node_ref);
+                let operands = ir_utils::operands(&node.payload);
+                let mut out = Vec::new();
+                for operand in operands {
+                    out.extend(match_solutions(
+                        &matcher.args[0],
+                        f,
+                        users,
+                        operand,
+                        bindings,
+                    ));
+                }
+                return out;
+            }
             let node = f.get_node(node_ref);
             if !matches_kind(&matcher.kind, &node.payload) {
                 return vec![];
@@ -359,6 +378,7 @@ fn matches_kind(kind: &MatcherKind, payload: &ir::NodePayload) -> bool {
             ),
             _ => false,
         },
+        MatcherKind::Users => false,
         MatcherKind::Msb => matches!(payload, ir::NodePayload::BitSlice { .. }),
         MatcherKind::OpName(opname) => payload.get_operator() == opname,
         MatcherKind::Literal { .. } => matches!(payload, ir::NodePayload::Literal(_)),
@@ -421,6 +441,16 @@ mod tests {
         assert_eq!(matcher.kind, MatcherKind::AnyCmp);
         assert_eq!(matcher.args.len(), 2);
         assert!(matcher.named_args.is_empty());
+    }
+
+    #[test]
+    fn parse_users_query() {
+        let query = parse_query("$users(encode(one_hot(x)))").unwrap();
+        let QueryExpr::Matcher(matcher) = query else {
+            panic!("expected matcher");
+        };
+        assert_eq!(matcher.kind, MatcherKind::Users);
+        assert_eq!(matcher.args.len(), 1);
     }
 
     /// Verifies the parser accepts concrete operator matchers like
@@ -617,6 +647,34 @@ fn main(x: bits[8] id=1) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "msb");
+    }
+
+    #[test]
+    fn find_matches_users_of_encode_one_hot() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[1] {
+  oh: bits[5] = one_hot(x, lsb_prio=true, id=2)
+  enc: bits[3] = encode(oh, id=3)
+  lit0: bits[3] = literal(value=0, id=4)
+  lit1: bits[3] = literal(value=1, id=5)
+  cmp0: bits[1] = eq(enc, lit0, id=6)
+  cmp1: bits[1] = ne(enc, lit1, id=7)
+  ret out: bits[1] = or(cmp0, cmp1, id=8)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("$users(encode(one_hot(x, lsb_prio=true)))").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        let mut ids: Vec<String> = matches
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["cmp0", "cmp1"]);
     }
 
     #[test]

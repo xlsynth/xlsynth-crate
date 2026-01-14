@@ -26,10 +26,19 @@ impl<'a> QueryParser<'a> {
                 let kind = match ident.as_str() {
                     "anycmp" => MatcherKind::AnyCmp,
                     "anymul" => MatcherKind::AnyMul,
+                    "users" => MatcherKind::Users,
                     _ => return Err(self.error(&format!("unknown matcher ${}", ident))),
                 };
-                let user_count = if self.peek() == Some(b'[') {
-                    Some(self.parse_user_constraint()?)
+                let user_count = if matches!(kind, MatcherKind::AnyCmp | MatcherKind::AnyMul) {
+                    if self.peek() == Some(b'[') {
+                        Some(self.parse_user_constraint()?)
+                    } else {
+                        None
+                    }
+                } else if self.peek() == Some(b'[') {
+                    return Err(
+                        self.error("matchers only support user-count constraints like [1u]")
+                    );
                 } else {
                     None
                 };
@@ -308,6 +317,7 @@ struct ParsedArgs {
 fn expected_arity(kind: &MatcherKind) -> usize {
     match kind {
         MatcherKind::AnyCmp | MatcherKind::AnyMul => 2,
+        MatcherKind::Users => 1,
         _ => 0,
     }
 }
