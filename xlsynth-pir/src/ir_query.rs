@@ -672,10 +672,10 @@ fn main(x: bits[8] id=1) -> bits[1] {
     fn find_matches_bit_slice_with_width_named_arg() {
         let pkg_text = r#"package test
 
-fn main(x: bits[8] id=1) -> bits[2] {
+fn main(x: bits[8] id=1) -> bits[3] {
   slice1: bits[1] = bit_slice(x, start=3, width=1, id=2)
   slice2: bits[2] = bit_slice(x, start=4, width=2, id=3)
-  ret out: bits[2] = concat(slice2, slice1, id=4)
+  ret out: bits[3] = concat(slice2, slice1, id=4)
 }
 "#;
         let mut parser = Parser::new(pkg_text);
@@ -693,10 +693,10 @@ fn main(x: bits[8] id=1) -> bits[2] {
     fn find_matches_bit_slice_with_width_wildcard() {
         let pkg_text = r#"package test
 
-fn main(x: bits[8] id=1) -> bits[2] {
+fn main(x: bits[8] id=1) -> bits[3] {
   slice1: bits[1] = bit_slice(x, start=3, width=1, id=2)
   slice2: bits[2] = bit_slice(x, start=4, width=2, id=3)
-  ret out: bits[2] = concat(slice2, slice1, id=4)
+  ret out: bits[3] = concat(slice2, slice1, id=4)
 }
 "#;
         let mut parser = Parser::new(pkg_text);
