@@ -293,12 +293,20 @@ impl<'a> QueryParser<'a> {
         }
         self.bump();
         self.skip_ws();
-        let value_ident = self.parse_ident("boolean literal or '_'")?;
-        let value = match value_ident.as_str() {
-            "true" => NamedArgValue::Bool(true),
-            "false" => NamedArgValue::Bool(false),
-            "_" => NamedArgValue::AnyBool,
-            _ => return Err(self.error("expected boolean literal or '_'")),
+        let value = match self.peek() {
+            Some(c) if c.is_ascii_digit() => {
+                let number = self.parse_number("number")?;
+                NamedArgValue::Number(number)
+            }
+            _ => {
+                let value_ident = self.parse_ident("literal or '_'")?;
+                match value_ident.as_str() {
+                    "true" => NamedArgValue::Bool(true),
+                    "false" => NamedArgValue::Bool(false),
+                    "_" => NamedArgValue::Any,
+                    _ => return Err(self.error("expected boolean literal, number, or '_'")),
+                }
+            }
         };
         Ok(Some(NamedArg { name: ident, value }))
     }
