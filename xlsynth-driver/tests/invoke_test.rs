@@ -7823,3 +7823,84 @@ fn main(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
         stdout
     );
 }
+
+#[test]
+fn test_ir_query_wildcard_lsb_prio_matches_both_one_hot_variants() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[5] {
+  oh_t: bits[5] = one_hot(x, lsb_prio=true, id=2)
+  oh_f: bits[5] = one_hot(x, lsb_prio=false, id=3)
+  ret out: bits[5] = xor(oh_t, oh_f, id=4)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-query")
+        .arg(ir_path.to_str().unwrap())
+        .arg("one_hot(x, lsb_prio=_)")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-query failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let expected = concat!(
+        "oh_t: bits[5] = one_hot(x, lsb_prio=true, id=2)\n",
+        "oh_f: bits[5] = one_hot(x, lsb_prio=false, id=3)\n",
+    );
+    assert_eq!(stdout, expected, "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn test_ir_query_malformed_query_reports_error() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[5] {
+  ret oh: bits[5] = one_hot(x, lsb_prio=true, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-query")
+        .arg(ir_path.to_str().unwrap())
+        .arg("one_hot(x, lsb_prio=maybe)")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-query to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("xlsynth-driver: ir-query:"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Failed to parse query:"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("expected boolean literal or '_'"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}

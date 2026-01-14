@@ -89,6 +89,18 @@ impl<'a> QueryParser<'a> {
                 let kind = MatcherKind::from_opname_and_predicate(&ident, predicate)
                     .map_err(|e| self.error(&e))?;
 
+                if matches!(kind, MatcherKind::Literal { .. }) {
+                    if !parsed_args.named_args.is_empty() {
+                        return Err(self.error("literal does not support named arguments"));
+                    }
+                    if parsed_args.args.len() != 1 {
+                        return Err(self.error(&format!(
+                            "literal expects 1 argument; got {}. Use '_' as a wildcard argument if needed",
+                            parsed_args.args.len()
+                        )));
+                    }
+                }
+
                 if matches!(kind, MatcherKind::Msb) {
                     if !parsed_args.named_args.is_empty() {
                         return Err(self.error("msb does not support named arguments"));
@@ -272,16 +284,14 @@ impl<'a> QueryParser<'a> {
         }
         self.bump();
         self.skip_ws();
-        let value_ident = self.parse_ident("boolean literal")?;
+        let value_ident = self.parse_ident("boolean literal or '_'")?;
         let value = match value_ident.as_str() {
-            "true" => true,
-            "false" => false,
-            _ => return Err(self.error("expected boolean literal")),
+            "true" => NamedArgValue::Bool(true),
+            "false" => NamedArgValue::Bool(false),
+            "_" => NamedArgValue::AnyBool,
+            _ => return Err(self.error("expected boolean literal or '_'")),
         };
-        Ok(Some(NamedArg {
-            name: ident,
-            value: NamedArgValue::Bool(value),
-        }))
+        Ok(Some(NamedArg { name: ident, value }))
     }
 }
 

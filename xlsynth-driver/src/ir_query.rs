@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
 use xlsynth_pir::ir;
@@ -13,6 +14,16 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     let query_text = matches
         .get_one::<String>("query")
         .expect("query is required");
+
+    // Parse the query up-front so malformed queries fail fast (before we do any IR
+    // I/O).
+    let query = match ir_query::parse_query(query_text) {
+        Ok(query) => query,
+        Err(e) => {
+            let msg = format!("Failed to parse query: {}", e);
+            report_cli_error_and_exit(&msg, Some("ir-query"), vec![]);
+        }
+    };
 
     let file_content = std::fs::read_to_string(input_file)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_file, e));
@@ -29,8 +40,6 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         .get_top_fn()
         .unwrap_or_else(|| panic!("No top function found in package"));
 
-    let query = ir_query::parse_query(query_text)
-        .unwrap_or_else(|e| panic!("Failed to parse query: {}", e));
     let matches = ir_query::find_matching_nodes(top_fn, &query);
 
     for node_ref in matches {
