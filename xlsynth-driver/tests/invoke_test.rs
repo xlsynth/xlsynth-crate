@@ -7897,6 +7897,48 @@ fn test_ir_query_check_query_true_does_not_read_ir_file() {
 }
 
 #[test]
+fn test_ir_query_show_file_prefixes_matches_with_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[5] {
+  oh_t: bits[5] = one_hot(x, lsb_prio=true, id=2)
+  oh_f: bits[5] = one_hot(x, lsb_prio=false, id=3)
+  ret out: bits[5] = xor(oh_t, oh_f, id=4)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-query")
+        .arg(ir_path.to_str().unwrap())
+        .arg("one_hot(x, lsb_prio=_)")
+        .arg("--show-file=true")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-query failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let ir_path_str = ir_path.to_str().unwrap();
+    let expected = format!(
+        "{}: oh_t: bits[5] = one_hot(x, lsb_prio=true, id=2)\n{}: oh_f: bits[5] = one_hot(x, lsb_prio=false, id=3)\n",
+        ir_path_str, ir_path_str
+    );
+    assert_eq!(stdout, expected, "unexpected stdout: {}", stdout);
+}
+
+#[test]
 fn test_ir_query_malformed_query_reports_error() {
     let _ = env_logger::builder().is_test(true).try_init();
 

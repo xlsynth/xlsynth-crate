@@ -30,6 +30,8 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         return;
     }
 
+    let show_file = parse_bool_flag_or(matches, "show-file", false);
+
     let file_content = std::fs::read_to_string(input_file)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_file, e));
     let mut parser = ir_parser::Parser::new(&file_content);
@@ -50,9 +52,18 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     for node_ref in matches {
         let node = top_fn.get_node(node_ref);
         if let Some(line) = node.to_string(top_fn) {
-            println!("{}", line);
+            if show_file {
+                println!("{}: {}", input_file, line);
+            } else {
+                println!("{}", line);
+            }
         } else {
-            println!("{}", ir::node_textual_id(top_fn, node_ref));
+            let node_id = ir::node_textual_id(top_fn, node_ref);
+            if show_file {
+                println!("{}: {}", input_file, node_id);
+            } else {
+                println!("{}", node_id);
+            }
         }
     }
 }
