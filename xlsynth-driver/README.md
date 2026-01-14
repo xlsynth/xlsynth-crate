@@ -693,6 +693,40 @@ xlsynth-driver ir-bool-cones my_design.opt.ir \
   --emit_pos_data=false
 ```
 
+### `ir-diverse-samples`
+
+Walks a corpus directory recursively, finds all demonstration `.ir` files, and selects a diverse subset based on depth-N PIR operation signatures.
+
+- Positional arguments: `<corpus-dir>`
+- Optional flags:
+  - `--signature-depth <N>`: depth for structural signature hashing (default `2`)
+  - `--log-skipped=<BOOL>`: log skipped samples (read/parse/lower failures) via the logger (default `false`)
+  - `--explain-new-hashes=<BOOL>`: print the PIR node signatures that introduced new hashes for each selected sample (default `false`)
+- For each `.ir` file, we compute:
+  - A set of **depth-N forward structural hashes** for all nodes in the package **top** function (computed from PIR parsing).
+  - `g8r-nodes` and `g8r-levels` from `ir2gates` lowering with **fraiging disabled**.
+- We sort by `g8r-nodes * g8r-levels` (descending) and greedily include a sample if it contributes any previously unseen hashes.
+
+Selected samples are printed to **stdout** as:
+
+```text
+<ir-file-path> g8r-nodes=<node-count> g8r-levels=<levels> new-hashes=<count>
+```
+
+With `--explain-new-hashes=true`, additional indented lines are printed after each selected sample:
+
+```text
+  new-signature node_index=<idx> text_id=<id> <pir-node-signature>
+```
+
+The printed signature expands operands recursively up to `--signature-depth`.
+
+Example:
+
+```shell
+xlsynth-driver ir-diverse-samples ./corpus_dir > selected.txt
+```
+
 ### `g8r-equiv`
 
 Checks two GateFns for functional equivalence using the available engines. A

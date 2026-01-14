@@ -1982,12 +1982,12 @@ fn gatify_node(
     env: &mut GateEnv,
     options: &GatifyOptions,
     param_id_to_node_ref: &HashMap<ParamId, ir::NodeRef>,
-) {
+) -> Result<(), String> {
     let payload = &node.payload;
     match payload {
         ir::NodePayload::GetParam(param_id) => {
             if env.contains(node_ref) {
-                return; // Already inserted above.
+                return Ok(()); // Already inserted above.
             }
             // Look up the original parameter node_ref by its ParamId
             let pr = param_id_to_node_ref
@@ -2832,9 +2832,11 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(result_bits));
         }
         _ => {
-            todo!("Unsupported node payload {:?}", payload);
+            let msg = format!("Unsupported node payload {:?}", payload);
+            return Err(msg);
         }
     }
+    Ok(())
 }
 
 /// Converts the contents of the given IR function to our "g8" representation
@@ -2844,7 +2846,7 @@ fn gatify_internal(
     g8_builder: &mut GateBuilder,
     env: &mut GateEnv,
     options: &GatifyOptions,
-) {
+) -> Result<(), String> {
     log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
 
@@ -2878,13 +2880,13 @@ fn gatify_internal(
             env,
             options,
             &param_id_to_node_ref,
-        );
+        )?;
     }
     // Resolve the outputs and place them into the builder.
     let ret_node_ref = match f.ret_node_ref {
         Some(ret_node_ref) => ret_node_ref,
         None => {
-            return;
+            return Ok(());
         }
     };
     let gate_refs = env
@@ -2899,6 +2901,7 @@ fn gatify_internal(
         gate_refs.get_bit_count()
     );
     g8_builder.add_output("output_value".to_string(), gate_refs);
+    Ok(())
 }
 
 pub struct GatifyOptions {
@@ -2969,7 +2972,7 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         },
     );
     let mut env = GateEnv::new();
-    gatify_internal(f, &mut g8_builder, &mut env, &options);
+    gatify_internal(f, &mut g8_builder, &mut env, &options)?;
     let gate_fn = g8_builder.build();
     log::debug!(
         "converted IR function to gate function:\n{}",
@@ -3113,7 +3116,7 @@ pub fn gatify_node_as_fn(
         &mut env,
         options,
         &param_id_to_node_ref,
-    );
+    )?;
     let output_bits = env.get_bit_vector(node_ref)?;
     g8_builder.add_output("output_value".to_string(), output_bits);
     Ok(g8_builder.build())
