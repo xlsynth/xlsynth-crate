@@ -908,6 +908,12 @@ extern "C" {
         dims: *const i64,
         dim_count: libc::size_t,
     ) -> *mut CVastDataType;
+    pub fn xls_vast_verilog_file_make_unpacked_array_type(
+        f: *mut CVastFile,
+        element_type: *mut CVastDataType,
+        dims: *const i64,
+        dim_count: libc::size_t,
+    ) -> *mut CVastDataType;
 
     // -- Data type introspection
     pub fn xls_vast_data_type_width_as_int64(
@@ -952,6 +958,11 @@ extern "C" {
         elements: *mut *mut CVastExpression,
         element_count: libc::size_t,
     ) -> *mut CVastConcat;
+    pub fn xls_vast_verilog_file_make_array_assignment_pattern(
+        f: *mut CVastFile,
+        elements: *mut *mut CVastExpression,
+        element_count: libc::size_t,
+    ) -> *mut CVastExpression;
 
     pub fn xls_vast_verilog_file_make_slice_i64(
         f: *mut CVastFile,
@@ -1156,6 +1167,9 @@ extern "C" {
     ) -> *mut CVastIndexableExpression;
     pub fn xls_vast_index_as_indexable_expression(
         v: *mut CVastIndex,
+    ) -> *mut CVastIndexableExpression;
+    pub fn xls_vast_parameter_ref_as_indexable_expression(
+        v: *mut CVastParameterRef,
     ) -> *mut CVastIndexableExpression;
 
     pub fn xls_vast_literal_as_expression(v: *mut CVastLiteral) -> *mut CVastExpression;
