@@ -52,7 +52,8 @@ pub struct NamedArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamedArgValue {
     Bool(bool),
-    AnyBool,
+    Number(usize),
+    Any,
 }
 
 impl MatcherKind {
@@ -406,6 +407,23 @@ fn matches_named_args(named_args: &[NamedArg], payload: &ir::NodePayload) -> boo
         return true;
     }
     match payload {
+        ir::NodePayload::BitSlice { width, .. } => {
+            for arg in named_args {
+                match arg.name.as_str() {
+                    "width" => match arg.value {
+                        NamedArgValue::Number(v) => {
+                            if v != *width {
+                                return false;
+                            }
+                        }
+                        NamedArgValue::Any => {}
+                        _ => return false,
+                    },
+                    _ => return false,
+                }
+            }
+            true
+        }
         ir::NodePayload::OneHot { lsb_prio, .. } => {
             for arg in named_args {
                 match arg.name.as_str() {
@@ -415,7 +433,8 @@ fn matches_named_args(named_args: &[NamedArg], payload: &ir::NodePayload) -> boo
                                 return false;
                             }
                         }
-                        NamedArgValue::AnyBool => {}
+                        NamedArgValue::Any => {}
+                        _ => return false,
                     },
                     _ => return false,
                 }
@@ -647,6 +666,51 @@ fn main(x: bits[8] id=1) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "msb");
+    }
+
+    #[test]
+    fn find_matches_bit_slice_with_width_named_arg() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> bits[2] {
+  slice1: bits[1] = bit_slice(x, start=3, width=1, id=2)
+  slice2: bits[2] = bit_slice(x, start=4, width=2, id=3)
+  ret out: bits[2] = concat(slice2, slice1, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("bit_slice(x, width=1)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "slice1");
+    }
+
+    #[test]
+    fn find_matches_bit_slice_with_width_wildcard() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> bits[2] {
+  slice1: bits[1] = bit_slice(x, start=3, width=1, id=2)
+  slice2: bits[2] = bit_slice(x, start=4, width=2, id=3)
+  ret out: bits[2] = concat(slice2, slice1, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("bit_slice(x, width=_)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        let mut ids: Vec<String> = matches
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["slice1", "slice2"]);
     }
 
     #[test]
