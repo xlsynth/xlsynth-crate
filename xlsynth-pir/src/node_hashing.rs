@@ -196,6 +196,89 @@ pub fn compute_node_local_structural_hash(f: &Fn, node_ref: NodeRef) -> FwdHash 
     FwdHash(hasher.finalize())
 }
 
+/// Returns a human-readable node signature that reflects the inputs that affect
+/// structural hashing (operator, types, and hashing-relevant payload
+/// attributes).
+///
+/// This is intended for diagnostics / reporting (e.g. fuzzing and corpus
+/// analysis), and should stay aligned with what `hash_payload_attributes()`
+/// uses.
+pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
+    let node = f.get_node(node_ref);
+    let operand_tys: Vec<String> = operands(&node.payload)
+        .iter()
+        .map(|o| f.get_node(*o).ty.to_string())
+        .collect();
+
+    let mut attrs: Vec<String> = Vec::new();
+    match &node.payload {
+        NodePayload::Nil => {}
+        NodePayload::GetParam(param_id) => {
+            let ordinal = get_param_ordinal(f, *param_id) + 1;
+            attrs.push(format!("param_ordinal={ordinal}"));
+        }
+        NodePayload::Tuple(nodes) => attrs.push(format!("len={}", nodes.len())),
+        NodePayload::Array(nodes) => attrs.push(format!("len={}", nodes.len())),
+        NodePayload::TupleIndex { index, .. } => attrs.push(format!("index={index}")),
+        NodePayload::Literal(value) => attrs.push(format!("value={}", value.to_string())),
+        NodePayload::SignExt { new_bit_count, .. } | NodePayload::ZeroExt { new_bit_count, .. } => {
+            attrs.push(format!("new_bit_count={new_bit_count}"));
+        }
+        NodePayload::ArrayUpdate {
+            assumed_in_bounds, ..
+        }
+        | NodePayload::ArrayIndex {
+            assumed_in_bounds, ..
+        } => attrs.push(format!("assumed_in_bounds={assumed_in_bounds}")),
+        NodePayload::ArraySlice { width, .. } => attrs.push(format!("width={width}")),
+        NodePayload::DynamicBitSlice { width, .. } => attrs.push(format!("width={width}")),
+        NodePayload::BitSlice { start, width, .. } => {
+            attrs.push(format!("start={start}"));
+            attrs.push(format!("width={width}"));
+        }
+        NodePayload::OneHot { lsb_prio, .. } => attrs.push(format!("lsb_prio={lsb_prio}")),
+        NodePayload::Decode { width, .. } => attrs.push(format!("width={width}")),
+        NodePayload::Nary(_, nodes) => attrs.push(format!("len={}", nodes.len())),
+        NodePayload::Invoke { to_apply, operands } => {
+            attrs.push(format!("to_apply={to_apply}"));
+            attrs.push(format!("len={}", operands.len()));
+        }
+        NodePayload::PrioritySel { cases, default, .. } => {
+            attrs.push(format!("len={}", cases.len()));
+            attrs.push(format!("has_default={}", default.is_some()));
+        }
+        NodePayload::OneHotSel { cases, .. } => attrs.push(format!("len={}", cases.len())),
+        NodePayload::Sel { cases, default, .. } => {
+            attrs.push(format!("len={}", cases.len()));
+            attrs.push(format!("has_default={}", default.is_some()));
+        }
+        NodePayload::CountedFor {
+            trip_count,
+            stride,
+            body,
+            invariant_args,
+            ..
+        } => {
+            attrs.push(format!("trip_count={trip_count}"));
+            attrs.push(format!("stride={stride}"));
+            attrs.push(format!("body={body}"));
+            attrs.push(format!("invariant_args_len={}", invariant_args.len()));
+        }
+        _ => {}
+    }
+
+    let mut args: Vec<String> = Vec::new();
+    args.extend(operand_tys);
+    args.extend(attrs);
+    let args_str = args.join(", ");
+    format!(
+        "{}({}) -> {}",
+        node.payload.get_operator(),
+        args_str,
+        node.ty.to_string()
+    )
+}
+
 /// Computes a node's backward structural hash by combining its local
 /// structural hash with its users' backward hashes and the operand indices
 /// at which this node appears. The user pairs are sorted by (hash bytes,
