@@ -51,6 +51,7 @@ pub struct NamedArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamedArgValue {
     Bool(bool),
+    AnyBool,
 }
 
 impl MatcherKind {
@@ -388,11 +389,14 @@ fn matches_named_args(named_args: &[NamedArg], payload: &ir::NodePayload) -> boo
         ir::NodePayload::OneHot { lsb_prio, .. } => {
             for arg in named_args {
                 match arg.name.as_str() {
-                    "lsb_prio" => {
-                        if arg.value != NamedArgValue::Bool(*lsb_prio) {
-                            return false;
+                    "lsb_prio" => match arg.value {
+                        NamedArgValue::Bool(v) => {
+                            if v != *lsb_prio {
+                                return false;
+                            }
                         }
-                    }
+                        NamedArgValue::AnyBool => {}
+                    },
                     _ => return false,
                 }
             }
@@ -431,6 +435,40 @@ mod tests {
         assert_eq!(matcher.kind, MatcherKind::OpName("sub".to_string()));
         assert_eq!(matcher.args.len(), 2);
         assert!(matcher.named_args.is_empty());
+    }
+
+    #[test]
+    fn parse_rejects_wrong_arity_for_literal_matcher() {
+        let err = parse_query("literal()").unwrap_err();
+        assert!(
+            err.contains("literal expects 1 argument"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn find_matches_one_hot_with_wildcard_lsb_prio_named_arg() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[5] {
+  oh_t: bits[5] = one_hot(x, lsb_prio=true, id=2)
+  oh_f: bits[5] = one_hot(x, lsb_prio=false, id=3)
+  ret out: bits[5] = xor(oh_t, oh_f, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("one_hot(x, lsb_prio=_)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        let mut ids: Vec<String> = matches
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["oh_f", "oh_t"]);
     }
 
     #[test]

@@ -933,6 +933,14 @@ fn main() {
                         .required(true)
                         .index(2),
                 )
+                .add_bool_arg(
+                    "check_query",
+                    "Validate the query and exit without reading/parsing IR (useful for preflight before corpus scans)",
+                )
+                .add_bool_arg(
+                    "show-file",
+                    "Prefix each match with the input file path as '<path>: <match>'",
+                )
                 .arg(
                     Arg::new("ir_top")
                         .long("top")
