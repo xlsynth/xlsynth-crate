@@ -6,6 +6,7 @@ use crate::ir;
 use crate::ir_utils;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use xlsynth::IrBits;
 use xlsynth::IrValue;
 
 mod parser;
@@ -15,6 +16,7 @@ use self::parser::QueryParser;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryExpr {
     Placeholder(String),
+    Number(u64),
     Matcher(MatcherExpr),
 }
 
@@ -23,6 +25,7 @@ pub struct MatcherExpr {
     pub kind: MatcherKind,
     pub user_count: Option<usize>,
     pub args: Vec<QueryExpr>,
+    pub named_args: Vec<NamedArg>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +39,17 @@ pub enum MatcherKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiteralPredicate {
     Pow2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedArg {
+    pub name: String,
+    pub value: NamedArgValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedArgValue {
+    Bool(bool),
 }
 
 impl MatcherKind {
@@ -128,6 +142,16 @@ fn match_solutions(
                 }
             }
         }
+        QueryExpr::Number(number) => match f.get_node(node_ref).payload {
+            ir::NodePayload::Literal(ref value) => {
+                if literal_matches_number(value, *number) {
+                    vec![bindings.clone()]
+                } else {
+                    vec![]
+                }
+            }
+            _ => vec![],
+        },
         QueryExpr::Matcher(matcher) => {
             let node = f.get_node(node_ref);
             if !matches_kind(&matcher.kind, &node.payload) {
@@ -138,6 +162,9 @@ fn match_solutions(
                 if actual_users != expected_users {
                     return vec![];
                 }
+            }
+            if !matches_named_args(&matcher.named_args, &node.payload) {
+                return vec![];
             }
             if let MatcherKind::Literal { predicate } = matcher.kind {
                 return match_literal_solutions(predicate, &matcher.args, &node.payload, bindings);
@@ -168,27 +195,35 @@ fn match_literal_solutions(
         return vec![];
     }
 
-    let QueryExpr::Placeholder(name) = &args[0] else {
-        return vec![];
-    };
-
-    if name == "_" {
-        // Wildcard literal argument: match any literal value without binding.
-        return vec![bindings.clone()];
-    }
-
-    match bindings.get(name) {
-        Some(existing) => match existing {
-            Binding::LiteralValue(existing_value) if *existing_value == *value => {
-                vec![bindings.clone()]
+    match &args[0] {
+        QueryExpr::Placeholder(name) => {
+            if name == "_" {
+                // Wildcard literal argument: match any literal value without binding.
+                return vec![bindings.clone()];
             }
-            _ => vec![],
-        },
-        None => {
-            let mut out = bindings.clone();
-            out.insert(name.clone(), Binding::LiteralValue(value.clone()));
-            vec![out]
+
+            match bindings.get(name) {
+                Some(existing) => match existing {
+                    Binding::LiteralValue(existing_value) if *existing_value == *value => {
+                        vec![bindings.clone()]
+                    }
+                    _ => vec![],
+                },
+                None => {
+                    let mut out = bindings.clone();
+                    out.insert(name.clone(), Binding::LiteralValue(value.clone()));
+                    vec![out]
+                }
+            }
         }
+        QueryExpr::Number(number) => {
+            if literal_matches_number(value, *number) {
+                vec![bindings.clone()]
+            } else {
+                vec![]
+            }
+        }
+        QueryExpr::Matcher(_) => vec![],
     }
 }
 
@@ -214,6 +249,39 @@ fn literal_satisfies_predicate(pred: LiteralPredicate, value: &IrValue) -> bool 
             set_bits == 1
         }
     }
+}
+
+fn literal_matches_number(value: &IrValue, number: u64) -> bool {
+    let Ok(bits) = value.to_bits() else {
+        return false;
+    };
+    let bit_count = bits.get_bit_count();
+
+    if bit_count == 0 {
+        return number == 0;
+    }
+
+    if number == 0 {
+        for i in 0..bit_count {
+            let Ok(bit) = bits.get_bit(i) else {
+                return false;
+            };
+            if bit {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Query numbers are widthless; treat them as an unsigned numeric value and
+    // match literals whose upper bits are all zero beyond the value's u64
+    // representation.
+    if bit_count < 64 && (number >> bit_count) != 0 {
+        return false;
+    }
+
+    let expected = IrBits::make_ubits(bit_count, number).unwrap();
+    bits.equals(&expected)
 }
 
 /// Matches the query arguments against a node's operands.
@@ -282,6 +350,28 @@ fn matches_kind(kind: &MatcherKind, payload: &ir::NodePayload) -> bool {
     }
 }
 
+fn matches_named_args(named_args: &[NamedArg], payload: &ir::NodePayload) -> bool {
+    if named_args.is_empty() {
+        return true;
+    }
+    match payload {
+        ir::NodePayload::OneHot { lsb_prio, .. } => {
+            for arg in named_args {
+                match arg.name.as_str() {
+                    "lsb_prio" => {
+                        if arg.value != NamedArgValue::Bool(*lsb_prio) {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +386,7 @@ mod tests {
         };
         assert_eq!(matcher.kind, MatcherKind::AnyCmp);
         assert_eq!(matcher.args.len(), 2);
+        assert!(matcher.named_args.is_empty());
     }
 
     /// Verifies the parser accepts concrete operator matchers like
@@ -309,6 +400,7 @@ mod tests {
         };
         assert_eq!(matcher.kind, MatcherKind::OpName("sub".to_string()));
         assert_eq!(matcher.args.len(), 2);
+        assert!(matcher.named_args.is_empty());
     }
 
     #[test]
@@ -347,6 +439,29 @@ fn main(x: bits[8] id=1) -> bits[8] {
         let pkg = parser.parse_and_validate_package().expect("parse package");
         let f = pkg.get_top_fn().expect("top function");
         let query = parse_query("sub(add(x, literal(L)), literal(L))").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "out");
+    }
+
+    #[test]
+    fn find_matches_one_hot_encode_zero_pattern() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[1] {
+  rev: bits[4] = reverse(x, id=2)
+  oh: bits[5] = one_hot(rev, lsb_prio=true, id=3)
+  enc: bits[3] = encode(oh, id=4)
+  zero: bits[3] = literal(value=0, id=5)
+  ret out: bits[1] = eq(enc, zero, id=6)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+        let query =
+            parse_query("eq(encode(one_hot(reverse(x), lsb_prio=true)), literal(0))").unwrap();
         let matches = find_matching_nodes(f, &query);
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);

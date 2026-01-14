@@ -83,6 +83,8 @@ Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid need
 Avoid `use` statements inside local function scopes; place all imports at the
 module level (or at the top of a `mod tests` section) for clarity.
 
+In general, when representing IR values with arbitrary bit widths, prefer `xlsynth::IrBits` / `xlsynth::IrValue` over fixed-width Rust integers (e.g. `u64`). Do not assume "64 bits is probably wide enough."
+
 When using C-style inline comments to document a named argument style in function calls, prefer:
 
 ```text
