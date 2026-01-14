@@ -59,11 +59,11 @@ fn format_depth_limited_nested_signature(
     node_ref: ir::NodeRef,
     depth: usize,
 ) -> String {
-    let node = f.get_node(node_ref);
-    let local = node.to_signature_string(f);
+    let local = xlsynth_pir::node_hashing::node_structural_signature_string(f, node_ref);
     if depth == 0 {
         return local;
     }
+    let node = f.get_node(node_ref);
     let child_refs = ir_utils::operands(&node.payload);
     if child_refs.is_empty() {
         return local;
