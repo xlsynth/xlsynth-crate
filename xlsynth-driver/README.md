@@ -456,6 +456,7 @@ Query expression basics:
 - `$anycmp` and `$anymul` are binary operators, so they always take two arguments. Use `_` for a wildcard position.
 - `literal(L)` matches a `literal` node and binds `L` to the literal **value** (reusing `L` requires the same literal value, even if it is a different literal node).
 - `literal[pow2](L)` additionally constrains the literal to be a strict power-of-two bits value (exactly one bit set; `0` does not match).
+- `msb(x)` is shorthand for matching a `bit_slice` of the highest bit (width 1) of `x`.
 
 Example:
 
@@ -473,6 +474,12 @@ Example: find comparisons against a power-of-two constant:
 
 ```shell
 xlsynth-driver ir-query my_pkg.ir '$anycmp(x, literal[pow2](L))'
+```
+
+Example: match the MSB of a negated value:
+
+```shell
+xlsynth-driver ir-query my_pkg.ir 'msb(neg(x))'
 ```
 
 ### `ir-structural-similarity`

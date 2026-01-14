@@ -32,6 +32,7 @@ pub struct MatcherExpr {
 pub enum MatcherKind {
     AnyCmp,
     AnyMul,
+    Msb,
     OpName(String),
     Literal { predicate: Option<LiteralPredicate> },
 }
@@ -69,6 +70,15 @@ impl MatcherKind {
                 }
             };
             Ok(MatcherKind::Literal { predicate })
+        } else if opname == "msb" {
+            if let Some(pred) = predicate {
+                Err(format!(
+                    "unknown bracket clause [{}] for operator {}; only user-count constraints like [1u] are supported",
+                    pred, opname
+                ))
+            } else {
+                Ok(MatcherKind::Msb)
+            }
         } else if let Some(pred) = predicate {
             Err(format!(
                 "unknown bracket clause [{}] for operator {}; only user-count constraints like [1u] are supported",
@@ -155,6 +165,9 @@ fn match_solutions(
         QueryExpr::Matcher(matcher) => {
             let node = f.get_node(node_ref);
             if !matches_kind(&matcher.kind, &node.payload) {
+                return vec![];
+            }
+            if matches!(matcher.kind, MatcherKind::Msb) && !matches_msb_slice(f, &node.payload) {
                 return vec![];
             }
             if let Some(expected_users) = matcher.user_count {
@@ -345,8 +358,25 @@ fn matches_kind(kind: &MatcherKind, payload: &ir::NodePayload) -> bool {
             ),
             _ => false,
         },
+        MatcherKind::Msb => matches!(payload, ir::NodePayload::BitSlice { .. }),
         MatcherKind::OpName(opname) => payload.get_operator() == opname,
         MatcherKind::Literal { .. } => matches!(payload, ir::NodePayload::Literal(_)),
+    }
+}
+
+fn matches_msb_slice(f: &ir::Fn, payload: &ir::NodePayload) -> bool {
+    match payload {
+        ir::NodePayload::BitSlice { arg, start, width } => {
+            if *width != 1 {
+                return false;
+            }
+            let arg_bits = f.get_node(*arg).ty.bit_count();
+            if arg_bits == 0 {
+                return false;
+            }
+            *start == arg_bits - 1
+        }
+        _ => false,
     }
 }
 
@@ -529,6 +559,26 @@ fn main(a: bits[8] id=1, b: bits[8] id=2) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "c");
+    }
+
+    #[test]
+    fn find_matches_msb_shorthand() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> bits[1] {
+  neg.2: bits[8] = neg(x, id=2)
+  ret msb: bits[1] = bit_slice(neg.2, start=7, width=1, id=3)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("msb(neg(x))").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "msb");
     }
 
     #[test]

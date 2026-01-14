@@ -89,6 +89,18 @@ impl<'a> QueryParser<'a> {
                 let kind = MatcherKind::from_opname_and_predicate(&ident, predicate)
                     .map_err(|e| self.error(&e))?;
 
+                if matches!(kind, MatcherKind::Msb) {
+                    if !parsed_args.named_args.is_empty() {
+                        return Err(self.error("msb does not support named arguments"));
+                    }
+                    if parsed_args.args.len() != 1 {
+                        return Err(self.error(&format!(
+                            "msb expects 1 argument; got {}. Use '_' as a wildcard argument if needed",
+                            parsed_args.args.len()
+                        )));
+                    }
+                }
+
                 Ok(QueryExpr::Matcher(MatcherExpr {
                     kind,
                     user_count,
