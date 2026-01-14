@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::common::parse_bool_flag_or;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
@@ -24,6 +25,10 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
             report_cli_error_and_exit(&msg, Some("ir-query"), vec![]);
         }
     };
+
+    if parse_bool_flag_or(matches, "check_query", false) {
+        return;
+    }
 
     let file_content = std::fs::read_to_string(input_file)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_file, e));

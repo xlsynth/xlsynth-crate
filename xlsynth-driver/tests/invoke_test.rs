@@ -7865,6 +7865,38 @@ fn main(x: bits[4] id=1) -> bits[5] {
 }
 
 #[test]
+fn test_ir_query_check_query_true_does_not_read_ir_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-query")
+        .arg("this_file_should_not_be_read.ir")
+        .arg("$anycmp(x, _)")
+        .arg("--check_query=true")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-query --check_query failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "",
+        "expected no stdout"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "",
+        "expected no stderr"
+    );
+}
+
+#[test]
 fn test_ir_query_malformed_query_reports_error() {
     let _ = env_logger::builder().is_test(true).try_init();
 

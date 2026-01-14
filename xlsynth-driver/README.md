@@ -444,6 +444,7 @@ Matches a query expression against the top function of an IR package and prints 
 - Positional arguments: `<ir_input_file> <query>`
 - Optional:
   - `--top <NAME>` – function name to treat as top (overrides the package top).
+  - `--check_query=true` – validate the query and exit without reading/parsing IR (useful for preflight before corpus scans).
 
 Query expression basics:
 
@@ -462,6 +463,12 @@ Example:
 
 ```shell
 xlsynth-driver ir-query my_pkg.ir '$anycmp($anymul[1u](x, y), _)'
+```
+
+Preflight a query once before running a large scan (avoids repeating parse errors per file when using `xargs`):
+
+```shell
+xlsynth-driver ir-query ignored.ir '$anycmp(x, _)' --check_query=true
 ```
 
 Example: match subtraction of an addition with a repeated constant:
