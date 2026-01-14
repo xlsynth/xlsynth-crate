@@ -266,6 +266,49 @@ pub fn functions_structurally_equivalent(lhs: &Fn, rhs: &Fn) -> bool {
     lhs_fwd[lhs.ret_node_ref.unwrap().index] == rhs_fwd[rhs.ret_node_ref.unwrap().index]
 }
 
+/// Computes depth-limited forward structural hashes for all nodes in `f`.
+///
+/// Depth definition:
+/// - depth=0: local structural hash only (operator + type + payload
+///   attributes).
+/// - depth>0: hash(local + ordered child hashes at depth-1), where child order
+///   is the operand order in the PIR node payload.
+///
+/// This is useful for computing bounded “neighborhood signatures” (e.g.
+/// depth=2).
+pub fn compute_depth_limited_forward_hashes(f: &Fn, depth: usize) -> Vec<FwdHash> {
+    let n = f.nodes.len();
+    if n == 0 {
+        return vec![];
+    }
+
+    let mut hashes: Vec<FwdHash> = (0..n)
+        .map(|index| compute_node_local_structural_hash(f, NodeRef { index }))
+        .collect();
+    if depth == 0 {
+        return hashes;
+    }
+
+    let order = get_topological(f);
+    for _ in 0..depth {
+        let prev = hashes;
+        let mut next: Vec<Option<FwdHash>> = vec![None; n];
+        for nr in order.iter().copied() {
+            let deps = operands(&f.get_node(nr).payload);
+            let mut child_hashes: Vec<FwdHash> = Vec::with_capacity(deps.len());
+            for c in deps.into_iter() {
+                child_hashes.push(prev[c.index]);
+            }
+            next[nr.index] = Some(compute_node_structural_hash(f, nr, &child_hashes));
+        }
+        hashes = next
+            .into_iter()
+            .map(|o| o.expect("hash must be computed for all nodes"))
+            .collect();
+    }
+    hashes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -63,6 +63,7 @@ mod ir2opt;
 mod ir2pipeline;
 mod ir_annotate_ranges;
 mod ir_bool_cones;
+mod ir_diverse_samples;
 mod ir_equiv;
 mod ir_equiv_blocks;
 mod ir_fn_eval;
@@ -387,6 +388,33 @@ fn main() {
                 .action(ArgAction::Set),
         )
         .subcommand(clap::Command::new("version").about("Prints the version of the driver"))
+        .subcommand(
+            clap::Command::new("ir-diverse-samples")
+                .about("Selects a diverse subset of IR samples from a corpus directory")
+                .arg(
+                    clap::Arg::new("corpus_dir")
+                        .value_name("CORPUS_DIR")
+                        .help("Root directory to search recursively for .ir files")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("signature_depth")
+                        .long("signature-depth")
+                        .value_name("N")
+                        .help("Depth for structural signature hashing (default 2)")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "log-skipped",
+                    "Log skipped samples (read/parse/lower failures) to stderr via the logger",
+                )
+                .add_bool_arg(
+                    "explain-new-hashes",
+                    "Print the PIR node signatures that introduced new hashes for each selected sample",
+                ),
+        )
         .subcommand(
             clap::Command::new("dslx2pipeline")
                 .about("Converts DSLX to SystemVerilog")
@@ -2014,6 +2042,12 @@ fn main() {
         }
         Some(("ir-bool-cones", subm)) => {
             ir_bool_cones::handle_ir_bool_cones(subm, &config);
+        }
+        Some(("ir-diverse-samples", subm)) => {
+            if let Err(e) = ir_diverse_samples::handle_ir_diverse_samples(subm) {
+                eprintln!("error in ir-diverse-samples: {e}");
+                std::process::exit(1);
+            }
         }
         Some(("ir-fn-eval", subm)) => {
             ir_fn_eval::handle_ir_fn_eval(subm, &config);
