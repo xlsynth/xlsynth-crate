@@ -941,6 +941,10 @@ fn main() {
                     "show-file",
                     "Prefix each match with the input file path as '<path>: <match>'",
                 )
+                .add_bool_arg(
+                    "show-ret",
+                    "Prefix matches that are return values with 'ret' (true by default)",
+                )
                 .arg(
                     Arg::new("ir_top")
                         .long("top")
