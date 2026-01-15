@@ -297,6 +297,9 @@ impl<'a> QueryParser<'a> {
             Some(b'[') => NamedArgValue::ExprList(self.parse_expr_list()?),
             _ => {
                 let expr = self.parse_expr()?;
+                if ident == "lsb_prio" {
+                    return self.parse_bool_named_arg(ident, expr);
+                }
                 match expr {
                     QueryExpr::Placeholder(ref name) if name == "_" => NamedArgValue::Any,
                     QueryExpr::Placeholder(ref name) if name == "true" => NamedArgValue::Bool(true),
@@ -340,6 +343,28 @@ impl<'a> QueryParser<'a> {
             }
         }
         Ok(items)
+    }
+
+    fn parse_bool_named_arg(
+        &mut self,
+        name: String,
+        expr: QueryExpr,
+    ) -> Result<Option<NamedArg>, String> {
+        match expr {
+            QueryExpr::Placeholder(ref ident) if ident == "_" => Ok(Some(NamedArg {
+                name,
+                value: NamedArgValue::Any,
+            })),
+            QueryExpr::Placeholder(ref ident) if ident == "true" => Ok(Some(NamedArg {
+                name,
+                value: NamedArgValue::Bool(true),
+            })),
+            QueryExpr::Placeholder(ref ident) if ident == "false" => Ok(Some(NamedArg {
+                name,
+                value: NamedArgValue::Bool(false),
+            })),
+            _ => Err(self.error("lsb_prio expects boolean literal or '_'")),
+        }
     }
 }
 

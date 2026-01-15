@@ -7957,7 +7957,7 @@ fn main(x: bits[4] id=1) -> bits[5] {
     let output = Command::new(driver)
         .arg("ir-query")
         .arg(ir_path.to_str().unwrap())
-        .arg("one_hot(x, lsb_prio=)")
+        .arg("one_hot(x, lsb_prio=maybe)")
         .output()
         .unwrap();
 
@@ -7974,7 +7974,7 @@ fn main(x: bits[4] id=1) -> bits[5] {
         stderr
     );
     assert!(
-        stderr.contains("expected placeholder or operator"),
+        stderr.contains("lsb_prio expects boolean literal or '_'"),
         "unexpected stderr: {}",
         stderr
     );
