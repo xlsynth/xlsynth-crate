@@ -597,6 +597,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_named_arg_true_is_expr_outside_lsb_prio() {
+        let query = parse_query("priority_sel(selector=true, cases=[a], default=d)").unwrap();
+        let QueryExpr::Matcher(matcher) = query else {
+            panic!("expected matcher");
+        };
+        match &matcher.named_args[0].value {
+            NamedArgValue::Expr(QueryExpr::Placeholder(name)) => assert_eq!(name, "true"),
+            other => panic!("expected selector expr placeholder, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn parse_rejects_wrong_arity_for_literal_matcher() {
         let err = parse_query("literal()").unwrap_err();
         assert!(

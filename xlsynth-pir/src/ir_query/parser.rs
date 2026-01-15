@@ -302,10 +302,6 @@ impl<'a> QueryParser<'a> {
                 }
                 match expr {
                     QueryExpr::Placeholder(ref name) if name == "_" => NamedArgValue::Any,
-                    QueryExpr::Placeholder(ref name) if name == "true" => NamedArgValue::Bool(true),
-                    QueryExpr::Placeholder(ref name) if name == "false" => {
-                        NamedArgValue::Bool(false)
-                    }
                     QueryExpr::Number(number) if ident == "width" => {
                         let number = usize::try_from(number).map_err(|_| {
                             self.error("named argument number does not fit in usize")
