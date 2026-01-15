@@ -31,6 +31,7 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     }
 
     let show_file = parse_bool_flag_or(matches, "show-file", false);
+    let show_ret = parse_bool_flag_or(matches, "show-ret", true);
 
     let file_content = std::fs::read_to_string(input_file)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_file, e));
@@ -51,19 +52,18 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
 
     for node_ref in matches {
         let node = top_fn.get_node(node_ref);
-        if let Some(line) = node.to_string(top_fn) {
-            if show_file {
-                println!("{}: {}", input_file, line);
-            } else {
-                println!("{}", line);
-            }
+        let mut line = if let Some(line) = node.to_string(top_fn) {
+            line
         } else {
-            let node_id = ir::node_textual_id(top_fn, node_ref);
-            if show_file {
-                println!("{}: {}", input_file, node_id);
-            } else {
-                println!("{}", node_id);
-            }
+            ir::node_textual_id(top_fn, node_ref)
+        };
+        if show_ret && top_fn.ret_node_ref == Some(node_ref) {
+            line = format!("ret {}", line);
+        }
+        if show_file {
+            println!("{}: {}", input_file, line);
+        } else {
+            println!("{}", line);
         }
     }
 }

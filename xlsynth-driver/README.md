@@ -446,6 +446,7 @@ Matches a query expression against the top function of an IR package and prints 
   - `--top <NAME>` – function name to treat as top (overrides the package top).
   - `--check_query=true` – validate the query and exit without reading/parsing IR (useful for preflight before corpus scans).
   - `--show-file=true` – prefix each match with the input file path as `<path>: <match>`.
+  - `--show-ret=false` – disable prefixing matches that are return values with `ret` (defaults to `true`).
 
 Query expression basics:
 

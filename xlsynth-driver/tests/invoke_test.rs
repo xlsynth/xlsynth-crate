@@ -7818,7 +7818,7 @@ fn main(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("cmp: bits[1] = eq("),
+        stdout.contains("ret cmp: bits[1] = eq("),
         "unexpected ir-query output: {}",
         stdout
     );
