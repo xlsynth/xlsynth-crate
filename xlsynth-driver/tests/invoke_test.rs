@@ -614,9 +614,10 @@ fn test_ir2gates_adder_mapping_flag() {
     // no better than more parallel prefix structures.
     assert!(rc_depth >= bk_depth);
     assert!(rc_depth >= ks_depth);
-    // Empirically in our current mapping pipeline, Kogge-Stone is not shallower
-    // than Brent-Kung (depth model / mapping choices can affect this ordering).
-    assert!(ks_depth >= bk_depth);
+    // Empirically in our current mapping pipeline, Kogge-Stone is at least as
+    // shallow as Brent-Kung (depth model / mapping choices can affect this
+    // ordering).
+    assert!(ks_depth <= bk_depth);
 }
 
 #[test]

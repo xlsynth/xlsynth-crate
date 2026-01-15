@@ -92,7 +92,7 @@ fn adder_depths() {
     let _ = env_logger::builder().is_test(true).try_init();
     const RIPPLE: [usize; 8] = [5, 7, 10, 13, 16, 19, 22, 25];
     const CARRY_SELECT: [usize; 8] = [5, 7, 9, 9, 11, 11, 13, 13];
-    const KOGGE: [usize; 8] = [5, 7, 9, 11, 14, 15, 17, 19];
+    const KOGGE: [usize; 8] = [5, 7, 8, 9, 10, 11, 11, 11];
     const BRENT: [usize; 8] = [5, 7, 8, 10, 10, 12, 12, 14];
 
     for bits in 1usize..=8 {

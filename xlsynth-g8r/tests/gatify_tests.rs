@@ -773,16 +773,17 @@ fn test_gatify_one_hot() {
         let one_hot = gatify_one_hot(&mut *builder, &arg, true);
         builder.add_output("result".to_string(), one_hot);
     });
+    // These stats track the Brent-Kung default prefix strategy for one_hot.
     #[rustfmt::skip]
     let want = &[
         (1, SummaryStats { live_nodes: 1, deepest_path: 1, fanout_histogram: btreemap!{} }),
         (2, SummaryStats { live_nodes: 4, deepest_path: 2, fanout_histogram: btreemap!{2 => 1} }),
-        (3, SummaryStats { live_nodes: 8, deepest_path: 3, fanout_histogram: btreemap!{2 => 1, 3 => 1, 1 => 2} }),
-        (4, SummaryStats { live_nodes: 12, deepest_path: 4, fanout_histogram: btreemap!{2 => 2, 1 => 3, 0 => 1, 4 => 1, 3 => 1} }),
-        (5, SummaryStats { live_nodes: 17, deepest_path: 4, fanout_histogram: btreemap!{4 => 1, 5 => 1, 2 => 1, 3 => 2, 1 => 6, 0 => 2} }),
-        (6, SummaryStats { live_nodes: 22, deepest_path: 5, fanout_histogram: btreemap!{1 => 7, 6 => 1, 2 => 3, 4 => 1, 3 => 2, 5 => 1, 0 => 4} }),
-        (7, SummaryStats { live_nodes: 27, deepest_path: 5, fanout_histogram: btreemap!{4 => 1, 3 => 4, 0 => 7, 7 => 1, 1 => 9, 2 => 2, 5 => 1, 6 => 1} }),
-        (8, SummaryStats { live_nodes: 32, deepest_path: 5, fanout_histogram: btreemap!{6 => 1, 3 => 3, 4 => 2, 5 => 1, 7 => 1, 8 => 1, 0 => 11, 1 => 9, 2 => 5} }),
+        (3, SummaryStats { live_nodes: 7, deepest_path: 3, fanout_histogram: btreemap!{0 => 1, 2 => 1, 3 => 2} }),
+        (4, SummaryStats { live_nodes: 11, deepest_path: 4, fanout_histogram: btreemap!{1 => 2, 2 => 2, 3 => 2} }),
+        (5, SummaryStats { live_nodes: 14, deepest_path: 4, fanout_histogram: btreemap!{0 => 2, 1 => 2, 2 => 2, 3 => 2, 4 => 2} }),
+        (6, SummaryStats { live_nodes: 18, deepest_path: 5, fanout_histogram: btreemap!{0 => 1, 1 => 3, 2 => 4, 3 => 3, 4 => 1} }),
+        (7, SummaryStats { live_nodes: 21, deepest_path: 5, fanout_histogram: btreemap!{0 => 1, 1 => 4, 2 => 5, 3 => 4, 4 => 1} }),
+        (8, SummaryStats { live_nodes: 26, deepest_path: 6, fanout_histogram: btreemap!{1 => 6, 2 => 6, 3 => 4, 4 => 1} }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();

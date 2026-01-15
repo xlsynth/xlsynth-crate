@@ -18,6 +18,7 @@ pub mod gate_fn_equiv_report;
 pub mod ir2gate_utils;
 pub mod ir2gates;
 pub mod liberty;
+pub(crate) mod prefix_scan_utils;
 pub mod verilog_version;
 pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));

@@ -9,6 +9,9 @@
 use crate::aig::gate::{self, AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gate_builder::ReductionKind;
+use crate::prefix_scan_utils::{prefix_scan_exclusive, prefix_scan_inclusive};
+
+pub use crate::prefix_scan_utils::PrefixScanStrategy;
 
 /// Selects the adder implementation to use when lowering addition operations.
 #[derive(Debug, Clone, Copy)]
@@ -159,19 +162,6 @@ pub fn gatify_add_ripple_carry(
     (c_in, AigBitVector::from_lsb_is_index_0(&gates))
 }
 
-fn prefix_update(
-    p_i: AigOperand,
-    g_i: AigOperand,
-    p_k: AigOperand,
-    g_k: AigOperand,
-    gb: &mut GateBuilder,
-) -> (AigOperand, AigOperand) {
-    let and = gb.add_and_binary(p_i, g_k);
-    let g = gb.add_or_binary(g_i, and);
-    let p = gb.add_and_binary(p_i, p_k);
-    (p, g)
-}
-
 pub fn gatify_add_kogge_stone(
     lhs: &AigBitVector,
     rhs: &AigBitVector,
@@ -184,24 +174,28 @@ pub fn gatify_add_kogge_stone(
     let xor_bits: Vec<AigOperand> = (0..bits)
         .map(|i| g8_builder.add_xor_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
         .collect();
-    let mut p: Vec<AigOperand> = xor_bits.clone();
-    let mut g: Vec<AigOperand> = (0..bits)
-        .map(|i| g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
+    let pg_inputs: Vec<PrefixPg> = (0..bits)
+        .map(|i| PrefixPg {
+            p: xor_bits[i],
+            g: g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)),
+        })
         .collect();
-    let mut step = 1;
-    while step < bits {
-        for i in step..bits {
-            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
-            p[i] = p_new;
-            g[i] = g_new;
-        }
-        step *= 2;
-    }
+    let identity = PrefixPg {
+        p: g8_builder.get_true(),
+        g: g8_builder.get_false(),
+    };
+    let pg_scan = prefix_scan_inclusive(
+        g8_builder,
+        &pg_inputs,
+        PrefixScanStrategy::KoggeStone,
+        identity,
+        combine_prefix_pg,
+    );
     let mut carries = Vec::with_capacity(bits + 1);
     carries.push(c_in);
     for i in 0..bits {
-        let and = g8_builder.add_and_binary(p[i], c_in);
-        let carry = g8_builder.add_or_binary(g[i], and);
+        let and = g8_builder.add_and_binary(pg_scan[i].p, c_in);
+        let carry = g8_builder.add_or_binary(pg_scan[i].g, and);
         carries.push(carry);
     }
     let mut sum = Vec::with_capacity(bits);
@@ -240,35 +234,28 @@ pub fn gatify_add_brent_kung(
     let xor_bits: Vec<AigOperand> = (0..bits)
         .map(|i| g8_builder.add_xor_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
         .collect();
-    let mut p: Vec<AigOperand> = xor_bits.clone();
-    let mut g: Vec<AigOperand> = (0..bits)
-        .map(|i| g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
+    let pg_inputs: Vec<PrefixPg> = (0..bits)
+        .map(|i| PrefixPg {
+            p: xor_bits[i],
+            g: g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)),
+        })
         .collect();
-    let mut step = 1;
-    while step < bits {
-        let stride = step * 2;
-        for i in (stride - 1..bits).step_by(stride) {
-            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
-            p[i] = p_new;
-            g[i] = g_new;
-        }
-        step = stride;
-    }
-    step /= 2;
-    while step > 0 {
-        let stride = step * 2;
-        for i in (stride + step - 1..bits).step_by(stride) {
-            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
-            p[i] = p_new;
-            g[i] = g_new;
-        }
-        step /= 2;
-    }
+    let identity = PrefixPg {
+        p: g8_builder.get_true(),
+        g: g8_builder.get_false(),
+    };
+    let pg_scan = prefix_scan_inclusive(
+        g8_builder,
+        &pg_inputs,
+        PrefixScanStrategy::BrentKung,
+        identity,
+        combine_prefix_pg,
+    );
     let mut carries = Vec::with_capacity(bits + 1);
     carries.push(c_in);
     for i in 0..bits {
-        let and = g8_builder.add_and_binary(p[i], c_in);
-        let carry = g8_builder.add_or_binary(g[i], and);
+        let and = g8_builder.add_and_binary(pg_scan[i].p, c_in);
+        let carry = g8_builder.add_or_binary(pg_scan[i].g, and);
         carries.push(carry);
     }
     let mut sum = Vec::with_capacity(bits);
@@ -589,48 +576,147 @@ pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool)
     gatify_one_hot_with_nonzero_flag(gb, bits, lsb_prio, /* value_cannot_be_zero= */ false)
 }
 
+pub fn gatify_one_hot_for_depth(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag_for_depth(
+        gb, bits, lsb_prio, /* value_cannot_be_zero= */ false,
+    )
+}
+
+pub fn gatify_one_hot_for_area(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag_for_area(
+        gb, bits, lsb_prio, /* value_cannot_be_zero= */ false,
+    )
+}
+
 pub fn gatify_one_hot_with_nonzero_flag(
     gb: &mut GateBuilder,
     bits: &AigBitVector,
     lsb_prio: bool,
     value_cannot_be_zero: bool,
 ) -> AigBitVector {
-    let mut gates = Vec::new();
+    gatify_one_hot_with_nonzero_flag_prefix_strategy(
+        gb,
+        bits,
+        lsb_prio,
+        value_cannot_be_zero,
+        PrefixScanStrategy::BrentKung,
+    )
+}
 
-    // Implementation note: instead of chaining all the "no prior bit" computations
-    // linearly through, we do a tree reduction for each bit.
-
-    let mut prior_bits_inverted = Vec::new();
-
+pub fn gatify_one_hot_with_nonzero_flag_prefix_strategy(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+    value_cannot_be_zero: bool,
+    prefix_strategy: PrefixScanStrategy,
+) -> AigBitVector {
+    let mut ordered_bits: Vec<AigOperand> = Vec::with_capacity(bits.get_bit_count());
     for i in 0..bits.get_bit_count() {
         let this_input_bit = if lsb_prio {
             bits.get_lsb(i)
         } else {
             bits.get_msb(i)
         };
-        let no_prior_bit = if prior_bits_inverted.is_empty() {
-            gb.get_true()
-        } else {
-            gb.add_and_nary(&prior_bits_inverted, ReductionKind::Tree)
-        };
-        let this_output_bit = gb.add_and_binary(*this_input_bit, no_prior_bit);
-        gates.push(this_output_bit);
-
-        prior_bits_inverted.push(gb.add_not(*this_input_bit));
+        ordered_bits.push(*this_input_bit);
     }
+
+    let mut inverted: Vec<AigOperand> = Vec::with_capacity(bits.get_bit_count());
+    for bit in ordered_bits.iter() {
+        inverted.push(gb.add_not(*bit));
+    }
+
+    let identity = gb.get_true();
+    let inclusive = prefix_scan_inclusive(
+        gb,
+        &inverted,
+        prefix_strategy,
+        identity,
+        |builder, lhs, rhs| builder.add_and_binary(lhs, rhs),
+    );
+    let exclusive = prefix_scan_exclusive(&inclusive, identity);
+
+    let mut gates: Vec<AigOperand> = Vec::with_capacity(bits.get_bit_count() + 1);
+    for (i, bit) in ordered_bits.iter().enumerate() {
+        let no_prior_bit = exclusive[i];
+        let this_output_bit = if no_prior_bit == gb.get_true() {
+            *bit
+        } else {
+            gb.add_and_binary(*bit, no_prior_bit)
+        };
+        gates.push(this_output_bit);
+    }
+
     if !lsb_prio {
         gates.reverse();
     }
+
     if value_cannot_be_zero {
         // If the input value is provably nonzero, then "none of the input bits were
-        // set" is provably false. Emit it as a literal zero instead of building
-        // an AND tree.
+        // set" is provably false. Emit it as a literal zero.
         gates.push(gb.get_false());
     } else {
-        let no_prior_bit = gb.add_and_nary(&prior_bits_inverted, ReductionKind::Tree);
+        let no_prior_bit = if inclusive.is_empty() {
+            gb.get_true()
+        } else {
+            *inclusive
+                .last()
+                .expect("inclusive scan should not be empty")
+        };
         gates.push(no_prior_bit);
     }
+
     AigBitVector::from_lsb_is_index_0(&gates)
+}
+
+pub fn gatify_one_hot_with_nonzero_flag_for_area(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+    value_cannot_be_zero: bool,
+) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag_prefix_strategy(
+        gb,
+        bits,
+        lsb_prio,
+        value_cannot_be_zero,
+        PrefixScanStrategy::Linear,
+    )
+}
+
+pub fn gatify_one_hot_with_nonzero_flag_for_depth(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+    value_cannot_be_zero: bool,
+) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag_prefix_strategy(
+        gb,
+        bits,
+        lsb_prio,
+        value_cannot_be_zero,
+        PrefixScanStrategy::KoggeStone,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct PrefixPg {
+    p: AigOperand,
+    g: AigOperand,
+}
+
+fn combine_prefix_pg(gb: &mut GateBuilder, lhs: PrefixPg, rhs: PrefixPg) -> PrefixPg {
+    let and = gb.add_and_binary(rhs.p, lhs.g);
+    let g = gb.add_or_binary(rhs.g, and);
+    let p = gb.add_and_binary(rhs.p, lhs.p);
+    PrefixPg { p, g }
 }
 
 #[cfg(test)]
