@@ -295,10 +295,6 @@ impl<'a> QueryParser<'a> {
         self.skip_ws();
         let value = match self.peek() {
             Some(b'[') => NamedArgValue::ExprList(self.parse_expr_list()?),
-            Some(c) if c.is_ascii_digit() => {
-                let number = self.parse_number("number")?;
-                NamedArgValue::Number(number)
-            }
             _ => {
                 let expr = self.parse_expr()?;
                 match expr {
@@ -307,7 +303,7 @@ impl<'a> QueryParser<'a> {
                     QueryExpr::Placeholder(ref name) if name == "false" => {
                         NamedArgValue::Bool(false)
                     }
-                    QueryExpr::Number(number) => {
+                    QueryExpr::Number(number) if ident == "width" => {
                         let number = usize::try_from(number).map_err(|_| {
                             self.error("named argument number does not fit in usize")
                         })?;

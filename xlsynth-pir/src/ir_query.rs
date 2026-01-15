@@ -736,6 +736,28 @@ fn main(sel: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) ->
     }
 
     #[test]
+    fn find_matches_priority_sel_with_numeric_named_args() {
+        let pkg_text = r#"package test
+
+fn main(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  sel_lit: bits[2] = literal(value=1, id=3)
+  def_lit: bits[8] = literal(value=0, id=4)
+  prio: bits[8] = priority_sel(sel_lit, cases=[a, b], default=def_lit, id=5)
+  ret out: bits[8] = identity(prio, id=6)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("priority_sel(selector=1, cases=[_, _], default=0)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "prio");
+    }
+
+    #[test]
     fn single_arg_matcher_backtracks_shared_placeholder() {
         let pkg_text = r#"package test
 
