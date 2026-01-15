@@ -2,8 +2,13 @@
 
 use xlsynth::FnBuilder;
 use xlsynth::IrPackage;
+use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::aig_serdes::ir2gate::{GatifyOptions, gatify};
+use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
+use xlsynth_g8r::ir2gate_utils::{
+    PrefixScanStrategy, gatify_one_hot_with_nonzero_flag_prefix_strategy,
+};
 use xlsynth_g8r::test_utils::Opt;
 use xlsynth_pir::ir_parser;
 
@@ -73,11 +78,82 @@ fn gather_one_hot_rows() -> Vec<OneHotRow> {
     got
 }
 
+fn build_one_hot_gate_fn(
+    bit_count: usize,
+    lsb_prio: bool,
+    prefix_strategy: PrefixScanStrategy,
+) -> GateFn {
+    let mut gb = GateBuilder::new("one_hot_prefix".to_string(), GateBuilderOptions::opt());
+    let input = gb.add_input("input".to_string(), bit_count);
+    let one_hot = gatify_one_hot_with_nonzero_flag_prefix_strategy(
+        &mut gb,
+        &input,
+        lsb_prio,
+        /* value_cannot_be_zero= */ false,
+        prefix_strategy,
+    );
+    gb.add_output("one_hot".to_string(), one_hot);
+    gb.build()
+}
+
+fn gather_one_hot_prefix_rows(prefix_strategy: PrefixScanStrategy) -> Vec<OneHotRow> {
+    let mut got: Vec<OneHotRow> = Vec::new();
+    for bit_count in 1..=8 {
+        for lsb_prio in [true, false] {
+            let prio = match lsb_prio {
+                true => "lsb",
+                false => "msb",
+            };
+            let gate_fn = build_one_hot_gate_fn(bit_count, lsb_prio, prefix_strategy);
+            let stats = get_summary_stats(&gate_fn);
+            got.push(OneHotRow {
+                bit_count: bit_count as u32,
+                prio,
+                live_nodes: stats.live_nodes,
+                deepest_path: stats.deepest_path,
+            });
+        }
+    }
+    got
+}
+
 #[test]
 fn test_one_hot_gate_stats_sweep_1_to_8() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let got = gather_one_hot_rows();
+
+    // This is a "microbenchmark sweep" style test: lock in the expected gate
+    // count + depth so we can notice regressions and improvements.
+    // eprintln!("{got:#?}");
+    #[rustfmt::skip]
+    let want: &[OneHotRow] = &[
+        OneHotRow { bit_count: 1, prio: "lsb", live_nodes: 1, deepest_path: 1 },
+        OneHotRow { bit_count: 1, prio: "msb", live_nodes: 1, deepest_path: 1 },
+        OneHotRow { bit_count: 2, prio: "lsb", live_nodes: 4, deepest_path: 2 },
+        OneHotRow { bit_count: 2, prio: "msb", live_nodes: 4, deepest_path: 2 },
+        OneHotRow { bit_count: 3, prio: "lsb", live_nodes: 7, deepest_path: 3 },
+        OneHotRow { bit_count: 3, prio: "msb", live_nodes: 7, deepest_path: 3 },
+        OneHotRow { bit_count: 4, prio: "lsb", live_nodes: 11, deepest_path: 4 },
+        OneHotRow { bit_count: 4, prio: "msb", live_nodes: 11, deepest_path: 4 },
+        OneHotRow { bit_count: 5, prio: "lsb", live_nodes: 14, deepest_path: 4 },
+        OneHotRow { bit_count: 5, prio: "msb", live_nodes: 14, deepest_path: 4 },
+        OneHotRow { bit_count: 6, prio: "lsb", live_nodes: 18, deepest_path: 5 },
+        OneHotRow { bit_count: 6, prio: "msb", live_nodes: 18, deepest_path: 5 },
+        OneHotRow { bit_count: 7, prio: "lsb", live_nodes: 21, deepest_path: 5 },
+        OneHotRow { bit_count: 7, prio: "msb", live_nodes: 21, deepest_path: 5 },
+        OneHotRow { bit_count: 8, prio: "lsb", live_nodes: 26, deepest_path: 6 },
+        OneHotRow { bit_count: 8, prio: "msb", live_nodes: 26, deepest_path: 6 },
+    ];
+
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn test_one_hot_gate_stats_sweep_1_to_8_kogge_stone_prefix() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let got = gather_one_hot_prefix_rows(PrefixScanStrategy::KoggeStone);
 
     // This is a "microbenchmark sweep" style test: lock in the expected gate
     // count + depth so we can notice regressions and improvements.
@@ -100,6 +176,38 @@ fn test_one_hot_gate_stats_sweep_1_to_8() {
         OneHotRow { bit_count: 7, prio: "msb", live_nodes: 27, deepest_path: 5 },
         OneHotRow { bit_count: 8, prio: "lsb", live_nodes: 32, deepest_path: 5 },
         OneHotRow { bit_count: 8, prio: "msb", live_nodes: 32, deepest_path: 5 },
+    ];
+
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn test_one_hot_gate_stats_sweep_1_to_8_brent_kung_prefix() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let got = gather_one_hot_prefix_rows(PrefixScanStrategy::BrentKung);
+
+    // This is a "microbenchmark sweep" style test: lock in the expected gate
+    // count + depth so we can notice regressions and improvements.
+    // eprintln!("{got:#?}");
+    #[rustfmt::skip]
+    let want: &[OneHotRow] = &[
+        OneHotRow { bit_count: 1, prio: "lsb", live_nodes: 1, deepest_path: 1 },
+        OneHotRow { bit_count: 1, prio: "msb", live_nodes: 1, deepest_path: 1 },
+        OneHotRow { bit_count: 2, prio: "lsb", live_nodes: 4, deepest_path: 2 },
+        OneHotRow { bit_count: 2, prio: "msb", live_nodes: 4, deepest_path: 2 },
+        OneHotRow { bit_count: 3, prio: "lsb", live_nodes: 7, deepest_path: 3 },
+        OneHotRow { bit_count: 3, prio: "msb", live_nodes: 7, deepest_path: 3 },
+        OneHotRow { bit_count: 4, prio: "lsb", live_nodes: 11, deepest_path: 4 },
+        OneHotRow { bit_count: 4, prio: "msb", live_nodes: 11, deepest_path: 4 },
+        OneHotRow { bit_count: 5, prio: "lsb", live_nodes: 14, deepest_path: 4 },
+        OneHotRow { bit_count: 5, prio: "msb", live_nodes: 14, deepest_path: 4 },
+        OneHotRow { bit_count: 6, prio: "lsb", live_nodes: 18, deepest_path: 5 },
+        OneHotRow { bit_count: 6, prio: "msb", live_nodes: 18, deepest_path: 5 },
+        OneHotRow { bit_count: 7, prio: "lsb", live_nodes: 21, deepest_path: 5 },
+        OneHotRow { bit_count: 7, prio: "msb", live_nodes: 21, deepest_path: 5 },
+        OneHotRow { bit_count: 8, prio: "lsb", live_nodes: 26, deepest_path: 6 },
+        OneHotRow { bit_count: 8, prio: "msb", live_nodes: 26, deepest_path: 6 },
     ];
 
     assert_eq!(got.as_slice(), want);

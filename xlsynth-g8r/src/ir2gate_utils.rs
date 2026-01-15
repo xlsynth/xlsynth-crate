@@ -34,6 +34,30 @@ impl std::fmt::Display for AdderMapping {
     }
 }
 
+/// Selects the prefix network to use for prefix scans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixScanStrategy {
+    Linear,
+    BrentKung,
+    KoggeStone,
+}
+
+impl Default for PrefixScanStrategy {
+    fn default() -> Self {
+        PrefixScanStrategy::Linear
+    }
+}
+
+impl std::fmt::Display for PrefixScanStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrefixScanStrategy::Linear => write!(f, "linear"),
+            PrefixScanStrategy::BrentKung => write!(f, "brent-kung"),
+            PrefixScanStrategy::KoggeStone => write!(f, "kogge-stone"),
+        }
+    }
+}
+
 /// Emits a carry-select adder for the given inputs.
 ///
 /// A carry-select adder specializes groups of bits on whether the carry-in to
@@ -589,48 +613,263 @@ pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool)
     gatify_one_hot_with_nonzero_flag(gb, bits, lsb_prio, /* value_cannot_be_zero= */ false)
 }
 
+pub fn gatify_one_hot_for_depth(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag_for_depth(
+        gb, bits, lsb_prio, /* value_cannot_be_zero= */ false,
+    )
+}
+
+pub fn gatify_one_hot_for_area(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag_for_area(
+        gb, bits, lsb_prio, /* value_cannot_be_zero= */ false,
+    )
+}
+
 pub fn gatify_one_hot_with_nonzero_flag(
     gb: &mut GateBuilder,
     bits: &AigBitVector,
     lsb_prio: bool,
     value_cannot_be_zero: bool,
 ) -> AigBitVector {
-    let mut gates = Vec::new();
+    gatify_one_hot_with_nonzero_flag_prefix_strategy(
+        gb,
+        bits,
+        lsb_prio,
+        value_cannot_be_zero,
+        PrefixScanStrategy::BrentKung,
+    )
+}
 
-    // Implementation note: instead of chaining all the "no prior bit" computations
-    // linearly through, we do a tree reduction for each bit.
-
-    let mut prior_bits_inverted = Vec::new();
-
+pub fn gatify_one_hot_with_nonzero_flag_prefix_strategy(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+    value_cannot_be_zero: bool,
+    prefix_strategy: PrefixScanStrategy,
+) -> AigBitVector {
+    let mut ordered_bits: Vec<AigOperand> = Vec::with_capacity(bits.get_bit_count());
     for i in 0..bits.get_bit_count() {
         let this_input_bit = if lsb_prio {
             bits.get_lsb(i)
         } else {
             bits.get_msb(i)
         };
-        let no_prior_bit = if prior_bits_inverted.is_empty() {
-            gb.get_true()
-        } else {
-            gb.add_and_nary(&prior_bits_inverted, ReductionKind::Tree)
-        };
-        let this_output_bit = gb.add_and_binary(*this_input_bit, no_prior_bit);
-        gates.push(this_output_bit);
-
-        prior_bits_inverted.push(gb.add_not(*this_input_bit));
+        ordered_bits.push(*this_input_bit);
     }
+
+    let mut inverted: Vec<AigOperand> = Vec::with_capacity(bits.get_bit_count());
+    for bit in ordered_bits.iter() {
+        inverted.push(gb.add_not(*bit));
+    }
+
+    let inclusive = prefix_scan_inclusive(
+        gb,
+        &inverted,
+        prefix_strategy,
+        gb.get_true(),
+        |builder, lhs, rhs| builder.add_and_binary(lhs, rhs),
+    );
+    let exclusive = prefix_scan_exclusive(&inclusive, gb.get_true());
+
+    let mut gates: Vec<AigOperand> = Vec::with_capacity(bits.get_bit_count() + 1);
+    for (i, bit) in ordered_bits.iter().enumerate() {
+        let no_prior_bit = exclusive[i];
+        let this_output_bit = if no_prior_bit == gb.get_true() {
+            *bit
+        } else {
+            gb.add_and_binary(*bit, no_prior_bit)
+        };
+        gates.push(this_output_bit);
+    }
+
     if !lsb_prio {
         gates.reverse();
     }
+
     if value_cannot_be_zero {
         // If the input value is provably nonzero, then "none of the input bits were
-        // set" is provably false. Emit it as a literal zero instead of building
-        // an AND tree.
+        // set" is provably false. Emit it as a literal zero.
         gates.push(gb.get_false());
     } else {
-        let no_prior_bit = gb.add_and_nary(&prior_bits_inverted, ReductionKind::Tree);
+        let no_prior_bit = if inclusive.is_empty() {
+            gb.get_true()
+        } else {
+            *inclusive
+                .last()
+                .expect("inclusive scan should not be empty")
+        };
         gates.push(no_prior_bit);
     }
+
     AigBitVector::from_lsb_is_index_0(&gates)
+}
+
+pub fn gatify_one_hot_with_nonzero_flag_for_area(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+    value_cannot_be_zero: bool,
+) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag_prefix_strategy(
+        gb,
+        bits,
+        lsb_prio,
+        value_cannot_be_zero,
+        PrefixScanStrategy::Linear,
+    )
+}
+
+pub fn gatify_one_hot_with_nonzero_flag_for_depth(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+    lsb_prio: bool,
+    value_cannot_be_zero: bool,
+) -> AigBitVector {
+    gatify_one_hot_with_nonzero_flag_prefix_strategy(
+        gb,
+        bits,
+        lsb_prio,
+        value_cannot_be_zero,
+        PrefixScanStrategy::KoggeStone,
+    )
+}
+
+fn prefix_scan_exclusive(inclusive: &[AigOperand], identity: AigOperand) -> Vec<AigOperand> {
+    if inclusive.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(inclusive.len());
+    out.push(identity);
+    for i in 1..inclusive.len() {
+        out.push(inclusive[i - 1]);
+    }
+    out
+}
+
+fn prefix_scan_inclusive(
+    gb: &mut GateBuilder,
+    inputs: &[AigOperand],
+    strategy: PrefixScanStrategy,
+    identity: AigOperand,
+    apply_op: impl Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
+) -> Vec<AigOperand> {
+    match strategy {
+        PrefixScanStrategy::Linear => prefix_scan_inclusive_linear(gb, inputs, apply_op),
+        PrefixScanStrategy::BrentKung => {
+            prefix_scan_inclusive_brent_kung(gb, inputs, identity, apply_op)
+        }
+        PrefixScanStrategy::KoggeStone => prefix_scan_inclusive_kogge_stone(gb, inputs, apply_op),
+    }
+}
+
+fn prefix_scan_inclusive_linear(
+    gb: &mut GateBuilder,
+    inputs: &[AigOperand],
+    apply_op: impl Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
+) -> Vec<AigOperand> {
+    if inputs.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(inputs.len());
+    let mut acc = inputs[0];
+    out.push(acc);
+    for &input in inputs.iter().skip(1) {
+        acc = apply_op(gb, acc, input);
+        out.push(acc);
+    }
+    out
+}
+
+fn prefix_scan_inclusive_kogge_stone(
+    gb: &mut GateBuilder,
+    inputs: &[AigOperand],
+    apply_op: impl Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
+) -> Vec<AigOperand> {
+    let n = inputs.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut y: Vec<AigOperand> = inputs.to_vec();
+    let mut step = 1usize;
+    while step < n {
+        let mut y2 = y.clone();
+        for i in step..n {
+            y2[i] = apply_op(gb, y[i - step], y[i]);
+        }
+        y = y2;
+        step <<= 1;
+    }
+    y
+}
+
+fn prefix_scan_inclusive_brent_kung(
+    gb: &mut GateBuilder,
+    inputs: &[AigOperand],
+    identity: AigOperand,
+    apply_op: impl Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
+) -> Vec<AigOperand> {
+    let n = inputs.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let m = next_pow2(n);
+    let mut y: Vec<AigOperand> = Vec::with_capacity(m);
+    for i in 0..m {
+        if i < n {
+            y.push(inputs[i]);
+        } else {
+            y.push(identity);
+        }
+    }
+
+    let mut levels = 0usize;
+    let mut size = m;
+    while size > 1 {
+        levels += 1;
+        size >>= 1;
+    }
+
+    for d in 0..levels {
+        let step = 1usize << (d + 1);
+        let half = step >> 1;
+        let mut i = step - 1;
+        while i < m {
+            y[i] = apply_op(gb, y[i - half], y[i]);
+            i += step;
+        }
+    }
+
+    if levels >= 2 {
+        for d in (0..=levels - 2).rev() {
+            let step = 1usize << (d + 1);
+            let half = step >> 1;
+            let mut i = step + half - 1;
+            while i < m {
+                y[i] = apply_op(gb, y[i - half], y[i]);
+                i += step;
+            }
+        }
+    }
+
+    y.truncate(n);
+    y
+}
+
+fn next_pow2(n: usize) -> usize {
+    let mut p = 1usize;
+    while p < n {
+        p <<= 1;
+    }
+    p
 }
 
 #[cfg(test)]
