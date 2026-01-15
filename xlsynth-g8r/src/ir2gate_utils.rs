@@ -9,6 +9,9 @@
 use crate::aig::gate::{self, AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gate_builder::ReductionKind;
+use crate::prefix_scan_utils::{prefix_scan_exclusive, prefix_scan_inclusive};
+
+pub use crate::prefix_scan_utils::PrefixScanStrategy;
 
 /// Selects the adder implementation to use when lowering addition operations.
 #[derive(Debug, Clone, Copy)]
@@ -30,30 +33,6 @@ impl std::fmt::Display for AdderMapping {
             AdderMapping::RippleCarry => write!(f, "ripple-carry"),
             AdderMapping::BrentKung => write!(f, "brent-kung"),
             AdderMapping::KoggeStone => write!(f, "kogge-stone"),
-        }
-    }
-}
-
-/// Selects the prefix network to use for prefix scans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrefixScanStrategy {
-    Linear,
-    BrentKung,
-    KoggeStone,
-}
-
-impl Default for PrefixScanStrategy {
-    fn default() -> Self {
-        PrefixScanStrategy::Linear
-    }
-}
-
-impl std::fmt::Display for PrefixScanStrategy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PrefixScanStrategy::Linear => write!(f, "linear"),
-            PrefixScanStrategy::BrentKung => write!(f, "brent-kung"),
-            PrefixScanStrategy::KoggeStone => write!(f, "kogge-stone"),
         }
     }
 }
@@ -183,19 +162,6 @@ pub fn gatify_add_ripple_carry(
     (c_in, AigBitVector::from_lsb_is_index_0(&gates))
 }
 
-fn prefix_update(
-    p_i: AigOperand,
-    g_i: AigOperand,
-    p_k: AigOperand,
-    g_k: AigOperand,
-    gb: &mut GateBuilder,
-) -> (AigOperand, AigOperand) {
-    let and = gb.add_and_binary(p_i, g_k);
-    let g = gb.add_or_binary(g_i, and);
-    let p = gb.add_and_binary(p_i, p_k);
-    (p, g)
-}
-
 pub fn gatify_add_kogge_stone(
     lhs: &AigBitVector,
     rhs: &AigBitVector,
@@ -208,24 +174,28 @@ pub fn gatify_add_kogge_stone(
     let xor_bits: Vec<AigOperand> = (0..bits)
         .map(|i| g8_builder.add_xor_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
         .collect();
-    let mut p: Vec<AigOperand> = xor_bits.clone();
-    let mut g: Vec<AigOperand> = (0..bits)
-        .map(|i| g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
+    let pg_inputs: Vec<PrefixPg> = (0..bits)
+        .map(|i| PrefixPg {
+            p: xor_bits[i],
+            g: g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)),
+        })
         .collect();
-    let mut step = 1;
-    while step < bits {
-        for i in step..bits {
-            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
-            p[i] = p_new;
-            g[i] = g_new;
-        }
-        step *= 2;
-    }
+    let identity = PrefixPg {
+        p: g8_builder.get_true(),
+        g: g8_builder.get_false(),
+    };
+    let pg_scan = prefix_scan_inclusive(
+        g8_builder,
+        &pg_inputs,
+        PrefixScanStrategy::KoggeStone,
+        identity,
+        combine_prefix_pg,
+    );
     let mut carries = Vec::with_capacity(bits + 1);
     carries.push(c_in);
     for i in 0..bits {
-        let and = g8_builder.add_and_binary(p[i], c_in);
-        let carry = g8_builder.add_or_binary(g[i], and);
+        let and = g8_builder.add_and_binary(pg_scan[i].p, c_in);
+        let carry = g8_builder.add_or_binary(pg_scan[i].g, and);
         carries.push(carry);
     }
     let mut sum = Vec::with_capacity(bits);
@@ -264,35 +234,28 @@ pub fn gatify_add_brent_kung(
     let xor_bits: Vec<AigOperand> = (0..bits)
         .map(|i| g8_builder.add_xor_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
         .collect();
-    let mut p: Vec<AigOperand> = xor_bits.clone();
-    let mut g: Vec<AigOperand> = (0..bits)
-        .map(|i| g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)))
+    let pg_inputs: Vec<PrefixPg> = (0..bits)
+        .map(|i| PrefixPg {
+            p: xor_bits[i],
+            g: g8_builder.add_and_binary(*lhs.get_lsb(i), *rhs.get_lsb(i)),
+        })
         .collect();
-    let mut step = 1;
-    while step < bits {
-        let stride = step * 2;
-        for i in (stride - 1..bits).step_by(stride) {
-            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
-            p[i] = p_new;
-            g[i] = g_new;
-        }
-        step = stride;
-    }
-    step /= 2;
-    while step > 0 {
-        let stride = step * 2;
-        for i in (stride + step - 1..bits).step_by(stride) {
-            let (p_new, g_new) = prefix_update(p[i], g[i], p[i - step], g[i - step], g8_builder);
-            p[i] = p_new;
-            g[i] = g_new;
-        }
-        step /= 2;
-    }
+    let identity = PrefixPg {
+        p: g8_builder.get_true(),
+        g: g8_builder.get_false(),
+    };
+    let pg_scan = prefix_scan_inclusive(
+        g8_builder,
+        &pg_inputs,
+        PrefixScanStrategy::BrentKung,
+        identity,
+        combine_prefix_pg,
+    );
     let mut carries = Vec::with_capacity(bits + 1);
     carries.push(c_in);
     for i in 0..bits {
-        let and = g8_builder.add_and_binary(p[i], c_in);
-        let carry = g8_builder.add_or_binary(g[i], and);
+        let and = g8_builder.add_and_binary(pg_scan[i].p, c_in);
+        let carry = g8_builder.add_or_binary(pg_scan[i].g, and);
         carries.push(carry);
     }
     let mut sum = Vec::with_capacity(bits);
@@ -670,14 +633,15 @@ pub fn gatify_one_hot_with_nonzero_flag_prefix_strategy(
         inverted.push(gb.add_not(*bit));
     }
 
+    let identity = gb.get_true();
     let inclusive = prefix_scan_inclusive(
         gb,
         &inverted,
         prefix_strategy,
-        gb.get_true(),
+        identity,
         |builder, lhs, rhs| builder.add_and_binary(lhs, rhs),
     );
-    let exclusive = prefix_scan_exclusive(&inclusive, gb.get_true());
+    let exclusive = prefix_scan_exclusive(&inclusive, identity);
 
     let mut gates: Vec<AigOperand> = Vec::with_capacity(bits.get_bit_count() + 1);
     for (i, bit) in ordered_bits.iter().enumerate() {
@@ -742,134 +706,17 @@ pub fn gatify_one_hot_with_nonzero_flag_for_depth(
     )
 }
 
-fn prefix_scan_exclusive(inclusive: &[AigOperand], identity: AigOperand) -> Vec<AigOperand> {
-    if inclusive.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(inclusive.len());
-    out.push(identity);
-    for i in 1..inclusive.len() {
-        out.push(inclusive[i - 1]);
-    }
-    out
+#[derive(Clone, Copy)]
+struct PrefixPg {
+    p: AigOperand,
+    g: AigOperand,
 }
 
-fn prefix_scan_inclusive(
-    gb: &mut GateBuilder,
-    inputs: &[AigOperand],
-    strategy: PrefixScanStrategy,
-    identity: AigOperand,
-    apply_op: impl Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
-) -> Vec<AigOperand> {
-    match strategy {
-        PrefixScanStrategy::Linear => prefix_scan_inclusive_linear(gb, inputs, apply_op),
-        PrefixScanStrategy::BrentKung => {
-            prefix_scan_inclusive_brent_kung(gb, inputs, identity, apply_op)
-        }
-        PrefixScanStrategy::KoggeStone => prefix_scan_inclusive_kogge_stone(gb, inputs, apply_op),
-    }
-}
-
-fn prefix_scan_inclusive_linear(
-    gb: &mut GateBuilder,
-    inputs: &[AigOperand],
-    apply_op: impl Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
-) -> Vec<AigOperand> {
-    if inputs.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(inputs.len());
-    let mut acc = inputs[0];
-    out.push(acc);
-    for &input in inputs.iter().skip(1) {
-        acc = apply_op(gb, acc, input);
-        out.push(acc);
-    }
-    out
-}
-
-fn prefix_scan_inclusive_kogge_stone(
-    gb: &mut GateBuilder,
-    inputs: &[AigOperand],
-    apply_op: impl Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
-) -> Vec<AigOperand> {
-    let n = inputs.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut y: Vec<AigOperand> = inputs.to_vec();
-    let mut step = 1usize;
-    while step < n {
-        let mut y2 = y.clone();
-        for i in step..n {
-            y2[i] = apply_op(gb, y[i - step], y[i]);
-        }
-        y = y2;
-        step <<= 1;
-    }
-    y
-}
-
-fn prefix_scan_inclusive_brent_kung(
-    gb: &mut GateBuilder,
-    inputs: &[AigOperand],
-    identity: AigOperand,
-    apply_op: impl Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
-) -> Vec<AigOperand> {
-    let n = inputs.len();
-    if n == 0 {
-        return Vec::new();
-    }
-
-    let m = next_pow2(n);
-    let mut y: Vec<AigOperand> = Vec::with_capacity(m);
-    for i in 0..m {
-        if i < n {
-            y.push(inputs[i]);
-        } else {
-            y.push(identity);
-        }
-    }
-
-    let mut levels = 0usize;
-    let mut size = m;
-    while size > 1 {
-        levels += 1;
-        size >>= 1;
-    }
-
-    for d in 0..levels {
-        let step = 1usize << (d + 1);
-        let half = step >> 1;
-        let mut i = step - 1;
-        while i < m {
-            y[i] = apply_op(gb, y[i - half], y[i]);
-            i += step;
-        }
-    }
-
-    if levels >= 2 {
-        for d in (0..=levels - 2).rev() {
-            let step = 1usize << (d + 1);
-            let half = step >> 1;
-            let mut i = step + half - 1;
-            while i < m {
-                y[i] = apply_op(gb, y[i - half], y[i]);
-                i += step;
-            }
-        }
-    }
-
-    y.truncate(n);
-    y
-}
-
-fn next_pow2(n: usize) -> usize {
-    let mut p = 1usize;
-    while p < n {
-        p <<= 1;
-    }
-    p
+fn combine_prefix_pg(gb: &mut GateBuilder, lhs: PrefixPg, rhs: PrefixPg) -> PrefixPg {
+    let and = gb.add_and_binary(rhs.p, lhs.g);
+    let g = gb.add_or_binary(rhs.g, and);
+    let p = gb.add_and_binary(rhs.p, lhs.p);
+    PrefixPg { p, g }
 }
 
 #[cfg(test)]
