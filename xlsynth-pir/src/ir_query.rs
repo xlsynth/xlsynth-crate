@@ -513,6 +513,9 @@ fn match_select_named_arg(
                 match_args_solutions(&[expr.clone()], cases, f, users, bindings)
             }
             NamedArgValue::ExprList(exprs) => {
+                if exprs.len() != cases.len() {
+                    return vec![];
+                }
                 match_args_solutions(exprs, cases, f, users, bindings)
             }
             _ => vec![],
@@ -755,6 +758,28 @@ fn main(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "prio");
+    }
+
+    #[test]
+    fn find_matches_priority_sel_requires_case_count() {
+        let pkg_text = r#"package test
+
+fn main(sel: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) -> bits[8] {
+  prio: bits[8] = priority_sel(sel, cases=[a, b], default=d, id=5)
+  ret out: bits[8] = identity(prio, id=6)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("priority_sel(cases=[])").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert!(matches.is_empty());
+
+        let query = parse_query("priority_sel(cases=[a])").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert!(matches.is_empty());
     }
 
     #[test]
