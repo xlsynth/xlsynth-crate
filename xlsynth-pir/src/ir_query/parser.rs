@@ -294,21 +294,73 @@ impl<'a> QueryParser<'a> {
         self.bump();
         self.skip_ws();
         let value = match self.peek() {
-            Some(c) if c.is_ascii_digit() => {
-                let number = self.parse_number("number")?;
-                NamedArgValue::Number(number)
-            }
+            Some(b'[') => NamedArgValue::ExprList(self.parse_expr_list()?),
             _ => {
-                let value_ident = self.parse_ident("literal or '_'")?;
-                match value_ident.as_str() {
-                    "true" => NamedArgValue::Bool(true),
-                    "false" => NamedArgValue::Bool(false),
-                    "_" => NamedArgValue::Any,
-                    _ => return Err(self.error("expected boolean literal, number, or '_'")),
+                let expr = self.parse_expr()?;
+                if ident == "lsb_prio" {
+                    return self.parse_bool_named_arg(ident, expr);
+                }
+                match expr {
+                    QueryExpr::Placeholder(ref name) if name == "_" => NamedArgValue::Any,
+                    QueryExpr::Number(number) if ident == "width" => {
+                        let number = usize::try_from(number).map_err(|_| {
+                            self.error("named argument number does not fit in usize")
+                        })?;
+                        NamedArgValue::Number(number)
+                    }
+                    _ => NamedArgValue::Expr(expr),
                 }
             }
         };
         Ok(Some(NamedArg { name: ident, value }))
+    }
+
+    fn parse_expr_list(&mut self) -> Result<Vec<QueryExpr>, String> {
+        self.expect('[')?;
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b']') {
+            self.bump();
+            return Ok(items);
+        }
+        loop {
+            let expr = self.parse_expr()?;
+            items.push(expr);
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => {
+                    self.bump();
+                }
+                Some(b']') => {
+                    self.bump();
+                    break;
+                }
+                _ => return Err(self.error("expected ',' or ']'")),
+            }
+        }
+        Ok(items)
+    }
+
+    fn parse_bool_named_arg(
+        &mut self,
+        name: String,
+        expr: QueryExpr,
+    ) -> Result<Option<NamedArg>, String> {
+        match expr {
+            QueryExpr::Placeholder(ref ident) if ident == "_" => Ok(Some(NamedArg {
+                name,
+                value: NamedArgValue::Any,
+            })),
+            QueryExpr::Placeholder(ref ident) if ident == "true" => Ok(Some(NamedArg {
+                name,
+                value: NamedArgValue::Bool(true),
+            })),
+            QueryExpr::Placeholder(ref ident) if ident == "false" => Ok(Some(NamedArg {
+                name,
+                value: NamedArgValue::Bool(false),
+            })),
+            _ => Err(self.error("lsb_prio expects boolean literal or '_'")),
+        }
     }
 }
 

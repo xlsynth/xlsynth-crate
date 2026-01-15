@@ -461,6 +461,9 @@ Query expression basics:
 - `literal(L)` matches a `literal` node and binds `L` to the literal **value** (reusing `L` requires the same literal value, even if it is a different literal node).
 - `literal[pow2](L)` additionally constrains the literal to be a strict power-of-two bits value (exactly one bit set; `0` does not match).
 - `msb(x)` is shorthand for matching a `bit_slice` of the highest bit (width 1) of `x`.
+- Named arguments are supported where the IR operator accepts them (e.g., `sel(selector=..., cases=[...], default=...)`).
+  - Named-arg values use the same expression syntax as positional args, so numeric literals like `selector=1` and `default=0` match literal nodes.
+  - `lsb_prio` accepts only `true`, `false`, or `_` and is rejected otherwise.
 
 Example:
 

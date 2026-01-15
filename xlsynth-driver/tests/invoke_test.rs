@@ -7974,7 +7974,7 @@ fn main(x: bits[4] id=1) -> bits[5] {
         stderr
     );
     assert!(
-        stderr.contains("expected boolean literal, number, or '_'"),
+        stderr.contains("lsb_prio expects boolean literal or '_'"),
         "unexpected stderr: {}",
         stderr
     );
