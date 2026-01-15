@@ -49,11 +49,13 @@ pub struct NamedArg {
     pub value: NamedArgValue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamedArgValue {
     Bool(bool),
     Number(usize),
     Any,
+    Expr(QueryExpr),
+    ExprList(Vec<QueryExpr>),
 }
 
 impl MatcherKind {
@@ -197,14 +199,29 @@ fn match_solutions(
                     return vec![];
                 }
             }
-            if !matches_named_args(&matcher.named_args, &node.payload) {
+            let named_arg_bindings =
+                match_named_args_solutions(&matcher.named_args, &node.payload, f, users, bindings);
+            if named_arg_bindings.is_empty() {
                 return vec![];
             }
             if let MatcherKind::Literal { predicate } = matcher.kind {
-                return match_literal_solutions(predicate, &matcher.args, &node.payload, bindings);
+                let mut out = Vec::new();
+                for b in named_arg_bindings {
+                    out.extend(match_literal_solutions(
+                        predicate,
+                        &matcher.args,
+                        &node.payload,
+                        &b,
+                    ));
+                }
+                return out;
             }
             let operands = ir_utils::operands(&node.payload);
-            match_args_solutions(&matcher.args, &operands, f, users, bindings)
+            let mut out = Vec::new();
+            for b in named_arg_bindings {
+                out.extend(match_args_solutions(&matcher.args, &operands, f, users, &b));
+            }
+            out
         }
     }
 }
@@ -402,46 +419,116 @@ fn matches_msb_slice(f: &ir::Fn, payload: &ir::NodePayload) -> bool {
     }
 }
 
-fn matches_named_args(named_args: &[NamedArg], payload: &ir::NodePayload) -> bool {
+fn match_named_args_solutions(
+    named_args: &[NamedArg],
+    payload: &ir::NodePayload,
+    f: &ir::Fn,
+    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    bindings: &Bindings,
+) -> Vec<Bindings> {
     if named_args.is_empty() {
-        return true;
+        return vec![bindings.clone()];
     }
-    match payload {
-        ir::NodePayload::BitSlice { width, .. } => {
-            for arg in named_args {
-                match arg.name.as_str() {
-                    "width" => match arg.value {
+    let mut partials = vec![bindings.clone()];
+    for arg in named_args {
+        let mut next = Vec::new();
+        for b in &partials {
+            let mut matched = Vec::new();
+            match payload {
+                ir::NodePayload::BitSlice { width, .. } => {
+                    if arg.name.as_str() != "width" {
+                        continue;
+                    }
+                    match &arg.value {
                         NamedArgValue::Number(v) => {
-                            if v != *width {
-                                return false;
+                            if *v == *width {
+                                matched.push(b.clone());
                             }
                         }
-                        NamedArgValue::Any => {}
-                        _ => return false,
-                    },
-                    _ => return false,
+                        NamedArgValue::Any => matched.push(b.clone()),
+                        _ => {}
+                    }
                 }
-            }
-            true
-        }
-        ir::NodePayload::OneHot { lsb_prio, .. } => {
-            for arg in named_args {
-                match arg.name.as_str() {
-                    "lsb_prio" => match arg.value {
+                ir::NodePayload::OneHot { lsb_prio, .. } => {
+                    if arg.name.as_str() != "lsb_prio" {
+                        continue;
+                    }
+                    match &arg.value {
                         NamedArgValue::Bool(v) => {
-                            if v != *lsb_prio {
-                                return false;
+                            if *v == *lsb_prio {
+                                matched.push(b.clone());
                             }
                         }
-                        NamedArgValue::Any => {}
-                        _ => return false,
-                    },
-                    _ => return false,
+                        NamedArgValue::Any => matched.push(b.clone()),
+                        _ => {}
+                    }
                 }
+                ir::NodePayload::PrioritySel {
+                    selector,
+                    cases,
+                    default,
+                } => {
+                    matched = match_select_named_arg(arg, *selector, cases, default, f, users, b);
+                }
+                ir::NodePayload::Sel {
+                    selector,
+                    cases,
+                    default,
+                } => {
+                    matched = match_select_named_arg(arg, *selector, cases, default, f, users, b);
+                }
+                ir::NodePayload::OneHotSel { selector, cases } => {
+                    matched = match_select_named_arg(arg, *selector, cases, &None, f, users, b);
+                }
+                _ => {}
             }
-            true
+            next.extend(matched);
         }
-        _ => false,
+        if next.is_empty() {
+            return vec![];
+        }
+        partials = next;
+    }
+    partials
+}
+
+fn match_select_named_arg(
+    arg: &NamedArg,
+    selector: ir::NodeRef,
+    cases: &[ir::NodeRef],
+    default: &Option<ir::NodeRef>,
+    f: &ir::Fn,
+    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    bindings: &Bindings,
+) -> Vec<Bindings> {
+    match arg.name.as_str() {
+        "selector" => match &arg.value {
+            NamedArgValue::Any => vec![bindings.clone()],
+            NamedArgValue::Expr(expr) => match_solutions(expr, f, users, selector, bindings),
+            _ => vec![],
+        },
+        "cases" => match &arg.value {
+            NamedArgValue::Any => vec![bindings.clone()],
+            NamedArgValue::Expr(expr) => {
+                match_args_solutions(&[expr.clone()], cases, f, users, bindings)
+            }
+            NamedArgValue::ExprList(exprs) => {
+                match_args_solutions(exprs, cases, f, users, bindings)
+            }
+            _ => vec![],
+        },
+        "default" => match &arg.value {
+            NamedArgValue::Any => match default {
+                Some(_) => vec![bindings.clone()],
+                None => vec![],
+            },
+            NamedArgValue::Expr(expr) => match default {
+                Some(node_ref) => match_solutions(expr, f, users, *node_ref, bindings),
+                None => vec![],
+            },
+            _ => vec![],
+        },
+        _ => vec![],
     }
 }
 
@@ -484,6 +571,26 @@ mod tests {
         assert_eq!(matcher.kind, MatcherKind::OpName("sub".to_string()));
         assert_eq!(matcher.args.len(), 2);
         assert!(matcher.named_args.is_empty());
+    }
+
+    #[test]
+    fn parse_priority_sel_with_cases_named_args() {
+        let query = parse_query("priority_sel(selector=s, cases=[a, b], default=d)").unwrap();
+        let QueryExpr::Matcher(matcher) = query else {
+            panic!("expected matcher");
+        };
+        assert_eq!(
+            matcher.kind,
+            MatcherKind::OpName("priority_sel".to_string())
+        );
+        assert_eq!(matcher.named_args.len(), 3);
+        assert_eq!(matcher.named_args[0].name, "selector");
+        assert_eq!(matcher.named_args[1].name, "cases");
+        assert_eq!(matcher.named_args[2].name, "default");
+        match &matcher.named_args[1].value {
+            NamedArgValue::ExprList(exprs) => assert_eq!(exprs.len(), 2),
+            other => panic!("expected cases list, got {:?}", other),
+        }
     }
 
     #[test]
@@ -606,6 +713,26 @@ fn main(x: bits[8] id=1) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "cmp_pow2");
+    }
+
+    #[test]
+    fn find_matches_anycmp_priority_sel() {
+        let pkg_text = r#"package test
+
+fn main(sel: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) -> bits[1] {
+  prio: bits[8] = priority_sel(sel, cases=[a, b], default=d, id=5)
+  ret out: bits[1] = eq(prio, a, id=6)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("$anycmp(priority_sel(), _)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "out");
     }
 
     #[test]

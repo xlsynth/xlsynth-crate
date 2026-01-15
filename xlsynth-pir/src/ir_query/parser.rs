@@ -294,21 +294,56 @@ impl<'a> QueryParser<'a> {
         self.bump();
         self.skip_ws();
         let value = match self.peek() {
+            Some(b'[') => NamedArgValue::ExprList(self.parse_expr_list()?),
             Some(c) if c.is_ascii_digit() => {
                 let number = self.parse_number("number")?;
                 NamedArgValue::Number(number)
             }
             _ => {
-                let value_ident = self.parse_ident("literal or '_'")?;
-                match value_ident.as_str() {
-                    "true" => NamedArgValue::Bool(true),
-                    "false" => NamedArgValue::Bool(false),
-                    "_" => NamedArgValue::Any,
-                    _ => return Err(self.error("expected boolean literal, number, or '_'")),
+                let expr = self.parse_expr()?;
+                match expr {
+                    QueryExpr::Placeholder(ref name) if name == "_" => NamedArgValue::Any,
+                    QueryExpr::Placeholder(ref name) if name == "true" => NamedArgValue::Bool(true),
+                    QueryExpr::Placeholder(ref name) if name == "false" => {
+                        NamedArgValue::Bool(false)
+                    }
+                    QueryExpr::Number(number) => {
+                        let number = usize::try_from(number).map_err(|_| {
+                            self.error("named argument number does not fit in usize")
+                        })?;
+                        NamedArgValue::Number(number)
+                    }
+                    _ => NamedArgValue::Expr(expr),
                 }
             }
         };
         Ok(Some(NamedArg { name: ident, value }))
+    }
+
+    fn parse_expr_list(&mut self) -> Result<Vec<QueryExpr>, String> {
+        self.expect('[')?;
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b']') {
+            self.bump();
+            return Ok(items);
+        }
+        loop {
+            let expr = self.parse_expr()?;
+            items.push(expr);
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => {
+                    self.bump();
+                }
+                Some(b']') => {
+                    self.bump();
+                    break;
+                }
+                _ => return Err(self.error("expected ',' or ']'")),
+            }
+        }
+        Ok(items)
     }
 }
 
